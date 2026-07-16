@@ -12,7 +12,9 @@ pub mod draw;
 pub mod export;
 pub mod font;
 pub mod frame_server;
+pub mod label_settings;
 pub mod light2d;
+pub mod occluder_polygon;
 pub mod polygon_raster;
 pub mod text_layout;
 pub mod text_server;
@@ -33,10 +35,14 @@ pub use text_server::TextServerLite;
 pub use ttf_font::{
     draw_label_text, draw_ttf_text, AtlasGlyph, GlyphAtlas, RasterGlyph, TtfFont,
 };
+pub use label_settings::{
+    FontHinting, FontSpacing, FontVariation, LabelSettings, SystemFont,
+};
 pub use light2d::{
     apply_lights_to_framebuffer, composite_light, is_occluded, light_factor_at, CanvasAmbient,
     Light2D, Light2DBlendMode, Light2DKind, LightOccluder2D, LIGHT2D_CLASS_NAMES,
 };
+pub use occluder_polygon::{OccluderCullMode, OccluderPolygon2D};
 pub use renderer::{Bgra8Image, FrameBuffer, Raster, SoftwareRenderer};
 pub use texture::{decode_png, load_png, resolve_res_path, Texture2D};
 #[cfg(feature = "gpu")]

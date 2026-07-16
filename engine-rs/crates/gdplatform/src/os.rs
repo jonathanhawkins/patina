@@ -57,6 +57,41 @@ pub fn is_debug_build() -> bool {
     cfg!(debug_assertions)
 }
 
+/// Returns whether the runtime provides the given Godot feature tag, mirroring
+/// `OS.has_feature`. Recognizes platform tags (`web`/`wasm`/the host OS,
+/// `pc`/`desktop`), architecture tags, and build tags (`debug`/`release`,
+/// `threads`).
+///
+/// Tags resolve from the compile-time target: on a native build `web`/`wasm`
+/// are `false` and `pc`/`desktop` are `true`; on the `wasm32` target those
+/// invert. Unknown tags return `false`.
+pub fn has_feature(feature: &str) -> bool {
+    let platform = current_platform();
+    match feature {
+        // Web / WASM platform tags.
+        "web" | "wasm" | "wasm32" | "JavaScript" | "javascript" => platform == Platform::Web,
+        // Native desktop tags.
+        "pc" | "desktop" => matches!(
+            platform,
+            Platform::Linux | Platform::MacOS | Platform::Windows
+        ),
+        // Host OS tags.
+        "linux" | "linuxbsd" => platform == Platform::Linux,
+        "macos" => platform == Platform::MacOS,
+        "windows" => platform == Platform::Windows,
+        // Architecture tags.
+        "x86_64" => cfg!(target_arch = "x86_64"),
+        "arm64" | "aarch64" => cfg!(target_arch = "aarch64"),
+        // Build-config tags.
+        "debug" => is_debug_build(),
+        "release" => !is_debug_build(),
+        // Threads: available on native; on the web target only with a threaded
+        // export, which is assumed off here.
+        "threads" => platform != Platform::Web,
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // OsInfo
 // ---------------------------------------------------------------------------
@@ -151,5 +186,50 @@ mod tests {
         assert_ne!(Platform::Linux, Platform::MacOS);
         assert_ne!(Platform::Windows, Platform::Web);
         assert_ne!(Platform::Unknown, Platform::Linux);
+    }
+
+    #[test]
+    fn has_feature_platform_and_build_tags() {
+        let platform = current_platform();
+        let is_web = platform == Platform::Web;
+
+        // Web/wasm tags track the compile target.
+        assert_eq!(has_feature("web"), is_web);
+        assert_eq!(has_feature("wasm"), is_web);
+
+        // Recognized platforms report their pc/desktop and host-OS tags.
+        match platform {
+            Platform::Linux => {
+                assert!(has_feature("pc"));
+                assert!(has_feature("desktop"));
+                assert!(has_feature("linux"));
+                assert!(!has_feature("web"));
+            }
+            Platform::MacOS => {
+                assert!(has_feature("pc"));
+                assert!(has_feature("desktop"));
+                assert!(has_feature("macos"));
+                assert!(!has_feature("web"));
+            }
+            Platform::Windows => {
+                assert!(has_feature("pc"));
+                assert!(has_feature("desktop"));
+                assert!(has_feature("windows"));
+                assert!(!has_feature("web"));
+            }
+            Platform::Web => {
+                assert!(has_feature("web"));
+                assert!(has_feature("wasm"));
+                assert!(!has_feature("pc"));
+            }
+            Platform::Unknown => {}
+        }
+
+        // Exactly one of debug/release is active, matching is_debug_build().
+        assert_ne!(has_feature("debug"), has_feature("release"));
+        assert_eq!(has_feature("debug"), is_debug_build());
+
+        // Unknown tags are not features.
+        assert!(!has_feature("totally_made_up_tag"));
     }
 }

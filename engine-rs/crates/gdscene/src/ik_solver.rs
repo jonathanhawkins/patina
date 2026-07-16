@@ -21,6 +21,7 @@
 //! `SkeletonProfile` / `BoneMap` retargeting.
 
 use gdcore::math::Vector3;
+use gdcore::math3d::Quaternion;
 
 const EPS: f32 = 1e-6;
 
@@ -187,6 +188,30 @@ fn any_perpendicular(axis: Vector3) -> Vector3 {
     }
 }
 
+/// The shortest-arc rotation turning direction `from` onto direction `to` (both
+/// normalized internally) — the rotation core of Godot's `AimModifier3D`, which
+/// turns a bone's forward axis to point at a target.
+///
+/// Returns the identity for a zero-length or already-aligned input, and a 180°
+/// turn about an arbitrary perpendicular axis for anti-parallel inputs.
+pub fn aim_rotation(from: Vector3, to: Vector3) -> Quaternion {
+    if from.length() < EPS || to.length() < EPS {
+        return Quaternion::IDENTITY;
+    }
+    let a = from.normalized();
+    let b = to.normalized();
+    let d = a.dot(b).clamp(-1.0, 1.0);
+    if d > 1.0 - EPS {
+        // Already aligned.
+        return Quaternion::IDENTITY;
+    }
+    if d < -1.0 + EPS {
+        // Anti-parallel: rotate 180° about any axis perpendicular to `a`.
+        return Quaternion::from_axis_angle(any_perpendicular(a), std::f32::consts::PI);
+    }
+    Quaternion::from_axis_angle(a.cross(b).normalized(), d.acos())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +364,42 @@ mod tests {
         let single = [Vector3::new(1.0, 2.0, 3.0)];
         let out = solve_fabrik(&single, Vector3::new(9.0, 9.0, 9.0), 10, 1e-5);
         assert_eq!(out, single.to_vec());
+    }
+
+    #[test]
+    fn aim_rotation_aligns_forward_to_target() {
+        // Aim +X at +Y: applying the rotation to +X yields ~+Y.
+        let q = aim_rotation(Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0));
+        let rotated = q.xform(Vector3::new(1.0, 0.0, 0.0));
+        assert!(
+            (rotated - Vector3::new(0.0, 1.0, 0.0)).length() < 1e-5,
+            "rotated {rotated:?}"
+        );
+    }
+
+    #[test]
+    fn aim_rotation_already_aligned_is_identity() {
+        // Same direction (any magnitude) -> identity -> leaves vectors unchanged.
+        let q = aim_rotation(Vector3::new(0.0, 0.0, 2.0), Vector3::new(0.0, 0.0, 5.0));
+        let v = Vector3::new(1.0, 2.0, 3.0);
+        assert!((q.xform(v) - v).length() < 1e-5);
+    }
+
+    #[test]
+    fn aim_rotation_antiparallel_flips_180() {
+        let from = Vector3::new(1.0, 0.0, 0.0);
+        let q = aim_rotation(from, Vector3::new(-1.0, 0.0, 0.0));
+        let rotated = q.xform(from);
+        assert!(
+            (rotated - Vector3::new(-1.0, 0.0, 0.0)).length() < 1e-4,
+            "rotated {rotated:?}"
+        );
+    }
+
+    #[test]
+    fn aim_rotation_zero_input_is_identity() {
+        let q = aim_rotation(Vector3::ZERO, Vector3::new(0.0, 1.0, 0.0));
+        let v = Vector3::new(1.0, 0.0, 0.0);
+        assert!((q.xform(v) - v).length() < 1e-6);
     }
 }

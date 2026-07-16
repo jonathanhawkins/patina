@@ -932,6 +932,17 @@ pub fn register_2d_classes() {
         register_class(ClassRegistration::new("Resource").parent("Object"));
     }
 
+    // -- StyleBox resource family (pat-nzgdu.90). Registering these lets ClassDB
+    // resolve `[sub_resource type="StyleBoxFlat"]` (etc.) in a .tscn/.tres theme
+    // to their proper class + parent chain, matching Godot's Resource hierarchy.
+    if !class_exists("StyleBox") {
+        register_class(ClassRegistration::new("StyleBox").parent("Resource"));
+        register_class(ClassRegistration::new("StyleBoxFlat").parent("StyleBox"));
+        register_class(ClassRegistration::new("StyleBoxTexture").parent("StyleBox"));
+        register_class(ClassRegistration::new("StyleBoxLine").parent("StyleBox"));
+        register_class(ClassRegistration::new("StyleBoxEmpty").parent("StyleBox"));
+    }
+
     // -- CanvasItem (base for all 2D & UI nodes) --
     if !class_exists("CanvasItem") {
         register_class(
@@ -1814,6 +1825,11 @@ pub fn register_editor_classes() {
     register_io_classes();
     register_networking_classes();
     register_navigation_classes();
+
+    // -- SceneState (pat-nzgdu.167): PackedScene.get_state() introspection --
+    if !class_exists("SceneState") {
+        register_class(ClassRegistration::new("SceneState").parent("RefCounted"));
+    }
 
     // -- EditorPlugin --
     if !class_exists("EditorPlugin") {

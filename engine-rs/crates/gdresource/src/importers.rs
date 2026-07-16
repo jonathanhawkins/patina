@@ -155,8 +155,10 @@ pub fn import_image_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource
     res.set_property("format", Variant::String(format.into()));
     res.set_property("bit_depth", Variant::Int(bit_depth as i64));
 
-    // Full pixel decode (pat-z35r2.2 / pat-p0s82.19).
-    if let Some(pixels) = decode_png_pixels(data) {
+    // Full pixel decode (pat-z35r2.2 / pat-p0s82.19). The hand-rolled fast path
+    // covers non-interlaced 8-bit; 16-bit / palette+tRNS / Adam7-interlaced PNGs
+    // fall back to the `image` crate (pat-nzgdu.112).
+    if let Some(pixels) = decode_png_pixels(data).or_else(|| decode_png_via_image(data)) {
         let colors: Vec<Variant> = pixels
             .into_iter()
             .map(|(r, g, b, a)| {
@@ -298,6 +300,29 @@ pub fn load_color_texture_linear(
 }
 
 /// Decode PNG IDAT to linear RGBA floats in \[0,1\]. Returns None on failure.
+/// Decodes the PNG variants the hand-rolled [`decode_png_pixels`] fast path
+/// skips — 1/2/4/16-bit depths, `PLTE`+`tRNS` palettes, and Adam7 interlacing —
+/// via the pure-Rust `image` crate (backed by the `png` crate), returning
+/// straight-alpha RGBA as the same `(r, g, b, a)` f32 tuples (pat-nzgdu.112).
+fn decode_png_via_image(data: &[u8]) -> Option<Vec<(f32, f32, f32, f32)>> {
+    let rgba = ::image::load_from_memory_with_format(data, ::image::ImageFormat::Png)
+        .ok()?
+        .to_rgba8();
+    Some(
+        rgba.into_raw()
+            .chunks_exact(4)
+            .map(|px| {
+                (
+                    px[0] as f32 / 255.0,
+                    px[1] as f32 / 255.0,
+                    px[2] as f32 / 255.0,
+                    px[3] as f32 / 255.0,
+                )
+            })
+            .collect(),
+    )
+}
+
 fn decode_png_pixels(data: &[u8]) -> Option<Vec<(f32, f32, f32, f32)>> {
     use miniz_oxide::inflate::decompress_to_vec_zlib;
 
@@ -308,7 +333,11 @@ fn decode_png_pixels(data: &[u8]) -> Option<Vec<(f32, f32, f32, f32)>> {
     let height = u32::from_be_bytes([data[20], data[21], data[22], data[23]]) as usize;
     let bit_depth = data[24];
     let color_type = data[25];
-    if bit_depth != 8 || width == 0 || height == 0 {
+    // This hand-rolled fast path only decodes non-interlaced 8-bit truecolor/
+    // grayscale. 1/2/4/16-bit, palette (`PLTE`+`tRNS`), and Adam7-interlaced
+    // (`data[28] != 0`) PNGs fall through to the `image`-crate path in
+    // `import_image_bytes` (pat-nzgdu.112).
+    if bit_depth != 8 || width == 0 || height == 0 || data[28] != 0 {
         return None;
     }
     let bpp: usize = match color_type {
@@ -730,6 +759,7 @@ impl ResourceFormatLoader {
         let mut rfl = Self::new();
         rfl.register(".png", import_image);
         rfl.register(".webp", import_webp);
+        rfl.register(".svg", crate::image_svg::import_svg);
         rfl.register(".ctex", load_ctex_file);
         rfl.register(".wav", import_wav);
         rfl.register(".ttf", import_font);

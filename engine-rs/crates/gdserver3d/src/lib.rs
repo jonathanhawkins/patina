@@ -6,6 +6,8 @@
 //! meshes, materials, lights, projection math, sky resources, and
 //! environment settings. Concrete rendering backends live in `gdrender3d`.
 
+pub mod box_projection;
+pub mod compositor;
 pub mod csg;
 pub mod environment;
 pub mod extra_meshes;
@@ -15,6 +17,7 @@ pub mod instance;
 pub mod label3d;
 pub mod light;
 pub mod material;
+pub mod material_math;
 pub mod mesh;
 pub mod multimesh;
 pub mod navigation;
@@ -30,6 +33,7 @@ pub mod sky;
 pub mod sprite3d;
 pub mod viewport;
 
+pub use compositor::{Compositor, CompositorEffect, EffectCallbackType};
 pub use csg::{CSGBox3D, CSGCombiner3D, CSGCylinder3D, CSGMesh3D, CSGOperation, CSGSphere3D};
 pub use environment::{AmbientSource, BackgroundMode, Environment3D, ToneMapper};
 pub use fog_volume::{FogMaterial, FogVolume, FogVolumeShape};

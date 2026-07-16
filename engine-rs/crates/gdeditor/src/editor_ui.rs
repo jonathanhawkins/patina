@@ -4274,7 +4274,45 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var nr = document.getElementById('insp-new-res'); if (nr) nr.addEventListener('click', function() { logMessage('info', 'New Resource'); });
       var lr = document.getElementById('insp-load-res'); if (lr) lr.addEventListener('click', function() { logMessage('info', 'Load Resource'); });
       var sr = document.getElementById('insp-save-res'); if (sr) sr.addEventListener('click', function() { logMessage('info', 'Save Resource'); });
-      var hb = document.getElementById('insp-history-btn'); if (hb) hb.addEventListener('click', function() { logMessage('info', 'Object History'); });
+      // pat-nzgdu.170: wire inspector Back/Forward + Object History to the
+      // existing server routes (/api/inspector/back|forward|history|history/select).
+      function inspectorNav(dir) {
+        api('POST', dir === 'back' ? '/api/inspector/back' : '/api/inspector/forward').then(function(r) {
+          if (!r) return;
+          if (r.selected !== undefined && r.selected !== null && r.selected !== 'null') {
+            selectedNodeId = r.selected;
+            if (typeof selectedNodeIds !== 'undefined' && selectedNodeIds.clear) {
+              selectedNodeIds.clear(); selectedNodeIds.add(r.selected);
+            }
+          }
+          var bb = document.getElementById('inspector-history-back');
+          var fb = document.getElementById('inspector-history-forward');
+          if (bb) bb.disabled = !r.can_back;
+          if (fb) fb.disabled = !r.can_forward;
+          fetchSelected(); fetchScene();
+        });
+      }
+      var ihBack = document.getElementById('inspector-history-back');
+      if (ihBack) ihBack.addEventListener('click', function() { inspectorNav('back'); });
+      var ihFwd = document.getElementById('inspector-history-forward');
+      if (ihFwd) ihFwd.addEventListener('click', function() { inspectorNav('forward'); });
+      var hb = document.getElementById('insp-history-btn');
+      if (hb) hb.addEventListener('click', function(e) {
+        e.stopPropagation();
+        api('GET', '/api/inspector/history').then(function(r) {
+          var items = (r && r.history) || [];
+          var menu = items.map(function(it) {
+            return [it.name + ' (' + it.class + ')', function() {
+              api('POST', '/api/inspector/history/select', { node_id: it.id }).then(function(res) {
+                if (res && res.selected !== undefined && res.selected !== null) selectedNodeId = res.selected;
+                fetchSelected(); fetchScene();
+              });
+            }];
+          });
+          if (menu.length === 0) menu = [['(no history)', function() {}]];
+          openSimpleMenu(hb, menu);
+        });
+      });
     })();
 
     // Sub-resource breadcrumb (only if navigating sub-resources)

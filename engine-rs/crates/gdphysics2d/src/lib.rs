@@ -30,8 +30,10 @@
 
 pub mod area2d;
 pub mod body;
+pub mod ccd;
 pub mod character;
 pub mod collision;
+pub mod contact_monitor;
 pub mod joint;
 pub mod obb_sat;
 pub mod shape;
@@ -52,6 +54,7 @@ pub use softbody3d::{SoftBody3D, SoftBodyId3D};
 // Re-export key types for convenience.
 pub use area2d::{Area2D, AreaId, AreaStore, OverlapEvent, OverlapState};
 pub use body::{BodyId, BodyType, PhysicsBody2D};
+pub use contact_monitor::{ContactChanges, ContactMonitor};
 pub use character::{CharacterBody2D, KinematicCollision2D};
 pub use collision::CollisionResult;
 pub use joint::{

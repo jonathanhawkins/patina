@@ -1271,6 +1271,80 @@ pub fn wire_connections(
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// pat-nzgdu.167: SceneState — read-only introspection over a parsed PackedScene
+// (Godot `PackedScene.get_state()`), backed by the existing node-template and
+// connection tables.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Read-only view of a [`PackedScene`]'s node table and signal connections,
+/// mirroring Godot's `SceneState`. Obtained via [`PackedScene::get_state`].
+pub struct SceneState<'a> {
+    templates: &'a [NodeTemplate],
+    connections: &'a [SceneConnection],
+}
+
+impl PackedScene {
+    /// Godot `PackedScene.get_state()` — a read-only [`SceneState`] for
+    /// introspecting the packed node table and connections.
+    pub fn get_state(&self) -> SceneState<'_> {
+        SceneState {
+            templates: &self.templates,
+            connections: &self.connections,
+        }
+    }
+}
+
+impl<'a> SceneState<'a> {
+    /// Number of nodes in the packed scene (`SceneState.get_node_count`).
+    pub fn get_node_count(&self) -> usize {
+        self.templates.len()
+    }
+
+    /// The node's name at `idx` (`SceneState.get_node_name`).
+    pub fn get_node_name(&self, idx: usize) -> Option<&str> {
+        self.templates.get(idx).map(|t| t.name.as_str())
+    }
+
+    /// The node's class/type at `idx` (`SceneState.get_node_type`).
+    pub fn get_node_type(&self, idx: usize) -> Option<&str> {
+        self.templates.get(idx).map(|t| t.class_name.as_str())
+    }
+
+    /// The groups the node at `idx` belongs to (`SceneState.get_node_groups`).
+    pub fn get_node_groups(&self, idx: usize) -> &[String] {
+        self.templates
+            .get(idx)
+            .map(|t| t.groups.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// Number of signal connections (`SceneState.get_connection_count`).
+    pub fn get_connection_count(&self) -> usize {
+        self.connections.len()
+    }
+
+    /// The emitting node path of connection `idx` (`get_connection_source`).
+    pub fn get_connection_source(&self, idx: usize) -> Option<&str> {
+        self.connections.get(idx).map(|c| c.from_path.as_str())
+    }
+
+    /// The signal name of connection `idx` (`get_connection_signal`).
+    pub fn get_connection_signal(&self, idx: usize) -> Option<&str> {
+        self.connections.get(idx).map(|c| c.signal_name.as_str())
+    }
+
+    /// The receiving node path of connection `idx` (`get_connection_target`).
+    pub fn get_connection_target(&self, idx: usize) -> Option<&str> {
+        self.connections.get(idx).map(|c| c.to_path.as_str())
+    }
+
+    /// The target method of connection `idx` (`get_connection_method`).
+    pub fn get_connection_method(&self, idx: usize) -> Option<&str> {
+        self.connections.get(idx).map(|c| c.method_name.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

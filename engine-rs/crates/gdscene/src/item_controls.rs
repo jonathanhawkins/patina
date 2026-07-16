@@ -255,6 +255,80 @@ impl OptionButton {
 }
 
 // ---------------------------------------------------------------------------
+// TabBar
+// ---------------------------------------------------------------------------
+
+/// A single tab in a [`TabBar`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tab {
+    /// The tab's display title.
+    pub title: String,
+}
+
+/// Model for Godot's `TabBar`: an ordered list of tabs with a current index.
+/// [`set_current_tab`](TabBar::set_current_tab) returns whether the current tab
+/// actually changed — the `tab_changed(idx)` trigger.
+#[derive(Debug, Clone)]
+pub struct TabBar {
+    tabs: Vec<Tab>,
+    current: i64,
+}
+
+impl Default for TabBar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TabBar {
+    /// Creates an empty tab bar (no tabs, current index `-1`).
+    pub fn new() -> Self {
+        Self {
+            tabs: Vec::new(),
+            current: -1,
+        }
+    }
+
+    /// Appends a tab with `title`; the first tab added becomes current. Returns
+    /// the new tab's index.
+    pub fn add_tab(&mut self, title: impl Into<String>) -> usize {
+        let idx = self.tabs.len();
+        self.tabs.push(Tab {
+            title: title.into(),
+        });
+        if self.current < 0 {
+            self.current = idx as i64;
+        }
+        idx
+    }
+
+    /// Number of tabs.
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
+    /// The current tab index, or `-1` when there are no tabs.
+    pub fn get_current_tab(&self) -> i64 {
+        self.current
+    }
+
+    /// The title of the tab at `idx`, if it exists.
+    pub fn get_tab_title(&self, idx: usize) -> Option<&str> {
+        self.tabs.get(idx).map(|t| t.title.as_str())
+    }
+
+    /// Sets the current tab to `idx` when in range. Returns `true` when the
+    /// current tab actually changed — Godot's `tab_changed(idx)` signal.
+    pub fn set_current_tab(&mut self, idx: usize) -> bool {
+        if idx >= self.tabs.len() || self.current == idx as i64 {
+            return false;
+        }
+        self.current = idx as i64;
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tree
 // ---------------------------------------------------------------------------
 

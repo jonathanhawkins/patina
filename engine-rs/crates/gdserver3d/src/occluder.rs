@@ -26,6 +26,15 @@ pub enum Occluder3D {
     /// A polygon occluder defined by a set of 2D vertices (in local XY plane).
     /// Matches Godot's `PolygonOccluder3D`.
     Polygon { vertices: Vec<Vector2> },
+    /// An occluder defined by an arbitrary triangle mesh — a 3D vertex array
+    /// plus a triangle index array (three indices per triangle). Matches
+    /// Godot's `ArrayOccluder3D`.
+    Array {
+        /// Local-space mesh vertices.
+        vertices: Vec<Vector3>,
+        /// Triangle indices into `vertices` (three per triangle).
+        indices: Vec<u32>,
+    },
 }
 
 impl Default for Occluder3D {
@@ -55,6 +64,33 @@ impl Occluder3D {
     /// Creates a polygon occluder from 2D vertices in the local XY plane.
     pub fn new_polygon(vertices: Vec<Vector2>) -> Self {
         Self::Polygon { vertices }
+    }
+
+    /// Creates an array occluder from a triangle mesh: `vertices` in local space
+    /// and `indices` (three per triangle) into that array (Godot's
+    /// `ArrayOccluder3D::set_arrays`).
+    pub fn new_array(vertices: Vec<Vector3>, indices: Vec<u32>) -> Self {
+        Self::Array { vertices, indices }
+    }
+
+    /// The triangles of an [`Occluder3D::Array`] as `[v0, v1, v2]` vertex
+    /// triples resolved from its index array. Returns an empty vec for
+    /// non-array occluders, and skips any triangle whose indices fall outside
+    /// the vertex array.
+    pub fn triangles(&self) -> Vec<[Vector3; 3]> {
+        match self {
+            Self::Array { vertices, indices } => indices
+                .chunks_exact(3)
+                .filter_map(|tri| {
+                    Some([
+                        *vertices.get(tri[0] as usize)?,
+                        *vertices.get(tri[1] as usize)?,
+                        *vertices.get(tri[2] as usize)?,
+                    ])
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// Returns the local-space AABB of this occluder shape.
@@ -97,6 +133,18 @@ impl Occluder3D {
                     Vector3::new(min_x, min_y, 0.0),
                     Vector3::new(max_x - min_x, max_y - min_y, 0.001),
                 )
+            }
+            Self::Array { vertices, .. } => {
+                if vertices.is_empty() {
+                    return Aabb::new(Vector3::ZERO, Vector3::ZERO);
+                }
+                let mut min = vertices[0];
+                let mut max = vertices[0];
+                for v in vertices {
+                    min = Vector3::new(min.x.min(v.x), min.y.min(v.y), min.z.min(v.z));
+                    max = Vector3::new(max.x.max(v.x), max.y.max(v.y), max.z.max(v.z));
+                }
+                Aabb::new(min, max - min)
             }
         }
     }
@@ -387,6 +435,37 @@ mod tests {
             }
             _ => panic!("Default occluder should be Box"),
         }
+    }
+
+    #[test]
+    fn array_occluder_aabb_and_triangles() {
+        let verts = vec![
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(2.0, 0.0, 0.0),
+            Vector3::new(0.0, 3.0, 1.0),
+        ];
+        let occ = Occluder3D::new_array(verts.clone(), vec![0, 1, 2]);
+
+        // AABB encloses every vertex (including the +Z depth).
+        let aabb = occ.get_aabb();
+        assert!(approx_eq(aabb.position.x, 0.0));
+        assert!(approx_eq(aabb.position.y, 0.0));
+        assert!(approx_eq(aabb.position.z, 0.0));
+        assert!(approx_eq(aabb.size.x, 2.0));
+        assert!(approx_eq(aabb.size.y, 3.0));
+        assert!(approx_eq(aabb.size.z, 1.0));
+
+        // triangles() resolves the index triple in order.
+        let tris = occ.triangles();
+        assert_eq!(tris.len(), 1);
+        assert_eq!(tris[0], [verts[0], verts[1], verts[2]]);
+
+        // An out-of-range index skips that triangle; non-array occluders have none.
+        let bad = Occluder3D::new_array(verts, vec![0, 1, 9]);
+        assert!(bad.triangles().is_empty());
+        assert!(Occluder3D::new_box(Vector3::new(1.0, 1.0, 1.0))
+            .triangles()
+            .is_empty());
     }
 
     // -- OccluderInstance3D --

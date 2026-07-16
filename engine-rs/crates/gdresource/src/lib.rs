@@ -27,9 +27,11 @@ pub mod ctex;
 pub mod fuzz_res;
 pub mod gltf_import;
 pub mod image;
+pub mod image_svg;
 pub mod image_tga_bmp;
 pub mod importers;
 pub mod loader;
+pub mod missing;
 pub mod noise;
 pub mod pck;
 pub mod project;
@@ -57,6 +59,7 @@ pub use project::{AutoloadEntry, GodotProjectFile, InputMapEntry, ProjectConfig,
 pub use res_loader::{
     is_res_binary, load_res_binary, parse_res_header, ResBinaryHeader, RES_MAGIC,
 };
+pub use missing::{MissingNode, MissingResource, PreservedProperties};
 pub use resource::{ExtResource, Resource};
 pub use saver::{ResourceSaver, TresSaver};
 pub use uid::{id_to_text, parse_uid_sidecar, text_to_id, UidRegistry, UID_INVALID_TEXT};

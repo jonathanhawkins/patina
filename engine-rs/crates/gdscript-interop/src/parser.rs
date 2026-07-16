@@ -223,6 +223,13 @@ pub enum Stmt {
         setter: Option<String>,
         /// Optional getter function name (Godot 4: `get = _get_name`).
         getter: Option<String>,
+        /// `true` for a `static var` declaration (class-shared) (pat-u3l8c.18).
+        is_static: bool,
+        /// Inline setter block `set(param): <body>` — `(param name, statements)`
+        /// (Godot 4 property block form, pat-u3l8c.18).
+        setter_body: Option<(String, Vec<Stmt>)>,
+        /// Inline getter block `get: <body>` — statements (pat-u3l8c.18).
+        getter_body: Option<Vec<Stmt>>,
     },
     /// Assignment: `target op value`
     Assignment {
@@ -502,14 +509,14 @@ impl Parser {
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
         match self.peek().clone() {
             Token::AtSign => self.parse_annotated_stmt(),
-            Token::Var => self.parse_var_decl_with_annotations(vec![]),
+            Token::Var => self.parse_var_decl_with_annotations(vec![], false),
             Token::Const => self.parse_const_decl(),
             Token::If => self.parse_if(),
             Token::While => self.parse_while(),
             Token::For => self.parse_for(),
             Token::Return => self.parse_return(),
             Token::Func => self.parse_func_def(false, Vec::new()),
-            Token::Static => self.parse_static_func(),
+            Token::Static => self.parse_static_decl(vec![]),
             Token::Extends => self.parse_extends(),
             Token::ClassName => self.parse_class_name_decl(),
             Token::Signal => self.parse_signal_decl(),
@@ -579,13 +586,13 @@ impl Parser {
         }
         // After annotations, expect a var decl, func def, or script-level annotation like @tool
         match self.peek().clone() {
-            Token::Var => self.parse_var_decl_with_annotations(annotations),
+            Token::Var => self.parse_var_decl_with_annotations(annotations, false),
             Token::Func => {
                 // Attach parsed annotations (e.g. `@rpc(...)`) to the function
                 // so the runtime can enforce their configuration (pat-u3l8c.75).
                 self.parse_func_def(false, annotations)
             }
-            Token::Static => self.parse_static_func(),
+            Token::Static => self.parse_static_decl(annotations),
             _ => {
                 // Script-level annotations like @tool: emit as standalone annotation statement
                 if annotations.iter().any(|a| a.name == "tool") {
@@ -623,6 +630,7 @@ impl Parser {
     fn parse_var_decl_with_annotations(
         &mut self,
         annotations: Vec<Annotation>,
+        is_static: bool,
     ) -> Result<Stmt, ParseError> {
         self.advance(); // consume `var`
         let name = self.eat_ident()?;
@@ -655,13 +663,14 @@ impl Parser {
         } else {
             None
         };
-        // Parse setter/getter: `var x: int = 0: set = _set_x, get = _get_x`
-        // Or after value: `var x = 0: set = _set_x, get = _get_x`
-        let (setter, getter) = if self.check(&Token::Colon) {
+        // Parse setter/getter. Two forms (pat-u3l8c.18):
+        //   name form:  `var x = 0: set = _set_x, get = _get_x`
+        //   block form: `var x = 0:` then an indented `set(v): ...` / `get: ...`
+        let (setter, getter, setter_body, getter_body) = if self.check(&Token::Colon) {
             self.advance();
-            self.parse_setter_getter()?
+            self.parse_property_accessors()?
         } else {
-            (None, None)
+            (None, None, None, None)
         };
         Ok(Stmt::VarDecl {
             name,
@@ -670,6 +679,9 @@ impl Parser {
             annotations,
             setter,
             getter,
+            is_static,
+            setter_body,
+            getter_body,
         })
     }
 
@@ -715,6 +727,89 @@ impl Parser {
             self.advance(); // consume comma
         }
         Ok((setter, getter))
+    }
+
+    /// Parses property accessors following the `:` after a `var` declaration.
+    ///
+    /// Supports both Godot 4 forms and returns
+    /// `(setter_name, getter_name, setter_body, getter_body)`:
+    ///  * name form (same line): `set = _setter, get = _getter`
+    ///  * block form (indented):
+    ///    ```gdscript
+    ///    var x = 0:
+    ///        set(value):
+    ///            _x = value
+    ///        get:
+    ///            return _x
+    ///    ```
+    #[allow(clippy::type_complexity)]
+    fn parse_property_accessors(
+        &mut self,
+    ) -> Result<
+        (
+            Option<String>,
+            Option<String>,
+            Option<(String, Vec<Stmt>)>,
+            Option<Vec<Stmt>>,
+        ),
+        ParseError,
+    > {
+        // The name form continues on the same line (`set`/`get` right after the
+        // colon); the block form starts on the next, indented line.
+        if !self.check(&Token::Newline) {
+            let (setter, getter) = self.parse_setter_getter()?;
+            return Ok((setter, getter, None, None));
+        }
+        self.skip_newlines();
+        self.expect(&Token::Indent)?;
+        let mut setter = None;
+        let mut getter = None;
+        let mut setter_body = None;
+        let mut getter_body = None;
+        self.skip_newlines();
+        while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+            match self.peek().clone() {
+                Token::Ident(ref kw) if kw == "set" => {
+                    self.advance(); // consume `set`
+                    if self.check(&Token::Assign) {
+                        // `set = _setter`
+                        self.advance();
+                        setter = Some(self.eat_ident()?);
+                    } else {
+                        // `set(param): <block>`
+                        self.expect(&Token::LParen)?;
+                        let param = self.eat_ident()?;
+                        if self.check(&Token::Colon) {
+                            self.advance();
+                            let _ = self.parse_type_hint()?; // optional param type
+                        }
+                        self.expect(&Token::RParen)?;
+                        self.expect(&Token::Colon)?;
+                        let body = self.parse_block()?;
+                        setter_body = Some((param, body));
+                    }
+                }
+                Token::Ident(ref kw) if kw == "get" => {
+                    self.advance(); // consume `get`
+                    if self.check(&Token::Assign) {
+                        // `get = _getter`
+                        self.advance();
+                        getter = Some(self.eat_ident()?);
+                    } else {
+                        // `get: <block>`
+                        self.expect(&Token::Colon)?;
+                        let body = self.parse_block()?;
+                        getter_body = Some(body);
+                    }
+                }
+                _ => break,
+            }
+            self.skip_newlines();
+        }
+        if self.check(&Token::Dedent) {
+            self.advance();
+        }
+        Ok((setter, getter, setter_body, getter_body))
     }
 
     fn parse_extends(&mut self) -> Result<Stmt, ParseError> {
@@ -917,23 +1012,28 @@ impl Parser {
         Ok(Stmt::Return(value))
     }
 
-    fn parse_static_func(&mut self) -> Result<Stmt, ParseError> {
+    /// Parses a `static` declaration: either `static func ...` or, since
+    /// pat-u3l8c.18, `static var ...` (a class-shared variable).
+    fn parse_static_decl(&mut self, annotations: Vec<Annotation>) -> Result<Stmt, ParseError> {
         self.advance(); // consume `static`
-        if !self.check(&Token::Func) {
-            let ts = self.tokens.get(self.pos);
-            let (token, line, col) = match ts {
-                Some(ts) => (ts.token.to_string(), ts.line, ts.col),
-                None => ("EOF".to_string(), 0, 0),
-            };
-            return Err(ParseError::UnexpectedToken {
-                token,
-                expected: "func after static".to_string(),
-                line,
-                col,
-                source_line: None,
-            });
+        match self.peek().clone() {
+            Token::Func => self.parse_func_def(true, annotations),
+            Token::Var => self.parse_var_decl_with_annotations(annotations, true),
+            _ => {
+                let ts = self.tokens.get(self.pos);
+                let (token, line, col) = match ts {
+                    Some(ts) => (ts.token.to_string(), ts.line, ts.col),
+                    None => ("EOF".to_string(), 0, 0),
+                };
+                Err(ParseError::UnexpectedToken {
+                    token,
+                    expected: "func or var after static".to_string(),
+                    line,
+                    col,
+                    source_line: None,
+                })
+            }
         }
-        self.parse_func_def(true, Vec::new())
     }
 
     fn parse_func_param(&mut self) -> Result<FuncParam, ParseError> {

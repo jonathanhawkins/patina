@@ -127,6 +127,34 @@ pub fn apply_scene_lights(
     apply_lights_to_framebuffer(fb, &lights, &occluders, ambient, item_mask);
 }
 
+/// Returns the tint color of the first `CanvasModulate` node in the tree, if any.
+/// Godot multiplies the entire canvas by this color as a final pass
+/// (scene/2d/canvas_modulate.cpp) (pat-nzgdu.117).
+pub fn collect_canvas_modulate(tree: &SceneTree) -> Option<Color> {
+    for id in tree.all_nodes_in_tree_order() {
+        let Some(node) = tree.get_node(id) else {
+            continue;
+        };
+        if node.class_name() == "CanvasModulate" {
+            return Some(prop_color(node, "color", Color::WHITE));
+        }
+    }
+    None
+}
+
+/// Multiplies every pixel of `fb` by `color` — the whole-canvas tint a
+/// `CanvasModulate` applies after lighting (pat-nzgdu.117).
+pub fn apply_canvas_modulate(fb: &mut FrameBuffer, color: Color) {
+    for p in fb.pixels.iter_mut() {
+        *p = Color::new(
+            (p.r * color.r).min(1.0),
+            (p.g * color.g).min(1.0),
+            (p.b * color.b).min(1.0),
+            p.a,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

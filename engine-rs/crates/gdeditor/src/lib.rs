@@ -28,6 +28,7 @@ pub mod asset_drag_drop;
 pub mod audio_bus_layout;
 pub mod auto_indent;
 pub mod autoload_manager;
+pub mod batch_rename;
 pub mod bezier_curve;
 pub mod bottom_panel_bar;
 pub mod bracket_match;

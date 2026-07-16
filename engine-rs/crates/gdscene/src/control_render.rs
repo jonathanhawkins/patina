@@ -368,8 +368,11 @@ fn draw_control(
             }
             let text = string_prop(tree, node_id, "text").unwrap_or_default();
             if !text.is_empty() {
-                let font_color = theme
-                    .get_color("Button", "font_color")
+                // Godot resolves a Control's theme color as: local
+                // `theme_override_colors/<name>` first, then the Theme
+                // (pat-z35r2.17). Honor the per-node override during draw.
+                let font_color = color_prop(tree, node_id, "theme_override_colors/font_color")
+                    .or_else(|| theme.get_color("Button", "font_color"))
                     .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
                 let font_size = theme.get_font_size("Button", "font_size").unwrap_or(16);
                 let scale = text_scale(font_size);
@@ -391,8 +394,10 @@ fn draw_control(
         "Label" => {
             let text = string_prop(tree, node_id, "text").unwrap_or_default();
             if !text.is_empty() {
-                let font_color = theme
-                    .get_color("Label", "font_color")
+                // Per-node `theme_override_colors/font_color` wins over the
+                // Theme during draw (pat-z35r2.17).
+                let font_color = color_prop(tree, node_id, "theme_override_colors/font_color")
+                    .or_else(|| theme.get_color("Label", "font_color"))
                     .unwrap_or(Color::WHITE);
                 let font_size = theme.get_font_size("Label", "font_size").unwrap_or(16);
                 let scale = text_scale(font_size);

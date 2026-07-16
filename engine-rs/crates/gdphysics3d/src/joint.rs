@@ -795,4 +795,42 @@ mod tests {
         assert_eq!(JointId3D(1), JointId3D(1));
         assert_ne!(JointId3D(1), JointId3D(2));
     }
+
+    // -- ConeTwistJoint3D / Generic6DofJoint3D --
+
+    #[test]
+    fn cone_twist_and_generic6dof_limits() {
+        let (jid, a, b) = ids();
+
+        // ConeTwist: default spans and swing/twist limit excess.
+        let ct = ConeTwistJoint3D::new(jid, a, b);
+        assert!((ct.swing_span - PI / 4.0).abs() < 1e-6);
+        assert!((ct.twist_span - PI).abs() < 1e-6);
+        assert_eq!(ct.swing_violation(PI / 8.0), 0.0); // within the cone
+        assert!((ct.swing_violation(PI / 2.0) - PI / 4.0).abs() < 1e-6); // PI/2 - PI/4
+        assert_eq!(ct.twist_violation(PI / 2.0), 0.0); // within twist span PI
+        assert!(ct.twist_violation(PI * 1.5) > 0.0); // beyond twist span
+
+        // The ConeTwist variant reaches the shared base via base()/bodies().
+        let jct = Joint3D::ConeTwist(ct);
+        assert_eq!(jct.bodies(), (a, b));
+        assert!(jct.is_enabled());
+
+        // Generic6DOF: per-axis limits, unlimited by default.
+        let mut g = Generic6DofJoint3D::new(jid, a, b);
+        assert_eq!(g.linear_violation(0, 100.0), 0.0); // unlimited axis
+        g.linear_limits[0] = AxisLimit {
+            enabled: true,
+            lower: -1.0,
+            upper: 2.0,
+        };
+        assert_eq!(g.linear_violation(0, 0.5), 0.0); // within [-1, 2]
+        assert_eq!(g.linear_violation(0, 3.0), 1.0); // 3 - 2 (above)
+        assert_eq!(g.linear_violation(0, -2.5), -1.5); // -2.5 - (-1) (below)
+        assert_eq!(g.angular_violation(9, 100.0), 0.0); // out-of-range axis index
+
+        let jg = Joint3D::Generic6Dof(g);
+        assert_eq!(jg.id(), jid);
+        assert!(jg.base().exclude_nodes_from_collision);
+    }
 }

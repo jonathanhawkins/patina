@@ -6779,6 +6779,12 @@ impl Interpreter {
                     annotations,
                     setter,
                     getter,
+                    // `static var` is stored like an ordinary instance var for
+                    // now (it initializes and is readable/writable); full
+                    // class-shared-across-instances semantics is a follow-up.
+                    is_static: _,
+                    setter_body,
+                    getter_body,
                 } => {
                     let var_decl = VarDecl {
                         name: name.clone(),
@@ -6793,6 +6799,37 @@ impl Interpreter {
                     }
                     if let Some(g) = getter {
                         class_def.getters.insert(name.clone(), g.clone());
+                    }
+                    // Inline `set(param): <block>` / `get: <block>` bodies
+                    // (pat-u3l8c.18): synthesize a hidden method for each and
+                    // register it in the setter/getter tables so the existing
+                    // property-dispatch machinery invokes it. The `@`-prefixed
+                    // name can never collide with a user-defined method.
+                    if let Some((param, body)) = setter_body {
+                        let fname = format!("@set_{}", name);
+                        class_def.methods.insert(
+                            fname.clone(),
+                            FuncDef {
+                                params: vec![param.clone()],
+                                defaults: vec![None],
+                                body: body.clone(),
+                                is_static: false,
+                            },
+                        );
+                        class_def.setters.insert(name.clone(), fname);
+                    }
+                    if let Some(body) = getter_body {
+                        let fname = format!("@get_{}", name);
+                        class_def.methods.insert(
+                            fname.clone(),
+                            FuncDef {
+                                params: vec![],
+                                defaults: vec![],
+                                body: body.clone(),
+                                is_static: false,
+                            },
+                        );
+                        class_def.getters.insert(name.clone(), fname);
                     }
                     if let Some((hint, hint_string)) =
                         annotations.iter().find_map(export_hint_from_annotation)
@@ -6838,6 +6875,7 @@ impl Interpreter {
                                 annotations,
                                 setter,
                                 getter,
+                                ..
                             } => {
                                 inner.instance_vars.push(VarDecl {
                                     name: name.clone(),

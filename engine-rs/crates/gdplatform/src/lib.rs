@@ -17,7 +17,9 @@ pub mod http_request;
 pub mod input;
 pub mod native_menu;
 pub mod network;
+pub mod packet_peer_stream;
 pub mod packet_peer_udp;
+pub mod stream_peer_buffer;
 pub mod stream_peer_tcp;
 pub mod tcp_multiplayer;
 pub mod multiplayer_peer_state;
@@ -65,6 +67,7 @@ pub use network::{
     NetworkPeer, Packet, PeerId, RPCCall, RPCConfig, RPCMode, SpawnPacket, SpawnRequest,
     SyncPacket, TransferMode, REPLICATION_KIND_SPAWN, REPLICATION_KIND_SYNC, RPC_MAGIC,
 };
+pub use packet_peer_stream::PacketPeerStream;
 pub use packet_peer_udp::{PacketPeerUDP, PacketPeerUdpError};
 pub use stream_peer_tcp::{StreamPeerTCP, StreamPeerTcpError, StreamPeerTcpStatus};
 pub use tcp_multiplayer::TcpMultiplayerPeer;

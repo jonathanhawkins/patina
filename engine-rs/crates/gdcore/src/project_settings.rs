@@ -23,6 +23,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::math::Color;
+
 // ---------------------------------------------------------------------------
 // Variant (lightweight, for settings values)
 // ---------------------------------------------------------------------------
@@ -79,6 +81,17 @@ impl SettingsValue {
     pub fn as_string(&self) -> Option<&str> {
         match self {
             SettingsValue::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Returns the value as a [`Color`], if it is one. The stored `f64`
+    /// channels are narrowed to `Color`'s `f32`.
+    pub fn as_color(&self) -> Option<Color> {
+        match self {
+            SettingsValue::Color(r, g, b, a) => {
+                Some(Color::new(*r as f32, *g as f32, *b as f32, *a as f32))
+            }
             _ => None,
         }
     }
@@ -185,6 +198,61 @@ impl ProjectSettings {
         self.properties.len()
     }
 
+    /// Resolves a setting honoring **feature-tag overrides** (pat-nzgdu.128): a
+    /// `name.<feature>` entry overrides the base `name` when `<feature>` is one
+    /// of the active `features`. The first active feature (in the order given)
+    /// that has an override wins; otherwise the base setting is returned (or
+    /// `None` if unset). Mirrors Godot's `ProjectSettings.get_setting_with_override`
+    /// fed an explicit feature set (e.g. `["web"]`, `["mobile"]`).
+    pub fn get_setting_with_override_and_custom_features(
+        &self,
+        name: &str,
+        features: &[&str],
+    ) -> Option<&SettingsValue> {
+        for feature in features {
+            let key = format!("{name}.{feature}");
+            if let Some(v) = self.properties.get(&key) {
+                return Some(v);
+            }
+        }
+        self.properties.get(name)
+    }
+
+    // -- Layer names (pat-nzgdu.130) ----------------------------------------
+
+    /// Returns the user-assigned name for a collision/render/navigation layer,
+    /// if the project set one. Godot stores these as
+    /// `layer_names/<category>/layer_<n>` string settings, where `category` is
+    /// one of `2d_physics`, `2d_render`, `3d_physics`, `3d_render`,
+    /// `2d_navigation`, `3d_navigation`, or `avoidance`, and layers are
+    /// 1-indexed (`layer_1`..`layer_32`). Returns `None` when unnamed or empty.
+    pub fn layer_name(&self, category: &str, layer: u32) -> Option<&str> {
+        self.get(&format!("layer_names/{category}/layer_{layer}"))
+            .and_then(|v| v.as_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Returns the label a layer grid should display for `layer`: the
+    /// user-assigned [`layer_name`](Self::layer_name), or Godot's default
+    /// `"Layer <n>"` when the layer is unnamed.
+    pub fn layer_label(&self, category: &str, layer: u32) -> String {
+        self.layer_name(category, layer)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Layer {layer}"))
+    }
+
+    /// Assigns a name to a collision/render/navigation layer, writing the
+    /// `layer_names/<category>/layer_<n>` setting. An empty `name` clears it.
+    pub fn set_layer_name(&mut self, category: &str, layer: u32, name: impl Into<String>) {
+        let name = name.into();
+        let key = format!("layer_names/{category}/layer_{layer}");
+        if name.is_empty() {
+            self.remove(&key);
+        } else {
+            self.set(&key, SettingsValue::String(name));
+        }
+    }
+
     // -- Convenience accessors ----------------------------------------------
 
     /// Returns the project name.
@@ -206,6 +274,39 @@ impl ProjectSettings {
         self.get("physics/common/physics_ticks_per_second")
             .and_then(|v| v.as_int())
             .unwrap_or(60)
+    }
+
+    /// The root viewport width (`display/window/size/viewport_width`),
+    /// defaulting to Godot's `1152`.
+    pub fn viewport_width(&self) -> i64 {
+        self.get("display/window/size/viewport_width")
+            .and_then(|v| v.as_int())
+            .unwrap_or(1152)
+    }
+
+    /// The root viewport height (`display/window/size/viewport_height`),
+    /// defaulting to Godot's `648`.
+    pub fn viewport_height(&self) -> i64 {
+        self.get("display/window/size/viewport_height")
+            .and_then(|v| v.as_int())
+            .unwrap_or(648)
+    }
+
+    /// The frame-rate cap (`application/run/max_fps`); `0` means uncapped,
+    /// matching Godot's default.
+    pub fn max_fps(&self) -> i64 {
+        self.get("application/run/max_fps")
+            .and_then(|v| v.as_int())
+            .unwrap_or(0)
+    }
+
+    /// The default background clear color
+    /// (`rendering/environment/defaults/default_clear_color`), defaulting to
+    /// Godot's grey `Color(0.3, 0.3, 0.3, 1.0)` when unset.
+    pub fn default_clear_color(&self) -> Color {
+        self.get("rendering/environment/defaults/default_clear_color")
+            .and_then(|v| v.as_color())
+            .unwrap_or_else(|| Color::new(0.3, 0.3, 0.3, 1.0))
     }
 
     // -- Iteration ----------------------------------------------------------
@@ -406,6 +507,52 @@ fn parse_godot_value(raw: &str) -> SettingsValue {
 mod tests {
     use super::*;
 
+    /// pat-nzgdu.128: a `name.<feature>` entry overrides the base `name` only
+    /// when that feature tag is active (e.g. `web`), matching Godot's
+    /// feature-tag override resolution.
+    #[test]
+    fn project_settings_feature_override() {
+        let mut ps = ProjectSettings::new();
+        ps.set(
+            "display/window/size/viewport_width",
+            SettingsValue::Int(1152),
+        );
+        ps.set(
+            "display/window/size/viewport_width.web",
+            SettingsValue::Int(800),
+        );
+
+        // The `.web` override wins when the `web` feature is active.
+        assert_eq!(
+            ps.get_setting_with_override_and_custom_features(
+                "display/window/size/viewport_width",
+                &["web"],
+            ),
+            Some(&SettingsValue::Int(800)),
+        );
+        // With no active features, the base value is returned.
+        assert_eq!(
+            ps.get_setting_with_override_and_custom_features(
+                "display/window/size/viewport_width",
+                &[],
+            ),
+            Some(&SettingsValue::Int(1152)),
+        );
+        // A feature with no matching override falls back to the base value.
+        assert_eq!(
+            ps.get_setting_with_override_and_custom_features(
+                "display/window/size/viewport_width",
+                &["mobile"],
+            ),
+            Some(&SettingsValue::Int(1152)),
+        );
+        // An unknown setting resolves to None even with features active.
+        assert_eq!(
+            ps.get_setting_with_override_and_custom_features("nonexistent/setting", &["web"]),
+            None,
+        );
+    }
+
     #[test]
     fn defaults_match_godot() {
         let ps = ProjectSettings::new();
@@ -595,5 +742,65 @@ common/physics_ticks_per_second=120
     fn int_promoted_to_float() {
         let v = SettingsValue::Int(60);
         assert_eq!(v.as_float(), Some(60.0));
+    }
+
+    #[test]
+    fn project_layer_names_get_and_label() {
+        let mut ps = ProjectSettings::new();
+        // Unset -> no name, default "Layer N" label.
+        assert_eq!(ps.layer_name("2d_physics", 1), None);
+        assert_eq!(ps.layer_label("2d_physics", 1), "Layer 1");
+        // Generic store retains an arbitrary key, as project.godot loading would.
+        ps.set(
+            "layer_names/2d_physics/layer_1",
+            SettingsValue::String("Player".into()),
+        );
+        assert_eq!(ps.layer_name("2d_physics", 1), Some("Player"));
+        assert_eq!(ps.layer_label("2d_physics", 1), "Player");
+        // The key is queryable via the generic getter (retention requirement).
+        assert_eq!(
+            ps.get("layer_names/2d_physics/layer_1")
+                .and_then(|v| v.as_string()),
+            Some("Player")
+        );
+        // set_layer_name round-trips; an empty name clears it back to default.
+        ps.set_layer_name("3d_render", 5, "Terrain");
+        assert_eq!(ps.layer_label("3d_render", 5), "Terrain");
+        ps.set_layer_name("3d_render", 5, "");
+        assert_eq!(ps.layer_name("3d_render", 5), None);
+        assert_eq!(ps.layer_label("3d_render", 5), "Layer 5");
+    }
+
+    #[test]
+    fn project_display_render_settings() {
+        // Defaults match Godot.
+        let ps = ProjectSettings::new();
+        assert_eq!(ps.viewport_width(), 1152);
+        assert_eq!(ps.viewport_height(), 648);
+        assert_eq!(ps.max_fps(), 0);
+        assert_eq!(ps.default_clear_color(), Color::new(0.3, 0.3, 0.3, 1.0));
+
+        // project.godot-style overrides read back through the typed getters.
+        let mut ps = ProjectSettings::new();
+        ps.set("display/window/size/viewport_width", SettingsValue::Int(800));
+        ps.set("display/window/size/viewport_height", SettingsValue::Int(600));
+        ps.set("application/run/max_fps", SettingsValue::Int(120));
+        ps.set(
+            "rendering/environment/defaults/default_clear_color",
+            SettingsValue::Color(0.25, 0.5, 0.75, 1.0),
+        );
+        assert_eq!(ps.viewport_width(), 800);
+        assert_eq!(ps.viewport_height(), 600);
+        assert_eq!(ps.max_fps(), 120);
+        assert_eq!(ps.default_clear_color(), Color::new(0.25, 0.5, 0.75, 1.0));
+    }
+
+    #[test]
+    fn settings_value_as_color() {
+        assert_eq!(
+            SettingsValue::Color(0.5, 0.25, 0.75, 1.0).as_color(),
+            Some(Color::new(0.5, 0.25, 0.75, 1.0))
+        );
+        assert_eq!(SettingsValue::Int(3).as_color(), None);
     }
 }

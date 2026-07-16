@@ -160,6 +160,12 @@ impl UidRegistry {
         self.uid_to_path.get(&uid.raw()).map(String::as_str)
     }
 
+    /// Godot `ResourceUID.get_id_path(id)`: the `res://` path a UID resolves to,
+    /// or `None`. Alias of [`lookup_uid`](Self::lookup_uid) matching Godot's name.
+    pub fn get_id_path(&self, uid: ResourceUid) -> Option<&str> {
+        self.lookup_uid(uid)
+    }
+
     /// Looks up the UID for a given path.
     pub fn lookup_path(&self, path: &str) -> Option<ResourceUid> {
         self.path_to_uid.get(path).copied()
@@ -419,6 +425,41 @@ mod tests {
     // -----------------------------------------------------------------------
     // uid_cache.bin + .uid sidecar tests
     // -----------------------------------------------------------------------
+
+    /// pat-nzgdu.134: a `uid_cache.bin` mapping resolves a `uid://` to its
+    /// `res://` path — `ResourceUID.get_id_path(text_to_id("uid://…"))` returns
+    /// the mapped path (the same resolution the loader uses for `load("uid://…")`).
+    #[test]
+    fn uid_resolves_to_path() {
+        // Hand-built uid_cache.bin (entry_count u32, then id u64, len u32, bytes)
+        // mapping id 12345 → res://sub.tscn.
+        let path = "res://sub.tscn";
+        let mut cache: Vec<u8> = Vec::new();
+        cache.extend_from_slice(&1u32.to_le_bytes()); // entry_count
+        cache.extend_from_slice(&12345u64.to_le_bytes()); // id
+        cache.extend_from_slice(&(path.len() as u32).to_le_bytes()); // str_len
+        cache.extend_from_slice(path.as_bytes());
+
+        let mut reg = UidRegistry::new();
+        assert_eq!(reg.load_from_cache_bytes(&cache).unwrap(), 1);
+
+        // get_id_path resolves the cached uid to its path.
+        assert_eq!(
+            reg.get_id_path(ResourceUid::new(12345)),
+            Some("res://sub.tscn"),
+        );
+        // The uid text "uid://kxd" decodes to the same id 12345, so resolving
+        // via text_to_id → get_id_path returns the same path.
+        let uid = text_to_id("uid://kxd");
+        assert_eq!(uid.raw(), 12345, "the uid text decodes to the cached id");
+        assert_eq!(reg.get_id_path(uid), Some("res://sub.tscn"));
+        // The reverse mapping (path → uid) resolves too. (ResourceUid has no
+        // Debug impl, so compare the raw ids rather than the values directly.)
+        assert_eq!(
+            reg.lookup_path("res://sub.tscn").map(|u| u.raw()),
+            Some(12345),
+        );
+    }
 
     #[test]
     fn load_from_cache_bytes_fixture() {
