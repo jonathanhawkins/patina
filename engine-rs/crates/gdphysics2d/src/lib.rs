@@ -33,6 +33,7 @@ pub mod body;
 pub mod character;
 pub mod collision;
 pub mod joint;
+pub mod obb_sat;
 pub mod shape;
 pub mod test_harness;
 pub mod tilemap_collision;

@@ -22,6 +22,7 @@ pub mod animation_tree;
 pub mod astar;
 pub mod audio_server_bridge;
 pub mod autoload;
+pub mod camera3d;
 pub mod canvas_order;
 pub mod collision;
 pub mod control;

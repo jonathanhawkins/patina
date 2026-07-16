@@ -437,15 +437,14 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("current", Variant::Bool(false))),
     );
 
-    // -- MeshInstance3D --
-    register_class(
-        ClassRegistration::new("MeshInstance3D")
-            .parent("Node3D")
-            .property(PropertyInfo::new("cast_shadow", Variant::Int(1))),
-    );
+    // -- MeshInstance3D (inherits GeometryInstance3D → VisualInstance3D → Node3D;
+    //    cast_shadow and the rest of the geometry surface come from the base). --
+    register_class(ClassRegistration::new("MeshInstance3D").parent("GeometryInstance3D"));
 
     // -- MultiMeshInstance3D --
-    register_class(ClassRegistration::new("MultiMeshInstance3D").parent("Node3D"));
+    register_class(
+        ClassRegistration::new("MultiMeshInstance3D").parent("GeometryInstance3D"),
+    );
 
     // -- Light3D (abstract base for all lights) --
     register_class(
@@ -676,7 +675,7 @@ pub fn register_3d_classes() {
     register_class(ClassRegistration::new("BoneAttachment3D").parent("Node3D"));
     register_class(ClassRegistration::new("AnimationPlayer").parent("Node"));
     register_class(ClassRegistration::new("AnimationTree").parent("Node"));
-    register_class(ClassRegistration::new("GPUParticles3D").parent("Node3D"));
+    register_class(ClassRegistration::new("GPUParticles3D").parent("GeometryInstance3D"));
     register_class(ClassRegistration::new("CPUParticles3D").parent("Node3D"));
     register_class(ClassRegistration::new("Decal").parent("Node3D"));
     register_class(ClassRegistration::new("FogVolume").parent("Node3D"));
@@ -686,7 +685,37 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("VisualInstance3D")
             .parent("Node3D")
-            .abstract_class(),
+            .abstract_class()
+            .property(PropertyInfo::new("layers", Variant::Int(1))),
+    );
+    // -- GeometryInstance3D (abstract base for drawable 3D instances:
+    //    MeshInstance3D, MultiMeshInstance3D, GPUParticles3D, …). Carries the
+    //    material_override/overlay, transparency, cast_shadow, GI, cull, LOD,
+    //    visibility-range and custom-AABB surface. --
+    register_class(
+        ClassRegistration::new("GeometryInstance3D")
+            .parent("VisualInstance3D")
+            .abstract_class()
+            .property(PropertyInfo::new("material_override", Variant::Nil))
+            .property(PropertyInfo::new("material_overlay", Variant::Nil))
+            .property(PropertyInfo::new("transparency", Variant::Float(0.0)))
+            .property(PropertyInfo::new("cast_shadow", Variant::Int(1)))
+            .property(PropertyInfo::new("extra_cull_margin", Variant::Float(0.0)))
+            .property(PropertyInfo::new("lod_bias", Variant::Float(1.0)))
+            .property(PropertyInfo::new("gi_mode", Variant::Int(1)))
+            .property(PropertyInfo::new("ignore_occlusion_culling", Variant::Bool(false)))
+            .property(PropertyInfo::new("visibility_range_begin", Variant::Float(0.0)))
+            .property(PropertyInfo::new(
+                "visibility_range_begin_margin",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new("visibility_range_end", Variant::Float(0.0)))
+            .property(PropertyInfo::new(
+                "visibility_range_end_margin",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new("visibility_range_fade_mode", Variant::Int(0)))
+            .property(PropertyInfo::new("custom_aabb", Variant::Nil)),
     );
     register_class(
         ClassRegistration::new("CSGShape3D")
@@ -1666,6 +1695,54 @@ mod tests {
         let guard = TEST_LOCK.lock().expect("test lock poisoned");
         clear_for_testing();
         guard
+    }
+
+    // pat-nzgdu.56: MeshInstance3D and the drawable-instance family inherit
+    // GeometryInstance3D → VisualInstance3D, exposing the material / transparency
+    // / shadow / GI / visibility-range property surface through ClassDB.
+    #[test]
+    fn geometry_instance3d_hierarchy_and_properties() {
+        let _guard = setup();
+        register_3d_classes();
+
+        // GeometryInstance3D exists under VisualInstance3D → Node3D.
+        assert!(class_exists("GeometryInstance3D"));
+        assert!(is_parent_class("GeometryInstance3D", "VisualInstance3D"));
+        assert!(is_parent_class("GeometryInstance3D", "Node3D"));
+
+        // The drawable-instance family now inherits it (and is still a Node3D).
+        for cls in ["MeshInstance3D", "MultiMeshInstance3D", "GPUParticles3D"] {
+            assert!(
+                is_parent_class(cls, "GeometryInstance3D"),
+                "{cls} should inherit GeometryInstance3D"
+            );
+            assert!(
+                is_parent_class(cls, "Node3D"),
+                "{cls} should still be a Node3D transitively"
+            );
+        }
+
+        // The VisualInstance3D + GeometryInstance3D property surface is reachable
+        // from MeshInstance3D via inheritance.
+        let props = get_property_list("MeshInstance3D");
+        let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
+        for expected in [
+            "layers",            // VisualInstance3D
+            "material_override", // GeometryInstance3D
+            "material_overlay",
+            "transparency",
+            "cast_shadow",
+            "gi_mode",
+            "extra_cull_margin",
+            "lod_bias",
+            "visibility_range_begin",
+            "custom_aabb",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "MeshInstance3D missing inherited property {expected}; got {names:?}"
+            );
+        }
     }
 
     #[test]

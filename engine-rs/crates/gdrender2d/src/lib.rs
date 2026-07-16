@@ -14,6 +14,7 @@ pub mod font;
 pub mod frame_server;
 pub mod light2d;
 pub mod polygon_raster;
+pub mod text_layout;
 pub mod text_server;
 pub mod ttf_font;
 pub mod renderer;

@@ -2463,12 +2463,10 @@ impl Interpreter {
                 Ok(Some(crate::coroutine::AwaitTarget::frames_variant(n)))
             }
             "str" => {
-                if args.len() != 1 {
-                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "str() takes exactly 1 argument".into(),
-                    )));
-                }
-                Ok(Some(Variant::String(format!("{}", args[0]))))
+                // Variadic (Godot `str(...)`): concatenate the string form of
+                // every argument with no separator. `str()` yields "".
+                let joined: String = args.iter().map(|a| format!("{a}")).collect();
+                Ok(Some(Variant::String(joined)))
             }
             "int" => {
                 if args.len() != 1 {
@@ -2659,28 +2657,31 @@ impl Interpreter {
                 }
             }
             "min" => {
-                if args.len() != 2 {
+                // Godot `min()` is variadic (2+ args). Fold pairwise using the
+                // existing 2-arg semantics so int/float typing is preserved
+                // exactly as before for the common 2-arg case.
+                if args.len() < 2 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "min() takes 2 arguments".into(),
+                        "min() takes at least 2 arguments".into(),
                     )));
                 }
-                Ok(Some(float_or_int(
-                    to_float(&args[0])?.min(to_float(&args[1])?),
-                    &args[0],
-                    &args[1],
-                )))
+                let mut acc = args[0].clone();
+                for a in &args[1..] {
+                    acc = float_or_int(to_float(&acc)?.min(to_float(a)?), &acc, a);
+                }
+                Ok(Some(acc))
             }
             "max" => {
-                if args.len() != 2 {
+                if args.len() < 2 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "max() takes 2 arguments".into(),
+                        "max() takes at least 2 arguments".into(),
                     )));
                 }
-                Ok(Some(float_or_int(
-                    to_float(&args[0])?.max(to_float(&args[1])?),
-                    &args[0],
-                    &args[1],
-                )))
+                let mut acc = args[0].clone();
+                for a in &args[1..] {
+                    acc = float_or_int(to_float(&acc)?.max(to_float(a)?), &acc, a);
+                }
+                Ok(Some(acc))
             }
             "clamp" => {
                 if args.len() != 3 {
@@ -2688,10 +2689,29 @@ impl Interpreter {
                         "clamp() takes 3 arguments".into(),
                     )));
                 }
-                let v = to_float(&args[0])?;
-                let lo = to_float(&args[1])?;
-                let hi = to_float(&args[2])?;
-                Ok(Some(float_or_int(v.max(lo).min(hi), &args[0], &args[1])))
+                // Componentwise on vectors (Godot `Vector2.clamp(min, max)`);
+                // `.max(lo).min(hi)` avoids f32::clamp's lo>hi panic.
+                match (&args[0], &args[1], &args[2]) {
+                    (Variant::Vector2(v), Variant::Vector2(lo), Variant::Vector2(hi)) => {
+                        Ok(Some(Variant::Vector2(gdcore::math::Vector2::new(
+                            v.x.max(lo.x).min(hi.x),
+                            v.y.max(lo.y).min(hi.y),
+                        ))))
+                    }
+                    (Variant::Vector3(v), Variant::Vector3(lo), Variant::Vector3(hi)) => {
+                        Ok(Some(Variant::Vector3(gdcore::math::Vector3::new(
+                            v.x.max(lo.x).min(hi.x),
+                            v.y.max(lo.y).min(hi.y),
+                            v.z.max(lo.z).min(hi.z),
+                        ))))
+                    }
+                    _ => {
+                        let v = to_float(&args[0])?;
+                        let lo = to_float(&args[1])?;
+                        let hi = to_float(&args[2])?;
+                        Ok(Some(float_or_int(v.max(lo).min(hi), &args[0], &args[1])))
+                    }
+                }
             }
             "lerp" => {
                 if args.len() != 3 {
@@ -2710,15 +2730,35 @@ impl Interpreter {
                         "sign() takes 1 argument".into(),
                     )));
                 }
-                let v = to_float(&args[0])?;
-                let s = if v > 0.0 {
-                    1.0
-                } else if v < 0.0 {
-                    -1.0
-                } else {
-                    0.0
+                // Componentwise on vectors (Godot `Vector2.sign()`).
+                let fsign = |x: f32| {
+                    if x > 0.0 {
+                        1.0
+                    } else if x < 0.0 {
+                        -1.0
+                    } else {
+                        0.0
+                    }
                 };
-                Ok(Some(float_or_int(s, &args[0], &args[0])))
+                match &args[0] {
+                    Variant::Vector2(v) => Ok(Some(Variant::Vector2(
+                        gdcore::math::Vector2::new(fsign(v.x), fsign(v.y)),
+                    ))),
+                    Variant::Vector3(v) => Ok(Some(Variant::Vector3(
+                        gdcore::math::Vector3::new(fsign(v.x), fsign(v.y), fsign(v.z)),
+                    ))),
+                    _ => {
+                        let v = to_float(&args[0])?;
+                        let s = if v > 0.0 {
+                            1.0
+                        } else if v < 0.0 {
+                            -1.0
+                        } else {
+                            0.0
+                        };
+                        Ok(Some(float_or_int(s, &args[0], &args[0])))
+                    }
+                }
             }
             "floor" => {
                 if args.len() != 1 {
@@ -2743,6 +2783,163 @@ impl Interpreter {
                     )));
                 }
                 Ok(Some(Variant::Float(to_float(&args[0])?.round())))
+            }
+            // Typed integer/float math variants (pat-nzgdu.39). Godot's `*i`
+            // family forces an int return, `*f` forces a float; they are
+            // pervasive in real 4.x scripts, so their absence throws
+            // UndefinedFunction on common code.
+            "floori" => {
+                Self::require_args("floori", args, 1)?;
+                Ok(Some(Variant::Int(to_float(&args[0])?.floor() as i64)))
+            }
+            "floorf" => {
+                Self::require_args("floorf", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.floor())))
+            }
+            "ceili" => {
+                Self::require_args("ceili", args, 1)?;
+                Ok(Some(Variant::Int(to_float(&args[0])?.ceil() as i64)))
+            }
+            "ceilf" => {
+                Self::require_args("ceilf", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.ceil())))
+            }
+            "roundi" => {
+                Self::require_args("roundi", args, 1)?;
+                Ok(Some(Variant::Int(to_float(&args[0])?.round() as i64)))
+            }
+            "roundf" => {
+                Self::require_args("roundf", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.round())))
+            }
+            "absi" => {
+                Self::require_args("absi", args, 1)?;
+                Ok(Some(Variant::Int(to_int(&args[0])?.abs())))
+            }
+            "absf" => {
+                Self::require_args("absf", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.abs())))
+            }
+            "signi" => {
+                Self::require_args("signi", args, 1)?;
+                let v = to_float(&args[0])?;
+                Ok(Some(Variant::Int(if v > 0.0 {
+                    1
+                } else if v < 0.0 {
+                    -1
+                } else {
+                    0
+                })))
+            }
+            "signf" => {
+                Self::require_args("signf", args, 1)?;
+                let v = to_float(&args[0])?;
+                Ok(Some(Variant::Float(if v > 0.0 {
+                    1.0
+                } else if v < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                })))
+            }
+            "snappedi" => {
+                Self::require_args("snappedi", args, 2)?;
+                let value = to_float(&args[0])?;
+                let step = to_float(&args[1])?;
+                let r = if step != 0.0 {
+                    (value / step + 0.5).floor() * step
+                } else {
+                    value
+                };
+                Ok(Some(Variant::Int(r as i64)))
+            }
+            "snappedf" => {
+                Self::require_args("snappedf", args, 2)?;
+                let value = to_float(&args[0])?;
+                let step = to_float(&args[1])?;
+                let r = if step != 0.0 {
+                    (value / step + 0.5).floor() * step
+                } else {
+                    value
+                };
+                Ok(Some(Variant::Float(r)))
+            }
+            "maxi" => {
+                Self::require_args("maxi", args, 2)?;
+                Ok(Some(Variant::Int(to_int(&args[0])?.max(to_int(&args[1])?))))
+            }
+            "mini" => {
+                Self::require_args("mini", args, 2)?;
+                Ok(Some(Variant::Int(to_int(&args[0])?.min(to_int(&args[1])?))))
+            }
+            "maxf" => {
+                Self::require_args("maxf", args, 2)?;
+                Ok(Some(Variant::Float(
+                    to_float(&args[0])?.max(to_float(&args[1])?),
+                )))
+            }
+            "minf" => {
+                Self::require_args("minf", args, 2)?;
+                Ok(Some(Variant::Float(
+                    to_float(&args[0])?.min(to_float(&args[1])?),
+                )))
+            }
+            "clampi" => {
+                Self::require_args("clampi", args, 3)?;
+                let v = to_int(&args[0])?;
+                let lo = to_int(&args[1])?;
+                let hi = to_int(&args[2])?;
+                Ok(Some(Variant::Int(v.max(lo).min(hi))))
+            }
+            "clampf" => {
+                Self::require_args("clampf", args, 3)?;
+                let v = to_float(&args[0])?;
+                let lo = to_float(&args[1])?;
+                let hi = to_float(&args[2])?;
+                Ok(Some(Variant::Float(v.max(lo).min(hi))))
+            }
+            "lerpf" => {
+                Self::require_args("lerpf", args, 3)?;
+                let a = to_float(&args[0])?;
+                let b = to_float(&args[1])?;
+                let t = to_float(&args[2])?;
+                Ok(Some(Variant::Float(a + (b - a) * t)))
+            }
+            // Variant-generic `wrap(value, min, max)`: integer operands wrap as
+            // wrapi, otherwise as wrapf (wrapi/wrapf themselves already exist).
+            "wrap" => {
+                Self::require_args("wrap", args, 3)?;
+                let all_int = matches!(&args[0], Variant::Int(_))
+                    && matches!(&args[1], Variant::Int(_))
+                    && matches!(&args[2], Variant::Int(_));
+                if all_int {
+                    let value = to_int(&args[0])?;
+                    let min = to_int(&args[1])?;
+                    let max = to_int(&args[2])?;
+                    let range = max - min;
+                    let result = if range == 0 {
+                        min
+                    } else {
+                        min + (((value - min) % range) + range) % range
+                    };
+                    Ok(Some(Variant::Int(result)))
+                } else {
+                    let value = to_float(&args[0])?;
+                    let min = to_float(&args[1])?;
+                    let max = to_float(&args[2])?;
+                    let range = max - min;
+                    let result = if range.abs() < 1e-5 {
+                        min
+                    } else {
+                        let r = value - (range * ((value - min) / range).floor());
+                        if is_equal_approx(r, max) {
+                            min
+                        } else {
+                            r
+                        }
+                    };
+                    Ok(Some(Variant::Float(result)))
+                }
             }
             "sqrt" => {
                 if args.len() != 1 {
@@ -3210,14 +3407,39 @@ impl Interpreter {
             }
             "snapped" => {
                 Self::require_args("snapped", args, 2)?;
-                let value = to_float(&args[0])?;
-                let step = to_float(&args[1])?;
-                let result = if step != 0.0 {
-                    (value / step + 0.5).floor() * step
-                } else {
-                    value
+                let snap = |value: f32, step: f32| {
+                    if step != 0.0 {
+                        (value / step + 0.5).floor() * step
+                    } else {
+                        value
+                    }
                 };
-                Ok(Some(float_or_int(result, &args[0], &args[1])))
+                // Componentwise on vectors (Godot `Vector2.snapped(step)`).
+                match (&args[0], &args[1]) {
+                    (Variant::Vector2(v), Variant::Vector2(s)) => {
+                        Ok(Some(Variant::Vector2(gdcore::math::Vector2::new(
+                            snap(v.x, s.x),
+                            snap(v.y, s.y),
+                        ))))
+                    }
+                    (Variant::Vector3(v), Variant::Vector3(s)) => {
+                        Ok(Some(Variant::Vector3(gdcore::math::Vector3::new(
+                            snap(v.x, s.x),
+                            snap(v.y, s.y),
+                            snap(v.z, s.z),
+                        ))))
+                    }
+                    _ => {
+                        let value = to_float(&args[0])?;
+                        let step = to_float(&args[1])?;
+                        let result = if step != 0.0 {
+                            (value / step + 0.5).floor() * step
+                        } else {
+                            value
+                        };
+                        Ok(Some(float_or_int(result, &args[0], &args[1])))
+                    }
+                }
             }
             "smoothstep" => {
                 Self::require_args("smoothstep", args, 3)?;
@@ -3251,6 +3473,128 @@ impl Interpreter {
                 Ok(Some(Variant::Float(
                     from + angle_difference(from, to) * weight,
                 )))
+            }
+            // Interpolation + angle helpers (pat-nzgdu.40). Missing arms threw
+            // UndefinedFunction on common Godot 4.x scripts.
+            "angle_difference" => {
+                Self::require_args("angle_difference", args, 2)?;
+                Ok(Some(Variant::Float(angle_difference(
+                    to_float(&args[0])?,
+                    to_float(&args[1])?,
+                ))))
+            }
+            "rotate_toward" => {
+                Self::require_args("rotate_toward", args, 3)?;
+                Ok(Some(Variant::Float(rotate_toward(
+                    to_float(&args[0])?,
+                    to_float(&args[1])?,
+                    to_float(&args[2])?,
+                ))))
+            }
+            "cubic_interpolate" => {
+                Self::require_args("cubic_interpolate", args, 5)?;
+                Ok(Some(Variant::Float(cubic_interpolate(
+                    to_float(&args[0])?,
+                    to_float(&args[1])?,
+                    to_float(&args[2])?,
+                    to_float(&args[3])?,
+                    to_float(&args[4])?,
+                ))))
+            }
+            "cubic_interpolate_angle" => {
+                Self::require_args("cubic_interpolate_angle", args, 5)?;
+                Ok(Some(Variant::Float(cubic_interpolate_angle(
+                    to_float(&args[0])?,
+                    to_float(&args[1])?,
+                    to_float(&args[2])?,
+                    to_float(&args[3])?,
+                    to_float(&args[4])?,
+                ))))
+            }
+            "cubic_interpolate_in_time" => {
+                Self::require_args("cubic_interpolate_in_time", args, 8)?;
+                Ok(Some(Variant::Float(cubic_interpolate_in_time(
+                    to_float(&args[0])?,
+                    to_float(&args[1])?,
+                    to_float(&args[2])?,
+                    to_float(&args[3])?,
+                    to_float(&args[4])?,
+                    to_float(&args[5])?,
+                    to_float(&args[6])?,
+                    to_float(&args[7])?,
+                ))))
+            }
+            "cubic_interpolate_angle_in_time" => {
+                Self::require_args("cubic_interpolate_angle_in_time", args, 8)?;
+                Ok(Some(Variant::Float(cubic_interpolate_angle_in_time(
+                    to_float(&args[0])?,
+                    to_float(&args[1])?,
+                    to_float(&args[2])?,
+                    to_float(&args[3])?,
+                    to_float(&args[4])?,
+                    to_float(&args[5])?,
+                    to_float(&args[6])?,
+                    to_float(&args[7])?,
+                ))))
+            }
+            "bezier_interpolate" => {
+                Self::require_args("bezier_interpolate", args, 5)?;
+                Ok(Some(Variant::Float(bezier_interpolate(
+                    to_float(&args[0])?,
+                    to_float(&args[1])?,
+                    to_float(&args[2])?,
+                    to_float(&args[3])?,
+                    to_float(&args[4])?,
+                ))))
+            }
+            "bezier_derivative" => {
+                Self::require_args("bezier_derivative", args, 5)?;
+                Ok(Some(Variant::Float(bezier_derivative(
+                    to_float(&args[0])?,
+                    to_float(&args[1])?,
+                    to_float(&args[2])?,
+                    to_float(&args[3])?,
+                    to_float(&args[4])?,
+                ))))
+            }
+            "is_finite" => {
+                Self::require_args("is_finite", args, 1)?;
+                Ok(Some(Variant::Bool(to_float(&args[0])?.is_finite())))
+            }
+            "step_decimals" => {
+                Self::require_args("step_decimals", args, 1)?;
+                Ok(Some(Variant::Int(step_decimals(to_float(&args[0])?))))
+            }
+            "fposmod" => {
+                Self::require_args("fposmod", args, 2)?;
+                Ok(Some(Variant::Float(fposmod(
+                    to_float(&args[0])?,
+                    to_float(&args[1])?,
+                ))))
+            }
+            "sinh" => {
+                Self::require_args("sinh", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.sinh())))
+            }
+            "cosh" => {
+                Self::require_args("cosh", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.cosh())))
+            }
+            "tanh" => {
+                Self::require_args("tanh", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.tanh())))
+            }
+            "asinh" => {
+                Self::require_args("asinh", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.asinh())))
+            }
+            "acosh" => {
+                Self::require_args("acosh", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.acosh())))
+            }
+            "atanh" => {
+                Self::require_args("atanh", args, 1)?;
+                Ok(Some(Variant::Float(to_float(&args[0])?.atanh())))
             }
             "wrapi" => {
                 Self::require_args("wrapi", args, 3)?;
@@ -3388,6 +3732,25 @@ impl Interpreter {
                     self.current_function.as_deref().unwrap_or("<anonymous>"),
                     self.current_line
                 ));
+                Ok(Some(Variant::Nil))
+            }
+            "printraw" => {
+                // Godot `printraw` writes with no trailing newline. The output
+                // buffer is line-based, so concatenate onto the current (last)
+                // line instead of starting a new one; consecutive `printraw`
+                // calls therefore land on a single line.
+                let joined: String = args.iter().map(|a| format!("{a}")).collect();
+                if let Some(last) = self.output.last_mut() {
+                    last.push_str(&joined);
+                } else {
+                    self.output.push(joined);
+                }
+                Ok(Some(Variant::Nil))
+            }
+            "print_verbose" => {
+                // Godot `print_verbose` prints only when OS verbose mode is on.
+                // The headless interpreter has no verbose stdout, so this is a
+                // no-op (registered so it does not throw UndefinedFunction).
                 Ok(Some(Variant::Nil))
             }
 
@@ -6139,6 +6502,44 @@ impl Interpreter {
                 let elems = obj.packed_to_array().unwrap();
                 Ok(Variant::Bool(elems.iter().any(|e| e == &args[0])))
             }
+            // PackedByteArray string-conversion surface (pat-nzgdu.33). These
+            // are meaningful only on a byte array; other packed types report
+            // "no method" via the catch-all.
+            "get_string_from_utf8" => match obj {
+                Variant::PackedByteArray(b) => {
+                    // Godot decodes UTF-8, substituting the replacement char for
+                    // invalid sequences (lossy).
+                    Ok(Variant::String(String::from_utf8_lossy(b).into_owned()))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "{} has no method 'get_string_from_utf8'",
+                    obj.variant_type()
+                )))),
+            },
+            "get_string_from_ascii" => match obj {
+                Variant::PackedByteArray(b) => {
+                    // Each byte maps directly to a Latin-1 code point.
+                    Ok(Variant::String(b.iter().map(|&c| c as char).collect()))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "{} has no method 'get_string_from_ascii'",
+                    obj.variant_type()
+                )))),
+            },
+            "hex_encode" => match obj {
+                Variant::PackedByteArray(b) => {
+                    // Lowercase, two hex digits per byte, no separator.
+                    let mut s = String::with_capacity(b.len() * 2);
+                    for &byte in b {
+                        s.push_str(&format!("{byte:02x}"));
+                    }
+                    Ok(Variant::String(s))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "{} has no method 'hex_encode'",
+                    obj.variant_type()
+                )))),
+            },
             other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "{} has no method '{}'",
                 obj.variant_type(),
@@ -7533,6 +7934,141 @@ fn smoothstep(from: f64, to: f64, s: f64) -> f64 {
 fn angle_difference(from: f64, to: f64) -> f64 {
     let difference = (to - from) % std::f64::consts::TAU;
     (2.0 * difference) % std::f64::consts::TAU - difference
+}
+
+/// Godot `rotate_toward`: move `from` toward `to` by at most `delta` radians,
+/// taking the shortest path. A negative `delta` moves away, no further than `to`.
+fn rotate_toward(from: f64, to: f64, delta: f64) -> f64 {
+    let difference = angle_difference(from, to);
+    let abs_difference = difference.abs();
+    let sign = if difference >= 0.0 { 1.0 } else { -1.0 };
+    from + delta.clamp(abs_difference - std::f64::consts::PI, abs_difference) * sign
+}
+
+/// Godot `cubic_interpolate` (Catmull-Rom style cubic through `from`/`to` with
+/// `pre`/`post` tangent samples).
+fn cubic_interpolate(from: f64, to: f64, pre: f64, post: f64, weight: f64) -> f64 {
+    0.5 * ((from * 2.0)
+        + (-pre + to) * weight
+        + (2.0 * pre - 5.0 * from + 4.0 * to - post) * (weight * weight)
+        + (-pre + 3.0 * from - 3.0 * to + post) * (weight * weight * weight))
+}
+
+/// Godot `cubic_interpolate_in_time` (Barry-Goldman non-uniform time form).
+#[allow(clippy::too_many_arguments)]
+fn cubic_interpolate_in_time(
+    from: f64,
+    to: f64,
+    pre: f64,
+    post: f64,
+    weight: f64,
+    to_t: f64,
+    pre_t: f64,
+    post_t: f64,
+) -> f64 {
+    let lerp = |a: f64, b: f64, t: f64| a + (b - a) * t;
+    let t = lerp(0.0, to_t, weight);
+    let a1 = lerp(pre, from, if pre_t == 0.0 { 0.0 } else { (t - pre_t) / -pre_t });
+    let a2 = lerp(from, to, if to_t == 0.0 { 0.5 } else { t / to_t });
+    let a3 = lerp(
+        to,
+        post,
+        if post_t - to_t == 0.0 {
+            1.0
+        } else {
+            (t - to_t) / (post_t - to_t)
+        },
+    );
+    let b1 = lerp(
+        a1,
+        a2,
+        if to_t - pre_t == 0.0 {
+            0.0
+        } else {
+            (t - pre_t) / (to_t - pre_t)
+        },
+    );
+    let b2 = lerp(a2, a3, if post_t == 0.0 { 1.0 } else { t / post_t });
+    lerp(b1, b2, if to_t == 0.0 { 0.5 } else { t / to_t })
+}
+
+/// Wraps `pre`/`to`/`post` into the shortest-angle frame of `from` (shared by
+/// the `_angle` cubic forms), returning `(from_rot, to_rot, pre_rot, post_rot)`.
+fn cubic_angle_frame(from: f64, to: f64, pre: f64, post: f64) -> (f64, f64, f64, f64) {
+    let tau = std::f64::consts::TAU;
+    let from_rot = from % tau;
+    let pre_diff = (pre - from_rot) % tau;
+    let pre_rot = from_rot + (2.0 * pre_diff) % tau - pre_diff;
+    let to_diff = (to - from_rot) % tau;
+    let to_rot = from_rot + (2.0 * to_diff) % tau - to_diff;
+    let post_diff = (post - to_rot) % tau;
+    let post_rot = to_rot + (2.0 * post_diff) % tau - post_diff;
+    (from_rot, to_rot, pre_rot, post_rot)
+}
+
+/// Godot `cubic_interpolate_angle`.
+fn cubic_interpolate_angle(from: f64, to: f64, pre: f64, post: f64, weight: f64) -> f64 {
+    let (from_rot, to_rot, pre_rot, post_rot) = cubic_angle_frame(from, to, pre, post);
+    cubic_interpolate(from_rot, to_rot, pre_rot, post_rot, weight)
+}
+
+/// Godot `cubic_interpolate_angle_in_time`.
+#[allow(clippy::too_many_arguments)]
+fn cubic_interpolate_angle_in_time(
+    from: f64,
+    to: f64,
+    pre: f64,
+    post: f64,
+    weight: f64,
+    to_t: f64,
+    pre_t: f64,
+    post_t: f64,
+) -> f64 {
+    let (from_rot, to_rot, pre_rot, post_rot) = cubic_angle_frame(from, to, pre, post);
+    cubic_interpolate_in_time(from_rot, to_rot, pre_rot, post_rot, weight, to_t, pre_t, post_t)
+}
+
+/// Godot `bezier_interpolate` (cubic Bézier from `start` to `end`).
+fn bezier_interpolate(start: f64, control_1: f64, control_2: f64, end: f64, t: f64) -> f64 {
+    let omt = 1.0 - t;
+    let omt2 = omt * omt;
+    let omt3 = omt2 * omt;
+    let t2 = t * t;
+    let t3 = t2 * t;
+    start * omt3 + control_1 * omt2 * t * 3.0 + control_2 * omt * t2 * 3.0 + end * t3
+}
+
+/// Godot `bezier_derivative` (tangent of the cubic Bézier at `t`).
+fn bezier_derivative(start: f64, control_1: f64, control_2: f64, end: f64, t: f64) -> f64 {
+    let omt = 1.0 - t;
+    let omt2 = omt * omt;
+    let t2 = t * t;
+    (control_1 - start) * 3.0 * omt2 + (control_2 - control_1) * 6.0 * omt * t + (end - control_2) * 3.0 * t2
+}
+
+/// Godot `fposmod`: floating modulo whose result carries the sign of `y`.
+fn fposmod(x: f64, y: f64) -> f64 {
+    let mut value = x % y;
+    if (value < 0.0 && y > 0.0) || (value > 0.0 && y < 0.0) {
+        value += y;
+    }
+    value + 0.0
+}
+
+/// Godot `step_decimals`: count of significant decimal places in `step`.
+fn step_decimals(step: f64) -> i64 {
+    const SD: [f64; 10] = [
+        0.9999, 0.09999, 0.009999, 0.0009999, 0.00009999, 0.000009999, 0.0000009999, 0.00000009999,
+        0.000000009999, 0.0000000009999,
+    ];
+    let abs = step.abs();
+    let decs = abs - (abs as i64) as f64;
+    for (i, sd) in SD.iter().enumerate() {
+        if decs >= *sd {
+            return i as i64;
+        }
+    }
+    0
 }
 /// Godot `ease` curve function.
 fn ease(mut x: f64, curve: f64) -> f64 {
@@ -13161,6 +13697,194 @@ match x:
         assert!((run_float("return smoothstep(0.0, 1.0, 0.5)\n") - 0.5).abs() < 1e-9);
         assert!((run_float("return remap(5.0, 0.0, 10.0, 0.0, 100.0)\n") - 50.0).abs() < 1e-9);
         assert!((run_float("return inverse_lerp(0.0, 10.0, 5.0)\n") - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn globalscope_typed_math_builtins() {
+        // pat-nzgdu.39: typed *i/*f variants force int/float returns; min/max
+        // are variadic; wrap is Variant-generic; abs/clamp/sign/snapped are
+        // componentwise on vectors.
+
+        // Integer-forcing variants return Variant::Int (Godot's INT typeof).
+        assert_eq!(run_val("return floori(2.7)\n"), Variant::Int(2));
+        assert_eq!(run_val("return ceili(2.1)\n"), Variant::Int(3));
+        assert_eq!(run_val("return roundi(2.5)\n"), Variant::Int(3));
+        assert_eq!(run_val("return absi(-4)\n"), Variant::Int(4));
+        assert_eq!(run_val("return signi(-3)\n"), Variant::Int(-1));
+        assert_eq!(run_val("return snappedi(12.0, 5)\n"), Variant::Int(10));
+        assert_eq!(run_val("return maxi(3, 7)\n"), Variant::Int(7));
+        assert_eq!(run_val("return mini(3, 7)\n"), Variant::Int(3));
+        assert_eq!(run_val("return clampi(15, 0, 10)\n"), Variant::Int(10));
+        // Type is genuinely INT, not a coerced float.
+        assert!(matches!(run_val("return floori(2.7)\n"), Variant::Int(_)));
+
+        // Float-forcing variants return Variant::Float.
+        assert!((run_float("return floorf(2.7)\n") - 2.0).abs() < 1e-9);
+        assert!((run_float("return ceilf(2.1)\n") - 3.0).abs() < 1e-9);
+        assert!((run_float("return roundf(2.4)\n") - 2.0).abs() < 1e-9);
+        assert!((run_float("return absf(-4.5)\n") - 4.5).abs() < 1e-9);
+        assert!((run_float("return signf(-3.0)\n") + 1.0).abs() < 1e-9);
+        assert!((run_float("return snappedf(1.37, 0.1)\n") - 1.4).abs() < 1e-9);
+        assert!((run_float("return maxf(1, 2.5)\n") - 2.5).abs() < 1e-9);
+        assert!((run_float("return minf(1, 2.5)\n") - 1.0).abs() < 1e-9);
+        assert!((run_float("return clampf(15.0, 0.0, 10.0)\n") - 10.0).abs() < 1e-9);
+        assert!((run_float("return lerpf(0.0, 10.0, 0.25)\n") - 2.5).abs() < 1e-9);
+        assert!(matches!(run_val("return floorf(2.7)\n"), Variant::Float(_)));
+
+        // Variadic min/max (2+ args).
+        assert_eq!(run_val("return min(3, 1, 2)\n"), Variant::Int(1));
+        assert_eq!(run_val("return max(3, 1, 2, 9, 4)\n"), Variant::Int(9));
+
+        // Variant-generic wrap: int operands wrap as int, float as float.
+        assert_eq!(run_val("return wrap(5, 0, 3)\n"), Variant::Int(2));
+        assert!((run_float("return wrap(5.0, 0.0, 3.0)\n") - 2.0).abs() < 1e-9);
+
+        // Componentwise vector abs/clamp/sign/snapped.
+        assert_eq!(
+            run_val("return abs(Vector2(-1, -2))\n"),
+            Variant::Vector2(gdcore::math::Vector2::new(1.0, 2.0))
+        );
+        assert_eq!(
+            run_val("return clamp(Vector2(5, -5), Vector2(0, 0), Vector2(3, 3))\n"),
+            Variant::Vector2(gdcore::math::Vector2::new(3.0, 0.0))
+        );
+        assert_eq!(
+            run_val("return sign(Vector3(-2, 0, 5))\n"),
+            Variant::Vector3(gdcore::math::Vector3::new(-1.0, 0.0, 1.0))
+        );
+        assert_eq!(
+            run_val("return abs(Vector3(-1, -2, -3))\n"),
+            Variant::Vector3(gdcore::math::Vector3::new(1.0, 2.0, 3.0))
+        );
+    }
+
+    #[test]
+    fn globalscope_interp_math_builtins() {
+        use std::f64::consts::PI;
+
+        // is_finite / step_decimals.
+        assert_eq!(run_val("return is_finite(1.0)\n"), Variant::Bool(true));
+        assert_eq!(run_val("return is_finite(INF)\n"), Variant::Bool(false));
+        assert_eq!(run_val("return is_finite(NAN)\n"), Variant::Bool(false));
+        assert_eq!(run_val("return step_decimals(0.01)\n"), Variant::Int(2));
+        assert_eq!(run_val("return step_decimals(1.0)\n"), Variant::Int(0));
+
+        // Bézier + cubic interpolation.
+        assert!(
+            (run_float("return bezier_interpolate(0.0, 0.0, 1.0, 1.0, 0.5)\n") - 0.5).abs() < 1e-9
+        );
+        assert!(
+            (run_float("return bezier_derivative(0.0, 0.0, 1.0, 1.0, 0.5)\n") - 1.5).abs() < 1e-9
+        );
+        assert!(
+            (run_float("return cubic_interpolate(0.0, 1.0, 0.0, 1.0, 0.5)\n") - 0.5).abs() < 1e-9
+        );
+        assert!(
+            (run_float("return cubic_interpolate_angle(0.0, 1.0, 0.0, 1.0, 0.5)\n") - 0.5).abs()
+                < 1e-9
+        );
+        assert!(
+            (run_float(
+                "return cubic_interpolate_in_time(0.0, 1.0, 0.0, 1.0, 0.5, 1.0, -1.0, 2.0)\n"
+            ) - 0.5)
+                .abs()
+                < 1e-9
+        );
+        assert!(
+            (run_float(
+                "return cubic_interpolate_angle_in_time(0.0, 1.0, 0.0, 1.0, 0.5, 1.0, -1.0, 2.0)\n"
+            ) - 0.5)
+                .abs()
+                < 1e-9
+        );
+
+        // Angle helpers.
+        assert!((run_float("return angle_difference(0.0, 1.0)\n") - 1.0).abs() < 1e-9);
+        // At the +/-PI boundary the sign is ambiguous; assert the magnitude.
+        assert!((run_float("return angle_difference(0.0, PI)\n").abs() - PI).abs() < 1e-9);
+        // Unambiguous small rotation moves exactly by delta toward the target.
+        assert!((run_float("return rotate_toward(0.0, 1.0, 0.1)\n") - 0.1).abs() < 1e-9);
+        // Boundary case: direction ambiguous, but the step magnitude is delta.
+        assert!((run_float("return rotate_toward(0.0, PI, 0.1)\n").abs() - 0.1).abs() < 1e-9);
+        // A delta larger than the gap lands exactly on the target.
+        assert!((run_float("return rotate_toward(0.0, 1.0, 5.0)\n") - 1.0).abs() < 1e-9);
+
+        // fposmod carries the sign of the divisor.
+        assert!((run_float("return fposmod(-1.0, 3.0)\n") - 2.0).abs() < 1e-9);
+        assert!((run_float("return fposmod(5.0, 3.0)\n") - 2.0).abs() < 1e-9);
+
+        // Hyperbolics.
+        assert!(run_float("return sinh(0.0)\n").abs() < 1e-9);
+        assert!((run_float("return cosh(0.0)\n") - 1.0).abs() < 1e-9);
+        assert!(run_float("return tanh(0.0)\n").abs() < 1e-9);
+        assert!(run_float("return asinh(0.0)\n").abs() < 1e-9);
+        assert!(run_float("return acosh(1.0)\n").abs() < 1e-9);
+        assert!(run_float("return atanh(0.0)\n").abs() < 1e-9);
+    }
+
+    #[test]
+    fn globalscope_diagnostics_print_builtins() {
+        // prints joins args with spaces; printt with tabs.
+        assert_eq!(
+            run("prints(\"a\", 1, true)\n").output,
+            vec!["a 1 true".to_string()]
+        );
+        assert_eq!(run("printt(\"a\", \"b\")\n").output, vec!["a\tb".to_string()]);
+
+        // str() is variadic and concatenates the string form of every arg.
+        assert_eq!(
+            run_val("return str(\"x\", 2, \"y\")\n"),
+            Variant::String("x2y".into())
+        );
+        assert_eq!(
+            run("print(str(\"x\", 2, \"y\"))\n").output,
+            vec!["x2y".to_string()]
+        );
+
+        // printraw has no trailing newline: consecutive raws share one line.
+        assert_eq!(
+            run("printraw(\"ab\")\nprintraw(\"cd\")\n").output,
+            vec!["abcd".to_string()]
+        );
+
+        // print_verbose is silent by default (headless verbose off).
+        assert!(run("print_verbose(\"hidden\")\n").output.is_empty());
+
+        // push_error / push_warning / printerr route to the observable
+        // diagnostics sink (not silently dropped).
+        let errs = run_interp("push_error(\"boom\")\n");
+        assert!(errs.errors().iter().any(|e| e.contains("boom")));
+        let warn = run_interp("push_warning(\"careful\")\n");
+        assert!(warn
+            .errors()
+            .iter()
+            .any(|e| e.contains("careful") && e.contains("WARNING")));
+        let perr = run_interp("printerr(\"eek\")\n");
+        assert!(perr.errors().iter().any(|e| e.contains("eek")));
+    }
+
+    #[test]
+    fn packed_bytearray_string_conversions() {
+        // pat-nzgdu.33 (interpreter slice): PackedByteArray string-conversion
+        // methods. "Hi" == bytes [72, 105].
+        assert_eq!(
+            run_val("var b = PackedByteArray([72, 105])\nreturn b.get_string_from_utf8()\n"),
+            Variant::String("Hi".into())
+        );
+        assert_eq!(
+            run_val("var b = PackedByteArray([72, 105])\nreturn b.get_string_from_ascii()\n"),
+            Variant::String("Hi".into())
+        );
+        // hex_encode: 72 -> "48", 105 -> "69".
+        assert_eq!(
+            run_val("var b = PackedByteArray([72, 105])\nreturn b.hex_encode()\n"),
+            Variant::String("4869".into())
+        );
+        // Multibyte UTF-8: [226, 156, 147] is U+2713 CHECK MARK.
+        assert_eq!(
+            run_val("var b = PackedByteArray([226, 156, 147])\nreturn b.get_string_from_utf8()\n"),
+            Variant::String("\u{2713}".into())
+        );
     }
 
     #[test]

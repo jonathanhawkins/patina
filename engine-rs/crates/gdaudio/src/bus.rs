@@ -24,6 +24,10 @@ pub struct AudioBus {
     send: String,
     /// Send level in dB (0 = full send).
     send_db: f32,
+    /// When true, the bus's effect chain is skipped during mixing (Godot
+    /// `bus/<i>/bypass_fx` / `AudioServer.set_bus_bypass_effects`). Volume,
+    /// mute/solo, and send routing still apply — only the inserts are bypassed.
+    bypass: bool,
 }
 
 impl Clone for AudioBus {
@@ -37,6 +41,7 @@ impl Clone for AudioBus {
             effects: EffectChain::new(),
             send: self.send.clone(),
             send_db: self.send_db,
+            bypass: self.bypass,
         }
     }
 }
@@ -49,6 +54,7 @@ impl std::fmt::Debug for AudioBus {
             .field("mute", &self.mute)
             .field("solo", &self.solo)
             .field("effects", &self.effects.len())
+            .field("bypass", &self.bypass)
             .finish()
     }
 }
@@ -64,6 +70,7 @@ impl AudioBus {
             effects: EffectChain::new(),
             send: String::new(),
             send_db: 0.0,
+            bypass: false,
         }
     }
 
@@ -153,6 +160,17 @@ impl AudioBus {
     /// Set the solo flag.
     pub fn set_solo(&mut self, solo: bool) {
         self.solo = solo;
+    }
+
+    /// Return whether this bus bypasses its effect chain.
+    pub fn is_bypass(&self) -> bool {
+        self.bypass
+    }
+
+    /// Set the effect-chain bypass flag (Godot `bus/<i>/bypass_fx`). When set,
+    /// mixing skips the bus's inserts but still applies volume/mute/solo/send.
+    pub fn set_bypass(&mut self, bypass: bool) {
+        self.bypass = bypass;
     }
 }
 

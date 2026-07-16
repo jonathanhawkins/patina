@@ -20,11 +20,13 @@
 
 #![warn(clippy::all)]
 
+pub mod block_compression;
 pub mod cache;
 pub mod config_file;
 pub mod ctex;
 pub mod fuzz_res;
 pub mod gltf_import;
+pub mod image_tga_bmp;
 pub mod importers;
 pub mod loader;
 pub mod pck;

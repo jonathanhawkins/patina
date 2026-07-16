@@ -263,9 +263,9 @@ impl AudioServer {
                 *s *= vol;
             }
 
-            // Effect chain.
+            // Effect chain (skipped when the bus bypasses its inserts).
             if let Some(bus) = self.mixer.get_bus_mut(i) {
-                if !bus.effects().is_empty() {
+                if !bus.is_bypass() && !bus.effects().is_empty() {
                     bus.process_effects(&mut bus_bufs[i], rate, out_ch as u16);
                 }
             }
@@ -305,7 +305,7 @@ impl AudioServer {
             *s *= master_vol;
         }
         if let Some(master) = self.mixer.get_bus_mut(0) {
-            if !master.effects().is_empty() {
+            if !master.is_bypass() && !master.effects().is_empty() {
                 master.process_effects(&mut bus_bufs[0], rate, out_ch as u16);
             }
         }
@@ -391,6 +391,95 @@ mod tests {
             sample_rate,
             channels: 1,
         }
+    }
+
+    // pat-nzgdu.26: a project bus layout loads named buses with their volumes,
+    // and the runner mix honors per-bus volume, solo, a non-Master effect chain,
+    // and the bypass flag. (The script-facing AudioServer singleton dispatch —
+    // AudioServer.set_bus_volume_db etc. in the interpreter — is a separate,
+    // interpreter-lane concern; this covers the mixer/runtime behavior.)
+    #[test]
+    fn audio_server_singleton_and_bus_layout() {
+        use crate::effects::AudioEffectAmplify;
+
+        // A project.godot [audio_bus_layout]: Master + Music(-10 dB) + SFX(0 dB).
+        const LAYOUT: &str = r#"
+[audio_bus_layout]
+bus/0/name = "Master"
+bus/0/volume_db = 0.0
+bus/1/name = "Music"
+bus/1/volume_db = -10.0
+bus/1/send = "Master"
+bus/2/name = "SFX"
+bus/2/volume_db = 0.0
+bus/2/send = "Master"
+"#;
+        // -10 dB in linear terms (10^(-10/20) ≈ 0.3162).
+        let music_lin = 10f32.powf(-10.0 / 20.0);
+
+        // (1) Per-bus volume: a voice on Music (-10 dB) mixes at the reduced
+        //     level, NOT unity.
+        let mut server = AudioServer::new();
+        assert_eq!(server.mixer_mut().load_bus_layout_str(LAYOUT), 3);
+        server.play_on_bus(make_dc_buffer(1.0, 44100), "Music");
+        let out = server.mix(64);
+        assert!(
+            (out[0] - music_lin).abs() < 1e-3,
+            "Music at -10 dB must mix at {music_lin}, got {}",
+            out[0]
+        );
+        assert!(
+            (out[0] - 1.0).abs() > 1e-2,
+            "Music must NOT play at unity — -10 dB is a real reduction"
+        );
+
+        // (2) Solo: soloing SFX silences the non-soloed Music voice.
+        let mut server = AudioServer::new();
+        server.mixer_mut().load_bus_layout_str(LAYOUT);
+        let sfx_idx = server.mixer().get_bus_by_name("SFX").unwrap();
+        server.mixer_mut().get_bus_mut(sfx_idx).unwrap().set_solo(true);
+        server.play_on_bus(make_dc_buffer(1.0, 44100), "Music"); // not soloed
+        let out = server.mix(64);
+        assert!(
+            out[0].abs() < 1e-4,
+            "soloing SFX must silence the Music voice, got {}",
+            out[0]
+        );
+
+        // (3) Non-Master effect chain: an Amplify(+6 dB ≈ x2) on Music boosts its
+        //     voice above the plain -10 dB level (the effect runs after volume).
+        let mut server = AudioServer::new();
+        server.mixer_mut().load_bus_layout_str(LAYOUT);
+        let music_idx = server.mixer().get_bus_by_name("Music").unwrap();
+        server
+            .mixer_mut()
+            .get_bus_mut(music_idx)
+            .unwrap()
+            .effects_mut()
+            .add(Box::new(AudioEffectAmplify::new(6.0)));
+        server.play_on_bus(make_dc_buffer(1.0, 44100), "Music");
+        let out_fx = server.mix(64)[0];
+        assert!(
+            out_fx > music_lin * 1.5,
+            "non-Master Amplify must boost the Music voice: got {out_fx}, base {music_lin}"
+        );
+
+        // (4) Bypass: flagging bypass_fx on the Music bus skips its effect chain,
+        //     so the voice falls back to the plain -10 dB level.
+        let mut server = AudioServer::new();
+        server.mixer_mut().load_bus_layout_str(LAYOUT);
+        let music_idx = server.mixer().get_bus_by_name("Music").unwrap();
+        {
+            let bus = server.mixer_mut().get_bus_mut(music_idx).unwrap();
+            bus.effects_mut().add(Box::new(AudioEffectAmplify::new(6.0)));
+            bus.set_bypass(true);
+        }
+        server.play_on_bus(make_dc_buffer(1.0, 44100), "Music");
+        let out_bypass = server.mix(64)[0];
+        assert!(
+            (out_bypass - music_lin).abs() < 1e-3,
+            "bypass must skip the effect: expected plain {music_lin}, got {out_bypass}"
+        );
     }
 
     #[test]

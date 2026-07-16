@@ -2312,6 +2312,8 @@ fn handle_connection(
         // pat-cgc: Script find/replace
         ("POST", "/api/script/find") => api_script_find(&req.body, &mut stream),
         ("POST", "/api/script/replace") => api_script_replace(&req.body, &mut stream),
+        // pat-nzgdu.35: Script code completion (wires script_completion engine)
+        ("POST", "/api/script/complete") => api_script_complete(&req.body, &mut stream),
         // pat-1v3: Script breakpoints
         ("POST", "/api/script/breakpoint/toggle") => {
             api_toggle_breakpoint(state, &req.body, &mut stream)
@@ -11063,6 +11065,78 @@ fn api_script_replace(body: &str, stream: &mut TcpStream) {
     send_json(stream, &json.to_string());
 }
 
+/// `POST /api/script/complete` -- code-completion candidates for the served
+/// script editor (pat-nzgdu.35). Wires the existing [`script_completion`]
+/// engine (which had no HTTP route) so the client can request suggestions.
+///
+/// Body: `{"current_class": "Node2D", "prefix": "my", "dot_class": null,
+/// "locals": ["my_health"]}`. `dot_class` (optional) requests member
+/// completion after `expr.`; `locals` (optional) are in-scope variable names.
+/// Responds with `{"candidates": [{label, kind, detail, documentation,
+/// score}], "count": N}` ranked by relevance (highest score first).
+fn api_script_complete(body: &str, stream: &mut TcpStream) {
+    use crate::script_completion::{CompletionContext, CompletionEngine};
+
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let current_class = parsed
+        .get("current_class")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let prefix = parsed
+        .get("prefix")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let dot_class = parsed
+        .get("dot_class")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let locals: Vec<String> = parsed
+        .get("locals")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let ctx = match dot_class {
+        Some(dc) => CompletionContext::dot_access(current_class, dc, prefix),
+        None => CompletionContext::bare(current_class, prefix),
+    }
+    .with_locals(locals);
+
+    let items = CompletionEngine::new().complete(&ctx);
+
+    let candidates: Vec<serde_json::Value> = items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "label": item.label,
+                "kind": format!("{:?}", item.kind),
+                "detail": item.detail,
+                "documentation": item.documentation,
+                "score": item.score,
+            })
+        })
+        .collect();
+
+    let count = candidates.len();
+    let json = serde_json::json!({
+        "candidates": candidates,
+        "count": count,
+    });
+    send_json(stream, &json.to_string());
+}
+
 // ---------------------------------------------------------------------------
 // pat-1v3: Script editor advanced - breakpoints, error lines
 // ---------------------------------------------------------------------------
@@ -14518,6 +14592,43 @@ environment = SubResource("env1")
         let resp = http_get(port, "/editor");
         assert!(resp.contains("200 OK"));
         assert!(resp.contains("Patina"));
+        handle.stop();
+    }
+
+    /// pat-nzgdu.35 (server half): the served editor exposes a
+    /// `POST /api/script/complete` route that drives the existing
+    /// `script_completion` engine. An edit-buffer completion request for a
+    /// known in-scope symbol returns a non-empty, ranked candidate list. The
+    /// EDITOR_HTML client wiring (completion popup + Ctrl+F/R + Ctrl+click
+    /// goto) is a follow-up in editor_ui.rs.
+    #[test]
+    fn editor_script_complete_endpoint_returns_candidates() {
+        let (handle, port) = make_server();
+        // A bare-identifier completion with in-scope locals: `my_health` is
+        // sourced from the current script scope, so it must appear regardless
+        // of ClassDB population.
+        let body = r#"{"current_class":"Node2D","prefix":"my","locals":["my_health","my_speed"]}"#;
+        let resp = http_post(port, "/api/script/complete", body);
+        assert!(
+            resp.contains("200 OK"),
+            "completion endpoint must respond 200: {resp}"
+        );
+        let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
+        let candidates = v["candidates"]
+            .as_array()
+            .expect("response must carry a candidates array");
+        assert!(
+            !candidates.is_empty(),
+            "completion for a known symbol must be non-empty: {resp}"
+        );
+        let labels: Vec<&str> = candidates
+            .iter()
+            .filter_map(|c| c["label"].as_str())
+            .collect();
+        assert!(
+            labels.contains(&"my_health"),
+            "expected in-scope local 'my_health' among candidates, got {labels:?}"
+        );
         handle.stop();
     }
 

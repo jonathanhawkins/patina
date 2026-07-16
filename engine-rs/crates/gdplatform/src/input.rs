@@ -306,6 +306,37 @@ pub enum GamepadButton {
     Guide,
 }
 
+impl GamepadButton {
+    /// Maps a W3C "standard gamepad" button index — the position in the
+    /// `buttons[]` array reported by the browser `navigator.getGamepads()` — to
+    /// a semantic [`GamepadButton`]. Returns `None` for indices outside the
+    /// standard layout so non-standard-mapped pads are ignored rather than
+    /// mis-bound (matching how Godot's web build only trusts `mapping ==
+    /// "standard"`).
+    pub fn from_standard(index: usize) -> Option<GamepadButton> {
+        Some(match index {
+            0 => GamepadButton::FaceA, // bottom (Xbox A / PS Cross)
+            1 => GamepadButton::FaceB, // right  (Xbox B / PS Circle)
+            2 => GamepadButton::FaceX, // left   (Xbox X / PS Square)
+            3 => GamepadButton::FaceY, // top    (Xbox Y / PS Triangle)
+            4 => GamepadButton::LeftShoulder,
+            5 => GamepadButton::RightShoulder,
+            6 => GamepadButton::LeftTrigger,
+            7 => GamepadButton::RightTrigger,
+            8 => GamepadButton::Select, // Back / View / Share
+            9 => GamepadButton::Start,  // Forward / Menu / Options
+            10 => GamepadButton::LeftStick,
+            11 => GamepadButton::RightStick,
+            12 => GamepadButton::DPadUp,
+            13 => GamepadButton::DPadDown,
+            14 => GamepadButton::DPadLeft,
+            15 => GamepadButton::DPadRight,
+            16 => GamepadButton::Guide, // vendor / home
+            _ => return None,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GamepadAxis
 // ---------------------------------------------------------------------------
@@ -319,6 +350,23 @@ pub enum GamepadAxis {
     RightStickY,
     LeftTriggerAnalog,
     RightTriggerAnalog,
+}
+
+impl GamepadAxis {
+    /// Maps a W3C "standard gamepad" axis index — the position in the `axes[]`
+    /// array reported by the browser `navigator.getGamepads()` — to a semantic
+    /// [`GamepadAxis`]. Returns `None` for indices outside the standard layout
+    /// (the standard mapping exposes exactly the two thumbsticks; analog
+    /// triggers arrive as `buttons[6]`/`buttons[7]` values, not axes).
+    pub fn from_standard(index: usize) -> Option<GamepadAxis> {
+        Some(match index {
+            0 => GamepadAxis::LeftStickX,
+            1 => GamepadAxis::LeftStickY,
+            2 => GamepadAxis::RightStickX,
+            3 => GamepadAxis::RightStickY,
+            _ => return None,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -977,6 +1025,39 @@ impl InputState {
     /// or `None` if it is not vibrating.
     pub fn joy_vibration(&self, device: u32) -> Option<(f32, f32, f32)> {
         self.joy_vibration.get(&device).copied()
+    }
+
+    /// Applies one poll of a W3C "standard mapping" browser gamepad (a single
+    /// `navigator.getGamepads()` entry) for `device`: marks the pad connected,
+    /// then normalizes and pushes its button/axis state through the same
+    /// `process_event` path physical devices use. `buttons`/`axes` follow the
+    /// standard layout (see [`GamepadButton::from_standard`] /
+    /// [`GamepadAxis::from_standard`]); indices outside it are ignored.
+    ///
+    /// This is the normalization the `/api/runtime/input/gamepad` producer runs
+    /// so a browser controller reaches `is_gamepad_button_pressed`
+    /// (`Input.is_joy_button_pressed`) / `get_gamepad_axis_value`
+    /// (`Input.get_joy_axis`) and any bound action in a running scene.
+    pub fn apply_standard_gamepad_frame(&mut self, device: u32, buttons: &[bool], axes: &[f32]) {
+        self.connect_joypad(device);
+        for (index, &pressed) in buttons.iter().enumerate() {
+            if let Some(button) = GamepadButton::from_standard(index) {
+                self.process_event(InputEvent::GamepadButton {
+                    button,
+                    pressed,
+                    gamepad_id: device,
+                });
+            }
+        }
+        for (index, &value) in axes.iter().enumerate() {
+            if let Some(axis) = GamepadAxis::from_standard(index) {
+                self.process_event(InputEvent::GamepadAxis {
+                    axis,
+                    value,
+                    gamepad_id: device,
+                });
+            }
+        }
     }
 
     /// Returns `true` if the given key became pressed this frame.
@@ -2024,6 +2105,54 @@ mod tests {
             state.get_gamepad_axis_value(0, GamepadAxis::LeftStickY),
             0.0
         );
+    }
+
+    // pat-nzgdu.48: browser "standard mapping" gamepad normalization. A poll of
+    // navigator.getGamepads() (button 0 = A down, axis 0 = left-stick-X) fed
+    // through apply_standard_gamepad_frame reaches the joy query API and lists
+    // the device connected — the InputState half of the gamepad_input_e2e
+    // acceptance (the HTTP /api/runtime/input/gamepad endpoint + the interpreter
+    // Input.is_joy_* dispatch are a separate, cross-cutting lane).
+    #[test]
+    fn gamepad_standard_mapping_frame() {
+        // W3C standard button/axis indices map to the right semantic enums.
+        assert_eq!(GamepadButton::from_standard(0), Some(GamepadButton::FaceA));
+        assert_eq!(GamepadButton::from_standard(1), Some(GamepadButton::FaceB));
+        assert_eq!(GamepadButton::from_standard(12), Some(GamepadButton::DPadUp));
+        assert_eq!(GamepadButton::from_standard(15), Some(GamepadButton::DPadRight));
+        assert_eq!(GamepadButton::from_standard(16), Some(GamepadButton::Guide));
+        assert_eq!(GamepadButton::from_standard(17), None);
+        assert_eq!(GamepadAxis::from_standard(0), Some(GamepadAxis::LeftStickX));
+        assert_eq!(GamepadAxis::from_standard(3), Some(GamepadAxis::RightStickY));
+        assert_eq!(GamepadAxis::from_standard(4), None);
+
+        // Simulate one getGamepads() frame for device 0: face-button A down,
+        // left-stick-X = 0.8.
+        let mut state = InputState::new();
+        let mut buttons = [false; 17];
+        buttons[0] = true; // JOY_BUTTON_A
+        let axes = [0.8f32, 0.0, 0.0, 0.0]; // JOY_AXIS_LEFT_X = 0.8
+        state.apply_standard_gamepad_frame(0, &buttons, &axes);
+
+        assert!(
+            state.is_gamepad_button_pressed(0, GamepadButton::FaceA),
+            "A down must reach is_joy_button_pressed"
+        );
+        assert!(!state.is_gamepad_button_pressed(0, GamepadButton::FaceB));
+        assert!(
+            (state.get_gamepad_axis_value(0, GamepadAxis::LeftStickX) - 0.8).abs() < 1e-6,
+            "left-stick-X must reach get_joy_axis"
+        );
+        assert_eq!(
+            state.connected_joypads(),
+            vec![0],
+            "device 0 must be listed by get_connected_joypads"
+        );
+
+        // A second frame releasing the button clears the pressed state.
+        let buttons_up = [false; 17];
+        state.apply_standard_gamepad_frame(0, &buttons_up, &axes);
+        assert!(!state.is_gamepad_button_pressed(0, GamepadButton::FaceA));
     }
 
     #[test]

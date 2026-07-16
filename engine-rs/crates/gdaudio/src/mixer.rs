@@ -74,7 +74,7 @@ impl AudioMixer {
     /// Accepts the layout's `key → value` entries using Godot's
     /// `bus/<index>/<field>` naming — as found in `default_bus_layout.tres` or a
     /// project.godot `[audio_bus_layout]` block. Recognized fields: `name`,
-    /// `volume_db`, `send`, `send_db`, `mute`, `solo`. Buses are created in
+    /// `volume_db`, `send`, `send_db`, `mute`, `solo`, `bypass_fx`. Buses are created in
     /// ascending index order (index 0 is the Master bus, defaulted if absent);
     /// string values may be quoted, and unrecognized keys/fields are ignored.
     ///
@@ -137,6 +137,9 @@ impl AudioMixer {
                 }
                 if let Some(v) = f.get("solo") {
                     bus.set_solo(v.as_str() == "true");
+                }
+                if let Some(v) = f.get("bypass_fx") {
+                    bus.set_bypass(v.as_str() == "true");
                 }
             }
             buses.push(bus);
@@ -221,8 +224,8 @@ bus/2/solo = true
             ("bus/0/name", "\"Master\""),
             ("bus/1/name", "\"Ambience\""),
             ("bus/1/send", "\"Master\""),
-            ("bus/1/bypass_fx", "true"), // unrecognized field → ignored
-            ("some/other/key", "5"),     // non-bus key → ignored
+            ("bus/1/pitch_scale", "2.0"), // unrecognized field → ignored
+            ("some/other/key", "5"),      // non-bus key → ignored
         ];
         let count = mixer.load_bus_layout(entries);
         assert_eq!(count, 2);
