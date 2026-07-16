@@ -817,6 +817,47 @@ pub fn register_3d_classes() {
     );
     register_class(ClassRegistration::new("StandardMaterial3D").parent("BaseMaterial3D"));
     register_class(ClassRegistration::new("ORMMaterial3D").parent("BaseMaterial3D"));
+
+    // ParticleProcessMaterial (pat-nzgdu.93): the resource driving GPU particles.
+    // Registered with its high-use property surface + the four enum defaults so
+    // ClassDB resolves `process_material = SubResource("ParticleProcessMaterial_…")`
+    // in a .tscn. (The .tscn/.tres value parse + simulator wiring are follow-ups.)
+    register_class(
+        ClassRegistration::new("ParticleProcessMaterial")
+            .parent("Material")
+            // Emission (EmissionShape enum: 0 = POINT default).
+            .property(PropertyInfo::new("emission_shape", Variant::Int(0)))
+            .property(PropertyInfo::new("emission_sphere_radius", Variant::Float(1.0)))
+            .property(PropertyInfo::new(
+                "emission_box_extents",
+                Variant::Vector3(Vector3::new(1.0, 1.0, 1.0)),
+            ))
+            // Direction / spread.
+            .property(PropertyInfo::new(
+                "direction",
+                Variant::Vector3(Vector3::new(1.0, 0.0, 0.0)),
+            ))
+            .property(PropertyInfo::new("spread", Variant::Float(45.0)))
+            .property(PropertyInfo::new("flatness", Variant::Float(0.0)))
+            // Gravity + linear/angular motion.
+            .property(PropertyInfo::new(
+                "gravity",
+                Variant::Vector3(Vector3::new(0.0, -9.8, 0.0)),
+            ))
+            .property(PropertyInfo::new("initial_velocity_min", Variant::Float(0.0)))
+            .property(PropertyInfo::new("initial_velocity_max", Variant::Float(0.0)))
+            .property(PropertyInfo::new("angular_velocity_min", Variant::Float(0.0)))
+            .property(PropertyInfo::new("angular_velocity_max", Variant::Float(0.0)))
+            .property(PropertyInfo::new("damping_min", Variant::Float(0.0)))
+            .property(PropertyInfo::new("damping_max", Variant::Float(0.0)))
+            .property(PropertyInfo::new("scale_min", Variant::Float(1.0)))
+            .property(PropertyInfo::new("scale_max", Variant::Float(1.0)))
+            // Flag / grouping enums (ParticleFlags, SubEmitterMode, CollisionMode).
+            .property(PropertyInfo::new("particle_flag_align_y", Variant::Bool(false)))
+            .property(PropertyInfo::new("sub_emitter_mode", Variant::Int(0)))
+            .property(PropertyInfo::new("collision_mode", Variant::Int(0)))
+            .property(PropertyInfo::new("lifetime_randomness", Variant::Float(0.0))),
+    );
 }
 
 /// Registers the standard Godot 2D class hierarchy in the ClassDB.
@@ -1160,6 +1201,15 @@ pub fn register_2d_classes() {
                 // TIMER_PROCESS_IDLE
                 .property(PropertyInfo::new("process_callback", Variant::Int(1))),
         );
+    }
+
+    // Theme resources (pat-nzgdu.89): Theme is a Resource; ThemeDB is the
+    // Object singleton exposing the project + default themes to scripts.
+    if !class_exists("Theme") {
+        register_class(ClassRegistration::new("Theme").parent("Resource"));
+    }
+    if !class_exists("ThemeDB") {
+        register_class(ClassRegistration::new("ThemeDB").parent("Object"));
     }
 
     // Viewport / SubViewport / ViewportTexture (pat-zx775).
@@ -1770,6 +1820,45 @@ mod tests {
         let guard = TEST_LOCK.lock().expect("test lock poisoned");
         clear_for_testing();
         guard
+    }
+
+    /// pat-nzgdu.93: ParticleProcessMaterial is registered in ClassDB as a
+    /// Material resource with its high-use property surface + Godot defaults, so
+    /// a `.tscn` `process_material = SubResource("ParticleProcessMaterial_…")`
+    /// resolves to the right class.
+    #[test]
+    fn particle_process_material_classdb_registered() {
+        let _guard = setup();
+        register_3d_classes();
+
+        assert!(
+            class_exists("ParticleProcessMaterial"),
+            "ParticleProcessMaterial must be registered"
+        );
+        assert!(is_parent_class("ParticleProcessMaterial", "Material"));
+        assert!(is_parent_class("ParticleProcessMaterial", "Resource"));
+
+        let info = get_class_info("ParticleProcessMaterial").expect("info");
+        let prop = |n: &str| {
+            info.properties
+                .iter()
+                .find(|p| p.name.as_str() == n)
+                .map(|p| p.default_value.clone())
+        };
+        assert_eq!(
+            prop("emission_shape"),
+            Some(Variant::Int(0)),
+            "emission_shape defaults to POINT (0)"
+        );
+        assert_eq!(
+            prop("spread"),
+            Some(Variant::Float(45.0)),
+            "spread defaults to 45"
+        );
+        assert!(prop("gravity").is_some(), "gravity property present");
+        assert!(prop("initial_velocity_min").is_some());
+        assert!(prop("initial_velocity_max").is_some());
+        assert!(prop("emission_box_extents").is_some());
     }
 
     /// pat-nzgdu.96: the Shape3D resource base and its concrete shapes are

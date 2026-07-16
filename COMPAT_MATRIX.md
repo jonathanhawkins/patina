@@ -15,7 +15,7 @@ runtime parity. Unit-test counts measure **library code in isolation**; `MainLoo
 wires in only the 2D physics server. Concretely, at runtime today:
 
 - **3D physics is never stepped** (a RigidBody3D never falls in a running game).
-- **No audio can play** (`gdaudio` has zero reverse dependencies; nothing pumps `mix()`).
+- **Audio plays through the cpal output** — `gdscene::audio_server_bridge` pumps `AudioServer::mix` (decode → mixer → effects → bus-send routing → device), so the earlier "nothing pumps `mix()`" claim is stale. The remaining audio gaps are that **GDScript cannot yet drive `AudioServer`** (no interpreter singleton for `set_bus_volume_db` etc.) and `default_bus_layout.tres` is not auto-loaded at boot.
 - **Scene nodes emit no 2D draw commands** (Play renders class-glyph icons, not sprites);
   rotated sprites rasterize as AABBs; TileMaps render as a dot.
 - **3D materials never sample textures; no skinning** reaches either renderer.
@@ -66,7 +66,7 @@ A subsystem may only claim runtime parity when an **app-level test drives it thr
 | 2D Physics | `gdphysics2d` | **Measured** | 111 + integration | 17 | Deterministic | `gdphysics2d` units (111), `physics_integration_test` |
 | Input / Platform Stable Layer | `gdplatform` | **Measured** | 504 + integration | — | Measured for bounded slice | `gdplatform` units (504) — input, timers, OS info, target metadata, export config; `platform_first_stable_layer_test`, `platform_targets_validation_test`, `ci_build_matrix_platform_test`, `startup_runtime_packaging_flow_test` |
 | 2D Vertical Slice | all | **Measured** | integration | — | End-to-end | `vertical_slice_test`: scene→scripts→input→physics→process→render |
-| Audio | `gdaudio` | **Claimed** | 100+ | — | Partial | Platform output (cpal), WAV/OGG decode, Amplify/Reverb/EQ effect resources, bus volume/mute/solo. Bus-to-bus send routing, MP3, and project.godot bus-layout load are NOT yet wired (send fields exist but `mix()` ignores them). See `AUDIO_MILESTONE.md` + scorecard. |
+| Audio | `gdaudio` | **Claimed** | 100+ | — | Partial | Platform output (cpal, pumped by `audio_server_bridge`), WAV/OGG/**MP3** decode, biquad filter / compressor / limiter / spectrum effect chain, bus volume/mute/solo, **bus-to-bus send routing in `mix()`**, and **bus-layout load** (`load_bus_layout_str`). Remaining: the script-facing `AudioServer` singleton (GDScript `set_bus_volume_db` etc.), boot-time `default_bus_layout` auto-load, streaming, and Godot oracle parity. See `AUDIO_MILESTONE.md` + [scorecard](prd/PORT_1TO1_SCORECARD_2026-07-11.md). |
 | Editor-Facing Compatibility Layer | `gdeditor` | **Measured** | 1963 + integration | — | Measured for bounded slice | `gdeditor` units (1963), `editor_smoke_test`, `editor_461_revalidation_test`, `editor_interface_compat_test`, `editor_menu_parity_test`, `editor_systems_parity_test` — browser editor shell, compatibility layer, selected tooling slices |
 | 3D Rendering | `gdrender3d` | **Measured** | 95 + integration | 64 render | Golden-based | `gdrender3d` units (95), `render_3d_parity_test`, `comparison_tooling_3d_test` — software renderer, framebuffer comparison, diff imaging |
 | 3D Rendering Server | `gdserver3d` | **Measured** | 338 | — | Measured | `gdserver3d` units (338) — mesh, camera, lighting, viewport, material |
@@ -139,14 +139,14 @@ until the real ENet + Godot command layout is bound.
 
 | Subsystem | What exists | What's missing |
 |-----------|-------------|----------------|
-| Audio | 88 tests covering bus routing, playback state machine, and WAV decode | No real audio output; no Godot parity comparison. See `AUDIO_MILESTONE.md`. |
+| Audio | Tests covering bus routing, the send graph, effects, the playback state machine, and WAV/OGG/MP3 decode | Real cpal output exists (`audio_server_bridge` pumps `mix()`); remaining gaps are the script-facing `AudioServer` singleton and Godot audio oracle parity. See `AUDIO_MILESTONE.md`. |
 
 ### Deferred (not in current milestone)
 
 | Subsystem | Milestone | Notes |
 |-----------|-----------|-------|
 | 3D Oracle Parity | Phase 6+ | 3D comparison tooling exists; oracle outputs for 3D scenes not yet captured from Godot |
-| Audio (full playback) | Audio milestone | Stub exists; see EXIT_CRITERIA.md audio gate (pat-dd3) |
+| Audio (oracle parity) | Audio milestone | Decode→mix→effects→cpal pipeline implemented; remaining gate is Godot-vs-Patina audible parity plus the script-facing `AudioServer` singleton. See EXIT_CRITERIA.md audio gate (pat-dd3). |
 | XR Server | Phase 7+ | Not started |
 
 ---

@@ -40,6 +40,7 @@ pub mod node2d;
 pub mod node3d;
 pub mod packed_scene;
 pub mod particle;
+pub mod polygon_path_finder;
 pub mod particle3d;
 pub mod path3d;
 pub mod physics_server;

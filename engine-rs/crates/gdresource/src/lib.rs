@@ -30,6 +30,7 @@ pub mod image;
 pub mod image_tga_bmp;
 pub mod importers;
 pub mod loader;
+pub mod noise;
 pub mod pck;
 pub mod project;
 pub mod radiance_hdr;
@@ -51,6 +52,7 @@ pub use importers::{
     ImportFile, ResourceFormatLoader,
 };
 pub use loader::{parse_uid_string, parse_variant_value, ResourceLoader, TresLoader};
+pub use noise::{FastNoiseLite, FractalType, NoiseType};
 pub use project::{AutoloadEntry, GodotProjectFile, InputMapEntry, ProjectConfig, ProjectLoader};
 pub use res_loader::{
     is_res_binary, load_res_binary, parse_res_header, ResBinaryHeader, RES_MAGIC,

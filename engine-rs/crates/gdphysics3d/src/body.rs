@@ -83,6 +83,13 @@ pub struct PhysicsBody3D {
     /// Constant torque applied every physics frame (Godot
     /// `RigidBody3D.constant_torque`).
     pub constant_torque: Vector3,
+    /// Constant surface linear velocity this body imparts to contacts (Godot
+    /// `StaticBody3D.constant_linear_velocity` — conveyor belts). Does not move
+    /// the body itself; only drags bodies resting on it via friction.
+    pub constant_linear_velocity: Vector3,
+    /// Constant surface angular velocity this body imparts to contacts (Godot
+    /// `StaticBody3D.constant_angular_velocity` — turntables).
+    pub constant_angular_velocity: Vector3,
     /// Whether continuous collision detection is enabled.
     pub continuous_cd: bool,
     /// Whether the body can sleep when at rest.
@@ -133,6 +140,8 @@ impl PhysicsBody3D {
             lock_rotation: false,
             constant_force: Vector3::ZERO,
             constant_torque: Vector3::ZERO,
+            constant_linear_velocity: Vector3::ZERO,
+            constant_angular_velocity: Vector3::ZERO,
             continuous_cd: false,
             can_sleep: true,
             sleeping: false,
@@ -300,6 +309,20 @@ impl PhysicsBody3D {
                 self.sleeping = true;
             }
         }
+    }
+
+    /// Velocity of this body's surface at `world_point` — the constant surface
+    /// motion a `StaticBody3D`/`AnimatableBody3D` imparts to bodies in contact:
+    /// `constant_linear_velocity + constant_angular_velocity × (point − pos)`.
+    /// A conveyor drags contacts along its linear velocity; a turntable adds the
+    /// tangential angular contribution. This is the value a friction/contact
+    /// solver folds into the relative contact velocity so the surface carries
+    /// resting bodies (the solver wiring is a separate step).
+    pub fn surface_velocity_at(&self, world_point: Vector3) -> Vector3 {
+        self.constant_linear_velocity
+            + self
+                .constant_angular_velocity
+                .cross(world_point - self.position)
     }
 
     // -- Sleep API ---------------------------------------------------------
@@ -484,6 +507,44 @@ mod tests {
             Shape3D::Sphere { radius: 1.0 },
             1.0,
         )
+    }
+
+    // pat-nzgdu.62: constant surface velocity (conveyor / turntable) a body
+    // imparts to contacts, via `surface_velocity_at`.
+    #[test]
+    fn body_surface_velocity_conveyor_and_turntable() {
+        // Conveyor: constant_linear_velocity drags every surface point equally.
+        let mut belt = make_rigid(Vector3::ZERO);
+        belt.constant_linear_velocity = Vector3::new(2.0, 0.0, 0.0);
+        let v = belt.surface_velocity_at(Vector3::new(5.0, 0.0, 3.0));
+        assert!(
+            (v.x - 2.0).abs() < 1e-6 && v.y.abs() < 1e-6 && v.z.abs() < 1e-6,
+            "conveyor surface velocity should be (2,0,0), got {v:?}"
+        );
+
+        // Turntable: ω=(0,1,0) about the center, point r=(1,0,0) -> ω×r=(0,0,-1).
+        let mut table = make_rigid(Vector3::ZERO);
+        table.constant_angular_velocity = Vector3::new(0.0, 1.0, 0.0);
+        let t = table.surface_velocity_at(Vector3::new(1.0, 0.0, 0.0));
+        assert!(
+            t.x.abs() < 1e-6 && t.y.abs() < 1e-6 && (t.z + 1.0).abs() < 1e-6,
+            "turntable tangential velocity should be (0,0,-1), got {t:?}"
+        );
+
+        // At the body's own center the angular term vanishes; linear remains.
+        let mut both = make_rigid(Vector3::new(10.0, 0.0, 0.0));
+        both.constant_linear_velocity = Vector3::new(0.0, 4.0, 0.0);
+        both.constant_angular_velocity = Vector3::new(0.0, 0.0, 1.0);
+        let at_center = both.surface_velocity_at(both.position);
+        assert!(
+            at_center.x.abs() < 1e-6 && (at_center.y - 4.0).abs() < 1e-6,
+            "at-center velocity should be just the linear part (0,4,0), got {at_center:?}"
+        );
+
+        // Defaults are zero: a plain body imparts no surface motion.
+        let still = make_rigid(Vector3::ZERO);
+        let s = still.surface_velocity_at(Vector3::new(3.0, 3.0, 3.0));
+        assert!(s.x.abs() < 1e-6 && s.y.abs() < 1e-6 && s.z.abs() < 1e-6);
     }
 
     // pat-nzgdu.61: RigidBody3D integrate-time properties — lock_rotation and

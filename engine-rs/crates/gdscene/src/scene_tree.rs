@@ -2491,6 +2491,98 @@ impl SceneTree {
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// pat-nzgdu.136: SceneTree group broadcasts — call_group / notify_group /
+// set_group (+ flags) and get_first_node_in_group / get_node_count_in_group /
+// has_group, over the existing group membership index.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Flags for [`SceneTree::call_group_flags`], mirroring Godot's
+/// `SceneTree.GroupCallFlags`.
+pub const GROUP_CALL_DEFAULT: u32 = 0;
+/// Invoke members in reverse tree order.
+pub const GROUP_CALL_REVERSE: u32 = 1;
+/// Queue the calls until the frame's deferred flush instead of running now.
+pub const GROUP_CALL_DEFERRED: u32 = 2;
+/// Coalesce identical calls (reserved; group members are already unique).
+pub const GROUP_CALL_UNIQUE: u32 = 4;
+
+impl SceneTree {
+    /// Group members in depth-first tree order (Godot broadcasts in tree order).
+    fn nodes_in_group_ordered(&self, group: &str) -> Vec<NodeId> {
+        let members = match self.groups.get(group) {
+            Some(m) if !m.is_empty() => m,
+            _ => return Vec::new(),
+        };
+        let root = self.root_id();
+        let mut order = vec![root];
+        order.extend(self.descendants(root));
+        order.into_iter().filter(|id| members.contains(id)).collect()
+    }
+
+    /// Godot `SceneTree.has_group` — whether any node is registered in `group`.
+    pub fn has_group(&self, group: &str) -> bool {
+        self.groups
+            .get(group)
+            .map(|m| !m.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Godot `SceneTree.get_node_count_in_group`.
+    pub fn get_node_count_in_group(&self, group: &str) -> usize {
+        self.groups.get(group).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Godot `SceneTree.get_first_node_in_group` — first member in tree order.
+    pub fn get_first_node_in_group(&self, group: &str) -> Option<NodeId> {
+        self.nodes_in_group_ordered(group).into_iter().next()
+    }
+
+    /// Godot `SceneTree.call_group(group, method, ...args)` — invoke `method` on
+    /// every member's attached script, in tree order.
+    pub fn call_group(&mut self, group: &str, method: &str, args: &[Variant]) {
+        self.call_group_flags(GROUP_CALL_DEFAULT, group, method, args);
+    }
+
+    /// Godot `SceneTree.call_group_flags` — like [`call_group`](Self::call_group)
+    /// honoring GROUP_CALL_REVERSE (reverse tree order) and GROUP_CALL_DEFERRED
+    /// (route through the existing deferred queue, run at the frame's flush).
+    pub fn call_group_flags(&mut self, flags: u32, group: &str, method: &str, args: &[Variant]) {
+        let mut members = self.nodes_in_group_ordered(group);
+        if flags & GROUP_CALL_REVERSE != 0 {
+            members.reverse();
+        }
+        let deferred = flags & GROUP_CALL_DEFERRED != 0;
+        for id in members {
+            if deferred {
+                self.call_deferred(id, method, args);
+            } else if self.scripts.contains_key(&id) {
+                self.call_script_with_access(id, method, args);
+            }
+        }
+    }
+
+    /// Godot `SceneTree.notify_group(group, what)` — deliver a notification to
+    /// every member.
+    pub fn notify_group(&mut self, group: &str, what: gdobject::notification::Notification) {
+        for id in self.nodes_in_group_ordered(group) {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.receive_notification(what);
+            }
+        }
+    }
+
+    /// Godot `SceneTree.set_group(group, property, value)` — set a property on
+    /// every member.
+    pub fn set_group(&mut self, group: &str, property: &str, value: Variant) {
+        for id in self.nodes_in_group_ordered(group) {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.set_property(property, value.clone());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

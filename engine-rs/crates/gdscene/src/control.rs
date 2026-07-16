@@ -1623,6 +1623,82 @@ pub fn get_range_ratio(tree: &SceneTree, node_id: NodeId) -> f32 {
 // Tests
 // ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Theme color override resolution (pat-nzgdu.89)
+// ---------------------------------------------------------------------------
+
+/// Godot `Control.add_theme_color_override(name, color)`: stores a per-node
+/// color override under the `theme_override_colors/<name>` property, which wins
+/// over any assigned or default Theme during resolution.
+pub fn add_theme_color_override(tree: &mut SceneTree, node_id: NodeId, name: &str, color: Color) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(
+            &format!("theme_override_colors/{name}"),
+            Variant::Color(color),
+        );
+    }
+}
+
+/// Whether a local `theme_override_colors/<name>` override is set on the node.
+pub fn has_theme_color_override(tree: &SceneTree, node_id: NodeId, name: &str) -> bool {
+    tree.get_node(node_id)
+        .map(|n| {
+            matches!(
+                n.get_property(&format!("theme_override_colors/{name}")),
+                Variant::Color(_)
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Godot `Control.remove_theme_color_override(name)`: clears the local override
+/// so resolution falls back to the assigned/default Theme.
+pub fn remove_theme_color_override(tree: &mut SceneTree, node_id: NodeId, name: &str) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(&format!("theme_override_colors/{name}"), Variant::Nil);
+    }
+}
+
+/// Resolves a Control's theme color for `name`, mirroring Godot's lookup order:
+/// (1) a local `add_theme_color_override`; then (2) the `assigned` Theme,
+/// checking the `theme_type_variation` type first and then the control's own
+/// type; then (3) the `default` Theme with the same variation/type order.
+/// Returns `None` if the color is unset everywhere.
+pub fn resolve_theme_color(
+    tree: &SceneTree,
+    node_id: NodeId,
+    control_type: &str,
+    variation: &str,
+    assigned: Option<&crate::theme::Theme>,
+    default: &crate::theme::Theme,
+    name: &str,
+) -> Option<Color> {
+    // 1. Local override wins.
+    if let Some(node) = tree.get_node(node_id) {
+        if let Variant::Color(c) = node.get_property(&format!("theme_override_colors/{name}")) {
+            return Some(c);
+        }
+    }
+    // 2. Assigned Theme: variation type first, then the base control type.
+    if let Some(theme) = assigned {
+        if !variation.is_empty() {
+            if let Some(c) = theme.get_color(variation, name) {
+                return Some(c);
+            }
+        }
+        if let Some(c) = theme.get_color(control_type, name) {
+            return Some(c);
+        }
+    }
+    // 3. Default Theme: variation type first, then the base control type.
+    if !variation.is_empty() {
+        if let Some(c) = default.get_color(variation, name) {
+            return Some(c);
+        }
+    }
+    default.get_color(control_type, name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

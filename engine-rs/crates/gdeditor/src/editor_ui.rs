@@ -2696,6 +2696,13 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
               <button id="anim-play-btn" title="Play">&#9654;</button>
               <button id="anim-stop-btn" title="Stop">&#9632;</button>
               <button id="anim-curve-btn" title="Edit Curve (select a keyframe first)">&#x2312;</button>
+              <!-- pat-nzgdu.104: keyframe copy/paste + track reorder, wired to the
+                   existing /api/animation/keyframe/copy|paste and /track/reorder. -->
+              <span class="anim-sep"></span>
+              <button id="anim-copy-key-btn" title="Copy selected keyframe (Ctrl+C)">&#128203;</button>
+              <button id="anim-paste-key-btn" title="Paste keyframe (Ctrl+V)">&#128204;</button>
+              <button id="anim-track-up-btn" title="Move selected track up">&#9650;</button>
+              <button id="anim-track-down-btn" title="Move selected track down">&#9660;</button>
               <button id="anim-onion-btn" class="anim-onion" title="Toggle Onion Skinning">&#x1f9c5;</button>
               <button id="anim-tree-btn" title="Open AnimationTree">&#x1f332;</button>
               <span id="anim-time-display">0.00 / 0.00</span>
@@ -10887,6 +10894,52 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
           selectedKeyframe = null;
           loadAnimation(currentAnimData.name);
         });
+      });
+
+      // pat-nzgdu.104: keyframe copy/paste + track reorder, wired to the existing
+      // server routes (/api/animation/keyframe/copy|paste, /api/animation/track/
+      // reorder). The server holds the keyframe clipboard across copy -> paste.
+      function copyKeyframes() {
+        if (!currentAnimData || !selectedKeyframe) return;
+        api('POST', '/api/animation/keyframe/copy', {
+          animation: currentAnimData.name,
+          track_index: selectedKeyframe.trackIdx,
+          keyframe_indices: [selectedKeyframe.kfIdx]
+        });
+      }
+      function pasteKeyframes() {
+        if (!currentAnimData || !selectedKeyframe) return;
+        // Paste a duplicate a short time after the copied keyframe.
+        api('POST', '/api/animation/keyframe/paste', {
+          animation: currentAnimData.name,
+          track_index: selectedKeyframe.trackIdx,
+          time_offset: 0.5
+        }).then(function() { loadAnimation(currentAnimData.name); });
+      }
+      function moveSelectedTrack(dir) {
+        if (!currentAnimData || !selectedKeyframe) return;
+        var to = selectedKeyframe.trackIdx + dir;
+        if (to < 0 || to >= currentAnimData.tracks.length) return;
+        api('POST', '/api/animation/track/reorder', {
+          animation: currentAnimData.name,
+          from: selectedKeyframe.trackIdx,
+          to: to
+        }).then(function() { loadAnimation(currentAnimData.name); });
+      }
+      var copyKeyBtn = document.getElementById('anim-copy-key-btn');
+      if (copyKeyBtn) copyKeyBtn.addEventListener('click', copyKeyframes);
+      var pasteKeyBtn = document.getElementById('anim-paste-key-btn');
+      if (pasteKeyBtn) pasteKeyBtn.addEventListener('click', pasteKeyframes);
+      var trackUpBtn = document.getElementById('anim-track-up-btn');
+      if (trackUpBtn) trackUpBtn.addEventListener('click', function() { moveSelectedTrack(-1); });
+      var trackDownBtn = document.getElementById('anim-track-down-btn');
+      if (trackDownBtn) trackDownBtn.addEventListener('click', function() { moveSelectedTrack(1); });
+      // Ctrl+C / Ctrl+V on the focused track canvas.
+      canvas.setAttribute('tabindex', '0');
+      canvas.addEventListener('keydown', function(e) {
+        if (!currentAnimData) return;
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) { e.preventDefault(); copyKeyframes(); }
+        else if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) { e.preventDefault(); pasteKeyframes(); }
       });
     }
 
