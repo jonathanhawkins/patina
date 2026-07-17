@@ -1891,6 +1891,34 @@ pub fn register_3d_classes() {
     if !class_exists("Mesh") {
         register_class(ClassRegistration::new("Mesh").parent("Resource").abstract_class());
     }
+
+    // -- Placeholder mesh/material (pat-nzgdu.221) ---------------------------
+    //
+    // The other two of the eight placeholders. They live here rather than beside
+    // the placeholder textures because their parents do: `Material` and `Mesh`
+    // are registered in this pass, and parenting to a class another pass owns
+    // severs the chain when this one runs alone (pat-nzgdu.98).
+    //
+    // ⚠️ `PlaceholderMesh` binds `set_aabb` and NOT `get_aabb` — the getter is
+    // `Mesh`'s. And its member is an `aabb`, not a size or a surface count: the
+    // bead's "surface-count getter" does not exist on it.
+    if !class_exists("PlaceholderMesh") {
+        register_class(
+            ClassRegistration::new("PlaceholderMesh")
+                .parent("Mesh")
+                .property(PropertyInfo::new(
+                    "aabb",
+                    Variant::Aabb(gdcore::math3d::Aabb::new(Vector3::ZERO, Vector3::ZERO)),
+                ))
+                .method(MethodInfo::new("set_aabb", 1)),
+        );
+    }
+    // ⚠️ Binds NOTHING — no methods, no properties. A placeholder material is a
+    // pure marker: it draws nothing and has nothing to configure.
+    if !class_exists("PlaceholderMaterial") {
+        register_class(ClassRegistration::new("PlaceholderMaterial").parent("Material"));
+    }
+
     register_class(
         ClassRegistration::new("PrimitiveMesh")
             .parent("Mesh")
@@ -1978,22 +2006,55 @@ pub fn register_3d_classes() {
         ClassRegistration::new("VisualShaderNode")
             .parent("Resource")
             .abstract_class()
-            .method(MethodInfo::new("get_default_input_values", 0))
-            .method(MethodInfo::new("set_input_port_default_value", 2))
+            // ⚠️ -1, not 0 (pat-nzgdu.227): both are "none" sentinels. Port 0 and
+            // frame 0 are real, so a 0 default would silently mean "preview port
+            // 0" / "linked to frame 0".
+            .property(PropertyInfo::new(
+                "output_port_for_preview",
+                Variant::Int(-1),
+            ))
+            .property(PropertyInfo::new(
+                "linked_parent_graph_frame",
+                Variant::Int(-1),
+            ))
+            .property(PropertyInfo::new(
+                "default_input_values",
+                Variant::Array(Vec::new()),
+            ))
+            .property(PropertyInfo::new(
+                "expanded_output_ports",
+                Variant::Array(Vec::new()),
+            ))
+            .method(MethodInfo::new("get_default_input_port", 1))
+            .method(MethodInfo::new("set_output_port_for_preview", 1))
+            .method(MethodInfo::new("get_output_port_for_preview", 0))
+            // ⚠️ THREE arguments (port, index, value) — this was registered with
+            // two (pat-nzgdu.227).
+            .method(MethodInfo::new("set_input_port_default_value", 3))
             .method(MethodInfo::new("get_input_port_default_value", 1))
+            .method(MethodInfo::new("remove_input_port_default_value", 1))
             .method(MethodInfo::new("clear_default_input_values", 0))
+            .method(MethodInfo::new("set_default_input_values", 1))
+            .method(MethodInfo::new("get_default_input_values", 0))
+            .method(MethodInfo::new("set_frame", 1))
+            .method(MethodInfo::new("get_frame", 0))
+            // ⚠️ THE VALUES WERE WRONG (pat-nzgdu.227). VECTOR_3D onward were
+            // 5/7/8/9/10/12 where Godot has 4/5/6/7/8/9 — the enum is
+            // consecutive, with no gaps. A script reading
+            // `PORT_TYPE_BOOLEAN` got 8 where Godot says 6, so every port-type
+            // comparison past VECTOR_2D silently disagreed with the engine.
             .enumeration(
                 EnumInfo::new("PortType")
                     .constant("PORT_TYPE_SCALAR", 0)
                     .constant("PORT_TYPE_SCALAR_INT", 1)
                     .constant("PORT_TYPE_SCALAR_UINT", 2)
                     .constant("PORT_TYPE_VECTOR_2D", 3)
-                    .constant("PORT_TYPE_VECTOR_3D", 5)
-                    .constant("PORT_TYPE_VECTOR_4D", 7)
-                    .constant("PORT_TYPE_BOOLEAN", 8)
-                    .constant("PORT_TYPE_TRANSFORM", 9)
-                    .constant("PORT_TYPE_SAMPLER", 10)
-                    .constant("PORT_TYPE_MAX", 12),
+                    .constant("PORT_TYPE_VECTOR_3D", 4)
+                    .constant("PORT_TYPE_VECTOR_4D", 5)
+                    .constant("PORT_TYPE_BOOLEAN", 6)
+                    .constant("PORT_TYPE_TRANSFORM", 7)
+                    .constant("PORT_TYPE_SAMPLER", 8)
+                    .constant("PORT_TYPE_MAX", 9),
             ),
     );
     // Graph entry/exit.
@@ -2130,6 +2191,12 @@ pub fn register_3d_classes() {
             .parent("VisualShaderNode")
             .abstract_class()
             .property(PropertyInfo::new("op_type", Variant::Int(0)))
+            // The accessor pair (pat-nzgdu.227). The property and enum were
+            // registered without them, so `op_type` was introspectable but had no
+            // methods — the same "properties but no methods" gap pat-nzgdu.217
+            // found on GLTFDocument.
+            .method(MethodInfo::new("set_op_type", 1))
+            .method(MethodInfo::new("get_op_type", 0))
             .enumeration(
                 EnumInfo::new("OpType")
                     .constant("OP_TYPE_VECTOR_2D", 0)
@@ -2200,6 +2267,9 @@ pub fn register_3d_classes() {
         ClassRegistration::new("VisualShaderNodeVectorOp")
             .parent("VisualShaderNodeVectorBase")
             .property(PropertyInfo::new("operator", Variant::Int(0)))
+            // The accessor pair (pat-nzgdu.227) — see VisualShaderNodeVectorBase.
+            .method(MethodInfo::new("set_operator", 1))
+            .method(MethodInfo::new("get_operator", 0))
             .enumeration(
                 EnumInfo::new("Operator")
                     .constant("OP_ADD", 0)
@@ -2558,6 +2628,143 @@ pub fn register_3d_classes() {
         ClassRegistration::new("VisualShaderNodeCubemapParameter")
             .parent("VisualShaderNodeTextureParameter"),
     );
+
+    // -- Cubemap / curve sampling nodes (pat-nzgdu.225) ----------------------
+    //
+    // ⚠️ `VisualShaderNodeCubemap` is NOT a `VisualShaderNodeCubemapParameter`
+    // (registered just above) and does not derive it: a *parameter* declares a
+    // uniform the material exposes; this *samples* a cubemap the node owns. Same
+    // noun, unrelated jobs — they only share `VisualShaderNode`.
+    if !class_exists("VisualShaderNodeCubemap") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeCubemap")
+                .parent("VisualShaderNode")
+                .property(PropertyInfo::new("source", Variant::Int(0)))
+                // A Cubemap/CompressedCubemap/PlaceholderCubemap/TextureCubemapRD
+                // — Nil until assigned.
+                .property(PropertyInfo::new("cube_map", Variant::Nil))
+                .property(PropertyInfo::new("texture_type", Variant::Int(0)))
+                .method(MethodInfo::new("set_source", 1))
+                .method(MethodInfo::new("get_source", 0))
+                .method(MethodInfo::new("set_cube_map", 1))
+                .method(MethodInfo::new("get_cube_map", 0))
+                .method(MethodInfo::new("set_texture_type", 1))
+                .method(MethodInfo::new("get_texture_type", 0))
+                // ⚠️ There is NO `SOURCE_SCREEN`. The bead says the source enum is
+                // "TEXTURE/PORT/SCREEN"; Godot has TEXTURE, PORT and a `_MAX`
+                // sentinel. Registering a SCREEN would invent a value scripts
+                // could pass and nothing could honour.
+                .enumeration(
+                    EnumInfo::new("Source")
+                        .constant("SOURCE_TEXTURE", 0)
+                        .constant("SOURCE_PORT", 1)
+                        .constant("SOURCE_MAX", 2),
+                )
+                // ⚠️ TYPE_NORMAL_MAP, not "NORMAL" (the bead's spelling).
+                .enumeration(
+                    EnumInfo::new("TextureType")
+                        .constant("TYPE_DATA", 0)
+                        .constant("TYPE_COLOR", 1)
+                        .constant("TYPE_NORMAL_MAP", 2)
+                        .constant("TYPE_MAX", 3),
+                ),
+        );
+    }
+    // ⚠️ ABSTRACT — `GDREGISTER_ABSTRACT_CLASS(VisualShaderNodeResizableBase)`.
+    // It exists to give resizable nodes their editor `size`; you never place one.
+    if !class_exists("VisualShaderNodeResizableBase") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeResizableBase")
+                .parent("VisualShaderNode")
+                .abstract_class()
+                .property(PropertyInfo::new(
+                    "size",
+                    Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)),
+                ))
+                .method(MethodInfo::new("set_size", 1))
+                .method(MethodInfo::new("get_size", 0)),
+        );
+    }
+    // ⚠️ These two derive the RESIZABLE base, not VisualShaderNode directly —
+    // they draw a curve preview in the editor, which is what the size is for.
+    // Each binds only its own `texture` accessor pair.
+    if !class_exists("VisualShaderNodeCurveTexture") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeCurveTexture")
+                .parent("VisualShaderNodeResizableBase")
+                .property(PropertyInfo::new("texture", Variant::Nil))
+                .method(MethodInfo::new("set_texture", 1))
+                .method(MethodInfo::new("get_texture", 0)),
+        );
+    }
+    if !class_exists("VisualShaderNodeCurveXYZTexture") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeCurveXYZTexture")
+                .parent("VisualShaderNodeResizableBase")
+                .property(PropertyInfo::new("texture", Variant::Nil))
+                .method(MethodInfo::new("set_texture", 1))
+                .method(MethodInfo::new("get_texture", 0)),
+        );
+    }
+
+    // -- Scene-effect nodes (pat-nzgdu.226) ----------------------------------
+    //
+    // Spatial-only helpers that read shader built-ins (DEPTH_TEXTURE, VERTEX,
+    // INV_PROJECTION_MATRIX) and emit a fixed snippet.
+    //
+    // ⚠️ All three bind **nothing** — zero methods, zero properties, zero enums.
+    // Their inputs are graph *ports* (DistanceFade's min/max, ProximityFade's
+    // distance), which are a VisualShader concept, not ClassDB properties. The
+    // bead's "min/max distance ports" wording is right, and reading it as
+    // properties would invent members Godot does not have.
+    if !class_exists("VisualShaderNodeLinearSceneDepth") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeLinearSceneDepth").parent("VisualShaderNode"),
+        );
+    }
+    if !class_exists("VisualShaderNodeDistanceFade") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeDistanceFade").parent("VisualShaderNode"),
+        );
+    }
+    if !class_exists("VisualShaderNodeProximityFade") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeProximityFade").parent("VisualShaderNode"),
+        );
+    }
+
+    // -- Vector family + depth position (pat-nzgdu.227) ----------------------
+    //
+    // ⚠️ All three bind **nothing** — zero methods, zero properties, zero enums.
+    //
+    // The bead says these "carry an operator/type enum (... VectorLen: length;
+    // VectorRefract: refract)". They do not: `VisualShaderNodeVectorOp` is the
+    // only node in this family with an operator, and Len/Refract each ARE the
+    // operation — there is nothing to choose. Their one configurable member,
+    // `op_type` (2D/3D/4D), is `VisualShaderNodeVectorBase`'s and is inherited.
+    // Registering a "length"/"refract" enum would invent members Godot lacks.
+    if !class_exists("VisualShaderNodeVectorLen") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeVectorLen")
+                .parent("VisualShaderNodeVectorBase"),
+        );
+    }
+    if !class_exists("VisualShaderNodeVectorRefract") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeVectorRefract")
+                .parent("VisualShaderNodeVectorBase"),
+        );
+    }
+    // ⚠️ NOT a vector node despite arriving in this bead: it reconstructs a world
+    // position from DEPTH_TEXTURE, so it hangs off `VisualShaderNode` directly —
+    // it has no `op_type` and is not a `VisualShaderNodeVectorBase`. It is the
+    // sibling of pat-nzgdu.226's scene-effect nodes.
+    if !class_exists("VisualShaderNodeWorldPositionFromDepth") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeWorldPositionFromDepth")
+                .parent("VisualShaderNode"),
+        );
+    }
     // Reads back an existing named parameter rather than declaring a new one, so
     // it derives VisualShaderNode directly — NOT VisualShaderNodeParameter.
     register_class(
@@ -3383,9 +3590,13 @@ pub fn register_viewport_classes() {
     // TextureLayered and Texture3D all descend from it (pat-nzgdu.214).
     if !class_exists("Texture") {
         register_class(
-            ClassRegistration::new("Texture")
-                .parent("Resource")
-                .abstract_class(),
+            // ⚠️ NOT abstract (pat-nzgdu.215). `GDREGISTER_VIRTUAL_CLASS(Texture)`
+            // — and VIRTUAL is not ABSTRACT. `register_class<T>(true)` still
+            // installs a creation func, and Godot's `ClassDB::is_abstract`
+            // returns false the moment one exists (`class_db.cpp:843`); only
+            // `GDREGISTER_ABSTRACT_CLASS` (no creation func) is abstract. The
+            // dump agrees: `is_instantiable=true`.
+            ClassRegistration::new("Texture").parent("Resource"),
         );
     }
 
@@ -3448,16 +3659,51 @@ pub fn register_viewport_classes() {
     // reference (the generic sub_resource loader handles the rest).
     if !class_exists("TextureLayered") {
         register_class(
+            // ⚠️ NOT abstract (pat-nzgdu.215): `GDREGISTER_VIRTUAL_CLASS(TextureLayered)`
+            // (register_scene_types.cpp:1057). See `Texture` above — virtual
+            // classes keep a creation func, so Godot's `is_abstract` is false
+            // and a script may extend AND construct one.
             ClassRegistration::new("TextureLayered")
                 .parent("Texture")
-                .abstract_class()
                 .method(MethodInfo::new("get_format", 0))
                 .method(MethodInfo::new("get_layered_type", 0))
                 .method(MethodInfo::new("get_width", 0))
                 .method(MethodInfo::new("get_height", 0))
                 .method(MethodInfo::new("get_layers", 0))
                 .method(MethodInfo::new("has_mipmaps", 0))
-                .method(MethodInfo::new("get_layer_data", 1)),
+                .method(MethodInfo::new("get_layer_data", 1))
+                // The seven `_`-prefixed virtuals a script/GDExtension overrides
+                // to supply the layer data. Being VIRTUAL rather than abstract is
+                // exactly what these are for — without them the class is
+                // introspectable but not implementable.
+                .method(MethodInfo::new("_get_format", 0))
+                .method(MethodInfo::new("_get_layered_type", 0))
+                .method(MethodInfo::new("_get_width", 0))
+                .method(MethodInfo::new("_get_height", 0))
+                .method(MethodInfo::new("_get_layers", 0))
+                .method(MethodInfo::new("_has_mipmaps", 0))
+                .method(MethodInfo::new("_get_layer_data", 1)),
+        );
+    }
+
+    // -- The concrete layered resources (pat-nzgdu.215) ----------------------
+    //
+    // ⚠️ Cubemap and CubemapArray are `ImageTextureLayered`s, NOT `TextureLayered`s
+    // directly — a cubemap is six image layers, so it inherits the image-backed
+    // base alongside Texture2DArray. Parenting them straight to TextureLayered
+    // would skip the layer storage they actually use.
+    if !class_exists("Cubemap") {
+        register_class(
+            ClassRegistration::new("Cubemap")
+                .parent("ImageTextureLayered")
+                .method(MethodInfo::new("create_placeholder", 0)),
+        );
+    }
+    if !class_exists("CubemapArray") {
+        register_class(
+            ClassRegistration::new("CubemapArray")
+                .parent("ImageTextureLayered")
+                .method(MethodInfo::new("create_placeholder", 0)),
         );
     }
 
@@ -3482,16 +3728,152 @@ pub fn register_viewport_classes() {
     // Texture3D is abstract in Godot; ImageTexture3D is the concrete volume type.
     if !class_exists("Texture3D") {
         register_class(
+            // ⚠️ NOT abstract (pat-nzgdu.215): `GDREGISTER_VIRTUAL_CLASS(Texture3D)`.
+            // See `Texture` above.
             ClassRegistration::new("Texture3D")
                 .parent("Texture")
-                .abstract_class()
                 .method(MethodInfo::new("get_format", 0))
                 .method(MethodInfo::new("get_width", 0))
                 .method(MethodInfo::new("get_height", 0))
                 .method(MethodInfo::new("get_depth", 0))
                 .method(MethodInfo::new("has_mipmaps", 0))
                 .method(MethodInfo::new("get_data", 0))
-                .method(MethodInfo::new("create_placeholder", 0)),
+                .method(MethodInfo::new("create_placeholder", 0))
+                // The six virtuals a script overrides to supply the volume data
+                // — the point of being VIRTUAL rather than abstract.
+                .method(MethodInfo::new("_get_format", 0))
+                .method(MethodInfo::new("_get_width", 0))
+                .method(MethodInfo::new("_get_height", 0))
+                .method(MethodInfo::new("_get_depth", 0))
+                .method(MethodInfo::new("_has_mipmaps", 0))
+                .method(MethodInfo::new("_get_data", 0)),
+        );
+    }
+
+    // -- Curve textures (pat-nzgdu.225) --------------------------------------
+    //
+    // A baked `Curve` sampled as a 1D lookup texture. They live here, not beside
+    // the VisualShader nodes that consume them, because their parent does:
+    // `Texture2D` is registered in this pass, and parenting to a class another
+    // pass owns severs the chain when this one runs alone (pat-nzgdu.98).
+    //
+    // ⚠️ `set_width` is bound but `get_width` is NOT — the getter is Texture2D's.
+    // Same asymmetry as the placeholders below.
+    //
+    // ⚠️ `width` defaults to **256**, not 0: these bake a curve into a texture of
+    // that many samples, and a zero-width lookup samples nothing.
+    if !class_exists("CurveTexture") {
+        register_class(
+            ClassRegistration::new("CurveTexture")
+                .parent("Texture2D")
+                .property(PropertyInfo::new("width", Variant::Int(256)))
+                .property(PropertyInfo::new("texture_mode", Variant::Int(0)))
+                // The baked `Curve` resource; Nil until assigned. ⚠️ `Curve`
+                // itself is NOT registered — see the bead notes.
+                .property(PropertyInfo::new("curve", Variant::Nil))
+                .method(MethodInfo::new("set_width", 1))
+                .method(MethodInfo::new("set_curve", 1))
+                .method(MethodInfo::new("get_curve", 0))
+                .method(MethodInfo::new("set_texture_mode", 1))
+                .method(MethodInfo::new("get_texture_mode", 0))
+                .enumeration(
+                    EnumInfo::new("TextureMode")
+                        .constant("TEXTURE_MODE_RGB", 0)
+                        .constant("TEXTURE_MODE_RED", 1),
+                ),
+        );
+    }
+    // ⚠️ Three separate curves, one per axis — NOT one curve and a mode. And it
+    // has no `texture_mode` at all, unlike its sibling above.
+    if !class_exists("CurveXYZTexture") {
+        register_class(
+            ClassRegistration::new("CurveXYZTexture")
+                .parent("Texture2D")
+                .property(PropertyInfo::new("width", Variant::Int(256)))
+                .property(PropertyInfo::new("curve_x", Variant::Nil))
+                .property(PropertyInfo::new("curve_y", Variant::Nil))
+                .property(PropertyInfo::new("curve_z", Variant::Nil))
+                .method(MethodInfo::new("set_width", 1))
+                .method(MethodInfo::new("set_curve_x", 1))
+                .method(MethodInfo::new("get_curve_x", 0))
+                .method(MethodInfo::new("set_curve_y", 1))
+                .method(MethodInfo::new("get_curve_y", 0))
+                .method(MethodInfo::new("set_curve_z", 1))
+                .method(MethodInfo::new("get_curve_z", 0)),
+        );
+    }
+
+    // -- Placeholder textures (pat-nzgdu.221) --------------------------------
+    //
+    // What Godot substitutes when a texture is stripped from an export or not
+    // yet imported: it carries dimensions and draws nothing.
+    //
+    // ⚠️ Only the SETTERS are bound. `PlaceholderTexture2D` binds `set_size`
+    // and **not** `get_size` — the getter is `Texture2D`'s, overridden in C++ but
+    // bound on the base. The bead asks to "give each a get_size/get_width/
+    // get_height ... getter"; adding one here would invent a duplicate ClassDB
+    // entry. The getters are reachable by inheritance, which is the point.
+    if !class_exists("PlaceholderTexture2D") {
+        register_class(
+            ClassRegistration::new("PlaceholderTexture2D")
+                .parent("Texture2D")
+                // ⚠️ Vector2 (float), unlike its layered/3D cousins below which
+                // are Vector2i/Vector3i — this one IS representable.
+                .property(PropertyInfo::new(
+                    "size",
+                    Variant::Vector2(gdcore::math::Vector2::new(1.0, 1.0)),
+                ))
+                .method(MethodInfo::new("set_size", 1)),
+        );
+    }
+    // ⚠️ ABSTRACT — `GDREGISTER_ABSTRACT_CLASS(PlaceholderTextureLayered)`. Its
+    // three concrete subtypes below are what a loader substitutes.
+    if !class_exists("PlaceholderTextureLayered") {
+        register_class(
+            ClassRegistration::new("PlaceholderTextureLayered")
+                .parent("TextureLayered")
+                .abstract_class()
+                // ⚠️ `size` is a **Vector2i**, which `Variant` cannot represent
+                // (`gdvariant::binary` names it among the types the enum lacks).
+                // Registered as Nil so the member exists for introspection
+                // without a Vector2 standing in for a Vector2i and making
+                // `typeof()` lie — same call as pat-nzgdu.213/.220.
+                .property(PropertyInfo::new("size", Variant::Nil))
+                // ⚠️ layers defaults to 1, not 0: a zero-layer placeholder is not
+                // a texture at all.
+                .property(PropertyInfo::new("layers", Variant::Int(1)))
+                // ⚠️ Asymmetric: `set_layers` is bound but `get_layers` is NOT —
+                // it comes from TextureLayered.
+                .method(MethodInfo::new("set_size", 1))
+                .method(MethodInfo::new("get_size", 0))
+                .method(MethodInfo::new("set_layers", 1)),
+        );
+    }
+    // ⚠️ All three bind NOTHING — no methods, no properties. Their whole surface
+    // is PlaceholderTextureLayered's. They exist to name the layered kind.
+    if !class_exists("PlaceholderTexture2DArray") {
+        register_class(
+            ClassRegistration::new("PlaceholderTexture2DArray").parent("PlaceholderTextureLayered"),
+        );
+    }
+    if !class_exists("PlaceholderCubemap") {
+        register_class(
+            ClassRegistration::new("PlaceholderCubemap").parent("PlaceholderTextureLayered"),
+        );
+    }
+    if !class_exists("PlaceholderCubemapArray") {
+        register_class(
+            ClassRegistration::new("PlaceholderCubemapArray").parent("PlaceholderTextureLayered"),
+        );
+    }
+    if !class_exists("PlaceholderTexture3D") {
+        register_class(
+            ClassRegistration::new("PlaceholderTexture3D")
+                .parent("Texture3D")
+                // ⚠️ Vector3i — also not representable; see above.
+                .property(PropertyInfo::new("size", Variant::Nil))
+                .method(MethodInfo::new("set_size", 1))
+                .method(MethodInfo::new("get_size", 0)),
         );
     }
 
@@ -3928,6 +4310,237 @@ fn register_rendering_device_classes() {
                 .method(MethodInfo::new("set_depth_attachment", 1))
                 .method(MethodInfo::new("get_depth_attachment", 0))
                 .constant("ATTACHMENT_UNUSED", -1),
+        );
+    }
+
+    // -- UniformSetCacheRD (pat-nzgdu.215) -----------------------------------
+    //
+    // FramebufferCacheRD's sibling: the same `*RD` **helper** shape (an `Object`,
+    // not a `RefCounted` parameter object) handing back a cached RID from a
+    // static method. See pat-nzgdu.210 for why `get_cache`'s staticness cannot
+    // be expressed here — `MethodInfo` is a name plus an arity.
+    if !class_exists("UniformSetCacheRD") {
+        register_class(
+            ClassRegistration::new("UniformSetCacheRD")
+                .parent("Object")
+                // static: (shader, set, uniforms)
+                .method(MethodInfo::new("get_cache", 3)),
+        );
+    }
+
+    register_compositor_render_data_classes();
+}
+
+/// Registers the per-frame render-data objects a `CompositorEffect` callback
+/// receives (pat-nzgdu.213).
+///
+/// Ten classes in three families, each with the same shape: an **abstract base**
+/// carrying the public getters, an **`*Extension`** whose `_`-prefixed virtuals
+/// a GDExtension overrides, and an **`*RD`** concrete implementation.
+///
+/// ⚠️ `RenderDataRD` and `RenderSceneDataRD` bind **nothing at all** — their
+/// entire surface is inherited from their base. That is not an omission: adding
+/// methods to them would invent a ClassDB surface Godot does not have.
+///
+/// **Registration only, deliberately.** These objects are handed to a
+/// `CompositorEffect._render_callback` over a live `RenderingDevice`, and Patina
+/// has neither: `CompositorEffect` is unregistered, there is no RD (pat-nzgdu.162),
+/// and the buffers hand back **`RID`s**, which `Variant` cannot represent at all
+/// (pat-nzgdu.210). Registering the surface is what makes `class_exists` and
+/// `class_get_method_list` answer as Godot does; the frame data lands with the RD
+/// implementation.
+///
+/// The method surface was **generated** from `extension_api.json` rather than
+/// transcribed — 73 methods with arities from 0 to 10 is exactly where hand-copying
+/// invents errors (the pat-nzgdu.204 lesson).
+fn register_compositor_render_data_classes() {
+    if !class_exists("Object") {
+        register_class(object_class());
+    }
+    if !class_exists("RefCounted") {
+        register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
+
+    // -- RenderData: what the effect callback is handed ----------------------
+    if !class_exists("RenderData") {
+        register_class(
+            ClassRegistration::new("RenderData")
+                .parent("Object")
+                .abstract_class()
+                .method(MethodInfo::new("get_render_scene_buffers", 0))
+                .method(MethodInfo::new("get_render_scene_data", 0))
+                .method(MethodInfo::new("get_environment", 0))
+                .method(MethodInfo::new("get_camera_attributes", 0)),
+        );
+    }
+    if !class_exists("RenderDataExtension") {
+        register_class(
+            ClassRegistration::new("RenderDataExtension")
+                .parent("RenderData")
+                .method(MethodInfo::new("_get_render_scene_buffers", 0))
+                .method(MethodInfo::new("_get_render_scene_data", 0))
+                .method(MethodInfo::new("_get_environment", 0))
+                .method(MethodInfo::new("_get_camera_attributes", 0)),
+        );
+    }
+    // ⚠️ Binds nothing — the whole surface is RenderData's.
+    if !class_exists("RenderDataRD") {
+        register_class(ClassRegistration::new("RenderDataRD").parent("RenderData"));
+    }
+
+    // -- RenderSceneData: camera/view matrices -------------------------------
+    if !class_exists("RenderSceneData") {
+        register_class(
+            ClassRegistration::new("RenderSceneData")
+                .parent("Object")
+                .abstract_class()
+                .method(MethodInfo::new("get_cam_transform", 0))
+                .method(MethodInfo::new("get_cam_projection", 0))
+                .method(MethodInfo::new("get_view_count", 0))
+                .method(MethodInfo::new("get_view_eye_offset", 1))
+                .method(MethodInfo::new("get_view_projection", 1))
+                .method(MethodInfo::new("get_uniform_buffer", 0)),
+        );
+    }
+    if !class_exists("RenderSceneDataExtension") {
+        register_class(
+            ClassRegistration::new("RenderSceneDataExtension")
+                .parent("RenderSceneData")
+                .method(MethodInfo::new("_get_cam_transform", 0))
+                .method(MethodInfo::new("_get_cam_projection", 0))
+                .method(MethodInfo::new("_get_view_count", 0))
+                .method(MethodInfo::new("_get_view_eye_offset", 1))
+                .method(MethodInfo::new("_get_view_projection", 1))
+                .method(MethodInfo::new("_get_uniform_buffer", 0)),
+        );
+    }
+    // ⚠️ Binds nothing — the whole surface is RenderSceneData's.
+    if !class_exists("RenderSceneDataRD") {
+        register_class(ClassRegistration::new("RenderSceneDataRD").parent("RenderSceneData"));
+    }
+
+    // -- RenderSceneBuffers: the color/depth/velocity textures ---------------
+    //
+    // ⚠️ RefCounted, NOT Object — unlike the two families above. The buffers are
+    // shared per-viewport and outlive a single callback; RenderData does not.
+    if !class_exists("RenderSceneBuffers") {
+        register_class(
+            ClassRegistration::new("RenderSceneBuffers")
+                .parent("RefCounted")
+                .abstract_class()
+                .method(MethodInfo::new("configure", 1)),
+        );
+    }
+    // ⚠️ NOT a 1:1 mirror of its base, unlike the *Extension classes above: the
+    // base binds one method, this binds FIVE virtuals. The four `_set_*` hooks
+    // have no public counterpart at all — assuming the mirror pattern here would
+    // drop them.
+    if !class_exists("RenderSceneBuffersExtension") {
+        register_class(
+            ClassRegistration::new("RenderSceneBuffersExtension")
+                .parent("RenderSceneBuffers")
+                .method(MethodInfo::new("_configure", 1))
+                .method(MethodInfo::new("_set_fsr_sharpness", 1))
+                .method(MethodInfo::new("_set_texture_mipmap_bias", 1))
+                .method(MethodInfo::new("_set_anisotropic_filtering_level", 1))
+                .method(MethodInfo::new("_set_use_debanding", 1)),
+        );
+    }
+    // The one class with a real surface: 27 methods over the frame's textures.
+    // ⚠️ `get_color_texture`/`get_depth_texture` take an argument (the MSAA
+    // flag) — they are NOT the zero-arg getters their names suggest.
+    if !class_exists("RenderSceneBuffersRD") {
+        register_class(
+            ClassRegistration::new("RenderSceneBuffersRD")
+                .parent("RenderSceneBuffers")
+                .method(MethodInfo::new("has_texture", 2))
+                .method(MethodInfo::new("create_texture", 10))
+                .method(MethodInfo::new("create_texture_from_format", 5))
+                .method(MethodInfo::new("create_texture_view", 4))
+                .method(MethodInfo::new("get_texture", 2))
+                .method(MethodInfo::new("get_texture_format", 2))
+                .method(MethodInfo::new("get_texture_slice", 6))
+                .method(MethodInfo::new("get_texture_slice_view", 7))
+                .method(MethodInfo::new("get_texture_slice_size", 3))
+                .method(MethodInfo::new("clear_context", 1))
+                .method(MethodInfo::new("get_color_texture", 1))
+                .method(MethodInfo::new("get_color_layer", 2))
+                .method(MethodInfo::new("get_depth_texture", 1))
+                .method(MethodInfo::new("get_depth_layer", 2))
+                .method(MethodInfo::new("get_velocity_texture", 1))
+                .method(MethodInfo::new("get_velocity_layer", 2))
+                .method(MethodInfo::new("get_render_target", 0))
+                .method(MethodInfo::new("get_view_count", 0))
+                .method(MethodInfo::new("get_internal_size", 0))
+                .method(MethodInfo::new("get_target_size", 0))
+                .method(MethodInfo::new("get_scaling_3d_mode", 0))
+                .method(MethodInfo::new("get_fsr_sharpness", 0))
+                .method(MethodInfo::new("get_msaa_3d", 0))
+                .method(MethodInfo::new("get_texture_samples", 0))
+                .method(MethodInfo::new("get_screen_space_aa", 0))
+                .method(MethodInfo::new("get_use_taa", 0))
+                .method(MethodInfo::new("get_use_debanding", 0)),
+        );
+    }
+
+    // -- RenderSceneBuffersConfiguration: how the buffers get allocated ------
+    //
+    // ⚠️ Property TYPES here come from the doc XML, NOT from
+    // `extension_api.json`, because the dump is **internally inconsistent**: it
+    // reports `fsr_sharpness` and `texture_mipmap_bias` as `bool` while its own
+    // `set_fsr_sharpness(float)` signature — and the XML's
+    // `type="float" default="0.0"` — say otherwise. The XML wins.
+    //
+    // ⚠️ Three of the ten members have NO representable default: `render_target`
+    // is an `RID` and `internal_size`/`target_size` are `Vector2i`, and
+    // `Variant` carries neither (`gdvariant::binary` names both among the types
+    // the enum lacks). They register as `Nil` — the property exists so
+    // introspection matches Godot, but the value is absent rather than a
+    // `Vector2` standing in for a `Vector2i`, which would make `typeof()` lie.
+    if !class_exists("RenderSceneBuffersConfiguration") {
+        register_class(
+            ClassRegistration::new("RenderSceneBuffersConfiguration")
+                .parent("RefCounted")
+                .property(PropertyInfo::new("render_target", Variant::Nil))
+                .property(PropertyInfo::new("internal_size", Variant::Nil))
+                .property(PropertyInfo::new("target_size", Variant::Nil))
+                // ⚠️ 1, not 0 — a zero view count would allocate nothing.
+                .property(PropertyInfo::new("view_count", Variant::Int(1)))
+                // ⚠️ 255, not 0: SCALING_3D_MODE_MAX is the "unset" sentinel
+                // here, so 0 (BILINEAR) would silently pick a real mode.
+                .property(PropertyInfo::new("scaling_3d_mode", Variant::Int(255)))
+                .property(PropertyInfo::new("msaa_3d", Variant::Int(0)))
+                .property(PropertyInfo::new("screen_space_aa", Variant::Int(0)))
+                .property(PropertyInfo::new("fsr_sharpness", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "texture_mipmap_bias",
+                    Variant::Float(0.0),
+                ))
+                // ⚠️ 2, not 0 — ANISOTROPY_4X is Godot's default.
+                .property(PropertyInfo::new(
+                    "anisotropic_filtering_level",
+                    Variant::Int(2),
+                ))
+                .method(MethodInfo::new("get_render_target", 0))
+                .method(MethodInfo::new("set_render_target", 1))
+                .method(MethodInfo::new("get_internal_size", 0))
+                .method(MethodInfo::new("set_internal_size", 1))
+                .method(MethodInfo::new("get_target_size", 0))
+                .method(MethodInfo::new("set_target_size", 1))
+                .method(MethodInfo::new("get_view_count", 0))
+                .method(MethodInfo::new("set_view_count", 1))
+                .method(MethodInfo::new("get_scaling_3d_mode", 0))
+                .method(MethodInfo::new("set_scaling_3d_mode", 1))
+                .method(MethodInfo::new("get_msaa_3d", 0))
+                .method(MethodInfo::new("set_msaa_3d", 1))
+                .method(MethodInfo::new("get_screen_space_aa", 0))
+                .method(MethodInfo::new("set_screen_space_aa", 1))
+                .method(MethodInfo::new("get_fsr_sharpness", 0))
+                .method(MethodInfo::new("set_fsr_sharpness", 1))
+                .method(MethodInfo::new("get_texture_mipmap_bias", 0))
+                .method(MethodInfo::new("set_texture_mipmap_bias", 1))
+                .method(MethodInfo::new("get_anisotropic_filtering_level", 0))
+                .method(MethodInfo::new("set_anisotropic_filtering_level", 1)),
         );
     }
 }
@@ -4424,6 +5037,52 @@ pub fn register_io_classes() {
     if !class_exists("JavaScriptObject") {
         register_class(ClassRegistration::new("JavaScriptObject").parent("RefCounted"));
     }
+
+    // -- ImageFormatLoader (pat-nzgdu.218) -----------------------------------
+    //
+    // The hook an add-on implements to teach `Image.load` a new file format.
+    //
+    // ⚠️ Genuinely ABSTRACT, unlike the texture bases: `GDREGISTER_ABSTRACT_CLASS(ImageFormatLoader)`
+    // — no creation func, so `is_abstract` is true. (Contrast pat-nzgdu.215,
+    // where `Texture`/`TextureLayered` are `GDREGISTER_VIRTUAL_CLASS` and so are
+    // NOT abstract. The macro must be read, not guessed from the role.)
+    //
+    // ⚠️ It binds NO methods at all — the base is a pure marker. Everything
+    // scripts touch lives on the Extension below.
+    if !class_exists("ImageFormatLoader") {
+        register_class(
+            ClassRegistration::new("ImageFormatLoader")
+                .parent("RefCounted")
+                .abstract_class()
+                // The `flags` in `_load_image(image, file_access, flags, scale)`.
+                // A bitfield, so the values are powers of two and combine.
+                .enumeration(
+                    EnumInfo::new("LoaderFlags")
+                        .constant("FLAG_NONE", 0)
+                        .constant("FLAG_FORCE_LINEAR", 1)
+                        .constant("FLAG_CONVERT_COLORS", 2),
+                ),
+        );
+    }
+    // ⚠️ FOUR methods, not two. The bead names only the `_load_image` /
+    // `_get_recognized_extensions` hooks, but `add_format_loader` and
+    // `remove_format_loader` are **public, non-virtual** methods — they are how a
+    // loader enters and leaves the registry, so a surface with only the virtuals
+    // would be overridable and unregisterable.
+    if !class_exists("ImageFormatLoaderExtension") {
+        register_class(
+            ClassRegistration::new("ImageFormatLoaderExtension")
+                .parent("ImageFormatLoader")
+                // The two overridable hooks.
+                .method(MethodInfo::new("_get_recognized_extensions", 0))
+                // (image, file_access, flags, scale)
+                .method(MethodInfo::new("_load_image", 4))
+                // ...and the two public registry calls.
+                .method(MethodInfo::new("add_format_loader", 0))
+                .method(MethodInfo::new("remove_format_loader", 0)),
+        );
+    }
+
     if !class_exists("FileAccess") {
         register_class(
             ClassRegistration::new("FileAccess")
@@ -4452,6 +5111,50 @@ pub fn register_io_classes() {
                 .method(MethodInfo::new("rename", 2)),
         );
     }
+    // -- PackedDataContainer (pat-nzgdu.220) ---------------------------------
+    //
+    // A nested Array/Dictionary packed into one compact byte buffer, read back
+    // by random access without unpacking the whole thing.
+    //
+    // ⚠️ `Resource`, not `RefCounted` — unlike ConfigFile/FileAccess below. A
+    // packed container is an *asset*: you save it and load it. This module
+    // bootstraps `Object` and `RefCounted` but not `Resource`, and an
+    // unregistered base silently severs the chain from Object (pat-nzgdu.98), so
+    // guard it here rather than relying on `register_gltf_classes` happening to
+    // do it first.
+    if !class_exists("Resource") {
+        register_class(ClassRegistration::new("Resource").parent("Object"));
+    }
+    if !class_exists("PackedDataContainer") {
+        register_class(
+            ClassRegistration::new("PackedDataContainer")
+                .parent("Resource")
+                // ⚠️ Exactly two methods. `__data__` — the packed bytes — is a
+                // real property in Godot (`ADD_PROPERTY(... PACKED_BYTE_ARRAY,
+                // "__data__" ...)`, packed_data_container.cpp:366) but carries
+                // `PROPERTY_USAGE_INTERNAL`, which is why `extension_api.json`
+                // reports zero properties for this class. `PropertyInfo` here has
+                // no `usage` field, so registering it would advertise an internal
+                // member as a public one. Left off deliberately — see the notes.
+                .method(MethodInfo::new("pack", 1))
+                .method(MethodInfo::new("size", 0)),
+        );
+    }
+    // ⚠️ ABSTRACT and `RefCounted` — a script never constructs one. Indexing a
+    // PackedDataContainer hands one back as a *view* into the parent's bytes;
+    // `GDREGISTER_ABSTRACT_CLASS(PackedDataContainerRef)` is what stops a script
+    // making a view of nothing.
+    if !class_exists("PackedDataContainerRef") {
+        register_class(
+            ClassRegistration::new("PackedDataContainerRef")
+                .parent("RefCounted")
+                .abstract_class()
+                // Just `size` — indexing goes through the Variant `_get`
+                // operator, which is not a bound method.
+                .method(MethodInfo::new("size", 0)),
+        );
+    }
+
     if !class_exists("ConfigFile") {
         register_class(
             ClassRegistration::new("ConfigFile")
@@ -4581,7 +5284,40 @@ fn register_gltf_classes() {
             .property(PropertyInfo::new("fallback_image_quality", Variant::Float(0.0)))
             .property(PropertyInfo::new("root_node_mode", Variant::Int(0)))
             .property(PropertyInfo::new("visibility_mode", Variant::Int(0)))
-            ,
+            // The document-import API (pat-nzgdu.217). pat-nzgdu.164 registered
+            // this family's properties but no methods, so `append_from_buffer`
+            // did not resolve at all — and `FBXDocument` binds NOTHING of its
+            // own, inheriting its entire surface from here.
+            //
+            // ⚠️ `append_from_buffer` takes FOUR arguments (bytes, base_path,
+            // state, flags), not the `(bytes, state)` its callers assume; likewise
+            // `generate_scene` takes four (state, bake_fps, trimming,
+            // remove_immutable_tracks), not one.
+            .method(MethodInfo::new("set_image_format", 1))
+            .method(MethodInfo::new("get_image_format", 0))
+            .method(MethodInfo::new("set_lossy_quality", 1))
+            .method(MethodInfo::new("get_lossy_quality", 0))
+            .method(MethodInfo::new("set_fallback_image_format", 1))
+            .method(MethodInfo::new("get_fallback_image_format", 0))
+            .method(MethodInfo::new("set_fallback_image_quality", 1))
+            .method(MethodInfo::new("get_fallback_image_quality", 0))
+            .method(MethodInfo::new("set_root_node_mode", 1))
+            .method(MethodInfo::new("get_root_node_mode", 0))
+            .method(MethodInfo::new("set_visibility_mode", 1))
+            .method(MethodInfo::new("get_visibility_mode", 0))
+            .method(MethodInfo::new("append_from_file", 4))
+            .method(MethodInfo::new("append_from_buffer", 4))
+            .method(MethodInfo::new("append_from_scene", 3))
+            .method(MethodInfo::new("generate_scene", 4))
+            .method(MethodInfo::new("generate_buffer", 1))
+            .method(MethodInfo::new("write_to_filesystem", 2))
+            .method(MethodInfo::new("import_object_model_property", 2))
+            .method(MethodInfo::new("export_object_model_property", 4))
+            // ⚠️ These two are STATIC in Godot; `MethodInfo` cannot say so
+            // (pat-nzgdu.210).
+            .method(MethodInfo::new("register_gltf_document_extension", 2))
+            .method(MethodInfo::new("unregister_gltf_document_extension", 1))
+            .method(MethodInfo::new("get_supported_gltf_extensions", 0)),
     );
     register_class(ClassRegistration::new("GLTFDocumentExtension").parent("Resource"));
     register_class(ClassRegistration::new("GLTFDocumentExtensionConvertImporterMesh").parent("GLTFDocumentExtension"));
@@ -4746,6 +5482,38 @@ fn register_gltf_classes() {
             .property(PropertyInfo::new("wrap_t", Variant::Int(0)))
             ,
     );
+
+    // -- FBX (pat-nzgdu.217) -------------------------------------------------
+    //
+    // Godot imports FBX by *reusing the glTF model wholesale*: `FBXDocument` and
+    // `FBXState` are subclasses of the glTF ones, and an imported FBX lands in
+    // the same node/mesh/material/animation structures. That is why these two
+    // live here rather than in a family of their own.
+    //
+    // ⚠️ `FBXDocument` binds NOTHING — zero methods, zero properties. Its entire
+    // surface, `append_from_buffer` included, is `GLTFDocument`'s. It exists to
+    // *name* the format, and adding methods to it would invent a ClassDB surface
+    // Godot does not have.
+    if !class_exists("FBXDocument") {
+        register_class(ClassRegistration::new("FBXDocument").parent("GLTFDocument"));
+    }
+    // ⚠️ FBXState adds exactly ONE member over GLTFState — the geometry-helper
+    // toggle, which is an FBX-specific concept (transform/pivot helper nodes
+    // glTF has no equivalent for). Default `false`: Godot collapses those helpers
+    // into transforms unless asked to keep them, so defaulting to `true` would
+    // silently produce a deeper node tree than Godot.
+    if !class_exists("FBXState") {
+        register_class(
+            ClassRegistration::new("FBXState")
+                .parent("GLTFState")
+                .property(PropertyInfo::new(
+                    "allow_geometry_helper_nodes",
+                    Variant::Bool(false),
+                ))
+                .method(MethodInfo::new("get_allow_geometry_helper_nodes", 0))
+                .method(MethodInfo::new("set_allow_geometry_helper_nodes", 1)),
+        );
+    }
 }
 
 /// * `HTTPRequest : Node` (scene/main/http_request)
@@ -6289,9 +7057,18 @@ mod tests {
         );
         assert_eq!(class_get_integer_constant("VisualShader", "TYPE_SKY"), Some(8));
         assert!(class_has_enum("VisualShaderNode", "PortType"));
+        // ⚠️ 4, not 5 (pat-nzgdu.227). This asserted 5 — the old, WRONG value.
+        // Godot's PortType is consecutive (SCALAR=0 … MAX=9); the registration
+        // had invented gaps from VECTOR_3D onward (5/7/8/9/10/12), so every
+        // port-type comparison past VECTOR_2D silently disagreed with the
+        // engine. This test was locking that bug in.
         assert_eq!(
             class_get_integer_constant("VisualShaderNode", "PORT_TYPE_VECTOR_3D"),
-            Some(5),
+            Some(4),
+        );
+        assert_eq!(
+            class_get_integer_constant("VisualShaderNode", "PORT_TYPE_MAX"),
+            Some(9),
         );
         // Enums inherit, so a concrete node sees the base's PortType.
         assert!(class_has_enum("VisualShaderNodeColorConstant", "PortType"));
@@ -7137,15 +7914,25 @@ mod tests {
         assert!(is_parent_class("ViewportTexture", "Texture2D"));
         assert!(is_parent_class("ViewportTexture", "Resource"));
 
-        // Godot marks the bases abstract; only the Image*/array types construct.
-        for name in [
-            "Texture",
-            "TextureLayered",
-            "ImageTextureLayered",
-            "Texture3D",
-            "TextureLayeredRD",
-        ] {
-            assert!(is_abstract(name), "{name} must be abstract");
+        // ⚠️ Only the ABSTRACT-registered bases are abstract (pat-nzgdu.215).
+        // This loop used to include Texture/TextureLayered/Texture3D on the
+        // theory that "Godot marks the bases abstract" — it does not. Those
+        // three are `GDREGISTER_VIRTUAL_CLASS`, and VIRTUAL is not ABSTRACT:
+        // `register_class<T>(true)` still installs a creation func, and Godot's
+        // `ClassDB::is_abstract` returns false as soon as one exists
+        // (class_db.cpp:843). The dump agrees (`is_instantiable=true`).
+        for name in ["ImageTextureLayered", "TextureLayeredRD"] {
+            assert!(
+                is_abstract(name),
+                "{name} is GDREGISTER_ABSTRACT_CLASS in Godot"
+            );
+        }
+        for name in ["Texture", "TextureLayered", "Texture3D"] {
+            assert!(
+                !is_abstract(name),
+                "{name} is GDREGISTER_VIRTUAL_CLASS — virtual, not abstract, so a \
+                 script may extend AND construct it"
+            );
         }
         assert!(!is_abstract("Texture2DArray"));
         assert!(!is_abstract("ImageTexture3D"));

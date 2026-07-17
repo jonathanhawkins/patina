@@ -221,6 +221,17 @@ impl SoftwareRenderer3D {
         &self.occluders
     }
 
+    /// Mutable access to the registered occluders (pat-nzgdu.212).
+    ///
+    /// A scene layer needs this to track a node's live state — moving an
+    /// occluder or toggling its `visible` must affect culling without tearing
+    /// the list down and rebuilding it, which is what Godot's
+    /// `instance_set_visible` does for `INSTANCE_OCCLUDER`
+    /// (`renderer_scene_cull.cpp:1075`).
+    pub fn occluders_mut(&mut self) -> &mut [OccluderInstance3D] {
+        &mut self.occluders
+    }
+
     /// Removes every registered occluder.
     pub fn clear_occluders(&mut self) {
         self.occluders.clear();

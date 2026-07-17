@@ -88,7 +88,10 @@ fn vector_nodes_derive_vector_base_not_visual_shader_node_directly() {
 fn vector_base_is_abstract_and_carries_the_dimension_op_type() {
     register_3d_classes();
     assert!(class_exists("VisualShaderNodeVectorBase"));
-    assert!(is_abstract("VisualShaderNodeVectorBase"), "it is a base, not a node");
+    assert!(
+        is_abstract("VisualShaderNodeVectorBase"),
+        "it is a base, not a node"
+    );
     assert_props("VisualShaderNodeVectorBase", &["op_type"]);
     assert!(class_has_enum("VisualShaderNodeVectorBase", "OpType"));
     for (name, value) in [
@@ -111,7 +114,10 @@ fn float_op_and_func_expose_the_selectors_the_acceptance_uses() {
     assert_eq!(konst("VisualShaderNodeFloatFunc", "FUNC_SIN"), Some(0));
     // Spot-check values that are easy to transpose across a 33-value enum.
     assert_eq!(konst("VisualShaderNodeFloatFunc", "FUNC_ABS"), Some(12));
-    assert_eq!(konst("VisualShaderNodeFloatFunc", "FUNC_ONEMINUS"), Some(31));
+    assert_eq!(
+        konst("VisualShaderNodeFloatFunc", "FUNC_ONEMINUS"),
+        Some(31)
+    );
     assert_eq!(konst("VisualShaderNodeFloatFunc", "FUNC_MAX"), Some(32));
     assert_eq!(konst("VisualShaderNodeFloatOp", "OP_ATAN2"), Some(8));
     assert_eq!(konst("VisualShaderNodeFloatOp", "OP_ENUM_SIZE"), Some(10));
@@ -136,7 +142,10 @@ fn int_op_and_func_differ_from_their_float_counterparts() {
         "the float op list is shorter — it has no bitwise operators"
     );
     // IntFunc is 5 values, not the float's 33.
-    assert_eq!(konst("VisualShaderNodeIntFunc", "FUNC_BITWISE_NOT"), Some(3));
+    assert_eq!(
+        konst("VisualShaderNodeIntFunc", "FUNC_BITWISE_NOT"),
+        Some(3)
+    );
     assert_eq!(konst("VisualShaderNodeIntFunc", "FUNC_MAX"), Some(4));
     assert_eq!(
         konst("VisualShaderNodeFloatFunc", "FUNC_MAX"),
@@ -150,7 +159,10 @@ fn int_op_and_func_differ_from_their_float_counterparts() {
 fn compare_carries_type_function_and_condition() {
     register_3d_classes();
     // Godot names the first property `type` (a Rust keyword, but a plain name here).
-    assert_props("VisualShaderNodeCompare", &["type", "function", "condition"]);
+    assert_props(
+        "VisualShaderNodeCompare",
+        &["type", "function", "condition"],
+    );
     for e in ["ComparisonType", "Function", "Condition"] {
         assert!(class_has_enum("VisualShaderNodeCompare", e));
     }
@@ -202,16 +214,26 @@ fn color_vector_and_mix_selectors_hold_their_godot_values() {
 #[test]
 fn remaining_fixed_nodes_have_no_properties() {
     register_3d_classes();
+    // ⚠️ `props` WALKS THE CHAIN, so this subtracts the base (pat-nzgdu.227).
+    // These declare no properties of their own, but all four DO inherit
+    // `VisualShaderNode`'s — asserting the full list is empty is a claim about
+    // the base, not about them, and it held only while the base was
+    // incompletely registered.
+    let base = props("VisualShaderNode");
     for class in [
         "VisualShaderNodeIf",
         "VisualShaderNodeFresnel",
         "VisualShaderNodeDeterminant",
         "VisualShaderNodeOuterProduct",
     ] {
+        let own: Vec<String> = props(class)
+            .into_iter()
+            .filter(|p| !base.contains(p))
+            .collect();
         assert_eq!(
-            props(class),
+            own,
             Vec::<String>::new(),
-            "{class} has no properties in Godot"
+            "{class} declares no properties of its own in Godot"
         );
     }
 }
@@ -258,10 +280,32 @@ fn fixed_behaviour_nodes_have_no_selectors() {
         assert!(is_parent_class(class, "VisualShaderNode"));
     }
     // FaceForward's only property is the one it inherits from VectorBase.
+    //
+    // ⚠️ `props` WALKS THE CHAIN, so this must subtract the base (pat-nzgdu.227).
+    // DotProduct declares no properties of its own — but in Godot it *does*
+    // inherit `VisualShaderNode`'s four (`output_port_for_preview`,
+    // `default_input_values`, `expanded_output_ports`,
+    // `linked_parent_graph_frame`). This previously asserted the whole chain was
+    // empty, which was only true while the base was **incompletely registered**;
+    // completing it (pat-nzgdu.227) surfaced them. Asserting an empty full list
+    // here is a claim about VisualShaderNode, not about DotProduct.
+    let base = props("VisualShaderNode");
+    let own: Vec<String> = props("VisualShaderNodeDotProduct")
+        .into_iter()
+        .filter(|p| !base.contains(p))
+        .collect();
     assert_eq!(
-        props("VisualShaderNodeDotProduct"),
+        own,
         Vec::<String>::new(),
-        "DotProduct has no properties of its own or inherited"
+        "DotProduct declares no properties of its own"
+    );
+    // ...and the inherited four really are there, so the subtraction above is a
+    // real filter rather than a no-op.
+    assert!(
+        props("VisualShaderNodeDotProduct")
+            .iter()
+            .any(|p| p == "output_port_for_preview"),
+        "DotProduct inherits VisualShaderNode's properties, as in Godot"
     );
 }
 

@@ -165,10 +165,21 @@ pub struct OccluderInstance3D {
     pub occluder: Option<Occluder3D>,
     /// World-space transform of this occluder.
     pub transform: Transform3D,
-    /// Whether this occluder is active for culling.
+    /// Which layers this occluder is baked from.
     pub bake_mask: u32,
     /// Bake simplification distance (Godot default 0.1).
     pub bake_simplification_distance: f32,
+    /// Whether this occluder takes part in culling (pat-nzgdu.212).
+    ///
+    /// ⚠️ A hidden occluder occludes NOTHING, and that is Godot's behaviour, not
+    /// a convenience: `OccluderInstance3D` is a `VisualInstance3D`, and hiding
+    /// one reaches `instance_set_visible`, which for `INSTANCE_OCCLUDER` calls
+    /// `scenario_set_instance(..., p_visible)` and drops it from the occlusion
+    /// scenario (`renderer_scene_cull.cpp:1075-1079`).
+    ///
+    /// `visible` itself is `Node3D`'s property, not one of this class's three
+    /// own members — ClassDB inherits it rather than re-declaring it.
+    pub visible: bool,
 }
 
 impl Default for OccluderInstance3D {
@@ -178,6 +189,9 @@ impl Default for OccluderInstance3D {
             transform: Transform3D::IDENTITY,
             bake_mask: 0xFFFF_FFFF,
             bake_simplification_distance: 0.1,
+            // Nodes are visible by default; a default-constructed occluder that
+            // silently did nothing would be a trap.
+            visible: true,
         }
     }
 }
@@ -211,6 +225,13 @@ impl OccluderInstance3D {
     /// from the camera's point of view, and the target is farther from the
     /// camera than the occluder.
     pub fn occludes(&self, camera_pos: Vector3, target_aabb: Aabb) -> bool {
+        // ⚠️ A hidden occluder occludes nothing (pat-nzgdu.212). Godot reaches
+        // the same result by dropping the instance from the occlusion scenario
+        // (`renderer_scene_cull.cpp:1075`); gating here means no caller can
+        // consult a hidden occluder by forgetting to filter first.
+        if !self.visible {
+            return false;
+        }
         let occluder_aabb = match self.get_world_aabb() {
             Some(aabb) => aabb,
             None => return false,
@@ -612,6 +633,44 @@ mod tests {
         let camera_pos = Vector3::new(0.0, 0.0, 0.0);
         let target = Aabb::new(Vector3::new(-0.5, -0.5, -10.0), Vector3::new(1.0, 1.0, 1.0));
         assert!(!inst.occludes(camera_pos, target));
+    }
+
+    /// ⚠️ A HIDDEN occluder occludes nothing (pat-nzgdu.212) — Godot drops it
+    /// from the occlusion scenario on `instance_set_visible`
+    /// (`renderer_scene_cull.cpp:1075-1079`).
+    #[test]
+    fn a_hidden_occluder_does_not_occlude() {
+        let mut inst =
+            OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(20.0, 20.0, 1.0)));
+        inst.transform.origin = Vector3::new(0.0, 0.0, -5.0);
+
+        let camera_pos = Vector3::new(0.0, 0.0, 0.0);
+        let target = Aabb::new(Vector3::new(-0.5, -0.5, -15.0), Vector3::new(1.0, 1.0, 1.0));
+
+        // Visible by default, and squarely in the way: it occludes.
+        assert!(
+            inst.occludes(camera_pos, target),
+            "baseline: this occluder does occlude while visible"
+        );
+
+        inst.visible = false;
+        assert!(
+            !inst.occludes(camera_pos, target),
+            "a hidden occluder must not occlude"
+        );
+
+        // ...and showing it again restores culling: visibility is a gate, not a
+        // one-way teardown.
+        inst.visible = true;
+        assert!(inst.occludes(camera_pos, target));
+    }
+
+    /// Occluders are visible by default — a fresh one must work without anyone
+    /// setting a flag.
+    #[test]
+    fn occluders_are_visible_by_default() {
+        assert!(OccluderInstance3D::new().visible);
+        assert!(OccluderInstance3D::with_occluder(Occluder3D::default()).visible);
     }
 
     /// ⚠️ An occluder OFF TO THE SIDE must not occlude — occlusion is about the
