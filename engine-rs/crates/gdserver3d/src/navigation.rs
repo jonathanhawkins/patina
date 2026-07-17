@@ -7,6 +7,8 @@
 //!
 //! Mirrors Godot's `NavigationMesh` resource and `NavigationRegion3D` node.
 
+use std::collections::HashMap;
+
 use gdcore::math::Vector3;
 use gdcore::math3d::{Aabb, Transform3D};
 
@@ -147,11 +149,123 @@ impl NavigationMesh3D {
         best_idx
     }
 
+    /// Resolves a polygon's vertex indices to positions, in winding order.
+    ///
+    /// The pathfinding side stores polygons as position lists rather than
+    /// indices, so this is the bridge between the two representations
+    /// (pat-nzgdu.114).
+    pub fn polygon_vertices(&self, poly_idx: usize) -> Option<Vec<Vector3>> {
+        let poly = self.polygons.get(poly_idx)?;
+        poly.indices
+            .iter()
+            .map(|&i| self.vertices.get(i as usize).copied())
+            .collect()
+    }
+
+    /// Computes polygon adjacency: for each polygon, the indices of the polygons
+    /// it shares an edge with.
+    ///
+    /// This is the piece a baked mesh is missing before it can be pathfound
+    /// over — [`bake_navigation_mesh`] emits vertices and polygons but no
+    /// connectivity, and a navigation map needs an adjacency list to run A*
+    /// across (pat-nzgdu.114).
+    ///
+    /// **Edges are matched by position, not by vertex index**, which is not a
+    /// nicety: the bake pushes three fresh vertices for every triangle, so two
+    /// touching triangles never share an index and an index-based match would
+    /// find no neighbours at all and silently produce an unpathable mesh.
+    /// Positions are quantised to [`WELD_EPSILON`] before hashing so vertices
+    /// that coincide within float error weld together.
+    pub fn compute_adjacency(&self) -> Vec<Vec<usize>> {
+        // Canonical key for an undirected edge: the two quantised endpoints,
+        // ordered so (a,b) and (b,a) collide.
+        let mut edge_owners: HashMap<(WeldKey, WeldKey), Vec<usize>> = HashMap::new();
+
+        for (poly_idx, poly) in self.polygons.iter().enumerate() {
+            let n = poly.indices.len();
+            if n < 3 {
+                continue; // Not a face; contributes no edges.
+            }
+            for i in 0..n {
+                let a = match self.vertices.get(poly.indices[i] as usize) {
+                    Some(v) => weld_key(*v),
+                    None => continue,
+                };
+                let b = match self.vertices.get(poly.indices[(i + 1) % n] as usize) {
+                    Some(v) => weld_key(*v),
+                    None => continue,
+                };
+                if a == b {
+                    continue; // Degenerate edge.
+                }
+                let key = if a <= b { (a, b) } else { (b, a) };
+                let owners = edge_owners.entry(key).or_default();
+                // A polygon can touch the same welded edge twice only if it is
+                // degenerate; keep the list unique so it cannot self-connect.
+                if !owners.contains(&poly_idx) {
+                    owners.push(poly_idx);
+                }
+            }
+        }
+
+        let mut connections: Vec<Vec<usize>> = vec![Vec::new(); self.polygons.len()];
+        for owners in edge_owners.values() {
+            // Every pair sharing this edge becomes mutual neighbours. An edge
+            // shared by 3+ polygons (a non-manifold seam) still connects them
+            // all, matching how a nav mesh treats a junction.
+            for (i, &a) in owners.iter().enumerate() {
+                for &b in &owners[i + 1..] {
+                    if !connections[a].contains(&b) {
+                        connections[a].push(b);
+                    }
+                    if !connections[b].contains(&a) {
+                        connections[b].push(a);
+                    }
+                }
+            }
+        }
+        // Sort each neighbour list. The loop above walks a HashMap, whose order
+        // is randomised per process, so without this a polygon's neighbours come
+        // out in a different order every run — which makes A* explore ties in a
+        // different order and return a *different* (equal-cost) path run to run.
+        // A non-deterministic path is a miserable thing to debug, and it would
+        // also make any exact-Vec assertion downstream flaky.
+        for neighbours in &mut connections {
+            neighbours.sort_unstable();
+        }
+        connections
+    }
+
     /// Clears all vertices and polygons.
     pub fn clear(&mut self) {
         self.vertices.clear();
         self.polygons.clear();
     }
+}
+
+/// Grid size used to bucket vertex positions when finding shared edges (metres).
+///
+/// This is a *quantisation* grid, not a true epsilon weld: two points are
+/// treated as one only when they round to the same cell, so a pair straddling a
+/// cell boundary (say 0.00004 and 0.00006) will not weld even though they are
+/// far closer together than the grid. That is sound for the bake's own output,
+/// which is what this serves — [`bake_navigation_mesh`] copies its vertices
+/// straight from the source triangles, so touching faces carry bit-identical
+/// coordinates and land in the same cell no matter where the grid falls.
+///
+/// If source geometry ever arrives from independent computation paths (e.g.
+/// two nodes' transforms producing the "same" corner), this needs a real
+/// tolerant weld that also probes neighbouring cells. The failure mode is quiet:
+/// a missed adjacency edge, i.e. an unpathable seam rather than an error.
+const WELD_EPSILON: f32 = 1e-4;
+
+/// A position quantised to the weld grid, usable as a hash key.
+type WeldKey = (i64, i64, i64);
+
+/// Quantises a position onto the [`WELD_EPSILON`] grid.
+fn weld_key(v: Vector3) -> WeldKey {
+    let q = |f: f32| -> i64 { (f / WELD_EPSILON).round() as i64 };
+    (q(v.x), q(v.y), q(v.z))
 }
 
 // ---------------------------------------------------------------------------
@@ -773,5 +887,162 @@ mod tests {
         let mesh = region.navigation_mesh.as_ref().unwrap();
         assert!(approx_eq(mesh.cell_size, 0.1));
         assert!(approx_eq(mesh.agent_height, 3.0));
+    }
+
+    // -- Adjacency (pat-nzgdu.114) --
+    //
+    // A baked mesh carries no connectivity, and a navigation map needs an
+    // adjacency list to run A* over — so without these the bake's output is
+    // unpathable. The end-to-end proof (bake -> map -> path) lives in
+    // gdscene's `navmesh_bake_from_geometry_feeds_map`; these pin the algorithm
+    // itself here, in the crate that owns it.
+
+    /// Adds the two triangles of an axis-aligned floor quad spanning
+    /// `[x0,x1] x [z0,z1]`, wound so the normal points up.
+    fn add_floor_quad(src: &mut BakeSourceGeometry3D, x0: f32, x1: f32, z0: f32, z1: f32) {
+        src.add_triangle(
+            Vector3::new(x0, 0.0, z0),
+            Vector3::new(x0, 0.0, z1),
+            Vector3::new(x1, 0.0, z1),
+        );
+        src.add_triangle(
+            Vector3::new(x0, 0.0, z0),
+            Vector3::new(x1, 0.0, z1),
+            Vector3::new(x1, 0.0, z0),
+        );
+    }
+
+    #[test]
+    fn adjacency_matches_shared_edges_by_position_not_index() {
+        let mut src = BakeSourceGeometry3D::new();
+        add_floor_quad(&mut src, 0.0, 4.0, 0.0, 4.0);
+        let baked = bake_navigation_mesh(&NavigationMesh3D::new(), &src);
+
+        assert_eq!(baked.polygon_count(), 2, "a quad bakes to two triangles");
+        // The bake pushes three FRESH vertices per triangle, so the two halves
+        // of one quad share no vertex index at all...
+        assert_eq!(baked.vertex_count(), 6, "no vertex index is reused");
+        let a = &baked.polygons[0].indices;
+        let b = &baked.polygons[1].indices;
+        assert!(
+            a.iter().all(|i| !b.contains(i)),
+            "the two triangles share no index: {a:?} vs {b:?}"
+        );
+
+        // ...yet they are neighbours, because they share the diagonal by
+        // POSITION. An index-based match would find nothing here and silently
+        // produce an unpathable mesh.
+        let adj = baked.compute_adjacency();
+        assert_eq!(adj[0], vec![1]);
+        assert_eq!(adj[1], vec![0]);
+    }
+
+    #[test]
+    fn adjacency_links_abutting_quads_into_one_connected_strip() {
+        let mut src = BakeSourceGeometry3D::new();
+        add_floor_quad(&mut src, 0.0, 4.0, 0.0, 4.0);
+        add_floor_quad(&mut src, 4.0, 8.0, 0.0, 4.0);
+        add_floor_quad(&mut src, 8.0, 12.0, 0.0, 4.0);
+        let baked = bake_navigation_mesh(&NavigationMesh3D::new(), &src);
+        let adj = baked.compute_adjacency();
+
+        assert_eq!(baked.polygon_count(), 6);
+        assert!(
+            adj.iter().all(|n| !n.is_empty()),
+            "every triangle of a connected floor has a neighbour: {adj:?}"
+        );
+        // Reachability across the whole strip — what makes it pathable end to end.
+        let mut seen = vec![false; 6];
+        let mut stack = vec![0usize];
+        while let Some(p) = stack.pop() {
+            if seen[p] {
+                continue;
+            }
+            seen[p] = true;
+            stack.extend(adj[p].iter().copied());
+        }
+        assert!(seen.iter().all(|&s| s), "all six triangles are reachable from 0");
+    }
+
+    #[test]
+    fn adjacency_keeps_disconnected_islands_apart() {
+        let mut src = BakeSourceGeometry3D::new();
+        add_floor_quad(&mut src, 0.0, 4.0, 0.0, 4.0);
+        add_floor_quad(&mut src, 100.0, 104.0, 0.0, 4.0);
+        let baked = bake_navigation_mesh(&NavigationMesh3D::new(), &src);
+        let adj = baked.compute_adjacency();
+
+        assert_eq!(baked.polygon_count(), 4);
+        for (i, n) in adj.iter().enumerate() {
+            assert_eq!(n.len(), 1, "polygon {i} touches only its own quad: {n:?}");
+        }
+        // Island A is {0,1}; island B is {2,3}. They must never link.
+        assert!(!adj[0].contains(&2) && !adj[0].contains(&3));
+        assert!(!adj[1].contains(&2) && !adj[1].contains(&3));
+    }
+
+    #[test]
+    fn adjacency_is_sorted_so_pathfinding_is_deterministic() {
+        // A fan of quads gives an interior triangle several neighbours. The
+        // lists are built by walking a HashMap, whose order is randomised per
+        // process — sorting keeps A*'s tie-breaking (and any assertion on these
+        // lists) stable run to run.
+        let mut src = BakeSourceGeometry3D::new();
+        add_floor_quad(&mut src, 0.0, 4.0, 0.0, 4.0);
+        add_floor_quad(&mut src, 4.0, 8.0, 0.0, 4.0);
+        add_floor_quad(&mut src, 8.0, 12.0, 0.0, 4.0);
+        let adj = bake_navigation_mesh(&NavigationMesh3D::new(), &src).compute_adjacency();
+
+        for n in &adj {
+            let mut sorted = n.clone();
+            sorted.sort_unstable();
+            assert_eq!(n, &sorted, "neighbour lists must be sorted: {n:?}");
+        }
+    }
+
+    #[test]
+    fn adjacency_is_empty_for_an_empty_or_single_polygon_mesh() {
+        let empty = NavigationMesh3D::new();
+        assert!(empty.compute_adjacency().is_empty(), "no polygons, no lists");
+
+        let mut src = BakeSourceGeometry3D::new();
+        src.add_triangle(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(4.0, 0.0, 0.0),
+            Vector3::new(2.0, 0.0, 4.0),
+        );
+        let one = bake_navigation_mesh(&NavigationMesh3D::new(), &src);
+        assert_eq!(one.polygon_count(), 1);
+        assert_eq!(
+            one.compute_adjacency(),
+            vec![Vec::<usize>::new()],
+            "a lone triangle has no neighbour — and must not link to itself"
+        );
+    }
+
+    #[test]
+    fn polygon_vertices_resolves_indices_and_rejects_a_bad_index() {
+        let mut src = BakeSourceGeometry3D::new();
+        src.add_triangle(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(4.0, 0.0, 0.0),
+            Vector3::new(2.0, 0.0, 4.0),
+        );
+        let baked = bake_navigation_mesh(&NavigationMesh3D::new(), &src);
+        let vs = baked.polygon_vertices(0).expect("polygon 0 resolves");
+        assert_eq!(vs.len(), 3);
+        assert!(approx_eq(vs[1].x, 4.0));
+        assert!(baked.polygon_vertices(99).is_none(), "no such polygon");
+
+        // An index pointing past the vertex array yields None rather than panicking.
+        let mut broken = NavigationMesh3D::new();
+        broken.vertices.push(Vector3::ZERO);
+        broken.polygons.push(NavPolygon3D {
+            indices: vec![0, 7, 9],
+        });
+        assert!(
+            broken.polygon_vertices(0).is_none(),
+            "a dangling vertex index must not panic"
+        );
     }
 }

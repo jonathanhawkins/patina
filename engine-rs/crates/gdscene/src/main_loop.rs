@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use crate::audio_server_bridge::AudioServerBridge;
 use crate::navigation::{
     NavMesh2D, NavMesh3D, NavPolygon, NavPolygon3D, NavigationAgent2D, NavigationAgent3D,
-    NavigationServer2D, NavigationServer3D,
+    NavigationServer2D, NavigationServer3D, OrcaAgent,
 };
 use crate::node::NodeId;
 use crate::particle::{ParticleEmitter, ParticleSimulator};
@@ -128,6 +128,100 @@ impl FrameTrace {
     /// Returns the total number of physics ticks across all frames.
     pub fn total_physics_ticks(&self) -> u32 {
         self.frames.iter().map(|f| f.physics_ticks).sum()
+    }
+}
+
+/// The avoidance parameters read off a `NavigationAgent2D` node for one tick
+/// (pat-nzgdu.116).
+///
+/// Each field is `Option`: a property the scene never set leaves the agent's
+/// existing value untouched, so a node that only sets `avoidance_enabled` keeps
+/// Godot's documented defaults instead of being zeroed.
+#[derive(Debug, Clone, Copy, Default)]
+struct AvoidanceNodeParams {
+    /// The desired velocity (Godot's `velocity`), defaulting to zero.
+    velocity: gdcore::math::Vector2,
+    radius: Option<f32>,
+    max_speed: Option<f32>,
+    neighbor_distance: Option<f32>,
+    max_neighbors: Option<usize>,
+    time_horizon_agents: Option<f32>,
+    time_horizon_obstacles: Option<f32>,
+    avoidance_layers: Option<u32>,
+    avoidance_mask: Option<u32>,
+    avoidance_priority: Option<f32>,
+}
+
+impl AvoidanceNodeParams {
+    /// Reads the avoidance property surface off a node.
+    fn read(node: &crate::node::Node) -> Self {
+        /// Godot exposes these as floats, but a scene (or a `.tscn` round-trip)
+        /// may hand back an int for a whole number.
+        fn number(node: &crate::node::Node, name: &str) -> Option<f32> {
+            match node.get_property(name) {
+                Variant::Float(f) => Some(f as f32),
+                Variant::Int(i) => Some(i as f32),
+                _ => None,
+            }
+        }
+        fn integer(node: &crate::node::Node, name: &str) -> Option<i64> {
+            match node.get_property(name) {
+                Variant::Int(i) => Some(i),
+                Variant::Float(f) => Some(f as i64),
+                _ => None,
+            }
+        }
+
+        Self {
+            velocity: match node.get_property("velocity") {
+                Variant::Vector2(v) => v,
+                _ => gdcore::math::Vector2::ZERO,
+            },
+            radius: number(node, "radius"),
+            max_speed: number(node, "max_speed"),
+            neighbor_distance: number(node, "neighbor_distance"),
+            max_neighbors: integer(node, "max_neighbors").map(|i| i.max(0) as usize),
+            time_horizon_agents: number(node, "time_horizon_agents"),
+            time_horizon_obstacles: number(node, "time_horizon_obstacles"),
+            avoidance_layers: integer(node, "avoidance_layers").map(|i| i as u32),
+            avoidance_mask: integer(node, "avoidance_mask").map(|i| i as u32),
+            avoidance_priority: number(node, "avoidance_priority"),
+        }
+    }
+
+    /// Applies the read parameters onto `agent`, leaving unset ones alone.
+    fn apply(&self, agent: &mut NavigationAgent2D) {
+        // Gathering already filtered on the node's `avoidance_enabled`; the
+        // backing agent must agree or the solve would pass the velocity through.
+        agent.avoidance_enabled = true;
+        agent.velocity = self.velocity;
+        if let Some(v) = self.radius {
+            agent.radius = v;
+        }
+        if let Some(v) = self.max_speed {
+            agent.max_speed = v;
+        }
+        if let Some(v) = self.neighbor_distance {
+            agent.neighbor_distance = v;
+        }
+        if let Some(v) = self.max_neighbors {
+            agent.max_neighbors = v;
+        }
+        if let Some(v) = self.time_horizon_agents {
+            agent.time_horizon_agents = v;
+        }
+        if let Some(v) = self.time_horizon_obstacles {
+            agent.time_horizon_obstacles = v;
+        }
+        if let Some(v) = self.avoidance_layers {
+            agent.avoidance_layers = v;
+        }
+        if let Some(v) = self.avoidance_mask {
+            agent.avoidance_mask = v;
+        }
+        if let Some(v) = self.avoidance_priority {
+            agent.avoidance_priority = v;
+        }
     }
 }
 
@@ -523,6 +617,120 @@ impl MainLoop {
         }
     }
 
+    /// Runs the ORCA avoidance simulation over avoidance-enabled
+    /// `NavigationAgent2D` nodes and delivers `velocity_computed(safe_velocity)`
+    /// (pat-nzgdu.116).
+    ///
+    /// This follows Godot's avoidance contract: the server does **not** move the
+    /// body. An agent whose node carries a desired `velocity` receives a
+    /// collision-free `safe_velocity` — published onto the node as a property and
+    /// passed as the `velocity_computed` argument — and the game moves in
+    /// response. Runs on the physics tick before the physics-frame script phase,
+    /// so a `_physics_process` handler reads the value solved for that same tick.
+    ///
+    /// `NavigationObstacle2D` nodes join the solve as non-reciprocal obstacles:
+    /// they never yield, so agents shoulder the whole correction around them.
+    pub fn process_navigation_avoidance(&mut self, dt: f32) {
+        use gdcore::math::Vector2;
+
+        // -- gather (immutable tree read) --
+        let mut agent_nodes: Vec<(NodeId, AvoidanceNodeParams)> = Vec::new();
+        let mut obstacles: Vec<OrcaAgent> = Vec::new();
+
+        for id in self.tree.all_nodes_in_tree_order() {
+            let Some(node) = self.tree.get_node(id) else {
+                continue;
+            };
+            match node.class_name() {
+                "NavigationAgent2D" => {
+                    if !matches!(node.get_property("avoidance_enabled"), Variant::Bool(true)) {
+                        continue;
+                    }
+                    agent_nodes.push((id, AvoidanceNodeParams::read(node)));
+                }
+                "NavigationObstacle2D" => {
+                    let radius = match node.get_property("radius") {
+                        Variant::Float(f) => f as f32,
+                        _ => 0.0,
+                    };
+                    if radius <= 0.0 {
+                        continue;
+                    }
+                    let position = crate::node2d::get_position(&self.tree, id);
+                    // max_speed is irrelevant for something that never moves
+                    // under its own avoidance solve.
+                    let mut obstacle = OrcaAgent::new(position, radius, 0.0);
+                    if let Variant::Vector2(v) = node.get_property("velocity") {
+                        obstacle.velocity = v;
+                    }
+                    if let Variant::Int(layers) = node.get_property("avoidance_layers") {
+                        obstacle.avoidance_layers = layers as u32;
+                    }
+                    obstacles.push(obstacle);
+                }
+                _ => {}
+            }
+        }
+
+        if agent_nodes.is_empty() {
+            return;
+        }
+
+        let positions: Vec<Vector2> = agent_nodes
+            .iter()
+            .map(|(id, _)| crate::node2d::get_position(&self.tree, *id))
+            .collect();
+
+        // -- sync node properties onto the agents, then snapshot solver views --
+        // Every view is taken BEFORE any solve, so each agent negotiates against
+        // its neighbors' state at the top of this tick rather than against
+        // whatever the earlier agents in iteration order were just given. Solving
+        // against half-updated neighbors makes the result depend on tree order.
+        let mut views: Vec<OrcaAgent> = Vec::with_capacity(agent_nodes.len());
+        for ((id, params), position) in agent_nodes.iter().zip(&positions) {
+            let agent = self
+                .nav_agents_2d
+                .entry(*id)
+                .or_insert_with(NavigationAgent2D::new);
+            params.apply(agent);
+            views.push(agent.orca_agent(*position));
+        }
+
+        // -- solve --
+        let mut results: Vec<(NodeId, Vector2)> = Vec::with_capacity(agent_nodes.len());
+        for (index, (id, params)) in agent_nodes.iter().enumerate() {
+            let neighbors: Vec<OrcaAgent> = views
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .map(|(_, view)| *view)
+                .collect();
+            let Some(agent) = self.nav_agents_2d.get(id) else {
+                continue;
+            };
+            let safe = agent.compute_safe_velocity_against(
+                positions[index],
+                params.velocity,
+                &neighbors,
+                &obstacles,
+                dt,
+            );
+            results.push((*id, safe));
+        }
+
+        // -- publish + signal --
+        for (id, safe) in results {
+            if let Some(agent) = self.nav_agents_2d.get_mut(&id) {
+                agent.safe_velocity = safe;
+            }
+            if let Some(node) = self.tree.get_node_mut(id) {
+                node.set_property("safe_velocity", Variant::Vector2(safe));
+            }
+            self.tree
+                .emit_signal(id, "velocity_computed", &[Variant::Vector2(safe)]);
+        }
+    }
+
     /// Drives `NavigationAgent2D`/`NavigationAgent3D` nodes along their computed
     /// paths each frame (pat-u3l8c.5).
     ///
@@ -605,7 +813,29 @@ impl MainLoop {
         let mut updates2: Vec<(NodeId, Vector2, Vector2)> = Vec::new();
         // Nodes whose agent reached its goal this frame (emit signals once).
         let mut finished2: Vec<NodeId> = Vec::new();
+        // Neighbor snapshot for path-following avoidance (pat-nzgdu.116). This
+        // was previously a hardcoded empty slice, which left avoidance inert at
+        // runtime no matter how an agent was configured: no agent was ever told
+        // another existed. Radii come from each agent's own value, defaulting
+        // for nodes not yet stepped.
+        let neighbor_radii: Vec<(NodeId, Vector2, f32)> = agents2
+            .iter()
+            .map(|(id, current, _)| {
+                let radius = self
+                    .nav_agents_2d
+                    .get(id)
+                    .map(|agent| agent.radius)
+                    .unwrap_or_else(|| NavigationAgent2D::new().radius);
+                (*id, *current, radius)
+            })
+            .collect();
         for (id, current, target) in &agents2 {
+            // Every other agent this frame — an agent must not avoid itself.
+            let others: Vec<(Vector2, f32)> = neighbor_radii
+                .iter()
+                .filter(|(other_id, _, _)| other_id != id)
+                .map(|(_, position, radius)| (*position, *radius))
+                .collect();
             let agent = self
                 .nav_agents_2d
                 .entry(*id)
@@ -620,7 +850,7 @@ impl MainLoop {
             let new_pos = if arrived {
                 *current
             } else {
-                agent.step(*current, dt, &[])
+                agent.step(*current, dt, &others)
             };
             let next = agent.get_next_path_position(new_pos);
             // Fire `navigation_finished`/`target_reached` exactly once, the frame
@@ -1143,6 +1373,13 @@ impl MainLoop {
             self.physics_server_3d.sync_to_physics(&self.tree);
             self.physics_server_3d.step(physics_dt as f32);
             self.physics_server_3d.sync_from_physics(&mut self.tree);
+
+            // -- navigation avoidance phase (pat-nzgdu.116) --
+            // ORCA runs per physics tick, like Godot's NavigationServer: agents
+            // with a desired velocity get a safe one back via velocity_computed.
+            // Emitted before the script phase so a _physics_process handler sees
+            // the velocity solved for this very tick.
+            self.process_navigation_avoidance(physics_dt as f32);
 
             // SceneTree.physics_frame fires before each physics tick's script
             // phase, mirroring Godot's per-tick emission (pat-nzgdu.84).

@@ -1038,6 +1038,29 @@ pub struct NavigationAgent2D {
     pub radius: f32,
     /// Maximum speed used when integrating avoidance (Godot default 100.0).
     pub max_speed: f32,
+    /// Neighbors farther than this are ignored by avoidance (pat-nzgdu.116).
+    pub neighbor_distance: f32,
+    /// Upper bound on how many neighbors constrain the avoidance solve.
+    pub max_neighbors: usize,
+    /// Seconds of lookahead for agent-vs-agent collisions.
+    pub time_horizon_agents: f32,
+    /// Seconds of lookahead for agent-vs-obstacle collisions.
+    pub time_horizon_obstacles: f32,
+    /// Bitmask this agent is visible on to other agents' avoidance masks.
+    pub avoidance_layers: u32,
+    /// Bitmask of avoidance layers this agent reacts to.
+    pub avoidance_mask: u32,
+    /// How strongly this agent holds its course: a higher priority yields less
+    /// of the mutual avoidance effort to neighbors (Godot default 1.0).
+    pub avoidance_priority: f32,
+    /// The velocity most recently requested via [`set_velocity`](Self::set_velocity)
+    /// — Godot's `velocity`, i.e. the *desired* velocity before avoidance.
+    pub velocity: Vector2,
+    /// The collision-free velocity the avoidance solve produced for the last
+    /// [`set_velocity`](Self::set_velocity) — the payload a game reads when
+    /// `velocity_computed` fires. `NavAgentSignal` is a payload-free `Copy`
+    /// enum, so the value is carried here rather than on the signal.
+    pub safe_velocity: Vector2,
     /// Whether `navigation_finished` has already been emitted for the current
     /// target — so the runtime fires it exactly once per navigation. Reset by
     /// [`set_target_position`](Self::set_target_position). (pat-nzgdu.10)
@@ -1057,8 +1080,39 @@ impl NavigationAgent2D {
             avoidance_enabled: false,
             radius: 10.0,
             max_speed: 100.0,
+            neighbor_distance: DEFAULT_NEIGHBOR_DISTANCE,
+            max_neighbors: DEFAULT_MAX_NEIGHBORS,
+            time_horizon_agents: DEFAULT_TIME_HORIZON_AGENTS,
+            time_horizon_obstacles: DEFAULT_TIME_HORIZON_OBSTACLES,
+            avoidance_layers: 1,
+            avoidance_mask: 1,
+            avoidance_priority: 1.0,
+            velocity: Vector2::ZERO,
+            safe_velocity: Vector2::ZERO,
             finished_emitted: false,
             pending_signals: Vec::new(),
+        }
+    }
+
+    /// Builds this agent's [`OrcaAgent`] view for the avoidance solve, using
+    /// `position` as its current world position.
+    ///
+    /// The solver's `velocity` is the agent's *current* velocity — the last
+    /// safe velocity it was given — not the desired one, since ORCA reasons
+    /// about where agents are actually heading.
+    pub fn orca_agent(&self, position: Vector2) -> OrcaAgent {
+        OrcaAgent {
+            position,
+            velocity: self.safe_velocity,
+            radius: self.radius,
+            max_speed: self.max_speed,
+            time_horizon_agents: self.time_horizon_agents,
+            time_horizon_obstacles: self.time_horizon_obstacles,
+            neighbor_distance: self.neighbor_distance,
+            max_neighbors: self.max_neighbors,
+            avoidance_layers: self.avoidance_layers,
+            avoidance_mask: self.avoidance_mask,
+            avoidance_priority: self.avoidance_priority,
         }
     }
 
@@ -1148,12 +1202,56 @@ impl NavigationAgent2D {
         if !self.avoidance_enabled {
             return preferred;
         }
-        rvo_avoidance_velocity(current, preferred, others, self.radius, self.max_speed)
+        // Positional-only neighbors carry no velocity, so they enter the solve
+        // as stationary agents. Callers that know neighbor velocities should
+        // prefer `compute_safe_velocity_against`, which is the full-fidelity
+        // reciprocal solve.
+        let neighbors: Vec<OrcaAgent> = others
+            .iter()
+            .map(|(position, radius)| OrcaAgent::new(*position, *radius, self.max_speed))
+            .collect();
+        self.compute_safe_velocity_against(
+            current,
+            preferred,
+            &neighbors,
+            &[],
+            NOMINAL_AVOIDANCE_DT,
+        )
+    }
+
+    /// The full ORCA solve: reciprocal avoidance of `neighbors` (whose real
+    /// velocities are honoured) and non-reciprocal avoidance of `obstacles`.
+    ///
+    /// Returns `preferred` unchanged when avoidance is disabled, mirroring
+    /// Godot, where a `NavigationAgent2D` with `avoidance_enabled == false`
+    /// passes the requested velocity straight through.
+    pub fn compute_safe_velocity_against(
+        &self,
+        current: Vector2,
+        preferred: Vector2,
+        neighbors: &[OrcaAgent],
+        obstacles: &[OrcaAgent],
+        dt: f32,
+    ) -> Vector2 {
+        if !self.avoidance_enabled {
+            return preferred;
+        }
+        orca_safe_velocity(
+            &self.orca_agent(current),
+            preferred,
+            neighbors,
+            obstacles,
+            dt,
+        )
     }
 
     /// Godot's `set_velocity`: filters `preferred` through avoidance (see
     /// [`compute_safe_velocity`](Self::compute_safe_velocity)), records a
     /// `velocity_computed` milestone carrying the safe velocity, and returns it.
+    ///
+    /// The safe velocity is also stored on
+    /// [`safe_velocity`](Self::safe_velocity), which is what the runtime hands
+    /// to the `velocity_computed` signal.
     pub fn set_velocity(
         &mut self,
         current: Vector2,
@@ -1161,8 +1259,21 @@ impl NavigationAgent2D {
         others: &[(Vector2, f32)],
     ) -> Vector2 {
         let safe = self.compute_safe_velocity(current, preferred, others);
+        self.velocity = preferred;
+        self.safe_velocity = safe;
         self.pending_signals.push(NavAgentSignal::VelocityComputed);
         safe
+    }
+
+    /// Godot's `set_velocity_forced`: adopt `velocity` immediately as both the
+    /// desired *and* the current velocity, bypassing the avoidance solve.
+    ///
+    /// Godot uses this on teleports, where the agent's previous velocity would
+    /// otherwise make the next ORCA solve reason from a stale trajectory. No
+    /// `velocity_computed` milestone is produced, because nothing was computed.
+    pub fn set_velocity_forced(&mut self, velocity: Vector2) {
+        self.velocity = velocity;
+        self.safe_velocity = velocity;
     }
 
     /// Removes and returns the navigation milestone signals produced since the
@@ -1745,13 +1856,23 @@ impl OrcaAgent {
 }
 
 /// Godot's `NavigationAgent2D.neighbor_distance` default.
-pub const DEFAULT_NEIGHBOR_DISTANCE: f32 = 50.0;
+///
+/// 2D navigation works in pixels, so this is `500.0` — the `50.0` that
+/// `NavigationAgent3D` uses would cull neighbors barely a few agent-widths away.
+/// Matches the ClassDB registration for `NavigationAgent2D`.
+pub const DEFAULT_NEIGHBOR_DISTANCE: f32 = 500.0;
 /// Godot's `NavigationAgent2D.max_neighbors` default.
 pub const DEFAULT_MAX_NEIGHBORS: usize = 10;
 /// Godot's `NavigationAgent2D.time_horizon_agents` default.
 pub const DEFAULT_TIME_HORIZON_AGENTS: f32 = 1.0;
 /// Godot's `NavigationAgent2D.time_horizon_obstacles` default.
 pub const DEFAULT_TIME_HORIZON_OBSTACLES: f32 = 0.0;
+
+/// Timestep assumed by avoidance entry points that are not given one.
+///
+/// `dt` only matters for resolving agents that already overlap, so a nominal
+/// 60 Hz tick is a safe stand-in when the caller has no better value.
+pub const NOMINAL_AVOIDANCE_DT: f32 = 1.0 / 60.0;
 
 /// Builds the ORCA half-plane that keeps `agent` clear of `other`.
 ///
@@ -3113,10 +3234,43 @@ mod tests {
     // -- ORCA / RVO2 solver (pat-nzgdu.116) --------------------------------
 
     /// A solver agent at `position` moving at `velocity`, radius 10, speed 100.
+    ///
+    /// `neighbor_distance` is pinned here rather than inherited from
+    /// [`DEFAULT_NEIGHBOR_DISTANCE`] on purpose. These fixtures exercise the ORCA
+    /// *math*, and must not fail — as an inscrutable "no deflection" error —
+    /// merely because a default moved: the fixtures sit ~60 units apart, which is
+    /// within a hair of the cull range at some plausible defaults. The default
+    /// itself is pinned separately by
+    /// [`orca_defaults_match_godot_navigation_agent_2d`].
     fn orca_at(position: Vector2, velocity: Vector2) -> OrcaAgent {
         let mut a = OrcaAgent::new(position, 10.0, 100.0);
         a.velocity = velocity;
+        a.neighbor_distance = 500.0;
         a
+    }
+
+    #[test]
+    fn orca_defaults_match_godot_navigation_agent_2d() {
+        // 2D navigation works in PIXELS. NavigationAgent3D's 50.0 (meters) would
+        // cull neighbors barely a few agent-widths away, producing avoidance that
+        // compiles, unit-tests green, and does almost nothing on screen. These
+        // must agree with the NavigationAgent2D ClassDB registration.
+        assert_eq!(
+            DEFAULT_NEIGHBOR_DISTANCE, 500.0,
+            "2D neighbor_distance is 500.0 (pixels); 50.0 is the 3D value"
+        );
+        assert_eq!(DEFAULT_MAX_NEIGHBORS, 10);
+        assert_eq!(DEFAULT_TIME_HORIZON_AGENTS, 1.0);
+        assert_eq!(DEFAULT_TIME_HORIZON_OBSTACLES, 0.0);
+
+        let agent = NavigationAgent2D::new();
+        assert_eq!(agent.neighbor_distance, DEFAULT_NEIGHBOR_DISTANCE);
+        assert_eq!(agent.max_neighbors, DEFAULT_MAX_NEIGHBORS);
+        assert_eq!(agent.radius, 10.0);
+        assert_eq!(agent.max_speed, 100.0);
+        assert_eq!(agent.avoidance_priority, 1.0);
+        assert_eq!(agent.avoidance_layers, 1);
+        assert_eq!(agent.avoidance_mask, 1);
     }
 
     #[test]
@@ -3262,6 +3416,102 @@ mod tests {
             obstacle_dev > agent_dev - 1e-3,
             "obstacle avoidance must not be split reciprocally \
              (obstacle {obstacle_dev} vs agent {agent_dev})"
+        );
+    }
+
+    #[test]
+    fn set_velocity_records_desired_and_safe_velocities() {
+        let mut agent = NavigationAgent2D::new();
+        agent.avoidance_enabled = true;
+        let preferred = Vector2::new(50.0, 0.0);
+        // A neighbor dead ahead forces a non-trivial safe velocity.
+        let others = [(Vector2::new(15.0, 0.5), 10.0)];
+
+        let returned = agent.set_velocity(Vector2::ZERO, preferred, &others);
+
+        assert_eq!(agent.velocity, preferred, "`velocity` is the DESIRED value");
+        assert_eq!(
+            agent.safe_velocity, returned,
+            "`safe_velocity` must hold what the solve returned"
+        );
+        assert!(
+            agent
+                .pending_signals()
+                .contains(&NavAgentSignal::VelocityComputed),
+            "set_velocity must record a velocity_computed milestone"
+        );
+    }
+
+    #[test]
+    fn set_velocity_forced_bypasses_avoidance_and_emits_nothing() {
+        let mut agent = NavigationAgent2D::new();
+        agent.avoidance_enabled = true;
+        let teleport_velocity = Vector2::new(-25.0, 7.0);
+
+        agent.set_velocity_forced(teleport_velocity);
+
+        assert_eq!(agent.velocity, teleport_velocity);
+        assert_eq!(
+            agent.safe_velocity, teleport_velocity,
+            "forced velocity is adopted verbatim, not filtered through ORCA"
+        );
+        assert!(
+            agent.pending_signals().is_empty(),
+            "set_velocity_forced computes nothing, so it must not signal"
+        );
+    }
+
+    #[test]
+    fn disabled_avoidance_passes_the_preferred_velocity_through() {
+        let agent = NavigationAgent2D::new();
+        assert!(!agent.avoidance_enabled, "avoidance is off by default");
+        let preferred = Vector2::new(50.0, 0.0);
+        let blocker = OrcaAgent::new(Vector2::new(15.0, 0.0), 10.0, 100.0);
+
+        let safe = agent.compute_safe_velocity_against(
+            Vector2::ZERO,
+            preferred,
+            &[blocker],
+            &[],
+            1.0 / 60.0,
+        );
+        assert_eq!(
+            safe, preferred,
+            "a disabled agent must not be deflected even by an imminent collision"
+        );
+    }
+
+    #[test]
+    fn neighbor_velocity_is_honoured_by_the_reciprocal_solve() {
+        // The same neighbor, once fleeing and once closing head-on. A neighbor
+        // moving away is far less constraining than one bearing down, which is
+        // exactly what the (position, radius)-only entry point cannot express.
+        let mut agent = NavigationAgent2D::new();
+        agent.avoidance_enabled = true;
+        // Pinned, not inherited — see `orca_at`: this fixture is ~60 units wide,
+        // so a changed default would surface here as a bogus math failure.
+        agent.neighbor_distance = 500.0;
+        let preferred = Vector2::new(50.0, 0.0);
+        let position = Vector2::new(-30.0, -0.5);
+
+        let mut closing = OrcaAgent::new(Vector2::new(30.0, 0.5), 10.0, 100.0);
+        closing.velocity = Vector2::new(-50.0, 0.0);
+        let mut fleeing = OrcaAgent::new(Vector2::new(30.0, 0.5), 10.0, 100.0);
+        fleeing.velocity = Vector2::new(50.0, 0.0);
+
+        let closing_dev =
+            (agent.compute_safe_velocity_against(position, preferred, &[closing], &[], 0.1)
+                - preferred)
+                .length();
+        let fleeing_dev =
+            (agent.compute_safe_velocity_against(position, preferred, &[fleeing], &[], 0.1)
+                - preferred)
+                .length();
+
+        assert!(
+            closing_dev > fleeing_dev,
+            "a closing neighbor must constrain more than a fleeing one \
+             (closing {closing_dev} vs fleeing {fleeing_dev})"
         );
     }
 }

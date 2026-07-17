@@ -1857,6 +1857,12 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "CameraServer") {
                             return call_cameraserver_static(member, &evaluated_args);
                         }
+                        // EngineDebugger singleton (pat-nzgdu.176) — backed by
+                        // the real gdcore::debugger. `is_active()` is false
+                        // until a session attaches, matching Godot.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "EngineDebugger") {
+                            return call_enginedebugger_static(member, &evaluated_args);
+                        }
                         // Handle ClassName.new() — runtime node creation / RefCounted helpers
                         if member == "new" {
                             if let Expr::Ident(class_name) = object.as_ref() {
@@ -9702,6 +9708,318 @@ thread_local! {
 /// Returns `true` when `id` was issued by [`new_camera_feed_handle`].
 fn is_camera_feed_handle(id: gdcore::id::ObjectId) -> bool {
     id.raw() & 0xFF00_0000_0000_0000 == CAMERA_FEED_HANDLE_TAG
+}
+
+// ---------------------------------------------------------------------------
+// EngineDebugger (pat-nzgdu.176)
+// ---------------------------------------------------------------------------
+//
+// Godot's EngineDebugger is the script-facing face of the remote debugger: the
+// running game reports breakpoints/stack/profiler frames to the editor over a
+// protocol. `gdcore::debugger::Debugger` already implements the breakpoint and
+// call-stack model, and `gdcore::debug_protocol` already implements the
+// transport — but nothing referenced either outside gdcore, and `EngineDebugger`
+// appeared nowhere in the workspace. This arm makes the singleton
+// script-reachable over the real gdcore debugger rather than a private mock.
+//
+// `is_active()` follows Godot: false until a debug session attaches (Godot only
+// activates the debugger under `--remote-debug`), so a normal run reports false.
+
+/// A registered `EngineProfiler`, keyed by name.
+#[derive(Debug, Default, Clone)]
+struct DebugProfilerState {
+    /// Whether `profiler_enable` has switched this profiler on.
+    enabled: bool,
+    /// Frame data handed to `profiler_add_frame_data`, in arrival order.
+    frames: Vec<Vec<Variant>>,
+}
+
+thread_local! {
+    /// The process-local debugger backing `EngineDebugger` (pat-nzgdu.176).
+    /// Under `nextest` each test runs in its own process, so this is
+    /// test-isolated. A real session is opened by the runner via
+    /// [`engine_debugger_attach`].
+    static ENGINE_DEBUGGER: std::cell::RefCell<gdcore::debugger::Debugger> =
+        std::cell::RefCell::new(gdcore::debugger::Debugger::new());
+    /// Profilers registered by `register_profiler`, keyed by name.
+    static DEBUG_PROFILERS: std::cell::RefCell<HashMap<String, DebugProfilerState>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Message captures registered by `register_message_capture`. Godot takes a
+    /// Callable; we keep the Variant so a future dispatch can invoke it.
+    static DEBUG_CAPTURES: std::cell::RefCell<HashMap<String, Variant>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Messages passed to `send_message`, in order — what the transport drains
+    /// to the editor. See [`drain_engine_debugger_messages`].
+    static DEBUG_MESSAGES: std::cell::RefCell<Vec<(String, Vec<Variant>)>> =
+        std::cell::RefCell::new(Vec::new());
+    /// `set_depth` / `get_depth` — Godot's stepping depth counter. Distinct from
+    /// the *call stack* depth `Debugger::stack_depth()` reports.
+    static DEBUG_DEPTH: std::cell::Cell<i64> = std::cell::Cell::new(0);
+    /// `set_lines_left` / `get_lines_left` — lines remaining before the debugger
+    /// breaks again while stepping.
+    static DEBUG_LINES_LEFT: std::cell::Cell<i64> = std::cell::Cell::new(0);
+    /// `is_skipping_breakpoints` — set when the user asks the editor to ignore
+    /// breakpoints without removing them.
+    static DEBUG_SKIP_BREAKPOINTS: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+/// Runtime hook: attach the debugger, making `EngineDebugger.is_active()` report
+/// true. The runner calls this when a debug session is established (Godot
+/// activates the debugger under `--remote-debug`).
+pub fn engine_debugger_attach() {
+    ENGINE_DEBUGGER.with(|d| d.borrow_mut().attach());
+}
+
+/// Runtime hook: detach the debugger — `is_active()` reports false again.
+pub fn engine_debugger_detach() {
+    ENGINE_DEBUGGER.with(|d| d.borrow_mut().detach());
+}
+
+/// Runtime hook: run `f` against the process-local debugger, so the runner can
+/// drive breakpoints/stack while scripts observe the same state.
+///
+/// # Panics
+///
+/// Panics with `BorrowMutError` if `f` re-enters the interpreter — the debugger
+/// stays mutably borrowed for the whole of `f`, and any script it runs that
+/// touches `EngineDebugger` would borrow it again. Decide inside `f`, act after:
+///
+/// ```ignore
+/// let hit = with_engine_debugger(|d| d.should_break(script, line)); // borrow ends here
+/// if hit { interp.run(on_break)?; }
+/// ```
+pub fn with_engine_debugger<R>(f: impl FnOnce(&mut gdcore::debugger::Debugger) -> R) -> R {
+    ENGINE_DEBUGGER.with(|d| f(&mut d.borrow_mut()))
+}
+
+/// Runtime hook: set whether the debugger ignores breakpoints without removing
+/// them. Godot exposes only the `is_skipping_breakpoints()` getter to scripts —
+/// the editor sets this over the debug protocol, so this is the transport's
+/// seam, mirroring [`engine_debugger_attach`].
+pub fn engine_debugger_set_skipping_breakpoints(skip: bool) {
+    DEBUG_SKIP_BREAKPOINTS.with(|s| s.set(skip));
+}
+
+/// Runtime hook: take everything `send_message` has queued, leaving the queue
+/// empty. This is the seam the debug-protocol transport drains to the editor.
+pub fn drain_engine_debugger_messages() -> Vec<(String, Vec<Variant>)> {
+    DEBUG_MESSAGES.with(|m| std::mem::take(&mut *m.borrow_mut()))
+}
+
+/// Runtime hook: the frame data queued for `profiler`, in arrival order.
+pub fn engine_debugger_profiler_frames(profiler: &str) -> Vec<Vec<Variant>> {
+    DEBUG_PROFILERS.with(|p| {
+        p.borrow()
+            .get(profiler)
+            .map(|s| s.frames.clone())
+            .unwrap_or_default()
+    })
+}
+
+/// Reads a `StringName`/`String` argument, which Godot's EngineDebugger uses for
+/// profiler, capture and breakpoint-source names.
+///
+/// Godot types every one of these as `StringName`, so both spellings are
+/// accepted — matching how the rest of this file reads name arguments. Scripts
+/// can only produce `Variant::String` today (the tokenizer has no `&"..."`
+/// literal), but StringNames flow in from other interpreter paths.
+fn debug_name_arg(args: &[Variant], at: usize, method: &str) -> Result<String, RuntimeError> {
+    match args.get(at) {
+        Some(Variant::String(s)) => Ok(s.clone()),
+        Some(Variant::StringName(s)) => Ok(s.as_str().to_string()),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "EngineDebugger.{method}() expects a name at argument {at}"
+        )))),
+    }
+}
+
+/// Reads a strict bool argument. Godot's `profiler_enable(name, enable)` takes a
+/// real bool; accepting anything truthy would turn `profiler_enable("p", 1)` —
+/// a realistic mistake — into a silent *disable*.
+fn debug_bool_arg(args: &[Variant], at: usize, method: &str) -> Result<bool, RuntimeError> {
+    match args.get(at) {
+        Some(Variant::Bool(b)) => Ok(*b),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "EngineDebugger.{method}() expects a bool at argument {at}"
+        )))),
+    }
+}
+
+/// Reads an integer argument (line numbers, depth, lines-left).
+fn debug_int_arg(args: &[Variant], at: usize, method: &str) -> Result<i64, RuntimeError> {
+    match args.get(at) {
+        Some(Variant::Int(i)) => Ok(*i),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "EngineDebugger.{method}() expects an integer at argument {at}"
+        )))),
+    }
+}
+
+/// Builds the gdcore breakpoint location for the Godot-order `(line, source)`
+/// argument pair.
+///
+/// ⚠️ Godot spells these `insert_breakpoint(line: int, source: StringName)` —
+/// **line first** — while `BreakpointLocation::new(script, line)` takes the
+/// script first. Both are read out of `&[Variant]`, so swapping them is not a
+/// compile error; it silently registers a breakpoint on the wrong script.
+fn debug_breakpoint_arg(
+    args: &[Variant],
+    method: &str,
+) -> Result<gdcore::debugger::BreakpointLocation, RuntimeError> {
+    let line = debug_int_arg(args, 0, method)?;
+    let source = debug_name_arg(args, 1, method)?;
+    if line < 0 {
+        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "EngineDebugger.{method}() line must be non-negative, got {line}"
+        ))));
+    }
+    Ok(gdcore::debugger::BreakpointLocation::new(
+        source,
+        line as usize,
+    ))
+}
+
+fn call_enginedebugger_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    match method {
+        // Godot reports false until a session attaches — a plain run is not
+        // being debugged.
+        "is_active" => Ok(Variant::Bool(
+            ENGINE_DEBUGGER.with(|d| d.borrow().is_attached()),
+        )),
+
+        // -- breakpoints (line FIRST, source second — see debug_breakpoint_arg)
+        "insert_breakpoint" => {
+            let loc = debug_breakpoint_arg(args, "insert_breakpoint")?;
+            ENGINE_DEBUGGER.with(|d| d.borrow_mut().add_breakpoint(loc));
+            Ok(Variant::Nil)
+        }
+        "remove_breakpoint" => {
+            let loc = debug_breakpoint_arg(args, "remove_breakpoint")?;
+            ENGINE_DEBUGGER.with(|d| d.borrow_mut().remove_breakpoint(&loc));
+            Ok(Variant::Nil)
+        }
+        "is_breakpoint" => {
+            let loc = debug_breakpoint_arg(args, "is_breakpoint")?;
+            Ok(Variant::Bool(
+                ENGINE_DEBUGGER.with(|d| d.borrow().has_breakpoint(&loc)),
+            ))
+        }
+        "clear_breakpoints" => {
+            ENGINE_DEBUGGER.with(|d| d.borrow_mut().clear_breakpoints());
+            Ok(Variant::Nil)
+        }
+        "is_skipping_breakpoints" => Ok(Variant::Bool(DEBUG_SKIP_BREAKPOINTS.with(|s| s.get()))),
+
+        // -- stepping counters. Godot's `depth` is the stepping counter, NOT the
+        // call-stack depth Debugger::stack_depth() reports.
+        "set_depth" => {
+            let d = debug_int_arg(args, 0, "set_depth")?;
+            DEBUG_DEPTH.with(|c| c.set(d));
+            Ok(Variant::Nil)
+        }
+        "get_depth" => Ok(Variant::Int(DEBUG_DEPTH.with(|c| c.get()))),
+        "set_lines_left" => {
+            let l = debug_int_arg(args, 0, "set_lines_left")?;
+            DEBUG_LINES_LEFT.with(|c| c.set(l));
+            Ok(Variant::Nil)
+        }
+        "get_lines_left" => Ok(Variant::Int(DEBUG_LINES_LEFT.with(|c| c.get()))),
+
+        // -- profilers
+        "register_profiler" => {
+            let name = debug_name_arg(args, 0, "register_profiler")?;
+            // The trailing `;` matters: without it the closure would return the
+            // `&mut` from `or_default()`, which borrows the temporary RefMut.
+            DEBUG_PROFILERS.with(|p| {
+                p.borrow_mut().entry(name).or_default();
+            });
+            Ok(Variant::Nil)
+        }
+        "unregister_profiler" => {
+            let name = debug_name_arg(args, 0, "unregister_profiler")?;
+            DEBUG_PROFILERS.with(|p| p.borrow_mut().remove(&name));
+            Ok(Variant::Nil)
+        }
+        "has_profiler" => {
+            let name = debug_name_arg(args, 0, "has_profiler")?;
+            Ok(Variant::Bool(
+                DEBUG_PROFILERS.with(|p| p.borrow().contains_key(&name)),
+            ))
+        }
+        // Registered and *enabled* are different: a registered profiler is off
+        // until profiler_enable turns it on.
+        "is_profiling" => {
+            let name = debug_name_arg(args, 0, "is_profiling")?;
+            Ok(Variant::Bool(DEBUG_PROFILERS.with(|p| {
+                p.borrow().get(&name).map(|s| s.enabled).unwrap_or(false)
+            })))
+        }
+        "profiler_enable" => {
+            let name = debug_name_arg(args, 0, "profiler_enable")?;
+            let enable = debug_bool_arg(args, 1, "profiler_enable")?;
+            DEBUG_PROFILERS.with(|p| {
+                p.borrow_mut().entry(name).or_default().enabled = enable;
+            });
+            Ok(Variant::Nil)
+        }
+        "profiler_add_frame_data" => {
+            let name = debug_name_arg(args, 0, "profiler_add_frame_data")?;
+            let data = match args.get(1) {
+                Some(Variant::Array(a)) => a.clone(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "EngineDebugger.profiler_add_frame_data() expects an Array of data".into(),
+                    )))
+                }
+            };
+            DEBUG_PROFILERS.with(|p| {
+                p.borrow_mut().entry(name).or_default().frames.push(data);
+            });
+            Ok(Variant::Nil)
+        }
+
+        // -- message captures
+        "register_message_capture" => {
+            let name = debug_name_arg(args, 0, "register_message_capture")?;
+            let callable = args.get(1).cloned().unwrap_or(Variant::Nil);
+            DEBUG_CAPTURES.with(|c| c.borrow_mut().insert(name, callable));
+            Ok(Variant::Nil)
+        }
+        "unregister_message_capture" => {
+            let name = debug_name_arg(args, 0, "unregister_message_capture")?;
+            DEBUG_CAPTURES.with(|c| c.borrow_mut().remove(&name));
+            Ok(Variant::Nil)
+        }
+        "has_capture" => {
+            let name = debug_name_arg(args, 0, "has_capture")?;
+            Ok(Variant::Bool(
+                DEBUG_CAPTURES.with(|c| c.borrow().contains_key(&name)),
+            ))
+        }
+
+        // -- transport
+        "send_message" => {
+            let message = debug_name_arg(args, 0, "send_message")?;
+            let data = match args.get(1) {
+                Some(Variant::Array(a)) => a.clone(),
+                None | Some(Variant::Nil) => Vec::new(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "EngineDebugger.send_message() expects an Array of data".into(),
+                    )))
+                }
+            };
+            DEBUG_MESSAGES.with(|m| m.borrow_mut().push((message, data)));
+            Ok(Variant::Nil)
+        }
+        // Godot polls the debugger between lines; with no live session there is
+        // nothing to poll, so this is a no-op rather than an error.
+        "line_poll" => Ok(Variant::Nil),
+
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("EngineDebugger.{other}"),
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------
