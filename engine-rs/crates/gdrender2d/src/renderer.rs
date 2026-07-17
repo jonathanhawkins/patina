@@ -170,8 +170,16 @@ pub struct Bgra8Image {
 impl Bgra8Image {
     /// Wraps raw top-down BGRA bytes. `data` must be exactly `width*height*4` long.
     pub fn from_bgra(width: u32, height: u32, data: Vec<u8>) -> Self {
-        debug_assert_eq!(data.len(), (width * height * 4) as usize, "BGRA buffer size mismatch");
-        Self { width, height, data }
+        debug_assert_eq!(
+            data.len(),
+            (width * height * 4) as usize,
+            "BGRA buffer size mismatch"
+        );
+        Self {
+            width,
+            height,
+            data,
+        }
     }
 }
 
@@ -841,7 +849,11 @@ mod tests {
         assert!(out.pixels.iter().any(|c| c.r > 0.5), "TTF text drawn");
         // Anti-aliased edges produce partially-covered (gray) pixels that the
         // 1-bit bitmap font never produces.
-        let ttf_partial = out.pixels.iter().filter(|c| c.r > 0.15 && c.r < 0.85).count();
+        let ttf_partial = out
+            .pixels
+            .iter()
+            .filter(|c| c.r > 0.15 && c.r < 0.85)
+            .count();
         assert!(ttf_partial > 0, "TTF glyphs should be anti-aliased");
     }
 

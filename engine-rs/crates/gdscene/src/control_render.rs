@@ -53,6 +53,12 @@ const CONTROL_CLASSES: &[&str] = &[
     "VBoxContainer",
     "HBoxContainer",
     "CenterContainer",
+    // pat-nzgdu.197. `Separator` itself is abstract and never instantiated, but
+    // it stays here so a subclass reaching the fallback still counts as a
+    // Control when the ClassDB chain is unavailable.
+    "Separator",
+    "HSeparator",
+    "VSeparator",
 ];
 
 /// Renders the Control subtree rooted at `root` into `viewport`.
@@ -440,6 +446,29 @@ fn bool_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<bool> {
     }
 }
 
+/// A separator's minimum size — Godot's `Separator::get_minimum_size`
+/// (`scene/gui/separator.cpp:35-43`), pat-nzgdu.197.
+///
+/// ⚠️ The base is **(3, 3), not zero**: a separator always reserves 3px on its
+/// *long* axis so it never collapses to nothing in a container. Only the cross
+/// axis takes the theme's `separation`. So an HSeparator is `(3, separation)` —
+/// returning `(0, separation)` or `(separation, separation)` are both wrong, and
+/// both look plausible.
+///
+/// The orientation comes from the CLASS, matching Godot, where H/VSeparator are
+/// separate classes rather than one node with a `vertical` flag.
+pub fn separator_minimum_size(theme: &Theme, class: &str) -> Vector2 {
+    // NB `get_constant_or` lives on `ThemeDB`, NOT on `Theme` — only `Theme`'s
+    // `get_constant` is available here, so the fallback is explicit.
+    let separation = theme.get_constant(class, "separation").unwrap_or(4) as f32;
+    match class {
+        // VERTICAL: the line runs down, so `separation` is its WIDTH.
+        "VSeparator" => Vector2::new(separation, 3.0),
+        // HORIZONTAL: the line runs across, so `separation` is its HEIGHT.
+        _ => Vector2::new(3.0, separation),
+    }
+}
+
 fn draw_control(
     tree: &SceneTree,
     node_id: NodeId,
@@ -455,6 +484,15 @@ fn draw_control(
                 color,
                 filled: true,
             });
+        }
+        // pat-nzgdu.197. The orientation is the CLASS, not a property — so the
+        // only difference between the two is which stylebox the theme hands
+        // back. Godot's is a StyleBoxLine, which already knows how to centre
+        // its line in the rect and honour `vertical`.
+        "HSeparator" | "VSeparator" => {
+            if let Some(sb) = theme.get_stylebox(&class_of(tree, node_id), "separator") {
+                out.extend(sb.draw(rect));
+            }
         }
         "Panel" | "PanelContainer" => {
             // Prefer a typed StyleBox (pat-u3l8c.70); fall back to the legacy

@@ -216,42 +216,31 @@ impl OccluderInstance3D {
             None => return false,
         };
 
-        // Target must be farther from camera than the occluder.
-        let occluder_center = aabb_center(&occluder_aabb);
-        let target_center = aabb_center(&target_aabb);
-
-        let dist_occluder = (occluder_center - camera_pos).length_squared();
-        let dist_target = (target_center - camera_pos).length_squared();
-
-        if dist_target <= dist_occluder {
-            return false;
+        // The target is hidden only if EVERY corner of its box is hidden: the
+        // segment from the camera to that corner must enter the occluder before
+        // it arrives. Any corner the camera can see means the target is visible.
+        //
+        // ⚠️ This must stay a line-of-sight test (pat-nzgdu.211). The previous
+        // version compared the two boxes' distances and angular extents, which
+        // discarded the *directions* — so a big, near occluder culled a small,
+        // far target no matter where each one sat. An occluder off to one side
+        // erased geometry dead ahead of the camera. Culling is an optimisation:
+        // a wrong cull deletes what the user should see, so every uncertain case
+        // answers `false` here.
+        for corner in aabb_corners(&target_aabb) {
+            let to_corner = corner - camera_pos;
+            let distance = to_corner.length();
+            // The camera is inside (or on) the target — nothing to cull.
+            if distance < 1e-6 {
+                return false;
+            }
+            match ray_aabb_entry(camera_pos, to_corner / distance, &occluder_aabb) {
+                // Enters the occluder before reaching the corner: blocked.
+                Some(entry) if entry < distance => {}
+                _ => return false,
+            }
         }
-
-        // Project both AABBs to the screen-space axis-aligned extent from
-        // the camera and check if the occluder fully covers the target.
-        // This is a simplified conservative test using direction-based
-        // angular extents.
-        let cam_to_occluder = occluder_center - camera_pos;
-        let cam_to_target = target_center - camera_pos;
-
-        let occ_dist = cam_to_occluder.length();
-        let tgt_dist = cam_to_target.length();
-
-        if occ_dist < 1e-6 || tgt_dist < 1e-6 {
-            return false;
-        }
-
-        // Conservative angular half-extent of each AABB from the camera.
-        let occ_half = aabb_half_extent(&occluder_aabb);
-        let tgt_half = aabb_half_extent(&target_aabb);
-
-        let occ_angular = occ_half / occ_dist;
-        let tgt_angular = tgt_half / tgt_dist;
-
-        // The occluder must subtend a larger angle than the target on all axes.
-        occ_angular.x >= tgt_angular.x
-            && occ_angular.y >= tgt_angular.y
-            && occ_angular.z >= tgt_angular.z
+        true
     }
 
     /// Returns whether a given layer bit (1-based) is set in the bake mask.
@@ -279,7 +268,68 @@ impl OccluderInstance3D {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// The eight corners of an AABB (pat-nzgdu.211).
+fn aabb_corners(aabb: &Aabb) -> [Vector3; 8] {
+    let p = aabb.position;
+    let s = aabb.size;
+    [
+        Vector3::new(p.x, p.y, p.z),
+        Vector3::new(p.x + s.x, p.y, p.z),
+        Vector3::new(p.x, p.y + s.y, p.z),
+        Vector3::new(p.x, p.y, p.z + s.z),
+        Vector3::new(p.x + s.x, p.y + s.y, p.z),
+        Vector3::new(p.x + s.x, p.y, p.z + s.z),
+        Vector3::new(p.x, p.y + s.y, p.z + s.z),
+        Vector3::new(p.x + s.x, p.y + s.y, p.z + s.z),
+    ]
+}
+
+/// Distance along unit `dir` at which a ray from `origin` enters `aabb`, or
+/// `None` if it misses (pat-nzgdu.211).
+///
+/// The standard slab test. ⚠️ An axis where the ray is parallel to the slab
+/// (`dir` component ~0) contributes no bound — it can only reject, when the
+/// origin already sits outside that slab. Treating it as a division would give
+/// an infinity that poisons the interval.
+///
+/// A ray starting inside the box returns 0.0 (`t_enter` clamped), not a negative
+/// distance; a box entirely behind the origin returns `None`.
+fn ray_aabb_entry(origin: Vector3, dir: Vector3, aabb: &Aabb) -> Option<f32> {
+    let min = aabb.position;
+    let max = aabb.position + aabb.size;
+    let mut t_enter = f32::NEG_INFINITY;
+    let mut t_exit = f32::INFINITY;
+
+    for (o, d, lo, hi) in [
+        (origin.x, dir.x, min.x, max.x),
+        (origin.y, dir.y, min.y, max.y),
+        (origin.z, dir.z, min.z, max.z),
+    ] {
+        if d.abs() < 1e-9 {
+            if o < lo || o > hi {
+                return None;
+            }
+        } else {
+            let (mut t0, mut t1) = ((lo - o) / d, (hi - o) / d);
+            if t0 > t1 {
+                std::mem::swap(&mut t0, &mut t1);
+            }
+            t_enter = t_enter.max(t0);
+            t_exit = t_exit.min(t1);
+            if t_enter > t_exit {
+                return None;
+            }
+        }
+    }
+
+    if t_exit < 0.0 {
+        return None;
+    }
+    Some(t_enter.max(0.0))
+}
+
 /// Returns the center of an AABB.
+#[allow(dead_code)]
 fn aabb_center(aabb: &Aabb) -> Vector3 {
     Vector3::new(
         aabb.position.x + aabb.size.x * 0.5,
@@ -289,12 +339,18 @@ fn aabb_center(aabb: &Aabb) -> Vector3 {
 }
 
 /// Returns the half-extent of an AABB.
+#[allow(dead_code)]
 fn aabb_half_extent(aabb: &Aabb) -> Vector3 {
     Vector3::new(aabb.size.x * 0.5, aabb.size.y * 0.5, aabb.size.z * 0.5)
 }
 
 /// Transforms a local-space AABB to world space (conservative, axis-aligned).
-fn transform_aabb(aabb: &Aabb, t: &Transform3D) -> Aabb {
+///
+/// `pub(crate)` for `Instance3D::world_aabb` (pat-nzgdu.211), which must produce
+/// its target box the *same* way the occluder produces its own — a cull that
+/// compared boxes built by two different transforms would be comparing two
+/// different notions of "world space".
+pub(crate) fn transform_aabb(aabb: &Aabb, t: &Transform3D) -> Aabb {
     // Transform all 8 corners and find the enclosing AABB.
     let corners = [
         Vector3::new(aabb.position.x, aabb.position.y, aabb.position.z),
@@ -556,6 +612,71 @@ mod tests {
         let camera_pos = Vector3::new(0.0, 0.0, 0.0);
         let target = Aabb::new(Vector3::new(-0.5, -0.5, -10.0), Vector3::new(1.0, 1.0, 1.0));
         assert!(!inst.occludes(camera_pos, target));
+    }
+
+    /// ⚠️ An occluder OFF TO THE SIDE must not occlude — occlusion is about the
+    /// line of sight, not about being nearer and bigger (pat-nzgdu.211).
+    ///
+    /// This is exactly what the original test got wrong: it built the
+    /// camera→occluder and camera→target vectors and then used only their
+    /// *lengths*, so direction never entered the comparison. Every earlier test
+    /// placed the occluder on the camera's axis, which is the one arrangement
+    /// where "nearer and bigger" happens to coincide with "in the way".
+    #[test]
+    fn an_occluder_beside_the_line_of_sight_does_not_occlude() {
+        let mut inst =
+            OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(3.0, 3.0, 3.0)));
+        inst.transform.origin = Vector3::new(5.0, 0.0, -1.0);
+
+        let camera_pos = Vector3::new(0.0, 0.0, 0.0);
+        // Dead ahead, farther away and smaller — nearer-and-bigger alone would
+        // have culled it.
+        let target = Aabb::new(Vector3::new(-0.5, -0.5, -8.5), Vector3::new(1.0, 1.0, 1.0));
+
+        assert!(
+            !inst.occludes(camera_pos, target),
+            "an occluder 78 degrees off-axis must not occlude geometry in front of the camera"
+        );
+    }
+
+    /// ⚠️ A FLAT occluder must still occlude. A quad's AABB is 0.001 thick, and
+    /// the original per-axis depth comparison made `QuadOccluder3D` and
+    /// `PolygonOccluder3D` incapable of ever culling (pat-nzgdu.211).
+    #[test]
+    fn a_flat_quad_occludes_what_is_behind_it() {
+        let mut inst = OccluderInstance3D::with_occluder(Occluder3D::Quad {
+            size: Vector2::new(10.0, 10.0),
+        });
+        inst.transform.origin = Vector3::new(0.0, 0.0, -2.0);
+
+        let camera_pos = Vector3::new(0.0, 0.0, 0.0);
+        let target = Aabb::new(Vector3::new(-0.5, -0.5, -5.5), Vector3::new(1.0, 1.0, 1.0));
+
+        assert!(
+            inst.occludes(camera_pos, target),
+            "a flat quad squarely between camera and target must occlude it"
+        );
+    }
+
+    /// Partial cover is not cover: if any corner of the target is visible, the
+    /// target is visible. Fails open, by design.
+    #[test]
+    fn an_occluder_covering_only_part_of_the_target_does_not_occlude() {
+        let mut inst =
+            OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(1.0, 20.0, 1.0)));
+        inst.transform.origin = Vector3::new(0.0, 0.0, -2.0);
+
+        let camera_pos = Vector3::new(0.0, 0.0, 0.0);
+        // A wide target: the narrow occluder hides its middle, not its ends.
+        let target = Aabb::new(
+            Vector3::new(-10.0, -0.5, -5.5),
+            Vector3::new(20.0, 1.0, 1.0),
+        );
+
+        assert!(
+            !inst.occludes(camera_pos, target),
+            "a narrow occluder must not cull a target whose edges are visible past it"
+        );
     }
 
     // -- Bake mask --

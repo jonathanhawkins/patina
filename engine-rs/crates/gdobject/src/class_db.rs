@@ -1524,9 +1524,85 @@ pub fn register_3d_classes() {
     );
     register_class(ClassRegistration::new("CPUParticles3D").parent("Node3D"));
     register_class(ClassRegistration::new("Decal").parent("Node3D"));
-    register_class(ClassRegistration::new("FogVolume").parent("Node3D"));
     register_class(ClassRegistration::new("ReflectionProbe").parent("Node3D"));
     register_class(ClassRegistration::new("VoxelGI").parent("Node3D"));
+
+    // -- Fog (pat-nzgdu.208) -------------------------------------------------
+    //
+    // `Material` itself is already registered (abstract) further down this same
+    // pass; `inheritance_chain` resolves parents by name at query time, so the
+    // fog family reads together here regardless of registration order.
+    //
+    // ⚠️ FogVolume was registered bare and parented to `Node3D`. Godot has
+    // `FogVolume <- VisualInstance3D` (doc/classes/FogVolume.xml), and the
+    // difference is load-bearing: `VisualInstance3D` is what carries `layers` /
+    // AABB and marks a node as participating in rendering, so a script doing
+    // `is_parent_class("FogVolume", "VisualInstance3D")` — or anything walking
+    // visual instances — silently missed it.
+    if !class_exists("FogVolume") {
+        register_class(
+            ClassRegistration::new("FogVolume")
+                .parent("VisualInstance3D")
+                // The Material driving the fog; Nil until assigned.
+                .property(PropertyInfo::new("material", Variant::Nil))
+                // ⚠️ shape defaults to 3 = BOX, NOT 0/Ellipsoid:
+                // `fog_volume.cpp:139` sets FOG_VOLUME_SHAPE_BOX in the
+                // constructor. gdserver3d's `FogVolume::default()` agrees — it
+                // sets `FogVolumeShape::Box` explicitly rather than taking the
+                // enum's zero value (which IS Ellipsoid, a different question).
+                // gdscene's `the_node_default_shape_is_box_on_both_sides` pins
+                // the two together.
+                .property(PropertyInfo::new("shape", Variant::Int(3)))
+                .property(PropertyInfo::new(
+                    "size",
+                    Variant::Vector3(Vector3::new(2.0, 2.0, 2.0)),
+                ))
+                .method(MethodInfo::new("set_material", 1))
+                .method(MethodInfo::new("get_material", 0))
+                .method(MethodInfo::new("set_shape", 1))
+                .method(MethodInfo::new("get_shape", 0))
+                .method(MethodInfo::new("set_size", 1))
+                .method(MethodInfo::new("get_size", 0)),
+        );
+    }
+    // The material a FogVolume points at. Every property mirrors
+    // `gdserver3d::fog_volume::FogMaterial`, whose defaults already match
+    // Godot's `FogMaterial::FogMaterial()` (fog_material.cpp:170-179)
+    // field-for-field — this is the ClassDB half that was missing.
+    if !class_exists("FogMaterial") {
+        register_class(
+            ClassRegistration::new("FogMaterial")
+                .parent("Material")
+                .property(PropertyInfo::new("density", Variant::Float(1.0)))
+                .property(PropertyInfo::new(
+                    "albedo",
+                    Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
+                ))
+                // ⚠️ emission is opaque BLACK (0,0,0,1), not transparent
+                // (0,0,0,0): fog emits no light by default, but alpha 0 here
+                // would be a different colour entirely.
+                .property(PropertyInfo::new(
+                    "emission",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                ))
+                .property(PropertyInfo::new("height_falloff", Variant::Float(0.0)))
+                .property(PropertyInfo::new("edge_fade", Variant::Float(0.1)))
+                // A Texture3D scaling density; null until assigned.
+                .property(PropertyInfo::new("density_texture", Variant::Nil))
+                .method(MethodInfo::new("set_density", 1))
+                .method(MethodInfo::new("get_density", 0))
+                .method(MethodInfo::new("set_albedo", 1))
+                .method(MethodInfo::new("get_albedo", 0))
+                .method(MethodInfo::new("set_emission", 1))
+                .method(MethodInfo::new("get_emission", 0))
+                .method(MethodInfo::new("set_height_falloff", 1))
+                .method(MethodInfo::new("get_height_falloff", 0))
+                .method(MethodInfo::new("set_edge_fade", 1))
+                .method(MethodInfo::new("get_edge_fade", 0))
+                .method(MethodInfo::new("set_density_texture", 1))
+                .method(MethodInfo::new("get_density_texture", 0)),
+        );
+    }
     // VoxelGIData (pat-nzgdu.216): the baked GI data resource referenced by
     // VoxelGI.data. Bake execution is deferred; registering the resource surface
     // + config properties lets baked-GI .tscn/.res scenes load without dropping
@@ -1557,6 +1633,118 @@ pub fn register_3d_classes() {
             .abstract_class()
             .property(PropertyInfo::new("layers", Variant::Int(1))),
     );
+    // -- Occluders (pat-nzgdu.207) ------------------------------------------
+    //
+    // The occlusion-culling shapes. gdserver3d/src/occluder.rs already implements
+    // all five (and the `occludes()` cull test, with 21 tests) — this is the
+    // ClassDB half that was missing.
+    //
+    // ⚠️ The base is a RESOURCE and is ABSTRACT: an occluder shape is a saved
+    // asset shared between instances, not a node. The NODE is
+    // OccluderInstance3D, a VisualInstance3D that *holds* one — the same
+    // shape/instance split as Mesh vs MeshInstance3D. Conflating them is the
+    // trap this family invites.
+    if !class_exists("Occluder3D") {
+        register_class(
+            ClassRegistration::new("Occluder3D")
+                .parent("Resource")
+                .abstract_class()
+                // The baked triangle soup every shape lowers to.
+                .method(MethodInfo::new("get_vertices", 0))
+                .method(MethodInfo::new("get_indices", 0)),
+        );
+    }
+    if !class_exists("BoxOccluder3D") {
+        register_class(
+            ClassRegistration::new("BoxOccluder3D")
+                .parent("Occluder3D")
+                .property(PropertyInfo::new(
+                    "size",
+                    Variant::Vector3(gdcore::math::Vector3::new(1.0, 1.0, 1.0)),
+                ))
+                .method(MethodInfo::new("set_size", 1))
+                .method(MethodInfo::new("get_size", 0)),
+        );
+    }
+    if !class_exists("SphereOccluder3D") {
+        register_class(
+            ClassRegistration::new("SphereOccluder3D")
+                .parent("Occluder3D")
+                .property(PropertyInfo::new("radius", Variant::Float(1.0)))
+                .method(MethodInfo::new("set_radius", 1))
+                .method(MethodInfo::new("get_radius", 0)),
+        );
+    }
+    // ⚠️ A Vector2 size — it is a flat quad, unlike BoxOccluder3D's Vector3.
+    if !class_exists("QuadOccluder3D") {
+        register_class(
+            ClassRegistration::new("QuadOccluder3D")
+                .parent("Occluder3D")
+                .property(PropertyInfo::new(
+                    "size",
+                    Variant::Vector2(gdcore::math::Vector2::new(1.0, 1.0)),
+                ))
+                .method(MethodInfo::new("set_size", 1))
+                .method(MethodInfo::new("get_size", 0)),
+        );
+    }
+    if !class_exists("PolygonOccluder3D") {
+        register_class(
+            ClassRegistration::new("PolygonOccluder3D")
+                .parent("Occluder3D")
+                // 2D vertices in the local XY plane.
+                .property(PropertyInfo::new(
+                    "polygon",
+                    Variant::PackedVector2Array(Vec::new()),
+                ))
+                .method(MethodInfo::new("set_polygon", 1))
+                .method(MethodInfo::new("get_polygon", 0)),
+        );
+    }
+    // ⚠️ The only one with TWO properties, and the only one whose setter is
+    // plural: `set_arrays(vertices, indices)` sets both at once, alongside the
+    // individual setters. An arbitrary triangle mesh needs both halves.
+    if !class_exists("ArrayOccluder3D") {
+        register_class(
+            ClassRegistration::new("ArrayOccluder3D")
+                .parent("Occluder3D")
+                .property(PropertyInfo::new(
+                    "vertices",
+                    Variant::PackedVector3Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "indices",
+                    Variant::PackedInt32Array(Vec::new()),
+                ))
+                .method(MethodInfo::new("set_arrays", 2))
+                .method(MethodInfo::new("set_vertices", 1))
+                .method(MethodInfo::new("set_indices", 1)),
+        );
+    }
+    // The node that puts an occluder in the world.
+    if !class_exists("OccluderInstance3D") {
+        register_class(
+            ClassRegistration::new("OccluderInstance3D")
+                .parent("VisualInstance3D")
+                .property(PropertyInfo::new("occluder", Variant::Nil))
+                // ⚠️ 4294967295 = all 32 layers. A default of 0 or 1 would make
+                // baking silently miss geometry.
+                .property(PropertyInfo::new("bake_mask", Variant::Int(4_294_967_295)))
+                .property(PropertyInfo::new(
+                    "bake_simplification_distance",
+                    Variant::Float(0.1),
+                ))
+                .method(MethodInfo::new("set_occluder", 1))
+                .method(MethodInfo::new("get_occluder", 0))
+                .method(MethodInfo::new("set_bake_mask", 1))
+                .method(MethodInfo::new("get_bake_mask", 0))
+                .method(MethodInfo::new("set_bake_mask_value", 2))
+                .method(MethodInfo::new("get_bake_mask_value", 1))
+                .method(MethodInfo::new("set_bake_simplification_distance", 1))
+                .method(MethodInfo::new("get_bake_simplification_distance", 0)),
+        );
+    }
+
     // -- RootMotionView (pat-nzgdu.184) ------------------------------------
     //
     // An editor-only gizmo: a grid that scrolls under the character by the root
@@ -1650,11 +1838,18 @@ pub fn register_3d_classes() {
     // Material; BaseMaterial3D → Material; StandardMaterial3D → BaseMaterial3D).
     // ShaderMaterial exposes the `shader` property plus set/get_shader and the
     // per-parameter set/get_shader_parameter methods that GDScript calls.
-    register_class(
-        ClassRegistration::new("Material")
-            .parent("Resource")
-            .abstract_class(),
-    );
+    // Guarded (pat-nzgdu.208): `register()` mints a fresh ClassId on every call
+    // and overwrites `classes[name]`, leaving a stale `by_id` alias behind — so
+    // an unguarded registration is not idempotent, and `register_3d_classes()`
+    // is called more than once in practice. `Material` is virtual in Godot:
+    // `GDREGISTER_VIRTUAL_CLASS(Material)` (register_scene_types.cpp:439).
+    if !class_exists("Material") {
+        register_class(
+            ClassRegistration::new("Material")
+                .parent("Resource")
+                .abstract_class(),
+        );
+    }
     // ProceduralSkyMaterial → Material (pat-nzgdu.161): the sky shader material
     // renders (gdserver3d::sky) but was invisible to ClassDB. Register it with
     // its properties + defaults (mirroring `ProceduralSkyMaterial::default()`)
@@ -3204,6 +3399,35 @@ pub fn register_viewport_classes() {
         );
     }
 
+    // -- ExternalTexture (pat-nzgdu.209) -------------------------------------
+    //
+    // A texture backed by a platform external buffer — "as defined by
+    // OES_EGL_image_external (GLES) or VK_ANDROID_external_memory_android_-
+    // hardware_buffer (Vulkan)" (scene/resources/external_texture.h). It takes
+    // an opaque uint64 handle; it has nothing to do with video or cameras
+    // (those are CameraFeed / CameraServer / VideoStreamPlayer).
+    //
+    // ⚠️ Only THREE methods are bound here (external_texture.cpp:35-41).
+    // `get_size` is NOT one of them — ExternalTexture overrides the virtual but
+    // the binding is inherited from Texture2D, so re-registering it here would
+    // invent a duplicate.
+    if !class_exists("ExternalTexture") {
+        register_class(
+            ClassRegistration::new("ExternalTexture")
+                .parent("Texture2D")
+                // ⚠️ 256x256, NOT zero: `Size2 size = Size2(256, 256)` is a
+                // member initialiser (external_texture.h) — the ctor body is
+                // empty, so it is easy to miss and assume 0.
+                .property(PropertyInfo::new(
+                    "size",
+                    Variant::Vector2(gdcore::math::Vector2::new(256.0, 256.0)),
+                ))
+                .method(MethodInfo::new("set_size", 1))
+                .method(MethodInfo::new("get_external_texture_id", 0))
+                .method(MethodInfo::new("set_external_buffer_id", 1)),
+        );
+    }
+
     if !class_exists("ViewportTexture") {
         register_class(
             ClassRegistration::new("ViewportTexture")
@@ -3637,6 +3861,75 @@ fn register_rendering_device_classes() {
                 .property(PropertyInfo::new("constant_id", Variant::Int(0))),
         );
     }
+
+    // -- FramebufferCacheRD (pat-nzgdu.210) ----------------------------------
+    //
+    // ⚠️ Note the name shape: the RD\* classes above are *parameters* handed to
+    // the device, but this is a `*RD` **helper** — a different family. It hangs
+    // off `Object`, not `RefCounted`, and it is not something you fill in and
+    // pass; it hands back a cached framebuffer RID.
+    //
+    // ⚠️ `get_cache_multipass` is STATIC (`qualifiers="static"`), called as
+    // `FramebufferCacheRD.get_cache_multipass(...)` on the class itself.
+    // `MethodInfo` cannot express staticness, so it registers like any other
+    // method — the arity is right and introspection answers, but ClassDB cannot
+    // tell a caller it must not be invoked on an instance.
+    if !class_exists("FramebufferCacheRD") {
+        register_class(
+            ClassRegistration::new("FramebufferCacheRD")
+                .parent("Object")
+                // (textures: RID[], passes: RDFramebufferPass[], views: int)
+                .method(MethodInfo::new("get_cache_multipass", 3)),
+        );
+    }
+    // `get_cache_multipass`'s second parameter type. Registered here because a
+    // registered method whose parameter class does not exist is unusable: a
+    // script cannot build the argument at all, so the method resolves and is
+    // still uncallable.
+    if !class_exists("RDFramebufferPass") {
+        register_class(
+            ClassRegistration::new("RDFramebufferPass")
+                .parent("RefCounted")
+                .property(PropertyInfo::new(
+                    "color_attachments",
+                    Variant::PackedInt32Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "input_attachments",
+                    Variant::PackedInt32Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "resolve_attachments",
+                    Variant::PackedInt32Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "preserve_attachments",
+                    Variant::PackedInt32Array(Vec::new()),
+                ))
+                // ⚠️ -1, not 0: this is ATTACHMENT_UNUSED, registered below.
+                // 0 is a valid attachment index, so a 0 default would silently
+                // mean "attachment 0" — a real depth attachment nobody asked
+                // for — rather than "none".
+                .property(PropertyInfo::new("depth_attachment", Variant::Int(-1)))
+                // Godot binds an accessor pair per member (10 methods). The RD\*
+                // classes registered above declare properties only and so answer
+                // `class_has_method("RDVertexAttribute", "set_binding")` with
+                // `false` where Godot says `true` — a gap across that whole
+                // family (pat-nzgdu.162), not a convention. Following the ground
+                // truth here rather than copying it.
+                .method(MethodInfo::new("set_color_attachments", 1))
+                .method(MethodInfo::new("get_color_attachments", 0))
+                .method(MethodInfo::new("set_input_attachments", 1))
+                .method(MethodInfo::new("get_input_attachments", 0))
+                .method(MethodInfo::new("set_resolve_attachments", 1))
+                .method(MethodInfo::new("get_resolve_attachments", 0))
+                .method(MethodInfo::new("set_preserve_attachments", 1))
+                .method(MethodInfo::new("get_preserve_attachments", 0))
+                .method(MethodInfo::new("set_depth_attachment", 1))
+                .method(MethodInfo::new("get_depth_attachment", 0))
+                .constant("ATTACHMENT_UNUSED", -1),
+        );
+    }
 }
 
 /// Registers the networking node/class hierarchy in the ClassDB.
@@ -3837,6 +4130,205 @@ pub fn register_io_classes() {
     }
     if !class_exists("RefCounted") {
         register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
+
+    // -- Script / ScriptLanguage + the GDExtension hooks (pat-nzgdu.204) ---
+    //
+    // SCOPE: the class surface only. Native-plugin loading is not feasible on a
+    // wasm target, so nothing implements these virtuals — see
+    // prd/UPSTREAM_GAP_MATRIX.md § "2026-07-17 Scope Decisions". Registering them
+    // keeps ClassDB introspection matching Godot and stops a .tscn/.tres that
+    // references them from silently failing.
+    //
+    // NOTE the bead names only the two *Extension classes, but BOTH their parents
+    // were missing too — a child over an absent parent has a silently severed
+    // chain (pat-nzgdu.98), so Script and ScriptLanguage are registered here as
+    // well.
+    if !class_exists("Script") {
+        register_class(
+            ClassRegistration::new("Script")
+                // A Resource: scripts are saved assets.
+                .parent("Resource")
+                .abstract_class()
+                .property(PropertyInfo::new("source_code", Variant::String(String::new())))
+                .method(MethodInfo::new("can_instantiate", 0))
+                .method(MethodInfo::new("instance_has", 1))
+                .method(MethodInfo::new("has_source_code", 0))
+                .method(MethodInfo::new("get_source_code", 0))
+                .method(MethodInfo::new("set_source_code", 1))
+                .method(MethodInfo::new("reload", 0))
+                .method(MethodInfo::new("get_base_script", 0))
+                .method(MethodInfo::new("get_instance_base_type", 0))
+                .method(MethodInfo::new("get_global_name", 0))
+                .method(MethodInfo::new("has_script_signal", 1))
+                .method(MethodInfo::new("get_script_property_list", 0))
+                .method(MethodInfo::new("get_script_method_list", 0))
+                .method(MethodInfo::new("get_script_signal_list", 0))
+                .method(MethodInfo::new("get_script_constant_map", 0))
+                .method(MethodInfo::new("get_property_default_value", 1))
+                .method(MethodInfo::new("is_tool", 0))
+                .method(MethodInfo::new("is_abstract", 0))
+                .method(MethodInfo::new("get_rpc_config", 0))
+        );
+    }
+    // A pure marker base: Godot binds NOTHING on it — no properties, no methods.
+    // The whole language surface lives on ScriptLanguageExtension's virtuals.
+    if !class_exists("ScriptLanguage") {
+        register_class(
+            ClassRegistration::new("ScriptLanguage")
+                .parent("Object")
+                .abstract_class(),
+        );
+    }
+    // ⚠️ Both Extensions are PURE VIRTUAL SURFACES (zero non-virtual methods) and
+    // are INSTANTIABLE in Godot — unlike their abstract parents. That asymmetry is
+    // the point: you construct the Extension and override its virtuals from a
+    // GDExtension. Without a native plugin providing them, an instance is inert —
+    // which is exactly Godot's behaviour too, not a Patina limitation.
+    if !class_exists("ScriptExtension") {
+        register_class(
+            ClassRegistration::new("ScriptExtension")
+                .parent("Script")
+                .method(MethodInfo::new("_editor_can_reload_from_file", 0))
+                .method(MethodInfo::new("_placeholder_erased", 1))
+                .method(MethodInfo::new("_can_instantiate", 0))
+                .method(MethodInfo::new("_get_base_script", 0))
+                .method(MethodInfo::new("_get_global_name", 0))
+                .method(MethodInfo::new("_inherits_script", 1))
+                .method(MethodInfo::new("_get_instance_base_type", 0))
+                .method(MethodInfo::new("_instance_create", 1))
+                .method(MethodInfo::new("_placeholder_instance_create", 1))
+                .method(MethodInfo::new("_instance_has", 1))
+                .method(MethodInfo::new("_has_source_code", 0))
+                .method(MethodInfo::new("_get_source_code", 0))
+                .method(MethodInfo::new("_set_source_code", 1))
+                .method(MethodInfo::new("_reload", 1))
+                .method(MethodInfo::new("_get_doc_class_name", 0))
+                .method(MethodInfo::new("_get_documentation", 0))
+                .method(MethodInfo::new("_get_class_icon_path", 0))
+                .method(MethodInfo::new("_has_method", 1))
+                .method(MethodInfo::new("_has_static_method", 1))
+                .method(MethodInfo::new("_get_script_method_argument_count", 1))
+                .method(MethodInfo::new("_get_method_info", 1))
+                .method(MethodInfo::new("_is_tool", 0))
+                .method(MethodInfo::new("_is_valid", 0))
+                .method(MethodInfo::new("_is_abstract", 0))
+                .method(MethodInfo::new("_get_language", 0))
+                .method(MethodInfo::new("_has_script_signal", 1))
+                .method(MethodInfo::new("_get_script_signal_list", 0))
+                .method(MethodInfo::new("_has_property_default_value", 1))
+                .method(MethodInfo::new("_get_property_default_value", 1))
+                .method(MethodInfo::new("_update_exports", 0))
+                .method(MethodInfo::new("_get_script_method_list", 0))
+                .method(MethodInfo::new("_get_script_property_list", 0))
+                .method(MethodInfo::new("_get_member_line", 1))
+                .method(MethodInfo::new("_get_constants", 0))
+                .method(MethodInfo::new("_get_members", 0))
+                .method(MethodInfo::new("_is_placeholder_fallback_enabled", 0))
+                .method(MethodInfo::new("_get_rpc_config", 0))
+        );
+    }
+    if !class_exists("ScriptLanguageExtension") {
+        register_class(
+            ClassRegistration::new("ScriptLanguageExtension")
+                .parent("ScriptLanguage")
+                .method(MethodInfo::new("_get_name", 0))
+                .method(MethodInfo::new("_init", 0))
+                .method(MethodInfo::new("_get_type", 0))
+                .method(MethodInfo::new("_get_extension", 0))
+                .method(MethodInfo::new("_finish", 0))
+                .method(MethodInfo::new("_get_reserved_words", 0))
+                .method(MethodInfo::new("_is_control_flow_keyword", 1))
+                .method(MethodInfo::new("_get_comment_delimiters", 0))
+                .method(MethodInfo::new("_get_doc_comment_delimiters", 0))
+                .method(MethodInfo::new("_get_string_delimiters", 0))
+                .method(MethodInfo::new("_make_template", 3))
+                .method(MethodInfo::new("_get_built_in_templates", 1))
+                .method(MethodInfo::new("_is_using_templates", 0))
+                .method(MethodInfo::new("_validate", 6))
+                .method(MethodInfo::new("_validate_path", 1))
+                .method(MethodInfo::new("_create_script", 0))
+                .method(MethodInfo::new("_has_named_classes", 0))
+                .method(MethodInfo::new("_supports_builtin_mode", 0))
+                .method(MethodInfo::new("_supports_documentation", 0))
+                .method(MethodInfo::new("_can_inherit_from_file", 0))
+                .method(MethodInfo::new("_find_function", 2))
+                .method(MethodInfo::new("_make_function", 3))
+                .method(MethodInfo::new("_can_make_function", 0))
+                .method(MethodInfo::new("_open_in_external_editor", 3))
+                .method(MethodInfo::new("_overrides_external_editor", 0))
+                .method(MethodInfo::new("_preferred_file_name_casing", 0))
+                .method(MethodInfo::new("_complete_code", 3))
+                .method(MethodInfo::new("_lookup_code", 4))
+                .method(MethodInfo::new("_auto_indent_code", 3))
+                .method(MethodInfo::new("_add_global_constant", 2))
+                .method(MethodInfo::new("_add_named_global_constant", 2))
+                .method(MethodInfo::new("_remove_named_global_constant", 1))
+                .method(MethodInfo::new("_thread_enter", 0))
+                .method(MethodInfo::new("_thread_exit", 0))
+                .method(MethodInfo::new("_debug_get_error", 0))
+                .method(MethodInfo::new("_debug_get_stack_level_count", 0))
+                .method(MethodInfo::new("_debug_get_stack_level_line", 1))
+                .method(MethodInfo::new("_debug_get_stack_level_function", 1))
+                .method(MethodInfo::new("_debug_get_stack_level_source", 1))
+                .method(MethodInfo::new("_debug_get_stack_level_locals", 3))
+                .method(MethodInfo::new("_debug_get_stack_level_members", 3))
+                .method(MethodInfo::new("_debug_get_stack_level_instance", 1))
+                .method(MethodInfo::new("_debug_get_globals", 2))
+                .method(MethodInfo::new("_debug_parse_stack_level_expression", 4))
+                .method(MethodInfo::new("_debug_get_current_stack_info", 0))
+                .method(MethodInfo::new("_reload_all_scripts", 0))
+                .method(MethodInfo::new("_reload_scripts", 2))
+                .method(MethodInfo::new("_reload_tool_script", 2))
+                .method(MethodInfo::new("_get_recognized_extensions", 0))
+                .method(MethodInfo::new("_get_public_functions", 0))
+                .method(MethodInfo::new("_get_public_constants", 0))
+                .method(MethodInfo::new("_get_public_annotations", 0))
+                .method(MethodInfo::new("_profiling_start", 0))
+                .method(MethodInfo::new("_profiling_stop", 0))
+                .method(MethodInfo::new("_profiling_set_save_native_calls", 1))
+                .method(MethodInfo::new("_profiling_get_accumulated_data", 2))
+                .method(MethodInfo::new("_profiling_get_frame_data", 2))
+                .method(MethodInfo::new("_frame", 0))
+                .method(MethodInfo::new("_handles_global_class_type", 1))
+                .method(MethodInfo::new("_get_global_class_name", 1))
+        );
+    }
+
+    // -- GodotInstance (pat-nzgdu.203) — SCOPE DECISION, NOT A GAP ---------
+    //
+    // OUT_OF_SCOPE for the browser target, decided 2026-07-17. Cited in
+    // prd/UPSTREAM_GAP_MATRIX.md § "2026-07-17 Scope Decisions". Do NOT re-open
+    // this as MISSING, and do NOT build a host-embedding runtime here.
+    //
+    // GodotInstance is a *host embedding* handle: one per process, created by the
+    // C API `libgodot_create_godot_instance`, driven by start()/iteration() from
+    // the host application's loop (`core/extension/godot_instance.h:36-57`).
+    // Upstream ships that entry point for linuxbsd and windows ONLY — there is no
+    // `platform/web/libgodot_*`. Godot does not embed itself in a page, because in
+    // the browser the page IS the host. There is no analog to port.
+    //
+    // ⚠️ Registered anyway, and ABSTRACT — matching
+    // `GDREGISTER_ABSTRACT_CLASS(GodotInstance)`
+    // (`core/register_core_types.cpp:290`) and `is_instantiable=false` in the API
+    // dump. So `class_exists` agrees with upstream and a defensive script probing
+    // for the class takes the same branch it would in Godot. The methods are
+    // declared for introspection; nothing implements them, and nothing needs to:
+    // a script cannot construct one in Godot either — the C API does.
+    if !class_exists("GodotInstance") {
+        register_class(
+            ClassRegistration::new("GodotInstance")
+                .parent("Object")
+                .abstract_class()
+                // The host loop's surface. Declared, never implemented here.
+                .method(MethodInfo::new("start", 0))
+                .method(MethodInfo::new("is_started", 0))
+                .method(MethodInfo::new("iteration", 0))
+                .method(MethodInfo::new("focus_in", 0))
+                .method(MethodInfo::new("focus_out", 0))
+                .method(MethodInfo::new("pause", 0))
+                .method(MethodInfo::new("resume", 0)),
+        );
     }
 
     // -- EncodedObjectAsID (pat-nzgdu.189) ---------------------------------
@@ -4401,6 +4893,74 @@ pub fn register_networking_classes() {
         );
     }
 
+    // -- Extension bases (pat-nzgdu.199) ------------------------------------
+    //
+    // The subclass-me bases: you override the virtuals to implement a custom
+    // transport (Peer) or an entirely custom multiplayer stack (API).
+    //
+    // ⚠️ Both are PURE VIRTUAL SURFACES — zero non-virtual methods between them.
+    // Every entry below is a hook the subclass provides, not an API the engine
+    // offers. That inverts the usual reading of a registration: nothing here is
+    // callable *on* the class; it is all callable *by* the engine.
+    //
+    // ⚠️ And note the direction of the hierarchy: the Extension is the CHILD of
+    // the abstract base it extends, not a sibling — so a subclass of
+    // MultiplayerPeerExtension IS-A MultiplayerPeer and can be handed straight
+    // to `multiplayer_peer`.
+    if !class_exists("MultiplayerPeerExtension") {
+        register_class(
+            ClassRegistration::new("MultiplayerPeerExtension")
+                .parent("MultiplayerPeer")
+                // The transport itself.
+                .method(MethodInfo::new("_get_packet", 2))
+                .method(MethodInfo::new("_put_packet", 2))
+                .method(MethodInfo::new("_get_available_packet_count", 0))
+                .method(MethodInfo::new("_get_max_packet_size", 0))
+                // The script-facing variants Godot calls when the override comes
+                // from a script rather than GDExtension — note they exist
+                // ALONGSIDE the raw pointer ones above, not instead of them.
+                .method(MethodInfo::new("_get_packet_script", 0))
+                .method(MethodInfo::new("_put_packet_script", 1))
+                .method(MethodInfo::new("_get_packet_channel", 0))
+                .method(MethodInfo::new("_get_packet_mode", 0))
+                .method(MethodInfo::new("_set_transfer_channel", 1))
+                .method(MethodInfo::new("_get_transfer_channel", 0))
+                .method(MethodInfo::new("_set_transfer_mode", 1))
+                .method(MethodInfo::new("_get_transfer_mode", 0))
+                .method(MethodInfo::new("_set_target_peer", 1))
+                .method(MethodInfo::new("_get_packet_peer", 0))
+                .method(MethodInfo::new("_is_server", 0))
+                // The pump the SceneTree drives each frame.
+                .method(MethodInfo::new("_poll", 0))
+                .method(MethodInfo::new("_close", 0))
+                .method(MethodInfo::new("_disconnect_peer", 2))
+                .method(MethodInfo::new("_get_unique_id", 0))
+                .method(MethodInfo::new("_set_refuse_new_connections", 1))
+                .method(MethodInfo::new("_is_refusing_new_connections", 0))
+                .method(MethodInfo::new("_is_server_relay_supported", 0))
+                .method(MethodInfo::new("_get_connection_status", 0)),
+        );
+    }
+    if !class_exists("MultiplayerAPIExtension") {
+        register_class(
+            ClassRegistration::new("MultiplayerAPIExtension")
+                .parent("MultiplayerAPI")
+                .method(MethodInfo::new("_poll", 0))
+                .method(MethodInfo::new("_set_multiplayer_peer", 1))
+                .method(MethodInfo::new("_get_multiplayer_peer", 0))
+                .method(MethodInfo::new("_get_unique_id", 0))
+                .method(MethodInfo::new("_get_peer_ids", 0))
+                // (method, peer_id, object, args) — the whole RPC path a custom
+                // stack has to reimplement.
+                .method(MethodInfo::new("_rpc", 4))
+                .method(MethodInfo::new("_get_remote_sender_id", 0))
+                // How MultiplayerSpawner/Synchronizer register themselves with a
+                // custom API.
+                .method(MethodInfo::new("_object_configuration_add", 2))
+                .method(MethodInfo::new("_object_configuration_remove", 2)),
+        );
+    }
+
     // -- MultiplayerSpawner / MultiplayerSynchronizer (pat-ikq04) --
     // Upstream: modules/multiplayer/multiplayer_spawner.* / multiplayer_synchronizer.*
     if !class_exists("MultiplayerSpawner") {
@@ -4720,6 +5280,26 @@ pub fn register_editor_classes() {
     // -- SceneState (pat-nzgdu.167): PackedScene.get_state() introspection --
     if !class_exists("SceneState") {
         register_class(ClassRegistration::new("SceneState").parent("RefCounted"));
+    }
+
+    // -- Separators (pat-nzgdu.197) -----------------------------------------
+    //
+    // A separator is a line in a container. All three declare NOTHING of their
+    // own: the base is abstract, and the two concrete ones differ ONLY in
+    // orientation — which is the class, not a property. Giving them a
+    // `vertical` bool would invent schema (contrast ScrollBar, where Godot does
+    // split H/V by class for the same reason).
+    if !class_exists("Separator") {
+        register_class(
+            ClassRegistration::new("Separator")
+                .parent("Control")
+                .abstract_class(),
+        );
+    }
+    for sep in ["HSeparator", "VSeparator"] {
+        if !class_exists(sep) {
+            register_class(ClassRegistration::new(sep).parent("Separator"));
+        }
     }
 
     // -- Script editor (pat-nzgdu.195) --------------------------------------

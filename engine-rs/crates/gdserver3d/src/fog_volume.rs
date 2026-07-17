@@ -5,6 +5,7 @@
 //! the fog appearance within its bounds.
 
 use gdcore::math::{Color, Vector3};
+use gdvariant::Variant;
 
 // ---------------------------------------------------------------------------
 // FogVolumeShape
@@ -89,6 +90,97 @@ impl Default for FogMaterial {
     }
 }
 
+impl FogMaterial {
+    /// Builds a material from ClassDB/`.tscn` property pairs (pat-nzgdu.208).
+    ///
+    /// This is the `set` half of the ClassDB binding. `gdobject` (ClassDB) and
+    /// `gdserver3d` deliberately do not depend on each other, so the two meet at
+    /// `gdvariant::Variant` — the same shape `ProceduralSkyMaterial` uses
+    /// (pat-nzgdu.161), which is how the editor drives sky materials out of a
+    /// parsed `.tscn`.
+    ///
+    /// Unknown keys and type mismatches are ignored, leaving the default: a
+    /// `.tscn` only serialises properties that differ from the default, so an
+    /// absent key means "default", never "zero".
+    pub fn from_properties<'a>(props: impl Iterator<Item = (&'a str, &'a Variant)>) -> Self {
+        let mut mat = Self::default();
+        for (key, value) in props {
+            match key {
+                "density" => {
+                    if let Variant::Float(f) = value {
+                        mat.density = *f as f32;
+                    }
+                }
+                "albedo" => {
+                    if let Variant::Color(c) = value {
+                        mat.albedo = *c;
+                    }
+                }
+                "emission" => {
+                    if let Variant::Color(c) = value {
+                        mat.emission = *c;
+                    }
+                }
+                "height_falloff" => {
+                    if let Variant::Float(f) = value {
+                        mat.height_falloff = *f as f32;
+                    }
+                }
+                "edge_fade" => {
+                    if let Variant::Float(f) = value {
+                        mat.edge_fade = *f as f32;
+                    }
+                }
+                // The Texture3D itself is resolved by a loader; here we keep the
+                // resource-ref string, exactly as `sky_cover`/`panorama` do.
+                "density_texture" => {
+                    if let Variant::String(s) = value {
+                        mat.density_texture = s.clone();
+                    }
+                }
+                _ => {}
+            }
+        }
+        mat
+    }
+
+    /// Serialises back to property pairs (pat-nzgdu.208) — the `get` half.
+    ///
+    /// Only properties that differ from the default are emitted, mirroring
+    /// Godot's `.tscn` convention (and `ProceduralSkyMaterial::to_properties`).
+    /// A default material therefore yields an empty list, which is what makes
+    /// `from_properties(to_properties(m))` round-trip.
+    pub fn to_properties(&self) -> Vec<(String, Variant)> {
+        let def = Self::default();
+        let mut props = Vec::new();
+        if (self.density - def.density).abs() > f32::EPSILON {
+            props.push(("density".into(), Variant::Float(self.density as f64)));
+        }
+        if self.albedo != def.albedo {
+            props.push(("albedo".into(), Variant::Color(self.albedo)));
+        }
+        if self.emission != def.emission {
+            props.push(("emission".into(), Variant::Color(self.emission)));
+        }
+        if (self.height_falloff - def.height_falloff).abs() > f32::EPSILON {
+            props.push((
+                "height_falloff".into(),
+                Variant::Float(self.height_falloff as f64),
+            ));
+        }
+        if (self.edge_fade - def.edge_fade).abs() > f32::EPSILON {
+            props.push(("edge_fade".into(), Variant::Float(self.edge_fade as f64)));
+        }
+        if self.density_texture != def.density_texture {
+            props.push((
+                "density_texture".into(),
+                Variant::String(self.density_texture.clone()),
+            ));
+        }
+        props
+    }
+}
+
 // ---------------------------------------------------------------------------
 // FogVolume
 // ---------------------------------------------------------------------------
@@ -112,7 +204,19 @@ pub struct FogVolume {
 impl Default for FogVolume {
     fn default() -> Self {
         Self {
-            shape: FogVolumeShape::default(),
+            // ⚠️ BOX, not `FogVolumeShape::default()` (pat-nzgdu.208).
+            //
+            // The enum's zero value is Ellipsoid — that matches
+            // `RS::FOG_VOLUME_SHAPE_ELLIPSOID = 0` and is correct — but a
+            // *node* does not default to the enum's zero: Godot's constructor
+            // calls `fog_volume_set_shape(volume, RS::FOG_VOLUME_SHAPE_BOX)`
+            // (scene/3d/fog_volume.cpp:139), and the doc XML records
+            // `shape` default `3`.
+            //
+            // This matters because a `.tscn` omits properties equal to Godot's
+            // default, so a stock FogVolume node carries no `shape` key at all
+            // and lands here — rendering an ellipsoid where Godot renders a box.
+            shape: FogVolumeShape::Box,
             size: Vector3::new(2.0, 2.0, 2.0),
             material: FogMaterial::default(),
         }
@@ -345,10 +449,24 @@ mod tests {
 
     // -- FogVolume constructors -------------------------------------------
 
+    /// ⚠️ A FogVolume defaults to BOX (fog_volume.cpp:139, doc XML `default="3"`),
+    /// even though the *enum's* zero value is Ellipsoid (see
+    /// `shape_default_is_ellipsoid`, which is a different question and still
+    /// correct). Both facts are true at once; conflating them is what made a
+    /// stock `.tscn` fog volume render as an ellipsoid (pat-nzgdu.208).
     #[test]
     fn default_volume() {
         let v = FogVolume::default();
-        assert_eq!(v.shape, FogVolumeShape::Ellipsoid);
+        assert_eq!(
+            v.shape,
+            FogVolumeShape::Box,
+            "Godot's FogVolume ctor sets FOG_VOLUME_SHAPE_BOX"
+        );
+        assert_ne!(
+            v.shape,
+            FogVolumeShape::default(),
+            "the node default deliberately differs from the enum's zero value"
+        );
         assert!(approx(v.size.x, 2.0));
         assert!(approx(v.size.y, 2.0));
         assert!(approx(v.size.z, 2.0));
@@ -541,6 +659,115 @@ mod tests {
         assert!(
             near_edge < center,
             "Edge fade should reduce density near boundary: center={center}, edge={near_edge}"
+        );
+    }
+
+    // -- from_properties / to_properties (pat-nzgdu.208) --------------------
+
+    #[test]
+    fn from_properties_maps_every_member() {
+        let density = Variant::Float(4.5);
+        let albedo = Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0));
+        let emission = Variant::Color(Color::new(0.0, 1.0, 0.0, 1.0));
+        let height_falloff = Variant::Float(2.0);
+        let edge_fade = Variant::Float(0.75);
+        let density_texture = Variant::String("res://fog.png".to_string());
+
+        let mat = FogMaterial::from_properties(
+            [
+                ("density", &density),
+                ("albedo", &albedo),
+                ("emission", &emission),
+                ("height_falloff", &height_falloff),
+                ("edge_fade", &edge_fade),
+                ("density_texture", &density_texture),
+            ]
+            .into_iter(),
+        );
+
+        assert!(approx(mat.density, 4.5));
+        assert_eq!(mat.albedo, Color::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(mat.emission, Color::new(0.0, 1.0, 0.0, 1.0));
+        assert!(approx(mat.height_falloff, 2.0));
+        assert!(approx(mat.edge_fade, 0.75));
+        assert_eq!(mat.density_texture, "res://fog.png");
+    }
+
+    /// ⚠️ An absent key means "default", NOT "zero". A `.tscn` only serialises
+    /// properties that differ from the default, so a material parsed from a
+    /// scene that never mentions `density` must still be dense — zeroing it
+    /// would silently render no fog at all.
+    #[test]
+    fn from_properties_empty_gives_default_not_zero() {
+        let mat = FogMaterial::from_properties(std::iter::empty());
+        assert_eq!(mat, FogMaterial::default());
+        assert!(
+            approx(mat.density, 1.0),
+            "density must default to 1.0, not 0"
+        );
+        assert!(approx(mat.edge_fade, 0.1));
+    }
+
+    #[test]
+    fn from_properties_ignores_unknown_keys_and_wrong_types() {
+        // A wrong-typed value must leave the default rather than panic: the
+        // property bag comes from a parsed scene and is not trusted to be
+        // well-typed.
+        let wrong = Variant::String("not a float".to_string());
+        let unknown = Variant::Float(9.0);
+        let mat = FogMaterial::from_properties(
+            [("density", &wrong), ("no_such_property", &unknown)].into_iter(),
+        );
+        assert_eq!(mat, FogMaterial::default());
+    }
+
+    /// Mirrors Godot's `.tscn` convention: only non-defaults are written.
+    #[test]
+    fn to_properties_emits_only_non_defaults() {
+        assert!(
+            FogMaterial::default().to_properties().is_empty(),
+            "a default material serialises to nothing"
+        );
+
+        let mut mat = FogMaterial::default();
+        mat.density = 3.0;
+        let props = mat.to_properties();
+        assert_eq!(props.len(), 1, "only the changed property is emitted");
+        assert_eq!(props[0].0, "density");
+        assert_eq!(props[0].1, Variant::Float(3.0));
+    }
+
+    #[test]
+    fn properties_round_trip_through_the_binding() {
+        let mut mat = FogMaterial::default();
+        mat.density = 2.5;
+        mat.albedo = Color::new(0.25, 0.5, 0.75, 1.0);
+        mat.emission = Color::new(0.1, 0.2, 0.3, 1.0);
+        mat.height_falloff = 1.5;
+        mat.edge_fade = 0.9;
+        mat.density_texture = "res://noise.png".to_string();
+
+        let props = mat.to_properties();
+        let restored = FogMaterial::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
+        assert_eq!(restored, mat, "from_properties(to_properties(m)) must be m");
+    }
+
+    /// The binding is only worth anything if the values reach the render math.
+    #[test]
+    fn density_set_through_properties_changes_sampled_density() {
+        let dense = Variant::Float(5.0);
+        let mut volume = FogVolume::box_shape(Vector3::new(4.0, 4.0, 4.0));
+        volume.material.edge_fade = 0.0;
+        let before = volume.sample_density(Vector3::ZERO);
+
+        volume.material = FogMaterial::from_properties([("density", &dense)].into_iter());
+        volume.material.edge_fade = 0.0;
+        let after = volume.sample_density(Vector3::ZERO);
+
+        assert!(approx(before, 1.0), "default density samples 1.0");
+        assert!(
+            approx(after, 5.0),
+            "a density set through the property binding must reach sample_density, got {after}"
         );
     }
 }

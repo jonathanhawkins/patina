@@ -275,3 +275,68 @@ Evidence:
 Evidence:
 - Upstream Godot renders via `drivers/vulkan/` and `drivers/gles3/`.
 - Patina's render crates are software-only today; individual GPU beads (multimesh-gpu, particle3d-gpu) exist but no backbone GPU pipeline bead.
+
+## 2026-07-17 Scope Decisions
+
+Gaps deliberately **not** closed, with the citation that settles them. A scope
+decision recorded here is a commitment: do not re-open it as a MISSING gap
+without new evidence.
+
+### `godot-instance-embedding`
+- Title: GodotInstance (libgodot native host embedding)
+- Status: **OUT_OF_SCOPE (browser target)** — decided 2026-07-17, pat-nzgdu.203
+- Priority: n/a (scope call, not work)
+- Labels: platform-os, scope-decision, web
+- Acceptance: `./scripts/rust_task.sh nextest run -p gdobject --test godot_instance_scope_stub_returns_unsupported_error_without_panic`
+
+Decision: **register the class, implement no runtime.** `ClassDB.class_exists("GodotInstance")`
+is **true** and the class is **abstract**, exactly as upstream — so introspection
+and defensive scripts see what they see in Godot, and no host-embedding runtime
+is built for the browser.
+
+Evidence (from the pinned `upstream/godot` 4.6.1 oracle):
+- `GodotInstance` is a host-embedding handle: one per process, created by the C
+  API `libgodot_create_godot_instance`, and driven by `start()` / `iteration()`
+  (`core/extension/godot_instance.h:36-57`). The *host application* owns the loop.
+- **Upstream itself ships no web implementation.** The entry point exists only in
+  `platform/linuxbsd/libgodot_linuxbsd.cpp` and `platform/windows/libgodot_windows.cpp`
+  — there is no `platform/web/libgodot_*`. Godot does not embed itself in a page,
+  because in the browser the *page* is the host. There is no browser analog to port.
+- Upstream registers it **abstract**: `GDREGISTER_ABSTRACT_CLASS(GodotInstance)`
+  (`core/register_core_types.cpp:290`), matching `is_instantiable=false` in
+  `extension_api.json`. A script therefore **cannot construct one in Godot either** —
+  the C API does. Patina mirrors that flag, which is a *stronger* guarantee than a
+  stub that errors on `start()`: there is no legitimate way to obtain an instance
+  to call `start()` on.
+
+Why not "leave it unregistered": `class_exists` would then disagree with upstream,
+and a defensive script probing for the class would take the wrong branch. Registering
+the honest, runtime-free surface keeps introspection truthful and costs nothing.
+
+### `script-extension-gdextension-hooks`
+- Title: ScriptExtension / ScriptLanguageExtension (GDExtension script hooks)
+- Status: **surface-only, runtime OUT_OF_SCOPE (wasm target)** — decided 2026-07-17, pat-nzgdu.204
+- Priority: n/a (scope call, not work)
+- Labels: platform-os, scope-decision, web, gdextension
+- Acceptance: `./scripts/rust_task.sh nextest run -p gdobject --test script_extension_surface_test`
+
+Decision: **register the full class surface, implement no virtuals.** These are the
+hooks a *native GDExtension plugin* implements to add a scripting language. Loading
+native plugins is not feasible on a wasm target, so nothing here has a runtime.
+
+Evidence (from the pinned `upstream/godot` 4.6.1 oracle):
+- `ScriptExtension` (37 virtuals) and `ScriptLanguageExtension` (60 virtuals) declare
+  **zero non-virtual methods** between them: they are pure override surfaces, not
+  APIs the engine offers. Every entry is a hook a plugin fills in.
+- Both are **instantiable** upstream, unlike their abstract parents `Script` and
+  `ScriptLanguage`. Patina mirrors that exactly.
+
+⚠️ **An instance being inert is Godot's behaviour, not a Patina limitation.** In
+Godot, constructing a `ScriptExtension` without a GDExtension providing its virtuals
+also yields an object that does nothing. So this port does **not** make construction
+raise "GDExtension not supported": that would *diverge* from upstream and break
+introspection parity, which is the whole point of registering the surface. What is
+unsupported on wasm is the **native plugin loader**, not the class.
+
+Note `Script` and `ScriptLanguage` themselves were missing too, and were registered
+alongside — a child over an absent parent has a silently severed chain.

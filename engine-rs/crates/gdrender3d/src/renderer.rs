@@ -14,6 +14,7 @@ use gdserver3d::instance::{Instance3D, Instance3DId};
 use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::Material3D;
 use gdserver3d::mesh::Mesh3D;
+use gdserver3d::occluder::OccluderInstance3D;
 use gdserver3d::projection::perspective_projection_matrix;
 use gdserver3d::reflection_probe::{sample_probes_at, ReflectionProbe, ReflectionProbeId};
 use gdserver3d::server::{FrameData3D, RenderingServer3D};
@@ -142,6 +143,9 @@ pub struct SoftwareRenderer3D {
     reflection_probes: Vec<ReflectionProbe>,
     fog_volumes: Vec<PlacedFogVolume>,
     decals: Vec<Decal3D>,
+    /// Occluders culling hidden instances (pat-nzgdu.211). Each carries its own
+    /// world transform, so unlike fog volumes they need no `Placed*` wrapper.
+    occluders: Vec<OccluderInstance3D>,
     next_id: u64,
     /// The rendering mode (wireframe or solid).
     pub render_mode: RenderMode,
@@ -156,6 +160,7 @@ impl SoftwareRenderer3D {
             reflection_probes: Vec::new(),
             fog_volumes: Vec::new(),
             decals: Vec::new(),
+            occluders: Vec::new(),
             next_id: 1,
             render_mode: RenderMode::Solid,
         }
@@ -177,6 +182,7 @@ impl SoftwareRenderer3D {
             reflection_probes: Vec::new(),
             fog_volumes: Vec::new(),
             decals: Vec::new(),
+            occluders: Vec::new(),
             next_id: 1,
             render_mode: RenderMode::Wireframe,
         }
@@ -202,6 +208,49 @@ impl SoftwareRenderer3D {
     /// Removes every registered fog volume.
     pub fn clear_fog_volumes(&mut self) {
         self.fog_volumes.clear();
+    }
+
+    /// Registers an [`OccluderInstance3D`] so instances fully behind it are
+    /// skipped (pat-nzgdu.211). The occluder carries its own world transform.
+    pub fn add_occluder(&mut self, occluder: OccluderInstance3D) {
+        self.occluders.push(occluder);
+    }
+
+    /// Returns the occluders currently registered with the renderer.
+    pub fn occluders(&self) -> &[OccluderInstance3D] {
+        &self.occluders
+    }
+
+    /// Removes every registered occluder.
+    pub fn clear_occluders(&mut self) {
+        self.occluders.clear();
+    }
+
+    /// Whether `inst` is fully hidden behind an occluder from `camera_pos`
+    /// (pat-nzgdu.211).
+    ///
+    /// Culling is an *optimisation*: every uncertain case must answer `false`.
+    /// A wrong `true` deletes visible geometry from the frame — a rendering bug
+    /// the user sees — while a wrong `false` only costs the work of drawing
+    /// something hidden. So this bails out rather than guessing when:
+    ///
+    /// - there are no occluders (the overwhelmingly common case, kept free);
+    /// - the instance has no world AABB (no mesh, or no vertices) — "unknown"
+    ///   bounds are never grounds to cull;
+    /// - the instance is a MultiMesh: its per-instance transforms scatter
+    ///   geometry far outside `inst.transform`'s box, so that box is not a
+    ///   bound on what gets drawn and culling on it would erase visible copies.
+    fn is_occluded(&self, inst: &Instance3D, camera_pos: Vector3) -> bool {
+        if self.occluders.is_empty() || inst.multimesh.is_some() {
+            return false;
+        }
+        let target = match inst.world_aabb() {
+            Some(aabb) => aabb,
+            None => return false,
+        };
+        self.occluders
+            .iter()
+            .any(|occluder| occluder.occludes(camera_pos, target))
     }
 
     /// Registers a [`Decal3D`] so it projects onto the rendered frame
@@ -341,6 +390,10 @@ impl SoftwareRenderer3D {
 
         for inst in &self.instances {
             if !inst.visible {
+                continue;
+            }
+            // Occlusion culling (pat-nzgdu.211).
+            if self.is_occluded(inst, viewport.camera_transform.origin) {
                 continue;
             }
             let mesh = match &inst.mesh {
@@ -567,6 +620,11 @@ impl SoftwareRenderer3D {
 
         for inst in &self.instances {
             if !inst.visible {
+                continue;
+            }
+            // Occlusion culling (pat-nzgdu.211). Both render paths cull, or a
+            // wireframe/solid switch would silently change what is drawn.
+            if self.is_occluded(inst, viewport.camera_transform.origin) {
                 continue;
             }
 

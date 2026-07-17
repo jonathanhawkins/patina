@@ -415,8 +415,8 @@ mod tests {
         // 8-byte signature + 25-byte IHDR chunk, then IDAT).
         fn raw_scanlines(png: &[u8]) -> Vec<u8> {
             let off = 8 + 25;
-            let len = u32::from_be_bytes([png[off], png[off + 1], png[off + 2], png[off + 3]])
-                as usize;
+            let len =
+                u32::from_be_bytes([png[off], png[off + 1], png[off + 2], png[off + 3]]) as usize;
             assert_eq!(&png[off + 4..off + 8], b"IDAT");
             decompress_to_vec_zlib(&png[off + 8..off + 8 + len]).expect("inflate")
         }
@@ -486,7 +486,11 @@ mod tests {
             data.push((c.a.clamp(0.0, 1.0) * 255.0) as u8);
         }
         let img = Bgra8Image::from_bgra(w, h, data);
-        assert_eq!(encode_bmp(&fb), encode_bmp_bgra(&img), "byte BMP must equal float BMP");
+        assert_eq!(
+            encode_bmp(&fb),
+            encode_bmp_bgra(&img),
+            "byte BMP must equal float BMP"
+        );
         // Header sanity on the byte path.
         let bmp = encode_bmp_bgra(&img);
         assert_eq!(&bmp[0..2], b"BM");
@@ -507,8 +511,16 @@ mod tests {
         assert_eq!(img.data, vec![0, 0, 255, 255]);
         // White at half coverage over red → B/G ~127, R stays 255, opaque.
         img.blend(0, 0, Color::new(1.0, 1.0, 1.0, 1.0), 0.5);
-        assert!((img.data[0] as i32 - 127).abs() <= 2, "B ~127: {}", img.data[0]);
-        assert!((img.data[1] as i32 - 127).abs() <= 2, "G ~127: {}", img.data[1]);
+        assert!(
+            (img.data[0] as i32 - 127).abs() <= 2,
+            "B ~127: {}",
+            img.data[0]
+        );
+        assert!(
+            (img.data[1] as i32 - 127).abs() <= 2,
+            "G ~127: {}",
+            img.data[1]
+        );
         assert_eq!(img.data[2], 255, "R stays 255");
         assert_eq!(img.data[3], 255, "stays opaque");
         // Out-of-bounds is a no-op (must not panic or corrupt).

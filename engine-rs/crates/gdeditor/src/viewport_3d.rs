@@ -12,9 +12,7 @@ use gdcore::math3d::{Aabb, Basis, Transform3D};
 use gdscene::node3d;
 use gdscene::SceneTree;
 use gdserver3d::environment::{AmbientSource, BackgroundMode, Environment3D, ToneMapper};
-#[cfg(test)]
-use gdserver3d::fog_volume::FogMaterial;
-use gdserver3d::fog_volume::{FogVolume, FogVolumeShape};
+use gdserver3d::fog_volume::{FogMaterial, FogVolume, FogVolumeShape};
 use gdserver3d::sky::{ProceduralSkyMaterial, Sky, SkyMaterial, SkyProcessMode};
 
 // ---------------------------------------------------------------------------
@@ -742,15 +740,24 @@ impl EnvironmentPreview3D {
 
 /// Constructs a [`FogVolume`] from a node's property iterator.
 ///
-/// Reads `shape`, `size`, and fog material properties (`density`, `albedo`,
-/// `emission`, `height_falloff`, `edge_fade`). Unrecognised properties are
-/// ignored; missing ones keep their defaults.
+/// Reads the node's own `shape` and `size`; the material half is delegated to
+/// [`FogMaterial::from_properties`] (pat-nzgdu.208), which is the same binding
+/// ClassDB's `FogMaterial` registration describes. Delegating keeps the two from
+/// drifting — this parser previously duplicated the material arms inline and
+/// silently dropped `density_texture`.
+///
+/// Unrecognised properties are ignored; missing ones keep their defaults, since
+/// a `.tscn` only serialises what differs from Godot's default.
 fn fog_volume_from_node_properties<'a>(
     props: impl Iterator<Item = (&'a String, &'a gdvariant::Variant)>,
 ) -> FogVolume {
     use gdvariant::Variant;
 
+    let props: Vec<(&String, &Variant)> = props.collect();
+
     let mut volume = FogVolume::default();
+    volume.material =
+        FogMaterial::from_properties(props.iter().copied().map(|(k, v)| (k.as_str(), v)));
 
     for (key, value) in props {
         match key.as_str() {
@@ -762,31 +769,6 @@ fn fog_volume_from_node_properties<'a>(
             "size" => {
                 if let Variant::Vector3(v) = value {
                     volume.size = *v;
-                }
-            }
-            "density" => {
-                if let Variant::Float(f) = value {
-                    volume.material.density = *f as f32;
-                }
-            }
-            "albedo" => {
-                if let Variant::Color(c) = value {
-                    volume.material.albedo = *c;
-                }
-            }
-            "emission" => {
-                if let Variant::Color(c) = value {
-                    volume.material.emission = *c;
-                }
-            }
-            "height_falloff" => {
-                if let Variant::Float(f) = value {
-                    volume.material.height_falloff = *f as f32;
-                }
-            }
-            "edge_fade" => {
-                if let Variant::Float(f) = value {
-                    volume.material.edge_fade = *f as f32;
                 }
             }
             _ => {}
@@ -3662,12 +3644,36 @@ mod tests {
         assert!(!env.fog_enabled);
     }
 
+    /// ⚠️ An empty property bag is the COMMON case, not an edge case: a `.tscn`
+    /// omits every property equal to Godot's default, so a stock FogVolume node
+    /// arrives here with no `shape` key. It must therefore land on Godot's
+    /// default — BOX (fog_volume.cpp:139) — not the enum's zero value
+    /// (Ellipsoid). It rendered an ellipsoid until pat-nzgdu.208.
     #[test]
     fn test_fog_volume_from_node_properties_defaults() {
         let props: Vec<(String, gdvariant::Variant)> = vec![];
         let volume = fog_volume_from_node_properties(props.iter().map(|(k, v)| (k, v)));
-        assert_eq!(volume.shape, FogVolumeShape::Ellipsoid);
+        assert_eq!(
+            volume.shape,
+            FogVolumeShape::Box,
+            "a stock .tscn FogVolume carries no `shape` key and must default to Box"
+        );
         assert!(approx_eq(volume.material.density, 1.0, 1e-4));
+    }
+
+    /// The material half now comes from the shared binding, so `density_texture`
+    /// — which the old inline parser dropped on the floor — survives the parse.
+    #[test]
+    fn test_fog_volume_from_node_properties_reads_density_texture() {
+        let props: Vec<(String, gdvariant::Variant)> = vec![(
+            "density_texture".to_string(),
+            gdvariant::Variant::String("res://fog_noise.png".to_string()),
+        )];
+        let volume = fog_volume_from_node_properties(props.iter().map(|(k, v)| (k, v)));
+        assert_eq!(
+            volume.material.density_texture, "res://fog_noise.png",
+            "density_texture must survive the parse (it was dropped before pat-nzgdu.208)"
+        );
     }
 
     #[test]

@@ -337,7 +337,11 @@ mod tests {
 
         let mix = composite_light(base, light, Light2DBlendMode::Mix);
         // Mix = 0.5 + 0.4*(1-0.5) = 0.7 — brighter than base, softer than Add.
-        assert!((mix.r - 0.7).abs() < 1e-5, "MIX soft-brightens, got {}", mix.r);
+        assert!(
+            (mix.r - 0.7).abs() < 1e-5,
+            "MIX soft-brightens, got {}",
+            mix.r
+        );
         assert!(mix.r < add.r, "MIX must be softer than ADD");
         assert!(sub.r < base.r, "SUB must darken below the base");
 
@@ -366,12 +370,7 @@ mod tests {
 
     #[test]
     fn point_light_brighter_near_source() {
-        let light = Light2D::point(
-            Vector2::new(0.0, 0.0),
-            Color::WHITE,
-            1.0,
-            100.0,
-        );
+        let light = Light2D::point(Vector2::new(0.0, 0.0), Color::WHITE, 1.0, 100.0);
         let near = light_factor_at(
             Vector2::new(5.0, 0.0),
             1,
@@ -434,7 +433,13 @@ mod tests {
         let ambient = CanvasAmbient {
             color: Color::BLACK,
         };
-        let lit = light_factor_at(Vector2::new(5.0, 0.0), 1, &[light.clone()], &[occ.clone()], ambient);
+        let lit = light_factor_at(
+            Vector2::new(5.0, 0.0),
+            1,
+            &[light.clone()],
+            &[occ.clone()],
+            ambient,
+        );
         let shadow = light_factor_at(Vector2::new(20.0, 0.0), 1, &[light], &[occ], ambient);
         assert!(lit.r > 0.1, "front of wall should be lit: {}", lit.r);
         assert!(

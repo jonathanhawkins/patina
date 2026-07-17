@@ -588,7 +588,10 @@ mod tests {
             Color::WHITE,
             true,
         );
-        assert!(n >= 3, "text should wrap to multiple lines in a narrow rect");
+        assert!(
+            n >= 3,
+            "text should wrap to multiple lines in a narrow rect"
+        );
         assert!(fb.pixels.iter().any(|c| c.r > 0.1), "glyph pixels drawn");
 
         // Short rect: lines beyond the height are clipped.

@@ -1863,6 +1863,13 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "EngineDebugger") {
                             return call_enginedebugger_static(member, &evaluated_args);
                         }
+                        // FramebufferCacheRD (pat-nzgdu.210) — a static helper
+                        // over a RenderingDevice that does not exist here, so it
+                        // answers with the documented unsupported value rather
+                        // than an undefined-variable error.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "FramebufferCacheRD") {
+                            return call_framebuffercacherd_static(member, &evaluated_args);
+                        }
                         // Handle ClassName.new() — runtime node creation / RefCounted helpers
                         if member == "new" {
                             if let Expr::Ident(class_name) = object.as_ref() {
@@ -10680,6 +10687,39 @@ fn call_cameraserver_static(method: &str, args: &[Variant]) -> Result<Variant, R
         "is_monitoring_feeds" => Ok(Variant::Bool(CAMERA_MONITORING.with(|m| m.get()))),
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("CameraServer.{other}"),
+        ))),
+    }
+}
+
+/// `FramebufferCacheRD.get_cache_multipass(...)` (pat-nzgdu.210).
+///
+/// ⚠️ Answers `Nil`, and that is the *documented unsupported value*, not a
+/// placeholder someone forgot to fill in. Godot returns an **`RID`** for the
+/// cached framebuffer, and Patina's `Variant` has **no `RID` variant at all** —
+/// `gdvariant::binary` lists `RID` among the types the enum lacks. There is also
+/// no `RenderingDevice` behind it to cache anything (pat-nzgdu.162). `Nil` is
+/// the only value this can honestly name until both exist.
+///
+/// Without this arm the class is reachable from `ClassDB.class_exists` yet a
+/// script calling it gets `UndefinedVariable("FramebufferCacheRD")` — the class
+/// resolves for reflection while the call does not, which is the gap the bead is
+/// about ("so scripts referencing it resolve").
+fn call_framebuffercacherd_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    match method {
+        // (textures: RID[], passes: RDFramebufferPass[], views: int). The arity
+        // is checked so a miscall is a TypeError, never a panic.
+        "get_cache_multipass" => {
+            if args.len() != 3 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "FramebufferCacheRD.get_cache_multipass() takes 3 arguments \
+                     (textures, passes, views), got {}",
+                    args.len()
+                ))));
+            }
+            Ok(Variant::Nil)
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("FramebufferCacheRD.{other}"),
         ))),
     }
 }

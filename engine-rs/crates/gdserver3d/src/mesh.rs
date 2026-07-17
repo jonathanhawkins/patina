@@ -4,6 +4,7 @@
 //! specifying how vertices are interpreted by the rendering pipeline.
 
 use gdcore::math::Vector3;
+use gdcore::math3d::Aabb;
 
 /// How vertices are interpreted during rasterization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -186,6 +187,28 @@ impl Mesh3D {
     /// Returns the number of vertices in this mesh.
     pub fn vertex_count(&self) -> usize {
         self.vertices.len()
+    }
+
+    /// The local-space AABB enclosing every vertex (pat-nzgdu.211).
+    ///
+    /// `None` for a mesh with no vertices: an empty mesh has no bounds, and a
+    /// zero-sized AABB at the origin would be a *lie* a culler would act on —
+    /// it would test as a real (if tiny) box sitting at the model origin.
+    ///
+    /// ⚠️ Covers `vertices` only. Additional `surfaces` carry their own vertex
+    /// arrays, so a multi-surface mesh's bounds are wider than this. The 3D
+    /// renderer's draw list keeps geometry in the top-level arrays, which is
+    /// what the occlusion cull reads; a caller that walks `surfaces` must merge
+    /// their bounds in itself.
+    pub fn aabb(&self) -> Option<Aabb> {
+        let mut iter = self.vertices.iter();
+        let first = *iter.next()?;
+        let (mut min, mut max) = (first, first);
+        for v in iter {
+            min = Vector3::new(min.x.min(v.x), min.y.min(v.y), min.z.min(v.z));
+            max = Vector3::new(max.x.max(v.x), max.y.max(v.y), max.z.max(v.z));
+        }
+        Some(Aabb::new(min, max - min))
     }
 
     /// Returns the number of triangles (only valid for `Triangles` primitive type).
@@ -1462,5 +1485,62 @@ v 1.0 0.0 0.0
 f 1 2
 ";
         assert!(Mesh3D::from_obj(obj).is_err());
+    }
+
+    // -- aabb (pat-nzgdu.211) ----------------------------------------------
+
+    /// ⚠️ An empty mesh has NO bounds — `None`, not a zero-sized box. A
+    /// zero-sized AABB at the origin is a real (if tiny) box as far as a culler
+    /// is concerned, so returning one would be a lie it would act on.
+    #[test]
+    fn aabb_is_none_for_an_empty_mesh() {
+        assert!(Mesh3D::new(PrimitiveType::Triangles).aabb().is_none());
+    }
+
+    #[test]
+    fn aabb_encloses_a_cubes_vertices() {
+        // cube(2.0) is FULL size, so it spans -1..1 on each axis.
+        let aabb = Mesh3D::cube(2.0).aabb().expect("a cube has bounds");
+        assert!((aabb.position.x - (-1.0)).abs() < 1e-4, "{aabb:?}");
+        assert!((aabb.position.y - (-1.0)).abs() < 1e-4, "{aabb:?}");
+        assert!((aabb.position.z - (-1.0)).abs() < 1e-4, "{aabb:?}");
+        assert!((aabb.size.x - 2.0).abs() < 1e-4, "{aabb:?}");
+        assert!((aabb.size.y - 2.0).abs() < 1e-4, "{aabb:?}");
+        assert!((aabb.size.z - 2.0).abs() < 1e-4, "{aabb:?}");
+    }
+
+    /// A single vertex yields a zero-SIZED box — which is correct here, unlike
+    /// the empty case: the mesh really does occupy exactly that point.
+    #[test]
+    fn aabb_of_a_single_vertex_is_a_degenerate_box_at_that_point() {
+        let mut mesh = Mesh3D::new(PrimitiveType::Points);
+        mesh.vertices.push(Vector3::new(3.0, -4.0, 5.0));
+
+        let aabb = mesh.aabb().expect("one vertex is still bounds");
+        assert!((aabb.position.x - 3.0).abs() < 1e-4, "{aabb:?}");
+        assert!((aabb.position.y - (-4.0)).abs() < 1e-4, "{aabb:?}");
+        assert!(aabb.size.x.abs() < 1e-4, "a point has no extent: {aabb:?}");
+    }
+
+    /// The bounds must enclose vertices in every direction, including negative
+    /// ones — a min/max mix-up survives a symmetric cube but not this.
+    #[test]
+    fn aabb_covers_asymmetric_vertices() {
+        let mut mesh = Mesh3D::new(PrimitiveType::Triangles);
+        for v in [
+            Vector3::new(-7.0, 2.0, 0.0),
+            Vector3::new(1.0, 9.0, -3.0),
+            Vector3::new(0.0, 2.5, 4.0),
+        ] {
+            mesh.vertices.push(v);
+        }
+
+        let aabb = mesh.aabb().expect("bounds");
+        assert!((aabb.position.x - (-7.0)).abs() < 1e-4, "{aabb:?}");
+        assert!((aabb.position.y - 2.0).abs() < 1e-4, "{aabb:?}");
+        assert!((aabb.position.z - (-3.0)).abs() < 1e-4, "{aabb:?}");
+        assert!((aabb.size.x - 8.0).abs() < 1e-4, "{aabb:?}");
+        assert!((aabb.size.y - 7.0).abs() < 1e-4, "{aabb:?}");
+        assert!((aabb.size.z - 7.0).abs() < 1e-4, "{aabb:?}");
     }
 }

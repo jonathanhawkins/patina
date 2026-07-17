@@ -167,7 +167,11 @@ mod tests {
             Color::new(0.5, 0.5, 0.5, 1.0),
             BlendMode::Add,
         );
-        assert!(approx(out.r, 1.0), "additive should reach 1.0, got {}", out.r);
+        assert!(
+            approx(out.r, 1.0),
+            "additive should reach 1.0, got {}",
+            out.r
+        );
     }
 
     #[test]
@@ -206,10 +210,29 @@ mod tests {
     #[test]
     fn nearest_sampling_picks_texel() {
         let tex = tex2x2();
-        let tl = sample_texture(&tex, 0.25, 0.25, TextureFilter::Nearest, TextureRepeat::Disabled);
-        assert!(approx(tl.r, 1.0) && approx(tl.g, 0.0), "expected red, got {:?}", tl);
-        let br = sample_texture(&tex, 0.75, 0.75, TextureFilter::Nearest, TextureRepeat::Disabled);
-        assert!(approx(br.r, 1.0) && approx(br.g, 1.0) && approx(br.b, 1.0), "expected white");
+        let tl = sample_texture(
+            &tex,
+            0.25,
+            0.25,
+            TextureFilter::Nearest,
+            TextureRepeat::Disabled,
+        );
+        assert!(
+            approx(tl.r, 1.0) && approx(tl.g, 0.0),
+            "expected red, got {:?}",
+            tl
+        );
+        let br = sample_texture(
+            &tex,
+            0.75,
+            0.75,
+            TextureFilter::Nearest,
+            TextureRepeat::Disabled,
+        );
+        assert!(
+            approx(br.r, 1.0) && approx(br.g, 1.0) && approx(br.b, 1.0),
+            "expected white"
+        );
     }
 
     #[test]
@@ -218,9 +241,18 @@ mod tests {
         let tex = Texture2D {
             width: 2,
             height: 1,
-            pixels: vec![Color::new(0.0, 0.0, 0.0, 1.0), Color::new(1.0, 1.0, 1.0, 1.0)],
+            pixels: vec![
+                Color::new(0.0, 0.0, 0.0, 1.0),
+                Color::new(1.0, 1.0, 1.0, 1.0),
+            ],
         };
-        let mid = sample_texture(&tex, 0.5, 0.5, TextureFilter::Linear, TextureRepeat::Disabled);
+        let mid = sample_texture(
+            &tex,
+            0.5,
+            0.5,
+            TextureFilter::Linear,
+            TextureRepeat::Disabled,
+        );
         assert!(approx(mid.r, 0.5), "midpoint should be grey, got {}", mid.r);
     }
 
@@ -229,11 +261,29 @@ mod tests {
         let tex = Texture2D {
             width: 2,
             height: 1,
-            pixels: vec![Color::new(0.0, 0.0, 0.0, 1.0), Color::new(1.0, 1.0, 1.0, 1.0)],
+            pixels: vec![
+                Color::new(0.0, 0.0, 0.0, 1.0),
+                Color::new(1.0, 1.0, 1.0, 1.0),
+            ],
         };
-        let a = sample_texture(&tex, 0.25, 0.0, TextureFilter::Nearest, TextureRepeat::Enabled);
-        let b = sample_texture(&tex, 1.25, 0.0, TextureFilter::Nearest, TextureRepeat::Enabled);
-        assert!(approx(a.r, b.r) && approx(a.g, b.g) && approx(a.b, b.b), "wrap should match");
+        let a = sample_texture(
+            &tex,
+            0.25,
+            0.0,
+            TextureFilter::Nearest,
+            TextureRepeat::Enabled,
+        );
+        let b = sample_texture(
+            &tex,
+            1.25,
+            0.0,
+            TextureFilter::Nearest,
+            TextureRepeat::Enabled,
+        );
+        assert!(
+            approx(a.r, b.r) && approx(a.g, b.g) && approx(a.b, b.b),
+            "wrap should match"
+        );
     }
 
     #[test]
@@ -241,11 +291,23 @@ mod tests {
         let tex = Texture2D {
             width: 2,
             height: 1,
-            pixels: vec![Color::new(0.0, 0.0, 0.0, 1.0), Color::new(1.0, 1.0, 1.0, 1.0)],
+            pixels: vec![
+                Color::new(0.0, 0.0, 0.0, 1.0),
+                Color::new(1.0, 1.0, 1.0, 1.0),
+            ],
         };
         // u=2.0 clamps to the last texel (white).
-        let c = sample_texture(&tex, 2.0, 0.0, TextureFilter::Nearest, TextureRepeat::Disabled);
-        assert!(approx(c.r, 1.0) && approx(c.g, 1.0) && approx(c.b, 1.0), "clamp to last texel");
+        let c = sample_texture(
+            &tex,
+            2.0,
+            0.0,
+            TextureFilter::Nearest,
+            TextureRepeat::Disabled,
+        );
+        assert!(
+            approx(c.r, 1.0) && approx(c.g, 1.0) && approx(c.b, 1.0),
+            "clamp to last texel"
+        );
     }
 
     #[test]
@@ -255,7 +317,13 @@ mod tests {
             height: 0,
             pixels: vec![],
         };
-        let c = sample_texture(&tex, 0.5, 0.5, TextureFilter::Linear, TextureRepeat::Enabled);
+        let c = sample_texture(
+            &tex,
+            0.5,
+            0.5,
+            TextureFilter::Linear,
+            TextureRepeat::Enabled,
+        );
         assert!(approx(c.a, 0.0));
     }
 }

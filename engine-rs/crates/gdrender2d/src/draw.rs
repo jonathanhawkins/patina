@@ -793,7 +793,9 @@ mod tests {
             red,
             1.0,
         );
-        let thin_rows = (0..40u32).filter(|&y| fb_thin.get_pixel(15, y).r > 0.5).count();
+        let thin_rows = (0..40u32)
+            .filter(|&y| fb_thin.get_pixel(15, y).r > 0.5)
+            .count();
         assert_eq!(thin_rows, 1, "a 1px line must stay 1 row, got {thin_rows}");
 
         // The blended variant honors width too.
@@ -805,7 +807,9 @@ mod tests {
             red,
             6.0,
         );
-        let blend_rows = (0..40u32).filter(|&y| fb_b.get_pixel(15, y).r > 0.5).count();
+        let blend_rows = (0..40u32)
+            .filter(|&y| fb_b.get_pixel(15, y).r > 0.5)
+            .count();
         assert!(
             (5..=7).contains(&blend_rows),
             "a 6px blended line must paint ~6 rows, got {blend_rows}"

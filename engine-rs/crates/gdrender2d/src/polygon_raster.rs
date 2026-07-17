@@ -344,7 +344,11 @@ mod tests {
     #[test]
     fn degenerate_polygon_is_noop() {
         let mut fb = FrameBuffer::new(8, 8, clear());
-        fill_polygon(&mut fb, &[Vector2::new(1.0, 1.0), Vector2::new(4.0, 4.0)], red());
+        fill_polygon(
+            &mut fb,
+            &[Vector2::new(1.0, 1.0), Vector2::new(4.0, 4.0)],
+            red(),
+        );
         assert!(approx(fb.get_pixel(2, 2), clear()));
     }
 
@@ -375,7 +379,15 @@ mod tests {
     fn thick_horizontal_line_covers_its_width() {
         let mut fb = FrameBuffer::new(40, 20, clear());
         let pts = [Vector2::new(5.0, 10.0), Vector2::new(35.0, 10.0)];
-        draw_polyline(&mut fb, &pts, 6.0, red(), false, LineCap::None, LineJoint::Sharp);
+        draw_polyline(
+            &mut fb,
+            &pts,
+            6.0,
+            red(),
+            false,
+            LineCap::None,
+            LineJoint::Sharp,
+        );
         // Centerline and points within +/- (width/2) are filled.
         assert!(approx(fb.get_pixel(20, 10), red()));
         assert!(approx(fb.get_pixel(20, 8), red()));
@@ -391,15 +403,34 @@ mod tests {
         let pts = [Vector2::new(10.0, 10.0), Vector2::new(30.0, 10.0)];
         // Without a cap the endpoint column past x=30 is empty; with a round
         // cap the disc bulges past it.
-        draw_polyline(&mut fb, &pts, 8.0, red(), false, LineCap::Round, LineJoint::Sharp);
-        assert!(approx(fb.get_pixel(32, 10), red()), "round cap should extend past the endpoint");
+        draw_polyline(
+            &mut fb,
+            &pts,
+            8.0,
+            red(),
+            false,
+            LineCap::Round,
+            LineJoint::Sharp,
+        );
+        assert!(
+            approx(fb.get_pixel(32, 10), red()),
+            "round cap should extend past the endpoint"
+        );
     }
 
     #[test]
     fn thin_or_zero_width_line_is_noop() {
         let mut fb = FrameBuffer::new(10, 10, clear());
         let pts = [Vector2::new(1.0, 5.0), Vector2::new(9.0, 5.0)];
-        draw_polyline(&mut fb, &pts, 0.0, red(), false, LineCap::None, LineJoint::Sharp);
+        draw_polyline(
+            &mut fb,
+            &pts,
+            0.0,
+            red(),
+            false,
+            LineCap::None,
+            LineJoint::Sharp,
+        );
         assert!(approx(fb.get_pixel(5, 5), clear()));
     }
 
@@ -475,7 +506,11 @@ mod tests {
         let weights = vec![vec![0.5], vec![0.5]];
         let deformed = deform_polygon_vertices(&verts, &skin, &weights);
         // (0.5*(dx,0) + 0.5*(0,dy)) / (0.5 + 0.5) = (dx/2, dy/2).
-        assert!(approx_v(deformed[0], Vector2::new(dx * 0.5, dy * 0.5), 1e-3));
+        assert!(approx_v(
+            deformed[0],
+            Vector2::new(dx * 0.5, dy * 0.5),
+            1e-3
+        ));
     }
 
     #[test]

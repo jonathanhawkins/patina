@@ -10,6 +10,7 @@ pub mod canvas_material;
 pub mod compare;
 pub mod draw;
 pub mod export;
+pub mod external_texture;
 pub mod font;
 pub mod frame_server;
 pub mod label_settings;

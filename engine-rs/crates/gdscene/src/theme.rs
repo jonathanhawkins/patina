@@ -12,7 +12,7 @@ use gdcore::math::Color;
 use gdvariant::Variant;
 use std::collections::HashMap;
 
-use crate::stylebox::StyleBox;
+use crate::stylebox::{StyleBox, StyleBoxLine};
 
 // ===========================================================================
 // Theme property categories
@@ -220,6 +220,36 @@ impl Theme {
     /// Label, Button, and Panel controls.
     pub fn default_theme() -> Self {
         let mut theme = Self::new("default");
+
+        // --- Separators (pat-nzgdu.197) ---
+        // Godot builds these as a StyleBoxLine of thickness round(scale) = 1,
+        // and gives each a `separation` of 4 — the minimum size a separator
+        // reserves in its container (`scene/theme/default_theme.cpp:734-739`,
+        // `:1063-1069`). VSeparator is the same line rotated, which is why the
+        // orientation lives on the stylebox rather than on a node property.
+        let separator_color = Color::new(0.5, 0.5, 0.5, 1.0);
+        theme.set_stylebox(
+            "HSeparator",
+            "separator",
+            StyleBox::Line(StyleBoxLine {
+                color: separator_color,
+                thickness: 1.0,
+                vertical: false,
+                ..StyleBoxLine::default()
+            }),
+        );
+        theme.set_stylebox(
+            "VSeparator",
+            "separator",
+            StyleBox::Line(StyleBoxLine {
+                color: separator_color,
+                thickness: 1.0,
+                vertical: true,
+                ..StyleBoxLine::default()
+            }),
+        );
+        theme.set_constant("HSeparator", "separation", 4);
+        theme.set_constant("VSeparator", "separation", 4);
 
         // --- Label ---
         theme.set_color("Label", "font_color", Color::WHITE);

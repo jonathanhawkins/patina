@@ -4218,7 +4218,16 @@ func _ready():
                 !signal_events.is_empty(),
                 "Signal emission should be traced"
             );
-            assert_eq!(signal_events[0].detail, "hit");
+            // The script's `emit_signal("hit")` must be traced. It is NOT
+            // necessarily the FIRST signal: `enter_tree` legitimately emits
+            // `tree_entered` first (lifecycle.rs:50, matching Godot), so
+            // asserting `signal_events[0]` pinned an ordering the engine never
+            // promised. Assert the intent — that "hit" was traced — instead.
+            assert!(
+                signal_events.iter().any(|e| e.detail == "hit"),
+                "the script's emit_signal(\"hit\") must be traced; got {:?}",
+                signal_events.iter().map(|e| &e.detail).collect::<Vec<_>>()
+            );
         }
     }
 
