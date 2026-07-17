@@ -23,6 +23,7 @@ use crate::char_fx::{BuiltinEffect, CharFXTransform};
 use crate::control;
 use crate::node::NodeId;
 use crate::scene_tree::SceneTree;
+use crate::syntax_highlighter::CodeHighlighter;
 use crate::theme::{Theme, ThemePropertyType};
 
 /// Nominal glyph metrics of the built-in 5×7 bitmap font used by the software
@@ -42,6 +43,12 @@ const CONTROL_CLASSES: &[&str] = &[
     "ColorRect",
     "TextureRect",
     "RichTextLabel",
+    // pat-nzgdu.198 — TextEdit/CodeEdit draw their text (and syntax-highlighted
+    // keyword spans) in draw_control; without them here is_control() rejects the
+    // node when the ClassDB Control chain is unavailable, and the draw arm never
+    // runs.
+    "TextEdit",
+    "CodeEdit",
     "ProgressBar",
     "CheckBox",
     "CheckButton",
@@ -644,6 +651,43 @@ fn draw_control(
                             x = gx;
                         }
                     }
+                }
+            }
+        }
+        // A TextEdit/CodeEdit draws its `text` line by line. When a
+        // CodeHighlighter is assigned — its `keyword_colors` carried on the node
+        // as the `syntax_highlighter/keyword_colors` dictionary, so the renderer
+        // stays a pure function of the tree, the way RichTextLabel carries its fx
+        // time — each keyword run draws in its configured colour; otherwise the
+        // whole line draws in the font colour. pat-nzgdu.198.
+        "TextEdit" | "CodeEdit" => {
+            let text = string_prop(tree, node_id, "text").unwrap_or_default();
+            if !text.is_empty() {
+                let font_color = color_prop(tree, node_id, "theme_override_colors/font_color")
+                    .or_else(|| theme.get_color("TextEdit", "font_color"))
+                    .unwrap_or(Color::WHITE);
+                let font_size = theme.get_font_size("TextEdit", "font_size").unwrap_or(16);
+                let scale = text_scale(font_size);
+                let keyword_dict = tree
+                    .get_node(node_id)
+                    .map(|n| n.get_property("syntax_highlighter/keyword_colors"))
+                    .unwrap_or(Variant::Nil);
+                let highlighter = CodeHighlighter::from_keyword_dict(&keyword_dict, font_color);
+                let line_h = (GLYPH_H + GLYPH_GAP) * scale as f32;
+                let mut y = rect.position.y;
+                for line in text.split('\n') {
+                    let mut x = rect.position.x;
+                    for span in highlighter.line_spans(line) {
+                        let w = text_width(&span.text, scale);
+                        out.push(DrawCommand::DrawString {
+                            text: span.text,
+                            position: Vector2::new(x, y),
+                            color: span.color,
+                            font_size: scale,
+                        });
+                        x += w + GLYPH_GAP * scale as f32;
+                    }
+                    y += line_h;
                 }
             }
         }

@@ -357,6 +357,18 @@ impl MainLoop {
                 }
             }
             emitter.one_shot = matches!(node.get_property("one_shot"), Variant::Bool(true));
+            // pat-nzgdu.145: node-level draw order (0=Index / 1=Lifetime /
+            // 2=ReverseLifetime) and fixed simulation rate. The emitter carried
+            // these fields, but the node's properties were never read into it, so
+            // setting them had no scene-level effect until now.
+            if let Variant::Int(o) = node.get_property("draw_order") {
+                emitter.draw_order = crate::particle::ParticleDrawOrder::from_godot_int(o);
+            }
+            if let Variant::Int(f) = node.get_property("fixed_fps") {
+                if f >= 0 {
+                    emitter.fixed_fps = f as u32;
+                }
+            }
             if let Some(e) = prop_f32(node.get_property("explosiveness")) {
                 emitter.explosiveness = e.clamp(0.0, 1.0);
             }
@@ -398,6 +410,10 @@ impl MainLoop {
 
         // Step every particle node's simulator: emitting nodes spawn new
         // particles, non-emitting nodes just age their remaining particles out.
+        // pat-nzgdu.145: nodes whose one_shot burst drains this frame get their
+        // Godot `finished` signal emitted after the loop (emitting inside would
+        // conflict with the `self.particles` borrow the loop holds).
+        let mut finished_emitters: Vec<NodeId> = Vec::new();
         for (id, is_emitting, emitter) in configs {
             let sim = self
                 .particles
@@ -413,6 +429,15 @@ impl MainLoop {
             sim.emitter = emitter;
             sim.emitter.emitting = emitting;
             sim.step(dt);
+            // Drain the one-shot completion edge (fires exactly once per drain).
+            if sim.take_finished() {
+                finished_emitters.push(id);
+            }
+        }
+        // Godot fires `finished` when a one_shot emitter completes; a connected
+        // script's callback (or `.tscn` [connection]) runs here.
+        for id in finished_emitters {
+            self.tree.emit_signal(id, "finished", &[]);
         }
 
         // Publish live counts + per-particle draw data back onto the nodes so the

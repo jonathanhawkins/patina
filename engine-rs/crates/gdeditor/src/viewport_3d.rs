@@ -81,6 +81,11 @@ pub struct ViewportCamera3D {
     pub pan_sensitivity: f32,
     /// Zoom sensitivity (multiplier per scroll tick).
     pub zoom_sensitivity: f32,
+    /// pat-nzgdu.173: when set, `transform()` returns this world transform
+    /// verbatim instead of the orbit-derived one. Used to render a preview from a
+    /// scene `Camera3D`'s viewpoint (the camera-preview inset / cinematic mode)
+    /// rather than the editor's orbit camera. `None` for the normal editor camera.
+    pub override_transform: Option<Transform3D>,
 }
 
 impl Default for ViewportCamera3D {
@@ -98,6 +103,7 @@ impl Default for ViewportCamera3D {
             orbit_sensitivity: 0.005,
             pan_sensitivity: 0.01,
             zoom_sensitivity: 0.1,
+            override_transform: None,
         }
     }
 }
@@ -154,6 +160,11 @@ impl ViewportCamera3D {
 
     /// Computes the full `Transform3D` for this camera.
     pub fn transform(&self) -> Transform3D {
+        // pat-nzgdu.173: a preview camera renders from an explicit world
+        // transform (a scene Camera3D's), bypassing the orbit derivation.
+        if let Some(tf) = self.override_transform {
+            return tf;
+        }
         let pos = self.position();
         let fwd = self.orbit_direction();
         let right = self.right();

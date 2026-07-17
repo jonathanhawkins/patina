@@ -8,6 +8,86 @@ use gdcore::math::{Color, Vector3};
 use gdvariant::Variant;
 
 // ---------------------------------------------------------------------------
+// Texture3DVolume
+// ---------------------------------------------------------------------------
+
+/// CPU volume storage backing a `Texture3D` density map (pat-nzgdu.214).
+///
+/// A `Texture3D` is a stack of `depth` image layers; here each layer is a
+/// `width * height` grid of scalar density samples (fog reads one density
+/// channel). The runtime `Texture3D` *resource* is registered in ClassDB
+/// (gdobject); this is the actual per-voxel data a `FogVolume` samples on the
+/// CPU fog path. It lives in `gdserver3d` — not `gdrender2d` as the bead's
+/// text suggested — because that is where `FogVolume` consumes it, and
+/// `gdserver3d` neither does nor (being 3D) should depend on the 2D crate.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Texture3DVolume {
+    width: usize,
+    height: usize,
+    /// One `width * height` layer per depth slice, front (`w = 0`) to back.
+    layers: Vec<Vec<f32>>,
+}
+
+impl Texture3DVolume {
+    /// Builds a volume from its depth layers. Each layer is normalised to
+    /// `width * height` (short layers zero-padded, long ones truncated) so the
+    /// sampler can never index out of bounds.
+    pub fn from_layers(width: usize, height: usize, mut layers: Vec<Vec<f32>>) -> Self {
+        let plane = width * height;
+        for layer in &mut layers {
+            layer.resize(plane, 0.0);
+        }
+        Self {
+            width,
+            height,
+            layers,
+        }
+    }
+
+    /// Number of depth layers.
+    pub fn depth(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Layer width in samples.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Layer height in samples.
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// `true` when there is no data to sample.
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty() || self.width == 0 || self.height == 0
+    }
+
+    /// Nearest-neighbour sample at normalised coordinates `(u, v, w)`, each in
+    /// `[0, 1]`. `w` selects the depth layer — the behaviour a `Texture3D` adds
+    /// over a flat texture. Coordinates outside `[0, 1]` clamp to the edge.
+    pub fn sample(&self, u: f32, v: f32, w: f32) -> f32 {
+        if self.is_empty() {
+            return 0.0;
+        }
+        let z = nearest_index(w, self.layers.len());
+        let x = nearest_index(u, self.width);
+        let y = nearest_index(v, self.height);
+        self.layers[z][y * self.width + x]
+    }
+}
+
+/// Maps a normalised coordinate in `[0, 1]` to a nearest cell index in
+/// `[0, len)`, clamping outside the range.
+fn nearest_index(t: f32, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    ((t.clamp(0.0, 1.0) * len as f32).floor() as usize).min(len - 1)
+}
+
+// ---------------------------------------------------------------------------
 // FogVolumeShape
 // ---------------------------------------------------------------------------
 
@@ -75,6 +155,11 @@ pub struct FogMaterial {
     pub edge_fade: f32,
     /// Density texture (path). Empty means uniform density.
     pub density_texture: String,
+    /// pat-nzgdu.214: the resolved `Texture3D` volume data for `density_texture`,
+    /// when a loader has resolved the path. Transient — not (de)serialised (the
+    /// path in `density_texture` is what round-trips); when present it modulates
+    /// the base density per voxel.
+    pub density_volume: Option<Texture3DVolume>,
 }
 
 impl Default for FogMaterial {
@@ -86,6 +171,7 @@ impl Default for FogMaterial {
             height_falloff: 0.0,
             edge_fade: 0.1,
             density_texture: String::new(),
+            density_volume: None,
         }
     }
 }
@@ -350,6 +436,27 @@ impl FogVolume {
             let edge_factor = self.edge_distance(local_point);
             let fade = (edge_factor / self.material.edge_fade).clamp(0.0, 1.0);
             density *= fade;
+        }
+
+        // pat-nzgdu.214: a resolved Texture3D density map modulates the base
+        // density by its per-voxel value; the `w` (depth) coordinate selects the
+        // correct layer. The local point spans [-size/2, size/2] per axis (see
+        // `contains_point`), so it maps to [0, 1] as `(p + size/2) / size`.
+        if let Some(vol) = &self.material.density_volume {
+            if !vol.is_empty() {
+                let half = self.size * 0.5;
+                let norm = |p: f32, half: f32, size: f32| {
+                    if size.abs() > 1e-6 {
+                        (p + half) / size
+                    } else {
+                        0.5
+                    }
+                };
+                let u = norm(local_point.x, half.x, self.size.x);
+                let v = norm(local_point.y, half.y, self.size.y);
+                let w = norm(local_point.z, half.z, self.size.z);
+                density *= vol.sample(u, v, w);
+            }
         }
 
         density

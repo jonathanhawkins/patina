@@ -865,6 +865,7 @@ dependencies = [
  "hound",
  "lewton",
  "minimp3",
+ "ogg",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",

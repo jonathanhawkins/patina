@@ -4727,6 +4727,103 @@ pub fn register_audio_classes() {
                 .method(MethodInfo::new("is_playing", 0)),
         );
     }
+
+    // -- The AudioStream *resource* side (pat-nzgdu.188) -----------------------
+    //
+    // ⚠️ Every `AudioStream*Playback*` class above was already registered — but
+    // not one of the *streams* they play. Godot splits the resource
+    // (`AudioStream`, holding the data) from the runtime instance
+    // (`AudioStreamPlayback`, pulling frames from it); Patina had only ever
+    // registered the second half, so an `AudioStreamOggVorbis` could be played
+    // but never named.
+    //
+    // `Resource` needs its own guard: this function ensures Object/Node/RefCounted
+    // but never Resource, and every class below descends from it.
+    if !class_exists("Resource") {
+        register_class(ClassRegistration::new("Resource").parent("Object"));
+    }
+    if !class_exists("AudioStream") {
+        // GDREGISTER_CLASS in servers/register_server_types.cpp:166 — concrete,
+        // not abstract, despite being a base (cf. AudioStreamPlayback above).
+        register_class(
+            ClassRegistration::new("AudioStream")
+                .parent("Resource")
+                .method(MethodInfo::new("get_length", 0))
+                .method(MethodInfo::new("is_monophonic", 0))
+                .method(MethodInfo::new("instantiate_playback", 0))
+                .method(MethodInfo::new("can_be_sampled", 0))
+                .method(MethodInfo::new("generate_sample", 0))
+                .method(MethodInfo::new("is_meta_stream", 0)),
+        );
+    }
+    if !class_exists("OggPacketSequence") {
+        register_class(
+            ClassRegistration::new("OggPacketSequence")
+                .parent("Resource")
+                // ⚠️ `packet_data` is Variant::ARRAY — an array of *pages*, each
+                // itself an array of packets (C++ `Vector<Vector<PackedByteArray>>`,
+                // bound as `TypedArray<Array>`). The api dump types this
+                // `typedarray::PackedByteArray`, i.e. a flat array of byte arrays,
+                // which loses the page grouping the granule positions index against.
+                // ADD_PROPERTY at modules/ogg/ogg_packet_sequence.cpp:131 is the truth.
+                .property(PropertyInfo::new("packet_data", Variant::Array(Vec::new())))
+                // ⚠️ Named `granule_positions`, but its accessors are
+                // `{set,get}_packet_granule_positions` — and the values are one per
+                // PAGE, not per packet, despite that name (`page_granule_positions`
+                // in the header).
+                .property(PropertyInfo::new(
+                    "granule_positions",
+                    Variant::PackedInt64Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new("sampling_rate", Variant::Float(0.0)))
+                .method(MethodInfo::new("set_packet_data", 1))
+                .method(MethodInfo::new("get_packet_data", 0))
+                .method(MethodInfo::new("set_packet_granule_positions", 1))
+                .method(MethodInfo::new("get_packet_granule_positions", 0))
+                .method(MethodInfo::new("set_sampling_rate", 1))
+                .method(MethodInfo::new("get_sampling_rate", 0))
+                .method(MethodInfo::new("get_length", 0)),
+        );
+    }
+    if !class_exists("OggPacketSequencePlayback") {
+        // Binds nothing — Godot hands it out only as an opaque handle.
+        // `OggPacketSequence::instantiate_playback()` exists in C++ but is
+        // deliberately NOT in _bind_methods, so it must not be registered.
+        register_class(ClassRegistration::new("OggPacketSequencePlayback").parent("RefCounted"));
+    }
+    if !class_exists("AudioStreamOggVorbis") {
+        register_class(
+            ClassRegistration::new("AudioStreamOggVorbis")
+                .parent("AudioStream")
+                .property(PropertyInfo::new("packet_sequence", Variant::Nil))
+                .property(PropertyInfo::new("bpm", Variant::Float(0.0)))
+                .property(PropertyInfo::new("beat_count", Variant::Int(0)))
+                // ⚠️ 4, not 0 — a bar is four beats unless told otherwise.
+                .property(PropertyInfo::new("bar_beats", Variant::Int(4)))
+                .property(PropertyInfo::new(
+                    "tags",
+                    Variant::Dictionary(gdvariant::Dictionary::new()),
+                ))
+                .property(PropertyInfo::new("loop", Variant::Bool(false)))
+                .property(PropertyInfo::new("loop_offset", Variant::Float(0.0)))
+                .method(MethodInfo::new("load_from_buffer", 1))
+                .method(MethodInfo::new("load_from_file", 1))
+                .method(MethodInfo::new("set_packet_sequence", 1))
+                .method(MethodInfo::new("get_packet_sequence", 0))
+                .method(MethodInfo::new("set_loop", 1))
+                .method(MethodInfo::new("has_loop", 0))
+                .method(MethodInfo::new("set_loop_offset", 1))
+                .method(MethodInfo::new("get_loop_offset", 0))
+                .method(MethodInfo::new("set_bpm", 1))
+                .method(MethodInfo::new("get_bpm", 0))
+                .method(MethodInfo::new("set_beat_count", 1))
+                .method(MethodInfo::new("get_beat_count", 0))
+                .method(MethodInfo::new("set_bar_beats", 1))
+                .method(MethodInfo::new("get_bar_beats", 0))
+                .method(MethodInfo::new("set_tags", 1))
+                .method(MethodInfo::new("get_tags", 0)),
+        );
+    }
 }
 
 /// Registers core IO utility classes matching Godot's `FileAccess` / `DirAccess`.
@@ -5080,6 +5177,50 @@ pub fn register_io_classes() {
                 // ...and the two public registry calls.
                 .method(MethodInfo::new("add_format_loader", 0))
                 .method(MethodInfo::new("remove_format_loader", 0)),
+        );
+    }
+
+    // pat-nzgdu.222: ResourceFormatLoader / ResourceFormatSaver — the
+    // script-subclassable base classes a plugin extends to add a custom resource
+    // format. Both are GDREGISTER_CLASS (core/register_core_types.cpp:149-150) —
+    // concrete and *directly* subclassable, unlike ImageFormatLoader above which
+    // splits into an abstract base + an Extension. They bind ONLY virtual methods
+    // (the dump reports zero non-virtual on each); a subclass overrides the ones
+    // it needs.
+    //
+    // ⚠️ SCOPE: this registers the class surface so `extends ResourceFormatLoader`
+    // resolves. The runtime *dispatch* — `ResourceLoader.add_resource_format_loader`
+    // plus a `load()` that invokes a script subclass's `_load` — is a separate,
+    // larger gdscript-interop feature (no ResourceLoader singleton/registry exists
+    // in the interpreter yet) and is NOT wired here.
+    if !class_exists("ResourceFormatLoader") {
+        register_class(
+            ClassRegistration::new("ResourceFormatLoader")
+                .parent("RefCounted")
+                .method(MethodInfo::new("_get_recognized_extensions", 0))
+                .method(MethodInfo::new("_recognize_path", 2))
+                .method(MethodInfo::new("_handles_type", 1))
+                .method(MethodInfo::new("_get_resource_type", 1))
+                .method(MethodInfo::new("_get_resource_script_class", 1))
+                .method(MethodInfo::new("_get_resource_uid", 1))
+                .method(MethodInfo::new("_get_dependencies", 2))
+                .method(MethodInfo::new("_rename_dependencies", 2))
+                .method(MethodInfo::new("_exists", 1))
+                .method(MethodInfo::new("_get_classes_used", 1))
+                // (path, original_path, use_sub_threads, cache_mode)
+                .method(MethodInfo::new("_load", 4)),
+        );
+    }
+    if !class_exists("ResourceFormatSaver") {
+        register_class(
+            ClassRegistration::new("ResourceFormatSaver")
+                .parent("RefCounted")
+                // (resource, path, flags)
+                .method(MethodInfo::new("_save", 3))
+                .method(MethodInfo::new("_set_uid", 2))
+                .method(MethodInfo::new("_recognize", 1))
+                .method(MethodInfo::new("_get_recognized_extensions", 1))
+                .method(MethodInfo::new("_recognize_path", 2)),
         );
     }
 
@@ -6542,6 +6683,78 @@ pub fn register_editor_classes() {
     if !class_exists("GDScriptSyntaxHighlighter") {
         register_class(
             ClassRegistration::new("GDScriptSyntaxHighlighter").parent("EditorSyntaxHighlighter"),
+        );
+    }
+    // CodeHighlighter is the concrete, *runtime* SyntaxHighlighter a TextEdit
+    // binds to colour code without an editor (pat-nzgdu.198). Godot registers it
+    // in `register_scene_types.cpp:533` (GDREGISTER_CLASS — concrete), next to
+    // the base; it lives here beside its base so a single registration call
+    // brings up the whole family.
+    //
+    // ⚠️ Its four scalar colours all default to `Color(0, 0, 0, 1)` — opaque
+    // black, not transparent — and its three maps default empty. An empty
+    // highlighter colours nothing (every `get_*_color` starts at black until a
+    // theme/script fills it in), which is exactly Godot's behaviour.
+    if !class_exists("CodeHighlighter") {
+        register_class(
+            ClassRegistration::new("CodeHighlighter")
+                .parent("SyntaxHighlighter")
+                .property(PropertyInfo::new(
+                    "number_color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "symbol_color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "function_color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "member_variable_color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "keyword_colors",
+                    Variant::Dictionary(gdvariant::Dictionary::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "member_keyword_colors",
+                    Variant::Dictionary(gdvariant::Dictionary::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "color_regions",
+                    Variant::Dictionary(gdvariant::Dictionary::new()),
+                ))
+                .method(MethodInfo::new("add_keyword_color", 2))
+                .method(MethodInfo::new("remove_keyword_color", 1))
+                .method(MethodInfo::new("has_keyword_color", 1))
+                .method(MethodInfo::new("get_keyword_color", 1))
+                .method(MethodInfo::new("set_keyword_colors", 1))
+                .method(MethodInfo::new("clear_keyword_colors", 0))
+                .method(MethodInfo::new("get_keyword_colors", 0))
+                .method(MethodInfo::new("add_member_keyword_color", 2))
+                .method(MethodInfo::new("remove_member_keyword_color", 1))
+                .method(MethodInfo::new("has_member_keyword_color", 1))
+                .method(MethodInfo::new("get_member_keyword_color", 1))
+                .method(MethodInfo::new("set_member_keyword_colors", 1))
+                .method(MethodInfo::new("clear_member_keyword_colors", 0))
+                .method(MethodInfo::new("get_member_keyword_colors", 0))
+                .method(MethodInfo::new("add_color_region", 4))
+                .method(MethodInfo::new("remove_color_region", 1))
+                .method(MethodInfo::new("has_color_region", 1))
+                .method(MethodInfo::new("set_color_regions", 1))
+                .method(MethodInfo::new("clear_color_regions", 0))
+                .method(MethodInfo::new("get_color_regions", 0))
+                .method(MethodInfo::new("set_function_color", 1))
+                .method(MethodInfo::new("get_function_color", 0))
+                .method(MethodInfo::new("set_number_color", 1))
+                .method(MethodInfo::new("get_number_color", 0))
+                .method(MethodInfo::new("set_symbol_color", 1))
+                .method(MethodInfo::new("get_symbol_color", 0))
+                .method(MethodInfo::new("set_member_variable_color", 1))
+                .method(MethodInfo::new("get_member_variable_color", 0)),
         );
     }
 

@@ -281,6 +281,22 @@ pub struct ClipboardEntry {
     pub children: Vec<ClipboardEntry>,
 }
 
+/// One recorded Movie Maker frame (pat-nzgdu.171). Godot's Movie Maker writes
+/// each rendered frame to a video container; a runtime step here produces a
+/// [`gdscene::main_loop::FrameOutput`] (frame number + timing), not pixels, so
+/// the downloadable sequence is per-frame metadata captured at a fixed timestep.
+/// Encoding the actual viewport pixels per frame is a follow-up (the runtime
+/// step does not currently rasterize a frame; `GET /api/editor/viewport.png`
+/// renders the editor viewport, not the running MainLoop's tree).
+#[derive(Debug, Clone)]
+pub struct MovieFrame {
+    /// 1-indexed frame number, matching `runtime_frame_count`.
+    pub index: u64,
+    /// Game time at the end of this frame (seconds), accumulated at the fixed
+    /// movie timestep.
+    pub time: f64,
+}
+
 /// Shared editor state protected by a mutex.
 pub struct EditorState {
     /// The scene tree being edited.
@@ -376,6 +392,14 @@ pub struct EditorState {
     pub runtime_hide_selection: bool,
     /// Game-view interaction mode: "input" | "2d" | "3d".
     pub runtime_input_mode: String,
+    /// pat-nzgdu.171: Movie Maker mode. Set by a `{"movie":true}` play request;
+    /// while active the runtime steps at a fixed timestep (ignoring time_scale)
+    /// and records each frame into `movie_frames`.
+    pub movie_mode: bool,
+    /// Frames captured during the current/last Movie Maker run — one per stepped
+    /// frame. Kept after Stop so the sequence can still be downloaded; cleared on
+    /// the next Play.
+    pub movie_frames: Vec<MovieFrame>,
     /// Time between frames (fixed at 1/60).
     pub delta_time: f64,
     /// Named animations stored in the editor.
@@ -787,6 +811,8 @@ impl EditorState {
             runtime_camera_override: false,
             runtime_hide_selection: false,
             runtime_input_mode: "input".to_string(),
+            movie_mode: false,
+            movie_frames: Vec::new(),
             delta_time: 1.0 / 60.0,
             animations: HashMap::new(),
             anim_tree: crate::anim_tree_graph::AnimTreeGraph::new(),
@@ -2128,6 +2154,11 @@ fn handle_connection(
         }
         ("GET", "/api/viewport") => api_get_viewport_bmp(viewport_cache, &mut stream),
         ("GET", "/api/viewport/png") => api_get_viewport_png(viewport_cache, &mut stream),
+        // pat-nzgdu.173: render a PNG from a scene Camera3D's viewpoint (the
+        // camera-preview inset; `?cinematic=1` renders through the active camera).
+        ("GET", "/api/viewport/3d/camera_preview") => {
+            api_viewport_3d_camera_preview(state, &req.query, &mut stream)
+        }
         ("POST", "/api/viewport/resize") => api_viewport_resize(state, &req.body, &mut stream),
         ("POST", "/api/node/add") => api_add_node(state, &req.body, &mut stream),
         ("POST", "/api/node/delete") => api_delete_node(state, &req.body, &mut stream),
@@ -2280,11 +2311,13 @@ fn handle_connection(
         ("POST", "/api/animation/seek") => api_seek_animation(state, &req.body, &mut stream),
         ("POST", "/api/animation/record") => api_toggle_recording(state, &req.body, &mut stream),
         ("POST", "/api/animation/blend") => api_animation_blend(state, &req.body, &mut stream),
-        ("POST", "/api/runtime/play") => api_runtime_play(state, &mut stream),
+        ("POST", "/api/runtime/play") => api_runtime_play(state, &req.body, &mut stream),
         ("POST", "/api/runtime/stop") => api_runtime_stop(state, &mut stream),
         ("POST", "/api/runtime/pause") => api_runtime_pause(state, &mut stream),
         ("POST", "/api/runtime/step") => api_runtime_step(state, &mut stream),
         ("GET", "/api/runtime/status") => api_runtime_status(state, &mut stream),
+        // pat-nzgdu.171: download the Movie Maker frame sequence for the run.
+        ("GET", "/api/runtime/movie") => api_runtime_movie(state, &mut stream),
         // pat-nzgdu.23: live node inspection of the running scene (remote tree).
         ("GET", "/api/runtime/node") => api_runtime_node(state, &req.query, &mut stream),
         // pat-j9yqh: game-view runtime toolbar controls
@@ -5460,6 +5493,49 @@ fn api_get_viewport_png(cache: &Arc<ViewportCache>, stream: &mut TcpStream) {
             send_error(stream, 404, "no frame available");
         }
     }
+}
+
+/// pat-nzgdu.173: `GET /api/viewport/3d/camera_preview[?cinematic=1]` — renders a
+/// PNG from a scene `Camera3D`'s viewpoint, distinct from the editor camera.
+///
+/// Without `cinematic`, previews the **selected** node (must be a Camera3D — the
+/// Preview button only shows when one is selected). With `cinematic=1`, renders
+/// through the scene's **active** camera (the first Camera3D in tree order).
+/// 404 when there is no eligible camera.
+fn api_viewport_3d_camera_preview(
+    state: &Arc<Mutex<EditorState>>,
+    query: &str,
+    stream: &mut TcpStream,
+) {
+    let state = state.lock().unwrap();
+    let is_camera = |id: NodeId| -> bool {
+        state
+            .scene_tree
+            .get_node(id)
+            .map(|n| n.class_name() == "Camera3D")
+            .unwrap_or(false)
+    };
+    let camera = if query.contains("cinematic=1") {
+        state
+            .scene_tree
+            .all_nodes_in_tree_order()
+            .into_iter()
+            .find(|id| is_camera(*id))
+    } else {
+        state.selected_node.filter(|id| is_camera(*id))
+    };
+    let camera = match camera {
+        Some(c) => c,
+        None => {
+            send_error(stream, 404, "no Camera3D to preview");
+            return;
+        }
+    };
+    // A small 4:3 inset — this is a picture-in-picture overlay, not the main view.
+    let fb =
+        crate::viewport_3d_render::render_camera3d_preview(&state.scene_tree, camera, 320, 240);
+    let png = encode_png_fast(&fb);
+    send_binary(stream, "image/png", &png);
 }
 
 /// Crash-safe file write: writes `contents` to a sibling temp file,
@@ -9879,7 +9955,12 @@ fn instantiate_play_autoloads(tree: &mut SceneTree, project_root: &str) -> Vec<N
         .collect()
 }
 
-fn api_runtime_play(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    // pat-nzgdu.171: an optional `{"movie":true}` body enables Movie Maker mode
+    // for this run — fixed-timestep stepping with a per-frame capture.
+    let movie = parse_json_body(body)
+        .and_then(|v| v.get("movie").and_then(|m| m.as_bool()))
+        .unwrap_or(false);
     let mut state = state.lock().unwrap();
     if state.is_running {
         send_json(stream, r#"{"ok":true,"already_running":true}"#);
@@ -9915,6 +9996,9 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     state.is_running = true;
     state.is_paused = false;
     state.runtime_frame_count = 0;
+    // pat-nzgdu.171: start (or clear) the Movie Maker recording for this run.
+    state.movie_mode = movie;
+    state.movie_frames.clear();
     // Launching the scene switches the main screen to the game view so the
     // running scene is shown where the editor viewport was (pat-niu1j.1).
     // Remember the mode we came from so Stop can restore it (pat-niu1j.3).
@@ -9982,6 +10066,9 @@ fn api_runtime_stop(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     state.is_paused = false;
     state.run_main_loop = None;
     state.runtime_frame_count = 0;
+    // pat-nzgdu.171: stop recording, but keep `movie_frames` so the finished
+    // run's sequence can still be downloaded until the next Play clears it.
+    state.movie_mode = false;
     state.clear_all_input();
     // Restore the main-screen view that Play switched away from (Play set
     // `editor_mode = "game"` and stashed the prior mode in
@@ -10030,7 +10117,16 @@ fn api_runtime_pause(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
 /// `delta * time_scale`). Engine input is drained after scripts run, mirroring
 /// the original step handler.
 fn advance_running_main_loop(state: &mut EditorState) -> u64 {
-    let delta = state.delta_time * state.runtime_time_scale;
+    // pat-nzgdu.171: Movie Maker records at a stable, fixed timestep. time_scale
+    // must not change how much game time each captured frame advances, or the
+    // recording would speed up/stutter, so movie mode uses the raw fixed delta.
+    let delta = if state.movie_mode {
+        state.delta_time
+    } else {
+        state.delta_time * state.runtime_time_scale
+    };
+    let capture = state.movie_mode;
+    let dt = state.delta_time;
     // The engine-owned InputState is populated by api_input_key_down/up via
     // push_event(). The bridge in MainLoop::step() converts it to the
     // script-facing InputSnapshot automatically. We still set a manual
@@ -10040,6 +10136,14 @@ fn advance_running_main_loop(state: &mut EditorState) -> u64 {
         main_loop.set_input(input_snapshot);
         let output = main_loop.step(delta);
         state.runtime_frame_count = output.frame_count;
+        // Record one frame per step while Movie Maker is active (this runs for
+        // both the auto-driver and the manual /api/runtime/step path).
+        if capture {
+            state.movie_frames.push(MovieFrame {
+                index: output.frame_count,
+                time: output.frame_count as f64 * dt,
+            });
+        }
     }
     // Clear per-frame input after scripts have run.
     state.clear_frame_input();
@@ -10058,6 +10162,31 @@ fn api_runtime_step(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     }
     let frame = advance_running_main_loop(&mut state);
     send_json(stream, &format!(r#"{{"ok":true,"frame_count":{frame}}}"#));
+}
+
+/// pat-nzgdu.171: `GET /api/runtime/movie` — the recorded Movie Maker frame
+/// sequence for the current or just-finished run, downloadable as JSON.
+/// `frame_count` equals the number of frames stepped while movie mode was
+/// active (the acceptance's "N captured frames for N stepped frames").
+fn api_runtime_movie(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let state = state.lock().unwrap();
+    let frames = state
+        .movie_frames
+        .iter()
+        .map(|f| format!(r#"{{"index":{},"time":{}}}"#, f.index, f.time))
+        .collect::<Vec<_>>()
+        .join(",");
+    let fps = (1.0 / state.delta_time).round() as u64;
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"movie_mode":{},"frame_count":{},"fps":{},"frames":[{}]}}"#,
+            state.movie_mode,
+            state.movie_frames.len(),
+            fps,
+            frames
+        ),
+    );
 }
 
 fn api_runtime_status(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
@@ -14789,6 +14918,61 @@ environment = SubResource("env1")
         let v: serde_json::Value =
             serde_json::from_str(extract_body(&http_get(port, "/api/runtime/status"))).unwrap();
         v["frame_count"].as_u64().unwrap()
+    }
+
+    /// pat-nzgdu.171: the number of frames recorded in the Movie Maker sequence.
+    fn movie_frame_count(port: u16) -> u64 {
+        let v: serde_json::Value =
+            serde_json::from_str(extract_body(&http_get(port, "/api/runtime/movie"))).unwrap();
+        v["frame_count"].as_u64().unwrap()
+    }
+
+    /// pat-nzgdu.171: Movie Maker mode must (a) be sent by the editor client on
+    /// Play and (b) record one frame per stepped frame while active.
+    #[test]
+    fn editor_movie_maker_record_test() {
+        // (a) The editor's Play requests carry the Movie Maker flag.
+        assert!(
+            crate::editor_ui::EDITOR_HTML.contains("movie: movieMakerEnabled"),
+            "the Play request must send the Movie Maker flag",
+        );
+
+        // (b) A movie-mode run records N frames for N stepped frames.
+        let (handle, port) = make_server();
+        assert!(http_post(port, "/api/runtime/play", r#"{"movie":true}"#).contains("200 OK"));
+        http_post(port, "/api/runtime/pause", "");
+        // The auto-driver stops once paused; from that baseline, each manual step
+        // captures exactly one more movie frame.
+        let base = movie_frame_count(port);
+        for _ in 0..5 {
+            http_post(port, "/api/runtime/step", "");
+        }
+        assert_eq!(
+            movie_frame_count(port),
+            base + 5,
+            "5 stepped frames must record 5 movie frames",
+        );
+        // The recorded frame count tracks the runtime frame count 1:1 — every
+        // stepped frame while movie mode is active is captured.
+        assert_eq!(movie_frame_count(port), status_frame_count(port));
+        handle.stop();
+    }
+
+    /// A normal (non-movie) Play records nothing.
+    #[test]
+    fn play_without_movie_flag_records_no_frames() {
+        let (handle, port) = make_server();
+        http_post(port, "/api/runtime/play", r#"{"movie":false}"#);
+        http_post(port, "/api/runtime/pause", "");
+        for _ in 0..3 {
+            http_post(port, "/api/runtime/step", "");
+        }
+        assert_eq!(
+            movie_frame_count(port),
+            0,
+            "no frames captured when movie mode is off",
+        );
+        handle.stop();
     }
 
     /// pat-nzgdu.148: the editor document is served cross-origin isolated, so a

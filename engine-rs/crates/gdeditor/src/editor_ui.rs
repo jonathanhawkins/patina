@@ -2252,6 +2252,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     <!-- Viewport -->
     <div id="viewport-panel">
       <div class="panel-header">Viewport</div>
+      <!-- pat-nzgdu.173: Camera3D preview inset (Godot's Preview button). Shows
+           what the selected Camera3D sees, rendered by the server at
+           /api/viewport/3d/camera_preview — distinct from the editor camera. -->
+      <img id="cam-preview-inset" alt="Camera3D preview"
+           style="display:none; position:absolute; right:12px; bottom:12px; width:240px; height:180px; border:1px solid var(--border); border-radius:3px; box-shadow:0 2px 10px rgba(0,0,0,0.5); z-index:9; background:#000;">
       <!-- 3D spatial editor toolbar (Godot Node3DEditor main_menu_hbox parity,
            node_3d_editor_plugin.cpp): transform tools, list-select, lock/group,
            ruler, local-space + snap, sun/environment preview + settings, and the
@@ -4186,12 +4191,14 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       clearScript();
       if (typeof updateMiscButtons === 'function') updateMiscButtons();
       buildTilePalette(); // pat-nzgdu.34: hide TileSet palette when nothing is selected
+      updateCameraPreviewInset(); // pat-nzgdu.173: hide the Camera3D preview inset
       return;
     }
     var data = await api('GET', '/api/selected');
     if (data) {
       selectedNodeData = data;
       buildTilePalette(); // pat-nzgdu.34: refresh TileSet palette for the new selection
+      updateCameraPreviewInset(); // pat-nzgdu.173: show/refresh the Camera3D preview inset
       renderInspector(data);
       document.getElementById('status-selected').textContent = data.name || 'None';
       document.getElementById('status-path').textContent = data.path || '\u2014';
@@ -5674,6 +5681,24 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   function updateTilePaintToggle() {
     var btn = document.getElementById('tilemap-paint-toggle');
     if (btn) btn.textContent = 'Paint: ' + (tilePaintActive ? 'on' : 'off');
+  }
+
+  // pat-nzgdu.173: Godot's Camera3D "Preview" inset. When a Camera3D is selected
+  // the picture-in-picture shows what that camera sees, rendered server-side by
+  // /api/viewport/3d/camera_preview (its viewpoint, not the editor's orbit
+  // camera). Called from fetchSelected() on every selection change.
+  function updateCameraPreviewInset() {
+    var el = document.getElementById('cam-preview-inset');
+    if (!el) return;
+    var cls = (selectedNodeData && (selectedNodeData.class || selectedNodeData.class_name)) || '';
+    if (cls === 'Camera3D') {
+      // Cache-bust so a moved camera re-renders.
+      el.src = '/api/viewport/3d/camera_preview?t=' + Date.now();
+      el.style.display = 'block';
+    } else {
+      el.style.display = 'none';
+      el.removeAttribute('src');
+    }
   }
 
   // Rebuild the TileSet palette for the current selection. Hidden unless a
@@ -9447,7 +9472,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     });
     document.getElementById('btn-play').addEventListener('click', async function() {
       if (runtimeRunning) return;
-      var r = await api('POST', '/api/runtime/play');
+      var r = await api('POST', '/api/runtime/play', { movie: movieMakerEnabled });
       if (r && r.ok) { runtimeRunning = true; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Play started (F5)'); enterGameViewOnPlay(); updatePlayButtonStates(); showPlayingOverlay(true); updateRuntimeStatusBar(); setRuntimeEditingDisabled(true); startRuntimePolling(); startGameInput(); }
     });
     document.getElementById('btn-pause').addEventListener('click', async function() {
@@ -9461,7 +9486,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     });
     document.getElementById('btn-play-current').addEventListener('click', async function() {
       if (runtimeRunning) return;
-      var r = await api('POST', '/api/runtime/play');
+      var r = await api('POST', '/api/runtime/play', { movie: movieMakerEnabled });
       if (r && r.ok) { runtimeRunning = true; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Play Current Scene (F6)'); enterGameViewOnPlay(); updatePlayButtonStates(); showPlayingOverlay(true); updateRuntimeStatusBar(); setRuntimeEditingDisabled(true); startRuntimePolling(); startGameInput(); }
     });
     // pat-12qzs: Play Custom Scene — pick a scene file and run it (Godot's
@@ -9474,7 +9499,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var scene = prompt('Play a custom scene (res:// path):', def);
       if (!scene || !scene.trim()) return;
       if (typeof doOpenScene === 'function') { await doOpenScene(scene.trim()); }
-      var r = await api('POST', '/api/runtime/play');
+      var r = await api('POST', '/api/runtime/play', { movie: movieMakerEnabled });
       if (r && r.ok) { runtimeRunning = true; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Play Custom Scene: ' + scene.trim()); enterGameViewOnPlay(); updatePlayButtonStates(); showPlayingOverlay(true); updateRuntimeStatusBar(); setRuntimeEditingDisabled(true); startRuntimePolling(); startGameInput(); }
     });
     // pat-uqj6w: Movie Maker mode toggle. When enabled, a play records the

@@ -66,6 +66,7 @@ pub mod springarm3d;
 pub mod sprite_frames;
 pub mod stylebox;
 pub mod sub_viewport;
+pub mod syntax_highlighter;
 pub mod theme;
 pub mod tilemap;
 pub mod trace;

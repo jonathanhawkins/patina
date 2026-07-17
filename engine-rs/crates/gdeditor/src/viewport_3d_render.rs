@@ -14,6 +14,7 @@ use gdcore::math::{Color, Vector3};
 use gdcore::math3d::Transform3D;
 use gdrender2d::renderer::{Bgra8Image, FrameBuffer, Raster};
 use gdrender3d::SoftwareRenderer3D;
+use gdscene::node::NodeId;
 use gdscene::SceneTree;
 use gdserver3d::light::{Light3D, Light3DId};
 use gdserver3d::material::Material3D;
@@ -1026,6 +1027,39 @@ fn draw_editor_overlays_3d(fb: &mut impl Raster, viewport: &Viewport3D, overlays
 ///
 /// This is the reference path (and the fallback for the GPU path); the
 /// GPU-accelerated twin is [`render_editor_3d_frame_gpu`].
+/// pat-nzgdu.173: renders the scene from a scene `Camera3D`'s viewpoint — the
+/// frame behind the camera-preview inset and cinematic mode. The preview
+/// viewport's camera is pinned to the node's global transform (via the camera's
+/// `override_transform`), with fov/projection read off the node, so the frame is
+/// what that `Camera3D` sees — distinct from the editor's orbit camera.
+pub fn render_camera3d_preview(
+    tree: &SceneTree,
+    camera_node: NodeId,
+    width: u32,
+    height: u32,
+) -> FrameBuffer {
+    let mut viewport = Viewport3D::new(width.max(1), height.max(1));
+    viewport.camera.override_transform =
+        Some(gdscene::node3d::get_global_transform(tree, camera_node));
+    viewport.camera.projection = match gdscene::camera3d::get_projection_type(tree, camera_node) {
+        gdscene::camera3d::ProjectionType::Orthogonal => {
+            crate::viewport_3d::Projection::Orthographic
+        }
+        // Perspective (and Frustum, which the software renderer approximates as
+        // perspective) both render through the perspective path.
+        _ => crate::viewport_3d::Projection::Perspective,
+    };
+    if let Some(node) = tree.get_node(camera_node) {
+        if let gdvariant::Variant::Float(fov) = node.get_property("fov") {
+            viewport.camera.fov_degrees = fov as f32;
+        }
+        if let gdvariant::Variant::Float(size) = node.get_property("size") {
+            viewport.camera.ortho_size = size as f32;
+        }
+    }
+    render_editor_3d_frame(&viewport, tree)
+}
+
 pub fn render_editor_3d_frame(viewport: &Viewport3D, tree: &SceneTree) -> FrameBuffer {
     let inputs = editor_3d_render_inputs(viewport, tree);
     render_editor_3d_frame_from_inputs(viewport, &inputs)

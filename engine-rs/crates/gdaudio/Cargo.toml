@@ -9,6 +9,9 @@ repository.workspace = true
 gdcore = { path = "../gdcore" }
 hound = "3"
 lewton = "0.10"
+# Ogg transport demuxing for OggPacketSequence (pat-nzgdu.188); already in the
+# lock as a lewton dependency, so this pins no new version.
+ogg = "0.8"
 # Real ISO MP3 decoding (pat-p0s82.13); Godot uses the same minimp3 decoder.
 minimp3 = "0.6"
 thiserror.workspace = true

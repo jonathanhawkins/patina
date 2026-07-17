@@ -10,6 +10,7 @@ pub mod effects;
 pub mod ima_adpcm;
 pub mod import;
 pub mod mixer;
+pub mod ogg_packet_sequence;
 pub mod output;
 pub mod player;
 pub mod sample;
