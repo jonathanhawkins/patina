@@ -784,6 +784,29 @@ pub fn register_3d_classes() {
     register_class(ClassRegistration::new("FogVolume").parent("Node3D"));
     register_class(ClassRegistration::new("ReflectionProbe").parent("Node3D"));
     register_class(ClassRegistration::new("VoxelGI").parent("Node3D"));
+    // VoxelGIData (pat-nzgdu.216): the baked GI data resource referenced by
+    // VoxelGI.data. Bake execution is deferred; registering the resource surface
+    // + config properties lets baked-GI .tscn/.res scenes load without dropping
+    // the reference (the generic sub_resource loader handles the rest).
+    if !class_exists("VoxelGIData") {
+        register_class(
+            ClassRegistration::new("VoxelGIData")
+                .parent("Resource")
+                .property(PropertyInfo::new("dynamic_range", Variant::Float(2.0)))
+                .property(PropertyInfo::new("energy", Variant::Float(1.0)))
+                .property(PropertyInfo::new("bias", Variant::Float(1.5)))
+                .property(PropertyInfo::new("normal_bias", Variant::Float(0.0)))
+                .property(PropertyInfo::new("propagation", Variant::Float(0.7)))
+                .property(PropertyInfo::new("interior", Variant::Bool(false)))
+                .method(MethodInfo::new("allocate", 7))
+                .method(MethodInfo::new("get_bounds", 0))
+                .method(MethodInfo::new("get_octree_size", 0))
+                .method(MethodInfo::new("get_octree_cells", 0))
+                .method(MethodInfo::new("get_data_cells", 0))
+                .method(MethodInfo::new("get_to_cell_xform", 0))
+                .method(MethodInfo::new("get_level_counts", 0)),
+        );
+    }
     register_class(ClassRegistration::new("LightmapGI").parent("Node3D"));
     register_class(
         ClassRegistration::new("VisualInstance3D")
@@ -898,7 +921,16 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("radial_segments", Variant::Int(64)))
             .property(PropertyInfo::new("rings", Variant::Int(8))),
     );
-    register_class(ClassRegistration::new("BoxMesh").parent("PrimitiveMesh"));
+    register_class(
+        ClassRegistration::new("BoxMesh")
+            .parent("PrimitiveMesh")
+            // BoxMesh.size default matches gdserver3d `BoxMesh::default()` so
+            // instantiate('BoxMesh') exposes the size resource property (pat-nzgdu.205).
+            .property(PropertyInfo::new(
+                "size",
+                Variant::Vector3(Vector3::new(1.0, 1.0, 1.0)),
+            )),
+    );
     register_class(ClassRegistration::new("SphereMesh").parent("PrimitiveMesh"));
     register_class(ClassRegistration::new("CylinderMesh").parent("PrimitiveMesh"));
     register_class(ClassRegistration::new("PlaneMesh").parent("PrimitiveMesh"));
@@ -1256,6 +1288,19 @@ pub fn register_2d_classes() {
     if !class_exists("VBoxContainer") {
         register_class(ClassRegistration::new("VBoxContainer").parent("Container"));
     }
+    // Split + SubViewport container family (pat-nzgdu.158).
+    if !class_exists("SplitContainer") {
+        register_class(ClassRegistration::new("SplitContainer").parent("Container"));
+    }
+    if !class_exists("HSplitContainer") {
+        register_class(ClassRegistration::new("HSplitContainer").parent("SplitContainer"));
+    }
+    if !class_exists("VSplitContainer") {
+        register_class(ClassRegistration::new("VSplitContainer").parent("SplitContainer"));
+    }
+    if !class_exists("SubViewportContainer") {
+        register_class(ClassRegistration::new("SubViewportContainer").parent("Container"));
+    }
 
     // -- Physics 2D bodies --
     if !class_exists("CollisionObject2D") {
@@ -1417,10 +1462,20 @@ pub fn register_viewport_classes() {
         );
     }
 
+    // Texture is Godot's abstract root for every texture resource; Texture2D,
+    // TextureLayered and Texture3D all descend from it (pat-nzgdu.214).
+    if !class_exists("Texture") {
+        register_class(
+            ClassRegistration::new("Texture")
+                .parent("Resource")
+                .abstract_class(),
+        );
+    }
+
     if !class_exists("Texture2D") {
         register_class(
             ClassRegistration::new("Texture2D")
-                .parent("Resource")
+                .parent("Texture")
                 .method(MethodInfo::new("get_width", 0))
                 .method(MethodInfo::new("get_height", 0))
                 .method(MethodInfo::new("get_size", 0)),
@@ -1438,6 +1493,110 @@ pub fn register_viewport_classes() {
                 .method(MethodInfo::new("get_width", 0))
                 .method(MethodInfo::new("get_height", 0))
                 .method(MethodInfo::new("get_size", 0)),
+        );
+    }
+
+    // Layered + volume texture family (pat-nzgdu.214). Only the class surface is
+    // registered here: layered/3D pixel storage and shader sampling are deferred,
+    // so a .tscn/.tres referencing these types loads without dropping the
+    // reference (the generic sub_resource loader handles the rest).
+    if !class_exists("TextureLayered") {
+        register_class(
+            ClassRegistration::new("TextureLayered")
+                .parent("Texture")
+                .abstract_class()
+                .method(MethodInfo::new("get_format", 0))
+                .method(MethodInfo::new("get_layered_type", 0))
+                .method(MethodInfo::new("get_width", 0))
+                .method(MethodInfo::new("get_height", 0))
+                .method(MethodInfo::new("get_layers", 0))
+                .method(MethodInfo::new("has_mipmaps", 0))
+                .method(MethodInfo::new("get_layer_data", 1)),
+        );
+    }
+
+    if !class_exists("ImageTextureLayered") {
+        register_class(
+            ClassRegistration::new("ImageTextureLayered")
+                .parent("TextureLayered")
+                .abstract_class()
+                .method(MethodInfo::new("create_from_images", 1))
+                .method(MethodInfo::new("update_layer", 2)),
+        );
+    }
+
+    if !class_exists("Texture2DArray") {
+        register_class(
+            ClassRegistration::new("Texture2DArray")
+                .parent("ImageTextureLayered")
+                .method(MethodInfo::new("create_placeholder", 0)),
+        );
+    }
+
+    // Texture3D is abstract in Godot; ImageTexture3D is the concrete volume type.
+    if !class_exists("Texture3D") {
+        register_class(
+            ClassRegistration::new("Texture3D")
+                .parent("Texture")
+                .abstract_class()
+                .method(MethodInfo::new("get_format", 0))
+                .method(MethodInfo::new("get_width", 0))
+                .method(MethodInfo::new("get_height", 0))
+                .method(MethodInfo::new("get_depth", 0))
+                .method(MethodInfo::new("has_mipmaps", 0))
+                .method(MethodInfo::new("get_data", 0))
+                .method(MethodInfo::new("create_placeholder", 0)),
+        );
+    }
+
+    if !class_exists("ImageTexture3D") {
+        register_class(
+            ClassRegistration::new("ImageTexture3D")
+                .parent("Texture3D")
+                .method(MethodInfo::new("create", 5))
+                .method(MethodInfo::new("update", 1)),
+        );
+    }
+
+    // RenderingDevice-backed wrappers. The `texture_rd_rid` property is deferred:
+    // Variant has no RID variant yet, so only the accessor surface is registered.
+    if !class_exists("Texture2DRD") {
+        register_class(
+            ClassRegistration::new("Texture2DRD")
+                .parent("Texture2D")
+                .method(MethodInfo::new("set_texture_rd_rid", 1))
+                .method(MethodInfo::new("get_texture_rd_rid", 0)),
+        );
+    }
+
+    if !class_exists("TextureLayeredRD") {
+        register_class(
+            ClassRegistration::new("TextureLayeredRD")
+                .parent("TextureLayered")
+                .abstract_class()
+                .method(MethodInfo::new("set_texture_rd_rid", 1))
+                .method(MethodInfo::new("get_texture_rd_rid", 0)),
+        );
+    }
+
+    if !class_exists("Texture2DArrayRD") {
+        register_class(ClassRegistration::new("Texture2DArrayRD").parent("TextureLayeredRD"));
+    }
+
+    if !class_exists("TextureCubemapRD") {
+        register_class(ClassRegistration::new("TextureCubemapRD").parent("TextureLayeredRD"));
+    }
+
+    if !class_exists("TextureCubemapArrayRD") {
+        register_class(ClassRegistration::new("TextureCubemapArrayRD").parent("TextureLayeredRD"));
+    }
+
+    if !class_exists("Texture3DRD") {
+        register_class(
+            ClassRegistration::new("Texture3DRD")
+                .parent("Texture3D")
+                .method(MethodInfo::new("set_texture_rd_rid", 1))
+                .method(MethodInfo::new("get_texture_rd_rid", 0)),
         );
     }
 }
@@ -1524,6 +1683,8 @@ pub fn register_audio_classes() {
 ///
 /// * `FileAccess : RefCounted` (core/io/file_access)
 /// * `DirAccess : RefCounted` (core/io/dir_access)
+/// * `ZIPReader : RefCounted` (core/io/zip_reader)
+/// * `ZIPPacker : RefCounted` (core/io/zip_packer)
 ///
 /// Idempotent — each class is only registered if not already present.
 pub fn register_io_classes() {
@@ -1574,6 +1735,30 @@ pub fn register_io_classes() {
                 .method(MethodInfo::new("load", 1))
                 .method(MethodInfo::new("save", 1))
                 .method(MethodInfo::new("clear", 0)),
+        );
+    }
+    if !class_exists("ZIPReader") {
+        register_class(
+            ClassRegistration::new("ZIPReader")
+                .parent("RefCounted")
+                .method(MethodInfo::new("open", 1))
+                .method(MethodInfo::new("close", 0))
+                .method(MethodInfo::new("get_files", 0))
+                .method(MethodInfo::new("file_exists", 2))
+                .method(MethodInfo::new("read_file", 2)),
+        );
+    }
+    if !class_exists("ZIPPacker") {
+        register_class(
+            ClassRegistration::new("ZIPPacker")
+                .parent("RefCounted")
+                // Godot's default: -1 selects the zlib default level.
+                .property(PropertyInfo::new("compression_level", Variant::Int(-1)))
+                .method(MethodInfo::new("open", 2))
+                .method(MethodInfo::new("start_file", 1))
+                .method(MethodInfo::new("write_file", 1))
+                .method(MethodInfo::new("close_file", 0))
+                .method(MethodInfo::new("close", 0)),
         );
     }
 }
@@ -1891,6 +2076,25 @@ pub fn register_editor_classes() {
         register_class(ClassRegistration::new("SceneState").parent("RefCounted"));
     }
 
+    // -- MovieWriter (pat-nzgdu.180): abstract offline video-capture base --
+    // Scripts subclass it and register via `movie_writer::add_writer`; actual
+    // frame/audio writing is deferred (out of web scope). The class surface must
+    // exist so script/tool references resolve without error.
+    if !class_exists("MovieWriter") {
+        register_class(
+            ClassRegistration::new("MovieWriter")
+                .parent("Object")
+                .abstract_class()
+                .method(MethodInfo::new("_handles_file", 1))
+                .method(MethodInfo::new("_get_audio_mix_rate", 0))
+                .method(MethodInfo::new("_get_audio_speaker_mode", 0))
+                .method(MethodInfo::new("_write_begin", 3))
+                .method(MethodInfo::new("_write_frame", 2))
+                .method(MethodInfo::new("_write_end", 0))
+                .method(MethodInfo::new("add_writer", 1)),
+        );
+    }
+
     // -- EditorPlugin --
     if !class_exists("EditorPlugin") {
         register_class(
@@ -1951,6 +2155,72 @@ mod tests {
         let guard = TEST_LOCK.lock().expect("test lock poisoned");
         clear_for_testing();
         guard
+    }
+
+    /// pat-nzgdu.216: the VoxelGIData bake-result resource is registered under
+    /// Resource, constructs via ClassDB with its config-property defaults, and
+    /// exposes the data accessor method surface.
+    #[test]
+    fn voxelgidata_resource_registered_and_loads() {
+        let _guard = setup();
+        register_3d_classes();
+
+        assert!(class_exists("VoxelGIData"), "VoxelGIData is registered");
+        assert!(
+            is_parent_class("VoxelGIData", "Resource"),
+            "VoxelGIData derives Resource",
+        );
+
+        // Config properties expose their Godot defaults via instantiate.
+        let data = instantiate("VoxelGIData").expect("VoxelGIData is instantiable");
+        assert_eq!(data.get_property("energy"), Variant::Float(1.0));
+        assert_eq!(data.get_property("bias"), Variant::Float(1.5));
+        assert_eq!(data.get_property("propagation"), Variant::Float(0.7));
+        assert_eq!(data.get_property("dynamic_range"), Variant::Float(2.0));
+
+        // The allocate/get_* data accessors are on the class surface.
+        let info = get_class_info("VoxelGIData").expect("VoxelGIData class info");
+        let methods: Vec<&str> = info.methods.iter().map(|m| m.name.as_str()).collect();
+        assert!(methods.contains(&"allocate"), "allocate() exposed");
+        assert!(methods.contains(&"get_bounds"), "get_bounds() exposed");
+        assert!(methods.contains(&"get_octree_size"), "get_octree_size() exposed");
+    }
+
+    /// pat-nzgdu.205: the Mesh → PrimitiveMesh → shape hierarchy is registered
+    /// with correct parents and abstract bases, and instantiate('BoxMesh')
+    /// exposes the `size` resource property at its BoxMesh::default() value.
+    #[test]
+    fn primitive_mesh_family_registered_in_classdb() {
+        use gdcore::math::Vector3;
+        let _guard = setup();
+        register_3d_classes();
+
+        for cls in [
+            "Mesh",
+            "PrimitiveMesh",
+            "BoxMesh",
+            "SphereMesh",
+            "CapsuleMesh",
+            "CylinderMesh",
+            "PlaneMesh",
+        ] {
+            assert!(class_exists(cls), "{cls} is registered in ClassDB");
+        }
+        // The two bases are abstract; the concrete primitives derive them.
+        assert!(is_abstract("Mesh"), "Mesh is abstract");
+        assert!(is_abstract("PrimitiveMesh"), "PrimitiveMesh is abstract");
+        assert!(is_parent_class("BoxMesh", "PrimitiveMesh"));
+        assert!(is_parent_class("BoxMesh", "Mesh"));
+        assert!(is_parent_class("PrimitiveMesh", "Resource"));
+
+        // instantiate('BoxMesh') exposes a `size` property defaulting to
+        // Vector3(1,1,1), matching gdserver3d BoxMesh::default().
+        let box_mesh = instantiate("BoxMesh").expect("BoxMesh is instantiable");
+        assert_eq!(
+            box_mesh.get_property("size"),
+            Variant::Vector3(Vector3::new(1.0, 1.0, 1.0)),
+            "instantiate('BoxMesh') exposes the size default",
+        );
     }
 
     /// pat-nzgdu.95: the AnimationNode* graph-node resource hierarchy is
@@ -2609,6 +2879,83 @@ mod tests {
         register_2d_classes();
         assert!(class_exists("SubViewport"));
         assert!(class_exists("ViewportTexture"));
+    }
+
+    /// pat-nzgdu.214: the abstract Texture base plus the layered (Texture2DArray)
+    /// and volume (Texture3D) families are registered under Godot's real
+    /// inheritance chain, alongside the RenderingDevice-backed wrappers.
+    #[test]
+    fn texture_base_layered_volume_classes_registered() {
+        let _g = setup();
+        register_viewport_classes();
+
+        for name in [
+            "Texture",
+            "Texture2D",
+            "TextureLayered",
+            "ImageTextureLayered",
+            "Texture2DArray",
+            "Texture3D",
+            "ImageTexture3D",
+            "Texture2DRD",
+            "TextureLayeredRD",
+            "Texture2DArrayRD",
+            "TextureCubemapRD",
+            "TextureCubemapArrayRD",
+            "Texture3DRD",
+        ] {
+            assert!(class_exists(name), "{name} must be in ClassDB");
+        }
+
+        // Texture2D now hangs off the Texture base rather than Resource directly.
+        assert_eq!(
+            inheritance_chain("Texture2DArray"),
+            vec![
+                "Texture2DArray",
+                "ImageTextureLayered",
+                "TextureLayered",
+                "Texture",
+                "Resource",
+                "Object",
+            ]
+        );
+        assert!(is_parent_class("Texture2D", "Texture"));
+        assert!(is_parent_class("Texture2D", "Resource"));
+        assert!(is_parent_class("ImageTexture3D", "Texture3D"));
+        assert!(is_parent_class("ImageTexture3D", "Texture"));
+        assert!(is_parent_class("Texture2DArrayRD", "TextureLayeredRD"));
+        assert!(is_parent_class("TextureCubemapArrayRD", "TextureLayered"));
+        assert!(is_parent_class("Texture2DRD", "Texture2D"));
+        assert!(is_parent_class("Texture3DRD", "Texture3D"));
+
+        // Reparenting Texture2D must not break the existing ViewportTexture chain.
+        assert!(is_parent_class("ViewportTexture", "Texture2D"));
+        assert!(is_parent_class("ViewportTexture", "Resource"));
+
+        // Godot marks the bases abstract; only the Image*/array types construct.
+        for name in [
+            "Texture",
+            "TextureLayered",
+            "ImageTextureLayered",
+            "Texture3D",
+            "TextureLayeredRD",
+        ] {
+            assert!(is_abstract(name), "{name} must be abstract");
+        }
+        assert!(!is_abstract("Texture2DArray"));
+        assert!(!is_abstract("ImageTexture3D"));
+
+        // Method surface resolves through the chain.
+        assert!(class_has_method("Texture2DArray", "get_layers"));
+        assert!(class_has_method("Texture2DArray", "get_layer_data"));
+        assert!(class_has_method("Texture2DArray", "create_from_images"));
+        assert!(class_has_method("Texture2DArray", "create_placeholder"));
+        assert!(class_has_method("Texture3D", "get_depth"));
+        assert!(class_has_method("ImageTexture3D", "get_depth"));
+        assert!(class_has_method("ImageTexture3D", "create"));
+        assert!(class_has_method("ImageTexture3D", "update"));
+        assert!(class_has_method("Texture3DRD", "set_texture_rd_rid"));
+        assert!(class_has_method("Texture2DArrayRD", "get_texture_rd_rid"));
     }
 
     /// pat-u3l8c.43: Shader / ShaderMaterial classes with set/get_shader_parameter.

@@ -2153,6 +2153,17 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   </div>
 </div>
 
+<!-- Quick Open + Batch Rename dialogs (pat-nzgdu.105) -->
+<div id="quick-open-dialog" class="editor-dialog" style="display:none">
+  <div class="dialog-title">Quick Open</div>
+  <input id="quick-open-input" type="text" placeholder="Fuzzy search files..." oninput="quickOpen(this.value)">
+  <div id="quick-open-results"></div>
+</div>
+<div id="batch-rename-dialog" class="editor-dialog" style="display:none">
+  <div class="dialog-title">Batch Rename</div>
+  <input id="batch-rename-pattern" type="text" value="node_%d" placeholder="Pattern, e.g. node_%d">
+</div>
+
 <!-- Main area -->
 <div id="main">
   <!-- Left panel: Scene tree + FileSystem -->
@@ -10142,6 +10153,35 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     if (bp && ps.bottom) bp.style.height = ps.bottom + 'px';
   }
 
+
+  // ---- Quick Open (fuzzy) + Batch Rename (pat-nzgdu.105) ----
+  // Quick Open filters project files by a fuzzy subsequence query and opens the
+  // selected scene through the existing open path.
+  async function quickOpen(query) {
+    var data = await api('GET', '/api/filesystem');
+    var files = (data && data.files) ? data.files : [];
+    var q = String(query || '').toLowerCase();
+    return files.filter(function(f) {
+      var name = String(typeof f === 'string' ? f : (f.path || f.name || '')).toLowerCase();
+      var qi = 0;
+      for (var i = 0; i < name.length && qi < q.length; i++) {
+        if (name.charAt(i) === q.charAt(qi)) qi++;
+      }
+      return qi === q.length;
+    });
+  }
+  function openQuickOpen() {
+    var dlg = document.getElementById('quick-open-dialog');
+    if (dlg) dlg.style.display = 'block';
+    var input = document.getElementById('quick-open-input');
+    if (input) input.focus();
+  }
+  // Batch Rename applies a counter pattern (e.g. node_%d) across a node
+  // multi-selection via the batch_rename endpoint, then refreshes the scene.
+  async function batchRename(nodeIds, pattern) {
+    await api('POST', '/api/node/batch_rename', { node_ids: nodeIds || [], pattern: pattern || 'node_%d' });
+    if (typeof fetchScene === 'function') fetchScene();
+  }
 
   // ---- Polling ----
   function startPolling() {

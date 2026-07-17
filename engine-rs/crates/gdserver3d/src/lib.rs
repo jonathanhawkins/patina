@@ -31,6 +31,7 @@ pub mod shader;
 pub mod skin;
 pub mod sky;
 pub mod sprite3d;
+pub mod text_mesh;
 pub mod viewport;
 
 pub use compositor::{Compositor, CompositorEffect, EffectCallbackType};
@@ -73,4 +74,5 @@ pub use sky::{
     SkyMaterial,
     SkyProcessMode,
 };
+pub use text_mesh::{extrude_contour, triangulate_simple_polygon, TextMesh};
 pub use viewport::Viewport3D;

@@ -18,6 +18,7 @@
 #![warn(clippy::all)]
 
 pub mod class_db;
+pub mod movie_writer;
 pub mod notification;
 pub mod object;
 pub mod ref_counted;

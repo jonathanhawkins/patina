@@ -355,6 +355,13 @@ pub trait SceneAccess {
 
     // -- Input methods (used by the `Input` singleton in GDScript) ----------
 
+    /// Marks the input event currently being dispatched as handled, stopping
+    /// it from reaching any later propagation stage (Godot:
+    /// `Viewport.set_input_as_handled()`).
+    ///
+    /// Defaults to a no-op for hosts that do not dispatch input events.
+    fn set_input_as_handled(&mut self) {}
+
     /// Returns `true` if any key mapped to `action` is currently held.
     fn is_input_action_pressed(&self, _action: &str) -> bool {
         false

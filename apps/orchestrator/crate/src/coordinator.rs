@@ -258,6 +258,60 @@ impl Coordinator {
         resolved
     }
 
+    /// Renew pane identities that aged out of `identity-resolve.sh`'s staleness
+    /// window so assignment never stalls silently on an expired identity.
+    ///
+    /// After ~2 days of continuous running every identity file's embedded
+    /// timestamp passes `IDENTITY_STALE_SECONDS`, the resolve script starts
+    /// exiting non-zero, and every pane reports an empty `worker_name`. The
+    /// assignment loop skips nameless panes, so the swarm quietly assigned
+    /// nothing for hours despite a full ready queue and idle workers — until an
+    /// operator cycled the flywheel. The recorded name is still correct (a
+    /// pane's `AGENT_NAME` is fixed at launch), so renew it in place and keep
+    /// assigning. Returns the number of identities recovered.
+    fn recover_expired_identities(&self, workers: &mut [worker::WorkerInfo]) -> usize {
+        let mut recovered = 0usize;
+
+        for w in workers.iter_mut() {
+            if !w.worker_name.is_empty() || self.config.is_reserved_verifier_pane(w.pane_index) {
+                continue;
+            }
+
+            match worker::renew_worker_identity(&self.config.project_root, &w.pane_id) {
+                Some(name) => {
+                    tracing::warn!(
+                        pane = w.pane_index,
+                        pane_id = %w.pane_id,
+                        worker = %name,
+                        "identity expired past its staleness window; renewed in place — \
+                         assignment continues without an operator cycle"
+                    );
+                    // Keep the resolve cache consistent with the renewed file so
+                    // other pane->name lookups this cycle see the same answer.
+                    if self.config.identity_cache_ttl_seconds > 0 {
+                        self.identity_cache
+                            .lock()
+                            .unwrap()
+                            .insert(w.pane_id.clone(), (name.clone(), Instant::now()));
+                    }
+                    w.worker_name = name;
+                    recovered += 1;
+                }
+                None => {
+                    tracing::error!(
+                        pane = w.pane_index,
+                        pane_id = %w.pane_id,
+                        "identity resolution FAILED and the pane has no renewable record \
+                         (never bootstrapped, or too old to trust — tmux recycles pane ids) — \
+                         pane is excluded from assignment; relaunch it to re-bootstrap"
+                    );
+                }
+            }
+        }
+
+        recovered
+    }
+
     /// Drain completed background verifications and process results.
     /// Called at the start of each poll cycle so results are handled promptly.
     pub fn drain_verify_results(&self) -> (usize, usize, Vec<tmux::PromptTask>) {
@@ -987,12 +1041,18 @@ impl Coordinator {
 
         // Read all DB state upfront, then drop the connection before calling br mutations.
         // This prevents our read connection from blocking br's write lock on macOS.
-        let workers = {
+        let mut workers = {
             let db = self.open_db()?;
             let workers = worker::worker_info_list_with_config(session, window, &db, &self.config)?;
             // db dropped here
             workers
         };
+
+        // Recover identities that aged out of the resolve script's staleness
+        // window BEFORE any per-worker state is keyed off `worker_name` —
+        // otherwise an expired pane looks nameless and is dropped from
+        // assignment entirely (see `recover_expired_identities`).
+        self.recover_expired_identities(&mut workers);
 
         let mut assigned = 0usize;
         let prompt_workers = self.config.worker_requires_assignment_prompt();
@@ -4723,6 +4783,38 @@ mod tests {
         assert!(
             fn_body.contains("prompt_tasks.push("),
             "assign_idle_workers_inner must push PromptTask to queue"
+        );
+    }
+
+    /// Regression: assign_idle_workers_inner must recover expired identities
+    /// BEFORE any per-worker state is keyed off `worker_name`.
+    ///
+    /// Once every identity file ages past the resolve script's staleness window
+    /// (~2 days of continuous running), every pane resolves to an empty name and
+    /// the nameless-pane skip drops the whole swarm from assignment — 104 ready
+    /// beads, 6 idle workers, assigned=0 for hours. Recovering after the skip,
+    /// or after `worker_db_state` is built, would leave the stall in place.
+    #[test]
+    fn test_assign_recovers_expired_identities_before_name_checks() {
+        let source = include_str!("coordinator.rs");
+
+        let fn_start = source
+            .find("fn assign_idle_workers_inner(")
+            .expect("assign_idle_workers_inner must exist");
+        let fn_end = source[fn_start..].find("\n    pub fn ").unwrap_or(5000);
+        let fn_body = &source[fn_start..fn_start + fn_end];
+
+        let recover_pos = fn_body
+            .find("recover_expired_identities(")
+            .expect("REGRESSION: assign_idle_workers_inner must recover expired identities");
+        let first_name_check = fn_body
+            .find("worker_name.is_empty()")
+            .expect("assign_idle_workers_inner must gate on worker_name");
+
+        assert!(
+            recover_pos < first_name_check,
+            "REGRESSION: identity recovery must run BEFORE worker_name is read, \
+             otherwise an expired identity TTL silently stalls all assignment."
         );
     }
 

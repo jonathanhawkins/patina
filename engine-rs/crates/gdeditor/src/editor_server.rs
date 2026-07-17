@@ -2136,6 +2136,7 @@ fn handle_connection(
         ("POST", "/api/node/group") => api_set_group(state, &req.body, &mut stream),
         ("POST", "/api/node/unique_name") => api_set_unique_name(state, &req.body, &mut stream),
         ("POST", "/api/node/rename") => api_rename_node(state, &req.body, &mut stream),
+        ("POST", "/api/node/batch_rename") => api_batch_rename(state, &req.body, &mut stream),
         ("POST", "/api/node/duplicate") => api_duplicate_node(state, &req.body, &mut stream),
         ("POST", "/api/node/create_dialog") => api_create_dialog(state, &req.body, &mut stream),
         ("POST", "/api/node/create_dialog/toggle_favorite") => {
@@ -4437,6 +4438,61 @@ fn api_rename_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
     );
 
     send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/node/batch_rename` — renames a multi-selection using a counter
+/// pattern (`%d` → 1, 2, 3, …), mirroring `api_rename_node` per node
+/// (pat-nzgdu.105). Body: `{"node_ids":[u64,...],"pattern":"node_%d"}`.
+fn api_batch_rename(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_ids: Vec<u64> = match parsed.get("node_ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_u64()).collect(),
+        None => {
+            send_error(stream, 400, "missing node_ids");
+            return;
+        }
+    };
+    let pattern = match parsed.get("pattern").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing pattern");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let mut renamed = 0u32;
+    for (i, raw) in node_ids.iter().enumerate() {
+        let node_id = match find_node_by_raw_id(&state.scene_tree, *raw) {
+            Some(id) => id,
+            None => continue,
+        };
+        // `%d` expands to a 1-indexed counter over the selection (Godot's
+        // batch-rename counter): node_%d -> node_1, node_2, node_3, ...
+        let new_name = pattern.replace("%d", &(i + 1).to_string());
+        if new_name.trim().is_empty() {
+            continue;
+        }
+        let mut cmd = EditorCommand::RenameNode {
+            node_id,
+            new_name,
+            old_name: String::new(),
+        };
+        if cmd.execute(&mut state.scene_tree).is_ok() {
+            state.undo_stack.push(cmd);
+            renamed += 1;
+        }
+    }
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log("info", format!("Batch-renamed {renamed} node(s)"));
+    send_json(stream, &format!(r#"{{"ok":true,"renamed":{renamed}}}"#));
 }
 
 /// `POST /api/node/duplicate` — duplicates a node and its subtree as a sibling.

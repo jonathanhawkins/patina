@@ -253,6 +253,75 @@ pub fn resolve_worker_identity(project_root: &Path, pane_id: &str) -> Option<Str
     }
 }
 
+/// Oldest identity a renewal will trust, in seconds (14 days).
+///
+/// tmux reuses pane ids across sessions, so a long-dead session's identity file
+/// can still be sitting at the path a live pane now maps to. The launcher
+/// rewrites the file every time it launches a worker, so a file belonging to
+/// the current occupant is at most as old as this swarm's run — days, not
+/// months. Beyond this bound the name is far more likely to be a recycled
+/// pane id's ghost than a live worker, and assigning to a ghost is worse than
+/// skipping the pane: the live worker answers to a different `AGENT_NAME` and
+/// its completion would never match the assignment.
+pub const MAX_RENEWABLE_IDENTITY_AGE_SECS: u64 = 14 * 24 * 60 * 60;
+
+/// Read the `(name, recorded_timestamp)` for a pane, ignoring the staleness window.
+///
+/// `identity-resolve.sh` exits non-zero once the file's embedded timestamp is
+/// older than `IDENTITY_STALE_SECONDS` (24h by default), which hides a name
+/// that is still perfectly correct: a pane's `AGENT_NAME` is fixed at launch
+/// and never changes for the life of the process. This reads the file
+/// regardless of age so an expired identity can be renewed rather than
+/// discarded. A missing/unparsable timestamp reads as `0` (infinitely old),
+/// matching the shell script's own fallback.
+pub fn read_identity_record_unchecked(project_root: &Path, pane_id: &str) -> Option<(String, u64)> {
+    let file = crate::launcher::identity_dir_for(project_root)
+        .ok()?
+        .join(pane_id);
+    let contents = std::fs::read_to_string(file).ok()?;
+    let mut lines = contents.lines();
+
+    let name = lines.next()?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let recorded_at = lines
+        .next()
+        .and_then(|l| l.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+
+    Some((name, recorded_at))
+}
+
+/// Refresh an expired identity file in place, preserving the recorded name.
+///
+/// Returns the renewed name, or `None` when the pane has no recorded name to
+/// renew (never bootstrapped, or the file was cleaned up) or the record is too
+/// old to trust ([`MAX_RENEWABLE_IDENTITY_AGE_SECS`]).
+///
+/// Re-registering a *new* name here would be wrong: the running worker still
+/// answers to the name it was launched with, so a fresh registration would
+/// desync the coordinator from the pane.
+pub fn renew_worker_identity(project_root: &Path, pane_id: &str) -> Option<String> {
+    let (name, recorded_at) = read_identity_record_unchecked(project_root, pane_id)?;
+
+    let age = now_epoch_secs().saturating_sub(recorded_at);
+    if age > MAX_RENEWABLE_IDENTITY_AGE_SECS {
+        return None;
+    }
+
+    crate::launcher::write_identity(&name, project_root, pane_id).ok()?;
+    Some(name)
+}
+
+/// Current Unix epoch seconds, saturating to 0 if the clock predates the epoch.
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Parse an ISO datetime string and return seconds since then.
 /// Returns 0 on parse failure or if the datetime is in the future.
 pub fn assignment_age_secs(updated_at: Option<&str>) -> u64 {
@@ -422,6 +491,200 @@ pub fn swarm_health(workers: &[WorkerInfo], db: &Connection) -> Result<SwarmHeal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serializes the tests that mutate the process-wide `HOME`. `cargo test`
+    /// runs a binary's tests as threads in one process, so an unsynchronized
+    /// `set_var` would race; nextest gives each test its own process and the
+    /// lock is simply uncontended there.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Point identity lookups at a throwaway HOME and return the pane's
+    /// identity file path under it.
+    fn identity_file_in(home: &Path, project_root: &Path, pane_id: &str) -> std::path::PathBuf {
+        std::env::set_var("HOME", home);
+        let dir = crate::launcher::identity_dir_for(project_root).expect("identity dir");
+        std::fs::create_dir_all(&dir).expect("mkdir identity dir");
+        dir.join(pane_id)
+    }
+
+    fn identity_timestamp(file: &Path) -> u64 {
+        let contents = std::fs::read_to_string(file).expect("read identity");
+        contents
+            .lines()
+            .nth(1)
+            .expect("timestamp line")
+            .trim()
+            .parse()
+            .expect("numeric timestamp")
+    }
+
+    /// A timestamp that is past the 24h staleness window (so `identity-resolve.sh`
+    /// rejects it — the stall this bead fixes) but inside the renewable bound.
+    fn expired_but_renewable() -> u64 {
+        now_epoch_secs() - (2 * 24 * 60 * 60)
+    }
+
+    /// The bug this guards: after ~2 days the identity file's embedded
+    /// timestamp ages past `IDENTITY_STALE_SECONDS`, `identity-resolve.sh`
+    /// starts exiting non-zero, and every pane resolves to an empty name — so
+    /// `assign_idle_workers` silently assigned nothing. The recorded name is
+    /// still correct, so the resolution-failure path must renew it in place.
+    #[test]
+    fn renew_worker_identity_restores_expired_name() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let project_root = Path::new("/tmp/patina-renew-expired");
+
+        let file = identity_file_in(home.path(), project_root, "%42");
+        std::fs::write(&file, format!("AmberFalcon\n{}\n", expired_but_renewable())).unwrap();
+
+        let renewed = renew_worker_identity(project_root, "%42");
+
+        assert_eq!(
+            renewed.as_deref(),
+            Some("AmberFalcon"),
+            "an expired identity must be renewed under its ORIGINAL name — the pane's \
+             AGENT_NAME is fixed at launch, so inventing a new one would desync the coordinator"
+        );
+        assert!(
+            now_epoch_secs().saturating_sub(identity_timestamp(&file)) < 60,
+            "renewal must refresh the timestamp so the resolve script accepts it again"
+        );
+    }
+
+    /// A pane with no recorded name cannot be renewed — the caller must log and
+    /// skip rather than register a name the running worker never answers to.
+    #[test]
+    fn renew_worker_identity_returns_none_without_recorded_name() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let project_root = Path::new("/tmp/patina-renew-missing");
+
+        // Directory exists, pane file does not.
+        let _ = identity_file_in(home.path(), project_root, "%1");
+
+        assert_eq!(renew_worker_identity(project_root, "%404"), None);
+    }
+
+    /// An empty name line is corrupt, not renewable.
+    #[test]
+    fn renew_worker_identity_rejects_empty_name() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let project_root = Path::new("/tmp/patina-renew-empty");
+
+        let file = identity_file_in(home.path(), project_root, "%7");
+        std::fs::write(&file, "\n1000\n").unwrap();
+
+        assert_eq!(renew_worker_identity(project_root, "%7"), None);
+    }
+
+    /// Renewal must be idempotent: a pane whose identity is renewed twice keeps
+    /// the same name, so repeated assignment cycles can't rename a live worker.
+    #[test]
+    fn renew_worker_identity_is_stable_across_repeat_calls() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let project_root = Path::new("/tmp/patina-renew-repeat");
+
+        let file = identity_file_in(home.path(), project_root, "%9");
+        std::fs::write(&file, format!("TealHarbor\n{}\n", expired_but_renewable())).unwrap();
+
+        assert_eq!(
+            renew_worker_identity(project_root, "%9").as_deref(),
+            Some("TealHarbor")
+        );
+        assert_eq!(
+            renew_worker_identity(project_root, "%9").as_deref(),
+            Some("TealHarbor"),
+            "renewing an already-fresh identity must be a no-op on the name"
+        );
+    }
+
+    /// The recorded name must survive the round-trip through the writer, so a
+    /// renewed identity is readable again by `identity-resolve.sh`.
+    #[test]
+    fn renewed_identity_round_trips_through_the_reader() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let project_root = Path::new("/tmp/patina-renew-roundtrip");
+
+        let file = identity_file_in(home.path(), project_root, "%11");
+        std::fs::write(
+            &file,
+            format!("CopperLantern\n{}\n", expired_but_renewable()),
+        )
+        .unwrap();
+
+        renew_worker_identity(project_root, "%11").expect("renew");
+
+        let (name, recorded_at) =
+            read_identity_record_unchecked(project_root, "%11").expect("record");
+        assert_eq!(name, "CopperLantern");
+        assert!(
+            now_epoch_secs().saturating_sub(recorded_at) < 60,
+            "the renewed record must carry a fresh timestamp"
+        );
+    }
+
+    /// tmux recycles pane ids across sessions, so a months-old identity file can
+    /// sit at the path a freshly launched pane maps to. Renewing it would hand
+    /// the coordinator a dead agent's name and every completion from the live
+    /// worker (which answers to a different AGENT_NAME) would fail to match.
+    /// Observed live: pane %410 held a 116-day-old `AzureMeadow` record while
+    /// the pane actually ran `FuchsiaHill`.
+    #[test]
+    fn renew_worker_identity_refuses_ghost_of_recycled_pane_id() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let project_root = Path::new("/tmp/patina-renew-ghost");
+
+        let file = identity_file_in(home.path(), project_root, "%410");
+        let ancient = now_epoch_secs() - (116 * 24 * 60 * 60);
+        std::fs::write(&file, format!("AzureMeadow\n{ancient}\n")).unwrap();
+
+        assert_eq!(
+            renew_worker_identity(project_root, "%410"),
+            None,
+            "an identity far older than any plausible swarm run is a recycled \
+             pane id's ghost — skipping the pane beats assigning to a dead agent"
+        );
+    }
+
+    /// The bound must not reject a legitimately long-running worker: a swarm
+    /// several days past the 24h staleness window is exactly the case this
+    /// bead exists to fix.
+    #[test]
+    fn renew_worker_identity_accepts_multi_day_live_worker() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let project_root = Path::new("/tmp/patina-renew-multiday");
+
+        let file = identity_file_in(home.path(), project_root, "%12");
+        // 3 days old: well past the 24h staleness window that breaks resolve,
+        // well inside the renewable bound.
+        let three_days_ago = now_epoch_secs() - (3 * 24 * 60 * 60);
+        std::fs::write(&file, format!("LavenderFox\n{three_days_ago}\n")).unwrap();
+
+        assert_eq!(
+            renew_worker_identity(project_root, "%12").as_deref(),
+            Some("LavenderFox")
+        );
+    }
+
+    /// A record with no parsable timestamp reads as epoch 0 — infinitely old,
+    /// same fallback the shell script uses — so it must not be renewed.
+    #[test]
+    fn renew_worker_identity_refuses_unparsable_timestamp() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::TempDir::new().unwrap();
+        let project_root = Path::new("/tmp/patina-renew-badts");
+
+        let file = identity_file_in(home.path(), project_root, "%13");
+        std::fs::write(&file, "GreenCastle\nnot-a-number\n").unwrap();
+
+        assert_eq!(renew_worker_identity(project_root, "%13"), None);
+    }
 
     #[test]
     fn test_detect_idle_prompt() {

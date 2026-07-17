@@ -918,14 +918,13 @@ fn extract_base_url(url: &str) -> String {
     }
 }
 
-/// Write identity file for a pane (pure Rust, no shell).
+/// Directory holding this project's pane identity files:
+/// `~/.local/state/agent-mail/identity/<project_hash>/`.
 ///
-/// Writes to: ~/.local/state/agent-mail/identity/<project_hash>/<pane_id>
-/// File contains two lines: agent name and Unix epoch timestamp.
-fn write_identity(agent_name: &str, project_root: &Path, pane_id: &str) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    use std::time::SystemTime;
-
+/// The hash must stay byte-identical to `mcp_agent_mail/scripts/identity-resolve.sh`
+/// (`sha256(project_path)` truncated to 12 hex chars) or the coordinator and the
+/// resolve script will disagree about where a pane's identity lives.
+pub(crate) fn identity_dir_for(project_root: &Path) -> Result<PathBuf> {
     // SHA-256 hash of project path, first 12 hex chars
     let hash = {
         let digest = {
@@ -949,9 +948,20 @@ fn write_identity(agent_name: &str, project_root: &Path, pane_id: &str) -> Resul
     };
 
     let home = std::env::var("HOME").map_err(|_| OrchestratorError::Mail("HOME not set".into()))?;
-    let identity_dir = PathBuf::from(&home)
+    Ok(PathBuf::from(&home)
         .join(".local/state/agent-mail/identity")
-        .join(&hash);
+        .join(&hash))
+}
+
+/// Write identity file for a pane (pure Rust, no shell).
+///
+/// Writes to: ~/.local/state/agent-mail/identity/<project_hash>/<pane_id>
+/// File contains two lines: agent name and Unix epoch timestamp.
+pub(crate) fn write_identity(agent_name: &str, project_root: &Path, pane_id: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::SystemTime;
+
+    let identity_dir = identity_dir_for(project_root)?;
 
     std::fs::create_dir_all(&identity_dir)
         .map_err(|e| OrchestratorError::Mail(format!("mkdir identity dir: {e}")))?;

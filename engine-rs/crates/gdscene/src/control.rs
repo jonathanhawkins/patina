@@ -1062,6 +1062,24 @@ pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vect
             let current = get_current_tab(tree, container_id);
             arrange_tabs(tree, &children, total, current);
         }
+        // Split containers place their first two children on either side of a
+        // draggable divider positioned by `split_offset` (pat-nzgdu.158).
+        "SplitContainer" | "HSplitContainer" => {
+            let offset = get_split_offset(tree, container_id);
+            arrange_split(tree, &children, total, sep, offset, false);
+        }
+        "VSplitContainer" => {
+            let offset = get_split_offset(tree, container_id);
+            arrange_split(tree, &children, total, sep, offset, true);
+        }
+        // SubViewportContainer sizes its hosted child (the SubViewport) to fill
+        // the container (pat-nzgdu.158).
+        "SubViewportContainer" => {
+            if let Some(&child) = children.first() {
+                set_position(tree, child, Vector2::ZERO);
+                set_size(tree, child, total);
+            }
+        }
         _ => {}
     }
 }
@@ -1081,7 +1099,88 @@ pub fn is_container_class_name(class: &str) -> bool {
             | "FlowContainer"
             | "HFlowContainer"
             | "VFlowContainer"
+            | "SplitContainer"
+            | "HSplitContainer"
+            | "VSplitContainer"
+            | "SubViewportContainer"
     )
+}
+
+/// Sets the SplitContainer `"split_offset"` — the pixel amount the divider is
+/// shifted from the container's midpoint. Dragging the divider updates this.
+pub fn set_split_offset(tree: &mut SceneTree, node_id: NodeId, offset: f32) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("split_offset", Variant::Float(offset as f64));
+    }
+}
+
+/// Gets the SplitContainer `"split_offset"`, defaulting to `0.0` (centered).
+pub fn get_split_offset(tree: &SceneTree, node_id: NodeId) -> f32 {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("split_offset") {
+            Variant::Float(v) => v as f32,
+            Variant::Int(v) => v as f32,
+            _ => 0.0,
+        })
+        .unwrap_or(0.0)
+}
+
+/// Lays out a SplitContainer's first two children on either side of a divider.
+/// The divider sits at the container's midpoint along the split axis, shifted by
+/// `split_offset` and clamped so both panes stay non-negative; `sep` is the
+/// divider gap. `vertical` splits top/bottom, otherwise left/right. Children past
+/// the first two are left unpositioned (Godot only lays out the first two).
+fn arrange_split(
+    tree: &mut SceneTree,
+    children: &[NodeId],
+    total: Vector2,
+    sep: f32,
+    split_offset: f32,
+    vertical: bool,
+) {
+    if children.is_empty() {
+        return;
+    }
+    let axis = if vertical { total.y } else { total.x };
+    let usable = (axis - sep).max(0.0);
+    let first = (usable * 0.5 + split_offset).clamp(0.0, usable);
+    let second = (usable - first).max(0.0);
+
+    let c0 = children[0];
+    set_position(tree, c0, Vector2::ZERO);
+    if vertical {
+        set_size(tree, c0, Vector2::new(total.x, first));
+    } else {
+        set_size(tree, c0, Vector2::new(first, total.y));
+    }
+
+    if let Some(&c1) = children.get(1) {
+        if vertical {
+            set_position(tree, c1, Vector2::new(0.0, first + sep));
+            set_size(tree, c1, Vector2::new(total.x, second));
+        } else {
+            set_position(tree, c1, Vector2::new(first + sep, 0.0));
+            set_size(tree, c1, Vector2::new(second, total.y));
+        }
+    }
+}
+
+/// Maps a click at `local` (SubViewportContainer-local pixels) into the hosted
+/// SubViewport's coordinate space (pat-nzgdu.158). With `stretch` enabled the
+/// sub-viewport is `stretch_shrink`× smaller than the container, so the click
+/// divides by the shrink factor; otherwise the mapping is 1:1. Mirrors Godot's
+/// `SubViewportContainer` input forwarding.
+pub fn subviewport_container_to_viewport_coord(
+    local: Vector2,
+    stretch: bool,
+    stretch_shrink: i64,
+) -> Vector2 {
+    if stretch && stretch_shrink > 1 {
+        let s = stretch_shrink as f32;
+        Vector2::new(local.x / s, local.y / s)
+    } else {
+        local
+    }
 }
 
 /// Recursively arranges `container_id` and every nested container beneath it, so
@@ -2405,6 +2504,51 @@ func _on_pressed():
             })
             .collect();
         (tree, cid, kids)
+    }
+
+    #[test]
+    fn split_container_layout_test() {
+        // (1) The split + subviewport container family registers in ClassDB.
+        gdobject::class_db::register_2d_classes();
+        for cls in [
+            "SplitContainer",
+            "HSplitContainer",
+            "VSplitContainer",
+            "SubViewportContainer",
+        ] {
+            assert!(
+                gdobject::class_db::class_exists(cls),
+                "{cls} is registered in ClassDB",
+            );
+        }
+
+        // (2) Dragging an HSplitContainer divider repositions both children.
+        let (mut tree, split, kids) = container_with_children("HSplitContainer", 2);
+        let total = Vector2::new(200.0, 100.0);
+        arrange_container(&mut tree, split, total);
+        let a0 = get_size(&tree, kids[0]);
+        let b0 = get_size(&tree, kids[1]);
+        // Drag the divider 40px right of center.
+        set_split_offset(&mut tree, split, 40.0);
+        arrange_container(&mut tree, split, total);
+        let a1 = get_size(&tree, kids[0]);
+        let b1 = get_size(&tree, kids[1]);
+        assert_ne!(a0, a1, "dragging the divider resizes the first pane");
+        assert_ne!(b0, b1, "dragging the divider resizes the second pane");
+        let sep = get_separation(&tree, split) as f32;
+        assert!(
+            (a1.x + b1.x + sep - total.x).abs() < 0.01,
+            "the two panes tile the container width (minus the divider gap)",
+        );
+
+        // (3) A SubViewportContainer forwards a click into sub-viewport space.
+        let mapped =
+            subviewport_container_to_viewport_coord(Vector2::new(100.0, 80.0), true, 2);
+        assert_eq!(
+            mapped,
+            Vector2::new(50.0, 40.0),
+            "a click divides by stretch_shrink into the sub-viewport's coordinate space",
+        );
     }
 
     #[test]

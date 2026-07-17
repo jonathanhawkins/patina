@@ -121,6 +121,10 @@ pub struct SceneTree {
     should_quit: bool,
     /// Exit code from the last [`quit`](Self::quit) (Godot's `OS.exit_code`).
     exit_code: i32,
+    /// Whether the input event currently being dispatched by
+    /// [`push_input`](Self::push_input) has been marked handled. Reset at the
+    /// start of each event; set via `set_input_as_handled()` from a script.
+    input_handled: bool,
 }
 
 impl std::fmt::Debug for SceneTree {
@@ -166,6 +170,7 @@ impl SceneTree {
             pending_scene: None,
             should_quit: false,
             exit_code: 0,
+            input_handled: false,
         }
     }
 

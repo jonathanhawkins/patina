@@ -7,6 +7,7 @@
 //! must implement, and `ScriptBridge` which maps engine objects to their
 //! attached scripts.
 
+pub mod autoload_registry;
 pub mod bindings;
 pub mod bridge;
 pub mod coroutine;

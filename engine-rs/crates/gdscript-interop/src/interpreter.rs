@@ -76,6 +76,34 @@ fn float_arg(args: &[Variant], idx: usize) -> f64 {
     }
 }
 
+/// Resolves a Godot resource path to a filesystem path for loading.
+///
+/// Falls back to a project-root-relative path when no `res://` root is
+/// configured, matching how the scene accessor resolves `res://` when it
+/// loads a `.tscn` from disk.
+fn resource_fs_path(path: &str) -> std::path::PathBuf {
+    gdcore::file_access::resolve_path(path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(path.strip_prefix("res://").unwrap_or(path)))
+}
+
+/// Parses a text resource (`.tres`/`.res`) into a [`ResourceRef`] carrying the
+/// class name and properties declared in the file.
+///
+/// Returns `None` when the file is missing or does not parse, leaving the
+/// caller to fall back to a path-only placeholder.
+fn load_text_resource(path: &str) -> Option<ResourceRef> {
+    let source = std::fs::read_to_string(resource_fs_path(path)).ok()?;
+    let resource = gdresource::TresLoader::new().parse_str(&source, path).ok()?;
+    Some(ResourceRef {
+        path: path.to_string(),
+        class_name: resource.class_name.clone(),
+        properties: resource
+            .properties()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    })
+}
+
 /// Source location for error reporting.
 #[derive(Debug, Clone)]
 pub struct SourceLocation {
@@ -1670,6 +1698,26 @@ impl Interpreter {
                     if let Some(value) = crate::global_constants::global_constant(name) {
                         return Ok(value);
                     }
+                    // Autoload singletons (pat-nzgdu.70). Godot binds every
+                    // `[autoload]` name declared in project.godot as a global
+                    // resolving to the node at `/root/<Name>`, so `Global.score`
+                    // needs no get_node. Resolved here — last, and only for names
+                    // that would otherwise be a hard error — so locals, members,
+                    // node properties and global constants all shadow an autoload,
+                    // matching Godot's resolution order. The node is looked up
+                    // through this interpreter's own scene access, so each
+                    // SceneTree in the process resolves to its own node.
+                    if crate::autoload_registry::is_autoload(name) {
+                        let path = format!("/root/{name}");
+                        if let (Some(ref access), Some(node_id)) =
+                            (&self.scene_access, self.current_node_id)
+                        {
+                            if let Some(target) = access.get_node(node_id, &path) {
+                                let oid = gdcore::id::ObjectId::from_raw(target);
+                                return Ok(Variant::ObjectId(oid));
+                            }
+                        }
+                    }
                     Err(RuntimeError::new(RuntimeErrorKind::UndefinedVariable(
                         name.clone(),
                     )))
@@ -1803,6 +1851,12 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "TranslationServer") {
                             return call_translationserver_static(member, &evaluated_args);
                         }
+                        // CameraServer singleton (pat-nzgdu.179) — reports 0 feeds
+                        // until a script adds one (web parity: Godot ships no web
+                        // camera driver).
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "CameraServer") {
+                            return call_cameraserver_static(member, &evaluated_args);
+                        }
                         // Handle ClassName.new() — runtime node creation / RefCounted helpers
                         if member == "new" {
                             if let Expr::Ident(class_name) = object.as_ref() {
@@ -1810,6 +1864,11 @@ impl Interpreter {
                                     return Ok(Variant::ObjectId(
                                         gdresource::ConfigFile::new_handle(),
                                     ));
+                                }
+                                // CameraFeed is a RefCounted-style handle, not a
+                                // node: it needs no scene access (pat-nzgdu.179).
+                                if class_name == "CameraFeed" {
+                                    return Ok(Variant::ObjectId(new_camera_feed_handle()));
                                 }
                                 if is_node_class_name(class_name) {
                                     if let Some(ref mut access) = self.scene_access {
@@ -2681,6 +2740,21 @@ impl Interpreter {
                     )))),
                 }
             }
+            // Godot exposes this as `Viewport.set_input_as_handled()`; until a
+            // Viewport node exists it is reachable as a bare call from an input
+            // virtual, marking the in-flight event handled so later propagation
+            // stages are skipped. A no-op when the host dispatches no input.
+            "set_input_as_handled" => {
+                if !args.is_empty() {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "set_input_as_handled() takes no arguments".into(),
+                    )));
+                }
+                if let Some(ref mut access) = self.scene_access {
+                    access.set_input_as_handled();
+                }
+                Ok(Some(Variant::Nil))
+            }
             "preload" | "load" => {
                 if args.len() != 1 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -2689,6 +2763,16 @@ impl Interpreter {
                 }
                 match &args[0] {
                     Variant::String(path) => {
+                        // Text resources are parsed off disk so the returned
+                        // Resource carries the file's real class name and
+                        // properties (`load("x.tres").get("prop")`). An
+                        // unreadable or malformed file falls through to the
+                        // path-only placeholder below.
+                        if path.ends_with(".tres") || path.ends_with(".res") {
+                            if let Some(loaded) = load_text_resource(path) {
+                                return Ok(Some(Variant::Resource(Box::new(loaded))));
+                            }
+                        }
                         // Return a Resource variant with the path and inferred class name
                         let class_name = if path.ends_with(".tres") || path.ends_with(".res") {
                             "Resource"
@@ -4531,6 +4615,9 @@ impl Interpreter {
             }
             if gdresource::is_config_file_handle(*oid) {
                 return call_config_file_instance(*oid, method, args);
+            }
+            if is_camera_feed_handle(*oid) {
+                return call_camera_feed_instance(*oid, method, args);
             }
         }
         match obj {
@@ -9497,6 +9584,197 @@ fn call_javascriptbridge_static(method: &str, args: &[Variant]) -> Result<Varian
         "pwa_needs_update" => Ok(Variant::Bool(false)),
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("JavaScriptBridge.{other}"),
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CameraServer / CameraFeed (pat-nzgdu.179)
+// ---------------------------------------------------------------------------
+
+/// Tags an `ObjectId` issued by [`new_camera_feed_handle`]; mirrors the
+/// FileAccess / DirAccess / ConfigFile handle tags (0xFA / 0xDA / 0xCF).
+const CAMERA_FEED_HANDLE_TAG: u64 = 0xCA00_0000_0000_0000;
+
+/// A script-visible `CameraFeed`. Godot's CameraFeed carries id/name/position/
+/// active plus the formats a camera driver reports. Neither Patina nor Godot's
+/// own web export ships a camera driver (upstream `modules/camera` builds only
+/// for android/linux/macos/windows), so a feed exists only once a script adds
+/// one and never carries driver-supplied image data.
+#[derive(Clone, Debug)]
+struct CameraFeedState {
+    id: i64,
+    name: String,
+    position: i64,
+    active: bool,
+}
+
+thread_local! {
+    /// Live `CameraFeed` handles, keyed by raw ObjectId.
+    static CAMERA_FEEDS: std::cell::RefCell<HashMap<u64, CameraFeedState>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// The CameraServer feed list in add order — `get_feed(idx)` indexes this.
+    static CAMERA_SERVER_FEEDS: std::cell::RefCell<Vec<u64>> =
+        std::cell::RefCell::new(Vec::new());
+    /// Sequence backing both the handle id and the Godot-visible feed id.
+    static NEXT_CAMERA_FEED: std::cell::Cell<u64> = std::cell::Cell::new(1);
+    /// `CameraServer.set_monitoring_feeds` flag.
+    static CAMERA_MONITORING: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+/// Returns `true` when `id` was issued by [`new_camera_feed_handle`].
+fn is_camera_feed_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == CAMERA_FEED_HANDLE_TAG
+}
+
+/// Allocates a `CameraFeed` in the handle table (script `CameraFeed.new()`).
+fn new_camera_feed_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_CAMERA_FEED.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = CAMERA_FEED_HANDLE_TAG | seq;
+    CAMERA_FEEDS.with(|feeds| {
+        feeds.borrow_mut().insert(
+            raw,
+            CameraFeedState {
+                id: seq as i64,
+                name: String::new(),
+                // CameraFeed.FEED_UNSPECIFIED
+                position: 0,
+                active: false,
+            },
+        );
+    });
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// `CameraFeed` instance methods (pat-nzgdu.179).
+fn call_camera_feed_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let raw = id.raw();
+    CAMERA_FEEDS.with(|feeds| {
+        let mut map = feeds.borrow_mut();
+        let feed = map.get_mut(&raw).ok_or_else(|| {
+            RuntimeError::new(RuntimeErrorKind::TypeError(
+                "CameraFeed handle is invalid".into(),
+            ))
+        })?;
+        match method {
+            "get_id" => Ok(Variant::Int(feed.id)),
+            "get_name" => Ok(Variant::String(feed.name.clone())),
+            "set_name" => match args.first() {
+                Some(Variant::String(s)) => {
+                    feed.name = s.clone();
+                    Ok(Variant::Nil)
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "CameraFeed.set_name() takes a string".into(),
+                ))),
+            },
+            "get_position" => Ok(Variant::Int(feed.position)),
+            "set_position" => {
+                if let Some(Variant::Int(p)) = args.first() {
+                    feed.position = *p;
+                }
+                Ok(Variant::Nil)
+            }
+            "is_active" => Ok(Variant::Bool(feed.active)),
+            "set_active" => {
+                if let Some(Variant::Bool(b)) = args.first() {
+                    feed.active = *b;
+                }
+                Ok(Variant::Nil)
+            }
+            // No camera driver: the feed never carries an image, so datatype is
+            // CameraFeed.FEED_NOIMAGE (0), no formats are reported, set_format
+            // fails, and no GPU texture is allocated.
+            "get_datatype" => Ok(Variant::Int(0)),
+            "get_formats" => Ok(Variant::Array(Vec::new())),
+            "set_format" => Ok(Variant::Bool(false)),
+            "get_texture_tex_id" => Ok(Variant::Int(0)),
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("CameraFeed.{other}"),
+            ))),
+        }
+    })
+}
+
+/// Extracts the raw `CameraFeed` handle from an `add_feed`/`remove_feed` arg.
+fn camera_feed_arg(args: &[Variant], who: &str) -> Result<u64, RuntimeError> {
+    match args.first() {
+        Some(Variant::ObjectId(oid)) if is_camera_feed_handle(*oid) => Ok(oid.raw()),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "CameraServer.{who}() takes a CameraFeed"
+        )))),
+    }
+}
+
+/// `CameraServer` singleton (pat-nzgdu.179). Godot exposes CameraServer on every
+/// platform but ships no web camera driver, so on the web target it resolves and
+/// reports zero feeds rather than erroring. Patina matches that parity headlessly:
+/// `get_feed_count()` is 0 until a script calls `add_feed`, and every method
+/// resolves instead of raising UndefinedFunction. A real getUserMedia-backed feed
+/// is a browser-side (wasm) concern layered on this same surface.
+fn call_cameraserver_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    match method {
+        "get_feed_count" => Ok(Variant::Int(
+            CAMERA_SERVER_FEEDS.with(|f| f.borrow().len() as i64),
+        )),
+        "get_feed" => {
+            let idx = match args.first() {
+                Some(Variant::Int(i)) => *i,
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "CameraServer.get_feed() takes an index".into(),
+                    )))
+                }
+            };
+            Ok(CAMERA_SERVER_FEEDS.with(|f| {
+                let list = f.borrow();
+                if idx < 0 {
+                    return Variant::Nil;
+                }
+                match list.get(idx as usize) {
+                    Some(raw) => Variant::ObjectId(gdcore::id::ObjectId::from_raw(*raw)),
+                    None => Variant::Nil,
+                }
+            }))
+        }
+        "feeds" => Ok(Variant::Array(CAMERA_SERVER_FEEDS.with(|f| {
+            f.borrow()
+                .iter()
+                .map(|raw| Variant::ObjectId(gdcore::id::ObjectId::from_raw(*raw)))
+                .collect()
+        }))),
+        "add_feed" => {
+            let raw = camera_feed_arg(args, "add_feed")?;
+            CAMERA_SERVER_FEEDS.with(|f| {
+                let mut list = f.borrow_mut();
+                if !list.contains(&raw) {
+                    list.push(raw);
+                }
+            });
+            Ok(Variant::Nil)
+        }
+        "remove_feed" => {
+            let raw = camera_feed_arg(args, "remove_feed")?;
+            CAMERA_SERVER_FEEDS.with(|f| f.borrow_mut().retain(|r| *r != raw));
+            Ok(Variant::Nil)
+        }
+        "set_monitoring_feeds" => {
+            if let Some(Variant::Bool(b)) = args.first() {
+                CAMERA_MONITORING.with(|m| m.set(*b));
+            }
+            Ok(Variant::Nil)
+        }
+        "is_monitoring_feeds" => Ok(Variant::Bool(CAMERA_MONITORING.with(|m| m.get()))),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("CameraServer.{other}"),
         ))),
     }
 }

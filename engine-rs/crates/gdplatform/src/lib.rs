@@ -29,6 +29,7 @@ pub mod platform_targets;
 pub mod signing;
 pub mod thread;
 pub mod time;
+pub mod websocket_multiplayer;
 pub mod websocket_peer;
 pub mod webrtc_peer;
 pub mod xr;

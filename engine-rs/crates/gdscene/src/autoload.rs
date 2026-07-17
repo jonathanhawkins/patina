@@ -97,7 +97,16 @@ pub fn instantiate_autoloads(
     let mut result = AutoloadResult::default();
     for entry in autoloads {
         match instantiate_one(tree, root_id, entry, project_root) {
-            Some(node_id) => result.nodes.push((entry.name.clone(), node_id)),
+            Some(node_id) => {
+                // Bind the autoload's global name so scripts can write
+                // `Global.score` without a get_node (pat-nzgdu.70). Registered
+                // per successful instantiation only: a name whose resource
+                // failed to load has no node to resolve to, so leaving it
+                // unregistered keeps `Global` an UndefinedVariable error rather
+                // than a silent nil.
+                gdscript_interop::autoload_registry::register_autoload(entry.name.clone());
+                result.nodes.push((entry.name.clone(), node_id));
+            }
             None => {
                 tracing::warn!(
                     autoload = %entry.name,
