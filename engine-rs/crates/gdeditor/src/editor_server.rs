@@ -2706,12 +2706,30 @@ fn serve_cors_preflight(stream: &mut TcpStream) {
     let _ = stream.write_all(response.as_bytes());
 }
 
+/// Cross-origin isolation headers (pat-nzgdu.148).
+///
+/// A threaded web build needs `SharedArrayBuffer`, which browsers only expose to
+/// a **cross-origin isolated** document — one served with
+/// `Cross-Origin-Opener-Policy: same-origin` **and**
+/// `Cross-Origin-Embedder-Policy: require-corp`. Godot's web export documents the
+/// same requirement. Serving them from the editor makes `crossOriginIsolated`
+/// true in the preview, so a threaded build can actually be run here.
+///
+/// Both are required: either one alone leaves `crossOriginIsolated` false.
+/// Sub-resources need no `Cross-Origin-Resource-Policy` because the editor
+/// serves them same-origin.
+pub(crate) const CROSS_ORIGIN_ISOLATION_HEADERS: &str =
+    "Cross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\n";
+
 fn serve_editor_html(stream: &mut TcpStream) {
     let html = crate::editor_ui::EDITOR_HTML;
+    // COOP/COEP go on the top-level document — that is what the browser
+    // evaluates to decide `crossOriginIsolated` (pat-nzgdu.148).
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\nConnection: close\r\n\r\n{html}",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\n{isolation}Connection: close\r\n\r\n{html}",
         len = html.len(),
         origin = cors_current_allow_origin(),
+        isolation = CROSS_ORIGIN_ISOLATION_HEADERS,
     );
     let _ = stream.write_all(response.as_bytes());
 }
@@ -14771,6 +14789,33 @@ environment = SubResource("env1")
         let v: serde_json::Value =
             serde_json::from_str(extract_body(&http_get(port, "/api/runtime/status"))).unwrap();
         v["frame_count"].as_u64().unwrap()
+    }
+
+    /// pat-nzgdu.148: the editor document is served cross-origin isolated, so a
+    /// threaded web build — which needs `SharedArrayBuffer`, and therefore
+    /// `crossOriginIsolated` — can actually be previewed here.
+    #[test]
+    fn editor_html_is_cross_origin_isolated() {
+        let (_handle, port) = make_server();
+        let resp = http_get(port, "/editor");
+        // Assert on the header block only; the body is the whole editor HTML.
+        let head = resp.split("\r\n\r\n").next().unwrap_or("").to_string();
+
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        assert!(head.contains("Content-Type: text/html"), "{head}");
+
+        // BOTH are required — either one alone leaves crossOriginIsolated false.
+        assert!(
+            head.contains("Cross-Origin-Opener-Policy: same-origin"),
+            "COOP header missing:\n{head}",
+        );
+        assert!(
+            head.contains("Cross-Origin-Embedder-Policy: require-corp"),
+            "COEP header missing:\n{head}",
+        );
+
+        // The existing CORS header must survive alongside them.
+        assert!(head.contains("Access-Control-Allow-Origin:"), "{head}");
     }
 
     /// A gizmo drag transforms the whole multi-selection together (Godot

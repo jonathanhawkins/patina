@@ -35,6 +35,42 @@ impl Default for OmniShadowMode {
     }
 }
 
+/// Converts a colour temperature in Kelvin to an RGB tint, mirroring Godot's
+/// `Light3D.light_temperature` (Tanner Helland's blackbody approximation, the
+/// same curve Godot uses).
+///
+/// 6500K is daylight-neutral (very close to white); lower is warm (orange),
+/// higher is cool (blue). Input is clamped to the 1000–40000K range the
+/// approximation is defined over.
+pub fn kelvin_to_rgb(kelvin: f32) -> Color {
+    let t = kelvin.clamp(1000.0, 40000.0) / 100.0;
+
+    let r = if t <= 66.0 {
+        255.0
+    } else {
+        329.698_73 * (t - 60.0).powf(-0.133_204_76)
+    };
+    let g = if t <= 66.0 {
+        99.470_802 * t.ln() - 161.119_57
+    } else {
+        288.122_17 * (t - 60.0).powf(-0.075_514_85)
+    };
+    let b = if t >= 66.0 {
+        255.0
+    } else if t <= 19.0 {
+        0.0
+    } else {
+        138.517_73 * (t - 10.0).ln() - 305.044_8
+    };
+
+    Color::new(
+        (r / 255.0).clamp(0.0, 1.0),
+        (g / 255.0).clamp(0.0, 1.0),
+        (b / 255.0).clamp(0.0, 1.0),
+        1.0,
+    )
+}
+
 /// Soft-shadow filter quality, mirroring Godot's
 /// `rendering/lights_and_shadows/soft_shadow_filter_quality` levels.
 ///
@@ -348,6 +384,47 @@ pub struct Light3D {
     /// [`ShadowFilterQuality::Hard`] (a binary edge, matching the previous
     /// behavior); a soft level produces penumbrae.
     pub shadow_filter_quality: ShadowFilterQuality,
+    /// Colour temperature in Kelvin (Godot's `Light3D.light_temperature`).
+    /// 6500 is daylight-neutral. The tint is applied into
+    /// [`color`](Self::color) when a scene sets the property; this field keeps
+    /// the authored value for introspection and re-tinting.
+    pub temperature: f32,
+    /// Render layers this light affects (Godot's `Light3D.light_cull_mask`).
+    /// A mesh is lit only when its layer bit is set here; defaults to all
+    /// layers.
+    pub cull_mask: u32,
+    /// Multiplier for this light's contribution to indirect/baked lighting
+    /// (Godot's `light_indirect_energy`).
+    pub indirect_energy: f32,
+    /// Multiplier for this light's contribution to volumetric fog
+    /// (Godot's `light_volumetric_fog_energy`).
+    pub volumetric_fog_energy: f32,
+    /// Whether the light fades out with distance (`distance_fade_enabled`).
+    pub distance_fade_enabled: bool,
+    /// Distance at which the light begins to fade (`distance_fade_begin`).
+    pub distance_fade_begin: f32,
+    /// Distance at which the light's shadow fades (`distance_fade_shadow`).
+    pub distance_fade_shadow: f32,
+    /// Length of the distance fade transition (`distance_fade_length`).
+    pub distance_fade_length: f32,
+    /// Shadow darkness, 0..1 (Godot's `shadow_opacity`).
+    pub shadow_opacity: f32,
+    /// Layers whose meshes cast shadows from this light
+    /// (Godot's `shadow_caster_mask`).
+    pub shadow_caster_mask: u32,
+    /// Whether the light exists only in the editor and is stripped at runtime
+    /// (Godot's `editor_only`).
+    pub editor_only: bool,
+    /// DirectionalLight3D PSSM split fractions of the shadow max distance
+    /// (`directional_shadow_split_1/2/3`). Ignored for other light types.
+    pub shadow_split_1: f32,
+    /// See [`shadow_split_1`](Self::shadow_split_1).
+    pub shadow_split_2: f32,
+    /// See [`shadow_split_1`](Self::shadow_split_1).
+    pub shadow_split_3: f32,
+    /// Whether PSSM splits blend across their boundaries
+    /// (`directional_shadow_blend_splits`).
+    pub blend_splits: bool,
 }
 
 impl Light3D {
@@ -372,6 +449,21 @@ impl Light3D {
             projector: None,
             shadow_blur: 0.0,
             shadow_filter_quality: ShadowFilterQuality::Hard,
+            temperature: 6500.0,
+            cull_mask: u32::MAX,
+            indirect_energy: 1.0,
+            volumetric_fog_energy: 1.0,
+            distance_fade_enabled: false,
+            distance_fade_begin: 40.0,
+            distance_fade_shadow: 50.0,
+            distance_fade_length: 10.0,
+            shadow_opacity: 1.0,
+            shadow_caster_mask: u32::MAX,
+            editor_only: false,
+            shadow_split_1: 0.1,
+            shadow_split_2: 0.2,
+            shadow_split_3: 0.5,
+            blend_splits: false,
         }
     }
 
@@ -396,6 +488,21 @@ impl Light3D {
             projector: None,
             shadow_blur: 0.0,
             shadow_filter_quality: ShadowFilterQuality::Hard,
+            temperature: 6500.0,
+            cull_mask: u32::MAX,
+            indirect_energy: 1.0,
+            volumetric_fog_energy: 1.0,
+            distance_fade_enabled: false,
+            distance_fade_begin: 40.0,
+            distance_fade_shadow: 50.0,
+            distance_fade_length: 10.0,
+            shadow_opacity: 1.0,
+            shadow_caster_mask: u32::MAX,
+            editor_only: false,
+            shadow_split_1: 0.1,
+            shadow_split_2: 0.2,
+            shadow_split_3: 0.5,
+            blend_splits: false,
         }
     }
 
@@ -420,7 +527,41 @@ impl Light3D {
             projector: None,
             shadow_blur: 0.0,
             shadow_filter_quality: ShadowFilterQuality::Hard,
+            temperature: 6500.0,
+            cull_mask: u32::MAX,
+            indirect_energy: 1.0,
+            volumetric_fog_energy: 1.0,
+            distance_fade_enabled: false,
+            distance_fade_begin: 40.0,
+            distance_fade_shadow: 50.0,
+            distance_fade_length: 10.0,
+            shadow_opacity: 1.0,
+            shadow_caster_mask: u32::MAX,
+            editor_only: false,
+            shadow_split_1: 0.1,
+            shadow_split_2: 0.2,
+            shadow_split_3: 0.5,
+            blend_splits: false,
         }
+    }
+
+    /// Whether this light affects a mesh on `layer` (a 1-based Godot render
+    /// layer, as used by `VisualInstance3D.layers`).
+    ///
+    /// Mirrors Godot's `light_cull_mask` test: the light lights the mesh only
+    /// when the mesh's layer bit is set in the mask. Layers outside 1..=32 are
+    /// not addressable by the 32-bit mask and are treated as unlit.
+    pub fn affects_layer(&self, layer: u32) -> bool {
+        if !(1..=32).contains(&layer) {
+            return false;
+        }
+        self.cull_mask & (1 << (layer - 1)) != 0
+    }
+
+    /// The RGB tint this light's colour temperature applies
+    /// (Godot's `light_temperature`). 6500K is daylight-neutral.
+    pub fn temperature_tint(&self) -> Color {
+        kelvin_to_rgb(self.temperature)
     }
 
     /// Returns the projector tint this light casts onto `world_pos`, or
@@ -463,6 +604,108 @@ impl Light3D {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- pat-nzgdu.121: temperature / cull mask / PSSM ------------------------
+
+    /// 6500K is daylight-neutral, so a light left at the default temperature
+    /// must not tint. This is what keeps temperature opt-in: a scene that never
+    /// sets `light_temperature` renders exactly as before.
+    #[test]
+    fn kelvin_6500_is_neutral() {
+        let c = kelvin_to_rgb(6500.0);
+        assert!(
+            (c.r - c.g).abs() < 0.05 && (c.r - c.b).abs() < 0.05,
+            "6500K must be ~neutral, got {c:?}",
+        );
+    }
+
+    /// Below 6500K is warm (orange), above is cool (blue) — the direction of
+    /// Godot's blackbody curve.
+    #[test]
+    fn kelvin_below_neutral_is_warm_above_is_cool() {
+        let warm = kelvin_to_rgb(3000.0);
+        assert!(warm.r > warm.g && warm.g > warm.b, "3000K must be warm, got {warm:?}");
+
+        let cool = kelvin_to_rgb(20000.0);
+        assert!(cool.b > cool.r, "20000K must be cool, got {cool:?}");
+
+        // A warm light is measurably less blue than the neutral reference —
+        // this is the "tinted vs a 6500K light" comparison.
+        assert!(
+            warm.b < kelvin_to_rgb(6500.0).b,
+            "3000K must be less blue than 6500K",
+        );
+    }
+
+    /// The approximation is only defined over 1000..=40000K; outside that it
+    /// clamps rather than producing NaNs or out-of-range channels.
+    #[test]
+    fn kelvin_clamps_out_of_range_and_stays_in_gamut() {
+        assert_eq!(kelvin_to_rgb(500.0), kelvin_to_rgb(1000.0));
+        assert_eq!(kelvin_to_rgb(99999.0), kelvin_to_rgb(40000.0));
+        for k in [1000.0, 3000.0, 6500.0, 40000.0] {
+            let c = kelvin_to_rgb(k);
+            for ch in [c.r, c.g, c.b] {
+                assert!((0.0..=1.0).contains(&ch), "{k}K channel {ch} out of gamut");
+            }
+        }
+    }
+
+    /// A light's temperature tint is reachable from the record.
+    #[test]
+    fn light_temperature_defaults_to_neutral_6500() {
+        let light = Light3D::directional(Light3DId(1));
+        assert_eq!(light.temperature, 6500.0);
+        let tint = light.temperature_tint();
+        assert!((tint.r - tint.g).abs() < 0.05 && (tint.r - tint.b).abs() < 0.05);
+    }
+
+    /// `light_cull_mask` decides which render layers a light touches. The
+    /// default lights every layer, so existing scenes are unaffected.
+    #[test]
+    fn cull_mask_defaults_to_all_layers() {
+        let light = Light3D::directional(Light3DId(1));
+        assert_eq!(light.cull_mask, u32::MAX);
+        for layer in [1u32, 2, 16, 32] {
+            assert!(light.affects_layer(layer), "layer {layer} must be lit by default");
+        }
+    }
+
+    /// A mask excluding a mesh's layer leaves that mesh unlit — the bead's
+    /// cull-mask acceptance, at the light record.
+    #[test]
+    fn cull_mask_excludes_unset_layers() {
+        let mut light = Light3D::directional(Light3DId(1));
+        // Only layer 1 (bit 0).
+        light.cull_mask = 0b1;
+        assert!(light.affects_layer(1), "layer 1 is in the mask");
+        assert!(!light.affects_layer(2), "layer 2 must be excluded");
+        assert!(!light.affects_layer(32), "layer 32 must be excluded");
+
+        // Layers outside 1..=32 aren't addressable by a 32-bit mask.
+        assert!(!light.affects_layer(0), "layer 0 is not a Godot layer");
+        assert!(!light.affects_layer(33), "layer 33 exceeds the mask");
+    }
+
+    /// PSSM splits and the rest of the new property surface carry Godot's
+    /// defaults on the record.
+    #[test]
+    fn light_property_surface_matches_godot_defaults() {
+        let l = Light3D::directional(Light3DId(1));
+        assert_eq!(l.shadow_split_1, 0.1);
+        assert_eq!(l.shadow_split_2, 0.2);
+        assert_eq!(l.shadow_split_3, 0.5);
+        assert!(!l.blend_splits);
+        assert_eq!(l.indirect_energy, 1.0);
+        assert_eq!(l.volumetric_fog_energy, 1.0);
+        assert_eq!(l.shadow_opacity, 1.0);
+        assert_eq!(l.shadow_caster_mask, u32::MAX);
+        assert!(!l.editor_only);
+        assert!(!l.distance_fade_enabled);
+        assert_eq!(l.distance_fade_begin, 40.0);
+        assert_eq!(l.distance_fade_shadow, 50.0);
+        assert_eq!(l.distance_fade_length, 10.0);
+    }
 
     // -- pat-p0s82.25: light projector ---------------------------------------
 

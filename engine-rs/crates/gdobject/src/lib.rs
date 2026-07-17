@@ -27,12 +27,13 @@ pub mod weak_ref;
 
 // Re-export the most-used types at the crate root.
 pub use class_db::{
-    class_count, class_exists, class_has_method, clear_for_testing, get_class_info,
-    get_class_info_by_id, get_method_list, get_property_list, inheritance_chain, instantiate,
-    is_parent_class, register_2d_classes, register_3d_classes, register_audio_classes,
-    register_class, register_editor_classes, register_io_classes, register_navigation_classes,
-    register_networking_classes, register_viewport_classes, ClassInfo, ClassRegistration,
-    MethodInfo, PropertyInfo,
+    class_count, class_exists, class_get_integer_constant, class_has_enum, class_has_method,
+    class_has_signal, clear_for_testing, get_class_info, get_class_info_by_id, get_enum_constants,
+    get_enum_list, get_integer_constant_list, get_method_list, get_property_list, get_signal_list,
+    inheritance_chain, instantiate, is_parent_class, register_2d_classes, register_3d_classes,
+    register_audio_classes, register_class, register_editor_classes, register_io_classes,
+    register_navigation_classes, register_networking_classes, register_viewport_classes, ClassInfo,
+    ClassRegistration, EnumInfo, MethodInfo, PropertyInfo, SignalInfo,
 };
 pub use notification::{
     dispatch_notification_chain, Notification, NotificationHandler, NotificationRecord,

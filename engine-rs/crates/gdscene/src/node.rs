@@ -124,6 +124,12 @@ pub struct Node {
     process_priority: i32,
     /// Controls whether this node processes when the tree is paused.
     process_mode: ProcessMode,
+    /// Whether `_process` runs on this node (Godot's `set_process`).
+    /// Toggled at runtime, independently of [`process_mode`](Self::process_mode).
+    process_enabled: bool,
+    /// Whether `_physics_process` runs on this node (Godot's
+    /// `set_physics_process`).
+    physics_process_enabled: bool,
 }
 
 impl Node {
@@ -148,6 +154,8 @@ impl Node {
             ready: false,
             process_priority: 0,
             process_mode: ProcessMode::default(),
+            process_enabled: true,
+            physics_process_enabled: true,
         };
         node.notification_log.push(NOTIFICATION_POSTINITIALIZE);
         node
@@ -173,6 +181,8 @@ impl Node {
             ready: false,
             process_priority: 0,
             process_mode: ProcessMode::default(),
+            process_enabled: true,
+            physics_process_enabled: true,
         };
         node.notification_log.push(NOTIFICATION_POSTINITIALIZE);
         node
@@ -400,6 +410,38 @@ impl Node {
     /// Marks whether this node has completed its ready phase.
     pub(crate) fn set_ready(&mut self, ready: bool) {
         self.ready = ready;
+    }
+
+    /// Re-arms `_ready` so it runs again the next time this node enters the
+    /// tree (Godot's `Node.request_ready`).
+    pub fn request_ready(&mut self) {
+        self.ready = false;
+    }
+
+    // -- process toggles (pat-nzgdu.137) -------------------------------------
+
+    /// Enables or disables `_process` on this node (Godot's
+    /// `Node.set_process`). Independent of
+    /// [`process_mode`](Self::process_mode), which governs pause behaviour.
+    pub fn set_process(&mut self, enabled: bool) {
+        self.process_enabled = enabled;
+    }
+
+    /// Whether `_process` runs on this node (Godot's `Node.is_processing`).
+    pub fn is_processing(&self) -> bool {
+        self.process_enabled
+    }
+
+    /// Enables or disables `_physics_process` on this node (Godot's
+    /// `Node.set_physics_process`).
+    pub fn set_physics_process(&mut self, enabled: bool) {
+        self.physics_process_enabled = enabled;
+    }
+
+    /// Whether `_physics_process` runs on this node (Godot's
+    /// `Node.is_physics_processing`).
+    pub fn is_physics_processing(&self) -> bool {
+        self.physics_process_enabled
     }
 
     // -- process priority / mode --------------------------------------------

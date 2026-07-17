@@ -202,6 +202,46 @@ impl Particle {
 // ParticleEmitter
 // ---------------------------------------------------------------------------
 
+/// The order a simulator emits its draw commands in (Godot's
+/// `GPUParticles2D.draw_order`, pat-nzgdu.145).
+///
+/// `VIEW_DEPTH` is deliberately absent: Godot only exposes it on
+/// `GPUParticles3D`, where particles have a camera-relative depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParticleDrawOrder {
+    /// Emission order — the order particles were spawned
+    /// (Godot `DRAW_ORDER_INDEX`). The default.
+    #[default]
+    Index,
+    /// By remaining lifetime, oldest (nearest death) first
+    /// (Godot `DRAW_ORDER_LIFETIME`).
+    Lifetime,
+    /// By remaining lifetime, youngest first
+    /// (Godot `DRAW_ORDER_REVERSE_LIFETIME`).
+    ReverseLifetime,
+}
+
+impl ParticleDrawOrder {
+    /// Maps Godot's `GPUParticles2D.DrawOrder` integer. Unknown values fall
+    /// back to [`Index`](Self::Index), matching Godot's default.
+    pub fn from_godot_int(v: i64) -> Self {
+        match v {
+            1 => ParticleDrawOrder::Lifetime,
+            2 => ParticleDrawOrder::ReverseLifetime,
+            _ => ParticleDrawOrder::Index,
+        }
+    }
+
+    /// The Godot `GPUParticles2D.DrawOrder` integer for this order.
+    pub fn to_godot_int(self) -> i64 {
+        match self {
+            ParticleDrawOrder::Index => 0,
+            ParticleDrawOrder::Lifetime => 1,
+            ParticleDrawOrder::ReverseLifetime => 2,
+        }
+    }
+}
+
 /// Configuration object that knows how to spawn individual particles.
 #[derive(Debug, Clone)]
 pub struct ParticleEmitter {
@@ -223,6 +263,16 @@ pub struct ParticleEmitter {
     pub emitting: bool,
     /// If `true`, particles are in the emitter's local space.
     pub local_coords: bool,
+    /// Order the simulator emits draw commands in (Godot `draw_order`,
+    /// pat-nzgdu.145).
+    pub draw_order: ParticleDrawOrder,
+    /// Fixed simulation rate in steps per second (Godot `fixed_fps`).
+    ///
+    /// `0` (the default) simulates with the frame's own delta. Any positive
+    /// value makes the simulation advance in fixed `1/fixed_fps` increments,
+    /// so the result depends only on elapsed time — not on how the render
+    /// delta happened to be chopped up (pat-nzgdu.145).
+    pub fixed_fps: u32,
 }
 
 impl Default for ParticleEmitter {
@@ -237,6 +287,8 @@ impl Default for ParticleEmitter {
             speed_scale: 1.0,
             emitting: true,
             local_coords: false,
+            draw_order: ParticleDrawOrder::Index,
+            fixed_fps: 0,
         }
     }
 }
@@ -306,7 +358,20 @@ pub struct ParticleSimulator {
     pub time_accumulator: f32,
     /// Total number of particles emitted (used for seeding).
     pub total_emitted: u64,
+    /// Leftover time when `fixed_fps` is set (pat-nzgdu.145).
+    fixed_step_accumulator: f32,
+    /// A `finished` edge waiting to be drained by the node layer.
+    finished_pending: bool,
+    /// Whether the current completion has already produced an edge, so
+    /// `finished` fires once per drain rather than every frame.
+    finished_emitted: bool,
 }
+
+/// Upper bound on catch-up iterations for one [`ParticleSimulator::step`] call.
+///
+/// Without it, a huge `dt` (a stall, or a debugger pause) against a high
+/// `fixed_fps` would spin for an unbounded time — Godot clamps the same way.
+const MAX_FIXED_STEPS_PER_FRAME: u32 = 64;
 
 impl ParticleSimulator {
     /// Creates a new simulator from the given emitter configuration.
@@ -316,15 +381,73 @@ impl ParticleSimulator {
             active_particles: Vec::new(),
             time_accumulator: 0.0,
             total_emitted: 0,
+            fixed_step_accumulator: 0.0,
+            finished_pending: false,
+            finished_emitted: false,
         }
     }
 
     /// Advance the simulation by `dt` seconds.
     ///
+    /// When [`fixed_fps`](ParticleEmitter::fixed_fps) is set the simulation runs
+    /// in fixed increments and any remainder is carried to the next call, so the
+    /// outcome depends only on total elapsed time rather than on the render
+    /// delta (pat-nzgdu.145). Otherwise `dt` is simulated directly.
+    pub fn step(&mut self, dt: f32) {
+        if self.emitter.fixed_fps > 0 {
+            let fixed_dt = 1.0 / self.emitter.fixed_fps as f32;
+            self.fixed_step_accumulator += dt;
+            let mut steps = 0;
+            while self.fixed_step_accumulator >= fixed_dt && steps < MAX_FIXED_STEPS_PER_FRAME {
+                self.step_exact(fixed_dt);
+                self.fixed_step_accumulator -= fixed_dt;
+                steps += 1;
+            }
+            if steps == MAX_FIXED_STEPS_PER_FRAME {
+                // Fell too far behind — drop the backlog instead of spiralling.
+                self.fixed_step_accumulator = 0.0;
+            }
+        } else {
+            self.step_exact(dt);
+        }
+        self.update_finished_edge();
+    }
+
+    /// Records a `finished` edge when a one-shot emitter drains.
+    ///
+    /// Only meaningful for `one_shot` (Godot never fires `finished` for a
+    /// continuous emitter), and only after something was actually emitted —
+    /// otherwise a freshly-built idle one-shot would "finish" on its first step
+    /// without ever having run.
+    fn update_finished_edge(&mut self) {
+        let complete = self.is_complete() && self.total_emitted > 0;
+        if complete {
+            if !self.finished_emitted {
+                self.finished_pending = true;
+                self.finished_emitted = true;
+            }
+        } else {
+            // Re-arm, so a restart()ed emitter can finish again.
+            self.finished_emitted = false;
+        }
+    }
+
+    /// Takes the pending `finished` edge, if any (pat-nzgdu.145).
+    ///
+    /// Returns `true` exactly once per completion — the seam the node layer
+    /// drains each frame to emit Godot's `finished` signal. Draining is
+    /// idempotent: a second call returns `false` until the emitter is restarted
+    /// and drains again.
+    pub fn take_finished(&mut self) -> bool {
+        std::mem::take(&mut self.finished_pending)
+    }
+
+    /// Advance the simulation by exactly `dt` seconds.
+    ///
     /// Ages existing particles, removes dead ones, emits new particles
     /// based on the configured rate and explosiveness, and applies
     /// gravity and velocity integration.
-    pub fn step(&mut self, dt: f32) {
+    fn step_exact(&mut self, dt: f32) {
         let dt_scaled = dt * self.emitter.speed_scale;
 
         // --- Age and integrate existing particles ---
@@ -387,10 +510,36 @@ impl ParticleSimulator {
         }
     }
 
-    /// Returns draw commands for each live particle: (position, color, scale).
+    /// Returns draw commands for each live particle: (position, color, scale),
+    /// ordered by the emitter's [`draw_order`](ParticleEmitter::draw_order).
+    ///
+    /// [`Index`](ParticleDrawOrder::Index) keeps emission order — which is what
+    /// this returned unconditionally before pat-nzgdu.145 — so the default is
+    /// unchanged. The lifetime orders sort by remaining lifetime; the sort is
+    /// stable, so particles with equal lifetime keep their emission order rather
+    /// than shuffling between frames.
     pub fn get_draw_commands(&self) -> Vec<(Vector2, Color, f32)> {
-        self.active_particles
-            .iter()
+        let mut particles: Vec<&Particle> = self.active_particles.iter().collect();
+        match self.emitter.draw_order {
+            ParticleDrawOrder::Index => {}
+            ParticleDrawOrder::Lifetime => {
+                // Oldest (least remaining) first.
+                particles.sort_by(|a, b| {
+                    a.lifetime_remaining
+                        .partial_cmp(&b.lifetime_remaining)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            ParticleDrawOrder::ReverseLifetime => {
+                particles.sort_by(|a, b| {
+                    b.lifetime_remaining
+                        .partial_cmp(&a.lifetime_remaining)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+        }
+        particles
+            .into_iter()
             .map(|p| (p.position, p.color, p.scale))
             .collect()
     }
@@ -656,6 +805,180 @@ mod tests {
         let p = &sim.active_particles[0];
         // Gravity should have pushed velocity downward
         assert!(p.velocity.y > 0.0, "Gravity should increase y velocity");
+    }
+
+    // -- pat-nzgdu.145: draw_order / fixed_fps / finished ---------------------
+
+    /// A burst emitter whose particles are all alive at once.
+    fn burst(amount: u32, lifetime: f32) -> ParticleEmitter {
+        ParticleEmitter {
+            amount,
+            lifetime,
+            one_shot: true,
+            explosiveness: 1.0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn draw_order_godot_int_roundtrip() {
+        for order in [
+            ParticleDrawOrder::Index,
+            ParticleDrawOrder::Lifetime,
+            ParticleDrawOrder::ReverseLifetime,
+        ] {
+            assert_eq!(ParticleDrawOrder::from_godot_int(order.to_godot_int()), order);
+        }
+        assert_eq!(ParticleDrawOrder::from_godot_int(0), ParticleDrawOrder::Index);
+        assert_eq!(ParticleDrawOrder::from_godot_int(1), ParticleDrawOrder::Lifetime);
+        // Unknown values fall back to Godot's default.
+        assert_eq!(ParticleDrawOrder::from_godot_int(99), ParticleDrawOrder::Index);
+        assert_eq!(ParticleDrawOrder::default(), ParticleDrawOrder::Index);
+    }
+
+    #[test]
+    fn draw_order_lifetime_sorts_by_age() {
+        // Three particles of differing remaining lifetime, deliberately pushed
+        // in an order that is neither sorted nor reverse-sorted.
+        let mut sim = ParticleSimulator::new(burst(1, 1.0));
+        let mut make = |remaining: f32, x: f32| Particle {
+            position: Vector2::new(x, 0.0),
+            velocity: Vector2::ZERO,
+            lifetime: 1.0,
+            lifetime_remaining: remaining,
+            color: Color::WHITE,
+            scale: 1.0,
+            rotation: 0.0,
+            angular_velocity: 0.0,
+        };
+        sim.active_particles = vec![make(0.5, 0.0), make(0.9, 1.0), make(0.1, 2.0)];
+
+        // Default (Index) keeps emission order — the pre-pat-nzgdu.145 behaviour.
+        let xs: Vec<f32> = sim.get_draw_commands().iter().map(|c| c.0.x).collect();
+        assert_eq!(xs, vec![0.0, 1.0, 2.0]);
+
+        // LIFETIME: oldest (least remaining) first => 0.1, 0.5, 0.9 => x 2,0,1.
+        sim.emitter.draw_order = ParticleDrawOrder::Lifetime;
+        let xs: Vec<f32> = sim.get_draw_commands().iter().map(|c| c.0.x).collect();
+        assert_eq!(xs, vec![2.0, 0.0, 1.0]);
+
+        // REVERSE_LIFETIME: youngest first => 0.9, 0.5, 0.1 => x 1,0,2.
+        sim.emitter.draw_order = ParticleDrawOrder::ReverseLifetime;
+        let xs: Vec<f32> = sim.get_draw_commands().iter().map(|c| c.0.x).collect();
+        assert_eq!(xs, vec![1.0, 0.0, 2.0]);
+
+        // Ordering must not disturb the particles themselves.
+        assert_eq!(sim.particle_count(), 3);
+    }
+
+    #[test]
+    fn fixed_fps_makes_the_sim_independent_of_the_render_delta() {
+        // Same elapsed time, chopped up differently: one big frame vs many
+        // small ones. With fixed_fps the outcome must match.
+        // lifetime 0.3 against 0.5s elapsed: the burst fires around step 18 of
+        // ~30, leaving ~0.2s of aging against a 0.3s lifetime — so all four
+        // particles are still alive at the end, with margin on both sides. The
+        // assertion is on the observable particle count, not the sub-step count,
+        // which keeps it robust to a ±1 sub-step difference from float
+        // accumulation.
+        let run = |chunks: &[f32]| {
+            let mut e = burst(4, 0.3);
+            e.fixed_fps = 60;
+            let mut sim = ParticleSimulator::new(e);
+            for &dt in chunks {
+                sim.step(dt);
+            }
+            sim.particle_count()
+        };
+
+        let one_big = run(&[0.5]);
+        let many_small = run(&[0.1; 5]);
+        let uneven = run(&[0.03, 0.21, 0.26]);
+        assert_eq!(one_big, many_small, "fixed_fps must not depend on chunking");
+        assert_eq!(one_big, uneven, "fixed_fps must not depend on chunking");
+        assert!(one_big > 0, "the burst should have emitted");
+    }
+
+    #[test]
+    fn fixed_fps_zero_keeps_the_variable_timestep() {
+        // Default (0) must behave exactly as before pat-nzgdu.145.
+        let mut sim = ParticleSimulator::new(burst(3, 10.0));
+        assert_eq!(sim.emitter.fixed_fps, 0);
+        sim.step(10.0);
+        assert_eq!(sim.particle_count(), 3, "burst emitted on the variable step");
+    }
+
+    #[test]
+    fn fixed_fps_survives_a_huge_delta_without_spiralling() {
+        // A pathological dt must be clamped, not spin for ~600k iterations.
+        //
+        // lifetime 0.8 turns the clamp into something *observable* rather than a
+        // test that passes vacuously: the clamp allows 64 steps ≈ 1.07s, so the
+        // burst fires (~step 48) and the particles are still alive at the end.
+        // Un-clamped, all 10000s would simulate, the particles would age out,
+        // and this would be 0 — so the count proves the clamp actually engaged.
+        let mut e = burst(2, 0.8);
+        e.fixed_fps = 60;
+        let mut sim = ParticleSimulator::new(e);
+        sim.step(10_000.0);
+        assert_eq!(
+            sim.particle_count(),
+            2,
+            "the clamp must bound the catch-up, leaving the burst alive",
+        );
+    }
+
+    #[test]
+    fn finished_fires_exactly_once_when_a_one_shot_drains() {
+        let mut sim = ParticleSimulator::new(burst(2, 0.1));
+
+        // Nothing emitted yet: an idle one-shot must not "finish" immediately.
+        assert!(!sim.take_finished(), "must not finish before emitting");
+
+        sim.step(0.1); // burst
+        assert!(!sim.is_complete());
+        assert!(!sim.take_finished(), "particles are still alive");
+
+        sim.step(0.5); // particles die out
+        assert!(sim.is_complete());
+        assert!(sim.take_finished(), "finished fires on drain");
+
+        // Exactly once: draining is idempotent and later steps do not re-fire.
+        assert!(!sim.take_finished(), "finished must not fire twice");
+        sim.step(0.5);
+        assert!(!sim.take_finished(), "finished must not re-fire each frame");
+    }
+
+    #[test]
+    fn finished_never_fires_for_a_continuous_emitter() {
+        // Godot only emits `finished` for one_shot emitters.
+        let mut sim = ParticleSimulator::new(ParticleEmitter {
+            amount: 2,
+            lifetime: 0.05,
+            one_shot: false,
+            explosiveness: 1.0,
+            ..Default::default()
+        });
+        for _ in 0..10 {
+            sim.step(0.05);
+            assert!(!sim.take_finished(), "continuous emitters never finish");
+        }
+    }
+
+    #[test]
+    fn finished_re_arms_when_the_emitter_runs_again() {
+        let mut sim = ParticleSimulator::new(burst(2, 0.1));
+        sim.step(0.1);
+        sim.step(0.5);
+        assert!(sim.take_finished());
+
+        // Restart by re-enabling emission: a second drain fires again.
+        sim.emitter.emitting = true;
+        sim.total_emitted = 0;
+        sim.step(0.1);
+        assert!(!sim.take_finished(), "re-armed, not yet drained");
+        sim.step(0.5);
+        assert!(sim.take_finished(), "a second completion fires again");
     }
 
     #[test]

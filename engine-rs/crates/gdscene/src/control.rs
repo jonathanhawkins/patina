@@ -688,6 +688,86 @@ pub fn set_h_size_flags(tree: &mut SceneTree, node_id: NodeId, flags: SizeFlags)
 }
 
 /// Gets the horizontal size flags, defaulting to [`SizeFlags::Fill`].
+/// A Control's layout direction, mirroring Godot's
+/// `Control.LayoutDirection` (pat-nzgdu.142).
+///
+/// `Inherited` takes the direction from the parent chain; `Locale` follows the
+/// application locale (treated as LTR until a locale service exists);
+/// `Ltr`/`Rtl` force a direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayoutDirection {
+    /// Inherit from the parent Control (Godot default).
+    #[default]
+    Inherited,
+    /// Follow the application locale.
+    Locale,
+    /// Force left-to-right.
+    Ltr,
+    /// Force right-to-left.
+    Rtl,
+}
+
+impl LayoutDirection {
+    /// Godot's `Control.LayoutDirection` integer (0..=3).
+    pub fn from_int(v: i64) -> Self {
+        match v {
+            1 => Self::Locale,
+            2 => Self::Ltr,
+            3 => Self::Rtl,
+            _ => Self::Inherited,
+        }
+    }
+
+    /// The Godot integer for this direction.
+    pub fn to_int(self) -> i64 {
+        match self {
+            Self::Inherited => 0,
+            Self::Locale => 1,
+            Self::Ltr => 2,
+            Self::Rtl => 3,
+        }
+    }
+}
+
+/// Sets a Control's layout direction (Godot's `Control.layout_direction`).
+pub fn set_layout_direction(tree: &mut SceneTree, node_id: NodeId, dir: LayoutDirection) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("layout_direction", Variant::Int(dir.to_int()));
+    }
+}
+
+/// Returns a Control's own `layout_direction` (without resolving `Inherited`).
+pub fn get_layout_direction(tree: &SceneTree, node_id: NodeId) -> LayoutDirection {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("layout_direction") {
+            Variant::Int(i) => LayoutDirection::from_int(i),
+            _ => LayoutDirection::Inherited,
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `node_id` lays out right-to-left, resolving `Inherited` up the
+/// parent chain (Godot's `Control.is_layout_rtl()`).
+///
+/// `Locale` resolves to LTR until a locale service exists; an unset chain is
+/// LTR, so existing scenes are unaffected.
+pub fn is_layout_rtl(tree: &SceneTree, node_id: NodeId) -> bool {
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        match get_layout_direction(tree, id) {
+            LayoutDirection::Rtl => return true,
+            LayoutDirection::Ltr => return false,
+            // Locale has no locale service yet -> LTR, matching Godot's
+            // behaviour for an LTR locale.
+            LayoutDirection::Locale => return false,
+            LayoutDirection::Inherited => {
+                current = tree.get_node(id).and_then(|n| n.parent());
+            }
+        }
+    }
+    false
+}
+
 pub fn get_h_size_flags(tree: &SceneTree, node_id: NodeId) -> SizeFlags {
     tree.get_node(node_id)
         .map(|n| match n.get_property("size_flags_horizontal") {
@@ -884,7 +964,13 @@ fn arrange_vbox(tree: &mut SceneTree, children: &[NodeId], total: Vector2, sep: 
     }
 }
 
-fn arrange_hbox(tree: &mut SceneTree, children: &[NodeId], total: Vector2, sep: f32) {
+/// Arranges `children` along the container's main axis.
+///
+/// When `rtl` is set the laid-out row is mirrored horizontally — the first
+/// child ends up at the right edge — matching Godot's BoxContainer under
+/// `layout_direction = RTL` (pat-nzgdu.142). Sizes are unaffected; only the x
+/// positions flip.
+fn arrange_hbox(tree: &mut SceneTree, children: &[NodeId], total: Vector2, sep: f32, rtl: bool) {
     let n = children.len();
     if n == 0 {
         return;
@@ -919,7 +1005,10 @@ fn arrange_hbox(tree: &mut SceneTree, children: &[NodeId], total: Vector2, sep: 
             0.0
         };
         let w = mins[i] + grow;
-        set_position(tree, c, Vector2::new(x, 0.0));
+        // RTL mirrors the row: a child occupying [x, x+w] from the left
+        // instead occupies the same span measured from the right edge.
+        let px = if rtl { total.x - x - w } else { x };
+        set_position(tree, c, Vector2::new(px, 0.0));
         set_size(tree, c, Vector2::new(w, total.y));
         x += w + sep;
     }
@@ -1040,7 +1129,10 @@ pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vect
 
     match class.as_str() {
         "VBoxContainer" => arrange_vbox(tree, &children, total, sep),
-        "HBoxContainer" | "BoxContainer" => arrange_hbox(tree, &children, total, sep),
+        "HBoxContainer" | "BoxContainer" => {
+            let rtl = is_layout_rtl(tree, container_id);
+            arrange_hbox(tree, &children, total, sep, rtl)
+        }
         // FlowContainer defaults to horizontal flow (Godot's `vertical` property
         // is false by default); H/VFlowContainer force the direction.
         "FlowContainer" | "HFlowContainer" => arrange_flow(tree, &children, total, sep, false),
@@ -2597,6 +2689,85 @@ func _on_pressed():
         // Content larger than viewport keeps its min size, shifted up by scroll.
         assert_eq!(size, Vector2::new(500.0, 400.0));
         assert_eq!(pos, Vector2::new(0.0, -120.0));
+    }
+
+    #[test]
+    // -- pat-nzgdu.142 (clause c): RTL layout mirroring ----------------------
+
+    /// The bead's RTL clause: a Control with `layout_direction = RTL` mirrors
+    /// its children's positions — the first child sits at the right edge — while
+    /// sizes are untouched.
+    #[test]
+    fn rtl_layout_mirrors_hbox_child_positions() {
+        // Two Expand children split 200px evenly -> 100px each.
+        let (mut tree, cid, kids) = container_with_children("HBoxContainer", 2);
+        set_h_size_flags(&mut tree, kids[0], SizeFlags::Expand);
+        set_h_size_flags(&mut tree, kids[1], SizeFlags::Expand);
+        set_layout_direction(&mut tree, cid, LayoutDirection::Rtl);
+        assert!(is_layout_rtl(&tree, cid));
+
+        arrange_container(&mut tree, cid, Vector2::new(200.0, 100.0));
+
+        // Sizes are unchanged by direction.
+        assert_eq!(get_size(&tree, kids[0]).x, 100.0);
+        assert_eq!(get_size(&tree, kids[1]).x, 100.0);
+        // Mirrored: child 0 (first in logical order) is on the RIGHT.
+        assert_eq!(
+            get_position(&tree, kids[0]).x,
+            100.0,
+            "the first child must sit at the right edge under RTL",
+        );
+        assert_eq!(get_position(&tree, kids[1]).x, 0.0);
+    }
+
+    /// LTR is the default, so existing scenes lay out exactly as before.
+    #[test]
+    fn ltr_is_the_default_and_unmirrored() {
+        let (mut tree, cid, kids) = container_with_children("HBoxContainer", 2);
+        set_h_size_flags(&mut tree, kids[0], SizeFlags::Expand);
+        set_h_size_flags(&mut tree, kids[1], SizeFlags::Expand);
+        assert_eq!(get_layout_direction(&tree, cid), LayoutDirection::Inherited);
+        assert!(!is_layout_rtl(&tree, cid), "unset layout is LTR");
+
+        arrange_container(&mut tree, cid, Vector2::new(200.0, 100.0));
+
+        assert_eq!(get_position(&tree, kids[0]).x, 0.0);
+        assert_eq!(get_position(&tree, kids[1]).x, 100.0);
+    }
+
+    /// `Inherited` (the default) resolves up the parent chain, so marking an
+    /// ancestor RTL flips its descendant containers — Godot's behaviour.
+    #[test]
+    fn rtl_is_inherited_from_an_ancestor() {
+        let (mut tree, cid, _kids) = container_with_children("HBoxContainer", 2);
+        let parent = tree.get_node(cid).unwrap().parent().expect("has a parent");
+
+        // The container itself stays Inherited; the ancestor is RTL.
+        set_layout_direction(&mut tree, parent, LayoutDirection::Rtl);
+        assert_eq!(get_layout_direction(&tree, cid), LayoutDirection::Inherited);
+        assert!(
+            is_layout_rtl(&tree, cid),
+            "Inherited must resolve RTL from an ancestor",
+        );
+
+        // An explicit LTR on the container overrides the RTL ancestor.
+        set_layout_direction(&mut tree, cid, LayoutDirection::Ltr);
+        assert!(!is_layout_rtl(&tree, cid), "explicit LTR wins over inheritance");
+    }
+
+    /// Godot's LayoutDirection integers round-trip (0=Inherited, 3=RTL).
+    #[test]
+    fn layout_direction_ints_match_godot() {
+        for (i, d) in [
+            (0, LayoutDirection::Inherited),
+            (1, LayoutDirection::Locale),
+            (2, LayoutDirection::Ltr),
+            (3, LayoutDirection::Rtl),
+        ] {
+            assert_eq!(LayoutDirection::from_int(i), d);
+            assert_eq!(d.to_int(), i);
+        }
+        assert_eq!(LayoutDirection::default(), LayoutDirection::Inherited);
     }
 
     #[test]

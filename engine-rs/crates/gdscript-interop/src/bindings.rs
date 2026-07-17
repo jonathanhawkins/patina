@@ -353,6 +353,32 @@ pub trait SceneAccess {
         None
     }
 
+    // -- Per-node process toggles (pat-nzgdu.137) ---------------------------
+
+    /// Enables/disables `_process` on `node` (Godot's `Node.set_process`).
+    ///
+    /// Defaults to a no-op for hosts without a scene tree.
+    fn set_process(&mut self, _node: u64, _enabled: bool) {}
+
+    /// Whether `_process` runs on `node` (`Node.is_processing`).
+    fn is_processing(&self, _node: u64) -> bool {
+        false
+    }
+
+    /// Enables/disables `_physics_process` on `node`
+    /// (`Node.set_physics_process`).
+    fn set_physics_process(&mut self, _node: u64, _enabled: bool) {}
+
+    /// Whether `_physics_process` runs on `node`
+    /// (`Node.is_physics_processing`).
+    fn is_physics_processing(&self, _node: u64) -> bool {
+        false
+    }
+
+    /// Re-arms `_ready` on `node` so it runs again on the next tree-enter
+    /// (`Node.request_ready`).
+    fn request_ready(&mut self, _node: u64) {}
+
     // -- Input methods (used by the `Input` singleton in GDScript) ----------
 
     /// Marks the input event currently being dispatched as handled, stopping

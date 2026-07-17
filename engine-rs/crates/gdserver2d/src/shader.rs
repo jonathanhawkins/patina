@@ -345,6 +345,10 @@ pub struct FragmentContext {
     pub screen_uv: (f32, f32),
     /// Time elapsed in seconds (for animated shaders).
     pub time: f32,
+    /// The sky stage's view direction (Godot's `EYEDIR`), as a unit vector
+    /// (pat-nzgdu.139). Unused — and left at zero — by canvas_item shaders,
+    /// which have no such built-in.
+    pub eyedir: (f32, f32, f32),
 }
 
 impl Default for FragmentContext {
@@ -354,6 +358,7 @@ impl Default for FragmentContext {
             uv: (0.0, 0.0),
             screen_uv: (0.0, 0.0),
             time: 0.0,
+            eyedir: (0.0, 0.0, 0.0),
         }
     }
 }
@@ -389,6 +394,18 @@ pub enum ColorExpr {
     BuiltinColor,
     /// `mix(a, b, t)` — linear interpolation of two colors.
     Mix(Box<ColorExpr>, Box<ColorExpr>, FloatExpr),
+    /// A `vec3`/`vec4` built from per-component expressions, e.g.
+    /// `vec3(EYEDIR.y, 0.0, 1.0)` (pat-nzgdu.139).
+    ///
+    /// [`Literal`](Self::Literal) only covers constant components; this covers
+    /// the case where a component references a built-in or uniform. A `vec3`
+    /// parses with an alpha of `1.0`.
+    Components(
+        Box<FloatExpr>,
+        Box<FloatExpr>,
+        Box<FloatExpr>,
+        Box<FloatExpr>,
+    ),
 }
 
 /// An expression that evaluates to a float value.
@@ -402,6 +419,10 @@ pub enum FloatExpr {
     BuiltinTime,
     /// `UV.x` or `UV.y`.
     UvComponent(UvAxis),
+    /// `EYEDIR.x`, `.y` or `.z` — the sky stage's view direction
+    /// (pat-nzgdu.139). Evaluates to `0.0` outside a sky shader, where Godot
+    /// does not expose this built-in.
+    EyeDirComponent(Vec3Axis),
     /// `sin(expr)`.
     Sin(Box<FloatExpr>),
 }
@@ -411,6 +432,17 @@ pub enum FloatExpr {
 pub enum UvAxis {
     X,
     Y,
+}
+
+/// Which component of a `vec3` built-in (e.g. `EYEDIR`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vec3Axis {
+    /// The `x` component.
+    X,
+    /// The `y` component.
+    Y,
+    /// The `z` component.
+    Z,
 }
 
 /// Parses a Godot shader's `fragment()` function body into instructions.
@@ -433,6 +465,37 @@ pub fn parse_fragment_body(source: &str) -> Vec<FragmentInstruction> {
             continue;
         }
 
+        if let Some(inst) = parse_fragment_statement(trimmed) {
+            instructions.push(inst);
+        }
+    }
+
+    instructions
+}
+
+/// Parses a `shader_type sky` program's `sky()` function body into the same
+/// instruction set as [`parse_fragment_body`] (pat-nzgdu.139).
+///
+/// Godot's sky stage writes `COLOR` (a `vec3`) from built-ins such as `EYEDIR`.
+/// Execute the result with [`execute_fragment`], passing a [`FragmentContext`]
+/// whose [`eyedir`](FragmentContext::eyedir) is the view direction for the pixel
+/// being shaded.
+///
+/// Returns an empty vec when the source has no `sky()` body — so a canvas_item
+/// shader parsed as sky (or vice versa) yields nothing rather than misfiring.
+pub fn parse_sky_body(source: &str) -> Vec<FragmentInstruction> {
+    let mut instructions = Vec::new();
+
+    let body = match extract_function_body(source, "sky") {
+        Some(b) => b,
+        None => return instructions,
+    };
+
+    for line in body.lines() {
+        let trimmed = line.trim().trim_end_matches(';').trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
         if let Some(inst) = parse_fragment_statement(trimmed) {
             instructions.push(inst);
         }
@@ -553,6 +616,45 @@ fn parse_color_expr(s: &str) -> ColorExpr {
         return ColorExpr::Uniform(s.to_string());
     }
 
+    // pat-nzgdu.139: constructors whose components are not all literals, e.g.
+    // `vec3(EYEDIR.y, 0.0, 1.0)`. The all-literal `vec4` forms above already
+    // returned, so reaching here means at least one component is an expression.
+    // `split_top_level_commas` (not `split(',')`) keeps nested calls intact.
+    if let Some(inner) = strip_func_call(s, "vec4") {
+        let parts = split_top_level_commas(inner);
+        if parts.len() == 4 {
+            return ColorExpr::Components(
+                Box::new(parse_float_expr(parts[0])),
+                Box::new(parse_float_expr(parts[1])),
+                Box::new(parse_float_expr(parts[2])),
+                Box::new(parse_float_expr(parts[3])),
+            );
+        }
+    }
+
+    // `vec3(r, g, b)` — the sky stage's COLOR is a vec3, so alpha is 1.0.
+    if let Some(inner) = strip_func_call(s, "vec3") {
+        let parts = split_top_level_commas(inner);
+        if parts.len() == 3 {
+            return ColorExpr::Components(
+                Box::new(parse_float_expr(parts[0])),
+                Box::new(parse_float_expr(parts[1])),
+                Box::new(parse_float_expr(parts[2])),
+                Box::new(FloatExpr::Literal(1.0)),
+            );
+        }
+        if parts.len() == 1 {
+            // `vec3(v)` splat.
+            let c = parse_float_expr(parts[0]);
+            return ColorExpr::Components(
+                Box::new(c.clone()),
+                Box::new(c.clone()),
+                Box::new(c),
+                Box::new(FloatExpr::Literal(1.0)),
+            );
+        }
+    }
+
     ColorExpr::BuiltinColor
 }
 
@@ -573,6 +675,17 @@ fn parse_float_expr(s: &str) -> FloatExpr {
     }
     if s == "UV.y" {
         return FloatExpr::UvComponent(UvAxis::Y);
+    }
+
+    // Sky stage view direction (pat-nzgdu.139).
+    if s == "EYEDIR.x" {
+        return FloatExpr::EyeDirComponent(Vec3Axis::X);
+    }
+    if s == "EYEDIR.y" {
+        return FloatExpr::EyeDirComponent(Vec3Axis::Y);
+    }
+    if s == "EYEDIR.z" {
+        return FloatExpr::EyeDirComponent(Vec3Axis::Z);
     }
 
     if let Some(inner) = strip_func_call(s, "sin") {
@@ -627,6 +740,9 @@ pub fn eval_float_expr(
         FloatExpr::BuiltinTime => ctx.time,
         FloatExpr::UvComponent(UvAxis::X) => ctx.uv.0,
         FloatExpr::UvComponent(UvAxis::Y) => ctx.uv.1,
+        FloatExpr::EyeDirComponent(Vec3Axis::X) => ctx.eyedir.0,
+        FloatExpr::EyeDirComponent(Vec3Axis::Y) => ctx.eyedir.1,
+        FloatExpr::EyeDirComponent(Vec3Axis::Z) => ctx.eyedir.2,
         FloatExpr::Uniform(name) => match uniforms.get(name) {
             Some(Variant::Float(f)) => *f as f32,
             Some(Variant::Int(i)) => *i as f32,
@@ -650,6 +766,12 @@ pub fn eval_color_expr(
             Some(Variant::Color(c)) => *c,
             _ => ctx.color,
         },
+        ColorExpr::Components(r, g, b, a) => gdcore::math::Color::new(
+            eval_float_expr(r, ctx, uniforms),
+            eval_float_expr(g, ctx, uniforms),
+            eval_float_expr(b, ctx, uniforms),
+            eval_float_expr(a, ctx, uniforms),
+        ),
         ColorExpr::Mix(a, b, t) => {
             let ca = eval_color_expr(a, ctx, uniforms);
             let cb = eval_color_expr(b, ctx, uniforms);
@@ -752,6 +874,11 @@ fn float_expr_to_wgsl(expr: &FloatExpr, uniforms: &[&str]) -> String {
         FloatExpr::BuiltinTime => "globals.time".to_string(),
         FloatExpr::UvComponent(UvAxis::X) => "UV.x".to_string(),
         FloatExpr::UvComponent(UvAxis::Y) => "UV.y".to_string(),
+        // EYEDIR is a sky-stage built-in with no canvas_item counterpart. This
+        // emitter only generates canvas_item programs, so degrade to 0.0 —
+        // matching what the CPU interpreter yields outside a sky shader — rather
+        // than emitting an undefined WGSL identifier (pat-nzgdu.139).
+        FloatExpr::EyeDirComponent(_) => "0.0".to_string(),
         FloatExpr::Uniform(name) => {
             if uniforms.contains(&name.as_str()) {
                 format!("material.{name}")
@@ -785,6 +912,15 @@ fn color_expr_to_wgsl(expr: &ColorExpr, uniforms: &[&str]) -> String {
                 "COLOR".to_string()
             }
         }
+        // Per-component constructor, e.g. `vec4(UV.x, 0.0, 0.0, 1.0)`
+        // (pat-nzgdu.139) — translate each component in turn.
+        ColorExpr::Components(r, g, b, a) => format!(
+            "vec4<f32>({}, {}, {}, {})",
+            float_expr_to_wgsl(r, uniforms),
+            float_expr_to_wgsl(g, uniforms),
+            float_expr_to_wgsl(b, uniforms),
+            float_expr_to_wgsl(a, uniforms)
+        ),
         ColorExpr::Mix(a, b, t) => format!(
             "mix({}, {}, {})",
             color_expr_to_wgsl(a, uniforms),
@@ -1561,6 +1697,119 @@ uniform bool enabled = true;
         let ctx = FragmentContext::default();
         let result = execute_fragment(&instructions, &ctx, &HashMap::new());
         assert_eq!(result, gdcore::math::Color::rgb(1.0, 0.0, 0.0));
+    }
+
+    // -- pat-nzgdu.139: shader_type sky stage + EYEDIR built-in ---------------
+
+    const SKY_SRC: &str = "shader_type sky;\nvoid sky() {\n    COLOR = vec3(EYEDIR.y, 0.0, 1.0);\n}";
+
+    #[test]
+    fn sky_shader_computes_color_from_eyedir() {
+        let instructions = parse_sky_body(SKY_SRC);
+        assert_eq!(instructions.len(), 1, "sky() body parsed");
+
+        // Looking up: EYEDIR.y = 0.25 drives the red channel.
+        let ctx = FragmentContext {
+            eyedir: (0.0, 0.25, 0.0),
+            ..Default::default()
+        };
+        let out = execute_fragment(&instructions, &ctx, &HashMap::new());
+        assert_eq!(out.r, 0.25);
+        assert_eq!(out.g, 0.0);
+        assert_eq!(out.b, 1.0);
+        // vec3 COLOR implies opaque alpha.
+        assert_eq!(out.a, 1.0);
+
+        // A different view direction yields a different colour — i.e. the sky
+        // is actually a function of EYEDIR rather than a constant.
+        let ctx2 = FragmentContext {
+            eyedir: (0.0, 0.9, 0.0),
+            ..Default::default()
+        };
+        let out2 = execute_fragment(&instructions, &ctx2, &HashMap::new());
+        assert_eq!(out2.r, 0.9);
+        assert_ne!(out.r, out2.r);
+    }
+
+    #[test]
+    fn sky_shader_reads_every_eyedir_axis() {
+        let src = "shader_type sky;\nvoid sky() {\n    COLOR = vec3(EYEDIR.x, EYEDIR.y, EYEDIR.z);\n}";
+        let ctx = FragmentContext {
+            eyedir: (0.1, 0.2, 0.3),
+            ..Default::default()
+        };
+        let out = execute_fragment(&parse_sky_body(src), &ctx, &HashMap::new());
+        assert_eq!((out.r, out.g, out.b), (0.1, 0.2, 0.3));
+    }
+
+    #[test]
+    fn parse_sky_body_ignores_a_canvas_item_shader() {
+        // Stage mismatch yields nothing rather than misfiring on fragment().
+        let canvas = "shader_type canvas_item;\nvoid fragment() {\n    COLOR = vec4(1.0, 0.0, 0.0, 1.0);\n}";
+        assert!(parse_sky_body(canvas).is_empty());
+        // ...and the converse: a sky program has no fragment() body.
+        assert!(parse_fragment_body(SKY_SRC).is_empty());
+    }
+
+    #[test]
+    fn eyedir_is_zero_outside_a_sky_shader() {
+        // canvas_item has no EYEDIR built-in; it must read as 0, not panic.
+        let instructions = vec![FragmentInstruction::SetColorAlpha(
+            FloatExpr::EyeDirComponent(Vec3Axis::Y),
+        )];
+        let out = execute_fragment(&instructions, &FragmentContext::default(), &HashMap::new());
+        assert_eq!(out.a, 0.0);
+    }
+
+    #[test]
+    fn vec3_and_non_literal_vec4_parse_as_components() {
+        // vec3 splat -> rgb all equal, alpha 1.
+        let src = "shader_type sky;\nvoid sky() {\n    COLOR = vec3(0.5);\n}";
+        let out = execute_fragment(
+            &parse_sky_body(src),
+            &FragmentContext::default(),
+            &HashMap::new(),
+        );
+        assert_eq!((out.r, out.g, out.b, out.a), (0.5, 0.5, 0.5, 1.0));
+
+        // vec4 with an expression component still evaluates per-component.
+        let src4 = "void fragment() {\n    COLOR = vec4(UV.x, 0.0, 0.0, 1.0);\n}";
+        let ctx = FragmentContext {
+            uv: (0.75, 0.0),
+            ..Default::default()
+        };
+        let out4 = execute_fragment(&parse_fragment_body(src4), &ctx, &HashMap::new());
+        assert_eq!(out4.r, 0.75);
+        assert_eq!(out4.a, 1.0);
+    }
+
+    #[test]
+    fn all_literal_vec4_still_parses_as_a_literal() {
+        // Regression: the existing all-literal fast path must keep its
+        // ColorExpr::Literal representation, not fall through to Components.
+        let src = "void fragment() {\n    COLOR = vec4(0.1, 0.2, 0.3, 0.4);\n}";
+        assert_eq!(
+            parse_fragment_body(src),
+            vec![FragmentInstruction::SetColor(ColorExpr::Literal(
+                0.1, 0.2, 0.3, 0.4
+            ))],
+        );
+    }
+
+    #[test]
+    fn sky_shader_uniform_and_time_built_ins_work() {
+        let src = "shader_type sky;\nvoid sky() {\n    COLOR = vec3(horizon, TIME, EYEDIR.y);\n}";
+        let mut uniforms = HashMap::new();
+        uniforms.insert("horizon".to_string(), Variant::Float(0.4));
+        let ctx = FragmentContext {
+            time: 0.5,
+            eyedir: (0.0, 0.6, 0.0),
+            ..Default::default()
+        };
+        let out = execute_fragment(&parse_sky_body(src), &ctx, &uniforms);
+        assert_eq!(out.r, 0.4, "uniform");
+        assert_eq!(out.g, 0.5, "TIME");
+        assert_eq!(out.b, 0.6, "EYEDIR.y");
     }
 
     #[test]

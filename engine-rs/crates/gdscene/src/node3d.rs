@@ -685,6 +685,89 @@ pub fn get_spot_angle_attenuation(tree: &SceneTree, node_id: NodeId) -> f64 {
 }
 
 // ===========================================================================
+// RemoteTransform3D
+// ===========================================================================
+
+/// Which parts of its transform a `RemoteTransform3D` pushes onto its target.
+///
+/// Mirrors Godot's `update_remote_position` / `update_remote_rotation` /
+/// `update_remote_scale` properties, which all default to `true`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteTransformFlags {
+    /// Push the origin.
+    pub position: bool,
+    /// Push the basis' orientation.
+    pub rotation: bool,
+    /// Push the basis' scale (column lengths).
+    pub scale: bool,
+}
+
+impl Default for RemoteTransformFlags {
+    fn default() -> Self {
+        Self {
+            position: true,
+            rotation: true,
+            scale: true,
+        }
+    }
+}
+
+/// Resolves what a `RemoteTransform3D` writes onto its target, given its own
+/// transform `ours` and the target's current transform `target`.
+///
+/// 1:1 port of Godot's `RemoteTransform3D::_update_remote`
+/// (`upstream/godot/scene/3d/remote_transform_3d.cpp`). Both transforms must be
+/// in the SAME space: global when `use_global_coordinates` is set, local
+/// otherwise — Godot reads and writes both ends in whichever space is selected,
+/// so the choice is the caller's and this function stays space-agnostic.
+///
+/// The partial-flag cases are the subtle part, and are easy to get backwards:
+///
+/// - **rotation only** keeps each of the target's basis column *lengths* (its
+///   scale) and takes only our column *directions*.
+/// - **scale only** is the mirror: it keeps the target's column *directions*
+///   and takes only our column *lengths*.
+///
+/// With all three flags set the whole transform is copied verbatim, which is
+/// the common case and the one Godot special-cases first.
+pub fn remote_target_transform(
+    ours: Transform3D,
+    target: Transform3D,
+    flags: RemoteTransformFlags,
+) -> Transform3D {
+    // Godot's fast path: everything is pushed, so the target simply becomes us.
+    if flags.position && flags.rotation && flags.scale {
+        return ours;
+    }
+
+    let mut result = target;
+
+    if flags.rotation && flags.scale {
+        result.basis = ours.basis;
+    } else if flags.rotation {
+        // our direction, target's length — per basis column.
+        result.basis = Basis {
+            x: ours.basis.x.normalized() * target.basis.x.length(),
+            y: ours.basis.y.normalized() * target.basis.y.length(),
+            z: ours.basis.z.normalized() * target.basis.z.length(),
+        };
+    } else if flags.scale {
+        // target's direction, our length — per basis column.
+        result.basis = Basis {
+            x: target.basis.x.normalized() * ours.basis.x.length(),
+            y: target.basis.y.normalized() * ours.basis.y.length(),
+            z: target.basis.z.normalized() * ours.basis.z.length(),
+        };
+    }
+
+    if flags.position {
+        result.origin = ours.origin;
+    }
+
+    result
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -1140,5 +1223,157 @@ mod tests {
         let n = tree.get_node(id).unwrap();
         assert_eq!(n.get_property("range"), Variant::Float(16.0));
         assert_eq!(n.get_property("attenuation"), Variant::Float(2.0));
+    }
+
+    // -- RemoteTransform3D ---------------------------------------------------
+
+    /// A transform whose basis columns are axis-aligned but scaled, so a
+    /// column's direction and its length can be checked independently.
+    fn scaled_at(origin: Vector3, scale: Vector3) -> Transform3D {
+        Transform3D {
+            basis: Basis {
+                x: Vector3::new(scale.x, 0.0, 0.0),
+                y: Vector3::new(0.0, scale.y, 0.0),
+                z: Vector3::new(0.0, 0.0, scale.z),
+            },
+            origin,
+        }
+    }
+
+    /// The default (all flags on) copies our transform wholesale — Godot's
+    /// fast path, and the bead's headline behaviour.
+    #[test]
+    fn remote_transform_pushes_whole_transform_by_default() {
+        let ours = scaled_at(Vector3::new(1.0, 2.0, 3.0), Vector3::new(2.0, 2.0, 2.0));
+        let target = scaled_at(Vector3::new(-9.0, -9.0, -9.0), Vector3::new(1.0, 1.0, 1.0));
+
+        let out = remote_target_transform(ours, target, RemoteTransformFlags::default());
+
+        assert_eq!(out, ours, "target becomes an exact copy of the remote");
+    }
+
+    /// Position-only leaves the target's basis completely alone.
+    #[test]
+    fn remote_transform_position_only_keeps_target_basis() {
+        let ours = scaled_at(Vector3::new(1.0, 2.0, 3.0), Vector3::new(5.0, 5.0, 5.0));
+        let target = scaled_at(Vector3::new(-9.0, -9.0, -9.0), Vector3::new(1.0, 1.0, 1.0));
+
+        let out = remote_target_transform(
+            ours,
+            target,
+            RemoteTransformFlags {
+                position: true,
+                rotation: false,
+                scale: false,
+            },
+        );
+
+        assert_eq!(out.origin, ours.origin, "origin is pushed");
+        assert_eq!(out.basis, target.basis, "basis is untouched");
+    }
+
+    /// Rotation+scale replaces the whole basis but keeps the target's origin.
+    #[test]
+    fn remote_transform_rotation_and_scale_keeps_target_origin() {
+        let ours = scaled_at(Vector3::new(1.0, 2.0, 3.0), Vector3::new(2.0, 3.0, 4.0));
+        let target = scaled_at(Vector3::new(-9.0, -9.0, -9.0), Vector3::new(1.0, 1.0, 1.0));
+
+        let out = remote_target_transform(
+            ours,
+            target,
+            RemoteTransformFlags {
+                position: false,
+                rotation: true,
+                scale: true,
+            },
+        );
+
+        assert_eq!(out.basis, ours.basis, "basis is pushed");
+        assert_eq!(out.origin, target.origin, "origin is untouched");
+    }
+
+    /// Rotation-only: our column DIRECTIONS, the target's column LENGTHS.
+    /// Getting this backwards silently rescales the target every frame.
+    #[test]
+    fn remote_transform_rotation_only_keeps_target_scale() {
+        // Ours points +X on the x column but is 10 long; target is 3 long.
+        let ours = scaled_at(Vector3::ZERO, Vector3::new(10.0, 10.0, 10.0));
+        let target = scaled_at(Vector3::ZERO, Vector3::new(3.0, 3.0, 3.0));
+
+        let out = remote_target_transform(
+            ours,
+            target,
+            RemoteTransformFlags {
+                position: false,
+                rotation: true,
+                scale: false,
+            },
+        );
+
+        assert_eq!(
+            out.basis.x.length(),
+            3.0,
+            "target keeps ITS scale under a rotation-only push"
+        );
+        assert_eq!(
+            out.basis.x.normalized(),
+            ours.basis.x.normalized(),
+            "but takes OUR direction"
+        );
+    }
+
+    /// Scale-only is the mirror: the target's DIRECTIONS, our LENGTHS.
+    #[test]
+    fn remote_transform_scale_only_keeps_target_rotation() {
+        // Our x column points +X (length 10); the target's x column points +Y.
+        let ours = scaled_at(Vector3::ZERO, Vector3::new(10.0, 10.0, 10.0));
+        let target = Transform3D {
+            basis: Basis {
+                x: Vector3::new(0.0, 3.0, 0.0),
+                y: Vector3::new(3.0, 0.0, 0.0),
+                z: Vector3::new(0.0, 0.0, 3.0),
+            },
+            origin: Vector3::ZERO,
+        };
+
+        let out = remote_target_transform(
+            ours,
+            target,
+            RemoteTransformFlags {
+                position: false,
+                rotation: false,
+                scale: true,
+            },
+        );
+
+        assert_eq!(
+            out.basis.x.normalized(),
+            target.basis.x.normalized(),
+            "target keeps ITS orientation under a scale-only push"
+        );
+        assert_eq!(
+            out.basis.x.length(),
+            10.0,
+            "but takes OUR column length (scale)"
+        );
+    }
+
+    /// All flags off is a no-op — the target must not drift.
+    #[test]
+    fn remote_transform_with_no_flags_is_a_no_op() {
+        let ours = scaled_at(Vector3::new(1.0, 2.0, 3.0), Vector3::new(2.0, 2.0, 2.0));
+        let target = scaled_at(Vector3::new(-9.0, -9.0, -9.0), Vector3::new(1.0, 1.0, 1.0));
+
+        let out = remote_target_transform(
+            ours,
+            target,
+            RemoteTransformFlags {
+                position: false,
+                rotation: false,
+                scale: false,
+            },
+        );
+
+        assert_eq!(out, target, "nothing is pushed");
     }
 }

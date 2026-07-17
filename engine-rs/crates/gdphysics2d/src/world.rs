@@ -26,6 +26,91 @@ pub struct RaycastHit {
     pub distance: f32,
 }
 
+/// Parameters for [`PhysicsWorld2D::intersect_ray`], mirroring Godot's
+/// `PhysicsRayQueryParameters2D` (pat-nzgdu.124).
+///
+/// Build with [`new`](Self::new) and the chained setters:
+///
+/// ```ignore
+/// let q = RayQuery2D::new(from, to)
+///     .with_exclude(vec![player_id])
+///     .with_collision_mask(0b0010);
+/// let hit = world.intersect_ray(&q);
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct RayQuery2D {
+    /// Ray start, in world space.
+    pub from: Vector2,
+    /// Ray end, in world space (Godot uses `from`/`to`, not a direction+length).
+    pub to: Vector2,
+    /// Bodies to skip (Godot `exclude`).
+    pub exclude: Vec<BodyId>,
+    /// Layer filter: a body is eligible when `collision_layer & collision_mask`
+    /// is non-zero.
+    ///
+    /// **Godot semantics, which differ from [`PhysicsWorld2D::raycast_filtered`]:**
+    /// this defaults to all layers (`u32::MAX`) and a mask of `0` therefore hits
+    /// **nothing**. `raycast_filtered` instead treats `0` as "every layer".
+    pub collision_mask: u32,
+    /// Whether bodies are considered (Godot `collide_with_bodies`, default true).
+    pub collide_with_bodies: bool,
+    /// Whether areas are considered (Godot `collide_with_areas`, default false).
+    ///
+    /// Areas live in a separate [`AreaStore`](crate::area2d::AreaStore) that
+    /// [`PhysicsWorld2D`] does not own, so this flag is carried for API parity
+    /// but not yet honored — see the module docs.
+    pub collide_with_areas: bool,
+    /// Whether a ray starting inside a shape reports that shape
+    /// (Godot `hit_from_inside`, default false).
+    pub hit_from_inside: bool,
+}
+
+impl RayQuery2D {
+    /// A query from `from` to `to` with Godot's defaults: every layer, bodies
+    /// only, no exclusions, no inside hits.
+    pub fn new(from: Vector2, to: Vector2) -> Self {
+        Self {
+            from,
+            to,
+            exclude: Vec::new(),
+            collision_mask: u32::MAX,
+            collide_with_bodies: true,
+            collide_with_areas: false,
+            hit_from_inside: false,
+        }
+    }
+
+    /// Sets the excluded bodies.
+    pub fn with_exclude(mut self, exclude: Vec<BodyId>) -> Self {
+        self.exclude = exclude;
+        self
+    }
+
+    /// Sets the layer mask (see [`collision_mask`](Self::collision_mask)).
+    pub fn with_collision_mask(mut self, mask: u32) -> Self {
+        self.collision_mask = mask;
+        self
+    }
+
+    /// Sets whether bodies are considered.
+    pub fn with_collide_with_bodies(mut self, enabled: bool) -> Self {
+        self.collide_with_bodies = enabled;
+        self
+    }
+
+    /// Sets whether areas are considered (not yet honored — see the field docs).
+    pub fn with_collide_with_areas(mut self, enabled: bool) -> Self {
+        self.collide_with_areas = enabled;
+        self
+    }
+
+    /// Sets whether a ray starting inside a shape reports it.
+    pub fn with_hit_from_inside(mut self, enabled: bool) -> Self {
+        self.hit_from_inside = enabled;
+        self
+    }
+}
+
 /// A single overlap reported by [`PhysicsWorld2D::shape_cast`] (Godot
 /// `ShapeCast2D`).
 #[derive(Debug, Clone, Copy)]
@@ -427,6 +512,77 @@ impl PhysicsWorld2D {
         }
 
         closest
+    }
+
+    /// Runs a Godot `PhysicsDirectSpaceState2D.intersect_ray` query
+    /// (pat-nzgdu.124): the closest body along `from -> to` that survives the
+    /// query's filters, or `None`.
+    ///
+    /// Unlike [`raycast`](Self::raycast) / [`raycast_filtered`](Self::raycast_filtered),
+    /// this takes Godot's parameter object ([`RayQuery2D`] ≙
+    /// `PhysicsRayQueryParameters2D`) and follows Godot's mask semantics — see
+    /// [`RayQuery2D::collision_mask`].
+    ///
+    /// `hit_from_inside` reproduces Godot's rule in both directions: a ray whose
+    /// `from` lies inside a shape either reports that shape at `from` with a
+    /// zero normal (when set), or does not report that shape **at all** (when
+    /// clear) — it does not punch out through the far wall.
+    pub fn intersect_ray(&self, query: &RayQuery2D) -> Option<RaycastHit> {
+        // Areas live in a separate AreaStore that this world does not own, so
+        // an areas-only query can never hit anything here.
+        if !query.collide_with_bodies {
+            return None;
+        }
+        let delta = query.to - query.from;
+        let max_distance = delta.length();
+        if max_distance < 1e-10 {
+            return None;
+        }
+        let dir = delta.normalized();
+
+        let mut inside: Option<RaycastHit> = None;
+        let mut closest: Option<RaycastHit> = None;
+
+        for (&id, body) in &self.bodies {
+            if query.exclude.contains(&id) {
+                continue;
+            }
+            if (body.collision_layer & query.collision_mask) == 0 {
+                continue;
+            }
+
+            // World -> local, mirroring point_query.
+            let local = body_transform(body.position, body.rotation)
+                .affine_inverse()
+                .xform(query.from);
+            if body.shape.contains_point(local) {
+                if query.hit_from_inside {
+                    // Godot reports an inside hit at the ray origin with a zero
+                    // normal. Several bodies may contain `from`; pick the lowest
+                    // id so the result is deterministic (BodyId is not Ord, and
+                    // the body map is unordered) rather than map-order dependent.
+                    let better = inside.as_ref().map_or(true, |c| id.0 < c.body_id.0);
+                    if better {
+                        inside = Some(RaycastHit {
+                            body_id: id,
+                            point: query.from,
+                            normal: Vector2::ZERO,
+                            distance: 0.0,
+                        });
+                    }
+                }
+                continue;
+            }
+
+            if let Some(hit) = raycast_shape(query.from, dir, max_distance, body) {
+                if closest.as_ref().map_or(true, |c| hit.distance < c.distance) {
+                    closest = Some(hit);
+                }
+            }
+        }
+
+        // An inside hit is at distance 0, so it always wins.
+        inside.or(closest)
     }
 
     /// Casts a ray like [`raycast`](Self::raycast) but honoring a Godot
@@ -1118,6 +1274,137 @@ mod tests {
         far.origin = Vector2::new(1000.0, 0.0);
         let cast = world.shape_cast(&Shape2D::Circle { radius: 1.0 }, far, &[], 0);
         assert_eq!(cast.len(), 0);
+    }
+
+    // -- pat-nzgdu.124: PhysicsDirectSpaceState2D.intersect_ray ---------------
+
+    #[test]
+    fn intersect_ray_returns_collider_position_and_normal() {
+        // The bead's acceptance shape: a ray into a static body reports that
+        // body's id, the hit point, and the surface normal.
+        let mut world = PhysicsWorld2D::new();
+        let wall = world.add_body(make_static_rect(Vector2::new(5.0, 0.0), 1.0));
+
+        let hit = world
+            .intersect_ray(&RayQuery2D::new(Vector2::ZERO, Vector2::new(10.0, 0.0)))
+            .expect("ray hits the wall");
+        assert_eq!(hit.body_id, wall);
+        // Rect half-extent 1 centred at x=5 => near face at x=4.
+        assert!(approx_eq(hit.point.x, 4.0), "point {:?}", hit.point);
+        assert!(approx_eq(hit.point.y, 0.0), "point {:?}", hit.point);
+        // Normal faces back along the ray.
+        assert!(approx_eq(hit.normal.x, -1.0), "normal {:?}", hit.normal);
+        assert!(approx_eq(hit.distance, 4.0));
+    }
+
+    #[test]
+    fn intersect_ray_excluding_the_body_returns_nothing() {
+        // Second half of the acceptance: excluding the hit body empties the result.
+        let mut world = PhysicsWorld2D::new();
+        let wall = world.add_body(make_static_rect(Vector2::new(5.0, 0.0), 1.0));
+
+        let query =
+            RayQuery2D::new(Vector2::ZERO, Vector2::new(10.0, 0.0)).with_exclude(vec![wall]);
+        assert!(world.intersect_ray(&query).is_none());
+    }
+
+    #[test]
+    fn intersect_ray_returns_the_closest_body() {
+        let mut world = PhysicsWorld2D::new();
+        let near = world.add_body(make_static_rect(Vector2::new(5.0, 0.0), 1.0));
+        let _far = world.add_body(make_static_rect(Vector2::new(9.0, 0.0), 1.0));
+
+        let hit = world
+            .intersect_ray(&RayQuery2D::new(Vector2::ZERO, Vector2::new(20.0, 0.0)))
+            .expect("hit");
+        assert_eq!(hit.body_id, near, "closest body wins");
+    }
+
+    #[test]
+    fn intersect_ray_honors_godot_collision_mask_semantics() {
+        let mut world = PhysicsWorld2D::new();
+        let mut wall = make_static_rect(Vector2::new(5.0, 0.0), 1.0);
+        wall.collision_layer = 0b0010;
+        let wall_id = world.add_body(wall);
+
+        let ray = |mask: u32| {
+            world.intersect_ray(
+                &RayQuery2D::new(Vector2::ZERO, Vector2::new(10.0, 0.0))
+                    .with_collision_mask(mask),
+            )
+        };
+
+        // Matching layer hits; non-matching does not.
+        assert_eq!(ray(0b0010).expect("match").body_id, wall_id);
+        assert!(ray(0b0001).is_none(), "non-matching layer must not hit");
+        // Default (u32::MAX) hits everything.
+        assert!(world
+            .intersect_ray(&RayQuery2D::new(Vector2::ZERO, Vector2::new(10.0, 0.0)))
+            .is_some());
+        // GODOT SEMANTICS: mask 0 hits NOTHING. This deliberately differs from
+        // raycast_filtered, where 0 means "every layer".
+        assert!(ray(0).is_none(), "mask 0 must hit nothing (Godot)");
+        assert!(
+            world
+                .raycast_filtered(Vector2::ZERO, Vector2::new(1.0, 0.0), 100.0, &[], 0)
+                .is_some(),
+            "raycast_filtered keeps its 0 = every layer meaning",
+        );
+    }
+
+    #[test]
+    fn intersect_ray_hit_from_inside() {
+        let mut world = PhysicsWorld2D::new();
+        let body = world.add_body(make_static_rect(Vector2::ZERO, 2.0));
+
+        // Ray starting inside the shape: ignored entirely by default...
+        let outward = RayQuery2D::new(Vector2::ZERO, Vector2::new(10.0, 0.0));
+        assert!(
+            world.intersect_ray(&outward).is_none(),
+            "a ray starting inside must not punch out through the far wall",
+        );
+
+        // ...and reported at the origin with a zero normal when requested.
+        let hit = world
+            .intersect_ray(&outward.clone().with_hit_from_inside(true))
+            .expect("inside hit");
+        assert_eq!(hit.body_id, body);
+        assert_eq!(hit.point, Vector2::ZERO);
+        assert_eq!(hit.normal, Vector2::ZERO);
+        assert!(approx_eq(hit.distance, 0.0));
+    }
+
+    #[test]
+    fn intersect_ray_degenerate_and_bodies_disabled() {
+        let mut world = PhysicsWorld2D::new();
+        world.add_body(make_static_rect(Vector2::new(5.0, 0.0), 1.0));
+
+        // Zero-length ray.
+        assert!(world
+            .intersect_ray(&RayQuery2D::new(Vector2::ZERO, Vector2::ZERO))
+            .is_none());
+        // Ray stops short of the body.
+        assert!(world
+            .intersect_ray(&RayQuery2D::new(Vector2::ZERO, Vector2::new(3.0, 0.0)))
+            .is_none());
+        // Areas-only query: this world owns no areas, so nothing can match.
+        assert!(world
+            .intersect_ray(
+                &RayQuery2D::new(Vector2::ZERO, Vector2::new(10.0, 0.0))
+                    .with_collide_with_bodies(false)
+                    .with_collide_with_areas(true),
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn ray_query_defaults_match_godot() {
+        let q = RayQuery2D::new(Vector2::ZERO, Vector2::new(1.0, 0.0));
+        assert_eq!(q.collision_mask, u32::MAX);
+        assert!(q.collide_with_bodies);
+        assert!(!q.collide_with_areas);
+        assert!(!q.hit_from_inside);
+        assert!(q.exclude.is_empty());
     }
 
     #[test]

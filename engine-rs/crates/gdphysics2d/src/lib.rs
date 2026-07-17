@@ -65,7 +65,9 @@ pub use shape::Shape2D;
 pub use tilemap_collision::{
     collect_collision_tiles, tilemap_to_physics, TileCollisionInfo, TileMapCollisionResult,
 };
-pub use world::{CollisionEvent, ContactState, PhysicsWorld2D, RaycastHit, DEFAULT_GRAVITY_2D};
+pub use world::{
+    CollisionEvent, ContactState, PhysicsWorld2D, RayQuery2D, RaycastHit, DEFAULT_GRAVITY_2D,
+};
 
 // 3D re-exports.
 pub use body3d::{BodyId3D, BodyType3D, PhysicsBody3D};

@@ -161,6 +161,14 @@ impl SoftwareRenderer3D {
         }
     }
 
+    /// The light records currently registered with the renderer.
+    ///
+    /// Lets callers (and tests) read back what a scene sync produced — e.g.
+    /// that a scene's `light_temperature` reached the light's colour.
+    pub fn lights(&self) -> &[Light3D] {
+        &self.lights
+    }
+
     /// Creates a new software renderer in wireframe mode.
     pub fn wireframe() -> Self {
         Self {

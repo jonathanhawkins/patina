@@ -62,6 +62,59 @@ pub struct SceneTreeTimer {
     pub signal_name: String,
 }
 
+/// Flags controlling what [`SceneTree::duplicate_node`] copies, mirroring
+/// Godot's `Node.DUPLICATE_*` constants (pat-nzgdu.138).
+///
+/// Combine with `|`; the [`Default`] is Godot's own `duplicate()` default
+/// (`SIGNALS | GROUPS | SCRIPTS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DuplicateFlags(u32);
+
+impl DuplicateFlags {
+    /// Copy nothing beyond properties and the unique-name flag.
+    pub const NONE: Self = Self(0);
+    /// Copy signal connections (Godot `DUPLICATE_SIGNALS` = 1).
+    pub const SIGNALS: Self = Self(1);
+    /// Copy group membership (Godot `DUPLICATE_GROUPS` = 2).
+    pub const GROUPS: Self = Self(2);
+    /// Copy attached scripts (Godot `DUPLICATE_SCRIPTS` = 4).
+    ///
+    /// Accepted but **not yet honored** — `ScriptInstance` has no clone.
+    pub const SCRIPTS: Self = Self(4);
+    /// Duplicate using scene instantiation (Godot `DUPLICATE_USE_INSTANTIATION`
+    /// = 8). Accepted but not yet honored.
+    pub const USE_INSTANTIATION: Self = Self(8);
+
+    /// Builds flags from Godot's raw bitmask (e.g. from GDScript).
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+
+    /// The raw Godot bitmask.
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Whether every bit in `other` is set.
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl Default for DuplicateFlags {
+    /// Godot's `duplicate()` default: `SIGNALS | GROUPS | SCRIPTS`.
+    fn default() -> Self {
+        Self(1 | 2 | 4)
+    }
+}
+
+impl std::ops::BitOr for DuplicateFlags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
 /// The scene tree — an arena that owns every node and maintains the
 /// hierarchy.
 ///
@@ -1351,6 +1404,101 @@ impl SceneTree {
     /// relationships already wired (using the new IDs). The first element
     /// is the clone of `root_id`. The cloned nodes are **not** inserted
     /// into the tree — the caller can add them via [`SceneTree::add_child`].
+    /// Duplicates the subtree at `root_id` **into the tree**, honoring Godot's
+    /// `Node.DUPLICATE_*` flags, and returns the new subtree's root id
+    /// (pat-nzgdu.138).
+    ///
+    /// The copy is attached as a sibling of `root_id` (under the same parent),
+    /// mirroring Godot's `duplicate()`. Properties and the unique-name flag are
+    /// always copied; group membership only with
+    /// [`DuplicateFlags::GROUPS`], and signal connections only with
+    /// [`DuplicateFlags::SIGNALS`].
+    ///
+    /// Unlike [`duplicate_subtree`](Self::duplicate_subtree) — which returns
+    /// detached nodes and therefore cannot carry signals, since connections
+    /// live on the tree — this inserts the clones, so it can.
+    ///
+    /// [`DuplicateFlags::SCRIPTS`] is accepted but **not yet honored**:
+    /// `ScriptInstance` is a trait object with no clone, so a script cannot be
+    /// copied today (see the bead comment on pat-nzgdu.138).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `root_id` is unknown, or is the scene tree's root
+    /// (which has no parent to duplicate into).
+    pub fn duplicate_node(&mut self, root_id: NodeId, flags: DuplicateFlags) -> EngineResult<NodeId> {
+        if root_id == self.root_id {
+            return Err(EngineError::InvalidOperation(
+                "cannot duplicate the scene tree root".into(),
+            ));
+        }
+        let target_parent = self
+            .nodes
+            .get(&root_id)
+            .ok_or_else(|| EngineError::NotFound(format!("node {root_id} not found")))?
+            .parent()
+            .ok_or_else(|| {
+                EngineError::InvalidOperation(format!("node {root_id} has no parent"))
+            })?;
+
+        let mut old_ids = Vec::new();
+        self.collect_subtree_top_down(root_id, &mut old_ids);
+
+        let mut old_to_new: HashMap<NodeId, NodeId> = HashMap::new();
+        let mut new_root: Option<NodeId> = None;
+
+        for &old_id in &old_ids {
+            // Snapshot everything needed before taking a mutable borrow.
+            let (clone, old_parent, groups) = {
+                let original = self
+                    .nodes
+                    .get(&old_id)
+                    .ok_or_else(|| EngineError::NotFound(format!("node {old_id} disappeared")))?;
+                let mut clone = Node::new(original.name(), original.class_name());
+                for (key, value) in original.properties() {
+                    clone.set_property(key, value.clone());
+                }
+                clone.set_unique_name(original.is_unique_name());
+                let groups: Vec<String> = original.groups().iter().cloned().collect();
+                (clone, original.parent(), groups)
+            };
+
+            let parent_for_clone = if old_id == root_id {
+                target_parent
+            } else {
+                match old_parent.and_then(|p| old_to_new.get(&p).copied()) {
+                    Some(p) => p,
+                    // Parent wasn't cloned (can't happen for a top-down walk).
+                    None => continue,
+                }
+            };
+
+            let new_id = self.add_child(parent_for_clone, clone)?;
+            // Groups go through the tree so the group index stays in sync —
+            // `add_child` does not index them.
+            if flags.contains(DuplicateFlags::GROUPS) {
+                for group in groups {
+                    self.add_to_group(new_id, &group)?;
+                }
+            }
+            old_to_new.insert(old_id, new_id);
+            if old_id == root_id {
+                new_root = Some(new_id);
+            }
+        }
+
+        // Signal connections live on the tree, keyed by node.
+        if flags.contains(DuplicateFlags::SIGNALS) {
+            for (old_id, new_id) in &old_to_new {
+                if let Some(store) = self.signal_stores.get(old_id).cloned() {
+                    self.signal_stores.insert(*new_id, store);
+                }
+            }
+        }
+
+        new_root.ok_or_else(|| EngineError::NotFound(format!("node {root_id} not found")))
+    }
+
     pub fn duplicate_subtree(&self, root_id: NodeId) -> EngineResult<Vec<Node>> {
         let _source = self
             .nodes
@@ -1890,6 +2038,9 @@ impl SceneTree {
             .all_nodes_in_process_order()
             .into_iter()
             .filter(|id| self.should_process_node(*id))
+            // Godot: `set_process(false)` stops _process independently of
+            // process_mode (pat-nzgdu.137).
+            .filter(|id| self.is_node_processing(*id))
             .filter(|id| self.scripts.contains_key(id))
             .collect();
         for id in ids {
@@ -1903,10 +2054,65 @@ impl SceneTree {
             .all_nodes_in_process_order()
             .into_iter()
             .filter(|id| self.should_process_node(*id))
+            // `set_physics_process(false)` gates only the physics callback —
+            // a node can stop _process and keep _physics_process.
+            .filter(|id| self.is_node_physics_processing(*id))
             .filter(|id| self.scripts.contains_key(id))
             .collect();
         for id in ids {
             self.process_script_physics_process(id, delta);
+        }
+    }
+
+    // -- per-node process toggles (pat-nzgdu.137) ----------------------------
+
+    /// Whether `_process` is enabled on `node_id` (Godot's
+    /// `Node.is_processing`). Unknown nodes report `false`.
+    pub fn is_node_processing(&self, node_id: NodeId) -> bool {
+        self.nodes.get(&node_id).is_some_and(|n| n.is_processing())
+    }
+
+    /// Whether `_physics_process` is enabled on `node_id`
+    /// (`Node.is_physics_processing`). Unknown nodes report `false`.
+    pub fn is_node_physics_processing(&self, node_id: NodeId) -> bool {
+        self.nodes
+            .get(&node_id)
+            .is_some_and(|n| n.is_physics_processing())
+    }
+
+    /// Enables/disables `_process` on `node_id` (`Node.set_process`).
+    /// Returns whether the node exists.
+    pub fn set_node_process(&mut self, node_id: NodeId, enabled: bool) -> bool {
+        match self.nodes.get_mut(&node_id) {
+            Some(n) => {
+                n.set_process(enabled);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Enables/disables `_physics_process` on `node_id`
+    /// (`Node.set_physics_process`). Returns whether the node exists.
+    pub fn set_node_physics_process(&mut self, node_id: NodeId, enabled: bool) -> bool {
+        match self.nodes.get_mut(&node_id) {
+            Some(n) => {
+                n.set_physics_process(enabled);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Re-arms `_ready` on `node_id` so it runs again on the next tree-enter
+    /// (`Node.request_ready`). Returns whether the node exists.
+    pub fn request_node_ready(&mut self, node_id: NodeId) -> bool {
+        match self.nodes.get_mut(&node_id) {
+            Some(n) => {
+                n.request_ready();
+                true
+            }
+            None => false,
         }
     }
 
@@ -2779,6 +2985,305 @@ impl SceneTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- pat-nzgdu.138: duplicate() flags ------------------------------------
+
+    /// Builds `parent -> child` where the child is in a group and has a signal
+    /// connection, then returns (tree, child_id).
+    fn tree_with_connected_grouped_child() -> (SceneTree, NodeId) {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let parent = tree.add_child(root, Node::new("Parent", "Node")).unwrap();
+        let child = tree.add_child(parent, Node::new("Child", "Node")).unwrap();
+        tree.get_node_mut(child)
+            .unwrap()
+            .set_property("hp", Variant::Int(7));
+        tree.add_to_group(child, "enemies").unwrap();
+        tree.connect_signal(
+            child,
+            "died",
+            gdobject::signal::Connection::new(root.object_id(), "on_died"),
+        );
+        (tree, child)
+    }
+
+    /// Number of connections on `node`'s `signal`, or 0 when it has no store.
+    fn conn_count(tree: &SceneTree, node: NodeId, signal: &str) -> usize {
+        tree.signal_store(node)
+            .and_then(|s| s.get_signal(signal))
+            .map(|sig| sig.connection_count())
+            .unwrap_or(0)
+    }
+
+    /// The bead's duplicate clause: `duplicate(DUPLICATE_GROUPS |
+    /// DUPLICATE_SIGNALS)` copies group membership AND signal connections.
+    #[test]
+    fn duplicate_node_flags_copy_groups_and_signals() {
+        let (mut tree, child) = tree_with_connected_grouped_child();
+        let before = tree.get_nodes_in_group("enemies").len();
+
+        let copy = tree
+            .duplicate_node(child, DuplicateFlags::GROUPS | DuplicateFlags::SIGNALS)
+            .expect("duplicate should succeed");
+
+        // Properties always come along.
+        assert_eq!(
+            tree.get_node(copy).unwrap().get_property("hp"),
+            Variant::Int(7),
+            "properties are always duplicated",
+        );
+        // Groups: both the node's set AND the tree's group index.
+        assert!(
+            tree.get_node(copy).unwrap().groups().contains("enemies"),
+            "DUPLICATE_GROUPS must copy group membership",
+        );
+        assert_eq!(
+            tree.get_nodes_in_group("enemies").len(),
+            before + 1,
+            "the tree's group index must include the duplicate",
+        );
+        // Signals: the connection store rides along.
+        assert_eq!(
+            conn_count(&tree, copy, "died"),
+            conn_count(&tree, child, "died"),
+            "DUPLICATE_SIGNALS must copy signal connections",
+        );
+        assert!(
+            conn_count(&tree, copy, "died") > 0,
+            "the source must actually have a connection, or this proves nothing",
+        );
+        // The copy is a sibling of the original.
+        assert_eq!(
+            tree.get_node(copy).unwrap().parent(),
+            tree.get_node(child).unwrap().parent(),
+            "a duplicate attaches under the original's parent",
+        );
+    }
+
+    /// Without the flags, neither groups nor signals are copied — proving the
+    /// flags gate rather than everything always coming along.
+    #[test]
+    fn duplicate_node_without_flags_copies_neither() {
+        let (mut tree, child) = tree_with_connected_grouped_child();
+        let before = tree.get_nodes_in_group("enemies").len();
+
+        let copy = tree.duplicate_node(child, DuplicateFlags::NONE).unwrap();
+
+        assert_eq!(
+            tree.get_node(copy).unwrap().get_property("hp"),
+            Variant::Int(7),
+            "properties are copied regardless of flags",
+        );
+        assert!(
+            !tree.get_node(copy).unwrap().groups().contains("enemies"),
+            "without DUPLICATE_GROUPS the copy joins no groups",
+        );
+        assert_eq!(
+            tree.get_nodes_in_group("enemies").len(),
+            before,
+            "the group index must not gain the duplicate",
+        );
+        assert_eq!(
+            conn_count(&tree, copy, "died"),
+            0,
+            "without DUPLICATE_SIGNALS the copy has no connections",
+        );
+    }
+
+    /// Duplication is recursive: children come along with their own flag-gated
+    /// groups.
+    #[test]
+    fn duplicate_node_copies_descendants() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let parent = tree.add_child(root, Node::new("Parent", "Node")).unwrap();
+        let a = tree.add_child(parent, Node::new("A", "Node")).unwrap();
+        let _b = tree.add_child(a, Node::new("B", "Node")).unwrap();
+        tree.add_to_group(_b, "deep").unwrap();
+
+        let copy = tree.duplicate_node(a, DuplicateFlags::GROUPS).unwrap();
+
+        let mut ids = Vec::new();
+        tree.collect_subtree_top_down(copy, &mut ids);
+        assert_eq!(ids.len(), 2, "the whole subtree duplicates (A + B)");
+        assert_eq!(
+            tree.get_nodes_in_group("deep").len(),
+            2,
+            "a duplicated descendant joins its groups too",
+        );
+    }
+
+    /// Godot's default `duplicate()` is SIGNALS|GROUPS|SCRIPTS.
+    #[test]
+    fn duplicate_flags_default_matches_godot() {
+        let d = DuplicateFlags::default();
+        assert!(d.contains(DuplicateFlags::SIGNALS));
+        assert!(d.contains(DuplicateFlags::GROUPS));
+        assert!(d.contains(DuplicateFlags::SCRIPTS));
+        assert!(!d.contains(DuplicateFlags::USE_INSTANTIATION));
+        assert_eq!(d.bits(), 7, "Godot's DUPLICATE default bitmask");
+        assert_eq!(DuplicateFlags::from_bits(3).bits(), 3);
+    }
+
+    /// The scene tree's root has no parent to duplicate into, so it errors
+    /// rather than corrupting the tree.
+    #[test]
+    fn duplicate_node_rejects_tree_root_and_unknown() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        assert!(tree.duplicate_node(root, DuplicateFlags::default()).is_err());
+
+        let ghost = NodeId::from_object_id(gdcore::id::ObjectId::from_raw(987_654));
+        assert!(tree.duplicate_node(ghost, DuplicateFlags::default()).is_err());
+    }
+
+    // -- pat-nzgdu.137: per-node process toggles gate script callbacks --------
+
+    /// Records which lifecycle callbacks the tree dispatched to this node.
+    struct ProcessProbe {
+        calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl gdscript_interop::bindings::ScriptInstance for ProcessProbe {
+        fn call_method(
+            &mut self,
+            name: &str,
+            _args: &[Variant],
+        ) -> Result<Variant, gdscript_interop::bindings::ScriptError> {
+            self.calls.borrow_mut().push(name.to_string());
+            Ok(Variant::Nil)
+        }
+        fn get_property(&self, _name: &str) -> Option<Variant> {
+            None
+        }
+        fn set_property(&mut self, _name: &str, _value: Variant) -> bool {
+            false
+        }
+        fn list_methods(&self) -> Vec<gdscript_interop::bindings::MethodInfo> {
+            Vec::new()
+        }
+        fn list_properties(&self) -> Vec<gdscript_interop::bindings::ScriptPropertyInfo> {
+            Vec::new()
+        }
+        fn get_script_name(&self) -> &str {
+            "ProcessProbe"
+        }
+        fn has_method(&self, _name: &str) -> bool {
+            true
+        }
+    }
+
+    /// The bead's acceptance, at the tree level: disabling `_process` on a node
+    /// stops its `_process` callbacks across subsequent ticks while
+    /// `_physics_process` keeps firing, and `request_ready` re-arms `_ready`.
+    #[test]
+    fn node_process_toggles_gate_callbacks() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let id = tree.add_child(root, Node::new("Probe", "Node")).unwrap();
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        tree.attach_script(
+            id,
+            Box::new(ProcessProbe {
+                calls: calls.clone(),
+            }),
+        );
+
+        // Default: both callbacks dispatch (Godot enables them by default).
+        assert!(tree.is_node_processing(id));
+        assert!(tree.is_node_physics_processing(id));
+        tree.process_all_scripts_process(0.016);
+        tree.process_all_scripts_physics_process(0.016);
+        assert_eq!(
+            calls.borrow().as_slice(),
+            ["_process", "_physics_process"],
+            "both callbacks dispatch by default",
+        );
+
+        // set_process(false) stops _process only.
+        calls.borrow_mut().clear();
+        assert!(tree.set_node_process(id, false));
+        assert!(!tree.is_node_processing(id));
+        for _ in 0..3 {
+            tree.process_all_scripts_process(0.016);
+            tree.process_all_scripts_physics_process(0.016);
+        }
+        assert_eq!(
+            calls.borrow().as_slice(),
+            ["_physics_process", "_physics_process", "_physics_process"],
+            "set_process(false) must stop _process across ticks while \
+             _physics_process keeps running",
+        );
+
+        // Re-enabling resumes _process.
+        calls.borrow_mut().clear();
+        tree.set_node_process(id, true);
+        tree.process_all_scripts_process(0.016);
+        assert_eq!(calls.borrow().as_slice(), ["_process"], "toggle is reversible");
+
+        // set_physics_process(false) gates the other side independently.
+        calls.borrow_mut().clear();
+        tree.set_node_physics_process(id, false);
+        assert!(!tree.is_node_physics_processing(id));
+        tree.process_all_scripts_process(0.016);
+        tree.process_all_scripts_physics_process(0.016);
+        assert_eq!(
+            calls.borrow().as_slice(),
+            ["_process"],
+            "set_physics_process(false) must stop only _physics_process",
+        );
+
+        // request_ready re-arms _ready for the next tree-enter.
+        tree.get_node_mut(id).unwrap().set_ready(true);
+        assert!(tree.get_node(id).unwrap().is_ready());
+        assert!(tree.request_node_ready(id));
+        assert!(
+            !tree.get_node(id).unwrap().is_ready(),
+            "request_ready() must clear the ready flag so _ready runs again",
+        );
+    }
+
+    /// Toggles are per-node: silencing one node must not silence its siblings.
+    #[test]
+    fn process_toggles_are_per_node() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let a = tree.add_child(root, Node::new("A", "Node")).unwrap();
+        let b = tree.add_child(root, Node::new("B", "Node")).unwrap();
+        let a_calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let b_calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        tree.attach_script(
+            a,
+            Box::new(ProcessProbe {
+                calls: a_calls.clone(),
+            }),
+        );
+        tree.attach_script(
+            b,
+            Box::new(ProcessProbe {
+                calls: b_calls.clone(),
+            }),
+        );
+
+        tree.set_node_process(a, false);
+        tree.process_all_scripts_process(0.016);
+
+        assert!(a_calls.borrow().is_empty(), "A is silenced");
+        assert_eq!(b_calls.borrow().as_slice(), ["_process"], "B still processes");
+    }
+
+    /// An unknown node reports not-processing rather than panicking, and
+    /// setting a toggle on it reports failure.
+    #[test]
+    fn process_toggles_on_unknown_node_are_safe() {
+        let mut tree = SceneTree::new();
+        let ghost = NodeId::from_object_id(gdcore::id::ObjectId::from_raw(999_999));
+        assert!(!tree.is_node_processing(ghost));
+        assert!(!tree.is_node_physics_processing(ghost));
+        assert!(!tree.set_node_process(ghost, true));
+        assert!(!tree.set_node_physics_process(ghost, true));
+        assert!(!tree.request_node_ready(ghost));
+    }
 
     #[test]
     fn new_tree_has_root() {

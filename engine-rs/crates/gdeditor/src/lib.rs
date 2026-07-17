@@ -153,6 +153,7 @@ pub mod viewport_2d;
 pub mod viewport_2d_render;
 pub mod viewport_3d;
 pub mod viewport_3d_gizmo;
+pub mod viewport_3d_handles;
 pub mod viewport_3d_overlay;
 pub mod viewport_3d_render;
 pub mod viewport_3d_select;

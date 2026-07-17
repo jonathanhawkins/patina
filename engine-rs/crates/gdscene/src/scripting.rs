@@ -408,6 +408,33 @@ impl SceneAccess for SceneTreeAccessor {
         self.tree_mut().set_input_as_handled();
     }
 
+    // -- Per-node process toggles (pat-nzgdu.137) ---------------------------
+
+    fn set_process(&mut self, node: u64, enabled: bool) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().set_node_process(nid, enabled);
+    }
+
+    fn is_processing(&self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().is_node_processing(nid)
+    }
+
+    fn set_physics_process(&mut self, node: u64, enabled: bool) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().set_node_physics_process(nid, enabled);
+    }
+
+    fn is_physics_processing(&self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().is_node_physics_processing(nid)
+    }
+
+    fn request_ready(&mut self, node: u64) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().request_node_ready(nid);
+    }
+
     // -- Object metadata (pat-nzgdu.30) -------------------------------------
     // Meta is Object-level state stored in the Node's own meta bag (distinct
     // from the script/property namespace used above).

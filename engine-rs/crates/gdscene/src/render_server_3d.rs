@@ -241,6 +241,14 @@ impl RenderServer3DAdapter {
         self.frame_counter
     }
 
+    /// The light records the last scene sync produced (pat-nzgdu.121).
+    ///
+    /// Exposes what `sync_lights` wrote, so callers can confirm a scene's
+    /// Light3D properties actually reached the render server's light.
+    pub fn lights(&self) -> &[Light3D] {
+        self.renderer.lights()
+    }
+
     /// Returns the last rendered frame buffer, if any.
     pub fn last_frame(&self) -> Option<&FrameBuffer3D> {
         self.last_frame.as_ref()
@@ -260,7 +268,9 @@ impl RenderServer3DAdapter {
         let multimesh_visible = self.sync_multimesh_instances(tree);
         // Sprites billboard toward the active camera, so pass its world origin.
         let sprite_visible = self.sync_sprite3d(tree, camera_transform.origin);
-        let visible_count = visible_count + multimesh_visible + sprite_visible;
+        // CSG roots evaluate their boolean tree into one mesh (pat-nzgdu.119).
+        let csg_visible = self.sync_csg_shapes(tree);
+        let visible_count = visible_count + multimesh_visible + sprite_visible + csg_visible;
 
         // 3. Sync light nodes to render server.
         let light_count = self.sync_lights(tree);
@@ -397,6 +407,61 @@ impl RenderServer3DAdapter {
     /// Creates new instances for nodes not yet tracked, updates transforms
     /// for existing ones, and removes instances for nodes no longer in the tree.
     /// Returns the number of visible mesh instances.
+    /// Evaluates every root CSG subtree and registers the resulting geometry as
+    /// a render instance (pat-nzgdu.119).
+    ///
+    /// A CSG node is a *root* when its parent is not itself a CSG node; that
+    /// root owns the whole boolean tree beneath it, exactly as Godot renders a
+    /// CSGShape3D hierarchy as one mesh. Returns the number of visible CSG roots
+    /// that produced geometry.
+    fn sync_csg_shapes(&mut self, tree: &SceneTree) -> u32 {
+        let mut visible_count = 0u32;
+
+        for &nid in &tree.all_nodes_in_tree_order() {
+            let node = match tree.get_node(nid) {
+                Some(n) => n,
+                None => continue,
+            };
+            if !is_csg_class(node.class_name()) {
+                continue;
+            }
+            // Only roots evaluate; descendants are folded in by their root.
+            let parent_is_csg = node
+                .parent()
+                .and_then(|p| tree.get_node(p))
+                .map(|p| is_csg_class(p.class_name()))
+                .unwrap_or(false);
+            if parent_is_csg {
+                continue;
+            }
+
+            let visible = node3d::is_visible(tree, nid);
+            let inst_id = if let Some(&existing) = self.instance_map.node_to_instance.get(&nid) {
+                existing
+            } else {
+                let mesh = match evaluate_csg_tree(tree, nid) {
+                    Some(m) => m,
+                    // No geometry (e.g. an empty combiner): nothing to register.
+                    None => continue,
+                };
+                let new_id = self.renderer.create_instance();
+                self.renderer.set_mesh(new_id, mesh);
+                self.renderer.set_material(new_id, Material3D::default());
+                self.instance_map.node_to_instance.insert(nid, new_id);
+                new_id
+            };
+
+            self.renderer
+                .set_transform(inst_id, node3d::get_global_transform(tree, nid));
+            self.renderer.set_visible(inst_id, visible);
+            if visible {
+                visible_count += 1;
+            }
+        }
+
+        visible_count
+    }
+
     fn sync_mesh_instances(&mut self, tree: &SceneTree) -> u32 {
         let all_nodes = tree.all_nodes_in_tree_order();
 
@@ -1052,6 +1117,11 @@ impl RenderServer3DAdapter {
                         if let gdvariant::Variant::Bool(s) = node.get_property("shadow_enabled") {
                             light.shadow_enabled = s;
                         }
+                        // Extended Light3D property surface (pat-nzgdu.121).
+                        // Each is applied only when the scene actually sets it,
+                        // so a scene that never authored these renders exactly
+                        // as before.
+                        sync_light_properties(node, &mut light);
 
                         // Sync type-specific properties.
                         match lt {
@@ -1293,6 +1363,197 @@ pub fn material_from_gltf_resource(resource: &gdresource::Resource) -> Option<Ma
 }
 
 /// Extracts `Vec<Vector3>` from a `Variant::Array` of `Variant::Vector3`.
+/// Whether `class` is a CSG shape node (Godot's CSGShape3D family).
+fn is_csg_class(class: &str) -> bool {
+    matches!(
+        class,
+        "CSGShape3D"
+            | "CSGCombiner3D"
+            | "CSGBox3D"
+            | "CSGSphere3D"
+            | "CSGCylinder3D"
+            | "CSGTorus3D"
+            | "CSGPolygon3D"
+            | "CSGMesh3D"
+            | "CSGPrimitive3D"
+    )
+}
+
+/// Builds the primitive mesh a CSG node contributes, from its scene properties
+/// (pat-nzgdu.119).
+///
+/// Returns `None` for nodes that carry no geometry of their own — a
+/// CSGCombiner3D only combines its children, and unimplemented primitives
+/// (torus/polygon/mesh) contribute nothing rather than guessing at geometry.
+fn csg_primitive_mesh(node: &crate::node::Node) -> Option<Mesh3D> {
+    use gdserver3d::csg::{CSGBox3D, CSGCylinder3D, CSGSphere3D};
+    use gdvariant::Variant;
+
+    match node.class_name() {
+        "CSGBox3D" => {
+            let size = match node.get_property("size") {
+                Variant::Vector3(v) => v,
+                _ => Vector3::new(2.0, 2.0, 2.0),
+            };
+            Some(CSGBox3D::new(size).to_mesh())
+        }
+        "CSGSphere3D" => {
+            let radius = match node.get_property("radius") {
+                Variant::Float(r) => r as f32,
+                _ => 0.5,
+            };
+            Some(CSGSphere3D::new(radius).to_mesh())
+        }
+        "CSGCylinder3D" => {
+            let radius = match node.get_property("radius") {
+                Variant::Float(r) => r as f32,
+                _ => 0.5,
+            };
+            let height = match node.get_property("height") {
+                Variant::Float(h) => h as f32,
+                _ => 2.0,
+            };
+            Some(CSGCylinder3D::new(radius, height).to_mesh())
+        }
+        _ => None,
+    }
+}
+
+/// The boolean operation a CSG child applies to its parent's accumulated mesh
+/// (Godot's `CSGShape3D.operation`: 0=union, 1=intersection, 2=subtraction).
+fn csg_node_operation(node: &crate::node::Node) -> gdserver3d::csg::CSGOperation {
+    use gdserver3d::csg::CSGOperation;
+    match node.get_property("operation") {
+        gdvariant::Variant::Int(v) => CSGOperation::from_godot_int(v),
+        _ => CSGOperation::Union,
+    }
+}
+
+/// Rewrites `mesh`'s vertices/normals from `child` space into `root` space so
+/// the boolean solver evaluates every operand in one coordinate system.
+fn csg_transform_mesh(mesh: &mut Mesh3D, root_inv: Transform3D, child_global: Transform3D) {
+    let to_root = root_inv * child_global;
+    for v in &mut mesh.vertices {
+        *v = to_root.xform(*v);
+    }
+    // Normals are direction vectors: rotate them, don't translate.
+    let mut rot = to_root;
+    rot.origin = Vector3::ZERO;
+    for n in &mut mesh.normals {
+        *n = rot.xform(*n).normalized();
+    }
+}
+
+/// Evaluates a CSG subtree rooted at `root` into a single mesh, in `root`'s
+/// local space (pat-nzgdu.119).
+///
+/// Mirrors Godot: the root's own primitive seeds the result, then each CSG
+/// descendant is folded in with its own `operation` (union / intersection /
+/// subtraction) via the `gdserver3d::csg` solver. Invisible nodes are skipped.
+/// Returns `None` when the subtree produces no geometry at all.
+fn evaluate_csg_tree(tree: &SceneTree, root: NodeId) -> Option<Mesh3D> {
+    use gdserver3d::csg::CSGCombiner3D;
+
+    let root_inv = node3d::get_global_transform(tree, root).inverse();
+
+    // Seed with the root's own primitive (a CSGCombiner3D contributes none).
+    let mut acc = tree.get_node(root).and_then(csg_primitive_mesh);
+
+    let mut children = Vec::new();
+    tree.collect_subtree_top_down(root, &mut children);
+    for &nid in children.iter().skip(1) {
+        let node = match tree.get_node(nid) {
+            Some(n) => n,
+            None => continue,
+        };
+        if !is_csg_class(node.class_name()) || !node3d::is_visible(tree, nid) {
+            continue;
+        }
+        let mut mesh = match csg_primitive_mesh(node) {
+            Some(m) => m,
+            None => continue,
+        };
+        csg_transform_mesh(&mut mesh, root_inv, node3d::get_global_transform(tree, nid));
+
+        acc = Some(match acc {
+            // The first operand has nothing to combine against, so it seeds the
+            // result regardless of its operation (Godot: the first shape under
+            // an empty combiner is simply the shape).
+            None => mesh,
+            Some(current) => CSGCombiner3D::combine(&current, &mesh, csg_node_operation(node)),
+        });
+    }
+    acc
+}
+
+/// Applies the extended Light3D property surface from a scene node onto the
+/// render server's light record (pat-nzgdu.121): colour temperature, cull and
+/// shadow-caster masks, indirect/volumetric energy, distance fade, shadow
+/// opacity, editor-only, and the DirectionalLight3D PSSM splits.
+///
+/// Every property is read through `get_property` and applied only when the
+/// scene actually authored it, so a scene that sets none of these produces the
+/// same light record as before this bead. `light_temperature` is folded into
+/// the light's colour (Godot tints the light by its blackbody colour) while the
+/// authored Kelvin value is kept on the record.
+fn sync_light_properties(node: &crate::node::Node, light: &mut Light3D) {
+    use gdvariant::Variant;
+
+    if let Variant::Float(t) = node.get_property("light_temperature") {
+        light.temperature = t as f32;
+        let tint = gdserver3d::light::kelvin_to_rgb(light.temperature);
+        light.color = Color::new(
+            light.color.r * tint.r,
+            light.color.g * tint.g,
+            light.color.b * tint.b,
+            light.color.a,
+        );
+    }
+    if let Variant::Int(mask) = node.get_property("light_cull_mask") {
+        light.cull_mask = mask as u32;
+    }
+    if let Variant::Float(e) = node.get_property("light_indirect_energy") {
+        light.indirect_energy = e as f32;
+    }
+    if let Variant::Float(e) = node.get_property("light_volumetric_fog_energy") {
+        light.volumetric_fog_energy = e as f32;
+    }
+    if let Variant::Bool(b) = node.get_property("distance_fade_enabled") {
+        light.distance_fade_enabled = b;
+    }
+    if let Variant::Float(v) = node.get_property("distance_fade_begin") {
+        light.distance_fade_begin = v as f32;
+    }
+    if let Variant::Float(v) = node.get_property("distance_fade_shadow") {
+        light.distance_fade_shadow = v as f32;
+    }
+    if let Variant::Float(v) = node.get_property("distance_fade_length") {
+        light.distance_fade_length = v as f32;
+    }
+    if let Variant::Float(v) = node.get_property("shadow_opacity") {
+        light.shadow_opacity = v as f32;
+    }
+    if let Variant::Int(mask) = node.get_property("shadow_caster_mask") {
+        light.shadow_caster_mask = mask as u32;
+    }
+    if let Variant::Bool(b) = node.get_property("editor_only") {
+        light.editor_only = b;
+    }
+    // DirectionalLight3D PSSM splits.
+    if let Variant::Float(v) = node.get_property("directional_shadow_split_1") {
+        light.shadow_split_1 = v as f32;
+    }
+    if let Variant::Float(v) = node.get_property("directional_shadow_split_2") {
+        light.shadow_split_2 = v as f32;
+    }
+    if let Variant::Float(v) = node.get_property("directional_shadow_split_3") {
+        light.shadow_split_3 = v as f32;
+    }
+    if let Variant::Bool(b) = node.get_property("directional_shadow_blend_splits") {
+        light.blend_splits = b;
+    }
+}
+
 fn extract_vector3_array(v: &gdvariant::Variant) -> Option<Vec<Vector3>> {
     if let gdvariant::Variant::Array(arr) = v {
         let mut out = Vec::with_capacity(arr.len());
@@ -2146,6 +2407,239 @@ material_override = SubResource("ShaderMaterial_1")
             3,
             "should load triangle indices from glb"
         );
+    }
+
+    // -- pat-nzgdu.119: CSG boolean tree reaches the renderer -----------------
+
+    /// Builds a CSGBox3D root, optionally with a child CSGSphere3D applying
+    /// `op`, and returns the evaluated root mesh the renderer would draw.
+    fn csg_scene_mesh(child_op: Option<i64>) -> Mesh3D {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let box_id = tree.add_child(root, Node::new("Box", "CSGBox3D")).unwrap();
+        tree.get_node_mut(box_id)
+            .unwrap()
+            .set_property("size", Variant::Vector3(Vector3::new(2.0, 2.0, 2.0)));
+
+        if let Some(op) = child_op {
+            let sphere_id = tree
+                .add_child(box_id, Node::new("Hole", "CSGSphere3D"))
+                .unwrap();
+            {
+                let n = tree.get_node_mut(sphere_id).unwrap();
+                n.set_property("radius", Variant::Float(0.9));
+                n.set_property("operation", Variant::Int(op));
+            }
+        }
+        evaluate_csg_tree(&tree, box_id).expect("a CSGBox3D root must produce geometry")
+    }
+
+    /// The bead's acceptance: a CSGBox3D root with a subtracting CSGSphere3D
+    /// child renders geometry whose signature differs from the plain box — i.e.
+    /// the boolean solver actually ran and carved a cavity.
+    #[test]
+    fn csg_box_subtract_renders_geometry_from_scene() {
+        let plain = csg_scene_mesh(None);
+        let carved = csg_scene_mesh(Some(2)); // 2 = subtraction
+
+        assert!(
+            !plain.vertices.is_empty(),
+            "a CSGBox3D must produce box geometry"
+        );
+        assert!(
+            !carved.vertices.is_empty(),
+            "subtracting a sphere must still leave the box shell"
+        );
+        // The carve must change the geometry: identical output would mean the
+        // solver never ran and the child was ignored.
+        assert_ne!(
+            (plain.vertices.len(), plain.indices.len()),
+            (carved.vertices.len(), carved.indices.len()),
+            "subtraction must change the mesh signature vs the box alone",
+        );
+
+        // A union of the same sphere differs from a subtraction of it, proving
+        // the child's `operation` is honored rather than hardcoded.
+        let unioned = csg_scene_mesh(Some(0)); // 0 = union
+        assert_ne!(
+            (unioned.vertices.len(), unioned.indices.len()),
+            (carved.vertices.len(), carved.indices.len()),
+            "union and subtraction must not produce the same mesh",
+        );
+    }
+
+    /// The evaluated CSG root reaches the renderer as a real draw instance and
+    /// renders pixels — the wiring the bead calls UNWIRED.
+    #[test]
+    fn csg_root_registers_a_render_instance() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let cam = tree.add_child(root, Node::new("Camera", "Camera3D")).unwrap();
+        node3d::set_position(&mut tree, cam, Vector3::new(0.0, 0.0, 5.0));
+        node3d::set_camera_current(&mut tree, cam, true);
+
+        let box_id = tree.add_child(root, Node::new("Box", "CSGBox3D")).unwrap();
+        tree.get_node_mut(box_id)
+            .unwrap()
+            .set_property("size", Variant::Vector3(Vector3::new(2.0, 2.0, 2.0)));
+        let sphere_id = tree
+            .add_child(box_id, Node::new("Hole", "CSGSphere3D"))
+            .unwrap();
+        {
+            let n = tree.get_node_mut(sphere_id).unwrap();
+            n.set_property("radius", Variant::Float(0.9));
+            n.set_property("operation", Variant::Int(2));
+        }
+
+        let mut adapter = RenderServer3DAdapter::new(64, 64);
+        let (snapshot, _frame) = adapter.render_frame(&tree);
+        assert!(
+            snapshot.visible_mesh_count >= 1,
+            "the CSG root must register a visible render instance, got {}",
+            snapshot.visible_mesh_count,
+        );
+        assert!(
+            snapshot.nonblack_pixel_count > 0,
+            "CSG geometry in front of the camera must produce pixels",
+        );
+    }
+
+    /// Only roots evaluate: a CSG child must not also register its own instance,
+    /// or the carved-away sphere would be drawn on top of the box.
+    #[test]
+    fn csg_child_does_not_register_its_own_instance() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let box_id = tree.add_child(root, Node::new("Box", "CSGBox3D")).unwrap();
+        let _sphere = tree
+            .add_child(box_id, Node::new("Hole", "CSGSphere3D"))
+            .unwrap();
+
+        let mut adapter = RenderServer3DAdapter::new(16, 16);
+        let _ = adapter.render_frame(&tree);
+        assert_eq!(
+            adapter.instance_map.node_to_instance.len(),
+            1,
+            "only the CSG root may own a render instance",
+        );
+    }
+
+    // -- pat-nzgdu.121: Light3D property surface reaches the light record -----
+
+    /// Builds a scene with one DirectionalLight3D carrying `props`, syncs it,
+    /// and returns the resulting light record.
+    fn light_record_from_scene(props: &[(&str, Variant)]) -> Light3D {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let light_id = tree
+            .add_child(root, Node::new("Sun", "DirectionalLight3D"))
+            .unwrap();
+        {
+            let node = tree.get_node_mut(light_id).unwrap();
+            for (k, v) in props {
+                node.set_property(k, v.clone());
+            }
+        }
+        let mut adapter = RenderServer3DAdapter::new(16, 16);
+        let _ = adapter.render_frame(&tree);
+        adapter
+            .lights()
+            .first()
+            .cloned()
+            .expect("scene light should reach the render server")
+    }
+
+    /// The bead's acceptance: a scene DirectionalLight3D with light_temperature
+    /// set produces a correspondingly tinted light vs a 6500K light, a
+    /// light_cull_mask excluding a layer leaves that layer unlit, and the PSSM
+    /// splits round-trip through the light record.
+    #[test]
+    fn light3d_temperature_cullmask_and_pssm_from_scene() {
+        // -- temperature tints the light, relative to daylight-neutral 6500K --
+        let warm = light_record_from_scene(&[("light_temperature", Variant::Float(3000.0))]);
+        let neutral = light_record_from_scene(&[("light_temperature", Variant::Float(6500.0))]);
+        assert_eq!(warm.temperature, 3000.0, "authored Kelvin reaches the record");
+        assert!(
+            warm.color.b < neutral.color.b,
+            "3000K must be less blue than 6500K (got {} vs {})",
+            warm.color.b,
+            neutral.color.b,
+        );
+        assert!(
+            warm.color.r > warm.color.b,
+            "3000K must read warm, got {:?}",
+            warm.color,
+        );
+        assert!(
+            (neutral.color.r - neutral.color.b).abs() < 0.05,
+            "6500K must stay ~neutral, got {:?}",
+            neutral.color,
+        );
+
+        // -- cull mask excludes a mesh's layer ------------------------------
+        // Mask = layer 1 only, so a mesh on layer 2 is not lit by this light.
+        let culled = light_record_from_scene(&[("light_cull_mask", Variant::Int(0b1))]);
+        assert_eq!(culled.cull_mask, 0b1);
+        assert!(culled.affects_layer(1), "layer 1 is in the mask");
+        assert!(
+            !culled.affects_layer(2),
+            "a mesh on an excluded layer must be left unlit"
+        );
+
+        // -- PSSM splits + blend round-trip ---------------------------------
+        let pssm = light_record_from_scene(&[
+            ("directional_shadow_split_1", Variant::Float(0.05)),
+            ("directional_shadow_split_2", Variant::Float(0.25)),
+            ("directional_shadow_split_3", Variant::Float(0.75)),
+            ("directional_shadow_blend_splits", Variant::Bool(true)),
+        ]);
+        assert_eq!(pssm.shadow_split_1, 0.05);
+        assert_eq!(pssm.shadow_split_2, 0.25);
+        assert_eq!(pssm.shadow_split_3, 0.75);
+        assert!(pssm.blend_splits, "blend_splits must round-trip");
+    }
+
+    /// A scene that authors none of the new properties must produce the same
+    /// light record as before this bead — temperature is opt-in, so an
+    /// unauthored light is not silently tinted by the 6500K default.
+    #[test]
+    fn light3d_unauthored_properties_leave_record_at_defaults() {
+        let light = light_record_from_scene(&[]);
+        assert_eq!(light.temperature, 6500.0);
+        assert_eq!(light.cull_mask, u32::MAX);
+        assert!(!light.blend_splits);
+        // Colour is untouched (white), NOT multiplied by the 6500K tint.
+        assert_eq!(
+            light.color,
+            Color::new(1.0, 1.0, 1.0, 1.0),
+            "an unauthored light must keep its plain colour",
+        );
+    }
+
+    /// The rest of the surface reaches the record too.
+    #[test]
+    fn light3d_extended_properties_reach_record() {
+        let l = light_record_from_scene(&[
+            ("light_indirect_energy", Variant::Float(2.5)),
+            ("light_volumetric_fog_energy", Variant::Float(0.25)),
+            ("distance_fade_enabled", Variant::Bool(true)),
+            ("distance_fade_begin", Variant::Float(12.0)),
+            ("distance_fade_shadow", Variant::Float(20.0)),
+            ("distance_fade_length", Variant::Float(3.0)),
+            ("shadow_opacity", Variant::Float(0.5)),
+            ("shadow_caster_mask", Variant::Int(0b101)),
+            ("editor_only", Variant::Bool(true)),
+        ]);
+        assert_eq!(l.indirect_energy, 2.5);
+        assert_eq!(l.volumetric_fog_energy, 0.25);
+        assert!(l.distance_fade_enabled);
+        assert_eq!(l.distance_fade_begin, 12.0);
+        assert_eq!(l.distance_fade_shadow, 20.0);
+        assert_eq!(l.distance_fade_length, 3.0);
+        assert_eq!(l.shadow_opacity, 0.5);
+        assert_eq!(l.shadow_caster_mask, 0b101);
+        assert!(l.editor_only);
     }
 
     #[test]

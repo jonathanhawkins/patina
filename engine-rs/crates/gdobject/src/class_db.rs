@@ -711,6 +711,18 @@ pub fn register_3d_classes() {
     use gdcore::math::Vector3;
     use gdcore::math3d::{Basis, Transform3D};
 
+    // Bootstrap the roots like every other register_*_classes does. Without
+    // them this pass registers `Node3D` under a `Node` that does not exist, so
+    // `inheritance_chain` stops dead at Node3D: run on its own,
+    // `is_parent_class("Node3D", "Node")` and `is_parent_class("XRServer",
+    // "Object")` were both false (pat-nzgdu.98).
+    if !class_exists("Object") {
+        register_class(object_class());
+    }
+    if !class_exists("Node") {
+        register_class(node_class());
+    }
+
     let identity_transform = Transform3D {
         basis: Basis::IDENTITY,
         origin: Vector3::ZERO,
@@ -1266,6 +1278,153 @@ pub fn register_3d_classes() {
     // ShaderGlobalsOverride is a Node that overrides project shader globals.
     register_class(ClassRegistration::new("ShaderInclude").parent("Resource"));
     register_class(ClassRegistration::new("ShaderGlobalsOverride").parent("Node"));
+
+    // -- VisualShader node-graph family (pat-nzgdu.140) --------------------
+    // VisualShader IS a Shader: its graph compiles to shader source
+    // (gdserver2d::material::VisualShader::get_code), so it is usable anywhere
+    // a text Shader is. Godot ships 111 VisualShaderNode* classes; this is the
+    // core input/output/constant/op/func/parameter/texture set the graph
+    // compiler can actually emit code for — the fuller set is additive.
+    register_class(
+        ClassRegistration::new("VisualShader")
+            .parent("Shader")
+            .method(MethodInfo::new("add_node", 3))
+            .method(MethodInfo::new("remove_node", 2))
+            .method(MethodInfo::new("get_node", 2))
+            .method(MethodInfo::new("get_node_list", 1))
+            .method(MethodInfo::new("connect_nodes", 5))
+            .method(MethodInfo::new("disconnect_nodes", 5))
+            .method(MethodInfo::new("is_node_connection", 5))
+            .method(MethodInfo::new("set_mode", 1))
+            .enumeration(
+                EnumInfo::new("Type")
+                    .constant("TYPE_VERTEX", 0)
+                    .constant("TYPE_FRAGMENT", 1)
+                    .constant("TYPE_LIGHT", 2)
+                    .constant("TYPE_START", 3)
+                    .constant("TYPE_PROCESS", 4)
+                    .constant("TYPE_COLLIDE", 5)
+                    .constant("TYPE_START_CUSTOM", 6)
+                    .constant("TYPE_PROCESS_CUSTOM", 7)
+                    .constant("TYPE_SKY", 8)
+                    .constant("TYPE_FOG", 9)
+                    .constant("TYPE_MAX", 10),
+            ),
+    );
+    // The graph node base. Every VisualShaderNode* derives from it.
+    register_class(
+        ClassRegistration::new("VisualShaderNode")
+            .parent("Resource")
+            .abstract_class()
+            .method(MethodInfo::new("get_default_input_values", 0))
+            .method(MethodInfo::new("set_input_port_default_value", 2))
+            .method(MethodInfo::new("get_input_port_default_value", 1))
+            .method(MethodInfo::new("clear_default_input_values", 0))
+            .enumeration(
+                EnumInfo::new("PortType")
+                    .constant("PORT_TYPE_SCALAR", 0)
+                    .constant("PORT_TYPE_SCALAR_INT", 1)
+                    .constant("PORT_TYPE_SCALAR_UINT", 2)
+                    .constant("PORT_TYPE_VECTOR_2D", 3)
+                    .constant("PORT_TYPE_VECTOR_3D", 5)
+                    .constant("PORT_TYPE_VECTOR_4D", 7)
+                    .constant("PORT_TYPE_BOOLEAN", 8)
+                    .constant("PORT_TYPE_TRANSFORM", 9)
+                    .constant("PORT_TYPE_SAMPLER", 10)
+                    .constant("PORT_TYPE_MAX", 12),
+            ),
+    );
+    // Graph entry/exit.
+    register_class(ClassRegistration::new("VisualShaderNodeInput").parent("VisualShaderNode"));
+    register_class(ClassRegistration::new("VisualShaderNodeOutput").parent("VisualShaderNode"));
+    // Constants: the graph compiler emits these as literals.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeConstant")
+            .parent("VisualShaderNode")
+            .abstract_class(),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeFloatConstant")
+            .parent("VisualShaderNodeConstant")
+            .property(PropertyInfo::new("constant", Variant::Float(0.0))),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeIntConstant")
+            .parent("VisualShaderNodeConstant")
+            .property(PropertyInfo::new("constant", Variant::Int(0))),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeBooleanConstant")
+            .parent("VisualShaderNodeConstant")
+            .property(PropertyInfo::new("constant", Variant::Bool(false))),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeColorConstant")
+            .parent("VisualShaderNodeConstant")
+            .property(PropertyInfo::new(
+                "constant",
+                Variant::Color(gdcore::math::Color::WHITE),
+            )),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVec3Constant")
+            .parent("VisualShaderNodeConstant")
+            .property(PropertyInfo::new(
+                "constant",
+                Variant::Vector3(gdcore::math::Vector3::ZERO),
+            )),
+    );
+    // Operators / functions / mix.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeFloatOp")
+            .parent("VisualShaderNode")
+            .property(PropertyInfo::new("operator", Variant::Int(0))),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVectorOp")
+            .parent("VisualShaderNode")
+            .property(PropertyInfo::new("operator", Variant::Int(0))),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeFloatFunc")
+            .parent("VisualShaderNode")
+            .property(PropertyInfo::new("function", Variant::Int(0))),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVectorFunc")
+            .parent("VisualShaderNode")
+            .property(PropertyInfo::new("function", Variant::Int(0))),
+    );
+    register_class(ClassRegistration::new("VisualShaderNodeMix").parent("VisualShaderNode"));
+    // Parameters (uniforms) and textures.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeParameter")
+            .parent("VisualShaderNode")
+            .abstract_class()
+            .property(PropertyInfo::new(
+                "parameter_name",
+                Variant::String(String::new()),
+            )),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeFloatParameter")
+            .parent("VisualShaderNodeParameter"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeColorParameter")
+            .parent("VisualShaderNodeParameter"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTexture").parent("VisualShaderNode"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeExpression")
+            .parent("VisualShaderNode")
+            .property(PropertyInfo::new(
+                "expression",
+                Variant::String(String::new()),
+            )),
+    );
     register_class(
         ClassRegistration::new("BaseMaterial3D")
             .parent("Material")
@@ -2003,6 +2162,35 @@ pub fn register_io_classes() {
     if !class_exists("RefCounted") {
         register_class(ClassRegistration::new("RefCounted").parent("Object"));
     }
+
+    // -- JavaScriptBridge web-interop singleton (pat-nzgdu.146) ------------
+    // Godot's web export exposes JavaScriptBridge as an Object singleton
+    // (javascript_bridge_singleton.cpp) whose eval/get_interface/create_object
+    // return a JavaScriptObject (a RefCounted wrapper around a JS value).
+    // Script dispatch already routes these (interpreter's singleton table,
+    // pat-nzgdu.66); this registers the ClassDB surface Godot also exposes, so
+    // ClassDB.class_exists("JavaScriptBridge") and class_get_method_list agree
+    // with upstream.
+    if !class_exists("JavaScriptBridge") {
+        register_class(
+            ClassRegistration::new("JavaScriptBridge")
+                .parent("Object")
+                .method(MethodInfo::new("eval", 1))
+                .method(MethodInfo::new("get_interface", 1))
+                .method(MethodInfo::new("create_callback", 1))
+                .method(MethodInfo::new("create_object", 1))
+                .method(MethodInfo::new("download_buffer", 2))
+                .method(MethodInfo::new("is_js_buffer", 1))
+                .method(MethodInfo::new("js_buffer_to_packed_byte_array", 1))
+                .method(MethodInfo::new("force_fs_sync", 0))
+                .method(MethodInfo::new("pwa_needs_update", 0))
+                .method(MethodInfo::new("pwa_update", 0))
+                .signal(SignalInfo::new("pwa_update_available")),
+        );
+    }
+    if !class_exists("JavaScriptObject") {
+        register_class(ClassRegistration::new("JavaScriptObject").parent("RefCounted"));
+    }
     if !class_exists("FileAccess") {
         register_class(
             ClassRegistration::new("FileAccess")
@@ -2464,6 +2652,346 @@ mod tests {
         let guard = TEST_LOCK.lock().expect("test lock poisoned");
         clear_for_testing();
         guard
+    }
+
+    // -- pat-nzgdu.98: signals / integer constants / enums on ClassInfo -------
+
+    #[test]
+    fn node_signals_are_registered_and_inherited() {
+        let _guard = setup();
+        register_2d_classes();
+
+        assert!(class_has_signal("Node", "tree_entered"));
+        assert!(class_has_signal("Node", "ready"));
+        assert!(!class_has_signal("Node", "__no_such_signal__"));
+        assert!(
+            !get_signal_list("Node").is_empty(),
+            "class_get_signal_list(\"Node\") must be non-empty",
+        );
+
+        // Signals inherit down the chain (Node2D -> CanvasItem -> Node).
+        assert!(class_has_signal("Node2D", "tree_entered"));
+        assert!(class_has_signal("Node2D", "script_changed"), "from Object");
+
+        // Base-first ordering, matching get_property_list/get_method_list.
+        let names: Vec<String> = get_signal_list("Node2D")
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        let object_sig = names.iter().position(|n| n == "script_changed");
+        let node_sig = names.iter().position(|n| n == "tree_entered");
+        assert!(
+            object_sig < node_sig,
+            "Object signals must come before Node signals: {names:?}",
+        );
+    }
+
+    #[test]
+    fn signal_arguments_are_recorded() {
+        let _guard = setup();
+        register_2d_classes();
+
+        let signals = get_signal_list("Node");
+        let entered = signals
+            .iter()
+            .find(|s| s.name == "child_entered_tree")
+            .expect("child_entered_tree is registered");
+        assert_eq!(entered.arguments, vec!["node".to_string()]);
+
+        let ready = signals.iter().find(|s| s.name == "ready").expect("ready");
+        assert!(ready.arguments.is_empty(), "ready carries no arguments");
+    }
+
+    #[test]
+    fn node_integer_constants_track_the_notification_codes() {
+        use crate::notification::{NOTIFICATION_ENTER_TREE, NOTIFICATION_READY};
+
+        let _guard = setup();
+        register_2d_classes();
+
+        // Sourced from crate::notification, so ClassDB cannot drift from the
+        // codes the engine actually dispatches.
+        assert_eq!(
+            class_get_integer_constant("Node", "NOTIFICATION_READY"),
+            Some(NOTIFICATION_READY.code() as i64),
+        );
+        assert_eq!(
+            class_get_integer_constant("Node", "NOTIFICATION_ENTER_TREE"),
+            Some(NOTIFICATION_ENTER_TREE.code() as i64),
+        );
+        assert!(get_integer_constant_list("Node")
+            .contains(&"NOTIFICATION_READY".to_string()));
+
+        // Inherited, and absent constants are None rather than 0.
+        assert!(class_get_integer_constant("Node2D", "NOTIFICATION_READY").is_some());
+        assert_eq!(class_get_integer_constant("Node", "__nope__"), None);
+    }
+
+    #[test]
+    fn enums_register_their_constants_as_integer_constants_too() {
+        let _guard = setup();
+        register_2d_classes();
+
+        assert!(class_has_enum("Node", "ProcessMode"));
+        assert!(get_enum_list("Node").contains(&"ProcessMode".to_string()));
+        assert_eq!(
+            get_enum_constants("Node", "ProcessMode"),
+            vec![
+                "PROCESS_MODE_INHERIT",
+                "PROCESS_MODE_PAUSABLE",
+                "PROCESS_MODE_WHEN_PAUSED",
+                "PROCESS_MODE_ALWAYS",
+                "PROCESS_MODE_DISABLED",
+            ],
+        );
+        // Godot exposes enum constants through class_get_integer_constant too.
+        assert_eq!(
+            class_get_integer_constant("Node", "PROCESS_MODE_ALWAYS"),
+            Some(3),
+        );
+        assert_eq!(
+            class_get_integer_constant("Node", "DUPLICATE_USE_INSTANTIATION"),
+            Some(8),
+        );
+
+        // Inherited; unknown enums are empty, not a panic.
+        assert!(class_has_enum("Node2D", "ProcessMode"));
+        assert!(get_enum_constants("Node", "__NoSuchEnum__").is_empty());
+        assert!(!class_has_enum("Node", "__NoSuchEnum__"));
+    }
+
+    #[test]
+    fn node_exposes_its_core_method_surface() {
+        let _guard = setup();
+        register_2d_classes();
+
+        // The acceptance script asserts exactly this call.
+        assert!(class_has_method("Node", "get_parent"));
+        assert!(class_has_method("Node", "queue_free"));
+        // Inherited from Object.
+        assert!(class_has_method("Node", "get_instance_id"));
+        assert!(class_has_method("Node2D", "get_parent"));
+        assert!(!get_method_list("Node").is_empty());
+    }
+
+    #[test]
+    fn object_and_node_metadata_do_not_depend_on_registration_order() {
+        // Every register_*_classes entry point bootstraps Object/Node behind a
+        // class_exists guard, so whichever runs first defines the metadata.
+        // Each must produce the same result.
+        for (label, register) in [
+            ("2d", register_2d_classes as fn()),
+            ("3d", register_3d_classes as fn()),
+            ("viewport", register_viewport_classes as fn()),
+            ("audio", register_audio_classes as fn()),
+            ("networking", register_networking_classes as fn()),
+        ] {
+            let _guard = setup();
+            register();
+            assert!(
+                class_has_signal("Node", "tree_entered"),
+                "{label} registered Node without signals",
+            );
+            assert!(
+                class_has_method("Node", "get_parent"),
+                "{label} registered Node without methods",
+            );
+            assert!(
+                class_has_signal("Object", "script_changed"),
+                "{label} registered Object without signals",
+            );
+        }
+    }
+
+    /// pat-nzgdu.146: Godot's web export exposes JavaScriptBridge in ClassDB
+    /// (an Object singleton) alongside JavaScriptObject (a RefCounted wrapper
+    /// around a JS value). Script dispatch already existed (pat-nzgdu.66); this
+    /// is the ClassDB surface upstream also reports.
+    #[test]
+    fn javascript_bridge_class_surface_registered() {
+        let _guard = setup();
+        register_io_classes();
+
+        assert!(class_exists("JavaScriptBridge"));
+        assert!(is_parent_class("JavaScriptBridge", "Object"));
+        for m in [
+            "eval",
+            "get_interface",
+            "create_callback",
+            "create_object",
+            "download_buffer",
+            "is_js_buffer",
+            "js_buffer_to_packed_byte_array",
+            "force_fs_sync",
+            "pwa_needs_update",
+            "pwa_update",
+        ] {
+            assert!(class_has_method("JavaScriptBridge", m), "method {m}");
+        }
+        // Godot fires this when a PWA update is staged.
+        assert!(class_has_signal("JavaScriptBridge", "pwa_update_available"));
+
+        // JavaScriptObject is what eval/get_interface/create_object hand back.
+        assert!(class_exists("JavaScriptObject"));
+        assert!(is_parent_class("JavaScriptObject", "RefCounted"));
+        assert!(is_parent_class("JavaScriptObject", "Object"));
+        assert!(can_instantiate("JavaScriptObject"));
+    }
+
+    /// pat-nzgdu.140: the VisualShader node-graph family is registered with the
+    /// Godot parent chain, so a saved `.tres` VisualShader round-trips through
+    /// ClassDB and the graph compiler has classes to instantiate.
+    #[test]
+    fn visual_shader_class_family_registered() {
+        let _guard = setup();
+        register_3d_classes();
+
+        // VisualShader IS a Shader — that is what lets it stand in for text
+        // shader source anywhere a Shader is accepted.
+        assert!(class_exists("VisualShader"));
+        assert!(is_parent_class("VisualShader", "Shader"));
+        assert!(is_parent_class("VisualShader", "Resource"));
+        assert!(is_parent_class("VisualShader", "Object"));
+        assert!(can_instantiate("VisualShader"));
+        assert!(class_has_method("VisualShader", "connect_nodes"));
+        // Inherited from Shader.
+        assert!(class_has_method("VisualShader", "get_code"));
+
+        // The node base is abstract; concrete nodes derive from it.
+        assert!(class_exists("VisualShaderNode"));
+        assert!(is_parent_class("VisualShaderNode", "Resource"));
+        assert!(is_abstract("VisualShaderNode"));
+        assert!(!can_instantiate("VisualShaderNode"));
+
+        for name in [
+            "VisualShaderNodeInput",
+            "VisualShaderNodeOutput",
+            "VisualShaderNodeFloatConstant",
+            "VisualShaderNodeColorConstant",
+            "VisualShaderNodeVec3Constant",
+            "VisualShaderNodeFloatOp",
+            "VisualShaderNodeVectorOp",
+            "VisualShaderNodeFloatFunc",
+            "VisualShaderNodeMix",
+            "VisualShaderNodeTexture",
+            "VisualShaderNodeExpression",
+            "VisualShaderNodeFloatParameter",
+        ] {
+            assert!(class_exists(name), "{name} is registered");
+            assert!(
+                is_parent_class(name, "VisualShaderNode"),
+                "{name} derives VisualShaderNode",
+            );
+            assert!(can_instantiate(name), "{name} is concrete");
+        }
+
+        // The two abstract intermediates.
+        assert!(is_abstract("VisualShaderNodeConstant"));
+        assert!(is_abstract("VisualShaderNodeParameter"));
+        assert!(is_parent_class(
+            "VisualShaderNodeColorConstant",
+            "VisualShaderNodeConstant"
+        ));
+        assert!(is_parent_class(
+            "VisualShaderNodeFloatParameter",
+            "VisualShaderNodeParameter"
+        ));
+    }
+
+    #[test]
+    fn visual_shader_node_defaults_and_enums() {
+        let _guard = setup();
+        register_3d_classes();
+
+        // Constant nodes carry their value as a property default, so
+        // instantiate() yields a usable node.
+        let color = instantiate("VisualShaderNodeColorConstant").expect("instantiates");
+        assert_eq!(
+            color.get_property("constant"),
+            Variant::Color(gdcore::math::Color::WHITE),
+        );
+        let f = instantiate("VisualShaderNodeFloatConstant").expect("instantiates");
+        assert_eq!(f.get_property("constant"), Variant::Float(0.0));
+
+        // Godot's VisualShader.Type / VisualShaderNode.PortType enums.
+        assert!(class_has_enum("VisualShader", "Type"));
+        assert_eq!(
+            class_get_integer_constant("VisualShader", "TYPE_FRAGMENT"),
+            Some(1),
+        );
+        assert_eq!(class_get_integer_constant("VisualShader", "TYPE_SKY"), Some(8));
+        assert!(class_has_enum("VisualShaderNode", "PortType"));
+        assert_eq!(
+            class_get_integer_constant("VisualShaderNode", "PORT_TYPE_VECTOR_3D"),
+            Some(5),
+        );
+        // Enums inherit, so a concrete node sees the base's PortType.
+        assert!(class_has_enum("VisualShaderNodeColorConstant", "PortType"));
+    }
+
+    #[test]
+    fn register_3d_classes_alone_reaches_the_object_root() {
+        // Regression (pat-nzgdu.98): register_3d_classes did not bootstrap
+        // Object/Node, so on its own it registered Node3D under a Node that did
+        // not exist and inheritance_chain stopped at Node3D — severing every 3D
+        // class from the root. This is what broke `xr_nodes_classdb_registered`.
+        let _guard = setup();
+        register_3d_classes();
+
+        assert!(class_exists("Object"), "3D pass must bootstrap Object");
+        assert!(class_exists("Node"), "3D pass must bootstrap Node");
+        assert!(is_parent_class("Node3D", "Node"));
+        assert!(is_parent_class("Node3D", "Object"));
+        assert!(is_parent_class("XRServer", "Object"));
+        // And the roots carry their metadata here too, not just via the 2D pass.
+        assert!(class_has_signal("Node3D", "tree_entered"));
+        assert!(class_has_method("Node3D", "get_parent"));
+    }
+
+    #[test]
+    fn a_plain_registration_has_no_signal_metadata() {
+        let _guard = setup();
+        register_class(ClassRegistration::new("Object"));
+        register_class(ClassRegistration::new("Plain").parent("Object"));
+
+        // Default-empty: existing registrations are unaffected by the new fields.
+        assert!(get_signal_list("Plain").is_empty());
+        assert!(get_integer_constant_list("Plain").is_empty());
+        assert!(get_enum_list("Plain").is_empty());
+        assert!(!class_has_signal("Plain", "anything"));
+        assert_eq!(class_get_integer_constant("Plain", "anything"), None);
+
+        let info = get_class_info("Plain").expect("registered");
+        assert!(info.signals.is_empty());
+        assert!(info.integer_constants.is_empty());
+        assert!(info.enums.is_empty());
+    }
+
+    #[test]
+    fn unregistered_class_queries_are_empty_not_panics() {
+        let _guard = setup();
+        assert!(get_signal_list("__Ghost__").is_empty());
+        assert!(get_integer_constant_list("__Ghost__").is_empty());
+        assert!(get_enum_list("__Ghost__").is_empty());
+        assert!(get_enum_constants("__Ghost__", "X").is_empty());
+        assert!(!class_has_signal("__Ghost__", "x"));
+        assert!(!class_has_enum("__Ghost__", "x"));
+        assert_eq!(class_get_integer_constant("__Ghost__", "x"), None);
+    }
+
+    #[test]
+    fn derived_constants_shadow_inherited_ones() {
+        let _guard = setup();
+        register_class(ClassRegistration::new("Base").constant("SHARED", 1));
+        register_class(
+            ClassRegistration::new("Derived")
+                .parent("Base")
+                .constant("SHARED", 2),
+        );
+
+        // Most-derived definition wins, as in Godot.
+        assert_eq!(class_get_integer_constant("Derived", "SHARED"), Some(2));
+        assert_eq!(class_get_integer_constant("Base", "SHARED"), Some(1));
     }
 
     /// pat-nzgdu.216: the VoxelGIData bake-result resource is registered under

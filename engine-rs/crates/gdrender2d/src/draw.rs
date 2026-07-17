@@ -680,6 +680,8 @@ pub fn draw_texture_rect_shaded(
                 uv: (u, v),
                 screen_uv: (u, v),
                 time,
+                // canvas_item shaders have no EYEDIR built-in.
+                ..Default::default()
             };
             let out = execute_fragment(instructions, &ctx, uniforms);
             if out.a > 0.001 {

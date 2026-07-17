@@ -8,7 +8,7 @@ use gdcore::math::Color;
 use gdrender2d::renderer::FrameBuffer;
 use gdresource::shader_tokenizer::{
     extract_uniforms as parse_uniforms, tokenize_shader, tokenize_shader_no_comments,
-    ShaderLexError, ShaderToken, ShaderUniform,
+    ShaderLexError, ShaderToken, ShaderTokenSpan, ShaderUniform,
 };
 
 // ── Syntax highlighting ─────────────────────────────────────────────────
@@ -521,11 +521,108 @@ pub fn validate_shader_source(source: &str) -> ShaderValidation {
         };
     }
 
+    // Semantic pass: a call to a function that is neither built-in nor
+    // defined in this shader is an error, not a warning (pat-nzgdu.141).
+    let errors = undefined_function_errors(source);
     ShaderValidation {
-        ok: true,
-        errors: Vec::new(),
+        ok: errors.is_empty(),
+        errors,
         warnings: unused_uniform_warnings(source),
     }
+}
+
+/// Reports a semantic error for every call to an undefined function
+/// (pat-nzgdu.141) — Godot's shader compiler rejects these, where a purely
+/// lexical pass accepts them.
+///
+/// A *call* is an identifier immediately followed by `(`; a *definition* is the
+/// same shape whose matching `)` is followed by `{`. Type constructors such as
+/// `vec3(..)` are their own tokens rather than identifiers, so they are never
+/// candidates and cannot produce false positives.
+///
+/// Only functions are checked. Undefined *variables* would need a per-stage
+/// built-in variable table (`ALBEDO`, `UV`, ...) and are left to the
+/// front-end-backed work — see the bead comment.
+fn undefined_function_errors(source: &str) -> Vec<ShaderDiagnostic> {
+    let tokens = match tokenize_shader_no_comments(source) {
+        Ok(t) => t,
+        // Lexing already failed; that error is reported by the caller.
+        Err(_) => return Vec::new(),
+    };
+
+    let defined = defined_function_names(&tokens);
+    let mut errors = Vec::new();
+
+    for (i, span) in tokens.iter().enumerate() {
+        let name = match &span.token {
+            ShaderToken::Ident(n) => n,
+            _ => continue,
+        };
+        // Only identifiers used as calls: `name (`.
+        if !matches!(
+            tokens.get(i + 1).map(|s| &s.token),
+            Some(ShaderToken::LParen)
+        ) {
+            continue;
+        }
+        if is_definition_site(&tokens, i) {
+            continue;
+        }
+        if is_builtin_function(name) || defined.contains(name.as_str()) {
+            continue;
+        }
+        errors.push(ShaderDiagnostic {
+            line: span.line,
+            col: span.col,
+            message: format!("Unknown function '{name}'."),
+        });
+    }
+    errors
+}
+
+/// Names of functions defined in this shader: an identifier followed by `(`
+/// whose matching `)` is followed by `{`.
+fn defined_function_names(tokens: &[ShaderTokenSpan]) -> std::collections::HashSet<&str> {
+    let mut names = std::collections::HashSet::new();
+    for (i, span) in tokens.iter().enumerate() {
+        if let ShaderToken::Ident(name) = &span.token {
+            if is_definition_site(tokens, i) {
+                names.insert(name.as_str());
+            }
+        }
+    }
+    names
+}
+
+/// Whether the identifier at `idx` heads a function *definition* (its matching
+/// `)` is followed by `{`) rather than a call.
+fn is_definition_site(tokens: &[ShaderTokenSpan], idx: usize) -> bool {
+    if !matches!(
+        tokens.get(idx + 1).map(|s| &s.token),
+        Some(ShaderToken::LParen)
+    ) {
+        return false;
+    }
+    // Walk to the `)` matching the `(` at idx + 1.
+    let mut depth = 0usize;
+    let mut j = idx + 1;
+    while j < tokens.len() {
+        match tokens[j].token {
+            ShaderToken::LParen => depth += 1,
+            ShaderToken::RParen => {
+                depth -= 1;
+                if depth == 0 {
+                    return matches!(
+                        tokens.get(j + 1).map(|s| &s.token),
+                        Some(ShaderToken::LBrace)
+                    );
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    false
 }
 
 /// Extracts the (line, col) position from a [`ShaderLexError`].
@@ -1133,6 +1230,72 @@ fn fill_quad(fb: &mut FrameBuffer, verts: &[(f32, f32); 4], color: Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- pat-nzgdu.141: semantic (not just lexical) diagnostics --------------
+
+    /// The bead's acceptance: validating a shader that calls an undefined
+    /// function reports a **semantic error on the right line**, where the old
+    /// validator only ever produced lex errors / unused-uniform warnings.
+    #[test]
+    fn shader_editor_reports_semantic_errors() {
+        // The bead's own example, with the call on line 3.
+        let src = "shader_type spatial;\n\nvoid fragment(){ ALBEDO = nonexistent_fn(UV); }\n";
+        let v = validate_shader_source(src);
+
+        assert!(!v.ok, "an undefined function call must fail validation");
+        assert_eq!(v.errors.len(), 1, "exactly one error, got {:?}", v.errors);
+        let e = &v.errors[0];
+        assert!(
+            e.message.contains("nonexistent_fn"),
+            "the error must name the unknown function, got {:?}",
+            e.message,
+        );
+        assert_eq!(e.line, 3, "the error must point at the call's line");
+    }
+
+    /// Built-ins, type constructors and shader-defined functions must NOT be
+    /// flagged — a false positive here would break every real shader.
+    #[test]
+    fn semantic_pass_accepts_builtins_constructors_and_user_functions() {
+        let src = "shader_type spatial;\n\
+                   float helper(float x) { return x * 2.0; }\n\
+                   void fragment() {\n\
+                       ALBEDO = vec3(mix(0.0, 1.0, helper(0.5)));\n\
+                   }\n";
+        let v = validate_shader_source(src);
+        assert!(
+            v.ok,
+            "builtin mix(), constructor vec3() and user helper() must all pass, got {:?}",
+            v.errors,
+        );
+    }
+
+    /// A function defined *after* its call site still resolves — definitions are
+    /// collected before calls are checked, as in Godot.
+    #[test]
+    fn semantic_pass_resolves_forward_declared_calls() {
+        let src = "shader_type spatial;\n\
+                   void fragment() { ALBEDO = vec3(later(1.0)); }\n\
+                   float later(float x) { return x; }\n";
+        let v = validate_shader_source(src);
+        assert!(v.ok, "a call before the definition must resolve, got {:?}", v.errors);
+    }
+
+    /// The semantic pass must not mask the existing passes.
+    #[test]
+    fn semantic_pass_preserves_lex_and_uniform_diagnostics() {
+        // Missing shader_type still wins (it's checked first).
+        let v = validate_shader_source("void fragment() {}\n");
+        assert!(!v.ok);
+        assert!(v.errors[0].message.contains("shader_type"));
+
+        // A clean shader with an unused uniform is still OK-with-warning.
+        let v = validate_shader_source(
+            "shader_type spatial;\nuniform float unused_thing;\nvoid fragment() {}\n",
+        );
+        assert!(v.ok, "unused uniforms are warnings, not errors");
+        assert_eq!(v.warnings.len(), 1, "the unused-uniform warning survives");
+    }
 
     const SAMPLE_SHADER: &str = r#"shader_type spatial;
 render_mode unshaded;

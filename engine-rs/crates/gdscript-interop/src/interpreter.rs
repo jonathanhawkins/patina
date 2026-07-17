@@ -9307,6 +9307,66 @@ fn call_classdb_static(method: &str, args: &[Variant]) -> Result<Variant, Runtim
         "get_class_list" => Ok(Variant::PackedStringArray(
             gdobject::class_db::get_class_list(),
         )),
+        // -- pat-nzgdu.98: parent / signal / constant / enum reflection ------
+        "get_parent_class" => {
+            let name = class_name_arg(args, 0, "ClassDB.get_parent_class()")?;
+            // Godot yields "" for an unregistered class and for Object itself.
+            Ok(Variant::String(
+                gdobject::get_class_info(&name)
+                    .map(|i| i.parent_class)
+                    .unwrap_or_default(),
+            ))
+        }
+        "class_has_signal" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_has_signal()")?;
+            let signal = class_name_arg(args, 1, "ClassDB.class_has_signal()")?;
+            Ok(Variant::Bool(gdobject::class_has_signal(&class, &signal)))
+        }
+        "class_get_signal_list" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_get_signal_list()")?;
+            // Godot yields Array[Dictionary]; each entry carries at least the
+            // signal name and its argument schema.
+            let list = gdobject::get_signal_list(&class)
+                .into_iter()
+                .map(|s| {
+                    let mut d = Dictionary::new();
+                    d.insert("name", Variant::String(s.name));
+                    d.insert("args", Variant::PackedStringArray(s.arguments));
+                    Variant::Dictionary(d)
+                })
+                .collect();
+            Ok(Variant::Array(list))
+        }
+        "class_get_integer_constant" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_get_integer_constant()")?;
+            let name = class_name_arg(args, 1, "ClassDB.class_get_integer_constant()")?;
+            // Godot returns 0 for an unknown constant rather than erroring.
+            Ok(Variant::Int(
+                gdobject::class_get_integer_constant(&class, &name).unwrap_or(0),
+            ))
+        }
+        "class_get_integer_constant_list" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_get_integer_constant_list()")?;
+            Ok(Variant::PackedStringArray(
+                gdobject::get_integer_constant_list(&class),
+            ))
+        }
+        "class_has_enum" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_has_enum()")?;
+            let name = class_name_arg(args, 1, "ClassDB.class_has_enum()")?;
+            Ok(Variant::Bool(gdobject::class_has_enum(&class, &name)))
+        }
+        "class_get_enum_list" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_get_enum_list()")?;
+            Ok(Variant::PackedStringArray(gdobject::get_enum_list(&class)))
+        }
+        "class_get_enum_constants" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_get_enum_constants()")?;
+            let name = class_name_arg(args, 1, "ClassDB.class_get_enum_constants()")?;
+            Ok(Variant::PackedStringArray(gdobject::get_enum_constants(
+                &class, &name,
+            )))
+        }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("ClassDB.{other}"),
         ))),
@@ -9582,6 +9642,12 @@ fn call_javascriptbridge_static(method: &str, args: &[Variant]) -> Result<Varian
         "get_interface" | "create_callback" | "create_object" => Ok(Variant::Nil),
         "force_fs_sync" | "pwa_update" => Ok(Variant::Nil),
         "pwa_needs_update" => Ok(Variant::Bool(false)),
+        // pat-nzgdu.146: the ArrayBuffer helpers. Off the web there is no JS
+        // heap, so nothing can be a JS buffer and the conversion yields an
+        // empty PackedByteArray — defined values rather than an error, matching
+        // how the rest of this singleton degrades natively.
+        "is_js_buffer" => Ok(Variant::Bool(false)),
+        "js_buffer_to_packed_byte_array" => Ok(Variant::PackedByteArray(Vec::new())),
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("JavaScriptBridge.{other}"),
         ))),
@@ -12844,6 +12910,95 @@ var speed = 10
     }
 
     // -----------------------------------------------------------------------
+    // ClassDB parent/signal/constant/enum reflection (pat-nzgdu.98)
+    // -----------------------------------------------------------------------
+
+    /// The reflection surface needs a populated registry — a bare interpreter
+    /// test starts with an empty ClassDB. Registration is `class_exists`-guarded
+    /// and therefore idempotent.
+    fn run_val_with_classes(src: &str) -> Variant {
+        gdobject::register_2d_classes();
+        run_val(src)
+    }
+
+    #[test]
+    fn classdb_get_parent_class_walks_the_registry() {
+        let v = run_val_with_classes("return ClassDB.get_parent_class(\"Sprite2D\")\n");
+        assert_eq!(v, Variant::String("Node2D".to_string()));
+    }
+
+    #[test]
+    fn classdb_get_parent_class_unknown_is_empty_string() {
+        // Godot yields "" rather than erroring.
+        let v = run_val("return ClassDB.get_parent_class(\"__PatinaNoSuchClass__\")\n");
+        assert_eq!(v, Variant::String(String::new()));
+    }
+
+    #[test]
+    fn classdb_class_get_signal_list_is_non_empty_for_node() {
+        let v = run_val_with_classes("return ClassDB.class_get_signal_list(\"Node\")\n");
+        let Variant::Array(list) = v else {
+            panic!("expected Array, got {v:?}");
+        };
+        assert!(!list.is_empty(), "class_get_signal_list(\"Node\") is empty");
+        assert!(
+            matches!(list[0], Variant::Dictionary(_)),
+            "entries are Dictionaries, got {:?}",
+            list[0],
+        );
+    }
+
+    #[test]
+    fn classdb_class_has_signal_routes_to_gdobject() {
+        let v = run_val_with_classes("return ClassDB.class_has_signal(\"Node\", \"tree_entered\")\n");
+        assert_eq!(v, Variant::Bool(true));
+        let v = run_val_with_classes("return ClassDB.class_has_signal(\"Node\", \"__nope__\")\n");
+        assert_eq!(v, Variant::Bool(false));
+    }
+
+    #[test]
+    fn classdb_integer_constant_reflection() {
+        let v = run_val_with_classes(
+            "return ClassDB.class_get_integer_constant(\"Node\", \"PROCESS_MODE_ALWAYS\")\n",
+        );
+        assert_eq!(v, Variant::Int(3));
+        // Godot returns 0 for an unknown constant rather than erroring.
+        let v = run_val_with_classes(
+            "return ClassDB.class_get_integer_constant(\"Node\", \"__nope__\")\n",
+        );
+        assert_eq!(v, Variant::Int(0));
+    }
+
+    #[test]
+    fn classdb_enum_reflection() {
+        let v = run_val_with_classes("return ClassDB.class_has_enum(\"Node\", \"ProcessMode\")\n");
+        assert_eq!(v, Variant::Bool(true));
+
+        let v = run_val_with_classes(
+            "return ClassDB.class_get_enum_constants(\"Node\", \"ProcessMode\")\n",
+        );
+        let Variant::PackedStringArray(items) = v else {
+            panic!("expected PackedStringArray, got {v:?}");
+        };
+        assert!(items.contains(&"PROCESS_MODE_ALWAYS".to_string()), "{items:?}");
+    }
+
+    #[test]
+    fn classdb_acceptance_script_runs_without_undefined_function() {
+        // The ClassDB half of pat-nzgdu.98's acceptance script. The instance
+        // half (has_method/get_method_list on self) still needs the SceneAccess
+        // reflection entry points and is NOT covered here.
+        let v = run_val_with_classes(
+            "assert(ClassDB.class_exists(\"Sprite2D\"))\n\
+             assert(ClassDB.get_parent_class(\"Sprite2D\") == \"Node2D\")\n\
+             assert(ClassDB.class_has_method(\"Node\", \"get_parent\"))\n\
+             assert(ClassDB.class_get_signal_list(\"Node\").size() > 0)\n\
+             return true\n",
+        );
+        assert_eq!(v, Variant::Bool(true));
+    }
+
+    // -----------------------------------------------------------------------
     // ProjectSettings singleton (pat-u3l8c.21)
     // -----------------------------------------------------------------------
 
@@ -14961,6 +15116,53 @@ match x:
         assert_eq!(
             run_val("return JavaScriptBridge.pwa_needs_update()\n"),
             Variant::Bool(false)
+        );
+    }
+
+    #[test]
+    fn javascript_bridge_buffer_helpers_have_native_fallbacks() {
+        // pat-nzgdu.146: Godot's ArrayBuffer helpers. Off the web there is no JS
+        // heap, so these must still resolve with defined values rather than an
+        // UndefinedFunction — the same way the rest of the singleton degrades.
+        assert_eq!(
+            run_val("return JavaScriptBridge.is_js_buffer(0)\n"),
+            Variant::Bool(false)
+        );
+        assert_eq!(
+            run_val("return JavaScriptBridge.js_buffer_to_packed_byte_array(0)\n"),
+            Variant::PackedByteArray(Vec::new())
+        );
+    }
+
+    #[test]
+    fn javascript_bridge_singleton_script_reachable() {
+        // pat-nzgdu.146 acceptance: a script referencing JavaScriptBridge must
+        // dispatch through the singleton table and return the defined values,
+        // never an unknown-identifier/UndefinedFunction error.
+        // Every call runs in one script: any UndefinedFunction would surface as
+        // an Err and panic the harness, so reaching the return proves dispatch.
+        let v = run_val(
+            "var calls = 0\n\
+             JavaScriptBridge.create_object(\"Object\")\n\
+             calls += 1\n\
+             JavaScriptBridge.eval(\"1+2\")\n\
+             calls += 1\n\
+             JavaScriptBridge.get_interface(\"localStorage\")\n\
+             calls += 1\n\
+             JavaScriptBridge.download_buffer(0, \"f.txt\", \"text/plain\")\n\
+             calls += 1\n\
+             JavaScriptBridge.force_fs_sync()\n\
+             calls += 1\n\
+             return calls\n",
+        );
+        assert_eq!(v, Variant::Int(5), "all five calls dispatched");
+
+        // An unknown method still errors, so the arm is a real dispatch table
+        // rather than a catch-all that silently swallows typos.
+        let err = run_err("return JavaScriptBridge.__no_such_method__()\n");
+        assert!(
+            matches!(err.kind, RuntimeErrorKind::UndefinedFunction(_)),
+            "got: {err:?}",
         );
     }
 
