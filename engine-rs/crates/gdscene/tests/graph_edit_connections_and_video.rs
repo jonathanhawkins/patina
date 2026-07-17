@@ -8,6 +8,9 @@
 //! 2. Attempting an invalid *type* connection is rejected.
 //! 3. A `VideoStreamPlayer` with a loaded stream reports `is_playing() == true`
 //!    after `play()`.
+//!
+//! The bead also asks that the family be registered in `class_db.rs`; that is
+//! covered by `graph_family_is_registered_in_class_db` below.
 
 use gdresource::image::{Image, ImageFormat};
 use gdscene::graph_edit::{GraphEdit, GraphEditError, GraphFrame, GraphNode};
@@ -145,4 +148,27 @@ fn graph_edit_connections_and_video() {
     player.stop();
     assert!(!player.is_playing(), "stop() halts playback");
     assert_eq!(player.position_secs, 0.0, "stop() rewinds to the start");
+}
+
+/// The GraphEdit family must resolve through ClassDB, or a `.tscn` naming
+/// `GraphEdit` will not instantiate. Hierarchy mirrors Godot 4.6.
+#[test]
+fn graph_family_is_registered_in_class_db() {
+    use gdobject::class_db::{class_has_property, is_parent_class, register_2d_classes};
+
+    // ClassDB is not populated for bare gdscene tests; populate it explicitly.
+    register_2d_classes();
+
+    assert!(is_parent_class("GraphElement", "Container"));
+    assert!(is_parent_class("GraphNode", "GraphElement"));
+    assert!(is_parent_class("GraphFrame", "GraphElement"));
+    assert!(is_parent_class("GraphEdit", "Control"));
+
+    // GraphNode/GraphFrame reach Control transitively through GraphElement.
+    assert!(is_parent_class("GraphNode", "Control"));
+
+    assert!(class_has_property("GraphElement", "position_offset"));
+    assert!(class_has_property("GraphNode", "title"));
+    assert!(class_has_property("GraphFrame", "autoshrink_enabled"));
+    assert!(class_has_property("GraphEdit", "right_disconnects"));
 }

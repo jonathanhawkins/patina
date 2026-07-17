@@ -1658,6 +1658,418 @@ pub fn rvo_avoidance_velocity_3d(
 }
 
 // ---------------------------------------------------------------------------
+// ORCA / RVO2 avoidance (pat-nzgdu.116)
+// ---------------------------------------------------------------------------
+
+/// Tolerance used when testing ORCA half-plane determinants for degeneracy.
+const ORCA_EPSILON: f32 = 1e-5;
+
+/// A directed ORCA half-plane constraint.
+///
+/// The permitted velocities are those on the left of the line through `point`
+/// along `direction` — i.e. every `v` with `direction.cross(point - v) <= 0`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OrcaLine {
+    /// A point on the constraint boundary.
+    pub point: Vector2,
+    /// Unit direction of the constraint boundary.
+    pub direction: Vector2,
+}
+
+/// One agent's input to the ORCA solver, mirroring Godot's avoidance
+/// parameters on `NavigationAgent2D` / `NavigationObstacle2D`.
+///
+/// This is the *simulation* view of an agent — [`NavigationAgent2D`] builds one
+/// of these per tick via [`NavigationAgent2D::orca_agent`].
+#[derive(Debug, Clone, Copy)]
+pub struct OrcaAgent {
+    /// World position this tick.
+    pub position: Vector2,
+    /// Current velocity (the velocity the agent is actually moving at).
+    pub velocity: Vector2,
+    /// Avoidance radius.
+    pub radius: f32,
+    /// Speed cap applied to the returned safe velocity.
+    pub max_speed: f32,
+    /// How far ahead (seconds) collisions with other agents are anticipated.
+    pub time_horizon_agents: f32,
+    /// How far ahead (seconds) collisions with obstacles are anticipated.
+    pub time_horizon_obstacles: f32,
+    /// Neighbors beyond this distance are ignored.
+    pub neighbor_distance: f32,
+    /// At most this many nearest neighbors constrain the solve.
+    pub max_neighbors: usize,
+    /// Bitmask this agent is visible on (checked against others' masks).
+    pub avoidance_layers: u32,
+    /// Bitmask of layers this agent avoids.
+    pub avoidance_mask: u32,
+    /// Share of the avoidance effort this agent shoulders relative to a
+    /// neighbor; a higher priority means it yields less. Godot default `1.0`.
+    pub avoidance_priority: f32,
+}
+
+impl OrcaAgent {
+    /// Creates an agent with Godot's `NavigationAgent2D` avoidance defaults.
+    pub fn new(position: Vector2, radius: f32, max_speed: f32) -> Self {
+        Self {
+            position,
+            velocity: Vector2::ZERO,
+            radius,
+            max_speed,
+            time_horizon_agents: DEFAULT_TIME_HORIZON_AGENTS,
+            time_horizon_obstacles: DEFAULT_TIME_HORIZON_OBSTACLES,
+            neighbor_distance: DEFAULT_NEIGHBOR_DISTANCE,
+            max_neighbors: DEFAULT_MAX_NEIGHBORS,
+            avoidance_layers: 1,
+            avoidance_mask: 1,
+            avoidance_priority: 1.0,
+        }
+    }
+
+    /// Whether `self` takes `other` into account, per Godot's layer/mask rule:
+    /// an agent avoids another when its mask intersects the other's layers.
+    pub fn avoids(&self, other: &OrcaAgent) -> bool {
+        self.avoidance_mask & other.avoidance_layers != 0
+    }
+
+    /// The fraction of the mutual avoidance effort `self` shoulders against
+    /// `other`. Equal priorities split the work evenly (the reciprocal `0.5`
+    /// of standard ORCA); a higher priority shifts the burden onto `other`.
+    fn effort_share(&self, other: &OrcaAgent) -> f32 {
+        let total = self.avoidance_priority + other.avoidance_priority;
+        if total <= 1e-6 {
+            return 0.5;
+        }
+        (other.avoidance_priority / total).clamp(0.0, 1.0)
+    }
+}
+
+/// Godot's `NavigationAgent2D.neighbor_distance` default.
+pub const DEFAULT_NEIGHBOR_DISTANCE: f32 = 50.0;
+/// Godot's `NavigationAgent2D.max_neighbors` default.
+pub const DEFAULT_MAX_NEIGHBORS: usize = 10;
+/// Godot's `NavigationAgent2D.time_horizon_agents` default.
+pub const DEFAULT_TIME_HORIZON_AGENTS: f32 = 1.0;
+/// Godot's `NavigationAgent2D.time_horizon_obstacles` default.
+pub const DEFAULT_TIME_HORIZON_OBSTACLES: f32 = 0.0;
+
+/// Builds the ORCA half-plane that keeps `agent` clear of `other`.
+///
+/// This is the standard RVO2 construction: outside the combined radius the
+/// constraint is taken from the velocity-obstacle cut-off circle or one of its
+/// legs (whichever the current relative velocity projects onto); already
+/// overlapping agents fall back to a `dt`-horizon constraint that pushes them
+/// apart. `share` splits the correction between the two agents.
+fn orca_line_for_agent(
+    agent: &OrcaAgent,
+    other: &OrcaAgent,
+    time_horizon: f32,
+    dt: f32,
+    share: f32,
+) -> OrcaLine {
+    let relative_position = other.position - agent.position;
+    let relative_velocity = agent.velocity - other.velocity;
+    let dist_sq = relative_position.length_squared();
+    let combined_radius = agent.radius + other.radius;
+    let combined_radius_sq = combined_radius * combined_radius;
+
+    let direction;
+    let u;
+
+    if dist_sq > combined_radius_sq {
+        // No collision yet: constrain against the velocity obstacle truncated
+        // at `time_horizon`.
+        let inv_time_horizon = 1.0 / time_horizon.max(ORCA_EPSILON);
+        let w = relative_velocity - relative_position * inv_time_horizon;
+        let w_length_sq = w.length_squared();
+        let dot1 = w.dot(relative_position);
+
+        if dot1 < 0.0 && dot1 * dot1 > combined_radius_sq * w_length_sq {
+            // Project on the cut-off circle.
+            let w_length = w_length_sq.sqrt();
+            if w_length <= ORCA_EPSILON {
+                // Degenerate: pick a stable axis rather than dividing by zero.
+                return OrcaLine {
+                    point: agent.velocity,
+                    direction: Vector2::new(0.0, 1.0),
+                };
+            }
+            let unit_w = w * (1.0 / w_length);
+            direction = Vector2::new(unit_w.y, -unit_w.x);
+            u = unit_w * (combined_radius * inv_time_horizon - w_length);
+        } else {
+            // Project on the closer leg of the velocity obstacle.
+            let leg = (dist_sq - combined_radius_sq).max(0.0).sqrt();
+            let inv_dist_sq = 1.0 / dist_sq;
+            direction = if relative_position.cross(w) > 0.0 {
+                Vector2::new(
+                    relative_position.x * leg - relative_position.y * combined_radius,
+                    relative_position.x * combined_radius + relative_position.y * leg,
+                ) * inv_dist_sq
+            } else {
+                Vector2::new(
+                    relative_position.x * leg + relative_position.y * combined_radius,
+                    -relative_position.x * combined_radius + relative_position.y * leg,
+                ) * -inv_dist_sq
+            };
+            let dot2 = relative_velocity.dot(direction);
+            u = direction * dot2 - relative_velocity;
+        }
+    } else {
+        // Already overlapping: resolve over a single timestep.
+        let inv_time_step = 1.0 / dt.max(ORCA_EPSILON);
+        let w = relative_velocity - relative_position * inv_time_step;
+        let w_length = w.length();
+        if w_length <= ORCA_EPSILON {
+            return OrcaLine {
+                point: agent.velocity,
+                direction: Vector2::new(0.0, 1.0),
+            };
+        }
+        let unit_w = w * (1.0 / w_length);
+        direction = Vector2::new(unit_w.y, -unit_w.x);
+        u = unit_w * (combined_radius * inv_time_step - w_length);
+    }
+
+    OrcaLine {
+        point: agent.velocity + u * share,
+        direction,
+    }
+}
+
+/// RVO2 `linearProgram1`: optimize along the boundary of `lines[line_no]`
+/// subject to the earlier constraints and the `radius` speed circle.
+///
+/// Returns `false` when the constraints are infeasible along that line.
+fn linear_program1(
+    lines: &[OrcaLine],
+    line_no: usize,
+    radius: f32,
+    opt_velocity: Vector2,
+    direction_opt: bool,
+    result: &mut Vector2,
+) -> bool {
+    let line = lines[line_no];
+    let dot_product = line.point.dot(line.direction);
+    let discriminant = dot_product * dot_product + radius * radius - line.point.length_squared();
+
+    if discriminant < 0.0 {
+        // The speed circle is entirely on the wrong side of this constraint.
+        return false;
+    }
+
+    let sqrt_discriminant = discriminant.sqrt();
+    let mut t_left = -dot_product - sqrt_discriminant;
+    let mut t_right = -dot_product + sqrt_discriminant;
+
+    for other in lines.iter().take(line_no) {
+        let denominator = line.direction.cross(other.direction);
+        let numerator = other.direction.cross(line.point - other.point);
+
+        if denominator.abs() <= ORCA_EPSILON {
+            // Lines are parallel: either always satisfied, or never.
+            if numerator < 0.0 {
+                return false;
+            }
+            continue;
+        }
+
+        let t = numerator / denominator;
+        if denominator >= 0.0 {
+            t_right = t_right.min(t);
+        } else {
+            t_left = t_left.max(t);
+        }
+        if t_left > t_right {
+            return false;
+        }
+    }
+
+    if direction_opt {
+        // Optimizing a direction rather than a point.
+        *result = if opt_velocity.dot(line.direction) > 0.0 {
+            line.point + line.direction * t_right
+        } else {
+            line.point + line.direction * t_left
+        };
+    } else {
+        let t = line.direction.dot(opt_velocity - line.point);
+        *result = if t < t_left {
+            line.point + line.direction * t_left
+        } else if t > t_right {
+            line.point + line.direction * t_right
+        } else {
+            line.point + line.direction * t
+        };
+    }
+
+    true
+}
+
+/// RVO2 `linearProgram2`: find the velocity closest to `opt_velocity` that
+/// satisfies every half-plane and the `radius` speed circle.
+///
+/// Returns the index of the first infeasible constraint, or `lines.len()` when
+/// the whole program was satisfied.
+fn linear_program2(
+    lines: &[OrcaLine],
+    radius: f32,
+    opt_velocity: Vector2,
+    direction_opt: bool,
+    result: &mut Vector2,
+) -> usize {
+    if direction_opt {
+        *result = opt_velocity * radius;
+    } else if opt_velocity.length_squared() > radius * radius {
+        *result = opt_velocity.normalized() * radius;
+    } else {
+        *result = opt_velocity;
+    }
+
+    for i in 0..lines.len() {
+        if lines[i].direction.cross(lines[i].point - *result) > 0.0 {
+            // `result` violates constraint i — re-optimize along its boundary.
+            let temp_result = *result;
+            if !linear_program1(lines, i, radius, opt_velocity, direction_opt, result) {
+                *result = temp_result;
+                return i;
+            }
+        }
+    }
+
+    lines.len()
+}
+
+/// RVO2 `linearProgram3`: densely-constrained fallback. When the program is
+/// infeasible, relax it to the velocity that minimizes the worst constraint
+/// violation, so a boxed-in agent still gets a sensible answer instead of none.
+fn linear_program3(
+    lines: &[OrcaLine],
+    num_obst_lines: usize,
+    begin_line: usize,
+    radius: f32,
+    result: &mut Vector2,
+) {
+    let mut distance = 0.0;
+
+    for i in begin_line..lines.len() {
+        if lines[i].direction.cross(lines[i].point - *result) <= distance {
+            continue;
+        }
+
+        // Obstacle constraints are hard: they seed the sub-program unprojected
+        // so the relaxed answer still clears static geometry.
+        let mut proj_lines: Vec<OrcaLine> = lines[..num_obst_lines].to_vec();
+        for j in num_obst_lines..i {
+            let determinant = lines[i].direction.cross(lines[j].direction);
+            let point = if determinant.abs() <= ORCA_EPSILON {
+                if lines[i].direction.dot(lines[j].direction) > 0.0 {
+                    // Same direction: constraint j is redundant here.
+                    continue;
+                }
+                (lines[i].point + lines[j].point) * 0.5
+            } else {
+                lines[i].point
+                    + lines[i].direction
+                        * (lines[j].direction.cross(lines[i].point - lines[j].point) / determinant)
+            };
+            let direction = (lines[j].direction - lines[i].direction).normalized();
+            proj_lines.push(OrcaLine { point, direction });
+        }
+
+        let temp_result = *result;
+        let opt = Vector2::new(-lines[i].direction.y, lines[i].direction.x);
+        if linear_program2(&proj_lines, radius, opt, true, result) < proj_lines.len() {
+            // Should not normally happen; keep the best answer so far.
+            *result = temp_result;
+        }
+        distance = lines[i].direction.cross(lines[i].point - *result);
+    }
+}
+
+/// Computes a collision-free ("safe") velocity for `agent` via ORCA.
+///
+/// This is the real reciprocal-avoidance solve Godot's NavigationServer runs:
+/// each considered neighbor contributes one half-plane, static `obstacles`
+/// contribute non-reciprocal half-planes (they take none of the effort), and
+/// the result is the feasible velocity closest to `preferred`, capped at
+/// `agent.max_speed`.
+///
+/// Neighbors are filtered by [`OrcaAgent::avoids`] and
+/// `neighbor_distance`, then the nearest `max_neighbors` are kept — matching
+/// Godot, where those parameters bound the solve rather than merely hint it.
+///
+/// `dt` is the timestep, used only to resolve already-overlapping agents.
+pub fn orca_safe_velocity(
+    agent: &OrcaAgent,
+    preferred: Vector2,
+    neighbors: &[OrcaAgent],
+    obstacles: &[OrcaAgent],
+    dt: f32,
+) -> Vector2 {
+    let mut lines: Vec<OrcaLine> = Vec::new();
+
+    // Static obstacles first: they never yield, so the agent takes the whole
+    // correction (share = 1.0) and these constraints are honoured before the
+    // reciprocal agent ones in the dense fallback.
+    let horizon_obstacles = if agent.time_horizon_obstacles > 0.0 {
+        agent.time_horizon_obstacles
+    } else {
+        agent.time_horizon_agents
+    };
+    for obstacle in obstacles {
+        if !agent.avoids(obstacle) {
+            continue;
+        }
+        let range = agent.neighbor_distance + obstacle.radius;
+        if (obstacle.position - agent.position).length_squared() > range * range {
+            continue;
+        }
+        lines.push(orca_line_for_agent(
+            agent,
+            obstacle,
+            horizon_obstacles,
+            dt,
+            1.0,
+        ));
+    }
+    let obstacle_lines = lines.len();
+
+    // Reciprocal agent constraints, nearest `max_neighbors` first.
+    let mut considered: Vec<(f32, &OrcaAgent)> = neighbors
+        .iter()
+        .filter(|other| agent.avoids(other))
+        .filter_map(|other| {
+            let range = agent.neighbor_distance + other.radius;
+            let dist_sq = (other.position - agent.position).length_squared();
+            (dist_sq <= range * range).then_some((dist_sq, other))
+        })
+        .collect();
+    considered.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    considered.truncate(agent.max_neighbors);
+
+    for (_, other) in &considered {
+        let share = agent.effort_share(other);
+        lines.push(orca_line_for_agent(
+            agent,
+            other,
+            agent.time_horizon_agents,
+            dt,
+            share,
+        ));
+    }
+
+    let mut result = Vector2::ZERO;
+    let failed = linear_program2(&lines, agent.max_speed, preferred, false, &mut result);
+    if failed < lines.len() {
+        // Infeasible — relax from the first failing constraint toward the
+        // least-bad velocity, still honouring the obstacle half-planes.
+        linear_program3(&lines, obstacle_lines, failed, agent.max_speed, &mut result);
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Runtime stepping — wire agents into a running game
 // ---------------------------------------------------------------------------
 
@@ -2696,5 +3108,160 @@ mod tests {
         assert!(agent
             .pending_signals()
             .contains(&NavAgentSignal::VelocityComputed));
+    }
+
+    // -- ORCA / RVO2 solver (pat-nzgdu.116) --------------------------------
+
+    /// A solver agent at `position` moving at `velocity`, radius 10, speed 100.
+    fn orca_at(position: Vector2, velocity: Vector2) -> OrcaAgent {
+        let mut a = OrcaAgent::new(position, 10.0, 100.0);
+        a.velocity = velocity;
+        a
+    }
+
+    #[test]
+    fn orca_with_no_neighbors_returns_the_preferred_velocity() {
+        let agent = orca_at(Vector2::ZERO, Vector2::new(50.0, 0.0));
+        let preferred = Vector2::new(50.0, 0.0);
+        let safe = orca_safe_velocity(&agent, preferred, &[], &[], 0.1);
+        assert!(
+            (safe - preferred).length() < 1e-3,
+            "an unobstructed agent must keep its preferred velocity, got {safe:?}"
+        );
+    }
+
+    #[test]
+    fn orca_caps_the_result_at_max_speed() {
+        let agent = orca_at(Vector2::ZERO, Vector2::ZERO);
+        // Preferred well above the 100.0 cap.
+        let safe = orca_safe_velocity(&agent, Vector2::new(500.0, 0.0), &[], &[], 0.1);
+        assert!(
+            safe.length() <= 100.0 + 1e-3,
+            "safe velocity must respect max_speed, got {}",
+            safe.length()
+        );
+    }
+
+    #[test]
+    fn orca_deflects_two_converging_agents() {
+        // Head-on, slightly offset so the configuration is not perfectly
+        // symmetric (a pure head-on tie has no preferred side).
+        let preferred = Vector2::new(50.0, 0.0);
+        let agent = orca_at(Vector2::new(-30.0, -0.5), preferred);
+        let other = orca_at(Vector2::new(30.0, 0.5), Vector2::new(-50.0, 0.0));
+
+        let safe = orca_safe_velocity(&agent, preferred, &[other], &[], 0.1);
+
+        assert!(
+            (safe - preferred).length() > 1e-3,
+            "a converging neighbor must change the velocity, got {safe:?}"
+        );
+        assert!(
+            safe.length() <= 100.0 + 1e-3,
+            "deflection must still respect max_speed"
+        );
+    }
+
+    #[test]
+    fn orca_ignores_neighbors_beyond_neighbor_distance() {
+        let mut agent = orca_at(Vector2::ZERO, Vector2::new(50.0, 0.0));
+        agent.neighbor_distance = 20.0;
+        // Far away, and heading at us — but outside neighbor_distance.
+        let far = orca_at(Vector2::new(400.0, 0.0), Vector2::new(-50.0, 0.0));
+
+        let preferred = Vector2::new(50.0, 0.0);
+        let safe = orca_safe_velocity(&agent, preferred, &[far], &[], 0.1);
+        assert!(
+            (safe - preferred).length() < 1e-3,
+            "a neighbor beyond neighbor_distance must not constrain the solve"
+        );
+    }
+
+    #[test]
+    fn orca_layer_mask_filters_neighbors() {
+        let preferred = Vector2::new(50.0, 0.0);
+        let mut agent = orca_at(Vector2::new(-30.0, -0.5), preferred);
+        let mut other = orca_at(Vector2::new(30.0, 0.5), Vector2::new(-50.0, 0.0));
+
+        // The neighbor lives only on layer 2; the agent only avoids layer 1.
+        other.avoidance_layers = 0b10;
+        agent.avoidance_mask = 0b01;
+        assert!(!agent.avoids(&other));
+        let safe = orca_safe_velocity(&agent, preferred, &[other], &[], 0.1);
+        assert!(
+            (safe - preferred).length() < 1e-3,
+            "a neighbor outside the avoidance mask must be ignored"
+        );
+
+        // Widening the mask to include layer 2 brings it back into the solve.
+        agent.avoidance_mask = 0b11;
+        assert!(agent.avoids(&other));
+        let safe = orca_safe_velocity(&agent, preferred, &[other], &[], 0.1);
+        assert!(
+            (safe - preferred).length() > 1e-3,
+            "a neighbor inside the avoidance mask must constrain the solve"
+        );
+    }
+
+    #[test]
+    fn orca_priority_shifts_effort_onto_the_lower_priority_agent() {
+        let preferred = Vector2::new(50.0, 0.0);
+        let other = orca_at(Vector2::new(30.0, 0.5), Vector2::new(-50.0, 0.0));
+
+        let mut low = orca_at(Vector2::new(-30.0, -0.5), preferred);
+        low.avoidance_priority = 0.1;
+        let mut high = orca_at(Vector2::new(-30.0, -0.5), preferred);
+        high.avoidance_priority = 10.0;
+
+        let low_dev =
+            (orca_safe_velocity(&low, preferred, &[other], &[], 0.1) - preferred).length();
+        let high_dev =
+            (orca_safe_velocity(&high, preferred, &[other], &[], 0.1) - preferred).length();
+
+        assert!(
+            low_dev > high_dev,
+            "the lower-priority agent must yield more (low {low_dev} vs high {high_dev})"
+        );
+    }
+
+    #[test]
+    fn orca_effort_share_is_even_at_equal_priority() {
+        let a = orca_at(Vector2::ZERO, Vector2::ZERO);
+        let b = orca_at(Vector2::new(10.0, 0.0), Vector2::ZERO);
+        assert!((a.effort_share(&b) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn orca_separates_overlapping_agents() {
+        // Two agents already inside each other's radius, both trying to hold
+        // still: the solver must still produce a separating velocity.
+        let agent = orca_at(Vector2::ZERO, Vector2::ZERO);
+        let other = orca_at(Vector2::new(4.0, 0.0), Vector2::ZERO);
+
+        let safe = orca_safe_velocity(&agent, Vector2::ZERO, &[other], &[], 0.1);
+        assert!(
+            safe.x < -1e-3,
+            "an overlapped agent must be pushed away from its neighbor, got {safe:?}"
+        );
+    }
+
+    #[test]
+    fn orca_static_obstacle_does_not_take_a_share_of_the_effort() {
+        // An obstacle never yields, so the agent shoulders the whole correction
+        // and is deflected at least as much as it would be by a mobile peer.
+        let preferred = Vector2::new(50.0, 0.0);
+        let agent = orca_at(Vector2::new(-30.0, -0.5), preferred);
+        let blocker = orca_at(Vector2::new(30.0, 0.5), Vector2::ZERO);
+
+        let as_obstacle = orca_safe_velocity(&agent, preferred, &[], &[blocker], 0.1);
+        let as_agent = orca_safe_velocity(&agent, preferred, &[blocker], &[], 0.1);
+
+        let obstacle_dev = (as_obstacle - preferred).length();
+        let agent_dev = (as_agent - preferred).length();
+        assert!(
+            obstacle_dev > agent_dev - 1e-3,
+            "obstacle avoidance must not be split reciprocally \
+             (obstacle {obstacle_dev} vs agent {agent_dev})"
+        );
     }
 }

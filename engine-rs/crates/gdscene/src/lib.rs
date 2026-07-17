@@ -25,6 +25,7 @@ pub mod autoload;
 pub mod bezier_bake;
 pub mod camera3d;
 pub mod canvas_order;
+pub mod char_fx;
 pub mod collision;
 pub mod control;
 pub mod control_render;

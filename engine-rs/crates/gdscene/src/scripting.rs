@@ -671,15 +671,21 @@ impl SceneAccess for SceneTreeAccessor {
     }
 
     fn instantiate_packed_scene(&mut self, path: &str) -> Option<u64> {
-        // Resolve `res://` to a filesystem path. No project root is available
-        // on the accessor, so `res://X` maps to the CWD-relative `X`.
-        let fs_path = path.strip_prefix("res://").unwrap_or(path);
-        let source = std::fs::read_to_string(fs_path).ok()?;
+        // `res://` resolves against the configured project root, exactly like
+        // `SceneTree::change_scene_to_file`. Hand-rolling
+        // `strip_prefix("res://")` here instead mapped `res://X` to the
+        // CWD-relative `X`, so `preload("res://bullet.tscn").instantiate()` —
+        // the way every real game spawns — only worked when the process
+        // happened to be running from the project root (pat-u3l8c.12).
+        // An unconfigured root is an Err here, which becomes `null` at the
+        // call site, matching the "missing/unloadable scene → null" contract.
+        let resolved = gdcore::resolve_path(path).ok()?;
+        let source = std::fs::read_to_string(resolved).ok()?;
         let scene = crate::packed_scene::PackedScene::from_tscn(&source).ok()?;
         // Recursively resolve `instance=ExtResource` sub-scenes from disk.
         let resolve = |sub: &str| -> Option<crate::packed_scene::PackedScene> {
-            let sub_fs = sub.strip_prefix("res://").unwrap_or(sub);
-            let src = std::fs::read_to_string(sub_fs).ok()?;
+            let sub_resolved = gdcore::resolve_path(sub).ok()?;
+            let src = std::fs::read_to_string(sub_resolved).ok()?;
             crate::packed_scene::PackedScene::from_tscn(&src).ok()
         };
         let tree = self.tree_mut();
@@ -692,14 +698,15 @@ impl SceneAccess for SceneTreeAccessor {
     }
 
     fn instantiate_script(&mut self, path: &str) -> Option<u64> {
-        // Resolve `res://` to a CWD-relative filesystem path (mirrors
-        // `instantiate_packed_scene`; no project root is on the accessor).
-        let fs_path = path.strip_prefix("res://").unwrap_or(path);
-        let source = std::fs::read_to_string(fs_path).ok()?;
+        // `res://` resolves against the project root (mirrors
+        // `instantiate_packed_scene`); see the note there on why the previous
+        // CWD-relative mapping broke `load("res://enemy.gd").new()`.
+        let resolved = gdcore::resolve_path(path).ok()?;
+        let source = std::fs::read_to_string(&resolved).ok()?;
         let base_class = script_base_class(&source);
         // Name the instance after the script file stem, matching how a
         // developer thinks of `load("enemy.gd").new()`.
-        let name = std::path::Path::new(fs_path)
+        let name = resolved
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("Script")

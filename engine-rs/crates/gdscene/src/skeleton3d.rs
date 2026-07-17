@@ -450,6 +450,206 @@ pub fn update_bone_attachment(
 }
 
 // ===========================================================================
+// SkeletonModifier3D / IKModifier3D (pat-nzgdu.151)
+// ===========================================================================
+
+/// `SkeletonModifier3D.active` — when false the modifier is skipped entirely.
+pub const MODIFIER_ACTIVE_KEY: &str = "active";
+/// `SkeletonModifier3D.influence` — how strongly the modifier applies, in [0, 1].
+pub const MODIFIER_INFLUENCE_KEY: &str = "influence";
+/// `IKModifier3D` target position, in the skeleton's space.
+pub const IK_TARGET_POSITION_KEY: &str = "target_position";
+/// First bone of the chain the solver may rotate.
+pub const IK_ROOT_BONE_KEY: &str = "root_bone";
+/// Last bone of the chain — the one driven toward the target.
+pub const IK_TIP_BONE_KEY: &str = "tip_bone";
+/// CCD passes per update.
+pub const IK_ITERATIONS_KEY: &str = "iterations";
+
+/// Godot's `SkeletonModifier3D` class name.
+pub const SKELETON_MODIFIER_CLASS: &str = "SkeletonModifier3D";
+/// Godot's `IKModifier3D` class name.
+pub const IK_MODIFIER_CLASS: &str = "IKModifier3D";
+
+/// Below this the chain is treated as already aligned and left alone, so a
+/// solved chain doesn't jitter.
+const IK_EPSILON: f32 = 1e-6;
+
+/// Reads a modifier's `influence`, clamped to Godot's [0, 1]. Missing = 1.0
+/// (fully applied), matching Godot's default.
+fn modifier_influence(tree: &SceneTree, modifier_id: NodeId) -> f32 {
+    tree.get_node(modifier_id)
+        .map(|n| match n.get_property(MODIFIER_INFLUENCE_KEY) {
+            Variant::Float(f) => (f as f32).clamp(0.0, 1.0),
+            Variant::Int(i) => (i as f32).clamp(0.0, 1.0),
+            _ => 1.0,
+        })
+        .unwrap_or(1.0)
+}
+
+/// Reads a modifier's `active`. Missing = true (Godot's default).
+fn modifier_active(tree: &SceneTree, modifier_id: NodeId) -> bool {
+    tree.get_node(modifier_id)
+        .map(|n| match n.get_property(MODIFIER_ACTIVE_KEY) {
+            Variant::Bool(b) => b,
+            _ => true,
+        })
+        .unwrap_or(false)
+}
+
+/// The bone chain from `root` down to `tip`, inclusive.
+///
+/// Returns an empty vec when `tip` does not actually descend from `root`, so a
+/// mis-wired modifier is a no-op rather than mangling unrelated bones.
+fn bone_chain(tree: &SceneTree, skeleton_id: NodeId, root: usize, tip: usize) -> Vec<usize> {
+    let count = get_bone_count(tree, skeleton_id);
+    if root >= count || tip >= count {
+        return Vec::new();
+    }
+    let mut chain = Vec::new();
+    let mut current = tip as i64;
+    while current >= 0 && (current as usize) < count {
+        chain.push(current as usize);
+        if current as usize == root {
+            chain.reverse();
+            return chain;
+        }
+        current = get_bone_parent(tree, skeleton_id, current as usize);
+    }
+    Vec::new()
+}
+
+/// Runs a skeleton's modifier stack (pat-nzgdu.151).
+///
+/// Mirrors Godot, where `SkeletonModifier3D` children process **after** the
+/// AnimationPlayer/Tree has written poses — so IK runs on top of animation
+/// rather than being overwritten by it. Call this once per frame, after the
+/// pose update. Children are processed in tree order; inactive ones are skipped.
+pub fn process_modifiers(tree: &mut SceneTree, skeleton_id: NodeId) {
+    let children = tree
+        .get_node(skeleton_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+
+    for child in children {
+        let is_ik = tree
+            .get_node(child)
+            .map(|n| n.class_name() == IK_MODIFIER_CLASS)
+            .unwrap_or(false);
+        if !is_ik || !modifier_active(tree, child) {
+            continue;
+        }
+        apply_ik_modifier(tree, skeleton_id, child);
+    }
+}
+
+/// Applies one `IKModifier3D` to its skeleton.
+fn apply_ik_modifier(tree: &mut SceneTree, skeleton_id: NodeId, modifier_id: NodeId) {
+    let node = match tree.get_node(modifier_id) {
+        Some(n) => n,
+        None => return,
+    };
+    let target = match node.get_property(IK_TARGET_POSITION_KEY) {
+        Variant::Vector3(v) => v,
+        _ => return, // no target: nothing to solve toward
+    };
+    let root = match node.get_property(IK_ROOT_BONE_KEY) {
+        Variant::Int(i) if i >= 0 => i as usize,
+        _ => return,
+    };
+    let tip = match node.get_property(IK_TIP_BONE_KEY) {
+        Variant::Int(i) if i >= 0 => i as usize,
+        _ => return,
+    };
+    let iterations = match node.get_property(IK_ITERATIONS_KEY) {
+        Variant::Int(i) => i.clamp(0, 64) as u32,
+        _ => 10,
+    };
+    let influence = modifier_influence(tree, modifier_id);
+    if influence <= 0.0 {
+        // Godot: influence 0 means the modifier contributes nothing at all.
+        return;
+    }
+
+    solve_ccd(tree, skeleton_id, root, tip, target, iterations, influence);
+}
+
+/// Cyclic Coordinate Descent: rotate each joint in turn so the tip swings
+/// toward `target` (pat-nzgdu.151).
+///
+/// Only bone **poses** are written, and a bone's global pose is composed from
+/// its parents, so the chain stays connected by construction — intermediate
+/// bones cannot detach.
+///
+/// `influence` scales each correction angle, which gives Godot's blend
+/// behaviour at the ends that matter: `0` leaves the pose untouched, `1` is a
+/// full solve, and values between move the tip partway.
+#[allow(clippy::too_many_arguments)]
+fn solve_ccd(
+    tree: &mut SceneTree,
+    skeleton_id: NodeId,
+    root: usize,
+    tip: usize,
+    target: Vector3,
+    iterations: u32,
+    influence: f32,
+) {
+    let chain = bone_chain(tree, skeleton_id, root, tip);
+    if chain.len() < 2 {
+        return; // nothing to rotate (or tip does not descend from root)
+    }
+
+    for _ in 0..iterations {
+        // Walk joints from the one nearest the tip back to the root — the
+        // "cyclic" part; near-tip joints make the fine corrections.
+        for &joint in chain.iter().rev().skip(1) {
+            let joint_pos = get_bone_global_pose(tree, skeleton_id, joint).origin;
+            let tip_pos = get_bone_global_pose(tree, skeleton_id, tip).origin;
+
+            let to_tip = tip_pos - joint_pos;
+            let to_target = target - joint_pos;
+            if to_tip.length() < IK_EPSILON || to_target.length() < IK_EPSILON {
+                continue;
+            }
+            let from = to_tip.normalized();
+            let to = to_target.normalized();
+
+            let axis = from.cross(to);
+            if axis.length() < IK_EPSILON {
+                continue; // already aligned (or exactly opposed — no unique axis)
+            }
+            let angle = from.dot(to).clamp(-1.0, 1.0).acos() * influence;
+            if angle.abs() < IK_EPSILON {
+                continue;
+            }
+            let delta = Basis::from_quaternion(Quaternion::from_axis_angle(
+                axis.normalized(),
+                angle,
+            ));
+
+            // `delta` is a rotation in skeleton space, but poses are stored in
+            // the bone's parent frame. global(j) = parent_global * rest * pose,
+            // so to get global' = delta * global we need
+            //   pose' = (parent_global.basis * rest.basis)^-1
+            //           * delta * (parent_global.basis * rest.basis) * pose
+            let parent = get_bone_parent(tree, skeleton_id, joint);
+            let parent_basis = if parent >= 0 {
+                get_bone_global_pose(tree, skeleton_id, parent as usize).basis
+            } else {
+                Basis::IDENTITY
+            };
+            let rest = get_bone_rest(tree, skeleton_id, joint);
+            let pose = get_bone_pose(tree, skeleton_id, joint);
+
+            let frame = parent_basis * rest.basis;
+            let mut new_pose = pose;
+            new_pose.basis = frame.inverse() * delta * frame * pose.basis;
+            set_bone_pose(tree, skeleton_id, joint, new_pose);
+        }
+    }
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 

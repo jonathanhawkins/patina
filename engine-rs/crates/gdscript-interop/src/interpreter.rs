@@ -1870,6 +1870,11 @@ impl Interpreter {
                                 if class_name == "CameraFeed" {
                                     return Ok(Variant::ObjectId(new_camera_feed_handle()));
                                 }
+                                // UndoRedo is an Object-derived handle, not a node
+                                // (pat-nzgdu.155).
+                                if class_name == "UndoRedo" {
+                                    return Ok(Variant::ObjectId(new_undo_redo_handle()));
+                                }
                                 if is_node_class_name(class_name) {
                                     if let Some(ref mut access) = self.scene_access {
                                         if let Some(raw_id) =
@@ -4618,6 +4623,12 @@ impl Interpreter {
             }
             if is_camera_feed_handle(*oid) {
                 return call_camera_feed_instance(*oid, method, args);
+            }
+            if is_undo_redo_handle(*oid) {
+                // UndoRedo applies its recorded property writes through the
+                // scene, so it is the one handle family that needs access.
+                let access = self.scene_access.as_deref_mut();
+                return call_undo_redo_instance(*oid, method, args, access);
             }
         }
         match obj {
@@ -9691,6 +9702,399 @@ thread_local! {
 /// Returns `true` when `id` was issued by [`new_camera_feed_handle`].
 fn is_camera_feed_handle(id: gdcore::id::ObjectId) -> bool {
     id.raw() & 0xFF00_0000_0000_0000 == CAMERA_FEED_HANDLE_TAG
+}
+
+// ---------------------------------------------------------------------------
+// UndoRedo (pat-nzgdu.155)
+// ---------------------------------------------------------------------------
+
+/// Tags an `ObjectId` issued by [`new_undo_redo_handle`]; mirrors the
+/// ConfigFile / FileAccess / DirAccess / CameraFeed handle tags
+/// (0xCF / 0xFA / 0xDA / 0xCA).
+const UNDO_REDO_HANDLE_TAG: u64 = 0xED00_0000_0000_0000;
+
+/// Godot's `UndoRedo.MergeMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum MergeMode {
+    /// Never merge — the default.
+    #[default]
+    Disable,
+    /// Merge with the previous action when it has the same name, keeping only
+    /// the *ends*: the new do-ops replace the previous ones, but the ORIGINAL
+    /// undo-ops are kept, so undoing returns to the state before the first of
+    /// the merged pair.
+    Ends,
+    /// Merge with the previous same-named action, appending both halves.
+    All,
+}
+
+impl MergeMode {
+    fn from_int(v: i64) -> Self {
+        match v {
+            1 => MergeMode::Ends,
+            2 => MergeMode::All,
+            _ => MergeMode::Disable,
+        }
+    }
+}
+
+/// A single recorded property write.
+#[derive(Debug, Clone)]
+struct PropOp {
+    object: u64,
+    property: String,
+    value: Variant,
+}
+
+/// One committed (or in-progress) undo/redo action.
+#[derive(Debug, Clone, Default)]
+struct UndoRedoAction {
+    name: String,
+    merge_mode: MergeMode,
+    do_ops: Vec<PropOp>,
+    undo_ops: Vec<PropOp>,
+}
+
+/// A script-visible `UndoRedo` instance.
+///
+/// Held interpreter-local (like `CameraFeed`) rather than delegating to
+/// gdeditor's `UndoRedoManager`: gdeditor **depends on** gdscript-interop, so
+/// reaching the other way would be a dependency cycle (pat-nzgdu.155).
+#[derive(Debug, Default)]
+struct UndoRedoState {
+    /// Committed actions, oldest first.
+    history: Vec<UndoRedoAction>,
+    /// Index of the action that `undo()` would revert; `-1` when fully undone.
+    current: i64,
+    /// The action being built by `create_action()`, if any.
+    pending: Option<UndoRedoAction>,
+    /// Bumped on every commit/undo/redo (Godot's `get_version()`).
+    version: u64,
+    /// True while `commit_action()` is applying its operations.
+    committing: bool,
+}
+
+thread_local! {
+    /// Live `UndoRedo` handles, keyed by raw ObjectId.
+    static UNDO_REDOS: std::cell::RefCell<HashMap<u64, UndoRedoState>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Sequence backing the handle id.
+    static NEXT_UNDO_REDO: std::cell::Cell<u64> = std::cell::Cell::new(1);
+}
+
+/// Returns `true` when `id` was issued by [`new_undo_redo_handle`].
+fn is_undo_redo_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == UNDO_REDO_HANDLE_TAG
+}
+
+/// Allocates an `UndoRedo` in the handle table (script `UndoRedo.new()`).
+fn new_undo_redo_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_UNDO_REDO.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = UNDO_REDO_HANDLE_TAG | seq;
+    UNDO_REDOS.with(|m| {
+        m.borrow_mut().insert(
+            raw,
+            UndoRedoState {
+                current: -1,
+                ..Default::default()
+            },
+        );
+    });
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Reads a `(object, property, value)` triple from an add_*_property call.
+fn prop_op_args(args: &[Variant], who: &str) -> Result<PropOp, RuntimeError> {
+    let object = match args.first() {
+        Some(Variant::ObjectId(id)) => id.raw(),
+        _ => {
+            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "{who} expects an object as its first argument"
+            ))))
+        }
+    };
+    let property = match args.get(1) {
+        Some(Variant::String(s)) => s.clone(),
+        Some(Variant::StringName(s)) => s.as_str().to_string(),
+        _ => {
+            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "{who} expects a property name"
+            ))))
+        }
+    };
+    Ok(PropOp {
+        object,
+        property,
+        value: args.get(2).cloned().unwrap_or(Variant::Nil),
+    })
+}
+
+/// `UndoRedo` instance methods (pat-nzgdu.155).
+///
+/// `scene_access` applies the property writes; without it the history is still
+/// recorded (so a headless script can build actions) but nothing is written —
+/// there is no object model to write to.
+fn call_undo_redo_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+    access: Option<&mut (dyn SceneAccess + 'static)>,
+) -> Result<Variant, RuntimeError> {
+    let raw = id.raw();
+
+    /// Applies a batch of property writes through the scene.
+    ///
+    /// Note the explicit `+ 'static` on the trait object, and the `Option`
+    /// taken **by value**. Both matter, and the elided `Option<&mut dyn
+    /// SceneAccess>` does NOT compile here (E0521, "borrowed data escapes"):
+    /// the caller's `scene_access: Option<Box<dyn SceneAccess>>` field means
+    /// `as_deref_mut()` yields `Option<&'r mut (dyn SceneAccess + 'static)>`,
+    /// where `'r` is only a reborrow of the interpreter's `self`. Eliding the
+    /// bound here would instead ask for `Option<&'x mut (dyn SceneAccess +
+    /// 'x)>`, and coercions do not reach inside a generic constructor like
+    /// `Option` — so the types must match by subtyping, `&mut` is invariant in
+    /// its pointee, and `'x` is forced to `'static`, dragging `'r` with it.
+    /// Naming `'static` (which the boxed accessor genuinely is) makes the
+    /// pointees equal, leaving only the covariant `'r: 'x` to satisfy.
+    /// Contrast the bare `&mut dyn SceneAccess` params above, whose callers
+    /// pass `&mut **access` — a fresh reborrow, which *is* a coercion site.
+    /// Same shape, same reason: `gdplatform`'s `NetworkContext::peer_mut`
+    /// (`network.rs:289`) also spells out `Option<&mut (dyn NetworkPeer +
+    /// 'static)>` over an `Option<Box<dyn _>>` field.
+    fn apply(ops: &[PropOp], access: Option<&mut (dyn SceneAccess + 'static)>) {
+        if let Some(a) = access {
+            for op in ops {
+                a.set_node_property(op.object, &op.property, op.value.clone());
+            }
+        }
+    }
+
+    match method {
+        "create_action" => {
+            let name = match args.first() {
+                Some(Variant::String(s)) => s.clone(),
+                Some(Variant::StringName(s)) => s.as_str().to_string(),
+                _ => String::new(),
+            };
+            let merge_mode = match args.get(1) {
+                Some(Variant::Int(i)) => MergeMode::from_int(*i),
+                _ => MergeMode::Disable,
+            };
+            UNDO_REDOS.with(|m| {
+                if let Some(s) = m.borrow_mut().get_mut(&raw) {
+                    s.pending = Some(UndoRedoAction {
+                        name,
+                        merge_mode,
+                        ..Default::default()
+                    });
+                }
+            });
+            Ok(Variant::Nil)
+        }
+        "add_do_property" => {
+            let op = prop_op_args(args, "UndoRedo.add_do_property()")?;
+            UNDO_REDOS.with(|m| {
+                if let Some(s) = m.borrow_mut().get_mut(&raw) {
+                    if let Some(p) = s.pending.as_mut() {
+                        p.do_ops.push(op);
+                    }
+                }
+            });
+            Ok(Variant::Nil)
+        }
+        "add_undo_property" => {
+            let op = prop_op_args(args, "UndoRedo.add_undo_property()")?;
+            UNDO_REDOS.with(|m| {
+                if let Some(s) = m.borrow_mut().get_mut(&raw) {
+                    if let Some(p) = s.pending.as_mut() {
+                        p.undo_ops.push(op);
+                    }
+                }
+            });
+            Ok(Variant::Nil)
+        }
+        "commit_action" => {
+            // Godot: commit_action(execute = true) — false records the action
+            // without running the do-half (the caller already applied it).
+            let execute = !matches!(args.first(), Some(Variant::Bool(false)));
+            let to_apply = UNDO_REDOS.with(|m| {
+                let mut map = m.borrow_mut();
+                let s = match map.get_mut(&raw) {
+                    Some(s) => s,
+                    None => return Vec::new(),
+                };
+                let action = match s.pending.take() {
+                    Some(a) => a,
+                    None => return Vec::new(),
+                };
+
+                // Anything redoable ahead of the cursor is discarded — a new
+                // action forks the history (Godot's behaviour).
+                s.history.truncate((s.current + 1).max(0) as usize);
+
+                let merged = match action.merge_mode {
+                    MergeMode::Disable => false,
+                    MergeMode::Ends | MergeMode::All => s
+                        .history
+                        .last()
+                        .map(|prev| prev.name == action.name)
+                        .unwrap_or(false),
+                };
+
+                let ops = action.do_ops.clone();
+                if merged {
+                    let prev = s.history.last_mut().expect("merged implies a previous");
+                    match action.merge_mode {
+                        MergeMode::Ends => {
+                            // Keep the ORIGINAL undo-ops (the far end) and take
+                            // the NEW do-ops: undo jumps back past both.
+                            prev.do_ops = action.do_ops;
+                        }
+                        MergeMode::All => {
+                            prev.do_ops.extend(action.do_ops);
+                            prev.undo_ops.extend(action.undo_ops);
+                        }
+                        MergeMode::Disable => unreachable!(),
+                    }
+                } else {
+                    s.history.push(action);
+                    s.current = s.history.len() as i64 - 1;
+                }
+                s.version += 1;
+                s.committing = true;
+                ops
+            });
+
+            if execute {
+                apply(&to_apply, access);
+            }
+            UNDO_REDOS.with(|m| {
+                if let Some(s) = m.borrow_mut().get_mut(&raw) {
+                    s.committing = false;
+                }
+            });
+            Ok(Variant::Nil)
+        }
+        "undo" => {
+            let ops = UNDO_REDOS.with(|m| {
+                let mut map = m.borrow_mut();
+                let s = match map.get_mut(&raw) {
+                    Some(s) => s,
+                    None => return None,
+                };
+                if s.current < 0 {
+                    return None;
+                }
+                let ops = s.history[s.current as usize].undo_ops.clone();
+                s.current -= 1;
+                s.version += 1;
+                Some(ops)
+            });
+            match ops {
+                Some(ops) => {
+                    apply(&ops, access);
+                    Ok(Variant::Bool(true))
+                }
+                None => Ok(Variant::Bool(false)),
+            }
+        }
+        "redo" => {
+            let ops = UNDO_REDOS.with(|m| {
+                let mut map = m.borrow_mut();
+                let s = match map.get_mut(&raw) {
+                    Some(s) => s,
+                    None => return None,
+                };
+                let next = s.current + 1;
+                if next as usize >= s.history.len() {
+                    return None;
+                }
+                let ops = s.history[next as usize].do_ops.clone();
+                s.current = next;
+                s.version += 1;
+                Some(ops)
+            });
+            match ops {
+                Some(ops) => {
+                    apply(&ops, access);
+                    Ok(Variant::Bool(true))
+                }
+                None => Ok(Variant::Bool(false)),
+            }
+        }
+        "has_undo" => Ok(Variant::Bool(UNDO_REDOS.with(|m| {
+            m.borrow().get(&raw).map(|s| s.current >= 0).unwrap_or(false)
+        }))),
+        "has_redo" => Ok(Variant::Bool(UNDO_REDOS.with(|m| {
+            m.borrow()
+                .get(&raw)
+                .map(|s| (s.current + 1) < s.history.len() as i64)
+                .unwrap_or(false)
+        }))),
+        "is_committing_action" => Ok(Variant::Bool(UNDO_REDOS.with(|m| {
+            m.borrow().get(&raw).map(|s| s.committing).unwrap_or(false)
+        }))),
+        "get_version" => Ok(Variant::Int(UNDO_REDOS.with(|m| {
+            m.borrow().get(&raw).map(|s| s.version as i64).unwrap_or(0)
+        }))),
+        "get_history_count" => Ok(Variant::Int(UNDO_REDOS.with(|m| {
+            m.borrow()
+                .get(&raw)
+                .map(|s| s.history.len() as i64)
+                .unwrap_or(0)
+        }))),
+        "get_current_action" => Ok(Variant::Int(
+            UNDO_REDOS.with(|m| m.borrow().get(&raw).map(|s| s.current).unwrap_or(-1)),
+        )),
+        "get_current_action_name" => Ok(Variant::String(UNDO_REDOS.with(|m| {
+            m.borrow()
+                .get(&raw)
+                .and_then(|s| {
+                    if s.current < 0 {
+                        None
+                    } else {
+                        s.history.get(s.current as usize).map(|a| a.name.clone())
+                    }
+                })
+                .unwrap_or_default()
+        }))),
+        "get_action_name" => {
+            let idx = match args.first() {
+                Some(Variant::Int(i)) => *i,
+                _ => -1,
+            };
+            Ok(Variant::String(UNDO_REDOS.with(|m| {
+                m.borrow()
+                    .get(&raw)
+                    .and_then(|s| {
+                        if idx < 0 {
+                            None
+                        } else {
+                            s.history.get(idx as usize).map(|a| a.name.clone())
+                        }
+                    })
+                    .unwrap_or_default()
+            })))
+        }
+        "clear_history" => {
+            UNDO_REDOS.with(|m| {
+                if let Some(s) = m.borrow_mut().get_mut(&raw) {
+                    s.history.clear();
+                    s.current = -1;
+                    s.pending = None;
+                    s.version += 1;
+                }
+            });
+            Ok(Variant::Nil)
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("UndoRedo.{other}"),
+        ))),
+    }
 }
 
 /// Allocates a `CameraFeed` in the handle table (script `CameraFeed.new()`).

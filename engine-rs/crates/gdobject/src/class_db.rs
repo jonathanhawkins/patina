@@ -1056,6 +1056,32 @@ pub fn register_3d_classes() {
     );
     register_class(ClassRegistration::new("Skeleton3D").parent("Node3D"));
     register_class(ClassRegistration::new("BoneAttachment3D").parent("Node3D"));
+
+    // -- Skeleton modifier stack (pat-nzgdu.151) ---------------------------
+    // Godot: a SkeletonModifier3D is a Node3D child of a Skeleton3D whose
+    // _process_modification runs during the skeleton's post-pose update, so
+    // modifiers layer on top of AnimationPlayer/Tree output. The base is
+    // abstract; IKModifier3D is the concrete solver.
+    register_class(
+        ClassRegistration::new("SkeletonModifier3D")
+            .parent("Node3D")
+            .abstract_class()
+            .property(PropertyInfo::new("active", Variant::Bool(true)))
+            .property(PropertyInfo::new("influence", Variant::Float(1.0)))
+            .method(MethodInfo::new("get_skeleton", 0))
+            .signal(SignalInfo::new("modification_processed")),
+    );
+    register_class(
+        ClassRegistration::new("IKModifier3D")
+            .parent("SkeletonModifier3D")
+            .property(PropertyInfo::new(
+                "target_position",
+                Variant::Vector3(Vector3::ZERO),
+            ))
+            .property(PropertyInfo::new("root_bone", Variant::Int(-1)))
+            .property(PropertyInfo::new("tip_bone", Variant::Int(-1)))
+            .property(PropertyInfo::new("iterations", Variant::Int(10))),
+    );
     register_class(ClassRegistration::new("AnimationPlayer").parent("Node"));
     register_class(ClassRegistration::new("AnimationTree").parent("Node"));
 
@@ -1374,45 +1400,462 @@ pub fn register_3d_classes() {
                 Variant::Vector3(gdcore::math::Vector3::ZERO),
             )),
     );
-    // Operators / functions / mix.
+    // Math operators and functions (pat-nzgdu.169).
+    //
+    // The workhorse nodes of every graph. Schemas and every enum value are
+    // generated from Godot's `extension_api.json`, not recalled — these carry
+    // 171 constants and a transposed one would silently mis-compile a graph.
+    //
+    // Note `VectorOp`/`VectorFunc`/`FaceForward` derive `VisualShaderNodeVectorBase`
+    // (which carries the vec2/vec3/vec4 `op_type`), NOT `VisualShaderNode`
+    // directly — the earlier registration got that wrong and the API diff caught it.
+    //
+    // Selector enums only: `generate_code()` does not yet consult them — see the
+    // bead notes (gdserver2d::material's graph compiler has no operator/function
+    // node kinds at all).
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVectorBase")
+            .parent("VisualShaderNode")
+            .abstract_class()
+            .property(PropertyInfo::new("op_type", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("OpType")
+                    .constant("OP_TYPE_VECTOR_2D", 0)
+                    .constant("OP_TYPE_VECTOR_3D", 1)
+                    .constant("OP_TYPE_VECTOR_4D", 2)
+                    .constant("OP_TYPE_MAX", 3)
+            ),
+    );
     register_class(
         ClassRegistration::new("VisualShaderNodeFloatOp")
             .parent("VisualShaderNode")
-            .property(PropertyInfo::new("operator", Variant::Int(0))),
+            .property(PropertyInfo::new("operator", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("Operator")
+                    .constant("OP_ADD", 0)
+                    .constant("OP_SUB", 1)
+                    .constant("OP_MUL", 2)
+                    .constant("OP_DIV", 3)
+                    .constant("OP_MOD", 4)
+                    .constant("OP_POW", 5)
+                    .constant("OP_MAX", 6)
+                    .constant("OP_MIN", 7)
+                    .constant("OP_ATAN2", 8)
+                    .constant("OP_STEP", 9)
+                    .constant("OP_ENUM_SIZE", 10)
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeIntOp")
+            .parent("VisualShaderNode")
+            .property(PropertyInfo::new("operator", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("Operator")
+                    .constant("OP_ADD", 0)
+                    .constant("OP_SUB", 1)
+                    .constant("OP_MUL", 2)
+                    .constant("OP_DIV", 3)
+                    .constant("OP_MOD", 4)
+                    .constant("OP_MAX", 5)
+                    .constant("OP_MIN", 6)
+                    .constant("OP_BITWISE_AND", 7)
+                    .constant("OP_BITWISE_OR", 8)
+                    .constant("OP_BITWISE_XOR", 9)
+                    .constant("OP_BITWISE_LEFT_SHIFT", 10)
+                    .constant("OP_BITWISE_RIGHT_SHIFT", 11)
+                    .constant("OP_ENUM_SIZE", 12)
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeColorOp")
+            .parent("VisualShaderNode")
+            .property(PropertyInfo::new("operator", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("Operator")
+                    .constant("OP_SCREEN", 0)
+                    .constant("OP_DIFFERENCE", 1)
+                    .constant("OP_DARKEN", 2)
+                    .constant("OP_LIGHTEN", 3)
+                    .constant("OP_OVERLAY", 4)
+                    .constant("OP_DODGE", 5)
+                    .constant("OP_BURN", 6)
+                    .constant("OP_SOFT_LIGHT", 7)
+                    .constant("OP_HARD_LIGHT", 8)
+                    .constant("OP_MAX", 9)
+            ),
     );
     register_class(
         ClassRegistration::new("VisualShaderNodeVectorOp")
-            .parent("VisualShaderNode")
-            .property(PropertyInfo::new("operator", Variant::Int(0))),
+            .parent("VisualShaderNodeVectorBase")
+            .property(PropertyInfo::new("operator", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("Operator")
+                    .constant("OP_ADD", 0)
+                    .constant("OP_SUB", 1)
+                    .constant("OP_MUL", 2)
+                    .constant("OP_DIV", 3)
+                    .constant("OP_MOD", 4)
+                    .constant("OP_POW", 5)
+                    .constant("OP_MAX", 6)
+                    .constant("OP_MIN", 7)
+                    .constant("OP_CROSS", 8)
+                    .constant("OP_ATAN2", 9)
+                    .constant("OP_REFLECT", 10)
+                    .constant("OP_STEP", 11)
+                    .constant("OP_ENUM_SIZE", 12)
+            ),
     );
     register_class(
         ClassRegistration::new("VisualShaderNodeFloatFunc")
             .parent("VisualShaderNode")
-            .property(PropertyInfo::new("function", Variant::Int(0))),
+            .property(PropertyInfo::new("function", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("Function")
+                    .constant("FUNC_SIN", 0)
+                    .constant("FUNC_COS", 1)
+                    .constant("FUNC_TAN", 2)
+                    .constant("FUNC_ASIN", 3)
+                    .constant("FUNC_ACOS", 4)
+                    .constant("FUNC_ATAN", 5)
+                    .constant("FUNC_SINH", 6)
+                    .constant("FUNC_COSH", 7)
+                    .constant("FUNC_TANH", 8)
+                    .constant("FUNC_LOG", 9)
+                    .constant("FUNC_EXP", 10)
+                    .constant("FUNC_SQRT", 11)
+                    .constant("FUNC_ABS", 12)
+                    .constant("FUNC_SIGN", 13)
+                    .constant("FUNC_FLOOR", 14)
+                    .constant("FUNC_ROUND", 15)
+                    .constant("FUNC_CEIL", 16)
+                    .constant("FUNC_FRACT", 17)
+                    .constant("FUNC_SATURATE", 18)
+                    .constant("FUNC_NEGATE", 19)
+                    .constant("FUNC_ACOSH", 20)
+                    .constant("FUNC_ASINH", 21)
+                    .constant("FUNC_ATANH", 22)
+                    .constant("FUNC_DEGREES", 23)
+                    .constant("FUNC_EXP2", 24)
+                    .constant("FUNC_INVERSE_SQRT", 25)
+                    .constant("FUNC_LOG2", 26)
+                    .constant("FUNC_RADIANS", 27)
+                    .constant("FUNC_RECIPROCAL", 28)
+                    .constant("FUNC_ROUNDEVEN", 29)
+                    .constant("FUNC_TRUNC", 30)
+                    .constant("FUNC_ONEMINUS", 31)
+                    .constant("FUNC_MAX", 32)
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeIntFunc")
+            .parent("VisualShaderNode")
+            .property(PropertyInfo::new("function", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("Function")
+                    .constant("FUNC_ABS", 0)
+                    .constant("FUNC_NEGATE", 1)
+                    .constant("FUNC_SIGN", 2)
+                    .constant("FUNC_BITWISE_NOT", 3)
+                    .constant("FUNC_MAX", 4)
+            ),
     );
     register_class(
         ClassRegistration::new("VisualShaderNodeVectorFunc")
-            .parent("VisualShaderNode")
-            .property(PropertyInfo::new("function", Variant::Int(0))),
+            .parent("VisualShaderNodeVectorBase")
+            .property(PropertyInfo::new("function", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("Function")
+                    .constant("FUNC_NORMALIZE", 0)
+                    .constant("FUNC_SATURATE", 1)
+                    .constant("FUNC_NEGATE", 2)
+                    .constant("FUNC_RECIPROCAL", 3)
+                    .constant("FUNC_ABS", 4)
+                    .constant("FUNC_ACOS", 5)
+                    .constant("FUNC_ACOSH", 6)
+                    .constant("FUNC_ASIN", 7)
+                    .constant("FUNC_ASINH", 8)
+                    .constant("FUNC_ATAN", 9)
+                    .constant("FUNC_ATANH", 10)
+                    .constant("FUNC_CEIL", 11)
+                    .constant("FUNC_COS", 12)
+                    .constant("FUNC_COSH", 13)
+                    .constant("FUNC_DEGREES", 14)
+                    .constant("FUNC_EXP", 15)
+                    .constant("FUNC_EXP2", 16)
+                    .constant("FUNC_FLOOR", 17)
+                    .constant("FUNC_FRACT", 18)
+                    .constant("FUNC_INVERSE_SQRT", 19)
+                    .constant("FUNC_LOG", 20)
+                    .constant("FUNC_LOG2", 21)
+                    .constant("FUNC_RADIANS", 22)
+                    .constant("FUNC_ROUND", 23)
+                    .constant("FUNC_ROUNDEVEN", 24)
+                    .constant("FUNC_SIGN", 25)
+                    .constant("FUNC_SIN", 26)
+                    .constant("FUNC_SINH", 27)
+                    .constant("FUNC_SQRT", 28)
+                    .constant("FUNC_TAN", 29)
+                    .constant("FUNC_TANH", 30)
+                    .constant("FUNC_TRUNC", 31)
+                    .constant("FUNC_ONEMINUS", 32)
+                    .constant("FUNC_MAX", 33)
+            ),
     );
-    register_class(ClassRegistration::new("VisualShaderNodeMix").parent("VisualShaderNode"));
-    // Parameters (uniforms) and textures.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeMix")
+            .parent("VisualShaderNode")
+            .property(PropertyInfo::new("op_type", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("OpType")
+                    .constant("OP_TYPE_SCALAR", 0)
+                    .constant("OP_TYPE_VECTOR_2D", 1)
+                    .constant("OP_TYPE_VECTOR_2D_SCALAR", 2)
+                    .constant("OP_TYPE_VECTOR_3D", 3)
+                    .constant("OP_TYPE_VECTOR_3D_SCALAR", 4)
+                    .constant("OP_TYPE_VECTOR_4D", 5)
+                    .constant("OP_TYPE_VECTOR_4D_SCALAR", 6)
+                    .constant("OP_TYPE_MAX", 7)
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeMultiplyAdd")
+            .parent("VisualShaderNode")
+            .property(PropertyInfo::new("op_type", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("OpType")
+                    .constant("OP_TYPE_SCALAR", 0)
+                    .constant("OP_TYPE_VECTOR_2D", 1)
+                    .constant("OP_TYPE_VECTOR_3D", 2)
+                    .constant("OP_TYPE_VECTOR_4D", 3)
+                    .constant("OP_TYPE_MAX", 4)
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeCompare")
+            .parent("VisualShaderNode")
+            .property(PropertyInfo::new("type", Variant::Int(0)))
+            .property(PropertyInfo::new("function", Variant::Int(0)))
+            .property(PropertyInfo::new("condition", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("ComparisonType")
+                    .constant("CTYPE_SCALAR", 0)
+                    .constant("CTYPE_SCALAR_INT", 1)
+                    .constant("CTYPE_SCALAR_UINT", 2)
+                    .constant("CTYPE_VECTOR_2D", 3)
+                    .constant("CTYPE_VECTOR_3D", 4)
+                    .constant("CTYPE_VECTOR_4D", 5)
+                    .constant("CTYPE_BOOLEAN", 6)
+                    .constant("CTYPE_TRANSFORM", 7)
+                    .constant("CTYPE_MAX", 8)
+            )
+            .enumeration(
+                EnumInfo::new("Function")
+                    .constant("FUNC_EQUAL", 0)
+                    .constant("FUNC_NOT_EQUAL", 1)
+                    .constant("FUNC_GREATER_THAN", 2)
+                    .constant("FUNC_GREATER_THAN_EQUAL", 3)
+                    .constant("FUNC_LESS_THAN", 4)
+                    .constant("FUNC_LESS_THAN_EQUAL", 5)
+                    .constant("FUNC_MAX", 6)
+            )
+            .enumeration(
+                EnumInfo::new("Condition")
+                    .constant("COND_ALL", 0)
+                    .constant("COND_ANY", 1)
+                    .constant("COND_MAX", 2)
+            ),
+    );
+    register_class(ClassRegistration::new("VisualShaderNodeIf").parent("VisualShaderNode"));
+    register_class(
+        ClassRegistration::new("VisualShaderNodeIs")
+            .parent("VisualShaderNode")
+            .property(PropertyInfo::new("function", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("Function")
+                    .constant("FUNC_IS_INF", 0)
+                    .constant("FUNC_IS_NAN", 1)
+                    .constant("FUNC_MAX", 2)
+            ),
+    );
+    register_class(ClassRegistration::new("VisualShaderNodeFresnel").parent("VisualShaderNode"));
+    register_class(ClassRegistration::new("VisualShaderNodeDotProduct").parent("VisualShaderNode"));
+    register_class(ClassRegistration::new("VisualShaderNodeDeterminant").parent("VisualShaderNode"));
+    register_class(ClassRegistration::new("VisualShaderNodeOuterProduct").parent("VisualShaderNode"));
+    register_class(
+        ClassRegistration::new("VisualShaderNodeDerivativeFunc")
+            .parent("VisualShaderNode")
+            .property(PropertyInfo::new("op_type", Variant::Int(0)))
+            .property(PropertyInfo::new("function", Variant::Int(0)))
+            .property(PropertyInfo::new("precision", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("OpType")
+                    .constant("OP_TYPE_SCALAR", 0)
+                    .constant("OP_TYPE_VECTOR_2D", 1)
+                    .constant("OP_TYPE_VECTOR_3D", 2)
+                    .constant("OP_TYPE_VECTOR_4D", 3)
+                    .constant("OP_TYPE_MAX", 4)
+            )
+            .enumeration(
+                EnumInfo::new("Function")
+                    .constant("FUNC_SUM", 0)
+                    .constant("FUNC_X", 1)
+                    .constant("FUNC_Y", 2)
+                    .constant("FUNC_MAX", 3)
+            )
+            .enumeration(
+                EnumInfo::new("Precision")
+                    .constant("PRECISION_NONE", 0)
+                    .constant("PRECISION_COARSE", 1)
+                    .constant("PRECISION_FINE", 2)
+                    .constant("PRECISION_MAX", 3)
+            ),
+    );
+    register_class(ClassRegistration::new("VisualShaderNodeFaceForward").parent("VisualShaderNodeVectorBase"));
+    // Parameters (uniforms) and textures (pat-nzgdu.168).
+    //
+    // Schemas below are diffed against Godot's `extension_api.json` rather than
+    // recalled — property names, types, and every enum value match 4.x exactly.
+    // A `VisualShaderNode*Parameter` becomes a `uniform` declaration in the
+    // generated shader; the node's `parameter_name` is the uniform's name.
     register_class(
         ClassRegistration::new("VisualShaderNodeParameter")
             .parent("VisualShaderNode")
             .abstract_class()
+            // Godot types this StringName; we carry it as a String.
             .property(PropertyInfo::new(
                 "parameter_name",
                 Variant::String(String::new()),
-            )),
+            ))
+            .property(PropertyInfo::new("qualifier", Variant::Int(0)))
+            .property(PropertyInfo::new("instance_index", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("Qualifier")
+                    .constant("QUAL_NONE", 0)
+                    .constant("QUAL_GLOBAL", 1)
+                    .constant("QUAL_INSTANCE", 2)
+                    .constant("QUAL_INSTANCE_INDEX", 3)
+                    .constant("QUAL_MAX", 4),
+            ),
     );
     register_class(
         ClassRegistration::new("VisualShaderNodeFloatParameter")
-            .parent("VisualShaderNodeParameter"),
+            .parent("VisualShaderNodeParameter")
+            // HINT_RANGE emits `: hint_range(min, max)`; HINT_RANGE_STEP adds step.
+            .property(PropertyInfo::new("hint", Variant::Int(0)))
+            .property(PropertyInfo::new("min", Variant::Float(0.0)))
+            .property(PropertyInfo::new("max", Variant::Float(1.0)))
+            .property(PropertyInfo::new("step", Variant::Float(0.1)))
+            .property(PropertyInfo::new("default_value_enabled", Variant::Bool(false)))
+            .property(PropertyInfo::new("default_value", Variant::Float(0.0)))
+            .enumeration(
+                EnumInfo::new("Hint")
+                    .constant("HINT_NONE", 0)
+                    .constant("HINT_RANGE", 1)
+                    .constant("HINT_RANGE_STEP", 2)
+                    .constant("HINT_MAX", 3),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeIntParameter")
+            .parent("VisualShaderNodeParameter")
+            .property(PropertyInfo::new("hint", Variant::Int(0)))
+            .property(PropertyInfo::new("min", Variant::Int(0)))
+            .property(PropertyInfo::new("max", Variant::Int(100)))
+            .property(PropertyInfo::new("step", Variant::Int(1)))
+            // Only meaningful under HINT_ENUM — the int parameter's named values.
+            .property(PropertyInfo::new(
+                "enum_names",
+                Variant::PackedStringArray(Vec::new()),
+            ))
+            .property(PropertyInfo::new("default_value_enabled", Variant::Bool(false)))
+            .property(PropertyInfo::new("default_value", Variant::Int(0)))
+            .enumeration(
+                // Note: the int hint has HINT_ENUM, which the float one does not.
+                EnumInfo::new("Hint")
+                    .constant("HINT_NONE", 0)
+                    .constant("HINT_RANGE", 1)
+                    .constant("HINT_RANGE_STEP", 2)
+                    .constant("HINT_ENUM", 3)
+                    .constant("HINT_MAX", 4),
+            ),
     );
     register_class(
         ClassRegistration::new("VisualShaderNodeColorParameter")
-            .parent("VisualShaderNodeParameter"),
+            .parent("VisualShaderNodeParameter")
+            .property(PropertyInfo::new("default_value_enabled", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "default_value",
+                Variant::Color(gdcore::math::Color::WHITE),
+            )),
+    );
+    // The abstract base for every texture-valued uniform (2D/2DArray/3D/Cubemap).
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTextureParameter")
+            .parent("VisualShaderNodeParameter")
+            .abstract_class()
+            .property(PropertyInfo::new("texture_type", Variant::Int(0)))
+            .property(PropertyInfo::new("color_default", Variant::Int(0)))
+            .property(PropertyInfo::new("texture_filter", Variant::Int(0)))
+            .property(PropertyInfo::new("texture_repeat", Variant::Int(0)))
+            .property(PropertyInfo::new("texture_source", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("TextureType")
+                    .constant("TYPE_DATA", 0)
+                    .constant("TYPE_COLOR", 1)
+                    .constant("TYPE_NORMAL_MAP", 2)
+                    .constant("TYPE_ANISOTROPY", 3)
+                    .constant("TYPE_MAX", 4),
+            )
+            .enumeration(
+                EnumInfo::new("ColorDefault")
+                    .constant("COLOR_DEFAULT_WHITE", 0)
+                    .constant("COLOR_DEFAULT_BLACK", 1)
+                    .constant("COLOR_DEFAULT_TRANSPARENT", 2)
+                    .constant("COLOR_DEFAULT_MAX", 3),
+            )
+            .enumeration(
+                EnumInfo::new("TextureFilter")
+                    .constant("FILTER_DEFAULT", 0)
+                    .constant("FILTER_NEAREST", 1)
+                    .constant("FILTER_LINEAR", 2)
+                    .constant("FILTER_NEAREST_MIPMAP", 3)
+                    .constant("FILTER_LINEAR_MIPMAP", 4)
+                    .constant("FILTER_NEAREST_MIPMAP_ANISOTROPIC", 5)
+                    .constant("FILTER_LINEAR_MIPMAP_ANISOTROPIC", 6)
+                    .constant("FILTER_MAX", 7),
+            )
+            .enumeration(
+                EnumInfo::new("TextureRepeat")
+                    .constant("REPEAT_DEFAULT", 0)
+                    .constant("REPEAT_ENABLED", 1)
+                    .constant("REPEAT_DISABLED", 2)
+                    .constant("REPEAT_MAX", 3),
+            )
+            .enumeration(
+                EnumInfo::new("TextureSource")
+                    .constant("SOURCE_NONE", 0)
+                    .constant("SOURCE_SCREEN", 1)
+                    .constant("SOURCE_DEPTH", 2)
+                    .constant("SOURCE_NORMAL_ROUGHNESS", 3)
+                    .constant("SOURCE_MAX", 4),
+            ),
+    );
+    // Godot gives CubemapParameter no properties of its own — the whole schema
+    // is inherited from VisualShaderNodeTextureParameter.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeCubemapParameter")
+            .parent("VisualShaderNodeTextureParameter"),
+    );
+    // Reads back an existing named parameter rather than declaring a new one, so
+    // it derives VisualShaderNode directly — NOT VisualShaderNodeParameter.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeParameterRef")
+            .parent("VisualShaderNode")
+            .property(PropertyInfo::new(
+                "parameter_name",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new("param_type", Variant::Int(0))),
     );
     register_class(
         ClassRegistration::new("VisualShaderNodeTexture").parent("VisualShaderNode"),
@@ -1602,6 +2045,61 @@ pub fn register_2d_classes() {
     if !class_exists("RichTextLabel") {
         register_class(ClassRegistration::new("RichTextLabel").parent("Control"));
     }
+
+    // -- RichTextEffect / CharFXTransform (pat-nzgdu.157) -------------------
+    // Godot's custom BBCode fx pair: a `RichTextEffect` resource declares a
+    // `bbcode` tag and implements `_process_custom_fx(char_fx)`, which
+    // RichTextLabel calls once per covered glyph with a `CharFXTransform`
+    // carrying that glyph's mutable offset/color plus its index and the
+    // effect's elapsed time.
+    //
+    // NOTE: this is the *reflection* surface only. The built-in effects are
+    // evaluated natively (`gdscene::char_fx`); `_process_custom_fx` is never
+    // dispatched, because RichTextLabel has no `custom_effects` property, the
+    // render pass holds `&SceneTree` (a script call needs `&mut`), and
+    // CharFXTransform has no Variant encoding to cross the call boundary. See
+    // `gdscene::char_fx`'s module docs for the full list — it is its own bead.
+    //
+    // `RefCounted` is not bootstrapped anywhere else in this function, and an
+    // unregistered base silently severs the whole chain from `Object`
+    // (pat-nzgdu.98), so register it before anything parents to it.
+    if !class_exists("RefCounted") {
+        register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
+    if !class_exists("RichTextEffect") {
+        register_class(
+            ClassRegistration::new("RichTextEffect")
+                .parent("Resource")
+                // Reads the `bbcode` tag the effect answers to. On a scripted
+                // effect Godot reads the script's own `bbcode` member.
+                .method(MethodInfo::new("get_bbcode", 0))
+                // The virtual a script overrides; returns false to hide the glyph.
+                .method(MethodInfo::new("_process_custom_fx", 1)),
+        );
+    }
+    if !class_exists("CharFXTransform") {
+        register_class(
+            ClassRegistration::new("CharFXTransform")
+                .parent("RefCounted")
+                // The glyph range this effect covers, as [start, end).
+                .property(PropertyInfo::new("range", Variant::Nil))
+                // Seconds since the label started animating this effect.
+                .property(PropertyInfo::new("elapsed_time", Variant::Float(0.0)))
+                // Cleared by an effect to skip drawing the glyph.
+                .property(PropertyInfo::new("visible", Variant::Bool(true)))
+                .property(PropertyInfo::new("outline", Variant::Bool(false)))
+                // The mutable per-glyph pixel offset — what `[wave]` writes.
+                .property(PropertyInfo::new("offset", Variant::Nil))
+                .property(PropertyInfo::new("color", Variant::Nil))
+                // `[ghost speed=2]` arrives here as {"speed": 2}.
+                .property(PropertyInfo::new("env", Variant::Nil))
+                .property(PropertyInfo::new("glyph_index", Variant::Int(0)))
+                .property(PropertyInfo::new("glyph_count", Variant::Int(0)))
+                // Index within the effect's own range (what effects animate on).
+                .property(PropertyInfo::new("relative_index", Variant::Int(0)))
+                .property(PropertyInfo::new("absolute_index", Variant::Int(0))),
+        );
+    }
     if !class_exists("ScrollContainer") {
         register_class(ClassRegistration::new("ScrollContainer").parent("Container"));
     }
@@ -1638,6 +2136,57 @@ pub fn register_2d_classes() {
     }
     if !class_exists("MarginContainer") {
         register_class(ClassRegistration::new("MarginContainer").parent("Container"));
+    }
+    // pat-nzgdu.109: the GraphEdit family. Hierarchy matches Godot 4.6:
+    // GraphElement : Container, GraphNode/GraphFrame : GraphElement,
+    // GraphEdit : Control. Behaviour lives in gdscene::graph_edit; drawing and
+    // box-select/drag interaction are follow-up beads.
+    if !class_exists("GraphElement") {
+        register_class(
+            ClassRegistration::new("GraphElement")
+                .parent("Container")
+                .property(PropertyInfo::new(
+                    "position_offset",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("resizable", Variant::Bool(false)))
+                .property(PropertyInfo::new("draggable", Variant::Bool(true)))
+                .property(PropertyInfo::new("selectable", Variant::Bool(true)))
+                .property(PropertyInfo::new("selected", Variant::Bool(false))),
+        );
+    }
+    if !class_exists("GraphNode") {
+        register_class(
+            ClassRegistration::new("GraphNode")
+                .parent("GraphElement")
+                .property(PropertyInfo::new("title", Variant::String(String::new()))),
+        );
+    }
+    if !class_exists("GraphFrame") {
+        register_class(
+            ClassRegistration::new("GraphFrame")
+                .parent("GraphElement")
+                .property(PropertyInfo::new("title", Variant::String(String::new())))
+                .property(PropertyInfo::new("autoshrink_enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new(
+                    "tint_color_enabled",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "tint_color",
+                    Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 0.3)),
+                )),
+        );
+    }
+    if !class_exists("GraphEdit") {
+        register_class(
+            ClassRegistration::new("GraphEdit")
+                .parent("Control")
+                .property(PropertyInfo::new("zoom", Variant::Float(1.0)))
+                .property(PropertyInfo::new("show_grid", Variant::Bool(true)))
+                .property(PropertyInfo::new("minimap_enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("right_disconnects", Variant::Bool(false))),
+        );
     }
     if !class_exists("AudioEffectAmplify") {
         register_class(ClassRegistration::new("AudioEffectAmplify").parent("Resource"));
@@ -2067,6 +2616,232 @@ pub fn register_viewport_classes() {
                 .method(MethodInfo::new("get_texture_rd_rid", 0)),
         );
     }
+
+    register_rendering_device_classes();
+}
+
+/// Registers `RenderingDevice` and the RD\* parameter/spec classes
+/// (pat-nzgdu.162).
+///
+/// These are the plain-data objects a script fills in and hands to
+/// `RenderingDevice`'s methods — `RDTextureFormat` describes a texture to
+/// allocate, `RDUniform` binds a resource to a set slot, `RDShaderSource`
+/// carries GLSL to compile, and so on. Registering them makes
+/// `ClassDB.class_exists("RDUniform")` and `class_get_property_list` answer, so
+/// scripts and the editor's inspector can see the schema.
+///
+/// **Scope, deliberate:** this is the *schema* half of the bead. The device
+/// itself is not implemented and is not reachable from script yet — see the
+/// bead notes. In short: there is no GLSL→SPIRV compiler anywhere in the
+/// workspace (no shaderc/naga), so `shader_compile_spirv_from_source` cannot be
+/// written; `gdrender3d::wgpu_pipeline` is render-only with no compute
+/// pipeline; and all of wgpu sits behind the non-default `gpu` feature. Method
+/// surfaces are therefore left off `RenderingDevice` rather than advertising
+/// ~100 methods that cannot run — the RD\* classes carry properties, which is
+/// what they are.
+fn register_rendering_device_classes() {
+    if !class_exists("Object") {
+        register_class(object_class());
+    }
+    if !class_exists("Resource") {
+        register_class(ClassRegistration::new("Resource").parent("Object"));
+    }
+    // `RefCounted` is not registered anywhere else in this module's viewport
+    // path, and an unregistered base silently severs the chain from `Object`
+    // (pat-nzgdu.98), so bootstrap it before the RD\* classes parent to it.
+    if !class_exists("RefCounted") {
+        register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
+
+    // The device. Godot exposes it via `RenderingServer.get_rendering_device()`,
+    // never `new()`. Registered so `class_exists`/inheritance answer; its method
+    // surface lands with the implementation beads.
+    if !class_exists("RenderingDevice") {
+        register_class(ClassRegistration::new("RenderingDevice").parent("Object"));
+    }
+
+    // GLSL (or HLSL) source handed to `shader_compile_spirv_from_source`.
+    if !class_exists("RDShaderSource") {
+        register_class(
+            ClassRegistration::new("RDShaderSource")
+                .parent("RefCounted")
+                .property(PropertyInfo::new("source_vertex", Variant::String(String::new())))
+                .property(PropertyInfo::new(
+                    "source_fragment",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "source_tesselation_control",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "source_tesselation_evaluation",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "source_compute",
+                    Variant::String(String::new()),
+                ))
+                // ShaderLanguage: GLSL = 0, HLSL = 1.
+                .property(PropertyInfo::new("language", Variant::Int(0))),
+        );
+    }
+
+    // The compiled result: per-stage SPIR-V bytecode, or a per-stage error.
+    if !class_exists("RDShaderSPIRV") {
+        register_class(
+            ClassRegistration::new("RDShaderSPIRV")
+                .parent("Resource")
+                .property(PropertyInfo::new(
+                    "bytecode_vertex",
+                    Variant::PackedByteArray(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "bytecode_fragment",
+                    Variant::PackedByteArray(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "bytecode_tesselation_control",
+                    Variant::PackedByteArray(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "bytecode_tesselation_evaluation",
+                    Variant::PackedByteArray(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "bytecode_compute",
+                    Variant::PackedByteArray(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "compile_error_vertex",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "compile_error_fragment",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "compile_error_tesselation_control",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "compile_error_tesselation_evaluation",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "compile_error_compute",
+                    Variant::String(String::new()),
+                )),
+        );
+    }
+
+    // A compiled `.glsl` import: named SPIR-V variants plus a base error.
+    if !class_exists("RDShaderFile") {
+        register_class(
+            ClassRegistration::new("RDShaderFile")
+                .parent("Resource")
+                .property(PropertyInfo::new(
+                    "base_error",
+                    Variant::String(String::new()),
+                )),
+        );
+    }
+
+    // Binds resources (buffers/textures/samplers) to one shader set slot.
+    if !class_exists("RDUniform") {
+        register_class(
+            ClassRegistration::new("RDUniform")
+                .parent("RefCounted")
+                // UniformType: SAMPLER = 0.
+                .property(PropertyInfo::new("uniform_type", Variant::Int(0)))
+                .property(PropertyInfo::new("binding", Variant::Int(0))),
+        );
+    }
+
+    // Describes a texture to allocate — the argument to `texture_create`.
+    if !class_exists("RDTextureFormat") {
+        register_class(
+            ClassRegistration::new("RDTextureFormat")
+                .parent("RefCounted")
+                .property(PropertyInfo::new("format", Variant::Int(0)))
+                .property(PropertyInfo::new("width", Variant::Int(1)))
+                .property(PropertyInfo::new("height", Variant::Int(1)))
+                .property(PropertyInfo::new("depth", Variant::Int(1)))
+                .property(PropertyInfo::new("array_layers", Variant::Int(1)))
+                .property(PropertyInfo::new("mipmaps", Variant::Int(1)))
+                // TextureType: 2D = 1.
+                .property(PropertyInfo::new("texture_type", Variant::Int(1)))
+                // TextureSamples: 1x = 0.
+                .property(PropertyInfo::new("samples", Variant::Int(0)))
+                .property(PropertyInfo::new("usage_bits", Variant::Int(0)))
+                .property(PropertyInfo::new("is_resolve_buffer", Variant::Bool(false)))
+                // Godot 4.4+: lets the driver throw the contents away between
+                // frames instead of storing them.
+                .property(PropertyInfo::new("is_discardable", Variant::Bool(false))),
+        );
+    }
+
+    // Reinterprets a texture's format/channel order at bind time.
+    if !class_exists("RDTextureView") {
+        register_class(
+            ClassRegistration::new("RDTextureView")
+                .parent("RefCounted")
+                .property(PropertyInfo::new("format_override", Variant::Int(0)))
+                .property(PropertyInfo::new("swizzle_r", Variant::Int(0)))
+                .property(PropertyInfo::new("swizzle_g", Variant::Int(0)))
+                .property(PropertyInfo::new("swizzle_b", Variant::Int(0)))
+                .property(PropertyInfo::new("swizzle_a", Variant::Int(0))),
+        );
+    }
+
+    // Filtering/wrap/compare state for `sampler_create`.
+    if !class_exists("RDSamplerState") {
+        register_class(
+            ClassRegistration::new("RDSamplerState")
+                .parent("RefCounted")
+                .property(PropertyInfo::new("mag_filter", Variant::Int(0)))
+                .property(PropertyInfo::new("min_filter", Variant::Int(0)))
+                .property(PropertyInfo::new("mip_filter", Variant::Int(0)))
+                .property(PropertyInfo::new("repeat_u", Variant::Int(0)))
+                .property(PropertyInfo::new("repeat_v", Variant::Int(0)))
+                .property(PropertyInfo::new("repeat_w", Variant::Int(0)))
+                .property(PropertyInfo::new("lod_bias", Variant::Float(0.0)))
+                .property(PropertyInfo::new("use_anisotropy", Variant::Bool(false)))
+                .property(PropertyInfo::new("anisotropy_max", Variant::Float(1.0)))
+                .property(PropertyInfo::new("enable_compare", Variant::Bool(false)))
+                .property(PropertyInfo::new("compare_op", Variant::Int(0)))
+                .property(PropertyInfo::new("min_lod", Variant::Float(0.0)))
+                .property(PropertyInfo::new("max_lod", Variant::Float(1e20)))
+                .property(PropertyInfo::new("border_color", Variant::Int(0)))
+                .property(PropertyInfo::new("unnormalized_uvw", Variant::Bool(false))),
+        );
+    }
+
+    // One vertex-buffer attribute in a vertex format.
+    if !class_exists("RDVertexAttribute") {
+        register_class(
+            ClassRegistration::new("RDVertexAttribute")
+                .parent("RefCounted")
+                // The vertex-buffer slot — distinct from `location`, which is
+                // the attribute's location in the shader.
+                .property(PropertyInfo::new("binding", Variant::Int(0)))
+                .property(PropertyInfo::new("location", Variant::Int(0)))
+                .property(PropertyInfo::new("offset", Variant::Int(0)))
+                .property(PropertyInfo::new("format", Variant::Int(0)))
+                .property(PropertyInfo::new("stride", Variant::Int(0)))
+                .property(PropertyInfo::new("frequency", Variant::Int(0))),
+        );
+    }
+
+    // Overrides a SPIR-V specialization constant when building a pipeline.
+    if !class_exists("RDPipelineSpecializationConstant") {
+        register_class(
+            ClassRegistration::new("RDPipelineSpecializationConstant")
+                .parent("RefCounted")
+                .property(PropertyInfo::new("value", Variant::Nil))
+                .property(PropertyInfo::new("constant_id", Variant::Int(0))),
+        );
+    }
 }
 
 /// Registers the networking node/class hierarchy in the ClassDB.
@@ -2087,6 +2862,93 @@ pub fn register_audio_classes() {
     }
     if !class_exists("Node") {
         register_class(node_class());
+    }
+    if !class_exists("RefCounted") {
+        register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
+
+    // -- AudioStreamPlayback runtime-instance family (pat-nzgdu.153) -------
+    // Godot separates the *resource* (AudioStream) from the *runtime instance*
+    // it hands out: AudioStream.instantiate_playback() returns an
+    // AudioStreamPlayback (a RefCounted, not a Resource) that the mixer pulls
+    // frames from. AudioStreamPlaybackResampled sits between the base and the
+    // decoders that need sample-rate conversion (Ogg, the generator); the
+    // container playbacks derive the base directly, since they mix
+    // sub-playbacks that have already been resampled.
+    if !class_exists("AudioStreamPlayback") {
+        register_class(
+            ClassRegistration::new("AudioStreamPlayback")
+                .parent("RefCounted")
+                .abstract_class()
+                .method(MethodInfo::new("start", 0))
+                .method(MethodInfo::new("stop", 0))
+                .method(MethodInfo::new("is_playing", 0))
+                .method(MethodInfo::new("seek", 0))
+                .method(MethodInfo::new("get_playback_position", 0))
+                .method(MethodInfo::new("mix", 3))
+                .method(MethodInfo::new("get_loop_count", 0)),
+        );
+    }
+    if !class_exists("AudioStreamPlaybackResampled") {
+        register_class(
+            ClassRegistration::new("AudioStreamPlaybackResampled")
+                .parent("AudioStreamPlayback")
+                .abstract_class()
+                .method(MethodInfo::new("begin_resample", 0))
+                .method(MethodInfo::new("get_stream_sampling_rate", 0)),
+        );
+    }
+    // Decoder playbacks — these resample.
+    if !class_exists("AudioStreamPlaybackOggVorbis") {
+        register_class(
+            ClassRegistration::new("AudioStreamPlaybackOggVorbis")
+                .parent("AudioStreamPlaybackResampled"),
+        );
+    }
+    if !class_exists("AudioStreamGeneratorPlayback") {
+        register_class(
+            ClassRegistration::new("AudioStreamGeneratorPlayback")
+                .parent("AudioStreamPlaybackResampled")
+                .method(MethodInfo::new("push_frame", 1))
+                .method(MethodInfo::new("can_push_buffer", 1))
+                .method(MethodInfo::new("push_buffer", 1))
+                .method(MethodInfo::new("get_frames_available", 0))
+                .method(MethodInfo::new("get_skips", 0))
+                .method(MethodInfo::new("clear_buffer", 0)),
+        );
+    }
+    // Container playbacks — these mix already-resampled sub-playbacks.
+    if !class_exists("AudioStreamPlaybackPolyphonic") {
+        register_class(
+            ClassRegistration::new("AudioStreamPlaybackPolyphonic")
+                .parent("AudioStreamPlayback")
+                .method(MethodInfo::new("play_stream", 1))
+                .method(MethodInfo::new("set_stream_volume", 2))
+                .method(MethodInfo::new("set_stream_pitch_scale", 2))
+                .method(MethodInfo::new("is_stream_playing", 1))
+                .method(MethodInfo::new("stop_stream", 1)),
+        );
+    }
+    if !class_exists("AudioStreamPlaybackInteractive") {
+        register_class(
+            ClassRegistration::new("AudioStreamPlaybackInteractive")
+                .parent("AudioStreamPlayback")
+                .method(MethodInfo::new("switch_to_clip_by_name", 1))
+                .method(MethodInfo::new("switch_to_clip", 1))
+                .method(MethodInfo::new("get_current_clip_index", 0)),
+        );
+    }
+    if !class_exists("AudioStreamPlaybackPlaylist") {
+        register_class(
+            ClassRegistration::new("AudioStreamPlaybackPlaylist")
+                .parent("AudioStreamPlayback"),
+        );
+    }
+    if !class_exists("AudioStreamPlaybackSynchronized") {
+        register_class(
+            ClassRegistration::new("AudioStreamPlaybackSynchronized")
+                .parent("AudioStreamPlayback"),
+        );
     }
 
     // Ensure 2D/3D bases exist for the positional players.
@@ -2161,6 +3023,46 @@ pub fn register_io_classes() {
     }
     if !class_exists("RefCounted") {
         register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
+
+    // -- UndoRedo (pat-nzgdu.155) ------------------------------------------
+    // Godot's UndoRedo is a plain Object (not a Resource/RefCounted): scripts
+    // and EditorPlugins construct one and record paired do/undo operations,
+    // then commit_action() applies the do-half and pushes it on the history.
+    //
+    // Only the *property* half of the op API is registered. Godot's
+    // add_do_method/add_undo_method/add_do_reference are deliberately absent:
+    // the script binding (gdscript-interop) records ops in a free function that
+    // has no way back into the interpreter, so it cannot invoke a Callable.
+    // Registering them would make class_has_method() promise a method that
+    // errors on call, which is worse than reflecting the honest surface.
+    if !class_exists("UndoRedo") {
+        register_class(
+            ClassRegistration::new("UndoRedo")
+                .parent("Object")
+                .method(MethodInfo::new("create_action", 1))
+                .method(MethodInfo::new("commit_action", 0))
+                .method(MethodInfo::new("is_committing_action", 0))
+                .method(MethodInfo::new("add_do_property", 3))
+                .method(MethodInfo::new("add_undo_property", 3))
+                .method(MethodInfo::new("undo", 0))
+                .method(MethodInfo::new("redo", 0))
+                .method(MethodInfo::new("has_undo", 0))
+                .method(MethodInfo::new("has_redo", 0))
+                .method(MethodInfo::new("get_version", 0))
+                .method(MethodInfo::new("clear_history", 0))
+                .method(MethodInfo::new("get_action_name", 1))
+                .method(MethodInfo::new("get_history_count", 0))
+                .method(MethodInfo::new("get_current_action", 0))
+                .method(MethodInfo::new("get_current_action_name", 0))
+                .signal(SignalInfo::new("version_changed"))
+                .enumeration(
+                    EnumInfo::new("MergeMode")
+                        .constant("MERGE_DISABLE", 0)
+                        .constant("MERGE_ENDS", 1)
+                        .constant("MERGE_ALL", 2),
+                ),
+        );
     }
 
     // -- JavaScriptBridge web-interop singleton (pat-nzgdu.146) ------------
@@ -2626,6 +3528,109 @@ pub fn register_editor_classes() {
                 .method(MethodInfo::new("is_distraction_free_mode_enabled", 0)),
         );
     }
+
+    register_resource_importer_classes();
+}
+
+/// Registers Godot's `ResourceImporter` family (pat-nzgdu.166).
+///
+/// One abstract base plus the 16 concrete importers the editor instantiates for
+/// each source-asset type. `ResourceImporter` itself is `api_type: "core"`; the
+/// 16 subclasses are `api_type: "editor"`, i.e. they exist only in an editor
+/// build — which is why a game-runtime ClassDB would not carry them and this
+/// lives in `register_editor_classes`.
+///
+/// **Import options are deliberately NOT registered as properties, because Godot
+/// does not have them.** The whole family exposes **zero** properties in Godot's
+/// `extension_api.json` — every one of the 17. An importer's options are not a
+/// ClassDB surface at all: the editor asks the importer for them at runtime
+/// (C++ `_get_import_options()`, not exposed to the extension API) and persists
+/// the chosen values in the asset's `.import` file. So inventing per-importer
+/// `compress/mode`-style properties here would be fiction that
+/// `class_get_property_list` would then report as truth.
+///
+/// The surface really is this small: the base has one virtual
+/// (`_get_build_dependencies`) and the `ImportOrder` enum, and the only subclass
+/// adding anything is `ResourceImporterOggVorbis` (two static loaders, omitted
+/// below — nothing dispatches them yet, and advertising a callable that errors
+/// is worse than an honest gap).
+fn register_resource_importer_classes() {
+    // The base. Abstract, RefCounted — an importer is not a Resource.
+    if !class_exists("ResourceImporter") {
+        register_class(
+            ClassRegistration::new("ResourceImporter")
+                .parent("RefCounted")
+                .abstract_class()
+                // The one virtual Godot exposes: a script-defined importer
+                // overrides it to declare what a reimport depends on.
+                .method(MethodInfo::new("_get_build_dependencies", 1))
+                .enumeration(
+                    // Note SCENE is 100, not 1 — scenes import last so their
+                    // dependencies (textures, meshes) are ready first.
+                    EnumInfo::new("ImportOrder")
+                        .constant("IMPORT_ORDER_DEFAULT", 0)
+                        .constant("IMPORT_ORDER_SCENE", 100),
+                ),
+        );
+    }
+
+    // The 16 concrete importers. Godot gives each of them nothing of its own —
+    // the type identity *is* the surface (the editor picks one per extension).
+    for name in [
+        "ResourceImporterBMFont",
+        "ResourceImporterBitMap",
+        "ResourceImporterCSVTranslation",
+        "ResourceImporterDynamicFont",
+        "ResourceImporterImage",
+        "ResourceImporterImageFont",
+        "ResourceImporterLayeredTexture",
+        "ResourceImporterMP3",
+        "ResourceImporterOBJ",
+        "ResourceImporterOggVorbis",
+        "ResourceImporterSVG",
+        "ResourceImporterScene",
+        "ResourceImporterShaderFile",
+        "ResourceImporterTexture",
+        "ResourceImporterTextureAtlas",
+        "ResourceImporterWAV",
+    ] {
+        if !class_exists(name) {
+            register_class(ClassRegistration::new(name).parent("ResourceImporter"));
+        }
+    }
+
+    // `EditorImportPlugin` also derives ResourceImporter, and it is where the
+    // bead's "per-type import options" actually live — a script subclasses it and
+    // overrides `_get_import_options`/`_get_preset_*`/`_get_option_visibility` to
+    // describe its options, then `_import` to produce the resource. Note it still
+    // has **zero properties**: even the class built for import options doesn't
+    // model them as ClassDB properties, which is the clearest evidence that
+    // options are a virtual/`.import`-file surface rather than a schema.
+    //
+    // Only the virtuals are registered. Godot's one concrete method here,
+    // `append_import_external_resource`, is omitted: nothing dispatches it, and a
+    // registered method that errors on call is worse than an honest gap
+    // (pat-nzgdu.155).
+    if !class_exists("EditorImportPlugin") {
+        register_class(
+            ClassRegistration::new("EditorImportPlugin")
+                .parent("ResourceImporter")
+                .method(MethodInfo::new("_get_importer_name", 0))
+                .method(MethodInfo::new("_get_visible_name", 0))
+                .method(MethodInfo::new("_get_preset_count", 0))
+                .method(MethodInfo::new("_get_preset_name", 1))
+                .method(MethodInfo::new("_get_recognized_extensions", 0))
+                .method(MethodInfo::new("_get_import_options", 2))
+                .method(MethodInfo::new("_get_save_extension", 0))
+                .method(MethodInfo::new("_get_resource_type", 0))
+                .method(MethodInfo::new("_get_priority", 0))
+                .method(MethodInfo::new("_get_import_order", 0))
+                .method(MethodInfo::new("_get_format_version", 0))
+                .method(MethodInfo::new("_get_option_visibility", 3))
+                .method(MethodInfo::new("_import", 5))
+                .method(MethodInfo::new("_can_import_threaded", 0)),
+        );
+    }
 }
 
 /// Clears all registered classes. **For testing only.**
@@ -2801,6 +3806,67 @@ mod tests {
                 "{label} registered Object without signals",
             );
         }
+    }
+
+    /// pat-nzgdu.153: the AudioStreamPlayback runtime-instance family, with
+    /// AudioStreamPlaybackResampled sitting between the base and the decoder
+    /// playbacks that need sample-rate conversion.
+    #[test]
+    fn audiostream_playback_family_registered() {
+        let _guard = setup();
+        register_audio_classes();
+
+        // The base is an abstract RefCounted — NOT a Resource: Godot separates
+        // the AudioStream resource from the playback instance it hands out.
+        assert!(class_exists("AudioStreamPlayback"));
+        assert!(is_parent_class("AudioStreamPlayback", "RefCounted"));
+        assert!(is_parent_class("AudioStreamPlayback", "Object"));
+        assert!(is_abstract("AudioStreamPlayback"));
+        assert!(class_has_method("AudioStreamPlayback", "mix"));
+
+        assert!(is_abstract("AudioStreamPlaybackResampled"));
+        assert!(is_parent_class(
+            "AudioStreamPlaybackResampled",
+            "AudioStreamPlayback"
+        ));
+
+        // "Resampled between": the decoders derive Resampled, which derives the
+        // base — so they inherit the base's mix() through it.
+        for name in ["AudioStreamPlaybackOggVorbis", "AudioStreamGeneratorPlayback"] {
+            assert!(class_exists(name), "{name}");
+            assert!(
+                is_parent_class(name, "AudioStreamPlaybackResampled"),
+                "{name} must derive Resampled",
+            );
+            assert!(is_parent_class(name, "AudioStreamPlayback"), "{name}");
+            assert!(class_has_method(name, "mix"), "{name} inherits mix");
+            assert!(can_instantiate(name), "{name} is concrete");
+        }
+
+        // Container playbacks mix already-resampled children, so they derive the
+        // base directly and must NOT sit under Resampled.
+        for name in [
+            "AudioStreamPlaybackPolyphonic",
+            "AudioStreamPlaybackInteractive",
+            "AudioStreamPlaybackPlaylist",
+            "AudioStreamPlaybackSynchronized",
+        ] {
+            assert!(class_exists(name), "{name}");
+            assert!(is_parent_class(name, "AudioStreamPlayback"), "{name}");
+            assert!(
+                !is_parent_class(name, "AudioStreamPlaybackResampled"),
+                "{name} must NOT derive Resampled",
+            );
+            assert!(can_instantiate(name), "{name} is concrete");
+        }
+
+        // The generator's buffer surface is what scripts drive.
+        assert!(class_has_method("AudioStreamGeneratorPlayback", "push_buffer"));
+        assert!(class_has_method(
+            "AudioStreamGeneratorPlayback",
+            "get_frames_available"
+        ));
+        assert!(class_has_method("AudioStreamPlaybackPolyphonic", "play_stream"));
     }
 
     /// pat-nzgdu.146: Godot's web export exposes JavaScriptBridge in ClassDB

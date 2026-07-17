@@ -12,11 +12,14 @@
 //! control becomes one [`CanvasItem`] added in tree pre-order so children paint
 //! over their parents (painter's algorithm), matching Godot's draw order.
 
+use std::collections::HashMap;
+
 use gdcore::math::{Color, Rect2, Vector2};
 use gdserver2d::canvas::{CanvasItem, CanvasItemId, DrawCommand};
 use gdserver2d::viewport::Viewport;
 use gdvariant::Variant;
 
+use crate::char_fx::{BuiltinEffect, CharFXTransform};
 use crate::control;
 use crate::node::NodeId;
 use crate::scene_tree::SceneTree;
@@ -159,6 +162,16 @@ fn string_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<String> {
     }
 }
 
+/// Reads a number-typed node property, if present. `Int` is accepted as well as
+/// `Float` because a script assigning `0` yields an int (pat-nzgdu.157).
+fn float_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<f64> {
+    match tree.get_node(node_id)?.get_property(key) {
+        Variant::Float(f) => Some(f),
+        Variant::Int(i) => Some(i as f64),
+        _ => None,
+    }
+}
+
 /// Resolves a StyleBox theme item to its background color. Default styleboxes
 /// are stored as `Variant::Color` (their flat background). Falls back to
 /// `fallback` when the item is missing or a different Variant type.
@@ -190,6 +203,20 @@ fn text_width(text: &str, scale: u32) -> f32 {
 struct TextSpan {
     text: String,
     color: Color,
+    /// The per-glyph effect covering this run, from `[wave]`/`[shake]`/… .
+    /// `None` is the common case and keeps the whole run in one draw call.
+    effect: Option<BuiltinEffect>,
+    /// Absolute index of this run's first glyph within the label's text, with
+    /// tags stripped. Effects phase off the index, so a run has to know where
+    /// it starts (pat-nzgdu.157).
+    char_offset: usize,
+    /// The `[start, end)` glyph range of the **whole effect application** this
+    /// run belongs to — deliberately NOT this run's own bounds. A nested tag
+    /// splits an effected run into several spans (`[wave]a[color=red]b[/color]c[/wave]`
+    /// is three), and they must keep phasing as one travelling wave, so
+    /// `relative_index` has to keep counting across the split. Only meaningful
+    /// when `effect` is `Some`; the `end` is backfilled once the tag closes.
+    effect_range: (usize, usize),
 }
 
 /// Parses a BBCode subset into colored spans. Recognized tags:
@@ -201,14 +228,33 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
     let mut spans: Vec<TextSpan> = Vec::new();
     // Color stack so nested `[color]` tags restore the outer color on `[/color]`.
     let mut color_stack: Vec<Color> = vec![default];
+    // Effect stack, mirroring the color stack: `[wave]a[shake]b[/shake]c[/wave]`
+    // leaves `c` waving. Each entry carries the tag name that opened it (so
+    // `[/wave]` only closes a wave) and the glyph index it opened at (so every
+    // run it produces phases from the tag, even across a nested tag).
+    let mut effect_stack: Vec<(String, BuiltinEffect, usize)> = Vec::new();
+    // Absolute glyph index, counting only text that survives tag stripping —
+    // this is what effects phase off, so it must not count tag characters.
+    let mut char_index: usize = 0;
     let mut cur = String::new();
+    let mut span_start: usize = 0;
     let mut chars = src.chars();
 
-    let flush = |cur: &mut String, color: Color, spans: &mut Vec<TextSpan>| {
+    // Closes the current run. `span_start` is where the run began; the caller
+    // advances it afterwards.
+    let flush = |cur: &mut String,
+                 color: Color,
+                 effect: Option<(BuiltinEffect, usize)>,
+                 start: usize,
+                 spans: &mut Vec<TextSpan>| {
         if !cur.is_empty() {
             spans.push(TextSpan {
                 text: std::mem::take(cur),
                 color,
+                effect: effect.map(|(e, _)| e),
+                char_offset: start,
+                // `end` is unknown until the tag closes; backfilled below.
+                effect_range: (effect.map(|(_, s)| s).unwrap_or(0), 0),
             });
         }
     };
@@ -229,28 +275,97 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                 // Unterminated '[' — treat literally.
                 cur.push('[');
                 cur.push_str(&tag);
+                char_index += 1 + tag.chars().count();
                 break;
             }
             let cur_color = *color_stack.last().unwrap();
+            let cur_effect = effect_stack.last().map(|(_, e, start)| (*e, *start));
             let lower = tag.to_ascii_lowercase();
             if let Some(spec) = lower.strip_prefix("color=") {
-                flush(&mut cur, cur_color, &mut spans);
+                flush(&mut cur, cur_color, cur_effect, span_start, &mut spans);
+                span_start = char_index;
                 color_stack.push(parse_bbcode_color(spec).unwrap_or(cur_color));
             } else if lower == "/color" {
-                flush(&mut cur, cur_color, &mut spans);
+                flush(&mut cur, cur_color, cur_effect, span_start, &mut spans);
+                span_start = char_index;
                 if color_stack.len() > 1 {
                     color_stack.pop();
                 }
+            } else if let Some(name) = lower.strip_prefix('/') {
+                // A closer: pop only if it matches the open effect.
+                if effect_stack.last().map(|(n, _, _)| n.as_str()) == Some(name) {
+                    flush(&mut cur, cur_color, cur_effect, span_start, &mut spans);
+                    span_start = char_index;
+                    effect_stack.pop();
+                }
+                // Otherwise it is `[/b]` and friends: strip, no state change.
             } else {
-                // b/i/u/s and unknown tags: strip, no color change.
+                // An opener: `wave`, or `wave amp=20 freq=3`.
+                let (name, params) = parse_tag_params(&lower);
+                if let Some(effect) = BuiltinEffect::parse(name, &params) {
+                    flush(&mut cur, cur_color, cur_effect, span_start, &mut spans);
+                    span_start = char_index;
+                    effect_stack.push((name.to_string(), effect, char_index));
+                }
+                // b/i/u/s, unknown tags, and script-defined effect tags (which
+                // cannot be dispatched yet — see `char_fx`): strip, no change.
             }
         } else {
             cur.push(c);
+            char_index += 1;
         }
     }
     let cur_color = *color_stack.last().unwrap();
-    flush(&mut cur, cur_color, &mut spans);
+    let cur_effect = effect_stack.last().map(|(_, e, start)| (*e, *start));
+    flush(&mut cur, cur_color, cur_effect, span_start, &mut spans);
+    backfill_effect_ends(&mut spans);
     spans
+}
+
+/// Fills in each effect application's `end` once all its runs are known.
+///
+/// Consecutive effected spans sharing an `effect_range.0` are the same
+/// application — a nested tag (`[wave]a[color=red]b[/color]c[/wave]`) split it
+/// into several runs, but it is one travelling wave, so they must all report the
+/// full range. Without this, every sub-run would restart at `relative_index 0`
+/// and the glyphs would bob in phase instead of travelling (pat-nzgdu.157).
+fn backfill_effect_ends(spans: &mut [TextSpan]) {
+    let mut i = 0;
+    while i < spans.len() {
+        if spans[i].effect.is_none() {
+            i += 1;
+            continue;
+        }
+        let start = spans[i].effect_range.0;
+        // Walk the whole application: same effect start, uninterrupted.
+        let mut j = i;
+        let mut end = start;
+        while j < spans.len()
+            && spans[j].effect.is_some()
+            && spans[j].effect_range.0 == start
+        {
+            end = spans[j].char_offset + spans[j].text.chars().count();
+            j += 1;
+        }
+        for span in &mut spans[i..j] {
+            span.effect_range.1 = end;
+        }
+        i = j;
+    }
+}
+
+/// Splits a BBCode tag body into its name and `key=value` params:
+/// `"wave amp=20 freq=3"` -> `("wave", {"amp": "20", "freq": "3"})`.
+fn parse_tag_params(tag: &str) -> (&str, HashMap<String, String>) {
+    let mut parts = tag.split_whitespace();
+    let name = parts.next().unwrap_or("");
+    let mut params = HashMap::new();
+    for p in parts {
+        if let Some((k, v)) = p.split_once('=') {
+            params.insert(k.to_string(), v.to_string());
+        }
+    }
+    (name, params)
 }
 
 /// Parses a BBCode color spec: `#rgb`, `#rrggbb`, `#rrggbbaa`, or a small set of
@@ -434,20 +549,63 @@ fn draw_control(
                     .get_font_size("RichTextLabel", "font_size")
                     .unwrap_or(16);
                 let scale = text_scale(font_size);
+                // Effects are pure functions of elapsed time, which the label
+                // carries as a property so the renderer stays a function of the
+                // tree. A frame driver advances it; a test sets it directly.
+                let elapsed = float_prop(tree, node_id, "fx_elapsed_time").unwrap_or(0.0) as f32;
+                let spans = parse_bbcode(&raw, font_color);
+                // The effect's range is its own run, so glyphs phase from the
+                // tag rather than from the start of the label's text.
                 let mut x = rect.position.x;
                 let y = rect.position.y;
-                for span in parse_bbcode(&raw, font_color) {
+                for span in spans {
                     if span.text.is_empty() {
                         continue;
                     }
                     let w = text_width(&span.text, scale);
-                    out.push(DrawCommand::DrawString {
-                        text: span.text,
-                        position: Vector2::new(x, y),
-                        color: span.color,
-                        font_size: scale,
-                    });
-                    x += w + GLYPH_GAP * scale as f32;
+                    match span.effect {
+                        // Plain text: one draw call for the whole run.
+                        None => {
+                            out.push(DrawCommand::DrawString {
+                                text: span.text,
+                                position: Vector2::new(x, y),
+                                color: span.color,
+                                font_size: scale,
+                            });
+                            x += w + GLYPH_GAP * scale as f32;
+                        }
+                        // Effected text: each glyph moves independently, so it
+                        // needs its own draw call with its own offset/color.
+                        Some(effect) => {
+                            // The whole tag's range, not this run's — a nested
+                            // tag splits the run but must not restart the phase.
+                            let range = span.effect_range;
+                            let mut gx = x;
+                            for (i, ch) in span.text.chars().enumerate() {
+                                let mut fx = CharFXTransform::new(
+                                    span.char_offset + i,
+                                    range,
+                                    elapsed,
+                                    span.color,
+                                );
+                                effect.apply(&mut fx);
+                                let gw = text_width(&ch.to_string(), scale);
+                                if fx.visible {
+                                    out.push(DrawCommand::DrawString {
+                                        text: ch.to_string(),
+                                        position: Vector2::new(gx, y) + fx.offset,
+                                        color: fx.color,
+                                        font_size: scale,
+                                    });
+                                }
+                                // Advance by the un-offset width: the effect
+                                // displaces the glyph, it must not re-flow the
+                                // line under it.
+                                gx += gw + GLYPH_GAP * scale as f32;
+                            }
+                            x = gx;
+                        }
+                    }
                 }
             }
         }

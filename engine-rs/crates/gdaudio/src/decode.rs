@@ -363,13 +363,97 @@ impl AudioStreamGenerator {
             channels: 2,
         }
     }
+
+    /// Frames still buffered, waiting to be mixed out (pat-nzgdu.153).
+    pub fn frames_queued(&self) -> usize {
+        self.buffer.len() / 2
+    }
+
+    /// Room left before the buffer is full — Godot's
+    /// `AudioStreamGeneratorPlayback.get_frames_available()` (pat-nzgdu.153).
+    pub fn frames_available(&self) -> usize {
+        self.max_frames.saturating_sub(self.frames_queued())
+    }
+
+    /// Whether `frames` more frames would fit — Godot's `can_push_buffer()`.
+    pub fn can_push_buffer(&self, frames: usize) -> bool {
+        self.frames_available() >= frames
+    }
+
+    /// Pushes a whole block of stereo frames — Godot's
+    /// `AudioStreamGeneratorPlayback.push_buffer()` (pat-nzgdu.153).
+    ///
+    /// **All or nothing:** if the block doesn't fit, nothing is pushed and this
+    /// returns `false`, matching Godot — a partial push would tear the signal.
+    pub fn push_buffer(&mut self, frames: &[(f32, f32)]) -> bool {
+        if !self.can_push_buffer(frames.len()) {
+            return false;
+        }
+        for &(left, right) in frames {
+            self.buffer.push(left);
+            self.buffer.push(right);
+        }
+        true
+    }
+
+    /// Drops every queued frame — Godot's `clear_buffer()`.
+    pub fn clear_buffer(&mut self) {
+        self.buffer.clear();
+    }
+
+    /// **Consumes** up to `frames` frames and returns them (pat-nzgdu.153).
+    ///
+    /// This is what an audio sink pulls each block, and it is the counterpart to
+    /// [`push_buffer`](Self::push_buffer): what goes in comes back out, once.
+    /// Unlike [`mix_to_buffer`](Self::mix_to_buffer) — which peeks at the whole
+    /// queue and leaves it in place — mixed frames are removed, so the generator
+    /// refills rather than replaying stale audio.
+    ///
+    /// Yields fewer frames than asked (possibly none) when the queue runs dry;
+    /// an underrun is silence, not an error.
+    pub fn mix(&mut self, frames: usize) -> AudioBuffer {
+        let take = frames.min(self.frames_queued());
+        let samples: Vec<f32> = self.buffer.drain(..take * 2).collect();
+        AudioBuffer {
+            samples,
+            sample_rate: self.sample_rate,
+            channels: 2,
+        }
+    }
+}
+
+/// One sounding sub-playback inside a [`PolyphonicPlayer`] (pat-nzgdu.153).
+#[derive(Debug, Clone)]
+struct Voice {
+    /// The stereo frames this voice plays.
+    buffer: AudioBuffer,
+    /// Next frame to read.
+    cursor: usize,
+}
+
+impl Voice {
+    fn frames(&self) -> usize {
+        self.buffer.samples.len() / 2
+    }
+    fn finished(&self) -> bool {
+        self.cursor >= self.frames()
+    }
 }
 
 /// Simple polyphonic voice pool.
+///
+/// Godot's `AudioStreamPlaybackPolyphonic` runs several streams at once on one
+/// player and sums them. [`try_play`](Self::try_play) reserves a voice slot;
+/// [`play_buffer`](Self::play_buffer) reserves one **and** gives it audio, which
+/// [`mix`](Self::mix) then sums (pat-nzgdu.153).
 #[derive(Debug, Default)]
 pub struct PolyphonicPlayer {
     pub max_voices: usize,
     pub active: usize,
+    /// Output rate of [`mix`](Self::mix). Voices are assumed to already be at
+    /// this rate (they share a bus); resampling belongs to the Resampled base.
+    pub sample_rate: u32,
+    voices: Vec<Voice>,
 }
 
 impl PolyphonicPlayer {
@@ -377,6 +461,8 @@ impl PolyphonicPlayer {
         Self {
             max_voices,
             active: 0,
+            sample_rate: 44_100,
+            voices: Vec::new(),
         }
     }
     pub fn try_play(&mut self) -> bool {
@@ -388,6 +474,55 @@ impl PolyphonicPlayer {
     }
     pub fn stop_one(&mut self) {
         self.active = self.active.saturating_sub(1);
+    }
+
+    /// Starts a sub-playback from `buffer` (pat-nzgdu.153).
+    ///
+    /// Takes a voice slot via [`try_play`](Self::try_play), so the pool's limit
+    /// is enforced identically however a voice was started. Returns `false` when
+    /// the pool is full — Godot drops the request rather than stealing a voice.
+    pub fn play_buffer(&mut self, buffer: AudioBuffer) -> bool {
+        if !self.try_play() {
+            return false;
+        }
+        self.voices.push(Voice { buffer, cursor: 0 });
+        true
+    }
+
+    /// Number of sub-playbacks still sounding.
+    pub fn voice_count(&self) -> usize {
+        self.voices.len()
+    }
+
+    /// Sums `frames` frames from every sounding sub-playback (pat-nzgdu.153).
+    ///
+    /// Voices that run out contribute silence for the rest of the block and are
+    /// then retired, freeing their slot — so a finished one-shot doesn't hold
+    /// the pool at its limit forever. Output is **not** clamped: mixing is
+    /// additive and headroom is the bus's job, matching Godot's mix stage.
+    pub fn mix(&mut self, frames: usize) -> AudioBuffer {
+        let mut samples = vec![0.0f32; frames * 2];
+        for voice in &mut self.voices {
+            let available = voice.frames().saturating_sub(voice.cursor);
+            let take = frames.min(available);
+            for i in 0..take {
+                let src = (voice.cursor + i) * 2;
+                samples[i * 2] += voice.buffer.samples[src];
+                samples[i * 2 + 1] += voice.buffer.samples[src + 1];
+            }
+            voice.cursor += take;
+        }
+        // Retire exhausted voices and free their slots.
+        let before = self.voices.len();
+        self.voices.retain(|v| !v.finished());
+        let retired = before - self.voices.len();
+        self.active = self.active.saturating_sub(retired);
+
+        AudioBuffer {
+            samples,
+            sample_rate: self.sample_rate,
+            channels: 2,
+        }
     }
 }
 
@@ -405,6 +540,109 @@ mod mp3_gen_tests {
         let buf = decode_mp3(&data).unwrap();
         assert_eq!(buf.sample_rate, 44100);
         assert_eq!(buf.samples.len(), 2);
+    }
+
+    // -- pat-nzgdu.153: generator push_buffer/mix + polyphonic mixing --------
+
+    fn buf(frames: &[(f32, f32)]) -> AudioBuffer {
+        let mut samples = Vec::new();
+        for &(l, r) in frames {
+            samples.push(l);
+            samples.push(r);
+        }
+        AudioBuffer {
+            samples,
+            sample_rate: 44_100,
+            channels: 2,
+        }
+    }
+
+    #[test]
+    fn generator_push_buffer_then_mix_returns_the_pushed_frames() {
+        let mut g = AudioStreamGenerator::new(48_000, 4);
+        assert_eq!(g.frames_available(), 4);
+
+        assert!(g.push_buffer(&[(0.1, 0.2), (0.3, 0.4)]));
+        assert_eq!(g.frames_queued(), 2);
+        assert_eq!(g.frames_available(), 2);
+
+        // What went in comes back out, in order.
+        let out = g.mix(2);
+        assert_eq!(out.samples, vec![0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(out.sample_rate, 48_000);
+        assert_eq!(out.channels, 2);
+
+        // mix CONSUMES — the queue is empty and refillable, not replayed.
+        assert_eq!(g.frames_queued(), 0);
+        assert_eq!(g.frames_available(), 4);
+        assert!(g.mix(2).samples.is_empty(), "an empty queue mixes silence");
+    }
+
+    #[test]
+    fn generator_push_buffer_is_all_or_nothing() {
+        let mut g = AudioStreamGenerator::new(48_000, 2);
+        // Three frames into a two-frame buffer: Godot rejects rather than
+        // partially filling (a torn push would tear the signal).
+        assert!(!g.can_push_buffer(3));
+        assert!(!g.push_buffer(&[(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]));
+        assert_eq!(g.frames_queued(), 0, "nothing was pushed");
+
+        assert!(g.push_buffer(&[(1.0, 1.0), (2.0, 2.0)]));
+        assert_eq!(g.frames_available(), 0);
+        g.clear_buffer();
+        assert_eq!(g.frames_queued(), 0);
+    }
+
+    #[test]
+    fn generator_mix_yields_what_is_queued_when_asked_for_more() {
+        let mut g = AudioStreamGenerator::new(48_000, 8);
+        assert!(g.push_buffer(&[(0.5, -0.5)]));
+        // Under-run: one frame available, two requested.
+        let out = g.mix(2);
+        assert_eq!(out.samples, vec![0.5, -0.5]);
+    }
+
+    #[test]
+    fn polyphonic_mixes_concurrent_sub_playbacks() {
+        let mut p = PolyphonicPlayer::new(3);
+        assert!(p.play_buffer(buf(&[(0.1, 0.2), (0.3, 0.4)])));
+        assert!(p.play_buffer(buf(&[(0.01, 0.02), (0.03, 0.04)])));
+        assert_eq!(p.voice_count(), 2);
+        assert_eq!(p.active, 2);
+
+        // Both voices sum, frame for frame.
+        let out = p.mix(2);
+        assert_eq!(out.channels, 2);
+        assert!((out.samples[0] - 0.11).abs() < 1e-6, "{:?}", out.samples);
+        assert!((out.samples[1] - 0.22).abs() < 1e-6, "{:?}", out.samples);
+        assert!((out.samples[2] - 0.33).abs() < 1e-6, "{:?}", out.samples);
+        assert!((out.samples[3] - 0.44).abs() < 1e-6, "{:?}", out.samples);
+    }
+
+    #[test]
+    fn polyphonic_retires_finished_voices_and_frees_slots() {
+        let mut p = PolyphonicPlayer::new(1);
+        assert!(p.play_buffer(buf(&[(1.0, 1.0)])));
+        // Pool is full: a second voice is dropped, not stolen.
+        assert!(!p.play_buffer(buf(&[(9.0, 9.0)])));
+
+        // Mixing past the end drains the voice and frees its slot.
+        let out = p.mix(2);
+        assert_eq!(out.samples, vec![1.0, 1.0, 0.0, 0.0], "tail is silence");
+        assert_eq!(p.voice_count(), 0);
+        assert_eq!(p.active, 0, "a finished one-shot must not hold the pool");
+
+        // The freed slot is reusable.
+        assert!(p.play_buffer(buf(&[(0.5, 0.5)])));
+        assert_eq!(p.voice_count(), 1);
+    }
+
+    #[test]
+    fn polyphonic_with_no_voices_mixes_silence() {
+        let mut p = PolyphonicPlayer::new(2);
+        let out = p.mix(3);
+        assert_eq!(out.samples, vec![0.0; 6]);
+        assert_eq!(out.sample_rate, 44_100);
     }
 
     #[test]

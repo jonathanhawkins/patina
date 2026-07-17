@@ -43,9 +43,510 @@ impl XrServer {
     }
 }
 
+// ---------------------------------------------------------------------------
+// WebXRInterface session lifecycle (pat-nzgdu.150)
+// ---------------------------------------------------------------------------
+
+/// Godot's `WebXRInterface.session_mode` (`navigator.xr` session modes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WebXrSessionMode {
+    /// `'inline'` — rendered into the page, no headset. Godot's default.
+    #[default]
+    Inline,
+    /// `'immersive-vr'`.
+    ImmersiveVr,
+    /// `'immersive-ar'`.
+    ImmersiveAr,
+}
+
+impl WebXrSessionMode {
+    /// Parses the string Godot/WebXR uses on the wire. Unknown values map to
+    /// `None` so a script typo surfaces rather than silently becoming inline.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "inline" => Some(WebXrSessionMode::Inline),
+            "immersive-vr" => Some(WebXrSessionMode::ImmersiveVr),
+            "immersive-ar" => Some(WebXrSessionMode::ImmersiveAr),
+            _ => None,
+        }
+    }
+
+    /// The `navigator.xr` string for this mode.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WebXrSessionMode::Inline => "inline",
+            WebXrSessionMode::ImmersiveVr => "immersive-vr",
+            WebXrSessionMode::ImmersiveAr => "immersive-ar",
+        }
+    }
+}
+
+/// Where a WebXR session currently is in its lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WebXrSessionState {
+    /// No session requested yet, or the last one ended.
+    #[default]
+    Idle,
+    /// `initialize()` called; `requestSession` is in flight.
+    Requesting,
+    /// A session is running.
+    Active,
+}
+
+/// A signal the interface wants emitted, mirroring `WebXRInterface`'s
+/// callback-driven API (pat-nzgdu.150).
+///
+/// WebXR is asynchronous — `is_session_supported()` and `initialize()` both
+/// return immediately and answer later — so the interface records what it owes
+/// the script here and the binding layer drains it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WebXrSignal {
+    /// `session_supported(session_mode, supported)`.
+    SessionSupported {
+        /// The mode that was queried.
+        mode: WebXrSessionMode,
+        /// Whether the browser reports support.
+        supported: bool,
+    },
+    /// `session_started()`.
+    SessionStarted,
+    /// `session_failed(message)`.
+    SessionFailed {
+        /// Why the session request was rejected.
+        message: String,
+    },
+    /// `session_ended()`.
+    SessionEnded,
+    /// `visibility_state_changed()`.
+    VisibilityStateChanged,
+    /// `reference_space_reset()`.
+    ReferenceSpaceReset,
+}
+
+/// What a browser's `navigator.xr` would answer, supplied by the caller.
+///
+/// On the web this is backed by real `navigator.xr` promises; natively — and in
+/// tests — it is set directly, which is exactly the "stubbed navigator.xr" the
+/// bead's acceptance describes. Defaults model a **browser with no WebXR at
+/// all**, which is also the correct native answer: `is_session_supported`
+/// reports unsupported rather than panicking.
+#[derive(Debug, Clone, Default)]
+pub struct WebXrStub {
+    /// Modes the "browser" supports.
+    pub supported_modes: Vec<WebXrSessionMode>,
+    /// Features the "browser" will grant; a required feature outside this list
+    /// makes the session request fail, as in WebXR.
+    pub available_features: Vec<String>,
+    /// When set, `initialize()` fails with this message regardless of features.
+    pub force_failure: Option<String>,
+}
+
+/// Godot's `WebXRInterface` — the session lifecycle and its signal queue
+/// (pat-nzgdu.150).
+///
+/// This is the interface's own logic, driven by a [`WebXrStub`] standing in for
+/// `navigator.xr`. The browser bindings (wasm32) would drive the same state
+/// machine from real promises/events; nothing here is web-specific, so it is
+/// testable natively.
+///
+/// **Not yet wired to script.** `XRServer.find_interface("WebXR")` and emitting
+/// these signals to a connected callback are the remaining half — see the bead.
+#[derive(Debug, Clone, Default)]
+pub struct WebXrInterface {
+    /// Requested session mode (Godot `session_mode`).
+    pub session_mode: WebXrSessionMode,
+    /// Features the session cannot start without (Godot `required_features`).
+    pub required_features: Vec<String>,
+    /// Features requested but not essential (Godot `optional_features`).
+    pub optional_features: Vec<String>,
+    /// Reference spaces to try, best first (Godot `requested_reference_space_types`).
+    pub requested_reference_space_types: Vec<String>,
+    state: WebXrSessionState,
+    reference_space_type: String,
+    enabled_features: Vec<String>,
+    visibility_state: String,
+    pending: Vec<WebXrSignal>,
+    stub: WebXrStub,
+}
+
+impl WebXrInterface {
+    /// A fresh interface with no session and no browser support (the correct
+    /// native answer).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Installs the stand-in for `navigator.xr`.
+    pub fn set_stub(&mut self, stub: WebXrStub) {
+        self.stub = stub;
+    }
+
+    /// Godot's `WebXRInterface.name`.
+    pub fn name(&self) -> &'static str {
+        "WebXR"
+    }
+
+    /// Current lifecycle state.
+    pub fn state(&self) -> WebXrSessionState {
+        self.state
+    }
+
+    /// Whether a session is running (Godot `XRInterface.is_initialized`).
+    pub fn is_initialized(&self) -> bool {
+        self.state == WebXrSessionState::Active
+    }
+
+    /// Resolved reference space (Godot `reference_space_type`); empty until a
+    /// session starts.
+    pub fn reference_space_type(&self) -> &str {
+        &self.reference_space_type
+    }
+
+    /// Features the session actually granted (Godot `enabled_features`).
+    pub fn enabled_features(&self) -> &[String] {
+        &self.enabled_features
+    }
+
+    /// Godot `visibility_state`; empty outside a session.
+    pub fn visibility_state(&self) -> &str {
+        &self.visibility_state
+    }
+
+    /// Drains the queued signals (the seam the script binding emits from).
+    ///
+    /// Draining is idempotent: a second call returns nothing until more are
+    /// queued.
+    pub fn take_signals(&mut self) -> Vec<WebXrSignal> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Godot's `is_session_supported(mode)` — **returns nothing**; the answer
+    /// arrives later as a `session_supported` signal.
+    ///
+    /// An unknown mode string answers `supported = false` (rather than
+    /// erroring), matching a browser that simply doesn't know the mode.
+    pub fn is_session_supported(&mut self, mode: &str) {
+        match WebXrSessionMode::from_str(mode) {
+            Some(m) => {
+                let supported = self.stub.supported_modes.contains(&m);
+                self.pending
+                    .push(WebXrSignal::SessionSupported { mode: m, supported });
+            }
+            None => {
+                self.pending.push(WebXrSignal::SessionSupported {
+                    mode: WebXrSessionMode::Inline,
+                    supported: false,
+                });
+            }
+        }
+    }
+
+    /// Godot's `XRInterface.initialize()` — requests a session asynchronously.
+    ///
+    /// Answers with `session_started` or `session_failed(message)`. Returns
+    /// `true` when the request was accepted for processing (Godot's return),
+    /// **not** that the session started.
+    pub fn initialize(&mut self) -> bool {
+        if self.state == WebXrSessionState::Active {
+            // Already running: Godot treats initialize() on a live interface as
+            // a no-op success.
+            return true;
+        }
+        self.state = WebXrSessionState::Requesting;
+
+        if let Some(msg) = self.stub.force_failure.clone() {
+            return self.fail(msg);
+        }
+        if !self.stub.supported_modes.contains(&self.session_mode) {
+            let msg = format!("session mode '{}' is not supported", self.session_mode.as_str());
+            return self.fail(msg);
+        }
+        // WebXR rejects the request if any required feature is unavailable.
+        if let Some(missing) = self
+            .required_features
+            .iter()
+            .find(|f| !self.stub.available_features.contains(f))
+        {
+            let msg = format!("required feature '{missing}' is not available");
+            return self.fail(msg);
+        }
+
+        // Optional features are granted only where available — never fatal.
+        let mut enabled = self.required_features.clone();
+        enabled.extend(
+            self.optional_features
+                .iter()
+                .filter(|f| self.stub.available_features.contains(f))
+                .cloned(),
+        );
+        self.enabled_features = enabled;
+
+        // First requested reference space wins; Godot falls back to "viewer",
+        // which every session provides.
+        self.reference_space_type = self
+            .requested_reference_space_types
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "viewer".to_string());
+
+        self.state = WebXrSessionState::Active;
+        self.visibility_state = "visible".to_string();
+        self.pending.push(WebXrSignal::SessionStarted);
+        true
+    }
+
+    /// Records a failed session request and returns `true` (the request itself
+    /// was accepted; the failure is reported by signal, as in WebXR).
+    fn fail(&mut self, message: String) -> bool {
+        self.state = WebXrSessionState::Idle;
+        self.pending.push(WebXrSignal::SessionFailed { message });
+        true
+    }
+
+    /// Godot's `XRInterface.uninitialize()` / the browser's session end.
+    /// Emits `session_ended` only if a session was actually running.
+    pub fn uninitialize(&mut self) {
+        if self.state != WebXrSessionState::Active {
+            return;
+        }
+        self.state = WebXrSessionState::Idle;
+        self.reference_space_type.clear();
+        self.enabled_features.clear();
+        self.visibility_state.clear();
+        self.pending.push(WebXrSignal::SessionEnded);
+    }
+
+    /// The browser's `visibilitychange` (Godot `visibility_state_changed`).
+    /// Ignored outside a session.
+    pub fn set_visibility_state(&mut self, state: &str) {
+        if self.state != WebXrSessionState::Active || self.visibility_state == state {
+            return;
+        }
+        self.visibility_state = state.to_string();
+        self.pending.push(WebXrSignal::VisibilityStateChanged);
+    }
+
+    /// The browser's `reset` event on the reference space.
+    pub fn notify_reference_space_reset(&mut self) {
+        if self.state == WebXrSessionState::Active {
+            self.pending.push(WebXrSignal::ReferenceSpaceReset);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- pat-nzgdu.150: WebXRInterface session lifecycle ---------------------
+
+    /// A "browser" supporting immersive-vr with the given features.
+    fn vr_stub(features: &[&str]) -> WebXrStub {
+        WebXrStub {
+            supported_modes: vec![WebXrSessionMode::ImmersiveVr, WebXrSessionMode::Inline],
+            available_features: features.iter().map(|s| s.to_string()).collect(),
+            force_failure: None,
+        }
+    }
+
+    #[test]
+    fn session_mode_string_roundtrip() {
+        for m in [
+            WebXrSessionMode::Inline,
+            WebXrSessionMode::ImmersiveVr,
+            WebXrSessionMode::ImmersiveAr,
+        ] {
+            assert_eq!(WebXrSessionMode::from_str(m.as_str()), Some(m));
+        }
+        // Unknown strings do not silently become inline.
+        assert_eq!(WebXrSessionMode::from_str("immersive-holodeck"), None);
+        assert_eq!(WebXrSessionMode::default(), WebXrSessionMode::Inline);
+    }
+
+    #[test]
+    fn is_session_supported_answers_by_signal_not_return_value() {
+        // WebXR is callback-based: the answer arrives as a signal.
+        let mut xr = WebXrInterface::new();
+        xr.set_stub(vr_stub(&[]));
+
+        xr.is_session_supported("immersive-vr");
+        assert_eq!(
+            xr.take_signals(),
+            vec![WebXrSignal::SessionSupported {
+                mode: WebXrSessionMode::ImmersiveVr,
+                supported: true,
+            }],
+        );
+
+        xr.is_session_supported("immersive-ar");
+        assert_eq!(
+            xr.take_signals(),
+            vec![WebXrSignal::SessionSupported {
+                mode: WebXrSessionMode::ImmersiveAr,
+                supported: false,
+            }],
+        );
+        // Draining is idempotent.
+        assert!(xr.take_signals().is_empty());
+    }
+
+    #[test]
+    fn native_default_reports_unsupported_rather_than_panicking() {
+        // No stub = no browser WebXR, which is the correct native answer.
+        let mut xr = WebXrInterface::new();
+        xr.is_session_supported("immersive-vr");
+        assert_eq!(
+            xr.take_signals(),
+            vec![WebXrSignal::SessionSupported {
+                mode: WebXrSessionMode::ImmersiveVr,
+                supported: false,
+            }],
+        );
+        assert!(!xr.is_initialized());
+
+        // initialize() must also fail cleanly, not panic.
+        assert!(xr.initialize());
+        assert!(matches!(
+            xr.take_signals().as_slice(),
+            [WebXrSignal::SessionFailed { .. }],
+        ));
+        assert_eq!(xr.state(), WebXrSessionState::Idle);
+    }
+
+    #[test]
+    fn initialize_starts_a_session_and_resolves_features_and_reference_space() {
+        let mut xr = WebXrInterface::new();
+        xr.set_stub(vr_stub(&["local-floor", "hand-tracking"]));
+        xr.session_mode = WebXrSessionMode::ImmersiveVr;
+        xr.required_features = vec!["local-floor".to_string()];
+        // 'bounded-floor' is NOT available — optional, so it must not be fatal.
+        xr.optional_features = vec!["hand-tracking".to_string(), "bounded-floor".to_string()];
+        xr.requested_reference_space_types =
+            vec!["local-floor".to_string(), "viewer".to_string()];
+
+        assert!(xr.initialize());
+        assert_eq!(xr.take_signals(), vec![WebXrSignal::SessionStarted]);
+        assert!(xr.is_initialized());
+        assert_eq!(xr.state(), WebXrSessionState::Active);
+
+        // First requested reference space wins.
+        assert_eq!(xr.reference_space_type(), "local-floor");
+        // Granted = required + available optionals; the unavailable one is dropped.
+        assert_eq!(xr.enabled_features(), ["local-floor", "hand-tracking"]);
+        assert_eq!(xr.visibility_state(), "visible");
+    }
+
+    #[test]
+    fn a_missing_required_feature_fails_the_session() {
+        let mut xr = WebXrInterface::new();
+        xr.set_stub(vr_stub(&["local-floor"]));
+        xr.session_mode = WebXrSessionMode::ImmersiveVr;
+        xr.required_features = vec!["hand-tracking".to_string()];
+
+        assert!(xr.initialize(), "the request itself is accepted");
+        match xr.take_signals().as_slice() {
+            [WebXrSignal::SessionFailed { message }] => {
+                assert!(message.contains("hand-tracking"), "{message}");
+            }
+            other => panic!("expected session_failed, got {other:?}"),
+        }
+        // A failed request leaves no session behind.
+        assert!(!xr.is_initialized());
+        assert_eq!(xr.state(), WebXrSessionState::Idle);
+    }
+
+    #[test]
+    fn an_unsupported_mode_fails_the_session() {
+        let mut xr = WebXrInterface::new();
+        xr.set_stub(vr_stub(&[]));
+        xr.session_mode = WebXrSessionMode::ImmersiveAr; // stub has no AR
+
+        assert!(xr.initialize());
+        match xr.take_signals().as_slice() {
+            [WebXrSignal::SessionFailed { message }] => {
+                assert!(message.contains("immersive-ar"), "{message}");
+            }
+            other => panic!("expected session_failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reference_space_defaults_to_viewer() {
+        let mut xr = WebXrInterface::new();
+        xr.set_stub(vr_stub(&[]));
+        xr.session_mode = WebXrSessionMode::ImmersiveVr;
+        // Nothing requested: every session provides "viewer".
+        assert!(xr.initialize());
+        assert_eq!(xr.reference_space_type(), "viewer");
+    }
+
+    #[test]
+    fn session_ends_once_and_clears_its_state() {
+        let mut xr = WebXrInterface::new();
+        xr.set_stub(vr_stub(&[]));
+        xr.session_mode = WebXrSessionMode::ImmersiveVr;
+        xr.initialize();
+        let _ = xr.take_signals();
+
+        xr.uninitialize();
+        assert_eq!(xr.take_signals(), vec![WebXrSignal::SessionEnded]);
+        assert!(!xr.is_initialized());
+        assert_eq!(xr.reference_space_type(), "");
+        assert!(xr.enabled_features().is_empty());
+
+        // Ending an already-ended session emits nothing.
+        xr.uninitialize();
+        assert!(xr.take_signals().is_empty());
+    }
+
+    #[test]
+    fn visibility_and_reference_space_reset_only_fire_inside_a_session() {
+        let mut xr = WebXrInterface::new();
+        xr.set_stub(vr_stub(&[]));
+
+        // Outside a session these are ignored.
+        xr.set_visibility_state("hidden");
+        xr.notify_reference_space_reset();
+        assert!(xr.take_signals().is_empty());
+
+        xr.session_mode = WebXrSessionMode::ImmersiveVr;
+        xr.initialize();
+        let _ = xr.take_signals();
+
+        xr.set_visibility_state("hidden");
+        assert_eq!(xr.take_signals(), vec![WebXrSignal::VisibilityStateChanged]);
+        assert_eq!(xr.visibility_state(), "hidden");
+        // Same value again is not a change.
+        xr.set_visibility_state("hidden");
+        assert!(xr.take_signals().is_empty());
+
+        xr.notify_reference_space_reset();
+        assert_eq!(xr.take_signals(), vec![WebXrSignal::ReferenceSpaceReset]);
+    }
+
+    #[test]
+    fn forced_failure_reports_the_browsers_message() {
+        let mut xr = WebXrInterface::new();
+        let mut stub = vr_stub(&[]);
+        stub.force_failure = Some("NotAllowedError: user denied".to_string());
+        xr.set_stub(stub);
+        xr.session_mode = WebXrSessionMode::ImmersiveVr;
+
+        assert!(xr.initialize());
+        match xr.take_signals().as_slice() {
+            [WebXrSignal::SessionFailed { message }] => {
+                assert!(message.contains("NotAllowedError"), "{message}");
+            }
+            other => panic!("expected session_failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interface_name_is_webxr() {
+        // XRServer.find_interface("WebXR") will match on this.
+        assert_eq!(WebXrInterface::new().name(), "WebXR");
+    }
+
     #[test]
     fn mock_session_pose() {
         let mut s = XrServer::new();
