@@ -470,6 +470,9 @@ pub const IK_ITERATIONS_KEY: &str = "iterations";
 pub const SKELETON_MODIFIER_CLASS: &str = "SkeletonModifier3D";
 /// Godot's `IKModifier3D` class name.
 pub const IK_MODIFIER_CLASS: &str = "IKModifier3D";
+/// Godot's `FABRIK3D` class name — an `IterateIK3D` whose solver is FABRIK
+/// (pat-nzgdu.183).
+pub const FABRIK_CLASS: &str = "FABRIK3D";
 
 /// Below this the chain is treated as already aligned and left alone, so a
 /// solved chain doesn't jitter.
@@ -532,19 +535,41 @@ pub fn process_modifiers(tree: &mut SceneTree, skeleton_id: NodeId) {
         .unwrap_or_default();
 
     for child in children {
-        let is_ik = tree
-            .get_node(child)
-            .map(|n| n.class_name() == IK_MODIFIER_CLASS)
-            .unwrap_or(false);
-        if !is_ik || !modifier_active(tree, child) {
+        let class = match tree.get_node(child) {
+            Some(n) => n.class_name().to_string(),
+            None => continue,
+        };
+        // Godot picks the algorithm by CLASS: FABRIK3D, CCDIK3D and
+        // JacobianIK3D are siblings under IterateIK3D that share every knob and
+        // differ only in how they solve (pat-nzgdu.183).
+        let solver = match class.as_str() {
+            IK_MODIFIER_CLASS => IkSolverKind::Ccd,
+            FABRIK_CLASS => IkSolverKind::Fabrik,
+            _ => continue,
+        };
+        if !modifier_active(tree, child) {
             continue;
         }
-        apply_ik_modifier(tree, skeleton_id, child);
+        apply_ik_modifier(tree, skeleton_id, child, solver);
     }
 }
 
-/// Applies one `IKModifier3D` to its skeleton.
-fn apply_ik_modifier(tree: &mut SceneTree, skeleton_id: NodeId, modifier_id: NodeId) {
+/// Which algorithm a modifier's class selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IkSolverKind {
+    /// Cyclic Coordinate Descent — `IKModifier3D` (pat-nzgdu.151).
+    Ccd,
+    /// Forward And Backward Reaching IK — `FABRIK3D` (pat-nzgdu.183).
+    Fabrik,
+}
+
+/// Applies one IK modifier to its skeleton, using the algorithm its class picks.
+fn apply_ik_modifier(
+    tree: &mut SceneTree,
+    skeleton_id: NodeId,
+    modifier_id: NodeId,
+    solver: IkSolverKind,
+) {
     let node = match tree.get_node(modifier_id) {
         Some(n) => n,
         None => return,
@@ -571,7 +596,105 @@ fn apply_ik_modifier(tree: &mut SceneTree, skeleton_id: NodeId, modifier_id: Nod
         return;
     }
 
-    solve_ccd(tree, skeleton_id, root, tip, target, iterations, influence);
+    match solver {
+        IkSolverKind::Ccd => {
+            solve_ccd(tree, skeleton_id, root, tip, target, iterations, influence)
+        }
+        IkSolverKind::Fabrik => {
+            solve_fabrik_chain(tree, skeleton_id, root, tip, target, iterations, influence)
+        }
+    }
+}
+
+/// Solves the chain with FABRIK and writes the result into the bone poses
+/// (pat-nzgdu.183).
+///
+/// The math core `ik_solver::solve_fabrik` already existed with its own tests —
+/// but it works in **world positions**, while a skeleton stores **poses**. This
+/// is the missing half: run FABRIK on the chain's joint positions, then turn the
+/// solved positions back into per-bone rotations.
+///
+/// Unlike CCD, FABRIK converges in one pass over the chain, so the iteration
+/// budget is spent inside `solve_fabrik` rather than re-walking the joints here.
+///
+/// `influence` scales each correction angle, matching `solve_ccd`: `0` leaves
+/// the pose untouched, `1` is a full solve.
+#[allow(clippy::too_many_arguments)]
+fn solve_fabrik_chain(
+    tree: &mut SceneTree,
+    skeleton_id: NodeId,
+    root: usize,
+    tip: usize,
+    target: Vector3,
+    iterations: u32,
+    influence: f32,
+) {
+    let chain = bone_chain(tree, skeleton_id, root, tip);
+    if chain.len() < 2 {
+        return; // nothing to rotate (or tip does not descend from root)
+    }
+
+    // FABRIK works on the chain's joint positions in skeleton space.
+    let joints: Vec<Vector3> = chain
+        .iter()
+        .map(|&b| get_bone_global_pose(tree, skeleton_id, b).origin)
+        .collect();
+
+    // NOTE: the IterateIK3D properties registered in ClassDB (`max_iterations`,
+    // `min_distance`, `angular_delta_limit`, `deterministic`) are NOT consumed
+    // here — this reads pat-nzgdu.151's flat `iterations` property and a fixed
+    // tolerance instead. Most visibly, `angular_delta_limit` (Godot's 2°/frame
+    // rotation cap) is unimplemented: Godot eases a big swing over many frames
+    // where this arrives in one. Wiring those knobs is follow-up; see the bead.
+    let solved = crate::ik_solver::solve_fabrik(&joints, target, iterations as usize, IK_EPSILON);
+
+    // Turn solved positions back into rotations, root → tip. Each bone rotates
+    // about its OWN origin, and rotating it carries its whole subtree with it —
+    // so the current positions are re-read every step rather than reused from
+    // `joints`, which went stale the moment the parent moved.
+    for i in 0..chain.len() - 1 {
+        let joint = chain[i];
+        let child = chain[i + 1];
+
+        let joint_pos = get_bone_global_pose(tree, skeleton_id, joint).origin;
+        let child_pos = get_bone_global_pose(tree, skeleton_id, child).origin;
+
+        let from_vec = child_pos - joint_pos;
+        // Aim at where FABRIK put the child, measured from where this joint
+        // actually is now.
+        let to_vec = solved[i + 1] - joint_pos;
+        if from_vec.length() < IK_EPSILON || to_vec.length() < IK_EPSILON {
+            continue;
+        }
+        let from = from_vec.normalized();
+        let to = to_vec.normalized();
+
+        let axis = from.cross(to);
+        if axis.length() < IK_EPSILON {
+            continue; // already aligned (or exactly opposed — no unique axis)
+        }
+        let angle = from.dot(to).clamp(-1.0, 1.0).acos() * influence;
+        if angle.abs() < IK_EPSILON {
+            continue;
+        }
+        let delta = Basis::from_quaternion(Quaternion::from_axis_angle(axis.normalized(), angle));
+
+        // Same frame conversion as solve_ccd: `delta` is a rotation in skeleton
+        // space, but poses are stored in the bone's parent frame.
+        let parent = get_bone_parent(tree, skeleton_id, joint);
+        let parent_basis = if parent >= 0 {
+            get_bone_global_pose(tree, skeleton_id, parent as usize).basis
+        } else {
+            Basis::IDENTITY
+        };
+        let rest = get_bone_rest(tree, skeleton_id, joint);
+        let pose = get_bone_pose(tree, skeleton_id, joint);
+
+        let frame = parent_basis * rest.basis;
+        let mut new_pose = pose;
+        new_pose.basis = frame.inverse() * delta * frame * pose.basis;
+        set_bone_pose(tree, skeleton_id, joint, new_pose);
+    }
 }
 
 /// Cyclic Coordinate Descent: rotate each joint in turn so the tip swings

@@ -13,6 +13,7 @@ pub mod mixer;
 pub mod output;
 pub mod player;
 pub mod sample;
+pub mod sample_pool;
 pub mod server;
 pub mod spatial;
 pub mod stream;

@@ -55,6 +55,7 @@ pub mod popup;
 pub mod raycast3d;
 pub mod render_server_3d;
 pub mod resource_preloader;
+pub mod root_motion_view;
 pub mod scene_bridge;
 pub mod scene_saver;
 pub mod scene_tree;

@@ -3953,7 +3953,11 @@ impl Interpreter {
                 let (v, _used) = gdvariant::binary::decode_variant(buf).map_err(|e| {
                     RuntimeError::new(RuntimeErrorKind::TypeError(format!("bytes_to_var: {e:?}")))
                 })?;
-                Ok(Some(v))
+                // Godot hands back an inert EncodedObjectAsID here, never a
+                // usable object — `bytes_to_var` decodes with objects disallowed
+                // (pat-nzgdu.189). Skipping this would turn a decoded id into a
+                // live scene reference.
+                Ok(Some(wrap_decoded_object_ids(v)))
             }
 
             // -- Utility (pat-u3l8c.20) ---------------------------------------
@@ -4635,6 +4639,12 @@ impl Interpreter {
                 // scene, so it is the one handle family that needs access.
                 let access = self.scene_access.as_deref_mut();
                 return call_undo_redo_instance(*oid, method, args, access);
+            }
+            // MUST precede the Variant::ObjectId arm below, which resolves ids
+            // against the live scene. An EncodedObjectAsID reports its id and
+            // resolves to nothing — that is the whole point (pat-nzgdu.189).
+            if is_encoded_object_as_id_handle(*oid) {
+                return call_encoded_object_as_id_instance(*oid, method, args);
             }
         }
         match obj {
@@ -10105,6 +10115,113 @@ fn is_undo_redo_handle(id: gdcore::id::ObjectId) -> bool {
     id.raw() & 0xFF00_0000_0000_0000 == UNDO_REDO_HANDLE_TAG
 }
 
+// ---------------------------------------------------------------------------
+// EncodedObjectAsID (pat-nzgdu.189)
+// ---------------------------------------------------------------------------
+
+/// Tags an `ObjectId` standing for an `EncodedObjectAsID`; mirrors the
+/// ConfigFile / FileAccess / DirAccess / CameraFeed / UndoRedo tags
+/// (0xCF / 0xFA / 0xDA / 0xCA / 0xED).
+const ENCODED_OBJECT_AS_ID_HANDLE_TAG: u64 = 0xE1_00_0000_0000_0000;
+
+thread_local! {
+    /// Maps an EncodedObjectAsID handle to the raw id it *reports*.
+    ///
+    /// The target is data, never a reference: nothing in this file resolves it
+    /// against the scene. That is the entire point — see
+    /// [`wrap_decoded_object_ids`].
+    static ENCODED_OBJECT_IDS: std::cell::RefCell<HashMap<u64, u64>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_ENCODED_OBJECT_ID: std::cell::Cell<u64> = std::cell::Cell::new(1);
+}
+
+/// Returns `true` when `id` was issued by [`new_encoded_object_as_id_handle`].
+fn is_encoded_object_as_id_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == ENCODED_OBJECT_AS_ID_HANDLE_TAG
+}
+
+/// Mints an `EncodedObjectAsID` reporting `target`.
+fn new_encoded_object_as_id_handle(target: u64) -> gdcore::id::ObjectId {
+    let seq = NEXT_ENCODED_OBJECT_ID.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = ENCODED_OBJECT_AS_ID_HANDLE_TAG | seq;
+    ENCODED_OBJECT_IDS.with(|m| m.borrow_mut().insert(raw, target));
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Replaces every decoded object id with an inert `EncodedObjectAsID`.
+///
+/// **This is a security boundary, not a formality.** Godot's `bytes_to_var`
+/// hands back an `EncodedObjectAsID` whose only surface is `object_id`; turning
+/// that id into a usable object needs an explicit `instance_from_id()`. That
+/// extra step is exactly what `p_allow_objects = false` buys
+/// (`core/io/marshalls.cpp:699-715`).
+///
+/// In this port `Variant::ObjectId` is *not* an inert id — it is the live node
+/// reference `get_node()` returns, and calling `get_children()` on one walks the
+/// scene tree. Returning a decoded id directly would therefore let
+/// `bytes_to_var(untrusted).get_children()` reach into the running scene, with
+/// ids that are trivially guessable (they start at 1). So every decoded id is
+/// re-wrapped in a tagged handle that reports the number and dereferences to
+/// nothing.
+///
+/// Applied recursively: an RPC payload is normally an array of arguments, and an
+/// id nested three levels down is exactly as dangerous as a bare one.
+fn wrap_decoded_object_ids(v: Variant) -> Variant {
+    match v {
+        Variant::ObjectId(id) => Variant::ObjectId(new_encoded_object_as_id_handle(id.raw())),
+        Variant::Array(items) => {
+            Variant::Array(items.into_iter().map(wrap_decoded_object_ids).collect())
+        }
+        Variant::Dictionary(d) => {
+            let mut out = gdvariant::dictionary::Dictionary::new();
+            for (k, val) in d.iter() {
+                // Keys are wrapped too: a dictionary keyed by object is rare but
+                // legal, and a live key is just as reachable as a live value.
+                out.insert(
+                    wrap_decoded_object_ids(k.clone()),
+                    wrap_decoded_object_ids(val.clone()),
+                );
+            }
+            Variant::Dictionary(out)
+        }
+        other => other,
+    }
+}
+
+/// `EncodedObjectAsID`'s whole method surface: the id it reports, and nothing
+/// that could resolve it.
+fn call_encoded_object_as_id_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let raw = id.raw();
+    match method {
+        "get_object_id" => Ok(Variant::Int(
+            ENCODED_OBJECT_IDS.with(|m| m.borrow().get(&raw).copied().unwrap_or(0)) as i64,
+        )),
+        "set_object_id" => {
+            let target = match args.first() {
+                Some(Variant::Int(i)) => *i as u64,
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "EncodedObjectAsID.set_object_id() expects an int id".into(),
+                    )))
+                }
+            };
+            ENCODED_OBJECT_IDS.with(|m| m.borrow_mut().insert(raw, target));
+            Ok(Variant::Nil)
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("EncodedObjectAsID.{other}"),
+        ))),
+    }
+}
+
 /// Allocates an `UndoRedo` in the handle table (script `UndoRedo.new()`).
 fn new_undo_redo_handle() -> gdcore::id::ObjectId {
     let seq = NEXT_UNDO_REDO.with(|n| {
@@ -10663,7 +10780,10 @@ fn call_marshalls_static(method: &str, args: &[Variant]) -> Result<Variant, Runt
                     "base64_to_variant: {e:?}"
                 )))
             })?;
-            Ok(v)
+            // Same decode, same hazard as `bytes_to_var`: base64 is just a
+            // transport for the identical bytes, so an id decoded here must be
+            // an inert EncodedObjectAsID too (pat-nzgdu.189).
+            Ok(wrap_decoded_object_ids(v))
         }
         "raw_to_base64" => match args.first() {
             Some(Variant::PackedByteArray(b)) => Ok(Variant::String(base64_encode(b))),

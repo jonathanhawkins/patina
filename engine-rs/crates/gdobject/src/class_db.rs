@@ -1334,6 +1334,94 @@ pub fn register_3d_classes() {
             .method(MethodInfo::new("set_joint_twist_amount", 3)),
     );
 
+    // -- IK solver chain (pat-nzgdu.183) -----------------------------------
+    //
+    // Godot's real hierarchy is deeper than "an IK modifier":
+    //   SkeletonModifier3D <- IKModifier3D <- ChainIK3D <- IterateIK3D <- FABRIK3D
+    // with CCDIK3D and JacobianIK3D as FABRIK3D's siblings. Only the leaves are
+    // instantiable; ChainIK3D and IterateIK3D are abstract bases that exist to
+    // share the chain definition and the iteration budget.
+    //
+    // ChainIK3D holds *which bones* — root/end, and the derived joint list. Like
+    // BoneConstraint3D its surface is indexed methods rather than properties,
+    // because one modifier can drive several chains.
+    register_class(
+        ClassRegistration::new("ChainIK3D")
+            .parent("IKModifier3D")
+            .abstract_class()
+            .method(MethodInfo::new("set_root_bone_name", 2))
+            .method(MethodInfo::new("get_root_bone_name", 1))
+            .method(MethodInfo::new("set_root_bone", 2))
+            .method(MethodInfo::new("get_root_bone", 1))
+            .method(MethodInfo::new("set_end_bone_name", 2))
+            .method(MethodInfo::new("get_end_bone_name", 1))
+            .method(MethodInfo::new("set_end_bone", 2))
+            .method(MethodInfo::new("get_end_bone", 1))
+            .method(MethodInfo::new("set_extend_end_bone", 2))
+            .method(MethodInfo::new("is_end_bone_extended", 1))
+            .method(MethodInfo::new("set_end_bone_direction", 2))
+            .method(MethodInfo::new("get_end_bone_direction", 1))
+            .method(MethodInfo::new("set_end_bone_length", 2))
+            .method(MethodInfo::new("get_end_bone_length", 1))
+            // Joints are derived from the root→end chain, so they are read-only
+            // and addressed by (setting_index, joint_index).
+            .method(MethodInfo::new("get_joint_count", 1))
+            .method(MethodInfo::new("get_joint_bone_name", 2))
+            .method(MethodInfo::new("get_joint_bone", 2)),
+    );
+
+    // IterateIK3D adds the iteration budget shared by every iterative solver.
+    register_class(
+        ClassRegistration::new("IterateIK3D")
+            .parent("ChainIK3D")
+            .abstract_class()
+            // Godot's defaults (doc XML). Note max_iterations is 4, NOT a big
+            // number — these solvers run every frame and converge over frames.
+            .property(PropertyInfo::new("max_iterations", Variant::Int(4)))
+            // The distance at which the end effector counts as "arrived".
+            .property(PropertyInfo::new("min_distance", Variant::Float(0.001)))
+            // 0.034906585 rad == exactly 2 degrees — the per-frame rotation cap
+            // that keeps a solve from snapping.
+            .property(PropertyInfo::new(
+                "angular_delta_limit",
+                Variant::Float(0.034_906_585),
+            ))
+            .property(PropertyInfo::new("deterministic", Variant::Bool(false)))
+            .property(PropertyInfo::new("setting_count", Variant::Int(0)))
+            .method(MethodInfo::new("set_max_iterations", 1))
+            .method(MethodInfo::new("get_max_iterations", 0))
+            .method(MethodInfo::new("set_min_distance", 1))
+            .method(MethodInfo::new("get_min_distance", 0))
+            .method(MethodInfo::new("set_angular_delta_limit", 1))
+            .method(MethodInfo::new("get_angular_delta_limit", 0))
+            .method(MethodInfo::new("set_deterministic", 1))
+            // Bool getter reads as a question, not `get_`.
+            .method(MethodInfo::new("is_deterministic", 0))
+            // The chain aims at a NODE, not a bare position — per setting.
+            .method(MethodInfo::new("set_target_node", 2))
+            .method(MethodInfo::new("get_target_node", 1))
+            // Per-joint limits, addressed by (setting_index, joint_index).
+            .method(MethodInfo::new("set_joint_rotation_axis", 3))
+            .method(MethodInfo::new("get_joint_rotation_axis", 2))
+            .method(MethodInfo::new("set_joint_rotation_axis_vector", 3))
+            .method(MethodInfo::new("get_joint_rotation_axis_vector", 2))
+            .method(MethodInfo::new("set_joint_limitation", 3))
+            .method(MethodInfo::new("get_joint_limitation", 2))
+            .method(MethodInfo::new("set_joint_limitation_right_axis", 3))
+            .method(MethodInfo::new("get_joint_limitation_right_axis", 2))
+            .method(MethodInfo::new("set_joint_limitation_right_axis_vector", 3))
+            .method(MethodInfo::new("get_joint_limitation_right_axis_vector", 2))
+            .method(MethodInfo::new("set_joint_limitation_rotation_offset", 3))
+            .method(MethodInfo::new("get_joint_limitation_rotation_offset", 2)),
+    );
+
+    // FABRIK3D declares NOTHING of its own — it is purely the solver choice.
+    // Every knob (chain, target, iterations, limits) is inherited. Giving it
+    // properties would invent a schema Godot does not have; the difference
+    // between FABRIK3D and its siblings CCDIK3D/JacobianIK3D is only the
+    // algorithm that runs during the modifier pass.
+    register_class(ClassRegistration::new("FABRIK3D").parent("IterateIK3D"));
+
     register_class(
         ClassRegistration::new("IKModifier3D")
             .parent("SkeletonModifier3D")
@@ -1469,6 +1557,51 @@ pub fn register_3d_classes() {
             .abstract_class()
             .property(PropertyInfo::new("layers", Variant::Int(1))),
     );
+    // -- RootMotionView (pat-nzgdu.184) ------------------------------------
+    //
+    // An editor-only gizmo: a grid that scrolls under the character by the root
+    // motion an AnimationMixer has accumulated, so you can see the motion an
+    // animation is *driving* rather than guessing from a sliding mesh. It is a
+    // VisualInstance3D because it draws, not a Node3D that merely has a
+    // transform.
+    //
+    // NOTE the bead's description also lists a `use_custom_color` property.
+    // Godot 4.6.1 has NO such property — RootMotionView exposes exactly the five
+    // below. Registering it would invent schema.
+    register_class(
+        ClassRegistration::new("RootMotionView")
+            .parent("VisualInstance3D")
+            // Points at the AnimationMixer whose root motion drives the grid.
+            // Empty by default: the gizmo tracks nothing until wired up.
+            .property(PropertyInfo::new(
+                "animation_path",
+                Variant::NodePath(gdcore::node_path::NodePath::new("")),
+            ))
+            .property(PropertyInfo::new("cell_size", Variant::Float(1.0)))
+            .property(PropertyInfo::new("radius", Variant::Float(10.0)))
+            // Godot's default is a pale blue, not white — the grid has to read
+            // as a gizmo against the scene rather than as geometry.
+            .property(PropertyInfo::new(
+                "color",
+                Variant::Color(gdcore::math::Color::new(0.5, 0.5, 1.0, 1.0)),
+            ))
+            // True by default: the grid stays flat on XZ, so vertical root
+            // motion (a jump) does not carry the ground plane up with it.
+            .property(PropertyInfo::new("zero_y", Variant::Bool(true)))
+            .method(MethodInfo::new("set_animation_path", 1))
+            .method(MethodInfo::new("get_animation_path", 0))
+            .method(MethodInfo::new("set_color", 1))
+            .method(MethodInfo::new("get_color", 0))
+            .method(MethodInfo::new("set_cell_size", 1))
+            .method(MethodInfo::new("get_cell_size", 0))
+            .method(MethodInfo::new("set_radius", 1))
+            .method(MethodInfo::new("get_radius", 0))
+            .method(MethodInfo::new("set_zero_y", 1))
+            // NOT `is_zero_y` — Godot spells this getter `get_zero_y` despite it
+            // being a bool, breaking its own `is_*` idiom.
+            .method(MethodInfo::new("get_zero_y", 0)),
+    );
+
     // -- GeometryInstance3D (abstract base for drawable 3D instances:
     //    MeshInstance3D, MultiMeshInstance3D, GPUParticles3D, …). Carries the
     //    material_override/overlay, transparency, cast_shadow, GI, cull, LOD,
@@ -2503,8 +2636,91 @@ pub fn register_2d_classes() {
     if !class_exists("PathFollow3D") {
         register_class(ClassRegistration::new("PathFollow3D").parent("Node3D"));
     }
+    // GridMap (pat-nzgdu.193) — was registered bare (`.parent("Node3D")` and
+    // nothing else), so the inspector had nothing to show and `set_cell_item`
+    // was invisible to ClassDB even though gdscene/src/grid_map.rs implements it.
     if !class_exists("GridMap") {
-        register_class(ClassRegistration::new("GridMap").parent("Node3D"));
+        register_class(
+            ClassRegistration::new("GridMap")
+                .parent("Node3D")
+                // The palette of meshes a cell can hold — what the editor tool
+                // shows and what `set_cell_item`'s id indexes into.
+                .property(PropertyInfo::new("mesh_library", Variant::Nil))
+                .property(PropertyInfo::new("physics_material", Variant::Nil))
+                // ⚠️ Godot's default is Vector3(2, 2, 2), NOT ones. A 1×1×1
+                // default would misplace every painted cell by half a cell and
+                // read as a broken grid rather than a wrong constant.
+                .property(PropertyInfo::new(
+                    "cell_size",
+                    Variant::Vector3(gdcore::math::Vector3::new(2.0, 2.0, 2.0)),
+                ))
+                .property(PropertyInfo::new("cell_octant_size", Variant::Int(8)))
+                // Cells are centred on all three axes by default.
+                .property(PropertyInfo::new("cell_center_x", Variant::Bool(true)))
+                .property(PropertyInfo::new("cell_center_y", Variant::Bool(true)))
+                .property(PropertyInfo::new("cell_center_z", Variant::Bool(true)))
+                .property(PropertyInfo::new("cell_scale", Variant::Float(1.0)))
+                .property(PropertyInfo::new("collision_layer", Variant::Int(1)))
+                .property(PropertyInfo::new("collision_mask", Variant::Int(1)))
+                .property(PropertyInfo::new("collision_priority", Variant::Float(1.0)))
+                .property(PropertyInfo::new("bake_navigation", Variant::Bool(false)))
+                // The cell API the editor tool drives. `set_cell_item` takes 2
+                // required args (position, item); orientation defaults.
+                .method(MethodInfo::new("set_cell_item", 2))
+                .method(MethodInfo::new("get_cell_item", 1))
+                .method(MethodInfo::new("get_cell_item_orientation", 1))
+                .method(MethodInfo::new("get_cell_item_basis", 1))
+                // Viewport click -> cell, and back. Without these a paint tool
+                // cannot turn a ray hit into a cell coordinate.
+                .method(MethodInfo::new("local_to_map", 1))
+                .method(MethodInfo::new("map_to_local", 1))
+                .method(MethodInfo::new("get_used_cells", 0))
+                .method(MethodInfo::new("get_used_cells_by_item", 1))
+                .method(MethodInfo::new("clear", 0))
+                .method(MethodInfo::new("clear_baked_meshes", 0))
+                .method(MethodInfo::new("set_mesh_library", 1))
+                .method(MethodInfo::new("get_mesh_library", 0))
+                .method(MethodInfo::new("set_cell_size", 1))
+                .method(MethodInfo::new("get_cell_size", 0))
+                .method(MethodInfo::new("set_cell_scale", 1))
+                .method(MethodInfo::new("get_cell_scale", 0))
+                .signal(SignalInfo::new("cell_size_changed"))
+                .signal(SignalInfo::new("changed")),
+        );
+    }
+    // The mesh palette itself (pat-nzgdu.193). Declares NO properties — its
+    // whole surface is the indexed item API, which is what a palette dock reads.
+    if !class_exists("MeshLibrary") {
+        register_class(
+            ClassRegistration::new("MeshLibrary")
+                .parent("Resource")
+                .method(MethodInfo::new("create_item", 1))
+                .method(MethodInfo::new("remove_item", 1))
+                .method(MethodInfo::new("clear", 0))
+                .method(MethodInfo::new("get_item_list", 0))
+                .method(MethodInfo::new("find_item_by_name", 1))
+                // Godot hands out ids; a palette needs this to add one.
+                .method(MethodInfo::new("get_last_unused_item_id", 0))
+                .method(MethodInfo::new("set_item_name", 2))
+                .method(MethodInfo::new("get_item_name", 1))
+                .method(MethodInfo::new("set_item_mesh", 2))
+                .method(MethodInfo::new("get_item_mesh", 1))
+                .method(MethodInfo::new("set_item_mesh_transform", 2))
+                .method(MethodInfo::new("get_item_mesh_transform", 1))
+                .method(MethodInfo::new("set_item_mesh_cast_shadow", 2))
+                .method(MethodInfo::new("get_item_mesh_cast_shadow", 1))
+                .method(MethodInfo::new("set_item_navigation_mesh", 2))
+                .method(MethodInfo::new("get_item_navigation_mesh", 1))
+                .method(MethodInfo::new("set_item_navigation_mesh_transform", 2))
+                .method(MethodInfo::new("get_item_navigation_mesh_transform", 1))
+                .method(MethodInfo::new("set_item_navigation_layers", 2))
+                .method(MethodInfo::new("get_item_navigation_layers", 1))
+                .method(MethodInfo::new("set_item_shapes", 2))
+                .method(MethodInfo::new("get_item_shapes", 1))
+                // The thumbnail the palette dock draws.
+                .method(MethodInfo::new("set_item_preview", 2))
+                .method(MethodInfo::new("get_item_preview", 1)),
+        );
     }
     if !class_exists("NavigationLink3D") {
         register_class(ClassRegistration::new("NavigationLink3D").parent("Node3D"));
@@ -3468,6 +3684,25 @@ pub fn register_audio_classes() {
                 .method(MethodInfo::new("get_loop_count", 0)),
         );
     }
+
+    // -- Sample pool (pat-nzgdu.187) ---------------------------------------
+    //
+    // ⚠️ BOTH register with NOTHING but a parent, and that is EXACT. Godot's
+    // `AudioSample` and `AudioSamplePlayback` are plain data structs carrying
+    // `GDCLASS(..., RefCounted)` and **no `_bind_methods()`**
+    // (`servers/audio/audio_stream.h:43-74`). They are GDREGISTER_CLASS'd
+    // (`servers/register_server_types.cpp:171-172`), so ClassDB knows the name
+    // and parent — but every field is a public C++ member, NOT a bound property,
+    // and `AudioSample::LoopMode` has no BIND_ENUM_CONSTANT/VARIANT_ENUM_CAST,
+    // so it is not a ClassDB enum either.
+    //
+    // The bead describes AudioSample as "wraps an AudioStream + LoopMode": true
+    // of the C++ struct, but none of it is visible to ClassDB or GDScript.
+    // Registering `stream`/`loop_mode`/`pitch_scale` as properties would invent
+    // a schema Godot does not have. These are opaque handles by design — the
+    // engine hands one to the audio driver, and only the driver looks inside.
+    register_class(ClassRegistration::new("AudioSample").parent("RefCounted"));
+    register_class(ClassRegistration::new("AudioSamplePlayback").parent("RefCounted"));
     if !class_exists("AudioStreamPlaybackResampled") {
         register_class(
             ClassRegistration::new("AudioStreamPlaybackResampled")
@@ -3602,6 +3837,31 @@ pub fn register_io_classes() {
     }
     if !class_exists("RefCounted") {
         register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
+
+    // -- EncodedObjectAsID (pat-nzgdu.189) ---------------------------------
+    //
+    // What `bytes_to_var` hands back for an object that was encoded as a bare
+    // instance id rather than as a full object. It carries the id and nothing
+    // else, and that minimalism IS the security property: decoding an id can
+    // never construct anything, which is why Godot takes this branch even when
+    // full-object decoding is refused — its own comment on it reads
+    // "This _is_ allowed." (`core/io/marshalls.cpp:699-715`). Only the
+    // full-object branch is gated behind `p_allow_objects`.
+    // Guarded like every sibling here: `register_class` does NOT dedupe — it
+    // mints a fresh ClassId and overwrites the name, leaving a stale by_id
+    // alias and leaking next_id on each of the ~20 calls this fn gets per suite.
+    if !class_exists("EncodedObjectAsID") {
+        register_class(
+            ClassRegistration::new("EncodedObjectAsID")
+                .parent("RefCounted")
+                // Godot's documented default. NOTE the decoder can never yield
+                // this value: a null id decodes to NIL, not to an object with
+                // id 0 (`marshalls.cpp:707-708`).
+                .property(PropertyInfo::new("object_id", Variant::Int(0)))
+                .method(MethodInfo::new("set_object_id", 1))
+                .method(MethodInfo::new("get_object_id", 0)),
+        );
     }
 
     // -- UndoRedo (pat-nzgdu.155) ------------------------------------------
@@ -4460,6 +4720,481 @@ pub fn register_editor_classes() {
     // -- SceneState (pat-nzgdu.167): PackedScene.get_state() introspection --
     if !class_exists("SceneState") {
         register_class(ClassRegistration::new("SceneState").parent("RefCounted"));
+    }
+
+    // -- Script editor (pat-nzgdu.195) --------------------------------------
+    //
+    // PanelContainer was missing, which is what kept ScriptEditor out: a child
+    // whose parent is unregistered has a silently severed chain (pat-nzgdu.98).
+    // It declares nothing of its own in Godot — a Container that paints a panel.
+    if !class_exists("PanelContainer") {
+        register_class(ClassRegistration::new("PanelContainer").parent("Container"));
+    }
+    // ⚠️ ABSTRACT (is_instantiable=false), which the bead does not mention. A
+    // script never constructs the script editor — it gets the editor's one via
+    // EditorInterface.get_script_editor().
+    if !class_exists("ScriptEditor") {
+        register_class(
+            ClassRegistration::new("ScriptEditor")
+                .parent("PanelContainer")
+                .abstract_class()
+                // What a plugin drives it with.
+                .method(MethodInfo::new("get_current_editor", 0))
+                .method(MethodInfo::new("get_open_script_editors", 0))
+                .method(MethodInfo::new("get_current_script", 0))
+                .method(MethodInfo::new("get_open_scripts", 0))
+                .method(MethodInfo::new("get_breakpoints", 0))
+                .method(MethodInfo::new("goto_line", 1))
+                // (base_path, base_name) — 2 required.
+                .method(MethodInfo::new("open_script_create_dialog", 2))
+                // A plugin can add its own highlighter to every open script —
+                // this is the hook pat-nzgdu.190's SyntaxHighlighter family
+                // plugs into.
+                .method(MethodInfo::new("register_syntax_highlighter", 1))
+                .method(MethodInfo::new("unregister_syntax_highlighter", 1))
+                .method(MethodInfo::new("goto_help", 1))
+                .method(MethodInfo::new("update_docs_from_script", 1))
+                .method(MethodInfo::new("clear_docs_from_script", 1))
+                .signal(SignalInfo::new("editor_script_changed"))
+                .signal(SignalInfo::new("script_close")),
+        );
+    }
+    // ⚠️ Also ABSTRACT. One open script's editor pane — a plugin implements this
+    // to provide an editor for its own language; it does not instantiate one.
+    //
+    // Note the shape: 2 methods but TEN signals. It is almost entirely a
+    // notifier — the editor listens to a pane, not the other way round.
+    if !class_exists("ScriptEditorBase") {
+        register_class(
+            ClassRegistration::new("ScriptEditorBase")
+                .parent("VBoxContainer")
+                .abstract_class()
+                .method(MethodInfo::new("get_base_editor", 0))
+                .method(MethodInfo::new("add_syntax_highlighter", 1))
+                .signal(SignalInfo::new("name_changed"))
+                .signal(SignalInfo::new("edited_script_changed"))
+                .signal(SignalInfo::new("request_help"))
+                .signal(SignalInfo::new("request_open_script_at_line"))
+                .signal(SignalInfo::new("request_save_history"))
+                .signal(SignalInfo::new("request_save_previous_state"))
+                .signal(SignalInfo::new("go_to_help"))
+                .signal(SignalInfo::new("search_in_files_requested"))
+                .signal(SignalInfo::new("replace_in_files_requested"))
+                .signal(SignalInfo::new("go_to_method")),
+        );
+    }
+
+    // -- 3D gizmos (pat-nzgdu.194) ------------------------------------------
+    //
+    // ⚠️ `Node3DGizmo` declares NOTHING — no properties, no methods, no
+    // virtuals — and is ABSTRACT. It exists only so `Node3D` can hold a gizmo
+    // reference without the scene tree depending on the editor. The whole
+    // surface the bead describes (`add_lines`, `add_handles`, `_redraw`, the
+    // handle-drag callbacks) lives on **EditorNode3DGizmo**, its concrete
+    // subclass. Registering that surface here would attribute it to the wrong
+    // class and let a script call methods Godot's Node3DGizmo does not have.
+    if !class_exists("Node3DGizmo") {
+        register_class(
+            ClassRegistration::new("Node3DGizmo")
+                .parent("RefCounted")
+                .abstract_class(),
+        );
+    }
+    // The concrete gizmo: what a plugin builds during `_redraw`.
+    if !class_exists("EditorNode3DGizmo") {
+        register_class(
+            ClassRegistration::new("EditorNode3DGizmo")
+                .parent("Node3DGizmo")
+                // Geometry a gizmo draws.
+                .method(MethodInfo::new("add_lines", 2))
+                .method(MethodInfo::new("add_mesh", 1))
+                .method(MethodInfo::new("add_unscaled_billboard", 1))
+                // The draggable dots. (handles, material, ids) — 3 required.
+                .method(MethodInfo::new("add_handles", 3))
+                // Picking geometry: what a click can hit, distinct from what is
+                // drawn.
+                .method(MethodInfo::new("add_collision_segments", 1))
+                .method(MethodInfo::new("add_collision_triangles", 1))
+                .method(MethodInfo::new("set_node_3d", 1))
+                .method(MethodInfo::new("get_node_3d", 0))
+                .method(MethodInfo::new("get_plugin", 0))
+                .method(MethodInfo::new("clear", 0))
+                .method(MethodInfo::new("set_hidden", 1))
+                .method(MethodInfo::new("is_subgizmo_selected", 1))
+                .method(MethodInfo::new("get_subgizmo_selection", 0))
+                // The virtuals a custom gizmo overrides. ⚠️ These take
+                // (handle_id, secondary); the PLUGIN's equivalents take an extra
+                // leading `gizmo` argument — see below.
+                .method(MethodInfo::new("_redraw", 0))
+                .method(MethodInfo::new("_get_handle_name", 2))
+                .method(MethodInfo::new("_is_handle_highlighted", 2))
+                .method(MethodInfo::new("_get_handle_value", 2))
+                .method(MethodInfo::new("_begin_handle_action", 2))
+                .method(MethodInfo::new("_set_handle", 4))
+                .method(MethodInfo::new("_commit_handle", 4))
+                .method(MethodInfo::new("_subgizmos_intersect_ray", 2))
+                .method(MethodInfo::new("_subgizmos_intersect_frustum", 2))
+                .method(MethodInfo::new("_set_subgizmo_transform", 2))
+                .method(MethodInfo::new("_get_subgizmo_transform", 1))
+                .method(MethodInfo::new("_commit_subgizmos", 3)),
+        );
+    }
+    // The registration path: a plugin says which nodes it handles and mints a
+    // gizmo for each. ⚠️ A Resource, not a RefCounted — the editor keeps it.
+    if !class_exists("EditorNode3DGizmoPlugin") {
+        register_class(
+            ClassRegistration::new("EditorNode3DGizmoPlugin")
+                .parent("Resource")
+                .method(MethodInfo::new("create_material", 2))
+                .method(MethodInfo::new("create_icon_material", 2))
+                .method(MethodInfo::new("create_handle_material", 1))
+                .method(MethodInfo::new("add_material", 2))
+                .method(MethodInfo::new("get_material", 1))
+                // The two that make a plugin a plugin: which nodes it claims,
+                // and the gizmo it builds for one.
+                .method(MethodInfo::new("_has_gizmo", 1))
+                .method(MethodInfo::new("_create_gizmo", 1))
+                .method(MethodInfo::new("_get_gizmo_name", 0))
+                // Priority breaks ties when two plugins claim the same node.
+                .method(MethodInfo::new("_get_priority", 0))
+                .method(MethodInfo::new("_can_be_hidden", 0))
+                .method(MethodInfo::new("_is_selectable_when_hidden", 0))
+                // ⚠️ Every hook below takes the GIZMO as its first argument, so
+                // each is exactly one arity higher than EditorNode3DGizmo's
+                // same-named virtual. A plugin serves many gizmos; a gizmo
+                // serves one node.
+                .method(MethodInfo::new("_redraw", 1))
+                .method(MethodInfo::new("_get_handle_name", 3))
+                .method(MethodInfo::new("_is_handle_highlighted", 3))
+                .method(MethodInfo::new("_get_handle_value", 3))
+                .method(MethodInfo::new("_begin_handle_action", 3))
+                .method(MethodInfo::new("_set_handle", 5))
+                .method(MethodInfo::new("_commit_handle", 5))
+                .method(MethodInfo::new("_subgizmos_intersect_ray", 3))
+                .method(MethodInfo::new("_subgizmos_intersect_frustum", 3))
+                .method(MethodInfo::new("_get_subgizmo_transform", 2))
+                .method(MethodInfo::new("_set_subgizmo_transform", 3))
+                .method(MethodInfo::new("_commit_subgizmos", 4)),
+        );
+    }
+
+    // -- GridMap editor tool (pat-nzgdu.193) --------------------------------
+    //
+    // ⚠️ This is NOT just a marker class. Its bound methods ARE the tool's API:
+    // `get_current_grid_map` is which GridMap is selected,
+    // `get_selected_palette_item` is which mesh the palette has highlighted, and
+    // `get_selected_cells` is the paint selection. A plugin drives the tool
+    // through these — so registering them is the contract the served editor's
+    // endpoints have to satisfy, not decoration.
+    if !class_exists("GridMapEditorPlugin") {
+        register_class(
+            ClassRegistration::new("GridMapEditorPlugin")
+                .parent("EditorPlugin")
+                .method(MethodInfo::new("get_current_grid_map", 0))
+                .method(MethodInfo::new("set_selection", 2))
+                .method(MethodInfo::new("clear_selection", 0))
+                .method(MethodInfo::new("get_selection", 0))
+                .method(MethodInfo::new("has_selection", 0))
+                .method(MethodInfo::new("get_selected_cells", 0))
+                .method(MethodInfo::new("set_selected_palette_item", 1))
+                .method(MethodInfo::new("get_selected_palette_item", 0)),
+        );
+    }
+
+    // -- Scene import plugins (pat-nzgdu.192) -------------------------------
+    //
+    // The scriptable scene-import pipeline. A format importer says which
+    // extensions it handles and turns a file into a scene; a post-import hook
+    // then mutates the result before it is saved.
+    //
+    // ⚠️ These are all `RefCounted`, NOT `ResourceImporter`. `EditorImportPlugin`
+    // (already registered) derives ResourceImporter and imports *any* resource;
+    // this family plugs into the **scene** importer specifically and shares no
+    // base with it beyond RefCounted. Deriving them from ResourceImporter would
+    // be a plausible-looking mistake.
+    if !class_exists("EditorSceneFormatImporter") {
+        register_class(
+            ClassRegistration::new("EditorSceneFormatImporter")
+                .parent("RefCounted")
+                // Called from inside _get_import_options to declare options.
+                .method(MethodInfo::new("add_import_option", 2))
+                .method(MethodInfo::new("add_import_option_advanced", 3))
+                // The two that make an importer an importer: which files it
+                // claims, and how it turns one into a scene.
+                .method(MethodInfo::new("_get_extensions", 0))
+                .method(MethodInfo::new("_import_scene", 3))
+                .method(MethodInfo::new("_get_import_options", 1))
+                .method(MethodInfo::new("_get_option_visibility", 3)),
+        );
+    }
+    // The concrete importers. Every one declares NOTHING of its own — the
+    // format is the only difference, and it lives in `_get_extensions`.
+    for importer in [
+        "EditorSceneFormatImporterGLTF",
+        // Blend and FBX2GLTF exist in Godot but shell out to Blender /
+        // FBX2glTF. Registering them keeps ClassDB honest; making them *work*
+        // needs a subprocess, which the web build has no answer for — see the
+        // bead notes.
+        "EditorSceneFormatImporterBlend",
+        "EditorSceneFormatImporterFBX2GLTF",
+        // UFBX decodes FBX in-process, so unlike FBX2GLTF it is portable.
+        "EditorSceneFormatImporterUFBX",
+    ] {
+        if !class_exists(importer) {
+            register_class(
+                ClassRegistration::new(importer).parent("EditorSceneFormatImporter"),
+            );
+        }
+    }
+    if !class_exists("EditorScenePostImport") {
+        register_class(
+            ClassRegistration::new("EditorScenePostImport")
+                .parent("RefCounted")
+                // Its whole surface: the hook, plus where the scene came from.
+                .method(MethodInfo::new("_post_import", 1))
+                .method(MethodInfo::new("get_source_file", 0)),
+        );
+    }
+    // The richer sibling: EditorScenePostImport mutates the finished scene,
+    // while EditorScenePostImportPlugin can also add import options and touch
+    // each internal resource as it is built.
+    if !class_exists("EditorScenePostImportPlugin") {
+        register_class(
+            ClassRegistration::new("EditorScenePostImportPlugin")
+                .parent("RefCounted")
+                .method(MethodInfo::new("get_option_value", 1))
+                .method(MethodInfo::new("add_import_option", 2))
+                .method(MethodInfo::new("add_import_option_advanced", 3))
+                .method(MethodInfo::new("_get_internal_import_options", 1))
+                .method(MethodInfo::new("_get_internal_option_visibility", 3))
+                .method(MethodInfo::new("_get_internal_option_update_view_required", 2))
+                .method(MethodInfo::new("_internal_process", 4))
+                .method(MethodInfo::new("_get_import_options", 1))
+                .method(MethodInfo::new("_get_option_visibility", 3))
+                .method(MethodInfo::new("_pre_process", 1))
+                .method(MethodInfo::new("_post_process", 1))
+                // Which kind of thing `_internal_process` is being handed.
+                .enumeration(
+                    EnumInfo::new("InternalImportCategory")
+                        .constant("INTERNAL_IMPORT_CATEGORY_NODE", 0)
+                        .constant("INTERNAL_IMPORT_CATEGORY_MESH_3D_NODE", 1)
+                        .constant("INTERNAL_IMPORT_CATEGORY_MESH", 2)
+                        .constant("INTERNAL_IMPORT_CATEGORY_MATERIAL", 3)
+                        .constant("INTERNAL_IMPORT_CATEGORY_ANIMATION", 4)
+                        .constant("INTERNAL_IMPORT_CATEGORY_ANIMATION_NODE", 5)
+                        .constant("INTERNAL_IMPORT_CATEGORY_SKELETON_3D_NODE", 6)
+                        // A count sentinel, not a category — Godot's _MAX idiom.
+                        .constant("INTERNAL_IMPORT_CATEGORY_MAX", 7),
+                ),
+        );
+    }
+
+    // -- Editor plugin scripting API (pat-nzgdu.191) ------------------------
+    //
+    // The classes a @tool EditorPlugin script reaches for. Registered here so
+    // ClassDB reports them; the script binding over the existing backends
+    // (editor_settings_store.rs / filesystem.rs / editor_compat.rs) is follow-up
+    // — see the bead notes.
+    //
+    // Schemas diffed against 4.6.1. NOTE the bead's description names several
+    // methods Godot does not have: `EditorSettings.get_setting_list` and
+    // `property_get_revert`, and `FileSystemDock.get_current_path`. None exist;
+    // they are not registered.
+    if !class_exists("EditorSettings") {
+        register_class(
+            ClassRegistration::new("EditorSettings")
+                // A Resource, not an Object: the editor saves it.
+                .parent("Resource")
+                .method(MethodInfo::new("has_setting", 1))
+                .method(MethodInfo::new("set_setting", 2))
+                .method(MethodInfo::new("get_setting", 1))
+                .method(MethodInfo::new("erase", 1))
+                .method(MethodInfo::new("set_initial_value", 3))
+                .method(MethodInfo::new("add_property_info", 1))
+                .method(MethodInfo::new("set_project_metadata", 3))
+                .method(MethodInfo::new("get_project_metadata", 2))
+                .method(MethodInfo::new("set_favorites", 1))
+                .method(MethodInfo::new("get_favorites", 0))
+                .method(MethodInfo::new("set_recent_dirs", 1))
+                .method(MethodInfo::new("get_recent_dirs", 0))
+                .method(MethodInfo::new("set_builtin_action_override", 2))
+                .method(MethodInfo::new("add_shortcut", 2))
+                .method(MethodInfo::new("remove_shortcut", 1))
+                .method(MethodInfo::new("is_shortcut", 2))
+                .method(MethodInfo::new("has_shortcut", 1))
+                .method(MethodInfo::new("get_shortcut", 1))
+                .method(MethodInfo::new("get_shortcut_list", 0))
+                .method(MethodInfo::new("check_changed_settings_in_group", 1))
+                .method(MethodInfo::new("get_changed_settings", 0))
+                .method(MethodInfo::new("mark_setting_changed", 1))
+                .signal(SignalInfo::new("settings_changed")),
+        );
+    }
+    if !class_exists("EditorSelection") {
+        register_class(
+            ClassRegistration::new("EditorSelection")
+                .parent("Object")
+                .method(MethodInfo::new("clear", 0))
+                // `add_node`/`remove_node`, NOT `add`/`remove` — the bead's
+                // shorthand would be the wrong names.
+                .method(MethodInfo::new("add_node", 1))
+                .method(MethodInfo::new("remove_node", 1))
+                .method(MethodInfo::new("get_selected_nodes", 0))
+                // Top-selected = the selection minus nodes whose parent is also
+                // selected; distinct from get_selected_nodes.
+                .method(MethodInfo::new("get_top_selected_nodes", 0))
+                .method(MethodInfo::new("get_transformable_selected_nodes", 0))
+                .signal(SignalInfo::new("selection_changed")),
+        );
+    }
+    // ⚠️ ABSTRACT in Godot (is_instantiable=false): a script never constructs
+    // one — it gets the editor's via EditorPlugin.get_undo_redo(). The bead does
+    // not mention this.
+    if !class_exists("EditorUndoRedoManager") {
+        register_class(
+            ClassRegistration::new("EditorUndoRedoManager")
+                .parent("Object")
+                .abstract_class()
+                .method(MethodInfo::new("create_action", 1))
+                .method(MethodInfo::new("commit_action", 0))
+                .method(MethodInfo::new("is_committing_action", 0))
+                .method(MethodInfo::new("force_fixed_history", 0))
+                .method(MethodInfo::new("add_do_method", 2))
+                .method(MethodInfo::new("add_undo_method", 2))
+                .method(MethodInfo::new("add_do_property", 3))
+                .method(MethodInfo::new("add_undo_property", 3))
+                .method(MethodInfo::new("add_do_reference", 1))
+                .method(MethodInfo::new("add_undo_reference", 1))
+                // The editor keeps a separate undo history per scene/resource;
+                // these are how a plugin finds the right one.
+                .method(MethodInfo::new("get_object_history_id", 1))
+                .method(MethodInfo::new("get_history_undo_redo", 1))
+                .method(MethodInfo::new("clear_history", 0))
+                .signal(SignalInfo::new("history_changed"))
+                .signal(SignalInfo::new("version_changed")),
+        );
+    }
+    if !class_exists("EditorScript") {
+        register_class(
+            ClassRegistration::new("EditorScript")
+                .parent("RefCounted")
+                .method(MethodInfo::new("add_root_node", 1))
+                .method(MethodInfo::new("get_scene", 0))
+                .method(MethodInfo::new("get_editor_interface", 0))
+                // The one-shot entry point a @tool script overrides.
+                .method(MethodInfo::new("_run", 0)),
+        );
+    }
+    if !class_exists("EditorVCSInterface") {
+        register_class(
+            ClassRegistration::new("EditorVCSInterface")
+                .parent("Object")
+                // Its surface is almost entirely virtuals a VCS plugin
+                // overrides; these few are the helpers Godot calls back into.
+                .method(MethodInfo::new("create_diff_line", 4))
+                .method(MethodInfo::new("create_diff_hunk", 4))
+                .method(MethodInfo::new("create_diff_file", 2))
+                .method(MethodInfo::new("create_commit", 5))
+                .method(MethodInfo::new("create_status_file", 3))
+                .method(MethodInfo::new("add_diff_hunks_into_diff_file", 2))
+                .method(MethodInfo::new("add_line_diffs_into_diff_hunk", 2))
+                .method(MethodInfo::new("popup_error", 1)),
+        );
+    }
+    if !class_exists("EditorResourcePreviewGenerator") {
+        register_class(
+            ClassRegistration::new("EditorResourcePreviewGenerator")
+                .parent("RefCounted")
+                .method(MethodInfo::new("request_draw_and_wait", 1))
+                .method(MethodInfo::new("_handles", 1))
+                .method(MethodInfo::new("_generate", 3))
+                .method(MethodInfo::new("_generate_from_path", 3))
+                .method(MethodInfo::new("_generate_small_preview_automatically", 0))
+                .method(MethodInfo::new("_can_generate_small_preview", 0)),
+        );
+    }
+    if !class_exists("EditorResourceTooltipPlugin") {
+        register_class(
+            ClassRegistration::new("EditorResourceTooltipPlugin")
+                .parent("RefCounted")
+                .method(MethodInfo::new("request_thumbnail", 2))
+                .method(MethodInfo::new("_handles", 1))
+                .method(MethodInfo::new("_make_tooltip_for_path", 3)),
+        );
+    }
+    // Declares no non-virtual methods at all — a parser plugin is pure override.
+    if !class_exists("EditorTranslationParserPlugin") {
+        register_class(
+            ClassRegistration::new("EditorTranslationParserPlugin")
+                .parent("RefCounted")
+                .method(MethodInfo::new("_parse_file", 1))
+                .method(MethodInfo::new("_get_recognized_extensions", 0)),
+        );
+    }
+    // ⚠️ ABSTRACT (is_instantiable=false) — the editor owns the one toaster; a
+    // plugin only pushes to it.
+    if !class_exists("EditorToaster") {
+        register_class(
+            ClassRegistration::new("EditorToaster")
+                .parent("HBoxContainer")
+                .abstract_class()
+                .method(MethodInfo::new("push_toast", 1)),
+        );
+    }
+
+    // -- Syntax highlighting (pat-nzgdu.190) --------------------------------
+    //
+    // A three-link chain, and every link is concrete:
+    //   Resource <- SyntaxHighlighter <- EditorSyntaxHighlighter <- GDScriptSyntaxHighlighter
+    //
+    // SyntaxHighlighter is the runtime base a TextEdit binds; EditorSyntaxHighlighter
+    // adds the editor-plugin surface (name + languages + `_create`, so the script
+    // editor can clone one per open file); GDScriptSyntaxHighlighter is the
+    // concrete GDScript one.
+    if !class_exists("SyntaxHighlighter") {
+        register_class(
+            ClassRegistration::new("SyntaxHighlighter")
+                .parent("Resource")
+                // Returns `{ start_column: { "color": Color } }` — a map from a
+                // column to the colour that starts there
+                // (`scene/resources/syntax_highlighter.cpp:212-213`).
+                //
+                // ⚠️ It takes only a LINE NUMBER, not text: the highlighter reads
+                // the line from the TextEdit it is bound to, and returns an EMPTY
+                // dict when it has none (`syntax_highlighter.cpp:41-43`). A
+                // highlighter with no editor colours nothing.
+                .method(MethodInfo::new("get_line_syntax_highlighting", 1))
+                .method(MethodInfo::new("update_cache", 0))
+                .method(MethodInfo::new("clear_highlighting_cache", 0))
+                .method(MethodInfo::new("get_text_edit", 0))
+                // The virtuals a custom highlighter overrides.
+                .method(MethodInfo::new("_get_line_syntax_highlighting", 1))
+                .method(MethodInfo::new("_clear_highlighting_cache", 0))
+                .method(MethodInfo::new("_update_cache", 0)),
+        );
+    }
+    if !class_exists("EditorSyntaxHighlighter") {
+        register_class(
+            ClassRegistration::new("EditorSyntaxHighlighter")
+                .parent("SyntaxHighlighter")
+                // ⚠️ EXACTLY three virtuals and nothing else. The bead's
+                // description also lists `_get_supported_extensions` — Godot has
+                // NO such virtual (`editor/script/script_editor_plugin.h:62-64`
+                // declares only these three). Registering it would invent a
+                // surface a plugin could override and Godot would never call.
+                .method(MethodInfo::new("_get_name", 0))
+                .method(MethodInfo::new("_get_supported_languages", 0))
+                // `_create` is why this class exists: the script editor clones a
+                // registered highlighter per open file rather than sharing one.
+                .method(MethodInfo::new("_create", 0)),
+        );
+    }
+    // Declares nothing of its own — it is the GDScript *implementation* of the
+    // editor highlighter, and every knob is inherited.
+    if !class_exists("GDScriptSyntaxHighlighter") {
+        register_class(
+            ClassRegistration::new("GDScriptSyntaxHighlighter").parent("EditorSyntaxHighlighter"),
+        );
     }
 
     // -- MovieWriter (pat-nzgdu.180): abstract offline video-capture base --

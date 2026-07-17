@@ -19,11 +19,16 @@
 //!
 //! Encodes every variant this crate's [`Variant`] enum can represent —
 //! including the nine `Packed*Array` types (ordinals 29–37). Types the enum
-//! lacks (`Vector2i`, `Projection`, `RID`, objects, `PackedVector4Array`, …)
-//! are reported as [`VariantDecodeError::UnsupportedType`] on decode and — for
-//! the three the enum *does* carry but the wire format can't round-trip
-//! (`ObjectId`, `Callable`, `Resource`) — as [`VariantEncodeError::Unsupported`]
-//! on encode.
+//! lacks (`Vector2i`, `Projection`, `RID`, `PackedVector4Array`, …) are reported
+//! as [`VariantDecodeError::UnsupportedType`] on decode and — for the two the
+//! enum *does* carry but the wire format can't round-trip (`Callable`,
+//! `Resource`) — as [`VariantEncodeError::Unsupported`] on encode.
+//!
+//! `OBJECT` is half-supported, exactly as Godot intends: an object encoded as a
+//! bare instance id round-trips through [`Variant::ObjectId`]
+//! ([`HEADER_DATA_FLAG_OBJECT_AS_ID`], pat-nzgdu.189), while a *full* object —
+//! class name plus properties, which decoding would have to instantiate — is
+//! refused.
 //!
 //! Math types are encoded as 32-bit floats (matching a default `real_t = float`
 //! Godot build, which is also how this engine stores them). The decoder still
@@ -34,6 +39,7 @@ use crate::dictionary::Dictionary;
 
 use thiserror::Error;
 
+use gdcore::id::ObjectId;
 use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
 use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
 use gdcore::node_path::NodePath;
@@ -49,6 +55,15 @@ use crate::variant::{Variant, VariantType};
 pub const HEADER_TYPE_MASK: u32 = 0xFF;
 /// Header bit marking a 64-bit `INT`/`FLOAT` (and double-precision math types).
 pub const HEADER_DATA_FLAG_64: u32 = 1 << 16;
+
+/// For `OBJECT`: the payload is a bare 8-byte instance id, not a full object
+/// (pat-nzgdu.189). Godot's `HEADER_DATA_FLAG_OBJECT_AS_ID`
+/// (`core/io/marshalls.cpp:66`).
+///
+/// ⚠️ This is the **same bit** as [`HEADER_DATA_FLAG_64`], and that is Godot's
+/// design, not a clash: bit 16 is read against the variant's type, meaning
+/// "64-bit payload" for `INT`/`FLOAT` and "object as id" for `OBJECT`.
+pub const HEADER_DATA_FLAG_OBJECT_AS_ID: u32 = 1 << 16;
 
 /// One past the last valid `Variant::Type` ordinal (`Variant::VARIANT_MAX`).
 const VARIANT_MAX: u32 = 39;
@@ -82,6 +97,7 @@ const T_TRANSFORM3D: u32 = 18;
 const T_COLOR: u32 = 20;
 const T_STRING_NAME: u32 = 21;
 const T_NODE_PATH: u32 = 22;
+const T_OBJECT: u32 = 24;
 const T_DICTIONARY: u32 = 27;
 const T_ARRAY: u32 = 28;
 const T_PACKED_BYTE_ARRAY: u32 = 29;
@@ -208,11 +224,7 @@ fn encode_node_path(np: &NodePath, out: &mut Vec<u8>) {
     }
 }
 
-fn encode_into(
-    value: &Variant,
-    out: &mut Vec<u8>,
-    depth: u32,
-) -> Result<(), VariantEncodeError> {
+fn encode_into(value: &Variant, out: &mut Vec<u8>, depth: u32) -> Result<(), VariantEncodeError> {
     if depth > MAX_RECURSION_DEPTH {
         return Err(VariantEncodeError::RecursionLimit);
     }
@@ -413,7 +425,28 @@ fn encode_into(
                 put_f32(out, c.a);
             }
         }
-        Variant::ObjectId(_) => return Err(VariantEncodeError::Unsupported(VariantType::ObjectId)),
+        // An object encodes as its bare instance id (pat-nzgdu.189), matching
+        // Godot's `var_to_bytes` — which sets OBJECT_AS_ID whenever full-object
+        // encoding is off (`core/io/marshalls.cpp:1395-1397`). Encoding the full
+        // object is `var_to_bytes_with_objects`, which this codec does not do:
+        // it would have to serialise a class name plus every property, and
+        // decoding it would construct arbitrary classes from untrusted bytes.
+        Variant::ObjectId(id) => {
+            // ⚠️ A null object encodes as a bare 4-byte NIL and never emits an
+            // OBJECT header at all — Godot decides this BEFORE reaching the
+            // as-id flag (`marshalls.cpp:1385-1393`, the `if (!obj)` early
+            // return). Emitting `OBJECT|AS_ID` + eight zero bytes would produce
+            // a buffer Godot itself never writes.
+            //
+            // Note the asymmetry this creates: `ObjectId(0)` does not round-trip
+            // (it decodes back as `Nil`), because a null id is not an object.
+            if id.raw() == 0 {
+                put_u32(out, T_NIL);
+            } else {
+                put_u32(out, T_OBJECT | HEADER_DATA_FLAG_OBJECT_AS_ID);
+                out.extend_from_slice(&id.raw().to_le_bytes());
+            }
+        }
         Variant::Callable(_) => return Err(VariantEncodeError::Unsupported(VariantType::Callable)),
         Variant::Resource(_) => return Err(VariantEncodeError::Unsupported(VariantType::Resource)),
     }
@@ -583,6 +616,34 @@ fn decode_from(r: &mut Reader, depth: u32) -> Result<Variant, VariantDecodeError
 
     match type_id {
         T_NIL => Ok(Variant::Nil),
+        // An object encoded as a bare id (pat-nzgdu.189). Godot builds an
+        // `EncodedObjectAsID` here; this crate's `Variant::ObjectId` carries the
+        // same single piece of information — the id — and gdvariant cannot
+        // construct engine objects (gdobject depends on gdvariant, not the
+        // reverse).
+        //
+        // ⚠️ Godot takes this branch REGARDLESS of whether objects are allowed
+        // ("// This _is_ allowed.", `marshalls.cpp:700`): decoding an id can
+        // never construct anything, so it is always safe. Only the FULL-object
+        // branch is gated. Refusing ids when objects are disallowed would be
+        // stricter than Godot and would break RPC payloads it accepts.
+        T_OBJECT if header & HEADER_DATA_FLAG_OBJECT_AS_ID != 0 => {
+            let raw = r.u64()?;
+            // ⚠️ A null id decodes to NIL, not an id-carrying object
+            // (`marshalls.cpp:707-708`). So `object_id == 0` is unreachable
+            // through the decoder, even though `EncodedObjectAsID`'s property
+            // defaults to 0.
+            if raw == 0 {
+                Ok(Variant::Nil)
+            } else {
+                Ok(Variant::ObjectId(ObjectId::from_raw(raw)))
+            }
+        }
+        // A full object: a class name plus its properties, which decoding would
+        // have to instantiate. Godot gates this on `p_allow_objects` and errors
+        // with ERR_UNAUTHORIZED when it is off (`marshalls.cpp:717`); this codec
+        // has no allow-objects mode, so it always refuses.
+        T_OBJECT => Err(VariantDecodeError::UnsupportedType(T_OBJECT)),
         T_BOOL => Ok(Variant::Bool(r.u32()? != 0)),
         T_INT => {
             if flag64 {
@@ -789,7 +850,8 @@ fn decode_from(r: &mut Reader, depth: u32) -> Result<Variant, VariantDecodeError
         }
         // Recognized Godot types this port does not (yet) support: VECTOR2I(6),
         // RECT2I(8), VECTOR3I(10), VECTOR4(12), VECTOR4I(13), PROJECTION(19),
-        // RID(23), OBJECT(24), CALLABLE(25), SIGNAL(26), and PACKED_VECTOR4_ARRAY(38).
+        // RID(23), CALLABLE(25), SIGNAL(26), and PACKED_VECTOR4_ARRAY(38).
+        // OBJECT(24) is handled above: as-id decodes, full-object is refused.
         other => Err(VariantDecodeError::UnsupportedType(other)),
     }
 }
@@ -825,12 +887,15 @@ fn basis_from_rows(r: &[f32; 9]) -> Basis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gdcore::id::ObjectId;
 
     /// Encode → decode → assert equal, all bytes consumed, and length a mult of 4.
     fn roundtrip(v: Variant) {
         let bytes = encode_variant(&v).expect("encode");
-        assert_eq!(bytes.len() % 4, 0, "encoded length must be 4-aligned: {v:?}");
+        assert_eq!(
+            bytes.len() % 4,
+            0,
+            "encoded length must be 4-aligned: {v:?}"
+        );
         let (decoded, used) = decode_variant(&bytes).expect("decode");
         assert_eq!(decoded, v, "round-trip mismatch");
         assert_eq!(used, bytes.len(), "consumed length mismatch for {v:?}");
@@ -934,9 +999,15 @@ mod tests {
 
         // Array of dicts of vectors (deep nesting).
         let mut d1 = Dictionary::new();
-        d1.insert("a".to_string(), Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)));
+        d1.insert(
+            "a".to_string(),
+            Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)),
+        );
         let mut d2 = Dictionary::new();
-        d2.insert("b".to_string(), Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)));
+        d2.insert(
+            "b".to_string(),
+            Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)),
+        );
         d2.insert("nested".to_string(), Variant::Array(vec![Variant::Int(9)]));
         roundtrip(Variant::Array(vec![
             Variant::Dictionary(d1),
@@ -968,7 +1039,11 @@ mod tests {
 
     /// Assert `v` encodes to exactly `expected` and decodes back to `v`.
     fn assert_fixture(v: Variant, expected: &[u8]) {
-        assert_eq!(encode_variant(&v).unwrap().as_slice(), expected, "encode {v:?}");
+        assert_eq!(
+            encode_variant(&v).unwrap().as_slice(),
+            expected,
+            "encode {v:?}"
+        );
         let (decoded, used) = decode_variant(expected).unwrap();
         assert_eq!(decoded, v, "decode {v:?}");
         assert_eq!(used, expected.len());
@@ -998,7 +1073,9 @@ mod tests {
         // 2^40 = 0x0000_0100_0000_0000 -> LE bytes 00 00 00 00 00 01 00 00
         assert_fixture(
             Variant::Int(1i64 << 40),
-            &[0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00],
+            &[
+                0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+            ],
         );
     }
 
@@ -1057,7 +1134,10 @@ mod tests {
     fn truncated_input_errors_at_every_length() {
         // A deeply-structured value: array of a dict, a string, and a transform.
         let mut d = Dictionary::new();
-        d.insert("k".to_string(), Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)));
+        d.insert(
+            "k".to_string(),
+            Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)),
+        );
         d.insert("s".to_string(), Variant::String("hello".into()));
         let v = Variant::Array(vec![
             Variant::Dictionary(d),
@@ -1102,7 +1182,8 @@ mod tests {
 
     #[test]
     fn decode_unsupported_type_id_errors() {
-        // OBJECT(24) is a valid Godot type but unsupported here.
+        // OBJECT(24) with no as-id flag is a FULL object: still unsupported
+        // (pat-nzgdu.189 added the as-id form, which decodes).
         let err = decode_variant(&[24, 0, 0, 0]).unwrap_err();
         assert_eq!(err, VariantDecodeError::UnsupportedType(24));
         // PACKED_VECTOR4_ARRAY(38) is recognized by Godot but not carried here.
@@ -1140,8 +1221,12 @@ mod tests {
             Vector2::new(1.0, 2.0),
             Vector2::new(-3.0, 4.5),
         ]));
-        roundtrip(Variant::PackedVector3Array(vec![Vector3::new(1.0, 2.0, 3.0)]));
-        roundtrip(Variant::PackedColorArray(vec![Color::new(0.1, 0.2, 0.3, 1.0)]));
+        roundtrip(Variant::PackedVector3Array(vec![Vector3::new(
+            1.0, 2.0, 3.0,
+        )]));
+        roundtrip(Variant::PackedColorArray(vec![Color::new(
+            0.1, 0.2, 0.3, 1.0,
+        )]));
     }
 
     #[test]
@@ -1200,20 +1285,38 @@ mod tests {
         ));
     }
 
+    /// ⚠️ CONTRACT CHANGE (pat-nzgdu.189): `ObjectId` used to be `Unsupported`.
+    /// It now encodes as a bare instance id (Godot's OBJECT_AS_ID), so the
+    /// unsupported set is `Callable`/`Resource` — and, importantly, the
+    /// propagate-out-of-containers behaviour this test guarded still holds; it
+    /// just needs a type that is still unsupported to demonstrate it.
     #[test]
     fn encode_unsupported_variant_types_error() {
+        let callable = || {
+            Variant::Callable(Box::new(crate::variant::CallableRef::Method {
+                target_id: 1,
+                method: "m".to_string(),
+            }))
+        };
         assert_eq!(
-            encode_variant(&Variant::ObjectId(ObjectId::from_raw(1))),
-            Err(VariantEncodeError::Unsupported(VariantType::ObjectId))
+            encode_variant(&callable()),
+            Err(VariantEncodeError::Unsupported(VariantType::Callable))
         );
-        // The error propagates out of nested containers.
+        // The error still propagates out of nested containers.
+        let arr = Variant::Array(vec![Variant::Int(1), callable()]);
+        assert_eq!(
+            encode_variant(&arr),
+            Err(VariantEncodeError::Unsupported(VariantType::Callable))
+        );
+        // ...and an ObjectId inside a container now encodes rather than
+        // poisoning the whole array.
         let arr = Variant::Array(vec![
             Variant::Int(1),
             Variant::ObjectId(ObjectId::from_raw(2)),
         ]);
-        assert_eq!(
-            encode_variant(&arr),
-            Err(VariantEncodeError::Unsupported(VariantType::ObjectId))
+        assert!(
+            encode_variant(&arr).is_ok(),
+            "an object-as-id is encodable inside a container"
         );
     }
 
