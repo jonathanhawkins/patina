@@ -4,6 +4,22 @@
 //! lightmap baking are out of scope for the initial port; these types carry
 //! the configuration surface so that scenes using VoxelGI or LightmapGI can
 //! be loaded, saved, and round-tripped without data loss.
+//!
+//! What "stub" means here, precisely (pat-u3l8c.41) — do not read these types
+//! as global illumination:
+//!
+//! - [`VoxelGI::bake`] never voxelizes anything. It takes lights and no
+//!   geometry, so it cannot bounce, occlude, or bleed colour between
+//!   surfaces. It samples DIRECT irradiance on a coarse grid and scales it by
+//!   `propagation`. Godot's VoxelGI voxelizes the scene and cone-traces
+//!   diffuse bounce; this does not, and no test here claims otherwise.
+//! - **SDFGI is not implemented at all** — there is no `Sdfgi` type, no
+//!   cascade storage, and no runtime path. A scene requesting SDFGI silently
+//!   gets no GI rather than an approximation.
+//!
+//! Closing either gap is 3D-render scope, which is deferred for the v1
+//! milestone (see `prd/PARITY_CODE_AUDIT_2026-07-11.md` "VoxelGI / SDFGI" and
+//! `prd/PORT_1TO1_SCORECARD_2026-07-11.md`).
 
 use gdcore::math::{Color, Vector3};
 use gdcore::math3d::{Aabb, Transform3D};
@@ -94,9 +110,20 @@ impl VoxelGI {
         }
     }
 
-    /// Bakes indirect-light contribution from `lights` into the volume.
+    /// Fills the volume's coarse grid with DIRECT irradiance from `lights`,
+    /// scaled by `propagation`.
     ///
-    /// Fills a coarse spatial grid so `sample` varies with position (P1 GI).
+    /// This is not indirect light and not Godot's VoxelGI bake, despite the
+    /// name it mirrors. It takes no geometry, so nothing is voxelized, nothing
+    /// occludes anything, and no light bounces: a lit wall will not bleed
+    /// colour onto adjacent surfaces. Each cell centre accumulates
+    /// `color * energy * attenuation` per light (inverse-square for
+    /// point/spot, unattenuated for directional, skipped when `interior`), and
+    /// the whole grid is multiplied by `propagation` to stand in for a bounce.
+    ///
+    /// The result is a cheap, spatially varying ambient term — enough for
+    /// `sample` to differ across the volume, and enough to round-trip the
+    /// configuration surface. See the module docs for what real parity needs.
     pub fn bake(&mut self, lights: &[Light3D]) {
         let n = self.grid_res as usize;
         self.grid = vec![Color::BLACK; n * n * n];
@@ -150,9 +177,11 @@ impl VoxelGI {
         self.baked = true;
     }
 
-    /// Samples the baked indirect-light contribution at `world_pos`.
+    /// Samples the baked ambient term at `world_pos`, scaled by `energy`.
     ///
-    /// Returns spatially varying irradiance from the coarse grid when baked.
+    /// Returns `BLACK` when unbaked or outside the volume. The value comes
+    /// from the coarse grid [`VoxelGI::bake`] filled with direct irradiance —
+    /// it is not cone-traced indirect light. See the module docs.
     pub fn sample(&self, world_pos: Vector3) -> Color {
         if !self.baked || !self.contains_point(world_pos) {
             return Color::BLACK;
@@ -363,13 +392,19 @@ impl LightmapGI {
                             1.0 / (d * d)
                         }
                     };
-                    // Trace toward the light; skip if an occluder blocks it.
-                    if light_occluded(pos, light, &occluder_aabbs) {
+                    // Trace toward the light. `visibility` is 0/1 for a hard
+                    // filter and fractional across a soft filter's penumbra
+                    // (pat-p0s82.25).
+                    let visibility = light_visibility(pos, light, &occluder_aabbs);
+                    if visibility <= 0.0 {
                         continue;
                     }
-                    r += light.color.r * light.energy * att;
-                    g += light.color.g * light.energy * att;
-                    b += light.color.b * light.energy * att;
+                    // A light projector tints its contribution per-texel.
+                    let gel = light.projector_modulate(pos);
+                    let scale = light.energy * att * visibility;
+                    r += light.color.r * gel.r * scale;
+                    g += light.color.g * gel.g * scale;
+                    b += light.color.b * gel.b * scale;
                 }
                 self.lightmap_samples
                     .push(Color::new(r * self.energy, g * self.energy, b * self.energy, 1.0));
@@ -420,13 +455,81 @@ fn light_occluded(pos: Vector3, light: &Light3D, occluder_aabbs: &[Aabb]) -> boo
     if occluder_aabbs.is_empty() {
         return false;
     }
-    let light_point = match light.light_type {
-        LightType::Directional => pos - light.direction * 1.0e4,
-        LightType::Point | LightType::Spot => light.position,
-    };
+    let light_point = light_origin(pos, light);
     occluder_aabbs
         .iter()
         .any(|aabb| segment_intersects_aabb(pos, light_point, *aabb))
+}
+
+/// The point a shadow ray from `pos` aims at for `light`: the light itself for
+/// point/spot lights, or a far point up the incoming direction for a
+/// directional light (which has no position).
+fn light_origin(pos: Vector3, light: &Light3D) -> Vector3 {
+    match light.light_type {
+        LightType::Directional => pos - light.direction * 1.0e4,
+        LightType::Point | LightType::Spot => light.position,
+    }
+}
+
+/// Fraction of `light` visible from `pos`, in `[0, 1]` (pat-p0s82.25).
+///
+/// With [`ShadowFilterQuality::Hard`] this takes a single tap and returns
+/// exactly 0.0 or 1.0 — the original binary behavior. A soft quality spreads
+/// [`Light3D::shadow_blur`] worth of taps across the disc facing the shadow ray
+/// and returns the fraction that reach the light, so a texel at the edge of an
+/// occluder lands strictly between 0 and 1: a penumbra.
+///
+/// Taps are placed on a deterministic golden-angle spiral (no RNG), so a bake
+/// is reproducible.
+fn light_visibility(pos: Vector3, light: &Light3D, occluder_aabbs: &[Aabb]) -> f32 {
+    if occluder_aabbs.is_empty() {
+        return 1.0;
+    }
+    let center = light_origin(pos, light);
+    let taps = light.shadow_filter_quality.taps();
+
+    // Hard (single tap) or a zero blur radius has no area to sample across:
+    // fall back to the binary test so behavior is unchanged.
+    if taps <= 1 || light.shadow_blur <= 0.0 {
+        return if light_occluded(pos, light, occluder_aabbs) {
+            0.0
+        } else {
+            1.0
+        };
+    }
+
+    let (right, up) = shadow_tap_basis(center - pos);
+    let mut unoccluded = 0u32;
+    for i in 0..taps {
+        // Golden-angle spiral over the disc: sqrt keeps samples area-uniform
+        // rather than clustered at the center.
+        let t = (i as f32 + 0.5) / taps as f32;
+        let radius = light.shadow_blur * t.sqrt();
+        let angle = i as f32 * 2.399_963_2; // ~137.5° in radians
+        let offset = right * (radius * angle.cos()) + up * (radius * angle.sin());
+        let sample_point = center + offset;
+        if !occluder_aabbs
+            .iter()
+            .any(|aabb| segment_intersects_aabb(pos, sample_point, *aabb))
+        {
+            unoccluded += 1;
+        }
+    }
+    unoccluded as f32 / taps as f32
+}
+
+/// Orthonormal basis spanning the disc perpendicular to `axis`, used to offset
+/// soft-shadow taps around the light.
+fn shadow_tap_basis(axis: Vector3) -> (Vector3, Vector3) {
+    let a = axis.normalized();
+    let reference = if a.y.abs() > 0.99 {
+        Vector3::new(1.0, 0.0, 0.0)
+    } else {
+        Vector3::new(0.0, 1.0, 0.0)
+    };
+    let right = reference.cross(a).normalized();
+    let up = a.cross(right).normalized();
+    (right, up)
 }
 
 /// Slab-test a segment `p0`→`p1` against an axis-aligned box.
@@ -471,8 +574,141 @@ fn segment_intersects_aabb(p0: Vector3, p1: Vector3, aabb: Aabb) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::light::Light3DId;
+    use crate::light::{Light3DId, LightProjector, ShadowFilterQuality};
     use crate::occluder::Occluder3D;
+
+    // -- pat-p0s82.25: soft shadow filter + light projector -------------------
+
+    /// Fixture matching `lightmapgi_occluder_darkens_opposite_side`: a box over
+    /// x∈[0,10], y∈[4,6] lit from straight above, so the shadow edge falls at
+    /// x = 0 and a texel there straddles it.
+    fn edge_shadow_occluders() -> Vec<Aabb> {
+        let mut occ = OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(
+            10.0, 2.0, 40.0,
+        )));
+        occ.transform.origin = Vector3::new(5.0, 5.0, 0.0);
+        occ.get_world_aabb().into_iter().collect()
+    }
+
+    /// A hard filter keeps the binary edge: every texel is fully lit or fully
+    /// shadowed, never in between. This is the pre-bead behavior and the
+    /// default, so existing bakes are unchanged.
+    #[test]
+    fn hard_shadow_filter_is_binary() {
+        let light = Light3D::directional(Light3DId(1));
+        assert_eq!(light.shadow_filter_quality, ShadowFilterQuality::Hard);
+        let occluders = edge_shadow_occluders();
+
+        // On the shadow edge, and deep under the box: fully shadowed.
+        assert_eq!(
+            light_visibility(Vector3::new(0.0, 0.0, 0.0), &light, &occluders),
+            0.0,
+        );
+        assert_eq!(
+            light_visibility(Vector3::new(5.0, 0.0, 0.0), &light, &occluders),
+            0.0,
+        );
+        // Clear of the box: fully lit.
+        assert_eq!(
+            light_visibility(Vector3::new(-8.0, 0.0, 0.0), &light, &occluders),
+            1.0,
+        );
+    }
+
+    /// The bead's soft option: with a soft quality and a blur radius, a texel on
+    /// the shadow edge is only PARTIALLY occluded — a penumbra — rather than
+    /// snapping to 0 or 1.
+    #[test]
+    fn pcf_soft_filter_produces_penumbra_at_shadow_edge() {
+        let mut light = Light3D::directional(Light3DId(1));
+        light.shadow_filter_quality = ShadowFilterQuality::High;
+        light.shadow_blur = 3.0;
+        let occluders = edge_shadow_occluders();
+
+        let edge = light_visibility(Vector3::new(0.0, 0.0, 0.0), &light, &occluders);
+        assert!(
+            edge > 0.0 && edge < 1.0,
+            "a texel on the shadow edge must be partially lit (penumbra), got {edge}",
+        );
+
+        // The penumbra must not leak into the umbra or dim the open area.
+        assert_eq!(
+            light_visibility(Vector3::new(5.0, 0.0, 0.0), &light, &occluders),
+            0.0,
+            "deep under the occluder must stay fully shadowed",
+        );
+        assert_eq!(
+            light_visibility(Vector3::new(-8.0, 0.0, 0.0), &light, &occluders),
+            1.0,
+            "well clear of the occluder must stay fully lit",
+        );
+    }
+
+    /// A soft quality with no blur radius has no area to filter across, so it
+    /// degrades to the hard binary edge rather than silently sampling a point.
+    #[test]
+    fn soft_filter_without_blur_radius_stays_binary() {
+        let mut light = Light3D::directional(Light3DId(1));
+        light.shadow_filter_quality = ShadowFilterQuality::High;
+        light.shadow_blur = 0.0;
+        let occluders = edge_shadow_occluders();
+
+        assert_eq!(
+            light_visibility(Vector3::new(0.0, 0.0, 0.0), &light, &occluders),
+            0.0,
+        );
+    }
+
+    /// Higher quality means more taps, so the edge is quantized more finely.
+    #[test]
+    fn shadow_filter_quality_tap_counts_match_levels() {
+        assert_eq!(ShadowFilterQuality::Hard.taps(), 1);
+        assert_eq!(ShadowFilterQuality::Low.taps(), 4);
+        assert_eq!(ShadowFilterQuality::Medium.taps(), 8);
+        assert_eq!(ShadowFilterQuality::High.taps(), 16);
+        assert!(!ShadowFilterQuality::Hard.is_soft());
+        assert!(ShadowFilterQuality::High.is_soft());
+    }
+
+    /// Visual test: a spot light with a red projector bakes a red-tinted
+    /// lightmap, where the same light without a projector bakes neutral.
+    #[test]
+    fn light_projector_modulates_baked_lightmap() {
+        let spot = |projector: Option<LightProjector>| {
+            let mut l = Light3D::spot(
+                Light3DId(1),
+                Vector3::new(0.0, 5.0, 0.0),
+                Vector3::new(0.0, -1.0, 0.0),
+            );
+            l.projector = projector;
+            l
+        };
+
+        let mut plain = LightmapGI::new(LightmapGIId(1));
+        plain.bake_samples(&[spot(None)], 16);
+        let neutral = plain.sample_lightmap(Vector3::ZERO);
+
+        let mut tinted = LightmapGI::new(LightmapGIId(2));
+        tinted.bake_samples(
+            &[spot(Some(LightProjector::solid(Color::new(1.0, 0.0, 0.0, 1.0))))],
+            16,
+        );
+        let red = tinted.sample_lightmap(Vector3::ZERO);
+
+        assert!(
+            neutral.g > 0.0 && neutral.b > 0.0,
+            "without a projector the light stays neutral, got {neutral:?}",
+        );
+        assert!(
+            red.r > 0.0,
+            "a red projector must still light the red channel, got {red:?}",
+        );
+        assert_eq!(
+            (red.g, red.b),
+            (0.0, 0.0),
+            "a red projector must cut the green/blue contribution, got {red:?}",
+        );
+    }
 
     // -- VoxelGI tests --------------------------------------------------------
 

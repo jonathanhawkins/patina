@@ -556,6 +556,12 @@ fn run_command_capture(
     // build-dir lock, and wedges every later verify (pat-regax).
     use std::os::unix::process::CommandExt;
 
+    // Snapshot compiles already referencing this workspace BEFORE we start.
+    // Anything matching later that is absent here began inside our window, so a
+    // timeout may reap it; anything already running is somebody else's and must
+    // survive (pat-r46zo).
+    let preexisting_compilers = compiler_pids_for_workspace(cwd);
+
     let mut child = Command::new("bash")
         .args(["-lc", cmd])
         .current_dir(cwd)
@@ -603,6 +609,18 @@ fn run_command_capture(
                 libc::kill(-pgid, libc::SIGKILL);
             }
             let _ = child.wait();
+            // The group kill cannot reach compiles that sccache's server spawned
+            // for us: they are pid-1-parented and never joined our group. Observed
+            // live 2026-07-14 — after a platform_suite timeout, its gdrender3d
+            // rustc survived 6+ min at 0 CPU holding an sccache slot and starving
+            // the lane. Reap them by cmdline instead (pat-r46zo).
+            let escaped = reap_escaped_compiler_orphans(cwd, &preexisting_compilers);
+            if !escaped.is_empty() {
+                tracing::warn!(
+                    "[verify] timeout kill reaped {} compiler orphan(s) outside group {pgid}: {escaped:?}",
+                    escaped.len()
+                );
+            }
             // Post-kill assertion: nothing in the group should still be alive.
             // If something is (e.g. a descendant that escaped into its own
             // group), surface it loudly so a wedge is visible, not silent.
@@ -618,6 +636,71 @@ fn run_command_capture(
     let out = out_handle.join().unwrap_or_default();
     let err = err_handle.join().unwrap_or_default();
     Ok(Some((status, format!("{out}{err}"))))
+}
+
+/// PIDs of compiler processes whose command line references `workspace`,
+/// regardless of who their parent is.
+///
+/// The process-group kill (pat-regax) only reaps descendants that inherited the
+/// verify's pgid. Compiles routed through `RUSTC_WRAPPER=sccache` do NOT: the
+/// sccache client hands the job to the long-lived sccache SERVER, which spawns
+/// `rustc` as its own (pid-1-parented) child, outside our group entirely. A
+/// cmdline match is the only way to find those. Best-effort — an empty set if
+/// `ps` is unavailable (pat-r46zo).
+fn compiler_pids_for_workspace(workspace: &Path) -> std::collections::HashSet<i32> {
+    let workspace = workspace.to_string_lossy();
+    let output = match Command::new("ps").args(["-axo", "pid=,command="]).output() {
+        Ok(o) => o,
+        Err(_) => return std::collections::HashSet::new(),
+    };
+    let self_pid = std::process::id() as i32;
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (pid, command) = line.trim_start().split_once(' ')?;
+            let pid: i32 = pid.parse().ok()?;
+            // Never signal ourselves, whatever our cmdline happens to contain.
+            if pid == self_pid {
+                return None;
+            }
+            if command.contains("rustc") && command.contains(&*workspace) {
+                Some(pid)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// SIGKILL compiler orphans that escaped the timeout's process-group kill,
+/// returning the pids actually signalled (sorted).
+///
+/// `preexisting` is the same match taken BEFORE the verify started: anything in
+/// it belongs to somebody else and is left alone. Everything else appeared
+/// inside this verify's window, so it is ours to reap — this is the bead's
+/// "start time falls within the verify window" test, done as a pid-set diff
+/// rather than by parsing `ps -o lstart` (pat-r46zo).
+fn reap_escaped_compiler_orphans(
+    workspace: &Path,
+    preexisting: &std::collections::HashSet<i32>,
+) -> Vec<i32> {
+    let mut reaped: Vec<i32> = compiler_pids_for_workspace(workspace)
+        .into_iter()
+        .filter(|pid| !preexisting.contains(pid))
+        .collect();
+    reaped.sort_unstable();
+
+    for pid in &reaped {
+        // SAFETY: kill(2) with a positive pid signals exactly that process. Each
+        // pid matched `rustc` + this verify's workspace and was absent before the
+        // verify began, so it is a compile this verify started.
+        unsafe {
+            libc::kill(*pid, libc::SIGKILL);
+        }
+    }
+
+    reaped
 }
 
 /// PIDs still alive in process group `pgid` (space-separated), or `None` if the
@@ -1347,6 +1430,123 @@ mod tests {
                 "pid {pid} survived the timeout kill — process group was not fully reaped"
             );
         }
+    }
+
+    /// Poll `kill -0 <pid>` until the process is gone, up to ~3s. Returns true
+    /// if it died. Absorbs the small teardown/reap window after a SIGKILL.
+    #[cfg(unix)]
+    fn died_within_grace(pid: &str) -> bool {
+        for _ in 0..30 {
+            let alive = Command::new("kill")
+                .args(["-0", pid])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !alive {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    }
+
+    /// pat-r46zo: `kill(-pgid)` cannot reach a compile that sccache's long-lived
+    /// server spawned on our behalf — it is pid-1-parented and never joined the
+    /// verify's process group, so it survives the timeout and holds an sccache
+    /// slot (observed live: a gdrender3d rustc lingering 6+ min at 0 CPU).
+    ///
+    /// Stands in a fake `rustc` for the real one and detaches it into its OWN
+    /// process group via bash job control (`set -m`), which is precisely the
+    /// escape the sccache server performs. With only the pat-regax group kill,
+    /// the fake rustc survives and this test fails.
+    #[cfg(unix)]
+    #[test]
+    fn verifier_timeout_reaps_wrapper_spawned_orphan_outside_group() {
+        let dir = TempDir::new().unwrap();
+        let ws = dir.path();
+
+        // A stand-in compiler: its path carries both "rustc" and the workspace,
+        // which is exactly how the reaper identifies this verify's compiles.
+        let fake_rustc = ws.join("rustc");
+        std::fs::write(&fake_rustc, "#!/bin/sh\nsleep 20\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let pidfile = ws.join("orphan.pid");
+        // `set -m` gives each background job its own process group — the same
+        // escape sccache's server performs. Then block so the call times out.
+        let cmd = format!(
+            "set -m; '{rustc}' & echo $! > '{pf}'; sleep 1000",
+            rustc = fake_rustc.display(),
+            pf = pidfile.display()
+        );
+
+        let outcome = run_command_capture(ws, &cmd, Duration::from_secs(3)).expect("spawn ok");
+        assert!(outcome.is_none(), "command should have timed out");
+
+        let orphan = std::fs::read_to_string(&pidfile).unwrap_or_default();
+        let orphan = orphan.trim();
+        assert!(
+            !orphan.is_empty(),
+            "fake rustc pid should have been recorded"
+        );
+
+        assert!(
+            died_within_grace(orphan),
+            "pid {orphan} (wrapper-spawned rustc outside the process group) survived the \
+             timeout — it would hold an sccache slot and starve the verify lane"
+        );
+    }
+
+    /// The reaper must not shoot down a compile that was already running when the
+    /// verify started: that one belongs to another lane (or the operator), and
+    /// killing it would turn one lane's timeout into everyone else's failure.
+    #[cfg(unix)]
+    #[test]
+    fn reaper_spares_compilers_that_predate_the_verify() {
+        let dir = TempDir::new().unwrap();
+        let ws = dir.path();
+
+        let fake_rustc = ws.join("rustc");
+        std::fs::write(&fake_rustc, "#!/bin/sh\nsleep 20\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_rustc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // Start it BEFORE any snapshot, standing in for a foreign in-flight compile.
+        let mut foreign = Command::new(&fake_rustc)
+            .spawn()
+            .expect("spawn foreign rustc");
+        let foreign_pid = foreign.id() as i32;
+
+        // Give ps a moment to see it, then snapshot as run_command_capture would.
+        std::thread::sleep(Duration::from_millis(300));
+        let preexisting = compiler_pids_for_workspace(ws);
+        assert!(
+            preexisting.contains(&foreign_pid),
+            "snapshot must see the in-flight compile at {foreign_pid}"
+        );
+
+        let reaped = reap_escaped_compiler_orphans(ws, &preexisting);
+
+        assert!(
+            !reaped.contains(&foreign_pid),
+            "reaper killed a compile that predates the verify window: {reaped:?}"
+        );
+        assert!(
+            Command::new("kill")
+                .args(["-0", &foreign_pid.to_string()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false),
+            "pid {foreign_pid} must still be alive — it was never ours to kill"
+        );
+
+        let _ = foreign.kill();
+        let _ = foreign.wait();
     }
 
     // ─── pat-8zkm3: dyld-wedge circuit breaker ───────────────────────────

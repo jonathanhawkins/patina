@@ -129,11 +129,15 @@ pub fn parse_res_header(data: &[u8]) -> EngineResult<ResBinaryHeader> {
 /// entries in the main resource's `subresources`/`ext_resources` maps — the
 /// same in-memory model the text loader produces.
 ///
+/// The `PackedByteArray`/`PackedInt32Array`/… family decodes into the matching
+/// [`Variant`] packed types (pat-nzgdu.82).
+///
 /// Returns an [`EngineError::Unsupported`] for compressed (`RSCC`), big-endian,
-/// newer-than-6 format, and packed-array/object variant types not yet modeled
-/// (packed arrays arrive with pat-u3l8c.11). All reads are bounds-checked, so
-/// truncated or corrupt input yields an [`EngineError::Parse`] rather than a
-/// panic.
+/// newer-than-6 format, and the variant types that still have no `Variant`
+/// counterpart (RID, InputEvent, Callable/Signal, the integer vectors,
+/// Vector4/Projection).
+/// All reads are bounds-checked, so truncated or corrupt input yields an
+/// [`EngineError::Parse`] rather than a panic.
 pub fn load_res_binary(data: &[u8], path: &str) -> EngineResult<Arc<Resource>> {
     let mut cur = Cursor::new(data);
 
@@ -326,9 +330,18 @@ const V_NODE_PATH: u32 = 22;
 const V_OBJECT: u32 = 24;
 const V_DICTIONARY: u32 = 26;
 const V_ARRAY: u32 = 30;
+const V_PACKED_BYTE_ARRAY: u32 = 31;
+const V_PACKED_INT32_ARRAY: u32 = 32;
+const V_PACKED_FLOAT32_ARRAY: u32 = 33;
+const V_PACKED_STRING_ARRAY: u32 = 34;
+const V_PACKED_VECTOR2_ARRAY: u32 = 35;
+const V_PACKED_VECTOR3_ARRAY: u32 = 36;
+const V_PACKED_COLOR_ARRAY: u32 = 37;
 const V_INT64: u32 = 40;
 const V_DOUBLE: u32 = 41;
 const V_STRING_NAME: u32 = 44;
+const V_PACKED_INT64_ARRAY: u32 = 48;
+const V_PACKED_FLOAT64_ARRAY: u32 = 49;
 
 // Object reference sub-kinds (within V_OBJECT).
 const OBJECT_EMPTY: u32 = 0;
@@ -476,6 +489,46 @@ impl BinaryResourceReader<'_> {
         }
     }
 
+    /// Reads a packed array's `u32` element count, rejecting counts whose
+    /// payload cannot fit in the remaining bytes.
+    ///
+    /// `min_elem_size` is the smallest number of bytes one element can occupy
+    /// (for `PackedStringArray` that is the 4-byte length prefix). Checking
+    /// before allocating keeps a corrupt count from reserving gigabytes — the
+    /// cursor alone would catch the truncation, but only after the allocation.
+    fn packed_len(&mut self, min_elem_size: usize) -> EngineResult<usize> {
+        let len = self.cur.u32()? as usize;
+        let needed = len
+            .checked_mul(min_elem_size)
+            .ok_or_else(|| EngineError::Parse("packed array length overflow".into()))?;
+        let remaining = self.cur.data.len().saturating_sub(self.cur.pos);
+        if needed > remaining {
+            return Err(EngineError::Parse(format!(
+                "packed array truncated: {len} element(s) need {needed} byte(s), have {remaining}"
+            )));
+        }
+        Ok(len)
+    }
+
+    /// Skips the zero padding Godot writes to re-align to 4 bytes after a
+    /// `PackedByteArray` payload (`_advance_padding`).
+    fn advance_padding(&mut self, len: usize) -> EngineResult<()> {
+        let extra = (4 - (len % 4)) % 4;
+        if extra > 0 {
+            self.cur.take(extra)?;
+        }
+        Ok(())
+    }
+
+    /// Byte width of one `real_t` component in this file.
+    fn real_size(&self) -> usize {
+        if self.real_is_double {
+            8
+        } else {
+            4
+        }
+    }
+
     fn parse_variant(&mut self, depth: u32) -> EngineResult<Variant> {
         if depth > MAX_DEPTH {
             return Err(EngineError::Parse(
@@ -591,6 +644,92 @@ impl BinaryResourceReader<'_> {
                 }
                 Ok(Variant::Array(arr))
             }
+            V_PACKED_BYTE_ARRAY => {
+                let len = self.packed_len(1)?;
+                let bytes = self.cur.take(len)?.to_vec();
+                // Byte arrays (and only byte arrays) are padded back to a
+                // 4-byte boundary.
+                self.advance_padding(len)?;
+                Ok(Variant::PackedByteArray(bytes))
+            }
+            V_PACKED_INT32_ARRAY => {
+                let len = self.packed_len(4)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    arr.push(self.cur.u32()? as i32);
+                }
+                Ok(Variant::PackedInt32Array(arr))
+            }
+            V_PACKED_INT64_ARRAY => {
+                let len = self.packed_len(8)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    arr.push(self.cur.u64()? as i64);
+                }
+                Ok(Variant::PackedInt64Array(arr))
+            }
+            V_PACKED_FLOAT32_ARRAY => {
+                // Always 32-bit, regardless of the file's real_t width.
+                let len = self.packed_len(4)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    arr.push(self.cur.f32()?);
+                }
+                Ok(Variant::PackedFloat32Array(arr))
+            }
+            V_PACKED_FLOAT64_ARRAY => {
+                // Always 64-bit, regardless of the file's real_t width.
+                let len = self.packed_len(8)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    arr.push(self.cur.f64()?);
+                }
+                Ok(Variant::PackedFloat64Array(arr))
+            }
+            V_PACKED_STRING_ARRAY => {
+                // Each element is at minimum its own 4-byte length prefix.
+                let len = self.packed_len(4)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    arr.push(read_unicode_string(&mut self.cur)?);
+                }
+                Ok(Variant::PackedStringArray(arr))
+            }
+            V_PACKED_VECTOR2_ARRAY => {
+                let len = self.packed_len(self.real_size() * 2)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let x = self.real()?;
+                    let y = self.real()?;
+                    arr.push(Vector2::new(x, y));
+                }
+                Ok(Variant::PackedVector2Array(arr))
+            }
+            V_PACKED_VECTOR3_ARRAY => {
+                let len = self.packed_len(self.real_size() * 3)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let x = self.real()?;
+                    let y = self.real()?;
+                    let z = self.real()?;
+                    arr.push(Vector3::new(x, y, z));
+                }
+                Ok(Variant::PackedVector3Array(arr))
+            }
+            V_PACKED_COLOR_ARRAY => {
+                // Colors are always single-precision (Color is float-based,
+                // not real_t), matching the V_COLOR scalar arm above.
+                let len = self.packed_len(16)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let r = self.cur.f32()?;
+                    let g = self.cur.f32()?;
+                    let b = self.cur.f32()?;
+                    let a = self.cur.f32()?;
+                    arr.push(Color::new(r, g, b, a));
+                }
+                Ok(Variant::PackedColorArray(arr))
+            }
             V_DICTIONARY => {
                 let len = self.cur.u32()? & 0x7FFF_FFFF;
                 let mut map = Dictionary::new();
@@ -602,8 +741,12 @@ impl BinaryResourceReader<'_> {
                 }
                 Ok(Variant::Dictionary(map))
             }
+            // Still unmapped: RID(23), INPUT_EVENT(25), CALLABLE(42), SIGNAL(43),
+            // the *I integer vectors (45/46/47), PACKED_VECTOR4_ARRAY(38),
+            // VECTOR4(50)/VECTOR4I(51)/PROJECTION(52) — none have a Variant
+            // counterpart yet.
             other => Err(EngineError::Unsupported(format!(
-                "binary resource variant type {other} is not supported yet (packed arrays land with pat-u3l8c.11)"
+                "binary resource variant type {other} is not supported yet"
             ))),
         }
     }
@@ -933,6 +1076,104 @@ mod binary_tests {
         }
         o
     }
+    /// `PackedByteArray`, including the 4-byte-alignment padding Godot writes.
+    fn v_packed_byte(bytes: &[u8]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_BYTE_ARRAY);
+        o.extend(u32b(bytes.len() as u32));
+        o.extend_from_slice(bytes);
+        o.extend(vec![0u8; (4 - (bytes.len() % 4)) % 4]);
+        o
+    }
+    fn v_packed_int32(vals: &[i32]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_INT32_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &v in vals {
+            o.extend_from_slice(&v.to_le_bytes());
+        }
+        o
+    }
+    fn v_packed_int64(vals: &[i64]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_INT64_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &v in vals {
+            o.extend_from_slice(&v.to_le_bytes());
+        }
+        o
+    }
+    fn v_packed_f32(vals: &[f32]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_FLOAT32_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &v in vals {
+            o.extend_from_slice(&v.to_le_bytes());
+        }
+        o
+    }
+    fn v_packed_f64(vals: &[f64]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_FLOAT64_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &v in vals {
+            o.extend_from_slice(&v.to_le_bytes());
+        }
+        o
+    }
+    fn v_packed_string(vals: &[&str]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_STRING_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for s in vals {
+            o.extend(ustr(s));
+        }
+        o
+    }
+    fn v_packed_vec2_f32(vals: &[(f32, f32)]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_VECTOR2_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &(x, y) in vals {
+            o.extend_from_slice(&x.to_le_bytes());
+            o.extend_from_slice(&y.to_le_bytes());
+        }
+        o
+    }
+    fn v_packed_vec2_f64(vals: &[(f64, f64)]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_VECTOR2_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &(x, y) in vals {
+            o.extend_from_slice(&x.to_le_bytes());
+            o.extend_from_slice(&y.to_le_bytes());
+        }
+        o
+    }
+    fn v_packed_vec3_f32(vals: &[(f32, f32, f32)]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_VECTOR3_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &(x, y, z) in vals {
+            o.extend_from_slice(&x.to_le_bytes());
+            o.extend_from_slice(&y.to_le_bytes());
+            o.extend_from_slice(&z.to_le_bytes());
+        }
+        o
+    }
+    fn v_packed_vec3_f64(vals: &[(f64, f64, f64)]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_VECTOR3_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &(x, y, z) in vals {
+            o.extend_from_slice(&x.to_le_bytes());
+            o.extend_from_slice(&y.to_le_bytes());
+            o.extend_from_slice(&z.to_le_bytes());
+        }
+        o
+    }
+    /// `PackedColorArray` — always single-precision, even in a real64 file.
+    fn v_packed_color(vals: &[(f32, f32, f32, f32)]) -> Vec<u8> {
+        let mut o = u32b(V_PACKED_COLOR_ARRAY);
+        o.extend(u32b(vals.len() as u32));
+        for &(r, g, b, a) in vals {
+            o.extend_from_slice(&r.to_le_bytes());
+            o.extend_from_slice(&g.to_le_bytes());
+            o.extend_from_slice(&b.to_le_bytes());
+            o.extend_from_slice(&a.to_le_bytes());
+        }
+        o
+    }
     fn v_dict(pairs: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         let mut o = u32b(V_DICTIONARY);
         o.extend(u32b(pairs.len() as u32));
@@ -1209,13 +1450,204 @@ mod binary_tests {
     }
 
     #[test]
-    fn packed_array_variant_unsupported() {
-        // VARIANT_PACKED_BYTE_ARRAY = 31, unsupported for now.
-        let mut packed = u32b(31);
-        packed.extend(u32b(0)); // len 0
-        let data = build(0, &[], &[("R", vec![("bytes", packed)])]);
-        let err = load_res_binary(&data, "res://p.res").unwrap_err().to_string();
-        assert!(err.contains("not supported"), "got: {err}");
+    fn packed_arrays_roundtrip_through_loader() {
+        let data = build(
+            0,
+            &[],
+            &[(
+                "R",
+                vec![
+                    // len 4 => no padding; a stray pad byte would desync "i32s".
+                    ("bytes", v_packed_byte(&[1, 2, 3, 4])),
+                    ("i32s", v_packed_int32(&[-1, 0, 7])),
+                    ("i64s", v_packed_int64(&[-1, 1i64 << 40])),
+                    ("f32s", v_packed_f32(&[0.5, -1.5])),
+                    ("f64s", v_packed_f64(&[0.25, 1e300])),
+                    ("strs", v_packed_string(&["a", "", "hello"])),
+                    ("v2s", v_packed_vec2_f32(&[(1.0, 2.0), (3.0, 4.0)])),
+                    ("v3s", v_packed_vec3_f32(&[(1.0, 2.0, 3.0)])),
+                    ("cols", v_packed_color(&[(1.0, 0.5, 0.25, 1.0)])),
+                ],
+            )],
+        );
+        let res = load_res_binary(&data, "res://packed.res").unwrap();
+        assert_eq!(
+            res.get_property("bytes"),
+            Some(&Variant::PackedByteArray(vec![1, 2, 3, 4]))
+        );
+        assert_eq!(
+            res.get_property("i32s"),
+            Some(&Variant::PackedInt32Array(vec![-1, 0, 7]))
+        );
+        assert_eq!(
+            res.get_property("i64s"),
+            Some(&Variant::PackedInt64Array(vec![-1, 1i64 << 40]))
+        );
+        assert_eq!(
+            res.get_property("f32s"),
+            Some(&Variant::PackedFloat32Array(vec![0.5, -1.5]))
+        );
+        assert_eq!(
+            res.get_property("f64s"),
+            Some(&Variant::PackedFloat64Array(vec![0.25, 1e300]))
+        );
+        assert_eq!(
+            res.get_property("strs"),
+            Some(&Variant::PackedStringArray(vec![
+                "a".to_string(),
+                String::new(),
+                "hello".to_string(),
+            ]))
+        );
+        assert_eq!(
+            res.get_property("v2s"),
+            Some(&Variant::PackedVector2Array(vec![
+                Vector2::new(1.0, 2.0),
+                Vector2::new(3.0, 4.0),
+            ]))
+        );
+        assert_eq!(
+            res.get_property("v3s"),
+            Some(&Variant::PackedVector3Array(vec![Vector3::new(1.0, 2.0, 3.0)]))
+        );
+        assert_eq!(
+            res.get_property("cols"),
+            Some(&Variant::PackedColorArray(vec![Color::new(
+                1.0, 0.5, 0.25, 1.0
+            )]))
+        );
+    }
+
+    #[test]
+    fn packed_byte_array_padding_is_consumed() {
+        // 5 bytes => 3 bytes of padding. If the padding is not skipped the
+        // following property decodes as garbage.
+        let data = build(
+            0,
+            &[],
+            &[(
+                "R",
+                vec![
+                    ("bytes", v_packed_byte(&[1, 2, 3, 4, 5])),
+                    ("after", v_int(42)),
+                ],
+            )],
+        );
+        let res = load_res_binary(&data, "res://pad.res").unwrap();
+        assert_eq!(
+            res.get_property("bytes"),
+            Some(&Variant::PackedByteArray(vec![1, 2, 3, 4, 5]))
+        );
+        assert_eq!(res.get_property("after"), Some(&Variant::Int(42)));
+    }
+
+    #[test]
+    fn empty_packed_arrays_decode_to_empty_vecs() {
+        let data = build(
+            0,
+            &[],
+            &[(
+                "R",
+                vec![
+                    ("bytes", v_packed_byte(&[])),
+                    ("strs", v_packed_string(&[])),
+                    ("after", v_int(9)),
+                ],
+            )],
+        );
+        let res = load_res_binary(&data, "res://empty.res").unwrap();
+        assert_eq!(
+            res.get_property("bytes"),
+            Some(&Variant::PackedByteArray(Vec::new()))
+        );
+        assert_eq!(
+            res.get_property("strs"),
+            Some(&Variant::PackedStringArray(Vec::new()))
+        );
+        assert_eq!(res.get_property("after"), Some(&Variant::Int(9)));
+    }
+
+    #[test]
+    fn packed_vector_arrays_honor_real64_flag_but_colors_stay_f32() {
+        let data = build(
+            FORMAT_FLAG_REAL_T_IS_DOUBLE,
+            &[],
+            &[(
+                "R",
+                vec![
+                    ("v2s", v_packed_vec2_f64(&[(1.5, 2.5)])),
+                    ("v3s", v_packed_vec3_f64(&[(1.5, 2.5, 3.5)])),
+                    // Colors are float-based, not real_t — still 4×f32 here.
+                    ("cols", v_packed_color(&[(1.0, 0.5, 0.25, 1.0)])),
+                    ("after", v_int(3)),
+                ],
+            )],
+        );
+        let res = load_res_binary(&data, "res://p64.res").unwrap();
+        assert_eq!(
+            res.get_property("v2s"),
+            Some(&Variant::PackedVector2Array(vec![Vector2::new(1.5, 2.5)]))
+        );
+        assert_eq!(
+            res.get_property("v3s"),
+            Some(&Variant::PackedVector3Array(vec![Vector3::new(1.5, 2.5, 3.5)]))
+        );
+        assert_eq!(
+            res.get_property("cols"),
+            Some(&Variant::PackedColorArray(vec![Color::new(
+                1.0, 0.5, 0.25, 1.0
+            )]))
+        );
+        // Proves the color array consumed exactly 16 bytes, not 32.
+        assert_eq!(res.get_property("after"), Some(&Variant::Int(3)));
+    }
+
+    #[test]
+    fn packed_arrays_nest_inside_array_and_dictionary() {
+        let data = build(
+            0,
+            &[],
+            &[(
+                "R",
+                vec![
+                    ("arr", v_array(&[v_packed_int32(&[1, 2])])),
+                    ("dict", v_dict(&[(v_string("k"), v_packed_string(&["v"]))])),
+                ],
+            )],
+        );
+        let res = load_res_binary(&data, "res://nest.res").unwrap();
+        assert_eq!(
+            res.get_property("arr"),
+            Some(&Variant::Array(vec![Variant::PackedInt32Array(vec![1, 2])]))
+        );
+        assert!(matches!(
+            res.get_property("dict"),
+            Some(Variant::Dictionary(_))
+        ));
+    }
+
+    #[test]
+    fn packed_array_with_absurd_length_errors_without_allocating() {
+        // A corrupt count must be rejected against the bytes actually left,
+        // never used to reserve ~16 GB.
+        let mut packed = u32b(V_PACKED_INT32_ARRAY);
+        packed.extend(u32b(u32::MAX));
+        let data = build(0, &[], &[("R", vec![("evil", packed)])]);
+        let err = load_res_binary(&data, "res://evil.res")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("truncated"), "got: {err}");
+    }
+
+    #[test]
+    fn packed_byte_array_with_truncated_payload_errors() {
+        let mut packed = u32b(V_PACKED_BYTE_ARRAY);
+        packed.extend(u32b(1_000_000)); // claims 1 MB; the file is far smaller
+        let data = build(0, &[], &[("R", vec![("evil", packed)])]);
+        let err = load_res_binary(&data, "res://evil2.res")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("truncated"), "got: {err}");
     }
 
     #[test]

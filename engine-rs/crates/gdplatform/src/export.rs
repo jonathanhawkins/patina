@@ -1410,6 +1410,35 @@ fn web_offline_html(app_name: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A fixture directory unique to this *process* and call site (pat-jtlwy).
+    ///
+    /// The tests here previously used a fixed `temp_dir()/patina_test_<name>`
+    /// path. That is unique between tests, but **not** between concurrent
+    /// processes: two simultaneous `nextest run -p gdplatform` invocations (the
+    /// swarm's verifier lane alongside a developer, or a retry overlapping its
+    /// own previous attempt) both resolve to the same directory, and each begins
+    /// with `remove_dir_all` — so one run deletes the other's fixtures mid-
+    /// pipeline and the victim fails on whichever assert reads a now-missing
+    /// resource. That is a plausible root cause of this test's intermittent
+    /// "pre-existing" failure, and it is invisible to a single-run repro.
+    ///
+    /// Keying on pid + a counter makes each run's fixtures its own, matching the
+    /// pattern already used in `patina-runner/tests/autoload_boot_test.rs`.
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "patina_test_{}_{}_{}",
+            tag,
+            std::process::id(),
+            n
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn build_profile_default_is_release() {
         assert_eq!(BuildProfile::default(), BuildProfile::Release);
@@ -1768,9 +1797,7 @@ mod tests {
 
     #[test]
     fn executor_run_full_pipeline() {
-        let tmp = std::env::temp_dir().join("patina_test_run_pipeline");
-        let _ = std::fs::remove_dir_all(&tmp);
-        let _ = std::fs::create_dir_all(&tmp);
+        let tmp = unique_temp_dir("run_pipeline");
         let textures = tmp.join("textures");
         std::fs::create_dir_all(&textures).unwrap();
         std::fs::write(tmp.join("main.tscn"), "main scene").unwrap();
@@ -1784,10 +1811,29 @@ mod tests {
         let mut exec = PackageExecutor::new(cfg, &tmp, tmp.join("build"));
         let result = exec.run();
 
-        assert!(result.success);
-        assert!(result.output_path.contains("CoolGame.windows.debug"));
-        assert!(result.size_bytes > 0);
-        assert!(!result.messages.is_empty());
+        // Report *why* on failure: this test has a history of failing without
+        // explanation, and a bare `assert!(result.success)` prints nothing about
+        // the pipeline that produced it (pat-jtlwy). `messages` carries the
+        // per-step trace and the error text on the failure paths.
+        assert!(
+            result.success,
+            "pipeline failed: {:?}",
+            result.messages
+        );
+        assert!(
+            result.output_path.contains("CoolGame.windows.debug"),
+            "output_path should be the <app>.<platform>.<profile> marker, got {:?}",
+            result.output_path
+        );
+        assert!(
+            result.size_bytes > 0,
+            "collected resources should have non-zero size; messages: {:?}",
+            result.messages
+        );
+        assert!(
+            !result.messages.is_empty(),
+            "a successful run records its per-step trace"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -3,6 +3,34 @@
 //! Provides a Godot-compatible CPU particle emitter with deterministic
 //! randomness (xorshift), configurable emission shapes, and per-particle
 //! physics (gravity, angular velocity, color interpolation).
+//!
+//! # Parity: `GPUParticles2D` is CPU-simulated here (pat-z35r2.19)
+//!
+//! Patina registers and renders `GPUParticles2D`/`GPUParticles3D`, but they are
+//! **not** GPU-simulated: `MainLoop::process_particles` drives all four particle
+//! classes — `GPUParticles2D`, `GPUParticles3D`, `CPUParticles2D`,
+//! `CPUParticles3D` — through this same [`ParticleSimulator`] on the CPU. The
+//! `GPU` prefix is therefore a naming alias for Godot compatibility, not a
+//! statement about where the work happens. `tests/gpu_particles_are_cpu_simulated.rs`
+//! pins that equivalence so the claim can't drift unnoticed.
+//!
+//! Two Godot features follow from real GPU particles and are consequently
+//! **absent**, not merely unimplemented here:
+//!
+//! - **Collision.** Godot's GPU particles collide against `ParticlesCollisionBox3D`
+//!   / `Sphere3D` / `SDF3D` / `HeightField3D` (and the 2D SDF equivalents) inside
+//!   the particle shader. This module has no collider input at all: a particle's
+//!   only per-step force is `gravity`, so particles pass through every body in the
+//!   scene. `collision_mode`/`collision_friction`/`collision_bounce` are unhonored.
+//! - **Trails.** `trail_enabled`/`trail_lifetime` (and the trail mesh sections
+//!   Godot builds from the particle's transform history) have no equivalent: each
+//!   particle emits exactly one draw command per frame (see
+//!   [`ParticleSimulator::get_draw_commands`]).
+//!
+//! Closing either gap means putting the simulation on the GPU (or writing a CPU
+//! collider query per particle per step); both are out of scope for this module
+//! as written, and are tracked separately. Do not describe these nodes as
+//! GPU-accelerated in docs or parity scorecards on the strength of the class name.
 
 use gdcore::math::{Color, Vector2};
 

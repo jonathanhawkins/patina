@@ -79,6 +79,17 @@ impl AnimTreeGraph {
         self.nodes.len()
     }
 
+    /// All nodes, in insertion order (the order the editor graph lists them).
+    pub fn nodes(&self) -> &[Node] {
+        &self.nodes
+    }
+
+    /// Finds a node id by its display name (the editor addresses states by
+    /// name, since that is what the served graph shows).
+    pub fn node_id_by_name(&self, name: &str) -> Option<NodeId> {
+        self.nodes.iter().find(|n| n.name == name).map(|n| n.id)
+    }
+
     /// A node by id.
     pub fn get_node(&self, id: NodeId) -> Option<&Node> {
         self.nodes.iter().find(|n| n.id == id)

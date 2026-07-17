@@ -2689,11 +2689,22 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
                 <span>AnimationTree</span>
                 <button id="anim-tree-close" title="Close">&times;</button>
               </div>
+              <!-- pat-nzgdu.103: states/transitions come from
+                   GET /api/animation/tree; the lists below are rendered by
+                   refreshAnimTree(), not hardcoded. -->
+              <div id="anim-tree-toolbar" style="display:flex;gap:4px;padding:4px 0">
+                <input id="anim-tree-state-name" placeholder="State name" style="flex:1;min-width:0">
+                <button id="anim-tree-add-state" title="Add state">+</button>
+              </div>
+              <div id="anim-tree-transition-toolbar" style="display:flex;gap:4px;padding:0 0 4px 0">
+                <input id="anim-tree-from" placeholder="From" style="flex:1;min-width:0">
+                <input id="anim-tree-to" placeholder="To" style="flex:1;min-width:0">
+                <button id="anim-tree-connect" title="Connect transition">&#8594;</button>
+              </div>
               <div id="anim-tree-body">
                 <div class="anim-tree-node active">AnimationNodeStateMachine (root)</div>
-                <div class="anim-tree-node">AnimationNodeAnimation: idle</div>
-                <div class="anim-tree-node">AnimationNodeAnimation: walk</div>
-                <div class="anim-tree-node">AnimationNodeAnimation: run</div>
+                <div id="anim-tree-states"></div>
+                <div id="anim-tree-transitions" style="padding:4px 0;color:var(--text-dim);font-size:11px"></div>
                 <div style="padding:8px 0;color:var(--text-dim);font-size:11px">Connect nodes to create animation state transitions.</div>
               </div>
             </div>
@@ -10863,11 +10874,69 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         logMessage('info', 'Onion skinning ' + (editorSettings.onion_skinning_enabled ? 'enabled' : 'disabled'));
       });
     }
-    // AnimationTree dialog
+    // AnimationTree dialog (pat-nzgdu.103: backed by /api/animation/tree).
+    // Renders the real state machine from the server and highlights the state
+    // that is currently playing, the way Godot's state-machine editor does.
+    async function refreshAnimTree() {
+      var statesEl = document.getElementById('anim-tree-states');
+      var transEl = document.getElementById('anim-tree-transitions');
+      if (!statesEl) return;
+      try {
+        var resp = await fetch('/api/animation/tree');
+        if (!resp.ok) return;
+        var graph = await resp.json();
+        var byId = {};
+        (graph.states || []).forEach(function(s) { byId[s.id] = s.name; });
+        statesEl.innerHTML = '';
+        (graph.states || []).forEach(function(s) {
+          var div = document.createElement('div');
+          div.className = 'anim-tree-node' +
+            (graph.current_state === s.name ? ' active' : '');
+          div.textContent = 'AnimationNodeAnimation: ' + s.name;
+          statesEl.appendChild(div);
+        });
+        if (transEl) {
+          transEl.textContent = (graph.transitions || [])
+            .map(function(t) { return byId[t.from] + ' -> ' + byId[t.to]; })
+            .join(', ');
+        }
+      } catch (e) { /* editor stays usable if the tree endpoint is unavailable */ }
+    }
+
+    async function addAnimTreeState() {
+      var input = document.getElementById('anim-tree-state-name');
+      if (!input || !input.value) return;
+      await fetch('/api/animation/tree/state/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: input.value })
+      });
+      input.value = '';
+      await refreshAnimTree();
+    }
+
+    async function connectAnimTreeTransition() {
+      var from = document.getElementById('anim-tree-from');
+      var to = document.getElementById('anim-tree-to');
+      if (!from || !to || !from.value || !to.value) return;
+      await fetch('/api/animation/tree/transition/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: from.value, to: to.value })
+      });
+      await refreshAnimTree();
+    }
+
+    var treeAddBtn = document.getElementById('anim-tree-add-state');
+    if (treeAddBtn) treeAddBtn.addEventListener('click', addAnimTreeState);
+    var treeConnectBtn = document.getElementById('anim-tree-connect');
+    if (treeConnectBtn) treeConnectBtn.addEventListener('click', connectAnimTreeTransition);
+
     var treeBtn = document.getElementById('anim-tree-btn');
     if (treeBtn) {
       treeBtn.addEventListener('click', function() {
         document.getElementById('anim-tree-dialog').classList.add('open');
+        refreshAnimTree();
       });
     }
     var treeClose = document.getElementById('anim-tree-close');

@@ -402,6 +402,12 @@ impl SceneAccess for SceneTreeAccessor {
         }
     }
 
+    // -- Input propagation (pat-nzgdu.83) -----------------------------------
+
+    fn set_input_as_handled(&mut self) {
+        self.tree_mut().set_input_as_handled();
+    }
+
     // -- Object metadata (pat-nzgdu.30) -------------------------------------
     // Meta is Object-level state stored in the Node's own meta bag (distinct
     // from the script/property namespace used above).

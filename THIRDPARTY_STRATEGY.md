@@ -200,11 +200,32 @@ is out of v1 1:1 scope. GDScript remains the primary scripting path.
 
 ## Jolt physics (pat-p0s82.27)
 
-**Classification: Replace with Rust crate / FFI (bucket 1 or 2) — optional feature**
+**Classification: Reimplemented cleanly (bucket 4) — Jolt itself deferred, out
+of v1 scope**
 
-Godot 4.6 defaults toward Jolt. Patina keeps custom `gdphysics3d` as default;
-optional `jolt` feature may wrap `joltc` / `jolt-rust` later. Not required for
-current fixture corpus.
+Godot 4.6 makes Jolt the default 3D physics backend for **new** projects.
+Patina reimplemented 3D physics as its own `gdphysics3d`, which is the only 3D
+backend. Patina ships **no** Jolt option in v1.
+
+This is a decision on record, not a pending task.
+`prd/GODOT_4_6_1_RELEASE_DELTA_AUDIT.md` lists "Jolt Physics as 3D default" in
+its **Out-of-Scope Changes** table ("3D deferred"), and
+`engine-rs/tests/release_suite/release_delta_461_audit_test.rs` asserts that
+entry stays there — so adopting Jolt in v1 would contradict a tested scope
+decision. Godot's flip also affects new projects only; existing projects keep
+their previous backend, so it creates no fixture-corpus delta for Patina to
+match.
+
+No `jolt` cargo feature is shipped, deliberately. An off-by-default flag with
+nothing behind it would advertise a backend that does not exist, and would
+still have to be kept compiling against `gdphysics3d`'s traits for no benefit.
+The dependency is not vendored either (`grep -i jolt engine-rs/Cargo.lock` →
+no match).
+
+**Reopen when** 3D physics enters milestone scope *and* a fixture pins
+behaviour where Godot-Jolt's solver differs from Patina's. Classify as bucket 2
+then (wrap `joltc` / `jolt-rust` via FFI, MIT), put it behind an off-by-default
+`jolt` feature, and add the rigid-body / character parity tests with it.
 
 ## FBX (pat-p0s82.24)
 

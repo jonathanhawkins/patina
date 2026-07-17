@@ -172,6 +172,10 @@ pub struct MainLoop {
     /// Engine-owned input state. Receives events via [`push_event`](Self::push_event)
     /// and produces the script-facing [`InputSnapshot`] each frame.
     input_state: InputState,
+    /// Events pushed since the last [`step`](Self::step), awaiting dispatch
+    /// through `SceneTree::push_input` (pat-nzgdu.83). Distinct from
+    /// `input_state`, which only accumulates pollable state.
+    pending_input: Vec<InputEvent>,
     /// CPU particle simulators for emitting particle nodes, keyed by node id
     /// (pat-u3l8c.4). Built on demand in [`process_particles`](Self::process_particles).
     particles: HashMap<NodeId, ParticleSimulator>,
@@ -209,6 +213,7 @@ impl MainLoop {
             physics_accumulator: 0.0,
             paused: false,
             input_state: InputState::new(),
+            pending_input: Vec::new(),
             particles: HashMap::new(),
             nav_agents_2d: HashMap::new(),
             nav_agents_3d: HashMap::new(),
@@ -1010,9 +1015,13 @@ impl MainLoop {
     /// the current `InputState` is converted into a script-facing
     /// [`InputSnapshot`] so scripts can query `Input.is_action_pressed()` etc.
     ///
+    /// The event is also queued for dispatch to script input virtuals
+    /// (`_input` / `_unhandled_input` / ...) at the next `step`.
+    ///
     /// Per-frame state (just_pressed / just_released) is flushed automatically
     /// at the end of each step.
     pub fn push_event(&mut self, event: InputEvent) {
+        self.pending_input.push(event.clone());
         self.input_state.process_event(event);
     }
 
@@ -1085,6 +1094,17 @@ impl MainLoop {
 
         // Sync trace frame counter so trace events have the correct frame.
         self.tree.set_trace_frame(self.frame_counter);
+
+        // -- input phase (pat-nzgdu.83) --
+        // Dispatch each event queued since the last step through the tree's
+        // staged propagation (_input -> _shortcut_input -> _unhandled_key_input
+        // -> _unhandled_input) before the physics and process phases, so a
+        // script reacting to an event does so on the same frame it arrived.
+        if !self.pending_input.is_empty() {
+            for event in std::mem::take(&mut self.pending_input) {
+                self.tree.push_input(&event);
+            }
+        }
 
         let physics_dt = 1.0 / self.physics_ticks_per_second as f64;
 

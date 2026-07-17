@@ -7,7 +7,9 @@
 use gdcore::math::{srgb_to_linear_channel, Color, Vector3};
 use gdcore::math3d::Transform3D;
 
+use gdserver3d::decal::Decal3D;
 use gdserver3d::environment::{BackgroundMode, Environment3D, FogMode};
+use gdserver3d::fog_volume::FogVolume;
 use gdserver3d::instance::{Instance3D, Instance3DId};
 use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::Material3D;
@@ -105,10 +107,41 @@ impl Default for RenderMode {
 /// In [`RenderMode::Solid`] mode, rasterizes filled triangles using the
 /// shader pipeline with vertex and fragment shaders selected by material
 /// shading mode.
+/// A [`FogVolume`] placed in the world (pat-p0s82.26).
+///
+/// [`FogVolume::sample_density`] works in the volume's *local* space, so the
+/// world transform is carried alongside it and inverted to map each fragment
+/// back into the volume.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedFogVolume {
+    /// The volume's shape, size and material.
+    pub volume: FogVolume,
+    /// The volume's world transform.
+    pub transform: Transform3D,
+}
+
+impl PlacedFogVolume {
+    /// Places `volume` in the world at `transform`.
+    pub fn new(volume: FogVolume, transform: Transform3D) -> Self {
+        Self { volume, transform }
+    }
+
+    /// Samples this volume's density at a *world*-space point.
+    ///
+    /// Returns 0.0 outside the volume. Inverts the transform per call — the
+    /// render pass hoists that inversion out of its pixel loop instead.
+    pub fn density_at_world(&self, world_pos: Vector3) -> f32 {
+        self.volume
+            .sample_density(self.transform.inverse().xform(world_pos))
+    }
+}
+
 pub struct SoftwareRenderer3D {
     instances: Vec<Instance3D>,
     lights: Vec<Light3D>,
     reflection_probes: Vec<ReflectionProbe>,
+    fog_volumes: Vec<PlacedFogVolume>,
+    decals: Vec<Decal3D>,
     next_id: u64,
     /// The rendering mode (wireframe or solid).
     pub render_mode: RenderMode,
@@ -121,6 +154,8 @@ impl SoftwareRenderer3D {
             instances: Vec::new(),
             lights: Vec::new(),
             reflection_probes: Vec::new(),
+            fog_volumes: Vec::new(),
+            decals: Vec::new(),
             next_id: 1,
             render_mode: RenderMode::Solid,
         }
@@ -132,6 +167,8 @@ impl SoftwareRenderer3D {
             instances: Vec::new(),
             lights: Vec::new(),
             reflection_probes: Vec::new(),
+            fog_volumes: Vec::new(),
+            decals: Vec::new(),
             next_id: 1,
             render_mode: RenderMode::Wireframe,
         }
@@ -140,6 +177,50 @@ impl SoftwareRenderer3D {
     /// Returns the reflection probes currently registered with the renderer.
     pub fn reflection_probes(&self) -> &[ReflectionProbe] {
         &self.reflection_probes
+    }
+
+    /// Registers a [`FogVolume`] at `transform` so it contributes to the
+    /// rendered frame (pat-p0s82.26).
+    pub fn add_fog_volume(&mut self, volume: FogVolume, transform: Transform3D) {
+        self.fog_volumes
+            .push(PlacedFogVolume::new(volume, transform));
+    }
+
+    /// Returns the fog volumes currently registered with the renderer.
+    pub fn fog_volumes(&self) -> &[PlacedFogVolume] {
+        &self.fog_volumes
+    }
+
+    /// Removes every registered fog volume.
+    pub fn clear_fog_volumes(&mut self) {
+        self.fog_volumes.clear();
+    }
+
+    /// Registers a [`Decal3D`] so it projects onto the rendered frame
+    /// (pat-p0s82.26). The decal carries its own `global_transform`.
+    pub fn add_decal(&mut self, decal: Decal3D) {
+        self.decals.push(decal);
+    }
+
+    /// Returns the decals currently registered with the renderer.
+    pub fn decals(&self) -> &[Decal3D] {
+        &self.decals
+    }
+
+    /// Removes every registered decal.
+    pub fn clear_decals(&mut self) {
+        self.decals.clear();
+    }
+
+    /// Samples the combined density of all fog volumes at a world-space point.
+    ///
+    /// Densities add where volumes overlap, matching the "thicker where they
+    /// overlap" behavior of Godot's volumetric fog.
+    pub fn sample_fog_volumes(&self, world_pos: Vector3) -> f32 {
+        self.fog_volumes
+            .iter()
+            .map(|v| v.density_at_world(world_pos))
+            .sum()
     }
 
     /// Samples the combined ambient contribution of all reflection probes
@@ -318,6 +399,17 @@ impl SoftwareRenderer3D {
         let default_env = Environment3D::default();
         let env = viewport.environment.as_ref().unwrap_or(&default_env);
         let fog_inv_proj = invert_projection(&proj);
+        // Decals modulate surface albedo, so they project before any fog
+        // covers the result (pat-p0s82.26).
+        Self::apply_decal_pass(
+            &mut pixels,
+            &depth_normalized,
+            w,
+            h,
+            &self.decals,
+            &fog_inv_proj,
+            &viewport.camera_transform,
+        );
         Self::apply_fog_pass(
             &mut pixels,
             &depth_normalized,
@@ -327,6 +419,16 @@ impl SoftwareRenderer3D {
             &fog_inv_proj,
             &viewport.camera_transform,
             &sky_suns_from_lights(&self.lights),
+        );
+        // Local fog volumes layer on top of the environment fog (pat-p0s82.26).
+        Self::apply_fog_volume_pass(
+            &mut pixels,
+            &depth_normalized,
+            w,
+            h,
+            &self.fog_volumes,
+            &fog_inv_proj,
+            &viewport.camera_transform,
         );
         // SSAO runs before tonemapping, gated on the environment.
         crate::postprocess::apply_ssao_env(&mut pixels, &depth_normalized, w, h, env);
@@ -619,6 +721,17 @@ impl SoftwareRenderer3D {
         let default_env = Environment3D::default();
         let env = viewport.environment.as_ref().unwrap_or(&default_env);
         let fog_inv_proj = invert_projection(&proj);
+        // Decals modulate surface albedo, so they project before any fog
+        // covers the result (pat-p0s82.26).
+        Self::apply_decal_pass(
+            &mut pixels,
+            &depth_normalized,
+            w,
+            h,
+            &self.decals,
+            &fog_inv_proj,
+            &viewport.camera_transform,
+        );
         Self::apply_fog_pass(
             &mut pixels,
             &depth_normalized,
@@ -628,6 +741,16 @@ impl SoftwareRenderer3D {
             &fog_inv_proj,
             &viewport.camera_transform,
             &sky_suns_from_lights(&self.lights),
+        );
+        // Local fog volumes layer on top of the environment fog (pat-p0s82.26).
+        Self::apply_fog_volume_pass(
+            &mut pixels,
+            &depth_normalized,
+            w,
+            h,
+            &self.fog_volumes,
+            &fog_inv_proj,
+            &viewport.camera_transform,
         );
         // SSAO runs before tonemapping, gated on the environment.
         crate::postprocess::apply_ssao_env(&mut pixels, &depth_normalized, w, h, env);
@@ -752,6 +875,150 @@ impl SoftwareRenderer3D {
                         pixels[i].a,
                     );
                 }
+            }
+        }
+    }
+
+    /// Projects decals onto a linear HDR frame in place (pat-p0s82.26).
+    ///
+    /// Godot projects decals onto geometry inside an oriented box, modulating
+    /// the surface albedo. This screen-space pass reconstructs each fragment's
+    /// world position from depth (the same reconstruction [`apply_fog_pass`]
+    /// uses) and asks each decal for its coverage there via
+    /// [`Decal3D::sample_alpha`], which already folds in the box test, the
+    /// upper/lower vertical fades, distance fade and `albedo_mix`. The
+    /// decal's `modulate` colour is blended over the fragment by that alpha.
+    ///
+    /// Distance fade measures the camera-to-decal distance (as Godot does),
+    /// so it is computed once per decal rather than per pixel.
+    ///
+    /// Only shaded fragments are affected — the sky (depth >= 1.0) has no
+    /// surface to project onto. Runs *before* the fog passes: decals alter
+    /// surface albedo, and fog then covers the result.
+    ///
+    /// [`apply_fog_pass`]: Self::apply_fog_pass
+    pub(crate) fn apply_decal_pass(
+        pixels: &mut [Color],
+        depth: &[f32],
+        w: u32,
+        h: u32,
+        decals: &[Decal3D],
+        inv_proj: &[[f32; 4]; 4],
+        camera_transform: &Transform3D,
+    ) {
+        if decals.is_empty() {
+            return;
+        }
+        let camera_pos = camera_transform.origin;
+        let camera_distances: Vec<f64> = decals
+            .iter()
+            .map(|d| (d.global_transform.origin - camera_pos).length() as f64)
+            .collect();
+
+        for y in 0..h {
+            let ndc_y = 1.0 - 2.0 * (y as f32 + 0.5) / h as f32;
+            for x in 0..w {
+                let ndc_x = 2.0 * (x as f32 + 0.5) / w as f32 - 1.0;
+                let i = (y * w + x) as usize;
+                let d = depth[i];
+                if d >= 1.0 {
+                    continue;
+                }
+
+                let view_pos = pixel_view_position(ndc_x, ndc_y, d, inv_proj);
+                let world_pos = camera_transform.xform(view_pos);
+
+                for (decal, camera_distance) in decals.iter().zip(camera_distances.iter()) {
+                    let alpha = match decal.sample_alpha(world_pos, *camera_distance) {
+                        Some(a) if a > 0.0 => a.clamp(0.0, 1.0) as f32,
+                        _ => continue,
+                    };
+                    pixels[i] = Color::new(
+                        lerp(pixels[i].r, decal.modulate.r, alpha),
+                        lerp(pixels[i].g, decal.modulate.g, alpha),
+                        lerp(pixels[i].b, decal.modulate.b, alpha),
+                        pixels[i].a,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Applies FogVolume contribution to a linear HDR frame in place
+    /// (pat-p0s82.26).
+    ///
+    /// Godot raymarches volumetric fog through a froxel grid. This software
+    /// path approximates that: it reconstructs each fragment's world position
+    /// from depth (the same reconstruction [`apply_fog_pass`] uses), samples
+    /// every volume's density there, and blends the density-weighted mean
+    /// albedo over the pixel, adding emission. Overlapping volumes accumulate
+    /// density, so fog thickens where they intersect.
+    ///
+    /// Only shaded fragments are affected: the sky background (depth >= 1.0)
+    /// has no surface to march to, so it is left alone. Runs after the
+    /// environment fog pass and before the camera post-process, in linear
+    /// space.
+    ///
+    /// [`apply_fog_pass`]: Self::apply_fog_pass
+    pub(crate) fn apply_fog_volume_pass(
+        pixels: &mut [Color],
+        depth: &[f32],
+        w: u32,
+        h: u32,
+        volumes: &[PlacedFogVolume],
+        inv_proj: &[[f32; 4]; 4],
+        camera_transform: &Transform3D,
+    ) {
+        if volumes.is_empty() {
+            return;
+        }
+        // sample_density takes local space; invert each transform once here
+        // rather than per pixel.
+        let inverses: Vec<Transform3D> = volumes.iter().map(|v| v.transform.inverse()).collect();
+
+        for y in 0..h {
+            let ndc_y = 1.0 - 2.0 * (y as f32 + 0.5) / h as f32;
+            for x in 0..w {
+                let ndc_x = 2.0 * (x as f32 + 0.5) / w as f32 - 1.0;
+                let i = (y * w + x) as usize;
+                let d = depth[i];
+                if d >= 1.0 {
+                    continue;
+                }
+
+                let view_pos = pixel_view_position(ndc_x, ndc_y, d, inv_proj);
+                let world_pos = camera_transform.xform(view_pos);
+
+                let mut total_density = 0.0f32;
+                let (mut albedo_r, mut albedo_g, mut albedo_b) = (0.0f32, 0.0f32, 0.0f32);
+                let (mut emit_r, mut emit_g, mut emit_b) = (0.0f32, 0.0f32, 0.0f32);
+                for (placed, inv) in volumes.iter().zip(inverses.iter()) {
+                    let density = placed.volume.sample_density(inv.xform(world_pos));
+                    if density <= 0.0 {
+                        continue;
+                    }
+                    let m = &placed.volume.material;
+                    total_density += density;
+                    albedo_r += m.albedo.r * density;
+                    albedo_g += m.albedo.g * density;
+                    albedo_b += m.albedo.b * density;
+                    emit_r += m.emission.r * density;
+                    emit_g += m.emission.g * density;
+                    emit_b += m.emission.b * density;
+                }
+                if total_density <= 0.0 {
+                    continue;
+                }
+
+                // Density-weighted mean albedo; coverage saturates at fully fogged.
+                let inv_total = 1.0 / total_density;
+                let amount = total_density.clamp(0.0, 1.0);
+                pixels[i] = Color::new(
+                    lerp(pixels[i].r, albedo_r * inv_total, amount) + emit_r,
+                    lerp(pixels[i].g, albedo_g * inv_total, amount) + emit_g,
+                    lerp(pixels[i].b, albedo_b * inv_total, amount) + emit_b,
+                    pixels[i].a,
+                );
             }
         }
     }
@@ -2588,5 +2855,420 @@ mod tests {
     fn viewport_environment_defaults_to_none() {
         let vp = Viewport3D::new(64, 64);
         assert!(vp.environment.is_none());
+    }
+
+    // -- FogVolume contribution (pat-p0s82.26) ------------------------------
+    //
+    // These drive `apply_fog_volume_pass` directly. With an identity
+    // `inv_proj` and an identity camera, `pixel_view_position` reduces to
+    // (ndc_x, ndc_y, depth), so a fragment's world position is exactly its
+    // NDC — which makes the expected densities checkable by hand. For the 2x2
+    // frame used here the world positions are (+/-0.5, +/-0.5, depth).
+
+    const IDENTITY_INV_PROJ: [[f32; 4]; 4] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+
+    /// A box volume with exact density: no height falloff, no edge fade.
+    fn exact_box_volume(size: f32, density: f32, albedo: Color) -> FogVolume {
+        let mut v = FogVolume::box_shape(Vector3::new(size, size, size));
+        v.material.density = density;
+        v.material.albedo = albedo;
+        v.material.height_falloff = 0.0;
+        v.material.edge_fade = 0.0;
+        v
+    }
+
+    fn black_2x2() -> Vec<Color> {
+        vec![Color::new(0.0, 0.0, 0.0, 1.0); 4]
+    }
+
+    fn run_volume_pass(pixels: &mut [Color], depth: &[f32], volumes: &[PlacedFogVolume]) {
+        SoftwareRenderer3D::apply_fog_volume_pass(
+            pixels,
+            depth,
+            2,
+            2,
+            volumes,
+            &IDENTITY_INV_PROJ,
+            &Transform3D::IDENTITY,
+        );
+    }
+
+    #[test]
+    fn fog_volume_contributes_albedo_to_covered_fragments() {
+        let mut pixels = black_2x2();
+        // Half-extent 2.0 covers every fragment at (+/-0.5, +/-0.5, 0.5).
+        let volume = exact_box_volume(4.0, 1.0, Color::new(1.0, 0.0, 0.0, 1.0));
+        let placed = PlacedFogVolume::new(volume, Transform3D::IDENTITY);
+        run_volume_pass(&mut pixels, &[0.5; 4], &[placed]);
+
+        // density 1.0 => fully fogged => pixel becomes the fog albedo.
+        for p in &pixels {
+            assert!(
+                (p.r - 1.0).abs() < 1e-5 && p.g.abs() < 1e-5 && p.b.abs() < 1e-5,
+                "covered fragment should take the fog albedo, got {p:?}"
+            );
+            assert!((p.a - 1.0).abs() < 1e-5, "alpha must be preserved");
+        }
+    }
+
+    #[test]
+    fn fog_volume_density_scales_the_blend() {
+        let mut pixels = black_2x2();
+        let volume = exact_box_volume(4.0, 0.5, Color::new(1.0, 1.0, 1.0, 1.0));
+        run_volume_pass(
+            &mut pixels,
+            &[0.5; 4],
+            &[PlacedFogVolume::new(volume, Transform3D::IDENTITY)],
+        );
+
+        // density 0.5 => half-way from black to white.
+        for p in &pixels {
+            assert!(
+                (p.r - 0.5).abs() < 1e-5,
+                "density 0.5 should blend half-way, got {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fog_volume_leaves_sky_background_untouched() {
+        let mut pixels = black_2x2();
+        let volume = exact_box_volume(4.0, 1.0, Color::new(1.0, 0.0, 0.0, 1.0));
+        // depth == 1.0 is the sky: no surface to march to.
+        run_volume_pass(
+            &mut pixels,
+            &[1.0; 4],
+            &[PlacedFogVolume::new(volume, Transform3D::IDENTITY)],
+        );
+
+        for p in &pixels {
+            assert!(
+                p.r.abs() < 1e-5 && p.g.abs() < 1e-5 && p.b.abs() < 1e-5,
+                "sky fragments must not be fogged, got {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fog_volume_outside_the_frame_contributes_nothing() {
+        let mut pixels = black_2x2();
+        // Small volume translated far away: no fragment falls inside it.
+        let volume = exact_box_volume(1.0, 1.0, Color::new(1.0, 0.0, 0.0, 1.0));
+        let far = Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(100.0, 100.0, 100.0),
+        };
+        run_volume_pass(&mut pixels, &[0.5; 4], &[PlacedFogVolume::new(volume, far)]);
+
+        for p in &pixels {
+            assert!(
+                p.r.abs() < 1e-5 && p.g.abs() < 1e-5 && p.b.abs() < 1e-5,
+                "a distant volume must not fog anything, got {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fog_volume_transform_positions_the_volume() {
+        // Half-extent 0.5 centred at x=+0.5 covers only the right-hand column
+        // (world x = +0.5), not the left (x = -0.5).
+        let volume = exact_box_volume(1.0, 1.0, Color::new(0.0, 1.0, 0.0, 1.0));
+        let right = Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(0.5, 0.0, 0.5),
+        };
+        let mut pixels = black_2x2();
+        run_volume_pass(
+            &mut pixels,
+            &[0.5; 4],
+            &[PlacedFogVolume::new(volume, right)],
+        );
+
+        // Row-major 2x2: indices 0,2 are the left column; 1,3 the right.
+        assert!(pixels[0].g.abs() < 1e-5, "left column must be unfogged");
+        assert!(pixels[2].g.abs() < 1e-5, "left column must be unfogged");
+        assert!(
+            (pixels[1].g - 1.0).abs() < 1e-5,
+            "right column must take the fog albedo, got {:?}",
+            pixels[1]
+        );
+        assert!(
+            (pixels[3].g - 1.0).abs() < 1e-5,
+            "right column must be fogged"
+        );
+    }
+
+    #[test]
+    fn overlapping_fog_volumes_accumulate_density() {
+        // Two half-density volumes over the same fragments sum to full density.
+        let a = exact_box_volume(4.0, 0.25, Color::new(1.0, 1.0, 1.0, 1.0));
+        let b = exact_box_volume(4.0, 0.25, Color::new(1.0, 1.0, 1.0, 1.0));
+        let mut one = black_2x2();
+        run_volume_pass(
+            &mut one,
+            &[0.5; 4],
+            &[PlacedFogVolume::new(a.clone(), Transform3D::IDENTITY)],
+        );
+        let mut two = black_2x2();
+        run_volume_pass(
+            &mut two,
+            &[0.5; 4],
+            &[
+                PlacedFogVolume::new(a, Transform3D::IDENTITY),
+                PlacedFogVolume::new(b, Transform3D::IDENTITY),
+            ],
+        );
+
+        assert!((one[0].r - 0.25).abs() < 1e-5, "one volume => 0.25");
+        assert!(
+            (two[0].r - 0.5).abs() < 1e-5,
+            "two overlapping volumes should double the density, got {:?}",
+            two[0]
+        );
+    }
+
+    #[test]
+    fn fog_volume_emission_adds_light() {
+        let mut volume = exact_box_volume(4.0, 1.0, Color::new(0.0, 0.0, 0.0, 1.0));
+        volume.material.emission = Color::new(0.25, 0.0, 0.0, 1.0);
+        let mut pixels = black_2x2();
+        run_volume_pass(
+            &mut pixels,
+            &[0.5; 4],
+            &[PlacedFogVolume::new(volume, Transform3D::IDENTITY)],
+        );
+
+        // Black albedo leaves the blend black; emission is added on top.
+        assert!(
+            (pixels[0].r - 0.25).abs() < 1e-5,
+            "emission should add to the fragment, got {:?}",
+            pixels[0]
+        );
+    }
+
+    #[test]
+    fn no_fog_volumes_is_a_no_op() {
+        let mut pixels = vec![Color::new(0.3, 0.4, 0.5, 1.0); 4];
+        let before = pixels.clone();
+        run_volume_pass(&mut pixels, &[0.5; 4], &[]);
+        assert_eq!(pixels, before, "an empty volume list must not touch pixels");
+    }
+
+    #[test]
+    fn renderer_registers_and_samples_fog_volumes() {
+        let mut renderer = SoftwareRenderer3D::new();
+        assert!(renderer.fog_volumes().is_empty());
+
+        renderer.add_fog_volume(
+            exact_box_volume(2.0, 0.75, Color::new(1.0, 1.0, 1.0, 1.0)),
+            Transform3D::IDENTITY,
+        );
+        assert_eq!(renderer.fog_volumes().len(), 1);
+
+        // Inside the volume (half-extent 1.0) vs outside it.
+        assert!((renderer.sample_fog_volumes(Vector3::new(0.0, 0.0, 0.0)) - 0.75).abs() < 1e-5);
+        assert_eq!(
+            renderer.sample_fog_volumes(Vector3::new(50.0, 0.0, 0.0)),
+            0.0
+        );
+
+        renderer.clear_fog_volumes();
+        assert!(renderer.fog_volumes().is_empty());
+        assert_eq!(renderer.sample_fog_volumes(Vector3::ZERO), 0.0);
+    }
+
+    #[test]
+    fn wireframe_renderer_also_starts_with_no_fog_volumes() {
+        assert!(SoftwareRenderer3D::wireframe().fog_volumes().is_empty());
+    }
+
+    // -- Decal projection (pat-p0s82.26) ------------------------------------
+    //
+    // Same identity setup as the fog-volume tests: a fragment's world position
+    // is exactly its NDC, i.e. (+/-0.5, +/-0.5, depth) for this 2x2 frame.
+
+    /// A decal with an exact alpha: no vertical gradient, so
+    /// `sample_alpha` reduces to `albedo_mix` inside the box.
+    fn exact_decal(size: f32, modulate: Color) -> Decal3D {
+        let mut d = Decal3D::new();
+        d.size = Vector3::new(size, size, size);
+        d.modulate = modulate;
+        d.upper_fade = 0.0;
+        d.lower_fade = 0.0;
+        d
+    }
+
+    fn run_decal_pass(pixels: &mut [Color], depth: &[f32], decals: &[Decal3D]) {
+        SoftwareRenderer3D::apply_decal_pass(
+            pixels,
+            depth,
+            2,
+            2,
+            decals,
+            &IDENTITY_INV_PROJ,
+            &Transform3D::IDENTITY,
+        );
+    }
+
+    #[test]
+    fn decal_projects_modulate_onto_covered_fragments() {
+        let mut pixels = black_2x2();
+        // Half-extent 2.0 covers every fragment; albedo_mix defaults to 1.0.
+        let decal = exact_decal(4.0, Color::new(1.0, 0.0, 0.0, 1.0));
+        run_decal_pass(&mut pixels, &[0.5; 4], &[decal]);
+
+        for p in &pixels {
+            assert!(
+                (p.r - 1.0).abs() < 1e-5 && p.g.abs() < 1e-5 && p.b.abs() < 1e-5,
+                "covered fragment should take the decal modulate, got {p:?}"
+            );
+            assert!((p.a - 1.0).abs() < 1e-5, "alpha must be preserved");
+        }
+    }
+
+    #[test]
+    fn decal_albedo_mix_scales_the_blend() {
+        let mut pixels = black_2x2();
+        let mut decal = exact_decal(4.0, Color::new(1.0, 1.0, 1.0, 1.0));
+        decal.albedo_mix = 0.5;
+        run_decal_pass(&mut pixels, &[0.5; 4], &[decal]);
+
+        for p in &pixels {
+            assert!(
+                (p.r - 0.5).abs() < 1e-5,
+                "albedo_mix 0.5 should blend half-way, got {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decal_leaves_sky_background_untouched() {
+        let mut pixels = black_2x2();
+        let decal = exact_decal(4.0, Color::new(1.0, 0.0, 0.0, 1.0));
+        run_decal_pass(&mut pixels, &[1.0; 4], &[decal]);
+
+        for p in &pixels {
+            assert!(p.r.abs() < 1e-5, "sky must not receive decals, got {p:?}");
+        }
+    }
+
+    #[test]
+    fn decal_outside_its_box_contributes_nothing() {
+        let mut pixels = black_2x2();
+        let mut decal = exact_decal(1.0, Color::new(1.0, 0.0, 0.0, 1.0));
+        decal.global_transform = Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(100.0, 100.0, 100.0),
+        };
+        run_decal_pass(&mut pixels, &[0.5; 4], &[decal]);
+
+        for p in &pixels {
+            assert!(
+                p.r.abs() < 1e-5,
+                "distant decal must not project, got {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invisible_decal_is_skipped() {
+        let mut pixels = black_2x2();
+        let mut decal = exact_decal(4.0, Color::new(1.0, 0.0, 0.0, 1.0));
+        decal.visible = false;
+        run_decal_pass(&mut pixels, &[0.5; 4], &[decal]);
+
+        for p in &pixels {
+            assert!(p.r.abs() < 1e-5, "invisible decal must not project");
+        }
+    }
+
+    #[test]
+    fn decal_transform_positions_the_projection() {
+        // Half-extent 0.5 centred at x=+0.5 covers only the right column.
+        let mut decal = exact_decal(1.0, Color::new(0.0, 1.0, 0.0, 1.0));
+        decal.global_transform = Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(0.5, 0.0, 0.5),
+        };
+        let mut pixels = black_2x2();
+        run_decal_pass(&mut pixels, &[0.5; 4], &[decal]);
+
+        assert!(pixels[0].g.abs() < 1e-5, "left column must be untouched");
+        assert!(pixels[2].g.abs() < 1e-5, "left column must be untouched");
+        assert!(
+            (pixels[1].g - 1.0).abs() < 1e-5,
+            "right column must take the decal, got {:?}",
+            pixels[1]
+        );
+        assert!(
+            (pixels[3].g - 1.0).abs() < 1e-5,
+            "right column must be decaled"
+        );
+    }
+
+    #[test]
+    fn decal_vertical_fade_softens_the_edges() {
+        // Godot's default upper/lower_fade = 0.3. A fragment at world y=+0.5
+        // inside a half-extent-1 box maps to w = 0.75, so the upper fade gives
+        // (1 - 0.75) / 0.3 = 0.8333..., and the lower fade is saturated at 1.
+        let mut decal = Decal3D::new();
+        decal.modulate = Color::new(1.0, 1.0, 1.0, 1.0);
+        let mut pixels = black_2x2();
+        run_decal_pass(&mut pixels, &[0.5; 4], &[decal]);
+
+        let expected = 0.25f32 / 0.3;
+        for p in &pixels {
+            assert!(
+                (p.r - expected).abs() < 1e-4,
+                "vertical fade should give {expected}, got {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decal_distance_fade_can_fade_it_out_entirely() {
+        // Big box centred 50 units away still covers the fragments, but the
+        // camera-to-decal distance is past begin + length, so alpha hits 0.
+        let mut decal = exact_decal(200.0, Color::new(1.0, 0.0, 0.0, 1.0));
+        decal.global_transform = Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(0.0, 0.0, 50.0),
+        };
+        decal.distance_fade_enabled = true;
+        decal.distance_fade_begin = 10.0;
+        decal.distance_fade_length = 10.0;
+        let mut pixels = black_2x2();
+        run_decal_pass(&mut pixels, &[0.5; 4], &[decal]);
+
+        for p in &pixels {
+            assert!(
+                p.r.abs() < 1e-5,
+                "a fully distance-faded decal must not project, got {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_decals_is_a_no_op() {
+        let mut pixels = vec![Color::new(0.3, 0.4, 0.5, 1.0); 4];
+        let before = pixels.clone();
+        run_decal_pass(&mut pixels, &[0.5; 4], &[]);
+        assert_eq!(pixels, before, "an empty decal list must not touch pixels");
+    }
+
+    #[test]
+    fn renderer_registers_and_clears_decals() {
+        let mut renderer = SoftwareRenderer3D::new();
+        assert!(renderer.decals().is_empty());
+        renderer.add_decal(exact_decal(2.0, Color::WHITE));
+        assert_eq!(renderer.decals().len(), 1);
+        renderer.clear_decals();
+        assert!(renderer.decals().is_empty());
+        assert!(SoftwareRenderer3D::wireframe().decals().is_empty());
     }
 }

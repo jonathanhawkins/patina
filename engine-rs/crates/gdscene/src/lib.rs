@@ -28,6 +28,7 @@ pub mod canvas_order;
 pub mod collision;
 pub mod control;
 pub mod control_render;
+pub mod frame_driver;
 pub mod grid_map;
 pub mod ik_solver;
 pub mod ik_solver_2d;

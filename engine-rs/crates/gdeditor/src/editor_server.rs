@@ -382,6 +382,12 @@ pub struct EditorState {
     pub animations: std::collections::HashMap<String, Animation>,
     /// Current animation playback state.
     pub animation_playback: AnimationPlaybackState,
+    /// Editable AnimationTree graph backing the served state-machine editor
+    /// (pat-nzgdu.103). States are nodes; transitions are the graph's links.
+    pub anim_tree: crate::anim_tree_graph::AnimTreeGraph,
+    /// Name of the state the AnimationTree is currently playing, if any. The
+    /// served graph highlights it, mirroring Godot's live playback highlight.
+    pub anim_tree_current_state: Option<String>,
     /// Currently pressed keyboard keys.
     pub pressed_keys: HashSet<String>,
     /// Keys pressed this frame (cleared each frame).
@@ -783,6 +789,8 @@ impl EditorState {
             runtime_input_mode: "input".to_string(),
             delta_time: 1.0 / 60.0,
             animations: HashMap::new(),
+            anim_tree: crate::anim_tree_graph::AnimTreeGraph::new(),
+            anim_tree_current_state: None,
             animation_playback: AnimationPlaybackState {
                 playing: false,
                 animation_name: None,
@@ -2255,6 +2263,20 @@ fn handle_connection(
         ("POST", "/api/animation/play") => api_play_animation(state, &req.body, &mut stream),
         ("POST", "/api/animation/stop") => api_stop_animation(state, &mut stream),
         ("GET", "/api/animation/status") => api_animation_status(state, &mut stream),
+        // AnimationTree state-machine editor (pat-nzgdu.103).
+        ("GET", "/api/animation/tree") => api_get_anim_tree(state, &mut stream),
+        ("POST", "/api/animation/tree/state/add") => {
+            api_anim_tree_add_state(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/animation/tree/state/remove") => {
+            api_anim_tree_remove_state(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/animation/tree/transition/add") => {
+            api_anim_tree_add_transition(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/animation/tree/transition/remove") => {
+            api_anim_tree_remove_transition(state, &req.body, &mut stream)
+        }
         ("POST", "/api/animation/seek") => api_seek_animation(state, &req.body, &mut stream),
         ("POST", "/api/animation/record") => api_toggle_recording(state, &req.body, &mut stream),
         ("POST", "/api/animation/blend") => api_animation_blend(state, &req.body, &mut stream),
@@ -9349,6 +9371,242 @@ fn api_animation_status(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream)
         )
     };
     send_json(stream, &json);
+}
+
+// ---------------------------------------------------------------------------
+// AnimationTree state-machine editor (pat-nzgdu.103)
+// ---------------------------------------------------------------------------
+
+/// Escapes a string for embedding in a JSON string literal.
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Maps a node kind to the string the served graph uses.
+fn anim_tree_kind_str(kind: crate::anim_tree_graph::NodeKind) -> &'static str {
+    use crate::anim_tree_graph::NodeKind;
+    match kind {
+        NodeKind::StateMachine => "state_machine",
+        NodeKind::BlendSpace => "blend_space",
+        NodeKind::Blend2 => "blend2",
+        NodeKind::Animation => "animation",
+    }
+}
+
+/// Parses the `kind` field of a tree request, defaulting to an animation leaf
+/// (the kind a plain state-machine state holds).
+fn anim_tree_kind_from_str(s: &str) -> crate::anim_tree_graph::NodeKind {
+    use crate::anim_tree_graph::NodeKind;
+    match s {
+        "state_machine" => NodeKind::StateMachine,
+        "blend_space" => NodeKind::BlendSpace,
+        "blend2" => NodeKind::Blend2,
+        _ => NodeKind::Animation,
+    }
+}
+
+/// `GET /api/animation/tree` -- the AnimationTree graph: states, transitions,
+/// blend-tree connections, and the live playback state (Godot highlights the
+/// currently playing state in its state-machine editor).
+fn api_get_anim_tree(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let state = state.lock().unwrap();
+        let g = &state.anim_tree;
+        let states: Vec<String> = g
+            .nodes()
+            .iter()
+            .map(|n| {
+                format!(
+                    r#"{{"id":{},"name":"{}","kind":"{}"}}"#,
+                    n.id,
+                    json_escape(&n.name),
+                    anim_tree_kind_str(n.kind)
+                )
+            })
+            .collect();
+        let transitions: Vec<String> = g
+            .transitions()
+            .iter()
+            .map(|l| format!(r#"{{"from":{},"to":{}}}"#, l.from, l.to))
+            .collect();
+        let connections: Vec<String> = g
+            .connections()
+            .iter()
+            .map(|l| format!(r#"{{"from":{},"to":{}}}"#, l.from, l.to))
+            .collect();
+        let current = match &state.anim_tree_current_state {
+            Some(n) => format!(r#""{}""#, json_escape(n)),
+            None => "null".to_string(),
+        };
+        format!(
+            r#"{{"states":[{}],"transitions":[{}],"connections":[{}],"current_state":{}}}"#,
+            states.join(","),
+            transitions.join(","),
+            connections.join(","),
+            current
+        )
+    };
+    send_json(stream, &json);
+}
+
+/// Reads a required non-empty string field from a parsed JSON body.
+fn anim_tree_name_field(parsed: &serde_json::Value, key: &str) -> Option<String> {
+    parsed
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+}
+
+/// `POST /api/animation/tree/state/add` -- add a state to the state machine.
+/// Body: `{"name":"Idle","kind":"animation"}` (kind optional).
+fn api_anim_tree_add_state(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let name = match anim_tree_name_field(&parsed, "name") {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing name");
+            return;
+        }
+    };
+    let kind = anim_tree_kind_from_str(parsed.get("kind").and_then(|v| v.as_str()).unwrap_or(""));
+
+    let mut state = state.lock().unwrap();
+    // Godot's state names are unique within a state machine.
+    if state.anim_tree.node_id_by_name(&name).is_some() {
+        send_error(stream, 400, "state already exists");
+        return;
+    }
+    let id = state.anim_tree.add_node(name.clone(), kind);
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"id":{},"name":"{}"}}"#, id, json_escape(&name)),
+    );
+}
+
+/// `POST /api/animation/tree/state/remove` -- remove a state and any
+/// transitions touching it. Body: `{"name":"Idle"}`.
+fn api_anim_tree_remove_state(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let name = match anim_tree_name_field(&parsed, "name") {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing name");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let id = match state.anim_tree.node_id_by_name(&name) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "unknown state");
+            return;
+        }
+    };
+    state.anim_tree.remove_node(id);
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// Resolves the `from`/`to` state names of a transition request.
+fn anim_tree_endpoints(
+    parsed: &serde_json::Value,
+    state: &EditorState,
+    stream: &mut TcpStream,
+) -> Option<(u64, u64)> {
+    let from_name = match anim_tree_name_field(parsed, "from") {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing from");
+            return None;
+        }
+    };
+    let to_name = match anim_tree_name_field(parsed, "to") {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing to");
+            return None;
+        }
+    };
+    let from = match state.anim_tree.node_id_by_name(&from_name) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "unknown from state");
+            return None;
+        }
+    };
+    let to = match state.anim_tree.node_id_by_name(&to_name) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "unknown to state");
+            return None;
+        }
+    };
+    Some((from, to))
+}
+
+/// `POST /api/animation/tree/transition/add` -- connect two states.
+/// Body: `{"from":"Idle","to":"Run"}`.
+fn api_anim_tree_add_transition(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let (from, to) = match anim_tree_endpoints(&parsed, &state, stream) {
+        Some(pair) => pair,
+        None => return,
+    };
+    // Rejects self-transitions and duplicates (see AnimTreeGraph::add_link).
+    if !state.anim_tree.add_transition(from, to) {
+        send_error(stream, 400, "invalid or duplicate transition");
+        return;
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/tree/transition/remove` -- drop a transition.
+/// Body: `{"from":"Idle","to":"Run"}`.
+fn api_anim_tree_remove_transition(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let (from, to) = match anim_tree_endpoints(&parsed, &state, stream) {
+        Some(pair) => pair,
+        None => return,
+    };
+    if !state.anim_tree.remove_transition(from, to) {
+        send_error(stream, 404, "unknown transition");
+        return;
+    }
+    send_json(stream, r#"{"ok":true}"#);
 }
 
 /// `POST /api/animation/seek` -- set the current playback time (for scrubbing).

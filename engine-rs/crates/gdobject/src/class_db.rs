@@ -61,6 +61,63 @@ impl MethodInfo {
     }
 }
 
+/// Metadata for a single registered signal (pat-nzgdu.98).
+///
+/// Mirrors an entry of Godot's `ClassDB.class_get_signal_list`: the signal name
+/// plus the names of the arguments it carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignalInfo {
+    /// The signal name (e.g., `"tree_entered"`).
+    pub name: String,
+    /// Argument names, in order (empty for a no-argument signal).
+    pub arguments: Vec<String>,
+}
+
+impl SignalInfo {
+    /// Creates a signal that carries no arguments.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            arguments: Vec::new(),
+        }
+    }
+
+    /// Adds an argument name (builder pattern).
+    pub fn arg(mut self, name: impl Into<String>) -> Self {
+        self.arguments.push(name.into());
+        self
+    }
+}
+
+/// Metadata for a named enum on a class (pat-nzgdu.98).
+///
+/// Mirrors Godot's `ClassDB.class_get_enum_list` / `class_get_enum_constants`:
+/// enum constants are *also* integer constants of the class, which is why
+/// [`ClassRegistration::enumeration`] registers them in both places.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumInfo {
+    /// The enum name (e.g., `"ProcessMode"`).
+    pub name: String,
+    /// The enum's constants as `(name, value)` pairs, in declaration order.
+    pub constants: Vec<(String, i64)>,
+}
+
+impl EnumInfo {
+    /// Creates an empty enum.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            constants: Vec::new(),
+        }
+    }
+
+    /// Adds a constant (builder pattern).
+    pub fn constant(mut self, name: impl Into<String>, value: i64) -> Self {
+        self.constants.push((name.into(), value));
+        self
+    }
+}
+
 /// Complete registration record for a class.
 #[derive(Debug, Clone)]
 pub struct ClassInfo {
@@ -74,6 +131,13 @@ pub struct ClassInfo {
     pub properties: Vec<PropertyInfo>,
     /// Registered methods.
     pub methods: Vec<MethodInfo>,
+    /// Registered signals (pat-nzgdu.98).
+    pub signals: Vec<SignalInfo>,
+    /// Registered integer constants as `(name, value)` pairs, including every
+    /// enum constant (pat-nzgdu.98).
+    pub integer_constants: Vec<(String, i64)>,
+    /// Registered named enums (pat-nzgdu.98).
+    pub enums: Vec<EnumInfo>,
     /// Whether the class is abstract (cannot be instantiated in Godot).
     ///
     /// Mirrors `!ClassDB::can_instantiate()` in Godot: abstract bases like
@@ -88,6 +152,9 @@ pub struct ClassRegistration {
     parent_class: String,
     properties: Vec<PropertyInfo>,
     methods: Vec<MethodInfo>,
+    signals: Vec<SignalInfo>,
+    integer_constants: Vec<(String, i64)>,
+    enums: Vec<EnumInfo>,
     is_abstract: bool,
 }
 
@@ -99,6 +166,9 @@ impl ClassRegistration {
             parent_class: String::new(),
             properties: Vec::new(),
             methods: Vec::new(),
+            signals: Vec::new(),
+            integer_constants: Vec::new(),
+            enums: Vec::new(),
             is_abstract: false,
         }
     }
@@ -124,6 +194,28 @@ impl ClassRegistration {
     /// Adds a method to the class registration.
     pub fn method(mut self, info: MethodInfo) -> Self {
         self.methods.push(info);
+        self
+    }
+
+    /// Adds a signal to the class registration (pat-nzgdu.98).
+    pub fn signal(mut self, info: SignalInfo) -> Self {
+        self.signals.push(info);
+        self
+    }
+
+    /// Adds a standalone integer constant (pat-nzgdu.98).
+    pub fn constant(mut self, name: impl Into<String>, value: i64) -> Self {
+        self.integer_constants.push((name.into(), value));
+        self
+    }
+
+    /// Adds a named enum, and registers each of its constants as an integer
+    /// constant of the class too — matching Godot, where enum constants are
+    /// reachable via both `class_get_integer_constant` and
+    /// `class_get_enum_constants` (pat-nzgdu.98).
+    pub fn enumeration(mut self, info: EnumInfo) -> Self {
+        self.integer_constants.extend(info.constants.iter().cloned());
+        self.enums.push(info);
         self
     }
 }
@@ -158,6 +250,9 @@ impl ClassDB {
             parent_class: reg.parent_class,
             properties: reg.properties,
             methods: reg.methods,
+            signals: reg.signals,
+            integer_constants: reg.integer_constants,
+            enums: reg.enums,
             is_abstract: reg.is_abstract,
         };
 
@@ -333,6 +428,101 @@ pub fn get_method_list(class_name: &str) -> Vec<MethodInfo> {
     methods
 }
 
+/// Returns all signals for a class, including inherited ones (pat-nzgdu.98).
+///
+/// Base-first, mirroring [`get_property_list`]. Empty if the class is not
+/// registered. Godot: `ClassDB.class_get_signal_list`.
+pub fn get_signal_list(class_name: &str) -> Vec<SignalInfo> {
+    let db = global_db().lock().expect("ClassDB lock poisoned");
+    let chain = db.inheritance_chain(class_name);
+    let mut signals = Vec::new();
+    for ancestor in chain.iter().rev() {
+        if let Some(info) = db.get_by_name(ancestor) {
+            signals.extend(info.signals.iter().cloned());
+        }
+    }
+    signals
+}
+
+/// Returns `true` if `signal_name` is registered on `class_name` or any of its
+/// ancestors (pat-nzgdu.98). Godot: `ClassDB.class_has_signal`.
+pub fn class_has_signal(class_name: &str, signal_name: &str) -> bool {
+    get_signal_list(class_name)
+        .iter()
+        .any(|s| s.name == signal_name)
+}
+
+/// Returns all integer constants for a class, including inherited ones
+/// (pat-nzgdu.98). Godot: `ClassDB.class_get_integer_constant_list`.
+pub fn get_integer_constant_list(class_name: &str) -> Vec<String> {
+    let db = global_db().lock().expect("ClassDB lock poisoned");
+    let chain = db.inheritance_chain(class_name);
+    let mut names = Vec::new();
+    for ancestor in chain.iter().rev() {
+        if let Some(info) = db.get_by_name(ancestor) {
+            names.extend(info.integer_constants.iter().map(|(n, _)| n.clone()));
+        }
+    }
+    names
+}
+
+/// Looks up an integer constant on a class or its ancestors (pat-nzgdu.98).
+///
+/// The most-derived definition wins, matching Godot's shadowing. Returns `None`
+/// when the constant is unknown — Godot returns 0 there, but `None` lets the
+/// caller tell "absent" from "genuinely zero".
+pub fn class_get_integer_constant(class_name: &str, constant_name: &str) -> Option<i64> {
+    let db = global_db().lock().expect("ClassDB lock poisoned");
+    // Derived-first: the chain runs derived -> base, so the first hit wins.
+    for ancestor in db.inheritance_chain(class_name) {
+        if let Some(info) = db.get_by_name(&ancestor) {
+            if let Some((_, value)) = info
+                .integer_constants
+                .iter()
+                .find(|(n, _)| n == constant_name)
+            {
+                return Some(*value);
+            }
+        }
+    }
+    None
+}
+
+/// Returns the names of every enum on a class, including inherited ones
+/// (pat-nzgdu.98). Godot: `ClassDB.class_get_enum_list`.
+pub fn get_enum_list(class_name: &str) -> Vec<String> {
+    let db = global_db().lock().expect("ClassDB lock poisoned");
+    let chain = db.inheritance_chain(class_name);
+    let mut names = Vec::new();
+    for ancestor in chain.iter().rev() {
+        if let Some(info) = db.get_by_name(ancestor) {
+            names.extend(info.enums.iter().map(|e| e.name.clone()));
+        }
+    }
+    names
+}
+
+/// Returns `true` if `enum_name` is registered on `class_name` or an ancestor
+/// (pat-nzgdu.98). Godot: `ClassDB.class_has_enum`.
+pub fn class_has_enum(class_name: &str, enum_name: &str) -> bool {
+    get_enum_list(class_name).iter().any(|n| n == enum_name)
+}
+
+/// Returns the constant names of one enum on a class or its ancestors
+/// (pat-nzgdu.98). Empty if the enum is unknown.
+/// Godot: `ClassDB.class_get_enum_constants`.
+pub fn get_enum_constants(class_name: &str, enum_name: &str) -> Vec<String> {
+    let db = global_db().lock().expect("ClassDB lock poisoned");
+    for ancestor in db.inheritance_chain(class_name) {
+        if let Some(info) = db.get_by_name(&ancestor) {
+            if let Some(e) = info.enums.iter().find(|e| e.name == enum_name) {
+                return e.constants.iter().map(|(n, _)| n.clone()).collect();
+            }
+        }
+    }
+    Vec::new()
+}
+
 /// Returns `true` if the class is registered and marked abstract.
 pub fn is_abstract(class_name: &str) -> bool {
     global_db()
@@ -398,6 +588,125 @@ pub fn class_has_property(class_name: &str, property_name: &str) -> bool {
 ///
 /// This includes Node3D, Camera3D, MeshInstance3D, the Light3D family,
 /// physics bodies, and related 3D node types with their default properties.
+/// The full `Object` root registration (pat-nzgdu.98).
+///
+/// Several `register_*_classes` entry points bootstrap `Object`/`Node`, and
+/// each is `class_exists`-guarded — so whichever runs first decides the
+/// metadata. Both share these constructors so the result cannot depend on
+/// registration order.
+///
+/// Notification constants are sourced from [`crate::notification`] rather than
+/// hardcoded, so ClassDB can never disagree with the codes the engine actually
+/// dispatches.
+fn object_class() -> ClassRegistration {
+    use crate::notification::{NOTIFICATION_POSTINITIALIZE, NOTIFICATION_PREDELETE};
+
+    ClassRegistration::new("Object")
+        .method(MethodInfo::new("get_class", 0))
+        .method(MethodInfo::new("is_class", 1))
+        .method(MethodInfo::new("get_instance_id", 0))
+        .method(MethodInfo::new("has_method", 1))
+        .method(MethodInfo::new("has_signal", 1))
+        .method(MethodInfo::new("get_method_list", 0))
+        .method(MethodInfo::new("get_signal_list", 0))
+        .method(MethodInfo::new("get_property_list", 0))
+        .method(MethodInfo::new("connect", 2))
+        .method(MethodInfo::new("disconnect", 2))
+        .method(MethodInfo::new("emit_signal", 1))
+        .method(MethodInfo::new("call", 1))
+        .method(MethodInfo::new("set", 2))
+        .method(MethodInfo::new("get", 1))
+        .method(MethodInfo::new("notification", 1))
+        .signal(SignalInfo::new("script_changed"))
+        .signal(SignalInfo::new("property_list_changed"))
+        .constant(
+            "NOTIFICATION_POSTINITIALIZE",
+            NOTIFICATION_POSTINITIALIZE.code() as i64,
+        )
+        .constant("NOTIFICATION_PREDELETE", NOTIFICATION_PREDELETE.code() as i64)
+}
+
+/// The full `Node` registration — see [`object_class`] (pat-nzgdu.98).
+fn node_class() -> ClassRegistration {
+    use crate::notification::{
+        NOTIFICATION_CHILD_ORDER_CHANGED, NOTIFICATION_ENTER_TREE, NOTIFICATION_EXIT_TREE,
+        NOTIFICATION_PARENTED, NOTIFICATION_PAUSED, NOTIFICATION_PHYSICS_PROCESS,
+        NOTIFICATION_PROCESS, NOTIFICATION_READY, NOTIFICATION_UNPARENTED, NOTIFICATION_UNPAUSED,
+    };
+
+    ClassRegistration::new("Node")
+        .parent("Object")
+        .method(MethodInfo::new("get_parent", 0))
+        .method(MethodInfo::new("get_node", 1))
+        .method(MethodInfo::new("get_node_or_null", 1))
+        .method(MethodInfo::new("find_child", 1))
+        .method(MethodInfo::new("add_child", 1))
+        .method(MethodInfo::new("remove_child", 1))
+        .method(MethodInfo::new("get_child", 1))
+        .method(MethodInfo::new("get_child_count", 0))
+        .method(MethodInfo::new("get_children", 0))
+        .method(MethodInfo::new("get_name", 0))
+        .method(MethodInfo::new("set_name", 1))
+        .method(MethodInfo::new("get_path", 0))
+        .method(MethodInfo::new("get_tree", 0))
+        .method(MethodInfo::new("is_inside_tree", 0))
+        .method(MethodInfo::new("queue_free", 0))
+        .method(MethodInfo::new("set_process", 1))
+        .method(MethodInfo::new("is_processing", 0))
+        .method(MethodInfo::new("set_physics_process", 1))
+        .method(MethodInfo::new("is_physics_processing", 0))
+        .method(MethodInfo::new("add_to_group", 1))
+        .method(MethodInfo::new("remove_from_group", 1))
+        .method(MethodInfo::new("is_in_group", 1))
+        .method(MethodInfo::new("duplicate", 0))
+        .signal(SignalInfo::new("ready"))
+        .signal(SignalInfo::new("renamed"))
+        .signal(SignalInfo::new("tree_entered"))
+        .signal(SignalInfo::new("tree_exiting"))
+        .signal(SignalInfo::new("tree_exited"))
+        .signal(SignalInfo::new("child_entered_tree").arg("node"))
+        .signal(SignalInfo::new("child_exiting_tree").arg("node"))
+        .signal(SignalInfo::new("child_order_changed"))
+        .signal(SignalInfo::new("replacing_by").arg("node"))
+        .constant("NOTIFICATION_ENTER_TREE", NOTIFICATION_ENTER_TREE.code() as i64)
+        .constant("NOTIFICATION_EXIT_TREE", NOTIFICATION_EXIT_TREE.code() as i64)
+        .constant("NOTIFICATION_READY", NOTIFICATION_READY.code() as i64)
+        .constant("NOTIFICATION_PAUSED", NOTIFICATION_PAUSED.code() as i64)
+        .constant("NOTIFICATION_UNPAUSED", NOTIFICATION_UNPAUSED.code() as i64)
+        .constant("NOTIFICATION_PROCESS", NOTIFICATION_PROCESS.code() as i64)
+        .constant(
+            "NOTIFICATION_PHYSICS_PROCESS",
+            NOTIFICATION_PHYSICS_PROCESS.code() as i64,
+        )
+        .constant("NOTIFICATION_PARENTED", NOTIFICATION_PARENTED.code() as i64)
+        .constant("NOTIFICATION_UNPARENTED", NOTIFICATION_UNPARENTED.code() as i64)
+        .constant(
+            "NOTIFICATION_CHILD_ORDER_CHANGED",
+            NOTIFICATION_CHILD_ORDER_CHANGED.code() as i64,
+        )
+        .enumeration(
+            EnumInfo::new("ProcessMode")
+                .constant("PROCESS_MODE_INHERIT", 0)
+                .constant("PROCESS_MODE_PAUSABLE", 1)
+                .constant("PROCESS_MODE_WHEN_PAUSED", 2)
+                .constant("PROCESS_MODE_ALWAYS", 3)
+                .constant("PROCESS_MODE_DISABLED", 4),
+        )
+        .enumeration(
+            EnumInfo::new("InternalMode")
+                .constant("INTERNAL_MODE_DISABLED", 0)
+                .constant("INTERNAL_MODE_FRONT", 1)
+                .constant("INTERNAL_MODE_BACK", 2),
+        )
+        .enumeration(
+            EnumInfo::new("DuplicateFlags")
+                .constant("DUPLICATE_SIGNALS", 1)
+                .constant("DUPLICATE_GROUPS", 2)
+                .constant("DUPLICATE_SCRIPTS", 4)
+                .constant("DUPLICATE_USE_INSTANTIATION", 8),
+        )
+}
+
 pub fn register_3d_classes() {
     use gdcore::math::Vector3;
     use gdcore::math3d::{Basis, Transform3D};
@@ -1015,10 +1324,10 @@ pub fn register_2d_classes() {
     use gdcore::math::Vector2;
 
     if !class_exists("Object") {
-        register_class(ClassRegistration::new("Object"));
+        register_class(object_class());
     }
     if !class_exists("Node") {
-        register_class(ClassRegistration::new("Node").parent("Object"));
+        register_class(node_class());
     }
     if !class_exists("Resource") {
         register_class(ClassRegistration::new("Resource").parent("Object"));
@@ -1406,10 +1715,10 @@ pub fn register_viewport_classes() {
     use gdcore::math::Vector2;
 
     if !class_exists("Object") {
-        register_class(ClassRegistration::new("Object"));
+        register_class(object_class());
     }
     if !class_exists("Node") {
-        register_class(ClassRegistration::new("Node").parent("Object"));
+        register_class(node_class());
     }
     if !class_exists("Resource") {
         register_class(ClassRegistration::new("Resource").parent("Object"));
@@ -1615,10 +1924,10 @@ pub fn register_viewport_classes() {
 /// Idempotent — each class is only registered if not already present.
 pub fn register_audio_classes() {
     if !class_exists("Object") {
-        register_class(ClassRegistration::new("Object"));
+        register_class(object_class());
     }
     if !class_exists("Node") {
-        register_class(ClassRegistration::new("Node").parent("Object"));
+        register_class(node_class());
     }
 
     // Ensure 2D/3D bases exist for the positional players.
@@ -1689,7 +1998,7 @@ pub fn register_audio_classes() {
 /// Idempotent — each class is only registered if not already present.
 pub fn register_io_classes() {
     if !class_exists("Object") {
-        register_class(ClassRegistration::new("Object"));
+        register_class(object_class());
     }
     if !class_exists("RefCounted") {
         register_class(ClassRegistration::new("RefCounted").parent("Object"));
@@ -1771,13 +2080,13 @@ pub fn register_io_classes() {
 pub fn register_networking_classes() {
     // Ensure the base chain exists (Object → RefCounted → PacketPeer, and Node).
     if !class_exists("Object") {
-        register_class(ClassRegistration::new("Object"));
+        register_class(object_class());
     }
     if !class_exists("RefCounted") {
         register_class(ClassRegistration::new("RefCounted").parent("Object"));
     }
     if !class_exists("Node") {
-        register_class(ClassRegistration::new("Node").parent("Object"));
+        register_class(node_class());
     }
     if !class_exists("PacketPeer") {
         register_class(
@@ -1999,7 +2308,7 @@ pub fn register_networking_classes() {
 /// the editor can discover the types and their methods.
 pub fn register_navigation_classes() {
     if !class_exists("Object") {
-        register_class(ClassRegistration::new("Object"));
+        register_class(object_class());
     }
     if !class_exists("RefCounted") {
         register_class(ClassRegistration::new("RefCounted").parent("Object"));

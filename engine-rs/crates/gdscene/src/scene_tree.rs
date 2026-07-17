@@ -1811,6 +1811,69 @@ impl SceneTree {
         self.call_script_with_access(node_id, "_physics_process", &[Variant::Float(delta)]);
     }
 
+    // -- input propagation (pat-nzgdu.83) -----------------------------------
+
+    /// Returns whether the input event currently being dispatched has been
+    /// marked handled (Godot: `Viewport.is_input_handled()`).
+    pub fn is_input_handled(&self) -> bool {
+        self.input_handled
+    }
+
+    /// Marks the input event currently being dispatched as handled, stopping it
+    /// from reaching any later propagation stage (Godot:
+    /// `Viewport.set_input_as_handled()`).
+    pub fn set_input_as_handled(&mut self) {
+        self.input_handled = true;
+    }
+
+    /// Calls `_input(event)` on the node's script, if present.
+    pub fn process_script_input(&mut self, node_id: NodeId, event: &Variant) {
+        self.call_script_with_access(node_id, "_input", std::slice::from_ref(event));
+    }
+
+    /// Calls `_unhandled_input(event)` on the node's script, if present.
+    pub fn process_script_unhandled_input(&mut self, node_id: NodeId, event: &Variant) {
+        self.call_script_with_access(node_id, "_unhandled_input", std::slice::from_ref(event));
+    }
+
+    /// Routes `event` through Godot's input propagation stages in order:
+    /// `_input` → `_shortcut_input` → `_unhandled_key_input` → `_unhandled_input`,
+    /// walking nodes in tree order within each stage.
+    ///
+    /// A script calling `set_input_as_handled()` short-circuits the rest of the
+    /// walk, so later stages (and later nodes) never see the event — this is how
+    /// a node's `_input` suppresses a sibling's `_unhandled_input`.
+    /// `_unhandled_key_input` only runs for key events, matching Godot.
+    ///
+    /// Scripts that do not define a stage's method are skipped by
+    /// [`call_script_with_access`], so no opt-in flag is required for them.
+    pub fn push_input(&mut self, event: &gdplatform::input::InputEvent) {
+        let payload = input_event_to_variant(event);
+        let is_key = matches!(event, gdplatform::input::InputEvent::Key { .. });
+        // Each event starts unhandled; `set_input_as_handled()` sets the flag.
+        self.input_handled = false;
+
+        let stages: &[&str] = if is_key {
+            &[
+                "_input",
+                "_shortcut_input",
+                "_unhandled_key_input",
+                "_unhandled_input",
+            ]
+        } else {
+            &["_input", "_shortcut_input", "_unhandled_input"]
+        };
+
+        for &stage in stages {
+            for node_id in self.all_nodes_in_tree_order() {
+                if self.input_handled {
+                    return;
+                }
+                self.call_script_with_access(node_id, stage, std::slice::from_ref(&payload));
+            }
+        }
+    }
+
     /// Calls `_enter_tree()` on the node's script, if present.
     pub fn process_script_enter_tree(&mut self, node_id: NodeId) {
         self.call_script_with_access(node_id, "_enter_tree", &[]);
@@ -2343,6 +2406,103 @@ fn apply_root_motion_delta(node: &mut Node, delta: &crate::animation::RootMotion
 // (Exposing them to the GDScript bridge is a follow-up; the interpreter's
 // singleton dispatch was under concurrent edit at authoring time.)
 // ───────────────────────────────────────────────────────────────────────────
+
+/// Converts an [`InputEvent`](gdplatform::input::InputEvent) into the Dictionary
+/// a script's input virtual receives as its `event` argument.
+///
+/// Godot passes a real `InputEvent` object; Patina has no Variant type for one
+/// yet, so each event is described by a Dictionary carrying a `type` tag plus
+/// that variant's payload (e.g. `{"type": "key", "keycode": "A", "pressed": true}`).
+/// Scripts read it with `event["keycode"]`.
+fn input_event_to_variant(event: &gdplatform::input::InputEvent) -> Variant {
+    use gdplatform::input::InputEvent as Ev;
+
+    let mut d = gdvariant::Dictionary::new();
+    match event {
+        Ev::Key {
+            key,
+            pressed,
+            shift,
+            ctrl,
+            alt,
+        } => {
+            d.insert("type", "key");
+            d.insert("keycode", key.name());
+            d.insert("pressed", *pressed);
+            d.insert("shift", *shift);
+            d.insert("ctrl", *ctrl);
+            d.insert("alt", *alt);
+        }
+        Ev::MouseButton {
+            button,
+            pressed,
+            position,
+        } => {
+            d.insert("type", "mouse_button");
+            d.insert("button", format!("{button:?}"));
+            d.insert("pressed", *pressed);
+            d.insert("position", *position);
+        }
+        Ev::MouseMotion { position, relative } => {
+            d.insert("type", "mouse_motion");
+            d.insert("position", *position);
+            d.insert("relative", *relative);
+        }
+        Ev::GamepadButton {
+            button,
+            pressed,
+            gamepad_id,
+        } => {
+            d.insert("type", "gamepad_button");
+            d.insert("button", format!("{button:?}"));
+            d.insert("pressed", *pressed);
+            d.insert("gamepad_id", *gamepad_id as i64);
+        }
+        Ev::GamepadAxis {
+            axis,
+            value,
+            gamepad_id,
+        } => {
+            d.insert("type", "gamepad_axis");
+            d.insert("axis", format!("{axis:?}"));
+            d.insert("value", *value);
+            d.insert("gamepad_id", *gamepad_id as i64);
+        }
+        Ev::ScreenTouch {
+            index,
+            position,
+            pressed,
+        } => {
+            d.insert("type", "screen_touch");
+            d.insert("index", *index as i64);
+            d.insert("position", *position);
+            d.insert("pressed", *pressed);
+        }
+        Ev::ScreenDrag {
+            index,
+            position,
+            relative,
+            velocity,
+        } => {
+            d.insert("type", "screen_drag");
+            d.insert("index", *index as i64);
+            d.insert("position", *position);
+            d.insert("relative", *relative);
+            d.insert("velocity", *velocity);
+        }
+        Ev::Action {
+            action,
+            pressed,
+            strength,
+        } => {
+            d.insert("type", "action");
+            d.insert("action", action.clone());
+            d.insert("pressed", *pressed);
+            d.insert("strength", *strength);
+        }
+    }
+    Variant::Dictionary(d)
+}
 
 /// Godot `String.match`-style wildcard test used by `find_child`/`find_children`:
 /// `*` matches any (possibly empty) run of characters, `?` matches exactly one,

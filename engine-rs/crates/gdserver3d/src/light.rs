@@ -35,6 +35,119 @@ impl Default for OmniShadowMode {
     }
 }
 
+/// Soft-shadow filter quality, mirroring Godot's
+/// `rendering/lights_and_shadows/soft_shadow_filter_quality` levels.
+///
+/// [`Hard`](Self::Hard) is the default and takes a single tap, giving the
+/// binary lit/shadowed edge. The soft levels take multiple taps across the
+/// light's [`shadow_blur`](Light3D::shadow_blur) radius and average the
+/// results, so a texel partially occluded lands between 0 and 1 (a penumbra).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShadowFilterQuality {
+    /// Single tap: fully lit or fully shadowed, no penumbra.
+    Hard,
+    /// 4 taps.
+    Low,
+    /// 8 taps.
+    Medium,
+    /// 16 taps.
+    High,
+}
+
+impl Default for ShadowFilterQuality {
+    fn default() -> Self {
+        Self::Hard
+    }
+}
+
+impl ShadowFilterQuality {
+    /// Number of shadow taps this quality level takes.
+    pub fn taps(self) -> u32 {
+        match self {
+            Self::Hard => 1,
+            Self::Low => 4,
+            Self::Medium => 8,
+            Self::High => 16,
+        }
+    }
+
+    /// Whether this level filters across the blur radius (more than one tap).
+    pub fn is_soft(self) -> bool {
+        self.taps() > 1
+    }
+}
+
+/// A texture projected through a light, mirroring Godot's
+/// `Light3D.light_projector` (a Texture2D shone through the light cone).
+///
+/// Stored as CPU texels because this crate renders on the CPU and carries no
+/// GPU dependency. Texel `(0, 0)` is the top-left of the projected image.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LightProjector {
+    /// Texture width in texels.
+    pub width: u32,
+    /// Texture height in texels.
+    pub height: u32,
+    /// Row-major texel colors (`width * height` entries).
+    pub texels: Vec<Color>,
+}
+
+impl LightProjector {
+    /// Creates a projector from row-major `texels`.
+    ///
+    /// Returns `None` unless `texels.len() == width * height` and both
+    /// dimensions are non-zero, so a malformed projector cannot be sampled.
+    pub fn new(width: u32, height: u32, texels: Vec<Color>) -> Option<Self> {
+        if width == 0 || height == 0 || texels.len() != (width as usize) * (height as usize) {
+            return None;
+        }
+        Some(Self {
+            width,
+            height,
+            texels,
+        })
+    }
+
+    /// Creates a 1x1 projector of a single color (a plain light gel).
+    pub fn solid(color: Color) -> Self {
+        Self {
+            width: 1,
+            height: 1,
+            texels: vec![color],
+        }
+    }
+
+    /// Samples the projector at normalized `(u, v)`, clamping to the edge.
+    ///
+    /// UVs outside `[0, 1]` clamp rather than wrap, matching how Godot's
+    /// projector fades at the cone edge instead of tiling.
+    pub fn sample_uv(&self, u: f32, v: f32) -> Color {
+        if self.texels.is_empty() {
+            return Color::WHITE;
+        }
+        let x = ((u.clamp(0.0, 1.0) * self.width as f32) as u32).min(self.width - 1);
+        let y = ((v.clamp(0.0, 1.0) * self.height as f32) as u32).min(self.height - 1);
+        self.texels[(y * self.width + x) as usize]
+    }
+}
+
+/// Builds an orthonormal (right, up) basis perpendicular to `dir`.
+///
+/// Used to project a world point onto the plane facing a spot light so the
+/// projector texture can be addressed in 2D.
+fn perpendicular_basis(dir: Vector3) -> (Vector3, Vector3) {
+    let d = dir.normalized();
+    // Any reference axis not parallel to `d`; swap when `d` is near-vertical.
+    let reference = if d.y.abs() > 0.99 {
+        Vector3::new(1.0, 0.0, 0.0)
+    } else {
+        Vector3::new(0.0, 1.0, 0.0)
+    };
+    let right = reference.cross(d).normalized();
+    let up = d.cross(right).normalized();
+    (right, up)
+}
+
 /// Index of a cubemap face (+X, -X, +Y, -Y, +Z, -Z).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -224,6 +337,17 @@ pub struct Light3D {
     /// `LIGHT_ONLY` clears `sky`, `SKY_ONLY` clears `affects_scene`, and the
     /// default `LIGHT_AND_SKY` leaves both set.
     pub affects_scene: bool,
+    /// Texture projected through this light (Godot's `Light3D.light_projector`).
+    /// `None` (the default) leaves the light's color unmodulated.
+    pub projector: Option<LightProjector>,
+    /// Radius the soft-shadow filter spreads its taps over, in world units
+    /// (Godot's `Light3D.shadow_blur`). Only used when
+    /// [`shadow_filter_quality`](Self::shadow_filter_quality) is a soft level.
+    pub shadow_blur: f32,
+    /// How many taps the shadow filter takes. Defaults to
+    /// [`ShadowFilterQuality::Hard`] (a binary edge, matching the previous
+    /// behavior); a soft level produces penumbrae.
+    pub shadow_filter_quality: ShadowFilterQuality,
 }
 
 impl Light3D {
@@ -245,6 +369,9 @@ impl Light3D {
             angular_distance: 0.0,
             sky: true,
             affects_scene: true,
+            projector: None,
+            shadow_blur: 0.0,
+            shadow_filter_quality: ShadowFilterQuality::Hard,
         }
     }
 
@@ -266,6 +393,9 @@ impl Light3D {
             angular_distance: 0.0,
             sky: true,
             affects_scene: true,
+            projector: None,
+            shadow_blur: 0.0,
+            shadow_filter_quality: ShadowFilterQuality::Hard,
         }
     }
 
@@ -287,6 +417,45 @@ impl Light3D {
             angular_distance: 0.0,
             sky: true,
             affects_scene: true,
+            projector: None,
+            shadow_blur: 0.0,
+            shadow_filter_quality: ShadowFilterQuality::Hard,
+        }
+    }
+
+    /// Returns the projector tint this light casts onto `world_pos`, or
+    /// [`Color::WHITE`] when the light has no projector (i.e. no modulation).
+    ///
+    /// The point is projected onto the plane facing the light and addressed in
+    /// the cone's cross-section, so the texture is shone through the light the
+    /// way Godot's `light_projector` is. Points behind a spot light, and light
+    /// types without a projection frame, return `WHITE`.
+    ///
+    /// Only spot lights project today; omni (cubemap-addressed) and directional
+    /// projectors are not implemented and return `WHITE`.
+    pub fn projector_modulate(&self, world_pos: Vector3) -> Color {
+        let projector = match self.projector.as_ref() {
+            Some(p) => p,
+            None => return Color::WHITE,
+        };
+        match self.light_type {
+            LightType::Spot => {
+                let to_point = world_pos - self.position;
+                let axis = self.direction.normalized();
+                let distance_along = to_point.dot(axis);
+                // Behind (or exactly at) the light: nothing is projected.
+                if distance_along <= 0.0 {
+                    return Color::WHITE;
+                }
+                // Half-width of the cone's cross-section at this distance; the
+                // texture spans the cone, so this maps the point into [0, 1].
+                let half_extent = (self.spot_angle.tan() * distance_along).max(1e-6);
+                let (right, up) = perpendicular_basis(axis);
+                let u = (to_point.dot(right) / half_extent) * 0.5 + 0.5;
+                let v = (to_point.dot(up) / half_extent) * 0.5 + 0.5;
+                projector.sample_uv(u, v)
+            }
+            LightType::Directional | LightType::Point => Color::WHITE,
         }
     }
 }
@@ -294,6 +463,97 @@ impl Light3D {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- pat-p0s82.25: light projector ---------------------------------------
+
+    const RED: Color = Color {
+        r: 1.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    const BLUE: Color = Color {
+        r: 0.0,
+        g: 0.0,
+        b: 1.0,
+        a: 1.0,
+    };
+
+    /// A light with no projector modulates nothing — the default must leave
+    /// existing lighting untouched.
+    #[test]
+    fn light_without_projector_modulates_white() {
+        let light = Light3D::spot(
+            Light3DId(1),
+            Vector3::new(0.0, 5.0, 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        assert!(light.projector.is_none());
+        assert_eq!(light.projector_modulate(Vector3::ZERO), Color::WHITE);
+    }
+
+    /// The projector is addressed by where the point falls in the light's cone,
+    /// not returned wholesale: a 2x1 texture shows its left texel on one side of
+    /// the axis and its right texel on the other.
+    #[test]
+    fn spot_projector_addresses_texture_by_cone_position() {
+        let mut light = Light3D::spot(
+            Light3DId(1),
+            Vector3::new(0.0, 5.0, 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        light.projector = LightProjector::new(2, 1, vec![RED, BLUE]);
+        assert!(light.projector.is_some(), "2x1 projector must be accepted");
+
+        // The cone's horizontal axis runs along -Z, so opposite z lands on
+        // opposite texels of the projected image.
+        assert_eq!(light.projector_modulate(Vector3::new(0.0, 0.0, 2.0)), RED);
+        assert_eq!(light.projector_modulate(Vector3::new(0.0, 0.0, -2.0)), BLUE);
+    }
+
+    /// Points behind a spot light are not in its projection frame.
+    #[test]
+    fn spot_projector_ignores_points_behind_the_light() {
+        let mut light = Light3D::spot(
+            Light3DId(1),
+            Vector3::new(0.0, 5.0, 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+        );
+        light.projector = Some(LightProjector::solid(RED));
+        // Above the light, i.e. opposite the direction it points.
+        assert_eq!(
+            light.projector_modulate(Vector3::new(0.0, 9.0, 0.0)),
+            Color::WHITE,
+        );
+    }
+
+    /// Omni/directional projectors are not implemented; they must degrade to no
+    /// modulation rather than mis-projecting the spot math.
+    #[test]
+    fn non_spot_projector_is_unmodulated() {
+        let mut light = Light3D::point(Light3DId(1), Vector3::new(0.0, 5.0, 0.0));
+        light.projector = Some(LightProjector::solid(RED));
+        assert_eq!(light.projector_modulate(Vector3::ZERO), Color::WHITE);
+    }
+
+    /// A malformed projector (texel count not matching the dimensions) is
+    /// rejected at construction rather than panicking at sample time.
+    #[test]
+    fn projector_rejects_mismatched_texel_count() {
+        assert!(LightProjector::new(2, 2, vec![RED]).is_none());
+        assert!(LightProjector::new(0, 0, vec![]).is_none());
+        assert!(LightProjector::new(1, 1, vec![RED]).is_some());
+    }
+
+    /// UVs outside the cone clamp to the edge instead of wrapping or panicking.
+    #[test]
+    fn projector_sample_uv_clamps_to_edge() {
+        let p = LightProjector::new(2, 1, vec![RED, BLUE]).unwrap();
+        assert_eq!(p.sample_uv(-5.0, 0.0), RED);
+        assert_eq!(p.sample_uv(5.0, 5.0), BLUE);
+        // u = 1.0 must land on the last texel, not out of bounds.
+        assert_eq!(p.sample_uv(1.0, 1.0), BLUE);
+    }
 
     #[test]
     fn directional_light_defaults() {

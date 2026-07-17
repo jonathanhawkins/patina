@@ -148,14 +148,78 @@ impl AutoloadManager {
             .collect()
     }
 
-    /// Serializes the `[autoload]` section to project-settings text.
+    /// Serializes this manager's state to JSON.
+    ///
+    /// **This is not project.godot text** despite the historical name — it is a
+    /// JSON snapshot, useful for round-tripping editor state. Writing it into
+    /// `project.godot` would produce a JSON blob where an INI section belongs.
+    /// Use [`to_project_godot_section`](Self::to_project_godot_section) to
+    /// persist to the real file. (pat-nzgdu.97)
     pub fn to_cfg(&self) -> String {
         serde_json::to_string_pretty(self).expect("AutoloadManager serializes")
     }
 
-    /// Loads the `[autoload]` section from project-settings text.
+    /// Loads manager state from the JSON produced by [`to_cfg`](Self::to_cfg).
+    ///
+    /// See `to_cfg` — this parses JSON, not project.godot text. Use
+    /// [`from_project_godot_section`](Self::from_project_godot_section) for the
+    /// real file.
     pub fn from_cfg(cfg: &str) -> serde_json::Result<Self> {
         serde_json::from_str(cfg)
+    }
+
+    /// Renders the real `project.godot` `[autoload]` section.
+    ///
+    /// Godot writes one `Name="path"` line per autoload, and marks an **enabled**
+    /// entry with a `*` prefix on the path (`Global="*res://global.gd"`); the
+    /// editor's "Enable" checkbox is exactly that prefix. Lines are emitted in
+    /// **declaration order**, not sorted: the order is the load order, so an
+    /// autoload may reference one declared before it, and reordering is a
+    /// user-visible operation ([`move_up`](Self::move_up)/[`move_down`](Self::move_down)).
+    ///
+    /// Round-trips with [`from_project_godot_section`](Self::from_project_godot_section).
+    pub fn to_project_godot_section(&self) -> String {
+        let mut out = String::from("[autoload]\n\n");
+        for a in &self.autoloads {
+            let marker = if a.enabled { "*" } else { "" };
+            out.push_str(&format!("{}=\"{}{}\"\n", a.name, marker, a.path));
+        }
+        out
+    }
+
+    /// Parses the `[autoload]` section out of `project.godot` text.
+    ///
+    /// Reads only that section (other sections are skipped), preserves the file's
+    /// declaration order, and treats a `*` path prefix as "enabled" — matching
+    /// `gdresource::ProjectLoader::get_autoloads`' `is_singleton` semantics.
+    /// Text with no `[autoload]` section yields an empty manager.
+    pub fn from_project_godot_section(text: &str) -> Self {
+        let mut mgr = Self::new();
+        let mut in_section = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('[') && line.ends_with(']') {
+                in_section = line == "[autoload]";
+                continue;
+            }
+            if !in_section || line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+                continue;
+            }
+            let Some((name, raw)) = line.split_once('=') else {
+                continue;
+            };
+            let value = raw.trim().trim_matches('"');
+            let (enabled, path) = match value.strip_prefix('*') {
+                Some(rest) => (true, rest.to_string()),
+                None => (false, value.to_string()),
+            };
+            mgr.autoloads.push(Autoload {
+                name: name.trim().to_string(),
+                path,
+                enabled,
+            });
+        }
+        mgr
     }
 }
 
@@ -205,11 +269,101 @@ mod tests {
         assert!(!mgr.is_global("GameState"));
         assert_eq!(mgr.names(), vec!["Sound"]);
 
-        // The [autoload] section persists and reloads identically.
+        // The JSON state snapshot persists and reloads identically.
         let cfg = mgr.to_cfg();
         let loaded = AutoloadManager::from_cfg(&cfg).expect("loads");
         assert_eq!(loaded.names(), vec!["Sound"]);
         assert_eq!(loaded.get("Sound").unwrap().path, "res://audio.gd");
         assert!(!loaded.get("Sound").unwrap().enabled);
+    }
+
+    /// pat-nzgdu.97: the manager renders the **real** `project.godot`
+    /// `[autoload]` section — `Name="*path"` lines, `*` marking enabled.
+    ///
+    /// `to_cfg` emits JSON, so it cannot be what gets written to the file; this
+    /// is the persistence the editor's Autoload tab needs.
+    #[test]
+    fn renders_real_project_godot_autoload_section() {
+        let mut mgr = AutoloadManager::new();
+        mgr.add("Global", "res://global.gd");
+        mgr.add("Music", "res://music.gd");
+        mgr.set_enabled("Music", false);
+
+        let section = mgr.to_project_godot_section();
+
+        assert!(section.starts_with("[autoload]"), "got: {section}");
+        // Enabled -> `*` prefix (Godot's "Enable" checkbox is exactly this).
+        assert!(
+            section.contains("Global=\"*res://global.gd\""),
+            "enabled autoload needs the * singleton marker; got: {section}"
+        );
+        // Disabled -> same line without the marker; the entry is NOT dropped.
+        assert!(
+            section.contains("Music=\"res://music.gd\""),
+            "disabled autoload keeps its line, minus the *; got: {section}"
+        );
+        assert!(!section.contains("*res://music.gd"));
+        // It must be INI, not the JSON `to_cfg` emits.
+        assert!(!section.contains('{'), "must not be JSON: {section}");
+    }
+
+    /// The section round-trips, preserving **declaration order** (= load order,
+    /// so a later autoload may reference an earlier one). Alphabetical sorting
+    /// would silently reorder boot here.
+    #[test]
+    fn project_godot_section_round_trips_in_declaration_order() {
+        let mut mgr = AutoloadManager::new();
+        // Deliberately not alphabetical: Zebra first, Alpha last.
+        mgr.add("Zebra", "res://zebra.gd");
+        mgr.add("Alpha", "res://alpha.gd");
+        mgr.set_enabled("Alpha", false);
+
+        let loaded = AutoloadManager::from_project_godot_section(&mgr.to_project_godot_section());
+
+        assert_eq!(
+            loaded.names(),
+            vec!["Zebra", "Alpha"],
+            "declaration order is load order and must survive the round trip"
+        );
+        assert!(loaded.get("Zebra").unwrap().enabled);
+        assert!(!loaded.get("Alpha").unwrap().enabled);
+        assert_eq!(loaded.get("Alpha").unwrap().path, "res://alpha.gd");
+        assert_eq!(loaded.globals(), vec!["Zebra"]);
+    }
+
+    /// Parsing a whole `project.godot` reads only `[autoload]`, ignoring the
+    /// other sections' keys.
+    #[test]
+    fn parses_autoload_section_out_of_a_full_project_file() {
+        let text = "\
+[application]
+
+config/name=\"MyGame\"
+run/main_scene=\"res://main.tscn\"
+
+[autoload]
+
+Global=\"*res://global.gd\"
+
+[input]
+
+ui_accept={\"deadzone\": 0.5}
+";
+        let mgr = AutoloadManager::from_project_godot_section(text);
+
+        assert_eq!(mgr.names(), vec!["Global"], "only [autoload] keys are read");
+        assert!(mgr.get("Global").unwrap().enabled);
+        assert_eq!(mgr.get("Global").unwrap().path, "res://global.gd");
+        // Keys from other sections must not leak in as autoloads.
+        assert!(!mgr.contains("config/name"));
+        assert!(!mgr.contains("ui_accept"));
+    }
+
+    /// A project with no `[autoload]` section yields an empty manager, not an error.
+    #[test]
+    fn project_file_without_autoload_section_is_empty() {
+        let mgr = AutoloadManager::from_project_godot_section("[application]\n\nconfig/name=\"X\"\n");
+        assert!(mgr.is_empty());
+        assert_eq!(mgr.to_project_godot_section(), "[autoload]\n\n");
     }
 }

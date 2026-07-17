@@ -9,6 +9,7 @@
 pub mod box_projection;
 pub mod compositor;
 pub mod csg;
+pub mod decal;
 pub mod environment;
 pub mod extra_meshes;
 pub mod fog_volume;
@@ -36,6 +37,7 @@ pub mod viewport;
 
 pub use compositor::{Compositor, CompositorEffect, EffectCallbackType};
 pub use csg::{CSGBox3D, CSGCombiner3D, CSGCylinder3D, CSGMesh3D, CSGOperation, CSGSphere3D};
+pub use decal::{Decal3D, DecalRegistry, DecalTexture};
 pub use environment::{AmbientSource, BackgroundMode, Environment3D, ToneMapper};
 pub use fog_volume::{FogMaterial, FogVolume, FogVolumeShape};
 pub use gi::{
