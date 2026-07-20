@@ -770,6 +770,79 @@ fn cmd_assign(project_root: &Path, cli: &CliArgs) {
     }
 }
 
+/// Newest modification time among `.rs` files under `dir` (recursive, skipping
+/// `target*` build dirs). `None` if the tree is unreadable or has no sources.
+fn newest_rust_source_mtime(dir: &Path) -> Option<std::time::SystemTime> {
+    let mut newest: Option<std::time::SystemTime> = None;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map_or(false, |n| n.starts_with("target"))
+                {
+                    continue;
+                }
+                stack.push(path);
+            } else if path.extension().map_or(false, |e| e == "rs") {
+                if let Ok(m) = entry.metadata().and_then(|md| md.modified()) {
+                    if newest.map_or(true, |n| m > n) {
+                        newest = Some(m);
+                    }
+                }
+            }
+        }
+    }
+    newest
+}
+
+/// True when the running binary predates its source and needs a rebuild for
+/// committed changes to take effect. A small skew tolerance stops a source
+/// file touched during the same build second from false-positiving. Pure so
+/// the comparison is unit-testable without touching the filesystem.
+fn binary_predates_source(
+    exe_mtime: std::time::SystemTime,
+    newest_src: std::time::SystemTime,
+) -> bool {
+    newest_src > exe_mtime + Duration::from_secs(2)
+}
+
+/// Emit one loud startup error if the deployed orchestrator binary is older
+/// than its own source tree. This is the trap that silently ran the pre-fix
+/// July-14 orchestrator for days after the identity-renewal fix (pat-bhc7b)
+/// was already committed: `launch`/`run` reuse the prebuilt release binary, so
+/// a committed orchestrator change does nothing until someone rebuilds. Surfaces
+/// it in seconds instead of days.
+fn warn_if_binary_stale(project_root: &Path) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Ok(exe_mtime) = std::fs::metadata(&exe).and_then(|m| m.modified()) else {
+        return;
+    };
+    let src_dir = project_root.join("apps/orchestrator/crate/src");
+    let Some(newest_src) = newest_rust_source_mtime(&src_dir) else {
+        return;
+    };
+    if binary_predates_source(exe_mtime, newest_src) {
+        let banner = "STALE-BINARY: the running orchestrator binary is OLDER than its \
+             source (apps/orchestrator/crate/src). Committed fixes are NOT in this \
+             process — rebuild+redeploy: `./scripts/rust_task.sh build --release -p \
+             patina-orchestrator` then relaunch (see /deploy-orchestrator). This trap \
+             silently ran pre-fix code for days (pat-bhc7b).";
+        tracing::error!("{banner}");
+        // Also to stdout so it lands in the coordinator tmux pane, not just the log.
+        println!("\n⚠️  {banner}\n");
+    }
+}
+
 fn cmd_run(project_root: &Path, cli: &CliArgs) {
     let config = match config::Config::from_env(project_root.to_path_buf()) {
         Ok(c) => c,
@@ -801,6 +874,11 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
             std::process::exit(1);
         }
     };
+
+    // Deploy-gap guard: shout if this binary predates its source, so a committed
+    // orchestrator fix that was never rebuilt (pat-bhc7b lived this way for days)
+    // is visible at startup instead of silently absent.
+    warn_if_binary_stale(&coord.config.project_root);
 
     // Startup sync: prefer the live DB state and only import if flush detects staleness.
     // Import-only at startup can clobber fresh in_progress assignments when JSONL lags DB.
@@ -1983,6 +2061,60 @@ mod tests {
             body.contains("sync_coordinator_discovery_file"),
             "lock winner must repoint the discovery file to its own identity"
         );
+    }
+
+    /// Deploy-gap guard (pat-bhc7b): a binary newer than source is fresh; a
+    /// source newer within the 2s skew window is still fresh; a source newer
+    /// beyond it means the binary predates committed fixes → warn.
+    #[test]
+    fn binary_predates_source_respects_skew_tolerance() {
+        use std::time::{Duration, SystemTime};
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert!(!super::binary_predates_source(
+            base + Duration::from_secs(10),
+            base
+        ));
+        assert!(!super::binary_predates_source(
+            base,
+            base + Duration::from_secs(1)
+        ));
+        assert!(super::binary_predates_source(
+            base,
+            base + Duration::from_secs(5)
+        ));
+    }
+
+    /// The source-mtime walk finds the newest `.rs` and ignores `target*` dirs
+    /// (build artifacts are always newer than sources and would defeat the check).
+    #[test]
+    fn newest_rust_source_mtime_skips_target_and_finds_newest() {
+        use std::time::{Duration, SystemTime};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::create_dir_all(root.join("target/deps")).unwrap();
+
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let new = old + Duration::from_secs(3600);
+        let write_rs = |p: &std::path::Path, t: SystemTime| {
+            std::fs::write(p, "// rs").unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        };
+        write_rs(&root.join("a.rs"), old);
+        write_rs(&root.join("nested/b.rs"), new);
+        // A far-newer file under target/ must NOT count.
+        write_rs(
+            &root.join("target/deps/ignored.rs"),
+            new + Duration::from_secs(99_999),
+        );
+
+        let got = super::newest_rust_source_mtime(root).expect("some source found");
+        assert_eq!(got, new, "newest non-target .rs wins; target/ is skipped");
     }
 
     /// Crate labels derive only from path-anchored `crates/<name>/` mentions,
