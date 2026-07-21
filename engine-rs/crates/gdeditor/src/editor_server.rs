@@ -561,6 +561,15 @@ pub struct EditorState {
     /// The project's audio bus layout, edited by the bottom-panel Audio editor
     /// (pat audio parity). Starts with a single `Master` bus.
     pub audio_bus_layout: crate::audio_bus_layout::AudioBusLayout,
+    /// The Theme resource currently open in the Theme editor panel, plus its
+    /// model wrapper (pat-nzgdu.102). Loaded from a `.tres` by
+    /// `POST /api/theme/load`; item edits mutate this and are written back to
+    /// [`theme_file`](Self::theme_file).
+    pub theme_editor: crate::theme_editor::ThemeEditor,
+    /// Filesystem path of the `.tres` backing [`theme_editor`](Self::theme_editor),
+    /// if a Theme is open. Item-set/remove routes rewrite this file so edits
+    /// persist. `None` when no Theme has been opened.
+    pub theme_file: Option<String>,
 }
 
 /// A single scene tab in the editor.
@@ -902,6 +911,8 @@ impl EditorState {
             gizmo_snap_active_3d: false,
             gizmo_drag_starts_3d: Vec::new(),
             audio_bus_layout: crate::audio_bus_layout::AudioBusLayout::new(),
+            theme_editor: crate::theme_editor::ThemeEditor::new(),
+            theme_file: None,
         }
     }
 
@@ -2200,6 +2211,11 @@ fn handle_connection(
         ("POST", "/api/history/goto") => api_history_goto(state, &req.body, &mut stream),
         ("POST", "/api/scene/save") => api_save_scene(state, &req.body, &mut stream),
         ("POST", "/api/scene/load") => api_load_scene(state, &req.body, &mut stream),
+        // Theme resource editor (pat-nzgdu.102).
+        ("GET", "/api/theme") => api_theme_get(state, &mut stream),
+        ("POST", "/api/theme/load") => api_theme_load(state, &req.body, &mut stream),
+        ("POST", "/api/theme/item/set") => api_theme_item_set(state, &req.body, &mut stream),
+        ("POST", "/api/theme/item/remove") => api_theme_item_remove(state, &req.body, &mut stream),
         ("POST", "/api/viewport/click") => api_viewport_click(state, &req.body, &mut stream),
         ("POST", "/api/viewport/drag_start") => {
             api_viewport_drag_start(state, &req.body, &mut stream)
@@ -5048,6 +5064,265 @@ fn api_reorder_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     state.scene_modified = true;
 
     send_json(stream, r#"{"ok":true}"#);
+}
+
+// ---------------------------------------------------------------------------
+// Theme resource editor (pat-nzgdu.102)
+//
+// Backs the served Theme editor panel with the previously-orphaned
+// `theme_editor::ThemeEditor` model. `POST /api/theme/load` reads a `.tres`
+// into `EditorState.theme_editor`; `GET /api/theme` returns its items; the
+// item set/remove routes mutate the model AND rewrite the backing `.tres` so
+// edits persist across a reload.
+// ---------------------------------------------------------------------------
+
+/// Serializes the open Theme (items flattened for the UI) as a JSON string.
+fn theme_state_json(st: &EditorState) -> String {
+    let theme = st.theme_editor.theme();
+    let mut types = theme.control_types();
+    types.sort_unstable();
+    let mut items = Vec::new();
+    for ct in &types {
+        let mut names = theme.item_names(ct);
+        names.sort_unstable();
+        for name in names {
+            if let Some(item) = theme.get_item(ct, name) {
+                items.push(theme_item_json(ct, name, item));
+            }
+        }
+    }
+    serde_json::json!({
+        "path": st.theme_file.clone(),
+        "control_types": types,
+        "revision": st.theme_editor.revision(),
+        "items": items,
+    })
+    .to_string()
+}
+
+/// One flattened `{control_type, item_name, data_type, <value>}` entry.
+fn theme_item_json(
+    ct: &str,
+    name: &str,
+    item: &crate::theme_editor::ThemeItem,
+) -> serde_json::Value {
+    use crate::theme_editor::ThemeItem;
+    let (data_type, value) = match item {
+        ThemeItem::Color(c) => ("color", serde_json::json!({ "color": [c.0, c.1, c.2, c.3] })),
+        ThemeItem::IconColor(c) => {
+            ("icon_color", serde_json::json!({ "color": [c.0, c.1, c.2, c.3] }))
+        }
+        ThemeItem::Constant(n) => ("constant", serde_json::json!({ "value": n })),
+        ThemeItem::FontSize(s) => ("font_size", serde_json::json!({ "value": s })),
+        ThemeItem::StyleBox(sb) => ("stylebox", serde_json::json!({ "stylebox": sb })),
+        ThemeItem::Font(f) => ("font", serde_json::json!({ "font": f })),
+    };
+    let mut obj = serde_json::json!({
+        "control_type": ct,
+        "item_name": name,
+        "data_type": data_type,
+    });
+    if let (Some(dst), Some(src)) = (obj.as_object_mut(), value.as_object()) {
+        for (k, v) in src {
+            dst.insert(k.clone(), v.clone());
+        }
+    }
+    obj
+}
+
+/// Parses a `{"color":[r,g,b,a]}` request field into a [`gdcore::math::Color`].
+fn theme_req_color(parsed: &serde_json::Value) -> Option<gdcore::math::Color> {
+    let arr = parsed.get("color")?.as_array()?;
+    if arr.len() != 4 {
+        return None;
+    }
+    let c = |i: usize| arr[i].as_f64().map(|x| x as f32);
+    Some(gdcore::math::Color::new(c(0)?, c(1)?, c(2)?, c(3)?))
+}
+
+/// Builds a [`ThemeItem`](crate::theme_editor::ThemeItem) from a set-request
+/// body for the named `data_type`, or `None` if the value is missing/malformed.
+fn theme_item_from_request(
+    data_type: &str,
+    parsed: &serde_json::Value,
+) -> Option<crate::theme_editor::ThemeItem> {
+    use crate::theme_editor::{StyleBoxFlat, ThemeFont, ThemeItem};
+    match data_type {
+        "color" => theme_req_color(parsed).map(ThemeItem::color),
+        "icon_color" => theme_req_color(parsed).map(ThemeItem::icon_color),
+        "constant" => parsed
+            .get("value")
+            .and_then(|v| v.as_i64())
+            .map(|n| ThemeItem::Constant(n as i32)),
+        "font_size" => parsed
+            .get("value")
+            .and_then(|v| v.as_u64())
+            .map(|n| ThemeItem::FontSize(n as u32)),
+        "stylebox" => parsed
+            .get("stylebox")
+            .and_then(|v| serde_json::from_value::<StyleBoxFlat>(v.clone()).ok())
+            .map(ThemeItem::StyleBox),
+        "font" => parsed
+            .get("font")
+            .and_then(|v| serde_json::from_value::<ThemeFont>(v.clone()).ok())
+            .map(ThemeItem::Font),
+        _ => None,
+    }
+}
+
+/// Writes the open Theme back to its `.tres` file. A no-op when no file backs
+/// the Theme (e.g. a freshly-constructed, never-loaded editor).
+fn persist_theme(st: &EditorState) -> std::io::Result<()> {
+    if let Some(path) = &st.theme_file {
+        atomic_write(
+            std::path::Path::new(path),
+            st.theme_editor.theme().to_tres().as_bytes(),
+        )?;
+    }
+    Ok(())
+}
+
+/// `GET /api/theme` — returns the open Theme's items for the editor panel.
+fn api_theme_get(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let st = state.lock().unwrap();
+        theme_state_json(&st)
+    };
+    send_json(stream, &json);
+}
+
+/// `POST /api/theme/load` — opens a `.tres` Theme resource for editing.
+fn api_theme_load(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = match parsed.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            send_error(stream, 400, "missing path");
+            return;
+        }
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            send_error(stream, 404, &format!("cannot read theme: {e}"));
+            return;
+        }
+    };
+    let theme = crate::theme_editor::ThemeResource::from_tres(&text);
+    let json = {
+        let mut st = state.lock().unwrap();
+        st.theme_editor = crate::theme_editor::ThemeEditor::with_theme(theme);
+        st.theme_file = Some(path);
+        theme_state_json(&st)
+    };
+    send_json(stream, &json);
+}
+
+/// `POST /api/theme/item/set` — sets one Theme item and persists to the `.tres`.
+///
+/// Body: `{control_type, item_name, data_type, ...value}` where `data_type` is
+/// one of `color`/`icon_color` (`{color:[r,g,b,a]}`), `constant`/`font_size`
+/// (`{value:n}`), `stylebox` (`{stylebox:{...}}`), or `font` (`{font:{...}}`).
+fn api_theme_item_set(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let control_type = match parsed.get("control_type").and_then(|v| v.as_str()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing control_type");
+            return;
+        }
+    };
+    let item_name = match parsed.get("item_name").and_then(|v| v.as_str()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing item_name");
+            return;
+        }
+    };
+    let data_type = match parsed.get("data_type").and_then(|v| v.as_str()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing data_type");
+            return;
+        }
+    };
+    let item = match theme_item_from_request(data_type, &parsed) {
+        Some(i) => i,
+        None => {
+            send_error(stream, 400, "invalid or missing value for data_type");
+            return;
+        }
+    };
+    let (json, persist_err) = {
+        let mut st = state.lock().unwrap();
+        st.theme_editor.set_item(control_type, item_name, item);
+        let err = persist_theme(&st).err();
+        (theme_state_json(&st), err)
+    };
+    if let Some(e) = persist_err {
+        send_error(
+            stream,
+            500,
+            &format!("theme updated in memory but writing .tres failed: {e}"),
+        );
+        return;
+    }
+    send_json(stream, &json);
+}
+
+/// `POST /api/theme/item/remove` — removes one Theme item and persists.
+///
+/// Idempotent: removing an absent item is a 200 (the resulting theme is
+/// returned either way), matching how the editor treats a cleared override.
+fn api_theme_item_remove(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let control_type = match parsed.get("control_type").and_then(|v| v.as_str()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing control_type");
+            return;
+        }
+    };
+    let item_name = match parsed.get("item_name").and_then(|v| v.as_str()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing item_name");
+            return;
+        }
+    };
+    let (json, persist_err) = {
+        let mut st = state.lock().unwrap();
+        st.theme_editor.remove_item(control_type, item_name);
+        let err = persist_theme(&st).err();
+        (theme_state_json(&st), err)
+    };
+    if let Some(e) = persist_err {
+        send_error(
+            stream,
+            500,
+            &format!("theme updated in memory but writing .tres failed: {e}"),
+        );
+        return;
+    }
+    send_json(stream, &json);
 }
 
 /// `POST /api/property/set` — sets a property on a node.

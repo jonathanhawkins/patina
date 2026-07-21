@@ -274,6 +274,127 @@ impl ThemeResource {
             _ => self.default_font_size,
         }
     }
+
+    /// Serializes this theme to Godot `.tres` text (pat-nzgdu.102).
+    ///
+    /// Emits Godot's `[gd_resource type="Theme" format=3]` header and a
+    /// `[resource]` section with one `Type/data_type/name = value` line per
+    /// override — the exact layout Godot's theme editor writes, e.g.
+    /// `Button/colors/font_color = Color(1, 0, 0, 1)`. Entries are sorted by
+    /// (control type, item name) so the output is deterministic and diffs are
+    /// stable across saves.
+    ///
+    /// **Scope:** the scalar item types — `Color`, `Constant`, `FontSize`, and
+    /// Patina's `IconColor` — round-trip losslessly through
+    /// [`from_tres`](Self::from_tres). `StyleBox` and `Font` overrides live in
+    /// the in-memory model and are returned by the editor API, but are **not**
+    /// yet persisted here: Godot stores them as `[sub_resource]` / external font
+    /// resources, which this text writer does not emit. They are silently
+    /// skipped rather than written in a form that would not reload. Persisting
+    /// them is a documented follow-up.
+    pub fn to_tres(&self) -> String {
+        let mut out = String::from("[gd_resource type=\"Theme\" format=3]\n\n[resource]\n");
+        let mut types = self.control_types();
+        types.sort_unstable();
+        for control_type in types {
+            let mut names = self.item_names(control_type);
+            names.sort_unstable();
+            for name in names {
+                let Some(item) = self.get_item(control_type, name) else {
+                    continue;
+                };
+                if let Some((data_type, value)) = tres_item_value(item) {
+                    out.push_str(&format!("{control_type}/{data_type}/{name} = {value}\n"));
+                }
+            }
+        }
+        out
+    }
+
+    /// Parses Godot `.tres` Theme text back into a [`ThemeResource`]
+    /// (pat-nzgdu.102) — the inverse of [`to_tres`](Self::to_tres) for the
+    /// scalar item types.
+    ///
+    /// Reads only the `[resource]` section, ignoring the header and any other
+    /// sections (and any `[sub_resource]` blocks a Godot-authored file may
+    /// carry — those become no-ops rather than errors). A line whose value does
+    /// not parse for its declared `data_type` is skipped, so a partially
+    /// hand-edited file loads what it can instead of failing wholesale. Text
+    /// with no `[resource]` section yields an empty theme.
+    pub fn from_tres(text: &str) -> Self {
+        let mut theme = Self::new();
+        let mut in_resource = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('[') && line.ends_with(']') {
+                in_resource = line == "[resource]";
+                continue;
+            }
+            if !in_resource || line.is_empty() || line.starts_with(';') {
+                continue;
+            }
+            let Some((key, raw_value)) = line.split_once('=') else {
+                continue;
+            };
+            // key = `Type/data_type/name` (name may itself be simple; splitn(3)
+            // keeps any stray slash inside the item name intact).
+            let parts: Vec<&str> = key.trim().splitn(3, '/').collect();
+            if parts.len() != 3 {
+                continue;
+            }
+            if let Some(item) = parse_tres_item(parts[1], raw_value.trim()) {
+                theme.set_item(parts[0], parts[2], item);
+            }
+        }
+        theme
+    }
+}
+
+/// The `(data_type folder, value literal)` for an item, or `None` for the item
+/// types this text writer does not persist yet (StyleBox / Font). See
+/// [`ThemeResource::to_tres`].
+fn tres_item_value(item: &ThemeItem) -> Option<(&'static str, String)> {
+    match item {
+        ThemeItem::Color(c) => Some(("colors", format_tres_color(*c))),
+        // Patina's icon tint has no Godot theme data type (Godot `icons` are
+        // textures); `icon_colors` is a Patina extension folder that round-trips.
+        ThemeItem::IconColor(c) => Some(("icon_colors", format_tres_color(*c))),
+        ThemeItem::Constant(n) => Some(("constants", n.to_string())),
+        ThemeItem::FontSize(s) => Some(("font_sizes", s.to_string())),
+        ThemeItem::StyleBox(_) | ThemeItem::Font(_) => None,
+    }
+}
+
+/// Parses one `[resource]` value for its declared `data_type` folder.
+fn parse_tres_item(data_type: &str, value: &str) -> Option<ThemeItem> {
+    match data_type {
+        "colors" => parse_tres_color(value).map(ThemeItem::Color),
+        "icon_colors" => parse_tres_color(value).map(ThemeItem::IconColor),
+        "constants" => value.parse::<i32>().ok().map(ThemeItem::Constant),
+        "font_sizes" => value.parse::<u32>().ok().map(ThemeItem::FontSize),
+        _ => None,
+    }
+}
+
+/// Formats a color as Godot's `Color(r, g, b, a)` literal. `f32` Display uses
+/// the shortest round-tripping representation, so `parse_tres_color` recovers
+/// the exact value.
+fn format_tres_color(c: SerdeColor) -> String {
+    format!("Color({}, {}, {}, {})", c.0, c.1, c.2, c.3)
+}
+
+/// Parses a Godot `Color(r, g, b, a)` literal. Returns `None` unless it is
+/// exactly four comma-separated floats inside `Color(...)`.
+fn parse_tres_color(value: &str) -> Option<SerdeColor> {
+    let inner = value.strip_prefix("Color(")?.strip_suffix(')')?;
+    let nums: Vec<f32> = inner
+        .split(',')
+        .map(|s| s.trim().parse::<f32>().ok())
+        .collect::<Option<Vec<f32>>>()?;
+    match nums.as_slice() {
+        [r, g, b, a] => Some(SerdeColor(*r, *g, *b, *a)),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1214,5 +1335,110 @@ mod tests {
         assert!(deserialized.has_item("Button", "normal"));
         assert!(deserialized.has_item("Label", "shadow_offset_x"));
         assert_eq!(deserialized.default_font_size, Some(16));
+    }
+
+    /// pat-nzgdu.102: a Theme serializes to real Godot `.tres` text —
+    /// `[gd_resource type="Theme" format=3]` + `Type/data_type/name = value`
+    /// lines — not the JSON `serde_json` would produce.
+    #[test]
+    fn to_tres_emits_godot_theme_format() {
+        let mut theme = ThemeResource::new();
+        theme.set_item(
+            "Button",
+            "font_color",
+            ThemeItem::color(Color::new(1.0, 0.0, 0.0, 1.0)),
+        );
+        theme.set_item("Button", "h_separation", ThemeItem::Constant(8));
+        theme.set_item("Label", "font_size", ThemeItem::FontSize(16));
+
+        let tres = theme.to_tres();
+
+        assert!(
+            tres.starts_with("[gd_resource type=\"Theme\" format=3]"),
+            "must carry the Godot Theme resource header, got:\n{tres}"
+        );
+        assert!(tres.contains("[resource]"), "got:\n{tres}");
+        assert!(
+            tres.contains("Button/colors/font_color = Color(1, 0, 0, 1)"),
+            "color override must be a real Godot theme line, got:\n{tres}"
+        );
+        assert!(
+            tres.contains("Button/constants/h_separation = 8"),
+            "got:\n{tres}"
+        );
+        assert!(tres.contains("Label/font_sizes/font_size = 16"), "got:\n{tres}");
+        // It must be INI/tres, not the JSON that serde derives on the struct.
+        assert!(!tres.contains('{'), "must not be JSON: {tres}");
+    }
+
+    /// The scalar item types round-trip losslessly through `.tres`.
+    #[test]
+    fn tres_round_trip_preserves_scalar_items() {
+        let mut theme = ThemeResource::new();
+        theme.set_item(
+            "Button",
+            "font_color",
+            ThemeItem::color(Color::new(0.25, 0.5, 0.75, 1.0)),
+        );
+        theme.set_item(
+            "Button",
+            "icon_modulate",
+            ThemeItem::icon_color(Color::new(0.1, 0.2, 0.3, 0.4)),
+        );
+        theme.set_item("Label", "outline_size", ThemeItem::Constant(-3));
+        theme.set_item("Label", "font_size", ThemeItem::FontSize(24));
+
+        let loaded = ThemeResource::from_tres(&theme.to_tres());
+
+        assert_eq!(loaded.override_count(), 4, "all scalar items round-trip");
+        assert_eq!(
+            loaded.resolve_color("Button", "font_color", Color::WHITE),
+            Color::new(0.25, 0.5, 0.75, 1.0)
+        );
+        assert!(
+            matches!(loaded.get_item("Button", "icon_modulate"), Some(ThemeItem::IconColor(_))),
+            "icon color keeps its distinct variant across the round trip"
+        );
+        assert_eq!(loaded.resolve_constant("Label", "outline_size", 0), -3);
+        assert_eq!(loaded.resolve_font_size("Label", "font_size"), Some(24));
+    }
+
+    /// `from_tres` reads only the `[resource]` section and tolerates other
+    /// sections, blank lines, comments, and unparseable lines.
+    #[test]
+    fn from_tres_is_lenient_and_section_scoped() {
+        let text = "\
+[gd_resource type=\"Theme\" format=3]
+
+[sub_resource type=\"StyleBoxFlat\" id=\"1\"]
+bg_color = Color(0, 0, 0, 1)
+
+[resource]
+; a comment
+Button/colors/font_color = Color(1, 0, 0, 1)
+Button/colors/broken = Color(not, a, number)
+Panel/constants/margin = 12
+";
+        let theme = ThemeResource::from_tres(text);
+
+        // The [sub_resource] bg_color must NOT leak in as a Button color.
+        assert_eq!(
+            theme.resolve_color("Button", "font_color", Color::WHITE),
+            Color::new(1.0, 0.0, 0.0, 1.0)
+        );
+        assert!(
+            !theme.has_item("Button", "broken"),
+            "an unparseable value is skipped, not stored"
+        );
+        assert_eq!(theme.resolve_constant("Panel", "margin", 0), 12);
+        // Only the two valid [resource] lines landed.
+        assert_eq!(theme.override_count(), 2);
+    }
+
+    /// A file with no `[resource]` section yields an empty theme, not an error.
+    #[test]
+    fn from_tres_without_resource_section_is_empty() {
+        let theme = ThemeResource::from_tres("[gd_resource type=\"Theme\" format=3]\n");
+        assert_eq!(theme.override_count(), 0);
     }
 }

@@ -2473,6 +2473,30 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       <div id="assetlib-pagination" style="display:none"></div>
     </div>
 
+    <!-- Theme resource editor (pat-nzgdu.102): opens when a .tres Theme is
+         double-clicked in the FileSystem dock. Edits an item override by type
+         and pushes it to /api/theme/item/set, which persists to the .tres. -->
+    <div id="theme-panel" style="display:none">
+      <div class="panel-header">Theme</div>
+      <div id="theme-editor-body">
+        <div id="theme-empty">Double-click a <code>.tres</code> Theme in the FileSystem dock to edit it.</div>
+        <div id="theme-content" style="display:none">
+          <div id="theme-path" class="theme-path"></div>
+          <div id="theme-items"></div>
+          <div class="theme-add-row">
+            <input id="theme-add-type" type="text" placeholder="Control type (e.g. Button)" />
+            <input id="theme-add-name" type="text" placeholder="Item (e.g. font_color)" />
+            <input id="theme-add-color" type="color" value="#ffffff" title="Override color" />
+            <button id="theme-add-btn" class="theme-btn">Set Color</button>
+          </div>
+          <div id="theme-preview" class="theme-preview">
+            <button id="theme-preview-button" class="theme-preview-control">Button</button>
+            <span id="theme-preview-label" class="theme-preview-control">Label</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Bottom panel -->
     <div id="bottom-resize-handle"></div>
     <div id="bottom-panel" class="collapsed" style="height: 240px;">
@@ -7811,6 +7835,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
             ev.stopPropagation();
             var ext = e.name.split('.').pop();
             if (ext === 'tscn') { doOpenScene(e.path); }
+            else if (ext === 'tres') { openThemeResource(e.path); }
           });
           // Drag support for asset files (scenes, textures, scripts, resources).
           var dragExt = e.name.split('.').pop().toLowerCase();
@@ -7979,6 +8004,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         if (fsExpandedDirs.has(e.path)) fsExpandedDirs.delete(e.path); else fsExpandedDirs.add(e.path);
         refreshFsTree();
       } else if (e.name.split('.').pop() === 'tscn') { doOpenScene(e.path); }
+      else if (e.name.split('.').pop() === 'tres') { openThemeResource(e.path); }
       else { showFilePreview(e); }
     } else if (action === 'deps') {
       api('GET', infoUrl).then(function(info) { showFsInfoPopup('Dependencies of ' + e.name, info ? info.dependencies : []); });
@@ -8157,7 +8183,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
           showFilePreview(e);
         });
         row.addEventListener('dblclick', function() {
-          if (e.name.split('.').pop() === 'tscn') doOpenScene(e.path);
+          var ext = e.name.split('.').pop();
+          if (ext === 'tscn') doOpenScene(e.path);
+          else if (ext === 'tres') openThemeResource(e.path);
         });
         list.appendChild(row);
       })(files[i]);
@@ -10956,6 +10984,115 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     if (treeAddBtn) treeAddBtn.addEventListener('click', addAnimTreeState);
     var treeConnectBtn = document.getElementById('anim-tree-connect');
     if (treeConnectBtn) treeConnectBtn.addEventListener('click', connectAnimTreeTransition);
+
+    // --- Theme resource editor (pat-nzgdu.102) ------------------------------
+    // Opens a .tres Theme, lists its item overrides, and edits an item's color
+    // via POST /api/theme/item/set (which rewrites the .tres). The preview strip
+    // recolors a sample Button/Label as overrides change.
+    function themeHexToRgba(hex) {
+      var h = String(hex).replace('#', '');
+      return [
+        parseInt(h.substr(0, 2), 16) / 255,
+        parseInt(h.substr(2, 2), 16) / 255,
+        parseInt(h.substr(4, 2), 16) / 255,
+        1
+      ];
+    }
+    function themeRgbaToHex(c) {
+      function comp(x) {
+        var v = Math.max(0, Math.min(255, Math.round((x || 0) * 255))).toString(16);
+        return v.length < 2 ? '0' + v : v;
+      }
+      return '#' + comp(c[0]) + comp(c[1]) + comp(c[2]);
+    }
+
+    function themeShowPanel() {
+      var panel = document.getElementById('theme-panel');
+      if (panel) panel.style.display = 'block';
+      var empty = document.getElementById('theme-empty');
+      var content = document.getElementById('theme-content');
+      if (empty) empty.style.display = 'none';
+      if (content) content.style.display = 'block';
+    }
+
+    function themeRender(data) {
+      var pathEl = document.getElementById('theme-path');
+      if (pathEl) pathEl.textContent = (data && data.path) || '(unsaved theme)';
+      var list = document.getElementById('theme-items');
+      if (!list) return;
+      list.innerHTML = '';
+      ((data && data.items) || []).forEach(function(it) {
+        var row = document.createElement('div');
+        row.className = 'theme-item-row';
+        var label = document.createElement('span');
+        label.className = 'theme-item-label';
+        label.textContent = it.control_type + ' / ' + it.item_name + ' (' + it.data_type + ')';
+        row.appendChild(label);
+        if (it.data_type === 'color' || it.data_type === 'icon_color') {
+          var swatch = document.createElement('span');
+          swatch.className = 'theme-swatch';
+          swatch.style.background = themeRgbaToHex(it.color);
+          row.appendChild(swatch);
+          // Live preview: reflect the sampled Button/Label overrides.
+          if (it.control_type === 'Button' && it.item_name === 'font_color') {
+            var pb = document.getElementById('theme-preview-button');
+            if (pb) pb.style.color = themeRgbaToHex(it.color);
+          }
+          if (it.control_type === 'Label' && it.item_name === 'font_color') {
+            var pl = document.getElementById('theme-preview-label');
+            if (pl) pl.style.color = themeRgbaToHex(it.color);
+          }
+        } else if (it.value !== undefined) {
+          var val = document.createElement('span');
+          val.textContent = String(it.value);
+          row.appendChild(val);
+        }
+        list.appendChild(row);
+      });
+    }
+
+    async function openThemeResource(path) {
+      var resp = await fetch('/api/theme/load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: path })
+      });
+      if (!resp.ok) return;
+      themeShowPanel();
+      themeRender(await resp.json());
+    }
+
+    async function refreshThemePanel() {
+      var resp = await fetch('/api/theme');
+      if (!resp.ok) return;
+      themeRender(await resp.json());
+    }
+
+    async function themeSetColor(controlType, itemName, hex) {
+      var resp = await fetch('/api/theme/item/set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          control_type: controlType,
+          item_name: itemName,
+          data_type: 'color',
+          color: themeHexToRgba(hex)
+        })
+      });
+      if (resp.ok) themeRender(await resp.json());
+    }
+
+    var themeAddBtn = document.getElementById('theme-add-btn');
+    if (themeAddBtn) {
+      themeAddBtn.addEventListener('click', function() {
+        var t = document.getElementById('theme-add-type');
+        var n = document.getElementById('theme-add-name');
+        var c = document.getElementById('theme-add-color');
+        if (t && n && c && t.value && n.value) {
+          themeSetColor(t.value, n.value, c.value);
+        }
+      });
+    }
 
     var treeBtn = document.getElementById('anim-tree-btn');
     if (treeBtn) {
