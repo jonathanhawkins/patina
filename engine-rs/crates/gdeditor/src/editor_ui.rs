@@ -1355,7 +1355,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
   font-size: 12px; line-height: 1.6; color: var(--text-dim);
   text-align: right; padding: 4px 8px 4px 0; user-select: none;
-  border-right: 1px solid var(--border); pointer-events: none; white-space: pre;
+  border-right: 1px solid var(--border); white-space: pre;
 }
 .script-highlight-layer {
   position: absolute; top: 0; left: 48px; right: 0;
@@ -1372,6 +1372,24 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 }
 .script-textarea::selection { background: rgba(87,158,255,0.3); }
 .script-empty { color: var(--text-dim); font-style: italic; padding: 20px; text-align: center; }
+/* pat-0q2kx.14: code-completion popup (Godot CodeEdit's completion list).
+   Absolutely positioned inside .script-editor-wrap at the caret. */
+#script-completion-popup {
+  position: absolute; display: none; z-index: 40; min-width: 200px; max-width: 420px;
+  max-height: 200px; overflow-y: auto; background: var(--panel);
+  border: 1px solid var(--border); border-radius: 3px; box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; font-size: 11px;
+}
+#script-completion-popup.open { display: block; }
+.script-completion-item {
+  padding: 3px 8px; cursor: pointer; display: flex; gap: 8px; align-items: baseline;
+  white-space: nowrap;
+}
+.script-completion-item.sel { background: rgba(87,158,255,0.22); }
+.script-completion-item .cmp-kind { color: var(--text-dim); font-size: 10px; margin-left: auto; }
+.script-completion-item .cmp-detail { color: var(--text-dim); font-size: 10px; }
+/* Ctrl/Cmd held over the editor: symbols read as clickable links. */
+.script-textarea.goto-armed { cursor: pointer; }
 /* pat-bc0tv: Shader Editor bottom-panel (Godot ShaderEditorPlugin parity).
    HSplitContainer: shader file list (left) + TextShaderEditor (right). */
 #shader-panel { display: flex; flex-direction: row; height: 100%; overflow: hidden; }
@@ -1629,6 +1647,12 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 #script-goto-bar input { width: 80px; padding: 2px 6px; font-size: 11px; }
 .script-line-numbers .breakpoint { color: var(--error); font-weight: bold; }
 .script-line-numbers .error-line { background: rgba(224,80,80,0.2); }
+/* One clickable row per line, so the gutter can toggle breakpoints the way
+   Godot's script editor does (pat-0q2kx.10). Height must stay exactly one
+   text line or the gutter drifts out of step with the textarea. */
+.script-line-numbers .ln { display: block; cursor: pointer; }
+.script-line-numbers .ln:hover { color: var(--text); }
+.script-line-numbers .ln.breakpoint::before { content: '\25CF'; float: left; }
 .script-minimap { position: absolute; top: 0; right: 0; width: 60px; height: 100%; background: rgba(13,13,13,0.8); border-left: 1px solid var(--border); overflow: hidden; cursor: pointer; z-index: 5; }
 .script-minimap canvas { width: 100%; height: 100%; }
 .fold-gutter { position: absolute; top: 0; left: 32px; width: 14px; cursor: pointer; z-index: 3; }
@@ -4767,6 +4791,62 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     material: 'Material', physics_material_override: 'PhysicsMaterial2D', mesh: 'Mesh', shape: 'Shape2D',
     sprite_frames: 'SpriteFrames', theme: 'Theme', tile_set: 'TileSet'
   };
+  // Concrete subclasses Godot's "New <Type>" submenu offers for an abstract
+  // resource type (editor_resource_picker.cpp builds this from ClassDB). A type
+  // that is already concrete is instantiated as itself.
+  var RESOURCE_SUBCLASSES = {
+    Shape2D: ['RectangleShape2D', 'CircleShape2D', 'CapsuleShape2D', 'SegmentShape2D',
+              'SeparationRayShape2D', 'WorldBoundaryShape2D', 'ConcavePolygonShape2D',
+              'ConvexPolygonShape2D'],
+    Texture2D: ['ImageTexture', 'GradientTexture2D', 'NoiseTexture2D', 'AtlasTexture',
+                'PlaceholderTexture2D'],
+    Material: ['CanvasItemMaterial', 'ShaderMaterial'],
+    Mesh: ['BoxMesh', 'SphereMesh', 'PlaneMesh', 'CylinderMesh', 'PrismMesh', 'TorusMesh',
+           'CapsuleMesh']
+  };
+  // Extensions each resource type can be loaded from, so Quick Load lists only
+  // files that can actually be assigned to the property.
+  var RESOURCE_EXTS = {
+    Texture2D: ['png', 'jpg', 'jpeg', 'webp', 'svg', 'bmp', 'tga'],
+    Script: ['gd'],
+    Mesh: ['tres', 'obj', 'gltf', 'glb'],
+    Theme: ['tres', 'theme']
+  };
+  function resourceExtsFor(resType) { return RESOURCE_EXTS[resType] || ['tres']; }
+  function pathSuitsResType(path, resType) {
+    var ext = String(path || '').split('.').pop().toLowerCase();
+    return resourceExtsFor(resType).indexOf(ext) >= 0;
+  }
+  // Point a resource property at a file (Load / Quick Load / FileSystem drop).
+  // A null path clears it, which is what the picker's Clear sends.
+  function assignResource(nodeId, property, path, resType) {
+    return api('POST', '/api/property/resource/assign',
+               { node_id: nodeId, property: property, path: path })
+      .then(function() {
+        logMessage('info', (path ? 'Assigned ' + path : 'Cleared') + ' → ' + humanizeProp(property));
+        if (selectedNodeId) fetchSelected();
+      });
+  }
+  // Create a fresh inline resource of `className` and assign it ("New <Type>").
+  function newResource(nodeId, property, className) {
+    return api('POST', '/api/property/resource/new',
+               { node_id: nodeId, property: property, class_name: className })
+      .then(function() {
+        logMessage('info', 'New ' + className + ' → ' + humanizeProp(property));
+        if (selectedNodeId) fetchSelected();
+      });
+  }
+  // Every project file assignable to `resType`, flattened from the filesystem
+  // tree — Godot's Quick Load lists the whole project, not one directory.
+  function collectAssignableFiles(files, resType, out) {
+    (files || []).forEach(function(f) {
+      if (f.is_dir) { collectAssignableFiles(f.children, resType, out); }
+      else if (pathSuitsResType(f.name || f.path, resType)) {
+        out.push({ name: f.name, path: f.path });
+      }
+    });
+    return out;
+  }
   function makeResourcePicker(nodeId, prop, resType) {
     var wrap = document.createElement('div');
     wrap.className = 'res-picker';
@@ -4782,31 +4862,89 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     main.appendChild(lbl); main.appendChild(chev);
     var load = document.createElement('span');
     load.className = 'res-picker-load'; load.textContent = '📁'; load.title = 'Quick Load ' + resType;
-    function openMenu(anchor) {
+    // Renders a list of [label, action] rows as the picker menu, anchored under
+    // `anchor`. Used for the Assign menu and for its Load/New sub-lists.
+    function showMenu(anchor, rows) {
       closeResMenu();
       var menu = document.createElement('div');
       menu.className = 'res-picker-menu'; menu.id = 'res-picker-menu';
-      var items = [['New ' + resType, 'new'], ['Load...', 'load'], ['Clear', 'clear']];
-      items.forEach(function(it) {
-        if (it[1] === 'clear' && isEmpty) return;
+      rows.forEach(function(row) {
         var d = document.createElement('div');
-        d.textContent = it[0];
-        d.addEventListener('click', function(e) {
-          e.stopPropagation();
-          if (it[1] === 'clear') { setProperty(nodeId, prop.name, { type: 'Resource', value: null }); }
-          else { logMessage('info', it[0] + ' — ' + humanizeProp(prop.name) + ' (' + resType + ')'); }
-          closeResMenu();
-        });
+        d.textContent = row[0];
+        d.addEventListener('click', function(e) { e.stopPropagation(); row[1](); });
         menu.appendChild(d);
       });
       document.body.appendChild(menu);
       var r = anchor.getBoundingClientRect();
-      menu.style.left = r.left + 'px';
+      menu.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 184)) + 'px';
       menu.style.top = (r.bottom + 2) + 'px';
       setTimeout(function() { document.addEventListener('click', closeResMenu, { once: true }); }, 0);
     }
+    // "New <Type>": one entry per concrete subclass, or the type itself when it
+    // is already concrete.
+    function openNewMenu(anchor) {
+      var classes = RESOURCE_SUBCLASSES[resType] || [resType];
+      showMenu(anchor, classes.map(function(cls) {
+        return ['New ' + cls, function() {
+          closeResMenu();
+          newResource(nodeId, prop.name, cls);
+        }];
+      }));
+    }
+    // "Load…"/Quick Load: every project file the property can take.
+    function openLoadMenu(anchor) {
+      api('GET', '/api/filesystem').then(function(data) {
+        var files = collectAssignableFiles(data && data.files, resType, []);
+        if (!files.length) {
+          showMenu(anchor, [['No ' + resType + ' files in project', function() { closeResMenu(); }]]);
+          return;
+        }
+        showMenu(anchor, files.map(function(f) {
+          return [f.name, function() {
+            closeResMenu();
+            assignResource(nodeId, prop.name, f.path, resType);
+          }];
+        }));
+      });
+    }
+    function openMenu(anchor) {
+      var rows = [
+        ['New ' + resType + ' …', function() { openNewMenu(anchor); }],
+        ['Quick Load …', function() { openLoadMenu(anchor); }]
+      ];
+      if (!isEmpty) {
+        rows.push(['Clear', function() {
+          closeResMenu();
+          assignResource(nodeId, prop.name, null, resType);
+        }]);
+      }
+      showMenu(anchor, rows);
+    }
     main.addEventListener('click', function(e) { e.stopPropagation(); openMenu(main); });
-    load.addEventListener('click', function(e) { e.stopPropagation(); openMenu(load); });
+    load.addEventListener('click', function(e) { e.stopPropagation(); openLoadMenu(load); });
+    // Accept a FileSystem-dock drag straight onto the row, as Godot does. The
+    // payload is the same `{type, path, name}` JSON the viewport drop reads.
+    wrap.addEventListener('dragover', function(de) {
+      de.preventDefault();
+      de.dataTransfer.dropEffect = 'copy';
+      wrap.classList.add('insp-drop-active');
+    });
+    wrap.addEventListener('dragleave', function() { wrap.classList.remove('insp-drop-active'); });
+    wrap.addEventListener('drop', function(de) {
+      de.preventDefault(); de.stopPropagation();
+      wrap.classList.remove('insp-drop-active');
+      var raw = de.dataTransfer.getData('text/plain');
+      if (!raw) return;
+      var dragData;
+      try { dragData = JSON.parse(raw); } catch (ex) { return; }
+      if (!dragData || !dragData.path) return;
+      // Refuse a file the property cannot hold rather than writing a broken ref.
+      if (!pathSuitsResType(dragData.path, resType)) {
+        logMessage('warn', (dragData.name || dragData.path) + ' is not a ' + resType);
+        return;
+      }
+      assignResource(nodeId, prop.name, dragData.path, resType);
+    });
     wrap.appendChild(main); wrap.appendChild(load);
     return wrap;
   }
@@ -5765,6 +5903,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 
   function setupViewport() {
     var container = document.getElementById('viewport-container');
+    // pat-0q2kx.15: state for tool-aware 2D drags (rotate/scale). Declared in
+    // setupViewport's scope because the mousedown/mousemove/mouseup handlers
+    // below all close over it.
+    var toolDragPivot = null;
+    var toolDragPrev = null;
     var tilePaintToggleBtn = document.getElementById('tilemap-paint-toggle');
     if (tilePaintToggleBtn) tilePaintToggleBtn.addEventListener('click', function() { tilePaintActive = !tilePaintActive; updateTilePaintToggle(); });
     viewportImg = document.createElement('img');
@@ -5788,6 +5931,12 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var c = viewportCoords(e);
       dragStartX = e.clientX; dragStartY = e.clientY;
       isDragging = false;
+      // pat-0q2kx.15: rotate/scale are pivot-relative and incremental, so the
+      // drag needs an origin and a running previous point. Godot pivots on the
+      // node's own origin (canvas_item_editor_plugin.cpp); we pivot on the grab
+      // point, which the client can compute without another round-trip.
+      toolDragPivot = { x: c.x, y: c.y };
+      toolDragPrev = { x: c.x, y: c.y };
       // If holding Alt or in select mode clicking empty space, start box select
       api('POST', '/api/viewport/drag_start', c).then(function(result) {
         if (result && !result.dragging && currentToolMode === 'select') {
@@ -5822,7 +5971,52 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var dx = e.clientX - dragStartX;
       var dy = e.clientY - dragStartY;
       if (!isDragging && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) isDragging = true;
-      if (isDragging) api('POST', '/api/viewport/drag', viewportCoords(e));
+      if (isDragging) {
+        // pat-0q2kx.15: Godot's canvas editor applies the ACTIVE TOOL during a
+        // drag rather than always translating (canvas_item_editor_plugin.cpp:
+        // TOOL_ROTATE / TOOL_SCALE, axis constraints, multi-node drag). Patina
+        // already had the server endpoints; this client always POSTed the move
+        // route, so rotate/scale/axis-lock were unreachable from the UI.
+        var cur = viewportCoords(e);
+        var prev = toolDragPrev || cur;
+        var pivot = toolDragPivot || cur;
+        // Per-frame deltas: these endpoints apply an increment, not an absolute.
+        var stepX = cur.x - prev.x;
+        var stepY = cur.y - prev.y;
+        if (currentToolMode === 'rotate') {
+          // Signed angle swept about the pivot since the last move.
+          var a0 = Math.atan2(prev.y - pivot.y, prev.x - pivot.x);
+          var a1 = Math.atan2(cur.y - pivot.y, cur.x - pivot.x);
+          var da = a1 - a0;
+          // Normalise across the atan2 branch cut so a drag past ±180° does not
+          // jump a full turn in the wrong direction.
+          while (da > Math.PI) da -= 2 * Math.PI;
+          while (da < -Math.PI) da += 2 * Math.PI;
+          if (da !== 0) api('POST', '/api/viewport/rotate_node', { delta: da });
+        } else if (currentToolMode === 'scale') {
+          // Ratio of distances from the pivot; the endpoint multiplies scale.
+          var d0 = Math.hypot(prev.x - pivot.x, prev.y - pivot.y);
+          var d1 = Math.hypot(cur.x - pivot.x, cur.y - pivot.y);
+          if (d0 > 0.0001 && d1 > 0.0001) {
+            var f = d1 / d0;
+            // Shift locks scaling to one axis, as in Godot.
+            var sx = e.shiftKey ? (Math.abs(stepX) >= Math.abs(stepY) ? f : 1) : f;
+            var sy = e.shiftKey ? (Math.abs(stepX) >= Math.abs(stepY) ? 1 : f) : f;
+            api('POST', '/api/viewport/scale_node', { sx: sx, sy: sy });
+          }
+        } else if (e.shiftKey) {
+          // Shift constrains a move to the dominant axis.
+          var axis = Math.abs(e.clientX - dragStartX) >= Math.abs(e.clientY - dragStartY) ? 'x' : 'y';
+          api('POST', '/api/viewport/drag_axis', { dx: stepX, dy: stepY, axis: axis });
+        } else if (selectedNodeIds && selectedNodeIds.size > 1) {
+          // Dragging one node of a multi-selection moves them all.
+          api('POST', '/api/viewport/drag_multi', { dx: stepX, dy: stepY, snap: !e.altKey });
+        } else {
+          // Unchanged single-node move: absolute cursor position.
+          api('POST', '/api/viewport/drag', cur);
+        }
+        toolDragPrev = cur;
+      }
     });
     document.addEventListener('mouseup', function(e) {
       if (editorMode === '3d') { end3DNav(e); return; }
@@ -5863,6 +6057,8 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         });
       }
       isDragging = false; dragStartX = 0; dragStartY = 0;
+      // pat-0q2kx.15: clear the tool-drag origin so the next drag starts fresh.
+      toolDragPivot = null; toolDragPrev = null;
     });
     container.appendChild(viewportImg);
 
@@ -10704,11 +10900,64 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     for (var li = 0; li < lines.length; li++) hl.push(highlightGDScript(lines[li]));
     return hl.join('\n');
   }
+  // Breakpoint lines (1-based) for the script currently open in the editor.
+  var scriptBreakpoints = [];
+
   function updateLineNumbers(content) {
     var el = document.getElementById('script-line-numbers'); if (!el) return;
-    var c = content.split('\n').length; var nums = [];
-    for (var ln = 1; ln <= c; ln++) nums.push(String(ln));
-    el.textContent = nums.join('\n');
+    // One element per line rather than a single text node: the gutter has to be
+    // clickable per-line and carry a per-line marker class (pat-0q2kx.10).
+    var c = content.split('\n').length;
+    var frag = document.createDocumentFragment();
+    for (var ln = 1; ln <= c; ln++) {
+      var row = document.createElement('div');
+      row.className = 'ln';
+      row.setAttribute('data-line', String(ln));
+      row.textContent = String(ln);
+      frag.appendChild(row);
+    }
+    el.innerHTML = '';
+    el.appendChild(frag);
+    applyBreakpointMarkers();
+  }
+
+  // Paints `.breakpoint` onto the gutter rows that have one. Kept separate from
+  // rendering so a toggle does not have to rebuild the whole gutter.
+  function applyBreakpointMarkers() {
+    var el = document.getElementById('script-line-numbers'); if (!el) return;
+    var rows = el.querySelectorAll('.ln');
+    for (var i = 0; i < rows.length; i++) {
+      var line = parseInt(rows[i].getAttribute('data-line'), 10);
+      if (scriptBreakpoints.indexOf(line) !== -1) rows[i].classList.add('breakpoint');
+      else rows[i].classList.remove('breakpoint');
+    }
+  }
+
+  // Pulls the authoritative breakpoint set for the open script from the server
+  // and repaints both the gutter and the debugger panel list.
+  async function refreshBreakpoints() {
+    if (!currentScriptPath) { scriptBreakpoints = []; applyBreakpointMarkers(); return; }
+    var data = await api('GET', '/api/script/breakpoints?path=' + encodeURIComponent(currentScriptPath));
+    scriptBreakpoints = (data && data.breakpoints) || [];
+    applyBreakpointMarkers();
+    renderBreakpointList(scriptBreakpoints.map(function(l) {
+      return { script: currentScriptPath, line: l };
+    }));
+  }
+
+  // Godot toggles a breakpoint by clicking the gutter or pressing F9 on the
+  // caret line; both land here (pat-0q2kx.10).
+  async function toggleBreakpoint(line) {
+    if (!currentScriptPath || !line) return;
+    await api('POST', '/api/script/breakpoint/toggle', { path: currentScriptPath, line: line });
+    await refreshBreakpoints();
+  }
+
+  // 1-based line of the caret, for F9.
+  function currentScriptLine() {
+    var ta = document.getElementById('script-textarea');
+    if (!ta) return 0;
+    return ta.value.substring(0, ta.selectionStart).split('\n').length;
   }
   function updateHighlight(content) {
     var el = document.getElementById('script-highlight'); if (!el) return;
@@ -10786,6 +11035,13 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var wrap = document.createElement('div'); wrap.className = 'script-editor-wrap';
     var lineNums = document.createElement('div'); lineNums.className = 'script-line-numbers';
     lineNums.id = 'script-line-numbers'; wrap.appendChild(lineNums);
+    // Clicking a gutter row toggles its breakpoint, as in Godot's script editor
+    // (pat-0q2kx.10). Delegated, so rebuilt rows stay live.
+    lineNums.addEventListener('click', function(e) {
+      var row = e.target.closest ? e.target.closest('.ln') : null;
+      if (!row) return;
+      toggleBreakpoint(parseInt(row.getAttribute('data-line'), 10));
+    });
     var hlLayer = document.createElement('div'); hlLayer.className = 'script-highlight-layer';
     hlLayer.id = 'script-highlight'; wrap.appendChild(hlLayer);
     var textarea = document.createElement('textarea'); textarea.className = 'script-textarea';
@@ -10800,6 +11056,12 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       markScriptModified(textarea.value !== scriptOriginalContent);
     });
     textarea.addEventListener('keydown', function(e) {
+      // pat-0q2kx.14: while the completion popup is open it owns the navigation
+      // and accept keys, so Tab does not insert an indent and Enter does not
+      // break the line — that is Godot's CodeEdit behavior.
+      if (scriptCompletionHandleKey(e)) return;
+      // F9 toggles the breakpoint on the caret's line (Godot's shortcut).
+      if (e.key === 'F9') { e.preventDefault(); toggleBreakpoint(currentScriptLine()); return; }
       if (e.key === 'Tab') { e.preventDefault();
         var start = textarea.selectionStart; var end = textarea.selectionEnd; var val = textarea.value;
         textarea.value = val.substring(0, start) + '    ' + val.substring(end);
@@ -10819,11 +11081,225 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       }
       if (e.ctrlKey && e.key === 's') { e.preventDefault(); saveScript(); return; }
     });
+    // pat-0q2kx.14: completion popup + Ctrl+Click goto-definition. The server
+    // half (/api/script/complete, goto_definition.rs) has been green for a
+    // while; nothing in the served editor called it until now.
+    var cmpPopup = document.createElement('div');
+    cmpPopup.id = 'script-completion-popup';
+    cmpPopup.setAttribute('role', 'listbox');
+    cmpPopup.setAttribute('aria-label', 'Code completion');
+    wrap.appendChild(cmpPopup);
+    textarea.addEventListener('input', function() { scriptCompletionOnInput(textarea); });
+    // Any caret move that is not a completion keystroke dismisses the popup.
+    textarea.addEventListener('blur', function() { scriptCompletionClose(); });
+    textarea.addEventListener('click', function(e) {
+      if (e.ctrlKey || e.metaKey) { scriptGotoDefinitionAtCaret(textarea); return; }
+      scriptCompletionClose();
+    });
+    // Ctrl/Cmd held: hint that symbols are clickable.
+    textarea.addEventListener('keyup', function(e) {
+      if (!e.ctrlKey && !e.metaKey) textarea.classList.remove('goto-armed');
+    });
+    textarea.addEventListener('mousemove', function(e) {
+      if (e.ctrlKey || e.metaKey) textarea.classList.add('goto-armed');
+      else textarea.classList.remove('goto-armed');
+    });
     wrap.appendChild(textarea); el.appendChild(wrap);
     updateHighlight(content); updateLineNumbers(content);
+    // Show the breakpoints the server already holds for this script.
+    refreshBreakpoints();
     // pat-f64ui: reflect the opened script in the list, members overview, and
     // the centered script-name label.
     updateScriptDocChrome(path, content);
+  }
+
+  // ---- Code completion + goto-definition (pat-0q2kx.14) ----
+  // POST /api/script/complete and GET /api/script/goto have existed and been
+  // unit-tested for a while; the served editor never called either, so there
+  // was no popup and Ctrl+Click did nothing.
+  var scriptCmp = { items: [], sel: 0, timer: null, prefix: '', open: false };
+
+  function scriptCompletionClose() {
+    scriptCmp.open = false; scriptCmp.items = []; scriptCmp.sel = 0;
+    if (scriptCmp.timer) { clearTimeout(scriptCmp.timer); scriptCmp.timer = null; }
+    var pop = document.getElementById('script-completion-popup');
+    if (pop) { pop.classList.remove('open'); pop.innerHTML = ''; }
+  }
+
+  // The class this script extends — the completion engine's `current_class`.
+  function scriptCurrentClass(src) {
+    var m = /^\s*extends\s+([A-Za-z_][A-Za-z0-9_]*)/m.exec(src || '');
+    return m ? m[1] : '';
+  }
+
+  // Locally declared names: `var x`, `const x`, and function parameters. The
+  // server ranks these above engine members, as Godot does.
+  function scriptLocals(src) {
+    var out = [], seen = {};
+    (src || '').split('\n').forEach(function(line) {
+      var v = /^\s*(?:var|const)\s+([A-Za-z_][A-Za-z0-9_]*)/.exec(line);
+      if (v && !seen[v[1]]) { seen[v[1]] = 1; out.push(v[1]); }
+      var f = /^\s*(?:static\s+)?func\s+[A-Za-z_][A-Za-z0-9_]*\s*\(([^)]*)\)/.exec(line);
+      if (f && f[1].trim()) {
+        f[1].split(',').forEach(function(p) {
+          var n = /^\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(p);
+          if (n && !seen[n[1]]) { seen[n[1]] = 1; out.push(n[1]); }
+        });
+      }
+    });
+    return out;
+  }
+
+  // Splits the text before the caret into the identifier prefix being typed and
+  // the receiver it hangs off, if any. `self.` completes members of the current
+  // class; a bare prefix completes locals + globals.
+  function scriptCompletionContext(ta) {
+    var upto = ta.value.substring(0, ta.selectionStart);
+    var m = /([A-Za-z_][A-Za-z0-9_]*)?$/.exec(upto);
+    var prefix = (m && m[1]) || '';
+    var beforePrefix = upto.substring(0, upto.length - prefix.length);
+    var dotClass = null;
+    if (/\.$/.test(beforePrefix)) {
+      var recv = /([A-Za-z_][A-Za-z0-9_]*)\s*\.$/.exec(beforePrefix);
+      if (recv && recv[1] === 'self') dotClass = scriptCurrentClass(ta.value);
+      else if (recv) dotClass = recv[1];
+      else return null;
+    }
+    return { prefix: prefix, dot_class: dotClass };
+  }
+
+  function scriptCompletionOnInput(ta) {
+    if (scriptCmp.timer) clearTimeout(scriptCmp.timer);
+    var ctx = scriptCompletionContext(ta);
+    // Nothing to complete on: no prefix and not just after a `.`.
+    if (!ctx || (!ctx.prefix && ctx.dot_class === null)) { scriptCompletionClose(); return; }
+    // Debounced so a burst of keystrokes issues one request, not one per key.
+    scriptCmp.timer = setTimeout(function() {
+      var payload = {
+        current_class: scriptCurrentClass(ta.value),
+        prefix: ctx.prefix,
+        locals: scriptLocals(ta.value)
+      };
+      if (ctx.dot_class) payload.dot_class = ctx.dot_class;
+      api('POST', '/api/script/complete', payload).then(function(data) {
+        var items = (data && data.candidates) || [];
+        scriptCmp.prefix = ctx.prefix;
+        scriptCompletionRender(items, ta);
+      });
+    }, 120);
+  }
+
+  function scriptCompletionRender(items, ta) {
+    var pop = document.getElementById('script-completion-popup');
+    if (!pop) return;
+    if (!items.length) { scriptCompletionClose(); return; }
+    scriptCmp.items = items.slice(0, 40); scriptCmp.sel = 0; scriptCmp.open = true;
+    pop.innerHTML = '';
+    scriptCmp.items.forEach(function(it, i) {
+      var row = document.createElement('div');
+      row.className = 'script-completion-item' + (i === 0 ? ' sel' : '');
+      row.setAttribute('role', 'option');
+      row.setAttribute('data-idx', i);
+      var label = document.createElement('span');
+      label.textContent = it.label;
+      row.appendChild(label);
+      if (it.detail) {
+        var det = document.createElement('span');
+        det.className = 'cmp-detail'; det.textContent = it.detail;
+        row.appendChild(det);
+      }
+      var kind = document.createElement('span');
+      kind.className = 'cmp-kind'; kind.textContent = it.kind || '';
+      row.appendChild(kind);
+      // mousedown, not click: the textarea's blur would close the popup first.
+      row.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        scriptCmp.sel = parseInt(this.getAttribute('data-idx'), 10);
+        scriptCompletionAccept(ta);
+      });
+      pop.appendChild(row);
+    });
+    // Park the popup under the caret's line.
+    var line = ta.value.substring(0, ta.selectionStart).split('\n').length;
+    var top = Math.max(0, (line * 19) - ta.scrollTop + 6);
+    pop.style.top = top + 'px';
+    pop.style.left = '56px';
+    pop.classList.add('open');
+  }
+
+  function scriptCompletionMove(delta) {
+    if (!scriptCmp.open || !scriptCmp.items.length) return;
+    scriptCmp.sel = (scriptCmp.sel + delta + scriptCmp.items.length) % scriptCmp.items.length;
+    var pop = document.getElementById('script-completion-popup');
+    if (!pop) return;
+    var rows = pop.querySelectorAll('.script-completion-item');
+    for (var i = 0; i < rows.length; i++) {
+      if (i === scriptCmp.sel) { rows[i].classList.add('sel'); rows[i].scrollIntoView({ block: 'nearest' }); }
+      else { rows[i].classList.remove('sel'); }
+    }
+  }
+
+  // Replaces the typed prefix with the selected candidate and fires `input`, so
+  // the buffer the save route persists really contains the completed name.
+  function scriptCompletionAccept(ta) {
+    var item = scriptCmp.items[scriptCmp.sel];
+    if (!item) { scriptCompletionClose(); return; }
+    var caret = ta.selectionStart;
+    var start = caret - scriptCmp.prefix.length;
+    ta.value = ta.value.substring(0, start) + item.label + ta.value.substring(caret);
+    var pos = start + item.label.length;
+    ta.selectionStart = ta.selectionEnd = pos;
+    scriptCompletionClose();
+    ta.dispatchEvent(new Event('input'));
+    ta.focus();
+  }
+
+  // Returns true when the popup consumed the key.
+  function scriptCompletionHandleKey(e) {
+    if (!scriptCmp.open) return false;
+    var ta = document.getElementById('script-textarea');
+    if (!ta) return false;
+    if (e.key === 'Escape') { e.preventDefault(); scriptCompletionClose(); return true; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); scriptCompletionMove(1); return true; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); scriptCompletionMove(-1); return true; }
+    if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); scriptCompletionAccept(ta); return true; }
+    return false;
+  }
+
+  // Ctrl/Cmd+Click: ask the server where the clicked symbol is defined, then
+  // jump. An unresolved symbol is a no-op, as in Godot.
+  function scriptGotoDefinitionAtCaret(ta) {
+    scriptCompletionClose();
+    if (!currentScriptPath) return;
+    var caret = ta.selectionStart;
+    var val = ta.value;
+    var lineStart = val.lastIndexOf('\n', caret - 1) + 1;
+    var lineEnd = val.indexOf('\n', caret); if (lineEnd < 0) lineEnd = val.length;
+    var lineText = val.substring(lineStart, lineEnd);
+    var col = caret - lineStart;
+    var q = '/api/script/goto?path=' + encodeURIComponent(currentScriptPath)
+          + '&line=' + encodeURIComponent(lineText) + '&col=' + col;
+    api('GET', q).then(function(data) {
+      if (!data || !data.found) return;
+      if (data.file && data.file !== currentScriptPath) {
+        fetchScript(data.file);
+        setTimeout(function() { scriptJumpToLine(data.line); }, 120);
+      } else {
+        scriptJumpToLine(data.line);
+      }
+    });
+  }
+
+  // Puts the caret at the start of 1-based `line` and scrolls it into view.
+  function scriptJumpToLine(line) {
+    var ta = document.getElementById('script-textarea');
+    if (!ta || !line) return;
+    var lines = ta.value.split('\n');
+    var idx = Math.min(Math.max(0, line - 1), lines.length - 1);
+    var pos = lines.slice(0, idx).join('\n').length + (idx > 0 ? 1 : 0);
+    ta.focus();
+    ta.setSelectionRange(pos, pos);
+    ta.scrollTop = Math.max(0, (idx - 4) * 19);
   }
 
   // pat-f64ui: open-scripts list + members overview population.
@@ -12346,6 +12822,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var incStr = document.getElementById('exp-include').value;
       var excStr = document.getElementById('exp-exclude').value;
       var preset = {
+        index: exportSelectedIdx,
         name: document.getElementById('exp-name').value,
         platform: exportPresets[exportSelectedIdx].platform,
         build_profile: document.getElementById('exp-build').value,

@@ -250,8 +250,22 @@ fn main() {
                     // sprite textures via the editor's texture cache. Build the
                     // render list off the tree first so its borrow ends before we
                     // mutably borrow the texture cache below.
-                    let items =
+                    let mut items =
                         gdeditor::viewport_2d_render::build_runtime_render_list(running_tree);
+                    // Themed Control pass (pat-0q2kx.19): lay out containers and
+                    // draw the UI subtree. It needs `&mut` (layout resolution
+                    // writes each control's rect), so it runs after the immutable
+                    // list above has been collected. Control items carry
+                    // `CONTROL_Z_BASE`-offset z, so appending keeps the list
+                    // ascending — UI composites above the plain 2D nodes.
+                    if let Some(ml) = state.run_main_loop.as_mut() {
+                        let root = ml.tree().root_id();
+                        items.extend(gdeditor::viewport_2d_render::build_control_render_items(
+                            ml.tree_mut(),
+                            root,
+                            gdcore::math::Vector2::new(rw as f32, rh as f32),
+                        ));
+                    }
                     let fb = gdeditor::viewport_2d_render::rasterize_render_list(
                         &items,
                         rw,

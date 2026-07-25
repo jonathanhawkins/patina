@@ -509,6 +509,29 @@ impl ExportDialog {
         }
     }
 
+    /// Replaces the preset at `index` wholesale (pat-0q2kx.11).
+    ///
+    /// This is the save path for the served Export dialog, which sends the whole
+    /// edited preset back rather than field-by-field deltas. Returns `false`
+    /// when `index` is out of range or the new name collides with a *different*
+    /// preset — renaming a preset to its own name is allowed, which is what
+    /// makes a plain "save with no rename" work.
+    pub fn replace_preset(&mut self, index: usize, preset: ExportPreset) -> bool {
+        if index >= self.presets.len() || preset.name.is_empty() {
+            return false;
+        }
+        if self
+            .presets
+            .iter()
+            .enumerate()
+            .any(|(i, p)| i != index && p.name == preset.name)
+        {
+            return false;
+        }
+        self.presets[index] = preset;
+        true
+    }
+
     /// Creates presets for all desktop platforms (Windows, Linux, macOS) at once.
     ///
     /// Returns the number of presets successfully added (skips duplicates).
@@ -539,6 +562,187 @@ impl ExportDialog {
     /// Finds a preset by name, returning its index.
     pub fn find_preset(&self, name: &str) -> Option<usize> {
         self.presets.iter().position(|p| p.name == name)
+    }
+
+    /// Serializes all presets to Godot's `export_presets.cfg` format
+    /// (pat-0q2kx.11).
+    ///
+    /// Mirrors `upstream/godot/editor/export/project_export.cpp`, which writes a
+    /// `ConfigFile` with one `[preset.N]` section per preset plus a
+    /// `[preset.N.options]` section for platform-specific keys. Writing the real
+    /// format (rather than the `---`-separated
+    /// [`serialize_presets`](Self::serialize_presets) debug form) is what lets a
+    /// project round-trip through the actual Godot editor.
+    ///
+    /// Patina-specific fields that Godot has no slot for (`build_profile`,
+    /// `app_name`, `icon_path`, `include_filters`) are written into the options
+    /// section under a `patina/` prefix, so Godot ignores them and
+    /// [`from_godot_cfg`](Self::from_godot_cfg) can restore them.
+    pub fn to_godot_cfg(&self) -> String {
+        let mut out = String::new();
+        for (i, preset) in self.presets.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            out.push_str(&format!("[preset.{i}]\n\n"));
+            out.push_str(&format!("name={}\n", cfg_quote(&preset.name)));
+            out.push_str(&format!(
+                "platform={}\n",
+                cfg_quote(preset.platform.label())
+            ));
+            // Godot marks the preset that the one-click deploy button uses.
+            out.push_str(&format!("runnable={}\n", i == 0));
+            out.push_str("custom_features=\"\"\n");
+            // Godot's export_filter/include_filter/exclude_filter trio.
+            out.push_str("export_filter=\"all_resources\"\n");
+            out.push_str(&format!(
+                "include_filter={}\n",
+                cfg_quote(&preset.include_filters.join(","))
+            ));
+            out.push_str(&format!(
+                "exclude_filter={}\n",
+                cfg_quote(&preset.exclude_filters.join(","))
+            ));
+            out.push_str(&format!("export_path={}\n", cfg_quote(&preset.export_path)));
+            out.push_str(&format!("\n[preset.{i}.options]\n\n"));
+            out.push_str(&format!(
+                "patina/build_profile={}\n",
+                cfg_quote(preset.build_profile.as_str())
+            ));
+            out.push_str(&format!(
+                "patina/platform_id={}\n",
+                cfg_quote(preset.platform.id())
+            ));
+            if !preset.app_name.is_empty() {
+                out.push_str(&format!(
+                    "patina/app_name={}\n",
+                    cfg_quote(&preset.app_name)
+                ));
+            }
+            if !preset.icon_path.is_empty() {
+                out.push_str(&format!(
+                    "patina/icon_path={}\n",
+                    cfg_quote(&preset.icon_path)
+                ));
+            }
+            // Custom properties keep their own keys, sorted so the file is
+            // stable across writes (HashMap iteration order is not).
+            let mut keys: Vec<&String> = preset.custom_properties.keys().collect();
+            keys.sort();
+            for k in keys {
+                let v = &preset.custom_properties[k];
+                out.push_str(&format!("{}={}\n", k, cfg_quote(v)));
+            }
+        }
+        out
+    }
+
+    /// Loads presets from Godot's `export_presets.cfg` format, replacing the
+    /// current list. Returns the number of presets loaded.
+    ///
+    /// Unparseable or platform-less sections are skipped rather than failing the
+    /// whole file, matching Godot's tolerance for configs written by a newer
+    /// editor.
+    pub fn from_godot_cfg(&mut self, cfg: &str) -> usize {
+        // section name -> ordered key/value pairs
+        let mut sections: Vec<(String, Vec<(String, String)>)> = Vec::new();
+        let mut current: Option<(String, Vec<(String, String)>)> = None;
+
+        for line in cfg.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') {
+                if let Some(sec) = current.take() {
+                    sections.push(sec);
+                }
+                current = Some((line[1..line.len() - 1].to_string(), Vec::new()));
+                continue;
+            }
+            if let Some((_, entries)) = current.as_mut() {
+                if let Some((k, v)) = line.split_once('=') {
+                    entries.push((k.trim().to_string(), cfg_unquote(v.trim())));
+                }
+            }
+        }
+        if let Some(sec) = current.take() {
+            sections.push(sec);
+        }
+
+        let lookup = |name: &str, key: &str| -> Option<String> {
+            sections
+                .iter()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, e)| e.iter().find(|(k, _)| k == key))
+                .map(|(_, v)| v.clone())
+        };
+
+        let mut loaded = Vec::new();
+        // Walk `[preset.N]` sections in index order until one is missing, so a
+        // gap terminates the list exactly as Godot's loader does.
+        for i in 0.. {
+            let head = format!("preset.{i}");
+            if !sections.iter().any(|(n, _)| n == &head) {
+                break;
+            }
+            let opts = format!("preset.{i}.options");
+            let Some(name) = lookup(&head, "name") else {
+                continue;
+            };
+            // Prefer the round-trip id; fall back to matching Godot's label.
+            let platform = lookup(&opts, "patina/platform_id")
+                .and_then(|id| ExportPlatform::from_id(&id))
+                .or_else(|| {
+                    lookup(&head, "platform").and_then(|label| {
+                        ExportPlatform::all()
+                            .iter()
+                            .copied()
+                            .find(|p| p.label() == label)
+                    })
+                });
+            let Some(platform) = platform else {
+                continue;
+            };
+
+            let mut preset = ExportPreset::new(name, platform);
+            if let Some(p) = lookup(&head, "export_path") {
+                preset.export_path = p;
+            }
+            if let Some(f) = lookup(&head, "include_filter") {
+                preset.include_filters = split_filters(&f);
+            }
+            if let Some(f) = lookup(&head, "exclude_filter") {
+                preset.exclude_filters = split_filters(&f);
+            }
+            if let Some(bp) = lookup(&opts, "patina/build_profile")
+                .and_then(|s| ExportBuildProfile::from_str_name(&s))
+            {
+                preset.build_profile = bp;
+            }
+            if let Some(v) = lookup(&opts, "patina/app_name") {
+                preset.app_name = v;
+            }
+            if let Some(v) = lookup(&opts, "patina/icon_path") {
+                preset.icon_path = v;
+            }
+            // Everything in the options section that is not a `patina/` field is
+            // a platform custom property.
+            preset.custom_properties.clear();
+            if let Some((_, entries)) = sections.iter().find(|(n, _)| n == &opts) {
+                for (k, v) in entries {
+                    if !k.starts_with("patina/") {
+                        preset.custom_properties.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            loaded.push(preset);
+        }
+
+        let count = loaded.len();
+        self.presets = loaded;
+        self.selected_index = if count > 0 { Some(0) } else { None };
+        count
     }
 
     /// Serializes all presets to a portable text format.
@@ -830,6 +1034,54 @@ impl Default for ExportDialog {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// `export_presets.cfg` value encoding (pat-0q2kx.11)
+// ---------------------------------------------------------------------------
+
+/// Quotes a value the way Godot's `ConfigFile` writes strings.
+fn cfg_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Inverse of [`cfg_quote`]. Unquoted values (`true`, numbers) pass through, so
+/// this is safe to apply to every value in the file.
+fn cfg_unquote(value: &str) -> String {
+    let v = value.trim();
+    if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
+        let inner = &v[1..v.len() - 1];
+        let mut out = String::with_capacity(inner.len());
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('"') => out.push('"'),
+                    Some('\\') => out.push('\\'),
+                    Some('n') => out.push('\n'),
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                    None => out.push('\\'),
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    } else {
+        v.to_string()
+    }
+}
+
+/// Splits Godot's comma-separated `include_filter` / `exclude_filter` value.
+/// An empty string yields no filters (not one empty filter).
+fn split_filters(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 #[cfg(test)]

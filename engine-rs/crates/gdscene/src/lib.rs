@@ -19,6 +19,8 @@
 
 pub mod animation;
 pub mod animation_tree;
+pub mod animation_tree_tscn;
+pub mod animation_tscn;
 pub mod astar;
 pub mod audio_server_bridge;
 pub mod autoload;

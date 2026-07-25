@@ -91,6 +91,8 @@ fn texture_layered_array_binds_in_pipeline() {
             "TextureLayered",
             "Texture",
             "Resource",
+            // Resource is a RefCounted, not a direct Object (pat-0q2kx.7).
+            "RefCounted",
             "Object",
         ]
     );

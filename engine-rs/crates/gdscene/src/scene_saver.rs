@@ -375,14 +375,42 @@ fn parse_ext_resource_id(s: &str) -> Option<String> {
 fn is_internal_prop(key: &str) -> bool {
     key.starts_with("__resref__")
         || key.starts_with("__viewport_")
+        // `__extres__<prop>` caches the path an `ExtResource("id")` property
+        // resolves to (pat-0q2kx.6). The property itself still carries the raw
+        // reference, which is what round-trips; emitting the cache would invent
+        // a property Godot has never heard of.
+        || key.starts_with("__extres__")
         || key == "_instance"
         || key == "_instance_path"
         || key == "_script_path"
 }
 
+/// The `type=` an external resource is declared as in a `[ext_resource]` header,
+/// inferred from the file's extension the way Godot's importer assigns one.
+/// Anything unrecognised is a plain `Resource`, which is what Godot writes for a
+/// `.tres` whose class it cannot infer from the path alone.
+fn ext_resource_type_for(path: &str) -> String {
+    let ext = match path.rsplit_once('.') {
+        Some((_, ext)) => ext.to_ascii_lowercase(),
+        None => String::new(),
+    };
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "webp" | "svg" | "bmp" | "tga" | "ktx" => "Texture2D",
+        "wav" | "ogg" | "mp3" => "AudioStream",
+        "tscn" | "scn" => "PackedScene",
+        "gd" => "Script",
+        "gdshader" | "glsl" => "Shader",
+        "ttf" | "otf" | "woff" | "woff2" => "FontFile",
+        "obj" | "gltf" | "glb" => "Mesh",
+        _ => "Resource",
+    }
+    .to_string()
+}
+
 /// Walks the subtree and reconstructs the ext/sub resource tables from node
 /// references. Script paths come from `_script_path`, instanced sub-scene paths
-/// from `_instance_path`, and inline sub-resources from `__resref__<prop>`
+/// from `_instance_path`, any other external reference from its
+/// `__extres__<prop>` companion, and inline sub-resources from `__resref__<prop>`
 /// companions (which carry `class::id`). Ids are preserved from the original
 /// `ExtResource("id")` / `SubResource("id")` references so a save/load round-trip
 /// is stable.
@@ -432,6 +460,32 @@ fn collect_resource_tables(tree: &SceneTree, node_ids: &[NodeId]) -> ResourceTab
                     }
                 }
             }
+        }
+
+        // Any *other* property holding an `ExtResource("id")` reference — a
+        // texture, an audio stream, a font — paired with the `__extres__<prop>`
+        // companion the loader writes for it (packed_scene.rs). Without this the
+        // property keeps its reference on save but its `[ext_resource]` header
+        // line is dropped, leaving a dangling id. `script` and `_instance` are
+        // handled above and re-inserting is a no-op thanks to `or_insert`.
+        for (k, v) in node.properties() {
+            if is_internal_prop(k) {
+                continue;
+            }
+            let Variant::String(s) = v else { continue };
+            let id = match parse_ext_resource_id(s) {
+                Some(id) => id,
+                None => match s.strip_prefix("ExtResource:") {
+                    Some(id) => id.to_string(),
+                    None => continue,
+                },
+            };
+            let path = match node.get_property(&format!("__extres__{k}")) {
+                Variant::String(p) if !p.is_empty() => p,
+                _ => continue,
+            };
+            let res_type = ext_resource_type_for(&path);
+            ext_by_id.entry(id).or_insert((res_type, path));
         }
     }
 
@@ -1064,6 +1118,83 @@ health = 100
     }
 
     // -- Lossless ext/sub resource round-trip (pat-nzgdu.18) ----------------
+
+    /// An external resource referenced by an ordinary property — not `script`,
+    /// not a sub-scene `instance` — must keep its `[ext_resource]` header across a
+    /// save. Before pat-0q2kx.13 only `script` and `_instance` were collected, so
+    /// a `texture`/`stream`/font reference saved as a dangling `ExtResource("id")`
+    /// with no header declaring it, which Godot cannot load.
+    #[test]
+    fn tscn_save_keeps_ext_resource_for_ordinary_properties() {
+        let tscn = r#"[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Texture2D" path="res://icon.png" id="1_tex"]
+[ext_resource type="AudioStream" path="res://beep.wav" id="2_snd"]
+
+[node name="Root" type="Node2D"]
+
+[node name="Icon" type="Sprite2D" parent="."]
+texture = ExtResource("1_tex")
+
+[node name="Beeper" type="AudioStreamPlayer" parent="."]
+stream = ExtResource("2_snd")
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scene_root_id = add_packed_scene_to_tree(&mut tree, root, &scene).unwrap();
+
+        let saved = TscnSaver::save_tree(&tree, scene_root_id);
+
+        // Both headers come back, each with the type inferred from its extension.
+        assert!(
+            saved.contains(r#"[ext_resource type="Texture2D" path="res://icon.png" id="1_tex"]"#),
+            "texture ext_resource header lost on save:\n{saved}"
+        );
+        assert!(
+            saved.contains(r#"[ext_resource type="AudioStream" path="res://beep.wav" id="2_snd"]"#),
+            "audio stream ext_resource header lost on save:\n{saved}"
+        );
+        // …and the properties still reference them by id.
+        assert!(
+            saved.contains(r#"texture = ExtResource("1_tex")"#),
+            "texture reference lost:\n{saved}"
+        );
+        assert!(
+            saved.contains(r#"stream = ExtResource("2_snd")"#),
+            "stream reference lost:\n{saved}"
+        );
+        // The `__extres__` companions are bookkeeping and must never be emitted.
+        assert!(
+            !saved.contains("__extres__"),
+            "internal companion leaked into the scene:\n{saved}"
+        );
+
+        // The saved text must load again with the references intact — a dangling
+        // id would survive a string assert but not a reload.
+        let reloaded = PackedScene::from_tscn(&saved).expect("saved scene reloads");
+        let mut tree2 = SceneTree::new();
+        let root2 = tree2.root_id();
+        let reloaded_root = add_packed_scene_to_tree(&mut tree2, root2, &reloaded).unwrap();
+        let icon = tree2
+            .get_node_or_null(reloaded_root, "Icon")
+            .expect("Icon survives the round-trip");
+        assert_eq!(
+            tree2.get_node(icon).unwrap().get_property("__extres__texture"),
+            Variant::String("res://icon.png".into()),
+            "the reloaded texture must resolve to the same path"
+        );
+    }
+
+    #[test]
+    fn ext_resource_type_is_inferred_from_the_extension() {
+        assert_eq!(ext_resource_type_for("res://icon.png"), "Texture2D");
+        assert_eq!(ext_resource_type_for("res://a/b/beep.WAV"), "AudioStream");
+        assert_eq!(ext_resource_type_for("res://child.tscn"), "PackedScene");
+        assert_eq!(ext_resource_type_for("res://player.gd"), "Script");
+        assert_eq!(ext_resource_type_for("res://theme.tres"), "Resource");
+        assert_eq!(ext_resource_type_for("res://noext"), "Resource");
+    }
 
     /// A complex scene — root with a script `ext_resource`, a child instancing a
     /// sub-scene, a node with an inline `sub_resource`, and a `Transform3D`

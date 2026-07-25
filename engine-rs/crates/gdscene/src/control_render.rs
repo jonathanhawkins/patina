@@ -68,6 +68,180 @@ const CONTROL_CLASSES: &[&str] = &[
     "VSeparator",
 ];
 
+/// One primitive of a control's drawing, in global viewport space, expressed
+/// without any `gdserver2d` type (pat-0q2kx.19).
+///
+/// [`render_control_tree`] emits `gdserver2d` [`DrawCommand`]s, which only hosts
+/// that depend on that crate can consume — the editor's 2D rasterizer does not.
+/// [`control_draw_items`] returns this instead, so a host can render real themed
+/// controls by mapping seven small cases onto whatever primitives it already has,
+/// rather than reimplementing per-control drawing.
+///
+/// `z` is the paint order assigned by the tree walk (pre-order: parents first),
+/// and items are returned already sorted by it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ControlDrawItem {
+    /// A filled or outlined rectangle — styleboxes, panels, progress fills.
+    Rect {
+        /// Rectangle in global viewport space.
+        rect: Rect2,
+        /// Fill (or stroke) color.
+        color: Color,
+        /// `true` fills the rect, `false` strokes its outline.
+        filled: bool,
+        /// Paint order.
+        z: i32,
+    },
+    /// A circle — radio buttons, round indicators.
+    Circle {
+        /// Center in global viewport space.
+        center: Vector2,
+        /// Radius in pixels.
+        radius: f32,
+        /// Fill color.
+        color: Color,
+        /// Paint order.
+        z: i32,
+    },
+    /// A line segment — separators, focus underlines, check marks.
+    Line {
+        /// Start point in global viewport space.
+        from: Vector2,
+        /// End point in global viewport space.
+        to: Vector2,
+        /// Stroke color.
+        color: Color,
+        /// Stroke width in pixels.
+        width: f32,
+        /// Paint order.
+        z: i32,
+    },
+    /// Text — button labels, `Label` content, tab titles.
+    Text {
+        /// The string to draw.
+        text: String,
+        /// Top-left position in global viewport space.
+        position: Vector2,
+        /// Text color.
+        color: Color,
+        /// Font size.
+        font_size: u32,
+        /// Paint order.
+        z: i32,
+    },
+    /// A texture stretched into a rect — theme icons, `TextureRect`. Nine-patch
+    /// styleboxes arrive here too, flattened to their destination rect: a host
+    /// without 9-slice support still draws the texture rather than nothing.
+    Texture {
+        /// Source texture path.
+        texture_path: String,
+        /// Destination rectangle in global viewport space.
+        rect: Rect2,
+        /// Tint.
+        modulate: Color,
+        /// Paint order.
+        z: i32,
+    },
+}
+
+/// Lays out and draws the Control subtree at `root`, returning its drawing as
+/// [`ControlDrawItem`]s in paint order (pat-0q2kx.19).
+///
+/// Same layout and theming as [`render_control_tree`] — it *is* that function,
+/// with the resulting canvas items flattened — so hosts get real themed controls
+/// without duplicating a single per-control drawing rule.
+pub fn control_draw_items(
+    tree: &mut SceneTree,
+    root: NodeId,
+    theme: &Theme,
+    viewport_size: Vector2,
+) -> Vec<ControlDrawItem> {
+    let mut viewport = Viewport::new(
+        viewport_size.x.max(1.0) as u32,
+        viewport_size.y.max(1.0) as u32,
+        Color::new(0.0, 0.0, 0.0, 0.0),
+    );
+    render_control_tree(tree, root, theme, &mut viewport, viewport_size);
+
+    let mut out = Vec::new();
+    // `get_sorted_items` orders by z, which the walk assigned in pre-order, so
+    // the flattened stream is already in paint order.
+    for item in viewport.get_sorted_items() {
+        let z = item.z_index;
+        for command in &item.commands {
+            match command {
+                DrawCommand::DrawRect {
+                    rect,
+                    color,
+                    filled,
+                } => out.push(ControlDrawItem::Rect {
+                    rect: *rect,
+                    color: *color,
+                    filled: *filled,
+                    z,
+                }),
+                DrawCommand::DrawCircle {
+                    center,
+                    radius,
+                    color,
+                } => out.push(ControlDrawItem::Circle {
+                    center: *center,
+                    radius: *radius,
+                    color: *color,
+                    z,
+                }),
+                DrawCommand::DrawLine {
+                    from,
+                    to,
+                    color,
+                    width,
+                } => out.push(ControlDrawItem::Line {
+                    from: *from,
+                    to: *to,
+                    color: *color,
+                    width: *width,
+                    z,
+                }),
+                DrawCommand::DrawString {
+                    text,
+                    position,
+                    color,
+                    font_size,
+                } => out.push(ControlDrawItem::Text {
+                    text: text.clone(),
+                    position: *position,
+                    color: *color,
+                    font_size: *font_size,
+                    z,
+                }),
+                DrawCommand::DrawTextureRect {
+                    texture_path,
+                    rect,
+                    modulate,
+                }
+                | DrawCommand::DrawTextureRegion {
+                    texture_path,
+                    rect,
+                    modulate,
+                    ..
+                }
+                | DrawCommand::DrawNinePatch {
+                    texture_path,
+                    rect,
+                    modulate,
+                    ..
+                } => out.push(ControlDrawItem::Texture {
+                    texture_path: texture_path.clone(),
+                    rect: *rect,
+                    modulate: *modulate,
+                    z,
+                }),
+            }
+        }
+    }
+    out
+}
+
 /// Renders the Control subtree rooted at `root` into `viewport`.
 ///
 /// `viewport_size` is the rect the root control anchors against (typically the

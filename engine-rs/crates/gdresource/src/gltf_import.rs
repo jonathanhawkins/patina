@@ -226,6 +226,38 @@ fn build_document(
                 sub.set_property("uvs", Variant::Array(uv_variants));
             }
 
+            // JOINTS_0 / WEIGHTS_0 (optional) — per-vertex skinning influences
+            // (pat-0q2kx.3). Godot's GLTFDocument imports these into
+            // ARRAY_BONES / ARRAY_WEIGHTS; without them a rigged mesh has no
+            // influences and a Skeleton3D can never deform it. Stored flattened
+            // (4 components per vertex) alongside the other vertex arrays.
+            if let Some(j_acc) = attrs.get("JOINTS_0").and_then(|v| v.as_u64()) {
+                let joints = read_vec4_index_accessor(json, &buffers, j_acc as usize)?;
+                sub.set_property(
+                    "bone_indices",
+                    Variant::Array(
+                        joints
+                            .iter()
+                            .flatten()
+                            .map(|&c| Variant::Int(c as i64))
+                            .collect(),
+                    ),
+                );
+            }
+            if let Some(w_acc) = attrs.get("WEIGHTS_0").and_then(|v| v.as_u64()) {
+                let weights = read_vec4_float_accessor(json, &buffers, w_acc as usize)?;
+                sub.set_property(
+                    "bone_weights",
+                    Variant::Array(
+                        weights
+                            .iter()
+                            .flatten()
+                            .map(|&c| Variant::Float(c as f64))
+                            .collect(),
+                    ),
+                );
+            }
+
             // indices (optional — if missing, sequential triangle list)
             if let Some(i_acc) = prim.get("indices").and_then(|v| v.as_u64()) {
                 let indices = read_index_accessor(json, &buffers, i_acc as usize)?;
@@ -916,6 +948,96 @@ fn read_vec2_accessor(
         let u = f32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
         let v = f32::from_le_bytes(buf[off + 4..off + 8].try_into().unwrap());
         out.push([u, v]);
+    }
+    Ok(out)
+}
+
+/// Reads a `VEC4` FLOAT accessor — glTF `WEIGHTS_0` (pat-0q2kx.3).
+fn read_vec4_float_accessor(
+    json: &Value,
+    buffers: &[Vec<u8>],
+    accessor_idx: usize,
+) -> EngineResult<Vec<[f32; 4]>> {
+    let meta = accessor_meta(json, accessor_idx)?;
+    if meta.type_str != "VEC4" {
+        return Err(EngineError::Parse(format!(
+            "gltf: expected VEC4 accessor, got {}",
+            meta.type_str
+        )));
+    }
+    if meta.component_type != 5126 {
+        // glTF also allows normalized u8/u16 weights; those are not produced by
+        // the exporters this importer targets yet.
+        return Err(EngineError::Unsupported(
+            "gltf: only FLOAT VEC4 supported for WEIGHTS_0".into(),
+        ));
+    }
+    let buf = buffers
+        .get(meta.buffer_idx)
+        .ok_or_else(|| EngineError::Parse(format!("gltf: buffer {} missing", meta.buffer_idx)))?;
+    let elem_size = 16usize;
+    let stride = meta.stride.unwrap_or(elem_size);
+    let mut out = Vec::with_capacity(meta.count);
+    for i in 0..meta.count {
+        let off = meta.byte_offset + i * stride;
+        if off + elem_size > buf.len() {
+            return Err(EngineError::Parse(format!(
+                "gltf: VEC4 float accessor overrun at element {i}"
+            )));
+        }
+        let mut v = [0f32; 4];
+        for (c, slot) in v.iter_mut().enumerate() {
+            let o = off + c * 4;
+            *slot = f32::from_le_bytes(buf[o..o + 4].try_into().unwrap());
+        }
+        out.push(v);
+    }
+    Ok(out)
+}
+
+/// Reads a `VEC4` integer accessor — glTF `JOINTS_0`, whose components are
+/// UNSIGNED_BYTE or UNSIGNED_SHORT (pat-0q2kx.3).
+fn read_vec4_index_accessor(
+    json: &Value,
+    buffers: &[Vec<u8>],
+    accessor_idx: usize,
+) -> EngineResult<Vec<[u32; 4]>> {
+    let meta = accessor_meta(json, accessor_idx)?;
+    if meta.type_str != "VEC4" {
+        return Err(EngineError::Parse(format!(
+            "gltf: expected VEC4 accessor, got {}",
+            meta.type_str
+        )));
+    }
+    let cs = component_size(meta.component_type)?;
+    let buf = buffers
+        .get(meta.buffer_idx)
+        .ok_or_else(|| EngineError::Parse(format!("gltf: buffer {} missing", meta.buffer_idx)))?;
+    let elem_size = cs * 4;
+    let stride = meta.stride.unwrap_or(elem_size);
+    let mut out = Vec::with_capacity(meta.count);
+    for i in 0..meta.count {
+        let off = meta.byte_offset + i * stride;
+        if off + elem_size > buf.len() {
+            return Err(EngineError::Parse(format!(
+                "gltf: VEC4 index accessor overrun at element {i}"
+            )));
+        }
+        let mut v = [0u32; 4];
+        for (c, slot) in v.iter_mut().enumerate() {
+            let o = off + c * cs;
+            *slot = match meta.component_type {
+                5121 => buf[o] as u32,
+                5123 => u16::from_le_bytes(buf[o..o + 2].try_into().unwrap()) as u32,
+                5125 => u32::from_le_bytes(buf[o..o + 4].try_into().unwrap()),
+                other => {
+                    return Err(EngineError::Unsupported(format!(
+                        "gltf: JOINTS_0 componentType {other}"
+                    )))
+                }
+            };
+        }
+        out.push(v);
     }
     Ok(out)
 }
@@ -1671,6 +1793,120 @@ mod tests {
         };
         assert_eq!(verts.len(), 3);
         assert_eq!(verts[1], Variant::Vector3(Vector3::new(2.0, 0.0, 0.0)));
+    }
+
+    /// glTF `JOINTS_0` / `WEIGHTS_0` reach the imported surface as flattened
+    /// per-vertex quads (pat-0q2kx.3). Without them a rigged mesh arrives with
+    /// no influences and no `Skeleton3D` can ever deform it.
+    #[test]
+    fn import_gltf_carries_joints_and_weights() {
+        // 2 vertices. Vertex 0 rides joint 0, vertex 1 splits 0.75/0.25 between
+        // joints 1 and 2 — enough to prove component order survives.
+        let mut bin = Vec::new();
+        for p in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0]] {
+            for v in p {
+                bin.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        assert_eq!(bin.len(), 24);
+        // JOINTS_0: UNSIGNED_SHORT VEC4 (the other common exporter width).
+        for j in [[0u16, 0, 0, 0], [1, 2, 0, 0]] {
+            for c in j {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        assert_eq!(bin.len(), 40);
+        // WEIGHTS_0: FLOAT VEC4.
+        for w in [[1.0f32, 0.0, 0.0, 0.0], [0.75, 0.25, 0.0, 0.0]] {
+            for c in w {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        assert_eq!(bin.len(), 72);
+
+        let json = serde_json::json!({
+            "asset": { "version": "2.0" },
+            "buffers": [{ "byteLength": bin.len() }],
+            "bufferViews": [
+                { "buffer": 0, "byteOffset": 0,  "byteLength": 24 },
+                { "buffer": 0, "byteOffset": 24, "byteLength": 16 },
+                { "buffer": 0, "byteOffset": 40, "byteLength": 32 }
+            ],
+            "accessors": [
+                { "bufferView": 0, "componentType": 5126, "count": 2, "type": "VEC3" },
+                { "bufferView": 1, "componentType": 5123, "count": 2, "type": "VEC4" },
+                { "bufferView": 2, "componentType": 5126, "count": 2, "type": "VEC4" }
+            ],
+            "meshes": [{
+                "primitives": [{
+                    "attributes": { "POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2 }
+                }]
+            }]
+        });
+        let mut json_bytes = serde_json::to_vec(&json).unwrap();
+        while json_bytes.len() % 4 != 0 {
+            json_bytes.push(b' ');
+        }
+        let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
+        let mut glb = Vec::with_capacity(total);
+        glb.extend_from_slice(&0x4654_6C67u32.to_le_bytes());
+        glb.extend_from_slice(&2u32.to_le_bytes());
+        glb.extend_from_slice(&(total as u32).to_le_bytes());
+        glb.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x4E4F_534Au32.to_le_bytes());
+        glb.extend_from_slice(&json_bytes);
+        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&0x004E_4942u32.to_le_bytes());
+        glb.extend_from_slice(&bin);
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("rigged.glb");
+        std::fs::write(&path, glb).unwrap();
+
+        let res = import_gltf(&path).expect("rigged glb import");
+        let sub = res.subresources.get("mesh_0_prim_0").expect("prim");
+
+        match sub.get_property("bone_indices") {
+            Some(Variant::Array(a)) => {
+                let got: Vec<i64> = a
+                    .iter()
+                    .map(|v| match v {
+                        Variant::Int(i) => *i,
+                        other => panic!("bone index not an int: {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(got, vec![0, 0, 0, 0, 1, 2, 0, 0]);
+            }
+            other => panic!("bone_indices missing: {other:?}"),
+        }
+        match sub.get_property("bone_weights") {
+            Some(Variant::Array(a)) => {
+                let got: Vec<f64> = a
+                    .iter()
+                    .map(|v| match v {
+                        Variant::Float(f) => *f,
+                        other => panic!("bone weight not a float: {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(got.len(), 8);
+                assert!((got[0] - 1.0).abs() < 1e-6);
+                assert!((got[4] - 0.75).abs() < 1e-6);
+                assert!((got[5] - 0.25).abs() < 1e-6);
+            }
+            other => panic!("bone_weights missing: {other:?}"),
+        }
+    }
+
+    /// An unrigged mesh must not gain empty skinning arrays.
+    #[test]
+    fn import_gltf_without_skinning_omits_bone_arrays() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("t.glb");
+        std::fs::write(&path, make_triangle_glb()).unwrap();
+        let res = import_gltf(&path).unwrap();
+        let sub = res.subresources.get("mesh_0_prim_0").expect("prim");
+        assert!(sub.get_property("bone_indices").is_none());
+        assert!(sub.get_property("bone_weights").is_none());
     }
 
     #[test]

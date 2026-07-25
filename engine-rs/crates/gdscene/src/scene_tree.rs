@@ -17,7 +17,8 @@ use gdplatform::network::MultiplayerAPI;
 use gdscript_interop::bindings::ScriptInstance;
 use gdvariant::Variant;
 
-use crate::animation::AnimationPlayer;
+use crate::animation::{AnimationPlayer, AnimationPlayerSignal};
+use crate::animation_tree::AnimationTree;
 use crate::lifecycle::LifecycleManager;
 use crate::node::{Node, NodeId};
 use crate::trace::{EventTrace, TraceEvent, TraceEventType};
@@ -130,6 +131,18 @@ pub struct SceneTree {
     signal_stores: HashMap<NodeId, SignalStore>,
     /// Per-node animation players.
     animation_players: HashMap<NodeId, AnimationPlayer>,
+    /// Per-node animation trees (Godot `AnimationTree` nodes), ticked each frame
+    /// by [`process_animation_trees`](Self::process_animation_trees).
+    animation_trees: HashMap<NodeId, AnimationTree>,
+    /// Control currently under the mouse, for `mouse_entered`/`mouse_exited`
+    /// transitions in the GUI input stage (pat-0q2kx.18).
+    hovered_control: Option<NodeId>,
+    /// Control that received the most recent mouse press. A release only counts
+    /// as a click when it lands on this same control, as in Godot.
+    gui_press_target: Option<NodeId>,
+    /// The Control holding keyboard focus (Godot's `Viewport::gui.key_focus`).
+    /// Clicking a focusable Control grabs it (pat-0q2kx.21).
+    focus_owner: Option<NodeId>,
     /// Active tweens: maps TweenId -> (owning NodeId, Tween).
     tweens: HashMap<TweenId, (NodeId, Tween)>,
     /// Per-node script instances. Attached scripts receive lifecycle
@@ -207,6 +220,10 @@ impl SceneTree {
             groups: HashMap::new(),
             signal_stores: HashMap::new(),
             animation_players: HashMap::new(),
+            animation_trees: HashMap::new(),
+            hovered_control: None,
+            gui_press_target: None,
+            focus_owner: None,
             tweens: HashMap::new(),
             scripts: HashMap::new(),
             input_snapshot: None,
@@ -1590,7 +1607,7 @@ impl SceneTree {
         for node_id in node_ids {
             // Advance the player and gather everything we need while only the
             // player is borrowed, so we can then mutate nodes and scripts.
-            let (values, skip, method_calls, root_motion, root_node) =
+            let (values, skip, method_calls, root_motion, root_node, signals, current) =
                 match self.animation_players.get_mut(&node_id) {
                     Some(player) => {
                         let prev = player.position();
@@ -1605,10 +1622,32 @@ impl SceneTree {
                         let method_calls = player.method_calls_in_range(prev, curr);
                         let root_motion = player.consume_root_motion(prev, curr);
                         let root_node = player.root_node.clone();
-                        (values, skip, method_calls, root_motion, root_node)
+                        // Playback signals queued by `advance` (and by the
+                        // autoplay `play` at scene load) — re-emitted below as
+                        // real node signals so `.tscn` `[connection]`s and
+                        // script `connect` calls fire (pat-0q2kx.1).
+                        let signals = player.drain_signals();
+                        // Godot exposes the playing clip as the node's
+                        // `current_animation` property; keep it in sync so a
+                        // script reading `$AnimationPlayer.current_animation`
+                        // sees the truth rather than the .tscn's stale value.
+                        let current = player.current_animation().unwrap_or("").to_string();
+                        (
+                            values,
+                            skip,
+                            method_calls,
+                            root_motion,
+                            root_node,
+                            signals,
+                            current,
+                        )
                     }
                     None => continue,
                 };
+
+            if let Some(node) = self.nodes.get_mut(&node_id) {
+                node.set_property("current_animation", Variant::String(current));
+            }
 
             // Base node that track `node_path`s resolve against: the player's
             // `root_node` from the owner node (default "." = the owner itself,
@@ -1664,6 +1703,109 @@ impl SceneTree {
                 };
                 self.call_script_with_access(target, &call.method, &call.args);
             }
+
+            // Re-emit playback signals on the player node itself, mirroring
+            // Godot's `AnimationMixer` signal set, so a GDScript handler
+            // connected in the scene (or via `connect`) actually runs. Emitted
+            // last so a handler observes the frame's sampled values.
+            for signal in signals {
+                match signal {
+                    AnimationPlayerSignal::AnimationStarted(name) => {
+                        self.emit_signal(node_id, "animation_started", &[Variant::String(name)]);
+                    }
+                    AnimationPlayerSignal::AnimationFinished(name) => {
+                        self.emit_signal(node_id, "animation_finished", &[Variant::String(name)]);
+                    }
+                    AnimationPlayerSignal::AnimationChanged { old, new } => {
+                        self.emit_signal(
+                            node_id,
+                            "animation_changed",
+                            &[Variant::String(old), Variant::String(new)],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // -- animation tree management ------------------------------------------
+
+    /// Attaches an [`AnimationTree`] to a node (Godot's `AnimationTree` node),
+    /// so [`process_animation_trees`](Self::process_animation_trees) drives it
+    /// every frame. Mirrors [`attach_animation_player`](Self::attach_animation_player).
+    pub fn attach_animation_tree(
+        &mut self,
+        node_id: NodeId,
+        anim_tree: AnimationTree,
+    ) -> EngineResult<()> {
+        if !self.nodes.contains_key(&node_id) {
+            return Err(EngineError::NotFound(format!("node {node_id} not found")));
+        }
+        self.animation_trees.insert(node_id, anim_tree);
+        Ok(())
+    }
+
+    /// Returns a reference to a node's animation tree, if attached.
+    pub fn get_animation_tree(&self, node_id: NodeId) -> Option<&AnimationTree> {
+        self.animation_trees.get(&node_id)
+    }
+
+    /// Returns a mutable reference to a node's animation tree, if attached.
+    /// Scripts reach this to set `parameters/...` entries at runtime.
+    pub fn get_animation_tree_mut(&mut self, node_id: NodeId) -> Option<&mut AnimationTree> {
+        self.animation_trees.get_mut(&node_id)
+    }
+
+    /// Number of animation trees currently attached.
+    pub fn animation_tree_count(&self) -> usize {
+        self.animation_trees.len()
+    }
+
+    /// Advances every attached [`AnimationTree`] by `delta` seconds and writes
+    /// the blended pose onto the nodes its tracks target.
+    ///
+    /// Each tree's tracks resolve against its
+    /// [`root_node`](AnimationTree::root_node) — a path relative to the node the
+    /// tree is attached to, defaulting to Godot's `".."` (the tree node's
+    /// parent) — and then each track's own node path relative to that. Inactive
+    /// trees (`active == false`) are skipped, as in Godot.
+    pub fn process_animation_trees(&mut self, delta: f64) {
+        // Snapshot the ids so nodes can be mutated while iterating.
+        let node_ids: Vec<NodeId> = self.animation_trees.keys().copied().collect();
+        for node_id in node_ids {
+            let (values, root_node) = match self.animation_trees.get_mut(&node_id) {
+                Some(anim_tree) if anim_tree.active => {
+                    anim_tree.advance(delta);
+                    (
+                        anim_tree.get_current_values_targeted(),
+                        anim_tree.root_node.clone(),
+                    )
+                }
+                _ => continue,
+            };
+
+            let base_node = if root_node.is_empty() || root_node == "." {
+                node_id
+            } else {
+                // A tree whose root_node does not resolve (e.g. the scene root
+                // itself, whose ".." is outside the scene) falls back to the
+                // owner node rather than dropping the frame's pose.
+                self.get_node_or_null(node_id, &root_node).unwrap_or(node_id)
+            };
+
+            for (track_node_path, path, value) in values {
+                let target = if track_node_path.is_empty() || track_node_path == "." {
+                    base_node
+                } else {
+                    match self.get_node_or_null(base_node, &track_node_path) {
+                        Some(t) => t,
+                        None => continue,
+                    }
+                };
+                if let Some(node) = self.nodes.get_mut(&target) {
+                    node.set_property(&path, value);
+                }
+            }
         }
     }
 
@@ -1697,26 +1839,97 @@ impl SceneTree {
     }
 
     /// Advances all tweens by `delta` seconds, applies interpolated values
-    /// to the corresponding node properties, and removes completed
-    /// non-looping tweens.
+    /// to the corresponding node properties, dispatches `tween_method` /
+    /// `tween_callback` to the owning node's script, emits `finished`, and
+    /// removes completed non-looping tweens.
+    ///
+    /// Before pat-0q2kx.4 this only did the property writes: the engine
+    /// computed [`method_values`](Tween::method_values) /
+    /// [`poll_callbacks`](Tween::poll_callbacks) /
+    /// [`take_just_finished`](Tween::take_just_finished) and *nothing consumed
+    /// them*, so `tween_callback`, `tween_method` and `finished` silently never
+    /// fired — including from Rust.
     pub fn process_tweens(&mut self, delta: f64) {
         let mut completed = Vec::new();
+        // Collected while the `self.tweens` borrow is live and dispatched after
+        // it ends: `call_script_with_access` / `emit_signal` take `&mut self`,
+        // and a script re-entered here may itself create or kill tweens.
+        let mut method_calls: Vec<(NodeId, String, Variant)> = Vec::new();
+        let mut callbacks: Vec<(NodeId, String)> = Vec::new();
+        let mut finished: Vec<(TweenId, NodeId)> = Vec::new();
+
         let tween_ids: Vec<TweenId> = self.tweens.keys().copied().collect();
         for tween_id in tween_ids {
             if let Some((node_id, tween)) = self.tweens.get_mut(&tween_id) {
-                let node_id = *node_id;
+                let owner = *node_id;
                 let done = tween.advance(delta);
-                let values = tween.get_current_values();
-                for (path, value) in values {
-                    if let Some(node) = self.nodes.get_mut(&node_id) {
-                        node.set_property(&path, value);
+
+                // Godot's `tween_property(object, ...)` names the target
+                // explicitly, so a step may write to a node other than the one
+                // that created the tween; `None` keeps the legacy "owning node"
+                // behaviour.
+                for (target, path, value) in tween.get_current_values_targeted() {
+                    let target_id = match target {
+                        Some(raw) => NodeId::from_object_id(gdcore::id::ObjectId::from_raw(raw)),
+                        None => owner,
+                    };
+                    if let Some(node) = self.nodes.get_mut(&target_id) {
+                        // `"position:x"` addresses the X of a Vector2, not a
+                        // property literally named `position:x` — the property
+                        // bag is flat, so decompose before writing.
+                        match crate::tween::split_property_path(&path) {
+                            (prop, Some(sub)) => {
+                                let base = node.get_property(prop);
+                                if let Some(updated) =
+                                    crate::tween::write_subname(&base, sub, &value)
+                                {
+                                    node.set_property(prop, updated);
+                                }
+                            }
+                            (prop, None) => {
+                                node.set_property(prop, value);
+                            }
+                        }
                     }
+                }
+
+                for (method, value) in tween.method_values() {
+                    method_calls.push((owner, method, value));
+                }
+                for method in tween.poll_callbacks() {
+                    callbacks.push((owner, method));
+                }
+                if tween.take_just_finished() {
+                    finished.push((tween_id, owner));
                 }
                 if done {
                     completed.push(tween_id);
                 }
             }
         }
+
+        // The `self.tweens` borrow has ended — safe to re-enter scripts.
+        for (node_id, method, value) in method_calls {
+            self.call_script_with_access(node_id, &method, &[value]);
+        }
+        for (node_id, method) in callbacks {
+            self.call_script_with_access(node_id, &method, &[]);
+        }
+        for (tween_id, owner) in finished {
+            // Godot emits `finished` on the *Tween object*, not on the node, so
+            // `tween.finished.connect(cb)` resolves against the tween's own id.
+            // Emitting it on the owner instead would spuriously fire an
+            // AudioStreamPlayer's real `finished` signal on the same node.
+            let tween_as_source =
+                NodeId::from_object_id(gdcore::id::ObjectId::from_raw(tween_id.raw()));
+            self.emit_signal(tween_as_source, "finished", &[]);
+            // `emit_signal` only resumes coroutines parked on the *emitting*
+            // node, and a tween has no script — so resume the owner separately
+            // for `await tween.finished`. This wakes parked coroutines only; it
+            // does not fire the owner's own `finished` connections.
+            self.notify_script_await(owner, "finished", &[]);
+        }
+
         for id in completed {
             self.tweens.remove(&id);
         }
@@ -1725,7 +1938,34 @@ impl SceneTree {
     // -- script store -------------------------------------------------------
 
     /// Attaches a script instance to a node.
-    pub fn attach_script(&mut self, node_id: NodeId, script: Box<dyn ScriptInstance>) {
+    pub fn attach_script(&mut self, node_id: NodeId, mut script: Box<dyn ScriptInstance>) {
+        // Godot applies a scene's stored node properties through `Object::set` as
+        // it instantiates (packed_scene.cpp `SceneState::instantiate`), which
+        // routes each exported value into the script instance and runs that
+        // property's setter (gdscript.cpp `GDScriptInstance::set`). The `.tscn`
+        // values are already on this node's property bag by the time a script is
+        // attached, so replay them into the fresh instance — otherwise
+        // `@export var speed := 200.0` with a scene override of `speed = 300.0`
+        // would run with 200, and any setter the property declares would never
+        // fire (pat-0q2kx.17).
+        //
+        // Doing it here rather than at each attach site is deliberate: the runner's
+        // boot path, the runner's main path and the editor's Play path all funnel
+        // through this method, so none of them can forget.
+        if let Some(node) = self.nodes.get(&node_id) {
+            let overrides: Vec<(String, Variant)> = script
+                .list_properties()
+                .into_iter()
+                .filter(|info| node.has_property(&info.name))
+                .map(|info| {
+                    let value = node.get_property(&info.name);
+                    (info.name, value)
+                })
+                .collect();
+            for (name, value) in overrides {
+                script.set_property(&name, value);
+            }
+        }
         self.scripts.insert(node_id, script);
     }
 
@@ -1803,12 +2043,37 @@ impl SceneTree {
     /// script. This allows the running script to call back into the tree
     /// (e.g. `get_node`, `emit_signal`) without violating borrow rules.
     fn call_script_with_access(&mut self, node_id: NodeId, method: &str, args: &[Variant]) {
+        let _ = self.call_script_method(node_id, method, args);
+    }
+
+    /// Calls `method` on the script attached to `node_id` and returns its value.
+    ///
+    /// This is Godot's `Object::call` reaching a scripted object
+    /// (upstream/godot/core/object/object.cpp `Object::callv`): the body runs
+    /// synchronously on the **target's** script — not the caller's — the target
+    /// can reach back into the tree through [`crate::scripting::SceneTreeAccessor`]
+    /// while it runs, and its script variables are synced onto the node
+    /// afterwards so the caller can read them as node properties.
+    ///
+    /// Returns `None` when the node has no script, the script does not define
+    /// `method`, or the call raised. Skipping an undefined method is what lets
+    /// lifecycle dispatch call `_ready`/`_process` on every node blindly.
+    pub fn call_script_method(
+        &mut self,
+        node_id: NodeId,
+        method: &str,
+        args: &[Variant],
+    ) -> Option<Variant> {
+        let mut result = None;
+        // The script is taken out of the arena for the duration of the call so a
+        // re-entrant call — the target calling back into this node, or into
+        // another script that reaches this one — cannot alias it.
         if let Some(mut script) = self.scripts.remove(&node_id) {
             // Skip methods the script doesn't define, matching Godot which only
             // dispatches lifecycle callbacks to scripts that actually override them.
             if !script.has_method(method) {
                 self.scripts.insert(node_id, script);
-                return;
+                return None;
             }
             self.trace_record(node_id, TraceEventType::ScriptCall, method);
 
@@ -1830,7 +2095,12 @@ impl SceneTree {
                 unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) }
             };
             script.set_scene_access(Box::new(accessor), node_id.raw());
-            let _ = script.call_method(method, args);
+            match script.call_method(method, args) {
+                Ok(value) => result = Some(value),
+                Err(err) => {
+                    tracing::debug!("script call {method} on node {node_id} failed: {err}")
+                }
+            }
             script.clear_scene_access();
 
             self.trace_record(node_id, TraceEventType::ScriptReturn, method);
@@ -1851,6 +2121,34 @@ impl SceneTree {
 
             self.scripts.insert(node_id, script);
         }
+        result
+    }
+
+    /// Whether `node_id` responds to `method`: its script's methods first, then
+    /// its class's registered methods. Mirrors Godot's `Object.has_method`, which
+    /// reports script and native methods alike.
+    pub fn node_has_method(&self, node_id: NodeId, method: &str) -> bool {
+        if let Some(script) = self.scripts.get(&node_id) {
+            if script.has_method(method) {
+                return true;
+            }
+        }
+        match self.nodes.get(&node_id) {
+            Some(node) => gdobject::class_db::class_has_method(node.class_name(), method),
+            None => false,
+        }
+    }
+
+    /// Declared parameter count of `method` on `node_id`'s script, or `None` when
+    /// the node has no script or the script does not define `method` (Godot
+    /// `Object.get_method_argument_count`).
+    pub fn node_method_argument_count(&self, node_id: NodeId, method: &str) -> Option<i64> {
+        let script = self.scripts.get(&node_id)?;
+        script
+            .list_methods()
+            .into_iter()
+            .find(|info| info.name == method)
+            .map(|info| info.argument_names.len() as i64)
     }
 
     /// Delivers an emitted signal to a coroutine on `node_id` parked at
@@ -1875,7 +2173,10 @@ impl SceneTree {
                 unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) }
             };
             script.set_scene_access(Box::new(accessor), node_id.raw());
-            script.notify_await_signal(signal_name, args);
+            // `node_id` is also the emitter here: `emit_signal` passes its own
+            // `source` as the node to notify. Carrying it lets an object-bound
+            // `await` reject another node's same-named signal (pat-0q2kx.9).
+            script.notify_await_signal_from(node_id.raw(), signal_name, args);
             script.clear_scene_access();
 
             // Sync any variables a resumed coroutine wrote back to node
@@ -2012,12 +2313,218 @@ impl SceneTree {
             &["_input", "_shortcut_input", "_unhandled_input"]
         };
 
-        for &stage in stages {
+        // Godot's `Viewport::push_input` runs a GUI stage between `_input` and
+        // the shortcut/unhandled stages (upstream/godot/scene/main/viewport.cpp
+        // `_gui_input_event`). Patina had the hit-test math but no runtime call
+        // path, so `_gui_input`, `gui_input`, `mouse_entered`/`mouse_exited` and
+        // button presses never fired from a real event (pat-0q2kx.18).
+        for node_id in self.all_nodes_in_tree_order() {
+            if self.input_handled {
+                return;
+            }
+            self.call_script_with_access(node_id, "_input", std::slice::from_ref(&payload));
+        }
+        if self.input_handled {
+            return;
+        }
+
+        self.gui_input_stage(event, &payload);
+        if self.input_handled {
+            return;
+        }
+
+        for &stage in &stages[1..] {
             for node_id in self.all_nodes_in_tree_order() {
                 if self.input_handled {
                     return;
                 }
                 self.call_script_with_access(node_id, stage, std::slice::from_ref(&payload));
+            }
+        }
+    }
+
+    /// The GUI stage of [`push_input`](Self::push_input): hit-tests Controls and
+    /// delivers the event to the one under the cursor (pat-0q2kx.18).
+    ///
+    /// Mirrors Godot's `Viewport::_gui_input_event`:
+    /// - the topmost Control at the position receives `_gui_input` and emits
+    ///   `gui_input`;
+    /// - `MOUSE_FILTER_PASS` bubbles the event to ancestors, `STOP` consumes it,
+    ///   `IGNORE` is already excluded by the hit test;
+    /// - hover transitions emit `mouse_exited` on the old control and
+    ///   `mouse_entered` on the new one;
+    /// - a press followed by a release **inside the same control** is a click,
+    ///   which emits `button_down` / `pressed` / `button_up` on a BaseButton;
+    /// - a disabled button consumes the event without emitting anything.
+    fn gui_input_stage(&mut self, event: &gdplatform::input::InputEvent, payload: &Variant) {
+        use gdplatform::input::InputEvent as Ev;
+        let position = match event {
+            Ev::MouseButton { position, .. } | Ev::MouseMotion { position, .. } => *position,
+            // Only mouse events participate in the GUI stage; keyboard input
+            // reaches Controls through focus, which Patina does not model yet.
+            _ => return,
+        };
+
+        let hit = crate::control::control_at_point(self, position);
+
+        // Hover transitions fire regardless of which control (if any) consumes
+        // the event, matching Godot's separate mouse-enter bookkeeping.
+        if self.hovered_control != hit {
+            if let Some(prev) = self.hovered_control {
+                if self.nodes.contains_key(&prev) {
+                    self.emit_signal(prev, "mouse_exited", &[]);
+                    self.call_script_with_access(prev, "_mouse_exited", &[]);
+                }
+            }
+            if let Some(now) = hit {
+                self.emit_signal(now, "mouse_entered", &[]);
+                self.call_script_with_access(now, "_mouse_entered", &[]);
+            }
+            self.hovered_control = hit;
+        }
+
+        let Some(hit) = hit else {
+            // A press over empty space clears any in-flight press so a later
+            // release elsewhere cannot be mistaken for a click.
+            if matches!(event, Ev::MouseButton { pressed: true, .. }) {
+                self.gui_press_target = None;
+            }
+            return;
+        };
+
+        // Deliver `_gui_input` / `gui_input` up the PASS chain: the hit control
+        // first, then each ancestor whose filter is PASS. A STOP control ends
+        // the walk (it consumed the event).
+        let mut target = Some(hit);
+        while let Some(node_id) = target {
+            self.call_script_with_access(node_id, "_gui_input", std::slice::from_ref(payload));
+            self.emit_signal(node_id, "gui_input", std::slice::from_ref(payload));
+            if self.input_handled {
+                return;
+            }
+            match crate::control::get_mouse_filter(self, node_id) {
+                crate::control::MouseFilter::Pass => {
+                    target = self.nodes.get(&node_id).and_then(|n| n.parent());
+                }
+                _ => break,
+            }
+        }
+
+        // Button press/release semantics on the originally hit control.
+        if let Ev::MouseButton { pressed, .. } = event {
+            let is_button = crate::control::node_is_base_button(self, hit);
+            let disabled = crate::control::is_disabled(self, hit);
+            if *pressed {
+                self.gui_press_target = Some(hit);
+                // Godot grabs focus on press for FOCUS_CLICK/FOCUS_ALL controls;
+                // clicking a non-focusable one drops focus entirely
+                // (pat-0q2kx.21).
+                if self.control_takes_click_focus(hit) {
+                    self.grab_focus(hit);
+                } else {
+                    self.release_focus();
+                }
+                if is_button && !disabled {
+                    self.emit_signal(hit, "button_down", &[]);
+                }
+            } else {
+                // A click only counts when press and release land on the same
+                // control, as in Godot — dragging off a button cancels it.
+                let same = self.gui_press_target == Some(hit);
+                self.gui_press_target = None;
+                if is_button && !disabled && same {
+                    self.emit_signal(hit, "button_up", &[]);
+                    self.emit_signal(hit, "pressed", &[]);
+                }
+            }
+        }
+    }
+
+    /// The Control currently under the mouse, if any (Godot's viewport hover
+    /// bookkeeping). Exposed for tests and tooling.
+    pub fn hovered_control(&self) -> Option<NodeId> {
+        self.hovered_control
+    }
+
+    // -- keyboard focus (pat-0q2kx.21) --------------------------------------
+
+    /// The Control holding keyboard focus (Godot `Viewport.gui_get_focus_owner`).
+    pub fn focus_owner(&self) -> Option<NodeId> {
+        self.focus_owner
+    }
+
+    /// Whether `node_id` currently holds focus (Godot `Control.has_focus`).
+    pub fn has_focus(&self, node_id: NodeId) -> bool {
+        self.focus_owner == Some(node_id)
+    }
+
+    /// Gives `node_id` keyboard focus (Godot `Control.grab_focus`).
+    ///
+    /// Emits `focus_exited` on the previous owner and `focus_entered` on the new
+    /// one. Re-grabbing focus on the node that already holds it is a no-op, so
+    /// repeated clicks do not re-fire the signals.
+    pub fn grab_focus(&mut self, node_id: NodeId) {
+        if self.focus_owner == Some(node_id) || !self.nodes.contains_key(&node_id) {
+            return;
+        }
+        if let Some(prev) = self.focus_owner.take() {
+            if self.nodes.contains_key(&prev) {
+                self.emit_signal(prev, "focus_exited", &[]);
+                self.call_script_with_access(prev, "_focus_exited", &[]);
+            }
+        }
+        self.focus_owner = Some(node_id);
+        self.emit_signal(node_id, "focus_entered", &[]);
+        self.call_script_with_access(node_id, "_focus_entered", &[]);
+    }
+
+    /// Drops keyboard focus, emitting `focus_exited` on the owner if there was
+    /// one (Godot `Control.release_focus`).
+    pub fn release_focus(&mut self) {
+        if let Some(prev) = self.focus_owner.take() {
+            if self.nodes.contains_key(&prev) {
+                self.emit_signal(prev, "focus_exited", &[]);
+                self.call_script_with_access(prev, "_focus_exited", &[]);
+            }
+        }
+    }
+
+    /// Whether clicking `node_id` should grab focus, from Godot's
+    /// `Control.focus_mode` (`FOCUS_NONE = 0`, `FOCUS_CLICK = 1`,
+    /// `FOCUS_ALL = 2`).
+    ///
+    /// When the property is absent Patina falls back to class: the interactive
+    /// Control families default to `FOCUS_ALL` in Godot, everything else to
+    /// `FOCUS_NONE`. Without that fallback a plain `.tscn` Button — which never
+    /// serializes the default `focus_mode` — would never take focus.
+    fn control_takes_click_focus(&self, node_id: NodeId) -> bool {
+        let Some(node) = self.nodes.get(&node_id) else {
+            return false;
+        };
+        match node.get_property("focus_mode") {
+            Variant::Int(0) => false,
+            Variant::Int(_) => true,
+            _ => {
+                const FOCUSABLE_BY_DEFAULT: &[&str] = &[
+                    "LineEdit",
+                    "TextEdit",
+                    "CodeEdit",
+                    "SpinBox",
+                    "OptionButton",
+                    "MenuButton",
+                    "CheckBox",
+                    "CheckButton",
+                    "Button",
+                    "LinkButton",
+                    "TextureButton",
+                    "BaseButton",
+                    "HSlider",
+                    "VSlider",
+                    "ItemList",
+                    "Tree",
+                    "TabBar",
+                ];
+                node.is_class("BaseButton") || FOCUSABLE_BY_DEFAULT.contains(&node.class_name())
             }
         }
     }
@@ -2437,6 +2944,7 @@ impl SceneTree {
                 self.scripts.remove(&nid);
                 self.signal_stores.remove(&nid);
                 self.animation_players.remove(&nid);
+                self.animation_trees.remove(&nid);
             }
             let _ = self.remove_node(child_id);
         }
@@ -2482,6 +2990,7 @@ impl SceneTree {
                 self.scripts.remove(&nid);
                 self.signal_stores.remove(&nid);
                 self.animation_players.remove(&nid);
+                self.animation_trees.remove(&nid);
             }
             let _ = self.remove_node(child_id);
         }
@@ -2542,6 +3051,7 @@ impl SceneTree {
                 self.scripts.remove(&nid);
                 self.signal_stores.remove(&nid);
                 self.animation_players.remove(&nid);
+                self.animation_trees.remove(&nid);
             }
             let _ = self.remove_node(child_id);
         }
@@ -3972,6 +4482,103 @@ mod tests {
             let p = tree.get_animation_player_mut(id).unwrap();
             p.speed_scale = 2.0;
             assert_eq!(tree.get_animation_player(id).unwrap().speed_scale, 2.0);
+        }
+
+        // -- animation trees (pat-0q2kx.2) ----------------------------------
+
+        /// A scene `Owner -> {Sprite, Tree}` plus a one-track clip on `Sprite:x`,
+        /// so a tree attached to `Tree` reaches `Sprite` through root_node "..".
+        fn tree_with_animation_tree(
+            crossfade_clip: f64,
+        ) -> (SceneTree, NodeId, NodeId, crate::animation_tree::AnimationTree) {
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let owner = tree.add_child(root, Node::new("Owner", "Node2D")).unwrap();
+            let sprite = tree.add_child(owner, Node::new("Sprite", "Node2D")).unwrap();
+            let tree_node = tree
+                .add_child(owner, Node::new("Tree", "AnimationTree"))
+                .unwrap();
+
+            let mut anim = Animation::new("run", crossfade_clip);
+            let mut track = AnimationTrack::with_node("Sprite", "x");
+            track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(0.0)));
+            track.add_keyframe(KeyFrame::linear(crossfade_clip, Variant::Float(100.0)));
+            anim.tracks.push(track);
+
+            let mut anim_tree = crate::animation_tree::AnimationTree::new();
+            anim_tree.add_animation(anim);
+            anim_tree.set_root(crate::animation_tree::AnimationNode::Animation {
+                name: "run".into(),
+                position: 0.0,
+            });
+            (tree, sprite, tree_node, anim_tree)
+        }
+
+        #[test]
+        fn attach_and_get_animation_tree() {
+            let (mut tree, id) = tree_with_node();
+            tree.attach_animation_tree(id, crate::animation_tree::AnimationTree::new())
+                .unwrap();
+            assert!(tree.get_animation_tree(id).is_some());
+            assert_eq!(tree.animation_tree_count(), 1);
+        }
+
+        #[test]
+        fn attach_animation_tree_to_nonexistent_node_fails() {
+            let mut tree = SceneTree::new();
+            let fake = NodeId::next();
+            let result =
+                tree.attach_animation_tree(fake, crate::animation_tree::AnimationTree::new());
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn process_animation_trees_writes_through_root_node_to_track_targets() {
+            let (mut tree, sprite, tree_node, anim_tree) = tree_with_animation_tree(1.0);
+            tree.attach_animation_tree(tree_node, anim_tree).unwrap();
+
+            tree.process_animation_trees(0.5);
+
+            // root_node ".." resolves to Owner, then the track's "Sprite" path —
+            // the value must land on the sprite, not on the AnimationTree node.
+            match tree.get_node(sprite).unwrap().get_property("x") {
+                Variant::Float(x) => assert!((x - 50.0).abs() < 1.0, "x={x}"),
+                other => panic!("Sprite:x not driven by the tree: {other:?}"),
+            }
+            assert_eq!(
+                tree.get_node(tree_node).unwrap().get_property("x"),
+                Variant::Nil,
+                "the pose must not be written to the AnimationTree node itself"
+            );
+        }
+
+        #[test]
+        fn process_animation_trees_skips_inactive_trees() {
+            let (mut tree, sprite, tree_node, mut anim_tree) = tree_with_animation_tree(1.0);
+            anim_tree.active = false;
+            tree.attach_animation_tree(tree_node, anim_tree).unwrap();
+
+            tree.process_animation_trees(0.5);
+
+            assert_eq!(
+                tree.get_node(sprite).unwrap().get_property("x"),
+                Variant::Nil,
+                "an inactive tree must not write anything"
+            );
+        }
+
+        #[test]
+        fn changing_scenes_drops_attached_animation_trees() {
+            let (mut tree, _sprite, tree_node, anim_tree) = tree_with_animation_tree(1.0);
+            tree.attach_animation_tree(tree_node, anim_tree).unwrap();
+            assert_eq!(tree.animation_tree_count(), 1);
+
+            tree.change_scene_to_node(Node::new("Next", "Node")).unwrap();
+            assert_eq!(
+                tree.animation_tree_count(),
+                0,
+                "trees of a freed scene must not keep ticking"
+            );
         }
 
         #[test]

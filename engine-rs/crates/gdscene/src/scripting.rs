@@ -94,6 +94,21 @@ impl ScriptInstance for GDScriptNodeInstance {
     }
 
     fn set_property(&mut self, name: &str, value: Variant) -> bool {
+        // A property declared with `set = fn` must be written *through* its
+        // setter: Godot's `Object::set` routes into `GDScriptInstance::set`, which
+        // runs the setter (gdscript.cpp), so a scene override or an engine-side
+        // write that bypassed it would leave whatever the setter maintains —
+        // derived state, clamping, a dirty flag — unapplied (pat-0q2kx.17).
+        if let Some(setter) = self.instance.class_def.setters.get(name).cloned() {
+            // Must go through `call_property_setter`, not `call_instance_method`:
+            // the latter leaves `current_function` unset, so the setter body's own
+            // `self.prop = value` does not recognise that it is already inside the
+            // setter and fires it a second time.
+            return self
+                .interpreter
+                .call_property_setter(&mut self.instance, &setter, value)
+                .is_ok();
+        }
         if self.instance.properties.contains_key(name) {
             self.instance.properties.insert(name.to_string(), value);
             true
@@ -169,6 +184,10 @@ impl ScriptInstance for GDScriptNodeInstance {
             .tick_instance_coroutine_frames(&mut self.instance);
     }
 
+    fn list_signals(&self) -> Vec<String> {
+        self.instance.class_def.signals.clone()
+    }
+
     fn notify_await_signal(&mut self, name: &str, args: &[Variant]) {
         // Wake `await`s parked on this signal name; the interpreter's coroutine
         // host resumes the matching suspended frames, binding the first emitted
@@ -178,6 +197,18 @@ impl ScriptInstance for GDScriptNodeInstance {
         let _ = self
             .interpreter
             .notify_instance_await_signal(&mut self.instance, name, args);
+    }
+
+    fn notify_await_signal_from(&mut self, source: u64, name: &str, args: &[Variant]) {
+        // Same as above, but carrying the emitter so an object-bound `await`
+        // (`await $ButtonA.pressed`) ignores another node's same-named signal
+        // (pat-0q2kx.9).
+        let _ = self.interpreter.notify_instance_await_signal_from(
+            &mut self.instance,
+            Some(source),
+            name,
+            args,
+        );
     }
 
     fn notification(&mut self, what: i64) {
@@ -278,6 +309,7 @@ impl InputSnapshot {
 // ---------------------------------------------------------------------------
 
 use crate::scene_tree::SceneTree;
+use crate::tween::{EaseType, TransFunc, TweenId, TweenStep};
 use gdcore::id::ObjectId;
 use gdobject::signal::Connection;
 
@@ -319,6 +351,116 @@ impl SceneTreeAccessor {
         // SAFETY: We hold `&mut self`, so no other accessor can alias this pointer.
         // The raw pointer validity is guaranteed by the caller of `new`/`with_input`.
         unsafe { &mut *self.tree }
+    }
+
+    // -- Tween step plumbing (pat-0q2kx.4) ----------------------------------
+
+    /// Appends a step to the tween, returning `None` if it no longer exists.
+    fn push_tween_step(&mut self, tid: TweenId, step: TweenStep) -> Option<()> {
+        let tween = self.tree_mut().get_tween_mut(tid)?;
+        tween.steps.push(step);
+        // Chaining a tweener onto a tween that already ran dry restarts it, so
+        // `create_tween()` followed by tweeners in the same frame animates even
+        // though the tween was momentarily empty.
+        tween.running = true;
+        Some(())
+    }
+
+    /// Applies `f` to the most recently added step — the one Godot's per-tweener
+    /// setters (`set_ease`/`set_trans`/`set_delay`) target in a fluent chain.
+    ///
+    /// `None` means the *tween* is gone. Having no steps yet is NOT an error:
+    /// `create_tween().set_trans(TRANS_SINE).tween_property(...)` is a common
+    /// Godot idiom where the setter records a tween-wide default for subsequent
+    /// tweeners. Patina's `Tween` has no default slot, so that setting is
+    /// currently dropped — but it must still report success, or the call would
+    /// fall through to node dispatch and raise `UndefinedFunction` on a handle
+    /// that is not a node. **Known gap:** setters placed *before* the first
+    /// tweener are ignored rather than applied as defaults.
+    fn with_last_step(&mut self, tid: TweenId, f: impl FnOnce(&mut TweenStep)) -> Option<()> {
+        let tween = self.tree_mut().get_tween_mut(tid)?;
+        if let Some(step) = tween.steps.last_mut() {
+            f(step);
+        }
+        Some(())
+    }
+}
+
+// -- Tween argument coercion (pat-0q2kx.4) ----------------------------------
+
+/// The raw object id behind a `Variant`, for `tween_property`'s target.
+fn variant_object_raw(v: &Variant) -> Option<u64> {
+    match v {
+        Variant::ObjectId(id) => Some(id.raw()),
+        // A script may hand back a bare instance id from `get_instance_id()`.
+        Variant::Int(i) if *i > 0 => Some(*i as u64),
+        _ => None,
+    }
+}
+
+/// String-ish `Variant` as an owned `String` (property paths, method names).
+fn variant_string(v: &Variant) -> Option<String> {
+    match v {
+        Variant::String(s) => Some(s.clone()),
+        Variant::StringName(s) => Some(s.as_str().to_string()),
+        Variant::NodePath(p) => Some(p.to_string()),
+        _ => None,
+    }
+}
+
+/// Numeric `Variant` as `f64` — Godot accepts int or float for durations.
+fn variant_number(v: &Variant) -> Option<f64> {
+    match v {
+        Variant::Float(f) => Some(*f),
+        Variant::Int(i) => Some(*i as f64),
+        _ => None,
+    }
+}
+
+/// The method name a `tween_callback` / `tween_method` argument names.
+///
+/// Godot passes a `Callable`; Patina's tween steps carry a plain method name
+/// dispatched against the tween's **owning node**, so a Callable bound to some
+/// other object is invoked on the owner instead. That is the pre-existing
+/// `TweenStep::method` contract, not something this bridge introduces.
+fn variant_callable_method(v: &Variant) -> Option<String> {
+    match v {
+        Variant::Callable(c) => match c.inner_callable() {
+            gdvariant::variant::CallableRef::Method { method, .. } => Some(method.clone()),
+            _ => None,
+        },
+        _ => variant_string(v),
+    }
+}
+
+/// Godot `Tween.EaseType`: EASE_IN=0, EASE_OUT=1, EASE_IN_OUT=2, EASE_OUT_IN=3.
+/// `OUT_IN` has no Patina counterpart and maps to the nearest, `InOut`.
+fn ease_type_from_i64(v: i64) -> EaseType {
+    match v {
+        0 => EaseType::In,
+        1 => EaseType::Out,
+        _ => EaseType::InOut,
+    }
+}
+
+/// Godot `Tween.TransitionType`: LINEAR=0, SINE=1, QUINT=2, QUART=3, QUAD=4,
+/// EXPO=5, ELASTIC=6, CUBIC=7, CIRC=8, BOUNCE=9, BACK=10, SPRING=11.
+/// Patina has no QUINT/QUART/CIRC/SPRING curve, so those fall back to the
+/// closest available shape rather than silently becoming `Linear`.
+fn trans_func_from_i64(v: i64) -> TransFunc {
+    match v {
+        0 => TransFunc::Linear,
+        1 => TransFunc::Sine,
+        2 | 3 => TransFunc::Cubic,
+        4 => TransFunc::Quad,
+        5 => TransFunc::Expo,
+        6 => TransFunc::Elastic,
+        7 => TransFunc::Cubic,
+        8 => TransFunc::Sine,
+        9 => TransFunc::Bounce,
+        10 => TransFunc::Back,
+        11 => TransFunc::Elastic,
+        _ => TransFunc::Linear,
     }
 }
 
@@ -375,6 +517,17 @@ impl SceneAccess for SceneTreeAccessor {
 
     fn get_node_property(&self, node: u64, prop: &str) -> Variant {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // An AnimationTree's `parameters/...` values live on the attached graph,
+        // which evaluation reads and writes — so report those rather than the
+        // node's stored copy, mirroring Godot's `AnimationTree.get()`
+        // (pat-0q2kx.2).
+        if prop.starts_with("parameters/") {
+            if let Some(anim_tree) = self.tree().get_animation_tree(nid) {
+                if let Some(value) = anim_tree.get_parameter(prop) {
+                    return value;
+                }
+            }
+        }
         // Try script property first
         if let Some(script) = self.tree().get_script(nid) {
             if let Some(val) = script.get_property(prop) {
@@ -390,6 +543,34 @@ impl SceneAccess for SceneTreeAccessor {
 
     fn set_node_property(&mut self, node: u64, prop: &str, value: Variant) {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // Route an AnimationTree's own properties into the attached graph so a
+        // script driving it (`tree.set("parameters/conditions/run", true)`,
+        // `tree.active = false`) affects the next frame's evaluation, as Godot's
+        // `AnimationTree.set()` does. The value is mirrored onto the node so the
+        // inspector and a scene save still see it (pat-0q2kx.2).
+        if prop.starts_with("parameters/") || prop == "active" {
+            let routed = match self.tree_mut().get_animation_tree_mut(nid) {
+                Some(anim_tree) => {
+                    if prop == "active" {
+                        anim_tree.active = match &value {
+                            Variant::Bool(b) => *b,
+                            Variant::Int(i) => *i != 0,
+                            _ => anim_tree.active,
+                        };
+                    } else {
+                        anim_tree.set_parameter(prop, value.clone());
+                    }
+                    true
+                }
+                None => false,
+            };
+            if routed {
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property(prop, value);
+                }
+                return;
+            }
+        }
         // Try script property first
         if let Some(script) = self.tree_mut().get_script_mut(nid) {
             if script.set_property(prop, value.clone()) {
@@ -399,6 +580,150 @@ impl SceneAccess for SceneTreeAccessor {
         // Then try node property
         if let Some(n) = self.tree_mut().get_node_mut(nid) {
             n.set_property(prop, value);
+        }
+    }
+
+    // -- Cross-object script calls (pat-0q2kx.8) ----------------------------
+
+    fn call_script_method(&mut self, node: u64, method: &str, args: &[Variant]) -> Option<Variant> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().call_script_method(nid, method, args)
+    }
+
+    fn node_has_method(&self, node: u64, method: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().node_has_method(nid, method)
+    }
+
+    fn node_method_argument_count(&self, node: u64, method: &str) -> Option<i64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().node_method_argument_count(nid, method)
+    }
+
+    // -- Native node method dispatch (pat-0q2kx.16) -------------------------
+    //
+    // The second half of Godot's `Object::callp`: after the script instance
+    // declines, the engine's own method for the class runs. Before this the
+    // interpreter's ObjectId match was a hand-coded list whose fallback threw
+    // `UndefinedFunction`, so `body.move_and_slide()` and `other.add_to_group()`
+    // errored out of a running script.
+    //
+    // `None` = "not a native method", so the caller keeps its own error path.
+
+    fn call_node_method(&mut self, node: u64, method: &str, args: &[Variant]) -> Option<Variant> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // String-ish first argument, shared by the group/child/signal calls.
+        let arg_str = |i: usize| -> Option<String> {
+            match args.get(i) {
+                Some(Variant::String(s)) => Some(s.clone()),
+                Some(Variant::StringName(s)) => Some(s.as_str().to_string()),
+                Some(Variant::NodePath(p)) => Some(p.to_string()),
+                _ => None,
+            }
+        };
+        let bool_prop = |tree: &SceneTree, key: &str| -> bool {
+            tree.get_node(nid)
+                .map(|n| matches!(n.get_property(key), Variant::Bool(true)))
+                .unwrap_or(false)
+        };
+
+        match method {
+            // -- CharacterBody2D motion --------------------------------------
+            //
+            // Godot's `move_and_slide()` moves the body inside the call. Patina
+            // runs the character step in the physics phase, which is *before*
+            // the script phase in the same tick (main_loop.rs), so the request
+            // is recorded here and applied on the next physics tick. The
+            // observable contract — "a body whose script calls move_and_slide
+            // moves, one that never calls it does not" — holds either way; only
+            // the timing differs by one tick.
+            "move_and_slide" => {
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("_move_and_slide_requested", Variant::Bool(true));
+                }
+                // Godot returns whether the body collided during the motion.
+                let tree = self.tree();
+                let collided = bool_prop(tree, "is_on_floor")
+                    || bool_prop(tree, "is_on_wall")
+                    || bool_prop(tree, "is_on_ceiling");
+                Some(Variant::Bool(collided))
+            }
+            // Collision state persisted by `process_character_movement`.
+            "is_on_floor" | "is_on_wall" | "is_on_ceiling" => {
+                Some(Variant::Bool(bool_prop(self.tree(), method)))
+            }
+            // `*_only` variants ignore the "was on X last frame" distinction
+            // Patina does not model separately; report the same state.
+            "is_on_floor_only" => Some(Variant::Bool(bool_prop(self.tree(), "is_on_floor"))),
+            "is_on_wall_only" => Some(Variant::Bool(bool_prop(self.tree(), "is_on_wall"))),
+            "is_on_ceiling_only" => Some(Variant::Bool(bool_prop(self.tree(), "is_on_ceiling"))),
+            "get_real_velocity" => Some(
+                self.tree()
+                    .get_node(nid)
+                    .map(|n| n.get_property("velocity"))
+                    .unwrap_or(Variant::Nil),
+            ),
+
+            // -- Node groups --------------------------------------------------
+            "add_to_group" => {
+                let group = arg_str(0)?;
+                let _ = self.tree_mut().add_to_group(nid, &group);
+                Some(Variant::Nil)
+            }
+            "remove_from_group" => {
+                let group = arg_str(0)?;
+                let _ = self.tree_mut().remove_from_group(nid, &group);
+                Some(Variant::Nil)
+            }
+            "is_in_group" => {
+                let group = arg_str(0)?;
+                Some(Variant::Bool(
+                    self.tree()
+                        .get_node(nid)
+                        .map(|n| n.groups().contains(&group))
+                        .unwrap_or(false),
+                ))
+            }
+            // Godot puts this on SceneTree; accepting it on a node too costs
+            // nothing and matches how scripts reach for it.
+            "get_nodes_in_group" => {
+                let group = arg_str(0)?;
+                let ids: Vec<Variant> = self
+                    .tree()
+                    .get_nodes_in_group(&group)
+                    .into_iter()
+                    .map(|n| Variant::ObjectId(n.object_id()))
+                    .collect();
+                Some(Variant::Array(ids))
+            }
+
+            // -- Node tree queries --------------------------------------------
+            "find_child" => {
+                let pattern = arg_str(0)?;
+                // Godot's signature is find_child(pattern, recursive = true, ...).
+                let recursive = !matches!(args.get(1), Some(Variant::Bool(false)));
+                Some(match self.tree().find_child(nid, &pattern, recursive) {
+                    Some(found) => Variant::ObjectId(found.object_id()),
+                    None => Variant::Nil,
+                })
+            }
+            "has_signal" => {
+                let name = arg_str(0)?;
+                let declared = self
+                    .tree()
+                    .signal_store(nid)
+                    .map(|s| s.has_signal(&name))
+                    .unwrap_or(false);
+                // A signal the class declares counts even with nothing connected.
+                let on_class = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| gdobject::class_db::class_has_signal(n.class_name(), &name))
+                    .unwrap_or(false);
+                Some(Variant::Bool(declared || on_class))
+            }
+
+            _ => None,
         }
     }
 
@@ -541,6 +866,45 @@ impl SceneAccess for SceneTreeAccessor {
             .unwrap_or(false)
     }
 
+    fn node_has_signal(&self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let tree = self.tree();
+        // 1. The attached script's `signal` declarations — the case the
+        //    SignalStore misses, because a declared-but-unconnected signal has
+        //    no store entry yet (pat-0q2kx.9).
+        if let Some(script) = tree.get_script(nid) {
+            if script.list_signals().iter().any(|s| s == name) {
+                return true;
+            }
+        }
+        // 2. A built-in signal on the node's class (`Button.pressed`).
+        if let Some(node_ref) = tree.get_node(nid) {
+            if gdobject::class_db::class_has_signal(node_ref.class_name(), name) {
+                return true;
+            }
+        }
+        // 3. Anything already connected or explicitly added at runtime.
+        tree.signal_store(nid)
+            .map(|store| store.get_signal(name).is_some())
+            .unwrap_or(false)
+    }
+
+    /// Backs Godot's `Signal.get_connections()` / `has_connections()`
+    /// (pat-0q2kx.9).
+    fn signal_connections(&self, source: u64, signal: &str) -> Vec<(u64, String)> {
+        let source_id = NodeId::from_object_id(ObjectId::from_raw(source));
+        self.tree()
+            .signal_store(source_id)
+            .and_then(|store| store.get_signal(signal))
+            .map(|sig| {
+                sig.connections()
+                    .iter()
+                    .map(|c| (c.target_id.raw(), c.method.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn get_node_name(&self, node: u64) -> Option<String> {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         self.tree().get_node(nid).map(|n| n.name().to_string())
@@ -668,6 +1032,234 @@ impl SceneAccess for SceneTreeAccessor {
         self.tree()
             .get_node(nid)
             .map(|n| n.class_name().to_string())
+    }
+
+    // -- AnimationPlayer playback (pat-0q2kx.1) -----------------------------
+
+    fn animation_player_play(&mut self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(player) = self.tree_mut().get_animation_player_mut(nid) else {
+            return false;
+        };
+        if name.is_empty() {
+            // Godot's `play()` with no argument resumes the current clip, or
+            // starts the autoplay clip when nothing has played yet.
+            let current = player.current_animation().map(str::to_owned);
+            match current {
+                Some(current) => player.play(&current),
+                None => {
+                    player.play_autoplay();
+                }
+            }
+        } else {
+            player.play(name);
+        }
+        true
+    }
+
+    fn animation_player_stop(&mut self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self.tree_mut().get_animation_player_mut(nid) {
+            Some(player) => {
+                player.stop();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn animation_player_seek(&mut self, node: u64, time: f64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self.tree_mut().get_animation_player_mut(nid) {
+            Some(player) => {
+                player.seek(time, true);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn animation_player_is_playing(&self, node: u64) -> Option<bool> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().get_animation_player(nid).map(|p| p.playing)
+    }
+
+    fn animation_player_current(&self, node: u64) -> Option<String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_animation_player(nid)
+            .map(|p| p.current_animation().unwrap_or("").to_string())
+    }
+
+    fn animation_player_position(&self, node: u64) -> Option<f64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().get_animation_player(nid).map(|p| p.position())
+    }
+
+    // -- Tween (pat-0q2kx.4) -----------------------------------------------
+
+    fn create_tween(&mut self, node: u64) -> Option<u64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let tree = self.tree_mut();
+        tree.get_node(nid)?;
+        let id = tree.create_tween(nid);
+        // Godot's `create_tween()` hands back an already-running tween: the
+        // script chains tweeners onto it and it advances on the next frame
+        // without an explicit `play()`.
+        if let Some(t) = tree.get_tween_mut(id) {
+            t.start();
+        }
+        Some(id.raw())
+    }
+
+    fn tween_call(&mut self, tween: u64, method: &str, args: &[Variant]) -> Option<Variant> {
+        let tid = TweenId::from_raw(tween);
+        // The identity check that makes this safe to try before node dispatch:
+        // an id that names no live tween returns `None` and the interpreter
+        // falls through to ordinary node semantics.
+        self.tree_mut().get_tween_mut(tid)?;
+
+        // `self` handle, so the fluent chain keeps flowing:
+        // `create_tween().tween_property(...).set_trans(...).set_ease(...)`.
+        let handle = Variant::ObjectId(ObjectId::from_raw(tween));
+
+        match method {
+            // -- tweeners ---------------------------------------------------
+            // Godot: tween_property(object, property, final_val, duration)
+            "tween_property" => {
+                let target = variant_object_raw(args.first()?)?;
+                let property = variant_string(args.get(1)?)?;
+                let final_value = args.get(2)?.clone();
+                let duration = variant_number(args.get(3)?)?;
+                // Godot samples the start value when the tweener *starts*; the
+                // tween is created and stepped in the same frame here, so the
+                // node's present value is that same sample.
+                let start = {
+                    let nid = NodeId::from_object_id(ObjectId::from_raw(target));
+                    let (prop, sub) = crate::tween::split_property_path(&property);
+                    let base = self
+                        .tree()
+                        .get_node(nid)
+                        .map(|n| n.get_property(prop))
+                        .unwrap_or(Variant::Nil);
+                    match sub {
+                        // `"position:x"` interpolates a float component, so the
+                        // start value must be that component — not the whole
+                        // Vector2, which would make `interpolate_variant` bail
+                        // on the type mismatch against the float end value.
+                        Some(s) => {
+                            crate::tween::read_subname(&base, s).unwrap_or(Variant::Float(0.0))
+                        }
+                        None => base,
+                    }
+                };
+                let step =
+                    TweenStep::new(property, start, final_value, duration).with_target(target);
+                self.push_tween_step(tid, step)?;
+                Some(handle)
+            }
+            // Godot: tween_method(callable, from, to, duration). Patina carries
+            // the callable as a plain method name on the owning node's script.
+            "tween_method" => {
+                let m = variant_callable_method(args.first()?)?;
+                let from = args.get(1)?.clone();
+                let to = args.get(2)?.clone();
+                let duration = variant_number(args.get(3)?)?;
+                self.push_tween_step(tid, TweenStep::method(m, from, to, duration))?;
+                Some(handle)
+            }
+            "tween_callback" => {
+                let m = variant_callable_method(args.first()?)?;
+                self.push_tween_step(tid, TweenStep::callback(m))?;
+                Some(handle)
+            }
+            "tween_interval" => {
+                let secs = variant_number(args.first()?)?;
+                self.push_tween_step(tid, TweenStep::interval(secs))?;
+                Some(handle)
+            }
+
+            // -- per-tweener setters ----------------------------------------
+            //
+            // Godot returns the *Tweener* from `tween_property`, and these
+            // setters apply to it. Patina returns the tween handle, so they
+            // apply to the most recently added step — which is the same step
+            // in every fluent chain.
+            "set_ease" => {
+                let v = variant_number(args.first()?)? as i64;
+                self.with_last_step(tid, |s| s.ease_type = ease_type_from_i64(v))?;
+                Some(handle)
+            }
+            "set_trans" => {
+                let v = variant_number(args.first()?)? as i64;
+                self.with_last_step(tid, |s| s.trans_func = trans_func_from_i64(v))?;
+                Some(handle)
+            }
+            "set_delay" => {
+                let v = variant_number(args.first()?)?;
+                self.with_last_step(tid, |s| s.delay = v)?;
+                Some(handle)
+            }
+
+            // -- sequencing ---------------------------------------------------
+            //
+            // `parallel()` makes the *next* tweener run alongside the previous
+            // one; Godot also accepts it retroactively on the last one, which is
+            // how the fluent form `.tween_property(..).parallel()` reads.
+            "parallel" => {
+                self.with_last_step(tid, |s| s.parallel = true)?;
+                Some(handle)
+            }
+            "chain" => {
+                self.with_last_step(tid, |s| s.parallel = false)?;
+                Some(handle)
+            }
+
+            // -- tween-wide controls ------------------------------------------
+            "set_loops" => {
+                let n = args
+                    .first()
+                    .and_then(variant_number)
+                    .map(|v| v as i32)
+                    // Godot: `set_loops()` with no argument loops forever.
+                    .unwrap_or(-1);
+                self.tree_mut().get_tween_mut(tid)?.set_loops(n);
+                Some(handle)
+            }
+            "set_speed_scale" => {
+                let v = variant_number(args.first()?)?;
+                self.tree_mut().get_tween_mut(tid)?.set_speed_scale(v);
+                Some(handle)
+            }
+            "play" => {
+                self.tree_mut().get_tween_mut(tid)?.play();
+                Some(Variant::Nil)
+            }
+            "pause" => {
+                self.tree_mut().get_tween_mut(tid)?.pause();
+                Some(Variant::Nil)
+            }
+            "stop" => {
+                self.tree_mut().get_tween_mut(tid)?.stop();
+                Some(Variant::Nil)
+            }
+            "kill" => {
+                self.tree_mut().get_tween_mut(tid)?.kill();
+                Some(Variant::Nil)
+            }
+            "is_running" => {
+                let running = self.tree_mut().get_tween_mut(tid)?.running;
+                Some(Variant::Bool(running))
+            }
+            "is_valid" => {
+                let valid = self.tree_mut().get_tween_mut(tid)?.is_valid();
+                Some(Variant::Bool(valid))
+            }
+            // A live tween asked for a method Tween does not have: fall through
+            // so the interpreter reports `UndefinedFunction` as it would for any
+            // other object, rather than silently returning Nil.
+            _ => None,
+        }
     }
 
     fn instantiate_packed_scene(&mut self, path: &str) -> Option<u64> {

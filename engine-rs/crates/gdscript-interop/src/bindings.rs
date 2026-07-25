@@ -148,6 +148,16 @@ pub trait ScriptInstance {
     /// Returns metadata for all properties exposed by this script.
     fn list_properties(&self) -> Vec<ScriptPropertyInfo>;
 
+    /// Names of the signals this script declares (GDScript `signal foo`).
+    ///
+    /// Needed to resolve `$Other.my_signal` into a `Signal` value: a declared
+    /// signal that has never been connected has no entry in the node's
+    /// `SignalStore`, so the store alone reports a false negative in exactly
+    /// the connect-before-emit case (pat-0q2kx.9). Default: none.
+    fn list_signals(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Returns the human-readable name of this script.
     fn get_script_name(&self) -> &str;
 
@@ -180,6 +190,16 @@ pub trait ScriptInstance {
     /// the awaited value. Driven by the SceneTree after each `emit_signal` and
     /// on SceneTreeTimer timeouts. Default no-op (pat-nzgdu.6).
     fn notify_await_signal(&mut self, _name: &str, _args: &[Variant]) {}
+
+    /// [`notify_await_signal`](Self::notify_await_signal) with the raw
+    /// `ObjectId` of the emitting object, so an `await` bound to a specific
+    /// object ignores a same-named signal from a different one (pat-0q2kx.9).
+    ///
+    /// Defaults to the unattributed form, so existing implementors keep their
+    /// current behaviour until they opt in.
+    fn notify_await_signal_from(&mut self, _source: u64, name: &str, args: &[Variant]) {
+        self.notify_await_signal(name, args);
+    }
 
     /// Delivers an engine notification (`what`, a Godot `NOTIFICATION_*` code)
     /// to the script's `_notification(int what)` virtual, if it overrides it.
@@ -235,6 +255,22 @@ pub trait SceneAccess {
     /// Whether `target.method` is connected to `source.signal`. Default `false`.
     fn is_signal_connected(&self, source: u64, signal: &str, target: u64, method: &str) -> bool {
         let _ = (source, signal, target, method);
+        false
+    }
+
+    /// Every `(target_object, method)` currently connected to `source.signal`,
+    /// backing Godot's `Signal.get_connections()` / `has_connections()`
+    /// (pat-0q2kx.9). Default: none.
+    fn signal_connections(&self, _source: u64, _signal: &str) -> Vec<(u64, String)> {
+        Vec::new()
+    }
+
+    /// Whether `node` declares a signal called `name`, from any of the three
+    /// places one can come from: the attached script's `signal` declarations,
+    /// the node class's ClassDB signal set, or an existing entry in the node's
+    /// `SignalStore`. Lets `$Other.my_signal` resolve to a `Signal` value
+    /// rather than a Nil property read (pat-0q2kx.9). Default: `false`.
+    fn node_has_signal(&self, _node: u64, _name: &str) -> bool {
         false
     }
     /// Return the name of `node`, if it exists.
@@ -295,6 +331,131 @@ pub trait SceneAccess {
 
     /// Return the class name of a node.
     fn get_class(&self, _node: u64) -> Option<String> {
+        None
+    }
+
+    // -- cross-object script calls (pat-0q2kx.8) ----------------------------
+    //
+    // Godot's `Object::call` dispatches into the *target's* script
+    // (upstream/godot/core/object/object.cpp `Object::callv`), so
+    // `$Enemy.take_damage(5)`, `obj.call("take_damage", 5)` and
+    // `Callable(obj, "take_damage").call(5)` all run on `obj`. These hooks let
+    // the interpreter ask the host to run a method on another object and hand
+    // back its return value.
+
+    /// Call `method` on the script attached to `node`, synchronously, returning
+    /// its value. `None` means the node has no script, the script does not define
+    /// `method`, or the call raised — the caller then reports "no such method".
+    fn call_script_method(
+        &mut self,
+        _node: u64,
+        _method: &str,
+        _args: &[Variant],
+    ) -> Option<Variant> {
+        None
+    }
+
+    /// Whether `node` responds to `method` (script methods and native/class
+    /// methods alike), for `Object.has_method`.
+    fn node_has_method(&self, _node: u64, _method: &str) -> bool {
+        false
+    }
+
+    /// Declared parameter count of `node`'s `method`, for
+    /// `Object.get_method_argument_count`. `None` when the method is unknown.
+    fn node_method_argument_count(&self, _node: u64, _method: &str) -> Option<i64> {
+        None
+    }
+
+    /// Run a **native** (engine-implemented) method on `node` — the second half
+    /// of Godot's `Object::callp`, which tries the script instance first and then
+    /// the ClassDB method bind (upstream/godot/core/object/object.cpp).
+    ///
+    /// `None` means "not a native method I implement", so the caller falls
+    /// through to its own error. This is deliberately **one** dispatch hook
+    /// rather than a trait method per engine call: `SceneAccess` has several
+    /// implementors (mostly test mocks), and every added method needs a default
+    /// body or they all break. Keeping the semantics host-side also puts them
+    /// where `SceneTree` is actually reachable (pat-0q2kx.16).
+    fn call_node_method(
+        &mut self,
+        _node: u64,
+        _method: &str,
+        _args: &[Variant],
+    ) -> Option<Variant> {
+        None
+    }
+
+    // -- AnimationPlayer playback (pat-0q2kx.1) -----------------------------
+    //
+    // `AnimationPlayer.play("walk")` names an animation clip, whereas
+    // `AudioStreamPlayer.play(0.5)` names a seek position — and both arrive at
+    // the interpreter as `ObjectId.play`. These hooks let the interpreter ask
+    // the host whether the node actually has an animation player before it
+    // falls back to the audio semantics. Each returns whether the node had one,
+    // so a `false` means "not an animation player, handle it some other way".
+
+    /// Play `name` on the AnimationPlayer attached to `node` (an empty `name`
+    /// resumes the current clip). Returns `false` if `node` has no player.
+    fn animation_player_play(&mut self, _node: u64, _name: &str) -> bool {
+        false
+    }
+
+    /// Stop the AnimationPlayer attached to `node`. Returns `false` if absent.
+    fn animation_player_stop(&mut self, _node: u64) -> bool {
+        false
+    }
+
+    /// Seek the AnimationPlayer attached to `node` to `time` seconds. Returns
+    /// `false` if absent.
+    fn animation_player_seek(&mut self, _node: u64, _time: f64) -> bool {
+        false
+    }
+
+    /// Whether the AnimationPlayer attached to `node` is playing, or `None`
+    /// when `node` has no attached player.
+    fn animation_player_is_playing(&self, _node: u64) -> Option<bool> {
+        None
+    }
+
+    /// The clip the AnimationPlayer attached to `node` is playing (empty when
+    /// stopped), or `None` when `node` has no attached player.
+    fn animation_player_current(&self, _node: u64) -> Option<String> {
+        None
+    }
+
+    /// The playback position of the AnimationPlayer attached to `node`, or
+    /// `None` when `node` has no attached player.
+    fn animation_player_position(&self, _node: u64) -> Option<f64> {
+        None
+    }
+
+    // -- Tween (pat-0q2kx.4) -----------------------------------------------
+    //
+    // Godot: `node.create_tween()` hands back a `Tween`, and the tweeners chain
+    // fluently off it (`tween_property(...).set_ease(...)`). The whole surface
+    // routes through these two hooks rather than one trait method per Tween
+    // method, so the host owns the tween semantics and this trait stays small.
+
+    /// Create a tween owned by `node` and return its raw id, usable as a
+    /// `Variant::ObjectId` handle (Godot `Node.create_tween`). The tween starts
+    /// running immediately, as in Godot. `None` when the host has no tween
+    /// store.
+    fn create_tween(&mut self, _node: u64) -> Option<u64> {
+        None
+    }
+
+    /// Dispatch a `Tween`/`Tweener` method against the tween handle `tween`.
+    ///
+    /// Returns `None` when `tween` is **not** a live tween, so the caller falls
+    /// through to ordinary node semantics — necessary because a tween handle
+    /// and a node id are both `Variant::ObjectId`, and `Tween` shares the
+    /// method names `play` / `stop` / `pause` / `kill` / `set_loops` with
+    /// `AudioStreamPlayer` and `AnimationPlayer`.
+    ///
+    /// Chainable setters return the tween handle itself so GDScript's fluent
+    /// `create_tween().tween_property(...).set_trans(...)` works.
+    fn tween_call(&mut self, _tween: u64, _method: &str, _args: &[Variant]) -> Option<Variant> {
         None
     }
 

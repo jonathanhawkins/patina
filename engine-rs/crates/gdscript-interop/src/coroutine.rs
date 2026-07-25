@@ -28,6 +28,14 @@ pub enum AwaitTarget {
     Signal {
         /// Signal name (e.g. `"timeout"`, `"done"`).
         name: String,
+        /// Raw `ObjectId` of the object whose signal is awaited, when the
+        /// awaitable was bound to one (`await $ButtonA.pressed`).
+        ///
+        /// `None` is the legacy name-only form — e.g. a `create_timer`
+        /// `timeout`, whose signal name is already unique per timer. Matching
+        /// on the name ALONE is why `await $ButtonA.pressed` used to be resumed
+        /// by `$ButtonB.pressed` as well (pat-0q2kx.9).
+        object_id: Option<u64>,
     },
     /// Wait for N process frames (`poll` once = one frame if delta>0, or
     /// use [`CoroutineHost::tick_frame`]).
@@ -62,7 +70,12 @@ impl AwaitTarget {
                             Some(Variant::String(s)) => s.clone(),
                             _ => return None,
                         };
-                        Some(Self::Signal { name })
+                        // Absent for the legacy name-only awaitables.
+                        let object_id = match d.get("object_id") {
+                            Some(Variant::Int(i)) if *i > 0 => Some(*i as u64),
+                            _ => None,
+                        };
+                        Some(Self::Signal { name, object_id })
                     }
                     "frames" => {
                         let n = match d.get("count") {
@@ -70,11 +83,20 @@ impl AwaitTarget {
                             Some(Variant::Float(f)) => (*f).max(0.0) as u32,
                             _ => 1,
                         };
-                        Some(Self::Frames { remaining: n.max(1) })
+                        Some(Self::Frames {
+                            remaining: n.max(1),
+                        })
                     }
                     _ => None,
                 }
             }
+            // A first-class `Signal` value — `await $B.pressed` (pat-0q2kx.9).
+            // It carries its object, so the resulting await is bound and will
+            // not be resumed by another node's same-named signal.
+            Variant::Signal { object_id, name } => Some(Self::Signal {
+                name: name.clone(),
+                object_id: Some(*object_id),
+            }),
             // Bare float/int → treat as timer seconds (test convenience).
             Variant::Float(f) => Some(Self::Timer {
                 remaining: (*f as f32).max(0.0),
@@ -83,7 +105,12 @@ impl AwaitTarget {
                 remaining: *i as f32,
             }),
             // Bare string → signal name.
-            Variant::String(s) if !s.is_empty() => Some(Self::Signal { name: s.clone() }),
+            // A bare string names a signal with no owning object, so it stays
+            // in the legacy name-only form.
+            Variant::String(s) if !s.is_empty() => Some(Self::Signal {
+                name: s.clone(),
+                object_id: None,
+            }),
             _ => None,
         }
     }
@@ -101,6 +128,17 @@ impl AwaitTarget {
         let mut d = Dictionary::new();
         d.insert("__await_kind", Variant::String("signal".into()));
         d.insert("name", Variant::String(name.into()));
+        Variant::Dictionary(d)
+    }
+
+    /// Like [`signal_variant`](Self::signal_variant) but bound to the object
+    /// that owns the signal, so only *that* object's emit resumes the await
+    /// (pat-0q2kx.9).
+    pub fn signal_variant_from(object_id: u64, name: &str) -> Variant {
+        let mut d = Dictionary::new();
+        d.insert("__await_kind", Variant::String("signal".into()));
+        d.insert("name", Variant::String(name.into()));
+        d.insert("object_id", Variant::Int(object_id as i64));
         Variant::Dictionary(d)
     }
 
@@ -236,9 +274,32 @@ impl CoroutineHost {
     /// signal's first emitted argument) as each resumed coroutine's awaited
     /// value (pat-nzgdu.6).
     pub fn notify_signal(&mut self, signal_name: &str, value: Variant) {
+        self.notify_signal_from(None, signal_name, value);
+    }
+
+    /// Resume coroutines awaiting `signal_name`, emitted by `source` (the raw
+    /// `ObjectId` of the emitting object, or `None` when the caller cannot say).
+    ///
+    /// Matching rules (pat-0q2kx.9):
+    /// * an await with no bound object resumes on any matching name — the
+    ///   legacy behaviour, which `create_timer`'s per-timer signal names rely on;
+    /// * an await bound to an object resumes only when `source` is that object,
+    ///   so `await $ButtonA.pressed` ignores `$ButtonB.pressed`;
+    /// * a bound await never resumes on an unattributed emit, since we cannot
+    ///   confirm it came from the right object.
+    pub fn notify_signal_from(&mut self, source: Option<u64>, signal_name: &str, value: Variant) {
         let mut still = Vec::new();
         for mut co in self.suspended.drain(..) {
-            let matches = matches!(&co.wait, AwaitTarget::Signal { name } if name == signal_name);
+            let matches = match &co.wait {
+                AwaitTarget::Signal { name, object_id } if name == signal_name => {
+                    match (object_id, source) {
+                        (None, _) => true,
+                        (Some(want), Some(got)) => *want == got,
+                        (Some(_), None) => false,
+                    }
+                }
+                _ => false,
+            };
             if matches {
                 co.resume_value = value.clone();
                 self.ready.push(co);
@@ -305,6 +366,7 @@ mod tests {
             is_instance_method: false,
             wait: AwaitTarget::Signal {
                 name: "done".into(),
+                object_id: None,
             },
             bind_target: None,
             resume_value: Variant::Nil,
@@ -314,6 +376,72 @@ mod tests {
         assert_eq!(host.suspended_count(), 1);
         host.notify_signal("done", Variant::Nil);
         assert_eq!(host.ready_count(), 1);
+    }
+
+    /// pat-0q2kx.9: an `await` bound to a specific object must ignore a
+    /// same-named signal emitted by a *different* object.
+    ///
+    /// Before this, `AwaitTarget::Signal` carried only a name and
+    /// `notify_signal` matched on it globally, so two buttons' `pressed` awaits
+    /// cross-resumed each other.
+    #[test]
+    fn object_bound_signal_await_ignores_other_emitters() {
+        fn park(host: &mut CoroutineHost, name: &str, object_id: Option<u64>) {
+            host.suspend(SuspendedCoroutine {
+                id: CoroutineId(0),
+                remaining: vec![],
+                locals: HashMap::new(),
+                instance_props: HashMap::new(),
+                function_name: "f".into(),
+                is_instance_method: false,
+                wait: AwaitTarget::Signal {
+                    name: name.into(),
+                    object_id,
+                },
+                bind_target: None,
+                resume_value: Variant::Nil,
+                prior_output: vec![],
+            });
+        }
+
+        // Awaiting object #7's `pressed`.
+        let mut host = CoroutineHost::new();
+        park(&mut host, "pressed", Some(7));
+
+        // Object #9 emits the SAME signal name — must not resume.
+        host.notify_signal_from(Some(9), "pressed", Variant::Nil);
+        assert_eq!(
+            host.ready_count(),
+            0,
+            "another object's emit must not resume"
+        );
+        assert_eq!(host.suspended_count(), 1);
+
+        // An unattributed emit must not resume a bound await either: we cannot
+        // confirm it came from #7.
+        host.notify_signal("pressed", Variant::Nil);
+        assert_eq!(
+            host.ready_count(),
+            0,
+            "unattributed emit must not resume a bound await"
+        );
+        assert_eq!(host.suspended_count(), 1);
+
+        // The right object does resume it.
+        host.notify_signal_from(Some(7), "pressed", Variant::Nil);
+        assert_eq!(host.ready_count(), 1);
+        assert_eq!(host.suspended_count(), 0);
+
+        // Not vacuous: the legacy name-only await still resumes on any emitter,
+        // which is what `create_timer`'s `timeout` relies on.
+        let mut legacy = CoroutineHost::new();
+        park(&mut legacy, "timeout", None);
+        legacy.notify_signal_from(Some(123), "timeout", Variant::Nil);
+        assert_eq!(
+            legacy.ready_count(),
+            1,
+            "name-only awaits keep resuming on any source"
+        );
     }
 
     #[test]

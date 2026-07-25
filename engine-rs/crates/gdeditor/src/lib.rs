@@ -597,6 +597,39 @@ pub enum EditorCommand {
         old_height: usize,
         old_cells: Vec<i32>,
     },
+    /// A whole-animation snapshot edit (pat-0q2kx.12).
+    ///
+    /// Animation edits live in `EditorState::animations`, not the scene tree, so
+    /// the [`execute`](Self::execute)/[`undo`](Self::undo) pair — which only
+    /// takes a `SceneTree` — cannot reverse them. This follows the existing
+    /// `execute_tilemap`/`undo_tilemap` precedent for a second store, but stores
+    /// before/after snapshots so ONE variant covers every animation edit
+    /// (keyframe add/remove, track add/delete/reorder) instead of needing a
+    /// command per edit kind. Animations are small, so the copy is cheap.
+    AnimationEdit {
+        /// The animation's name — the key into the animation map.
+        animation: String,
+        /// The animation exactly as it was before the edit. `None` when the
+        /// animation did not exist yet, so undo removes it entirely.
+        before: Option<Box<gdscene::animation::Animation>>,
+        /// The animation as it is after the edit.
+        after: Box<gdscene::animation::Animation>,
+        /// Human-readable label for the History dock.
+        label: String,
+    },
+    /// Paste clipboard entries under a parent (pat-0q2kx.12).
+    ///
+    /// Pushed already-executed by `POST /api/node/paste` (the nodes are in the
+    /// tree by then), so `created_ids` is authoritative for undo. Redo re-pastes
+    /// from `entries` and refreshes `created_ids` with the new node ids.
+    PasteNodes {
+        /// The parent the entries were pasted under.
+        parent_id: NodeId,
+        /// The clipboard contents, kept so redo can re-create the nodes.
+        entries: Vec<crate::editor_server::ClipboardEntry>,
+        /// The nodes created by the paste — what undo removes.
+        created_ids: Vec<NodeId>,
+    },
     /// Move a child node to a new index within its parent's child list.
     MoveNode {
         /// The parent node.
@@ -970,6 +1003,27 @@ impl EditorCommand {
             EditorCommand::TileMapPaint { .. }
             | EditorCommand::TileMapFill { .. }
             | EditorCommand::TileMapResize { .. } => Ok(()),
+            // Animation edits are replayed against the animation map by
+            // `execute_animation`, not the scene tree.
+            EditorCommand::AnimationEdit { .. } => Ok(()),
+            EditorCommand::PasteNodes {
+                parent_id,
+                entries,
+                created_ids,
+            } => {
+                // Redo: re-create the pasted nodes. The originals were removed
+                // by `undo`, and the arena hands out fresh ids, so
+                // `created_ids` is rebuilt rather than reused.
+                let mut fresh = Vec::with_capacity(entries.len());
+                for e in entries.iter() {
+                    fresh.push(crate::editor_server::paste_entry_with_unique_name(
+                        tree, *parent_id, e,
+                    )?);
+                }
+                *created_ids = fresh;
+                tracing::debug!("PasteNodes {} entries under {:?}", entries.len(), parent_id);
+                Ok(())
+            }
             EditorCommand::MoveNode {
                 parent_id,
                 child_id,
@@ -1050,6 +1104,50 @@ impl EditorCommand {
                 Ok(())
             }
         }
+    }
+
+    /// Applies the animation-map half of this command (pat-0q2kx.12).
+    ///
+    /// Mirrors [`execute_tilemap`](Self::execute_tilemap) for
+    /// `EditorState::animations`: every non-animation command is a no-op, so
+    /// `undo_one`/`redo_one` can call this unconditionally.
+    pub fn execute_animation(
+        &mut self,
+        animations: &mut std::collections::HashMap<String, gdscene::animation::Animation>,
+    ) -> EditorResult<()> {
+        if let EditorCommand::AnimationEdit {
+            animation, after, ..
+        } = self
+        {
+            animations.insert(animation.clone(), (**after).clone());
+        }
+        Ok(())
+    }
+
+    /// Reverses the animation-map half of this command (pat-0q2kx.12).
+    ///
+    /// A `before` of `None` means the animation did not exist prior to the
+    /// edit, so undoing removes it rather than restoring an empty one.
+    pub fn undo_animation(
+        &mut self,
+        animations: &mut std::collections::HashMap<String, gdscene::animation::Animation>,
+    ) -> EditorResult<()> {
+        if let EditorCommand::AnimationEdit {
+            animation, before, ..
+        } = self
+        {
+            match before {
+                Some(prev) => {
+                    animations.insert(animation.clone(), (**prev).clone());
+                }
+                None => {
+                    // `as_str()` rather than relying on a `&mut String` -> `&String`
+                    // reborrow being inferred at the `Borrow<Q>` call.
+                    animations.remove(animation.as_str());
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn execute_tilemap(
@@ -1237,7 +1335,10 @@ impl EditorCommand {
                 node.set_name(old_name.as_str());
                 Ok(())
             }
+            // Reversed by `undo_animation` against the animation map.
+            EditorCommand::AnimationEdit { .. } => Ok(()),
             EditorCommand::DuplicateNode { created_ids, .. }
+            | EditorCommand::PasteNodes { created_ids, .. }
             | EditorCommand::InstanceScene { created_ids, .. } => {
                 // Remove all created nodes in reverse order (children first).
                 for &id in created_ids.iter().rev() {
@@ -1325,6 +1426,10 @@ impl EditorCommand {
             EditorCommand::TileMapPaint { .. } => "Paint tile".into(),
             EditorCommand::TileMapFill { .. } => "Fill tiles".into(),
             EditorCommand::TileMapResize { .. } => "Resize tilemap".into(),
+            EditorCommand::AnimationEdit { label, .. } => label.clone(),
+            EditorCommand::PasteNodes { created_ids, .. } => {
+                format!("Paste {} node(s)", created_ids.len())
+            }
             EditorCommand::MoveNode { .. } => "Move node".into(),
             EditorCommand::ConnectSignal {
                 signal_name,

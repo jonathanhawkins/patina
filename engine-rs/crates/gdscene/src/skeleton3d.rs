@@ -83,13 +83,52 @@ pub fn add_bone(tree: &mut SceneTree, node_id: NodeId, name: &str) -> usize {
 }
 
 /// Returns the number of bones in the skeleton.
+///
+/// [`add_bone`] maintains an explicit `_bone_count`, which wins when present. A
+/// skeleton loaded from a `.tscn` has no such key — Godot writes only the
+/// `bones/{idx}/…` records and derives the count from them — so the count is
+/// inferred by walking consecutive `bones/{idx}/name` entries (pat-0q2kx.3).
+/// Without this, every bone API on a scene-loaded `Skeleton3D` sees zero bones.
 pub fn get_bone_count(tree: &SceneTree, node_id: NodeId) -> usize {
-    tree.get_node(node_id)
-        .map(|n| match n.get_property(BONE_COUNT_KEY) {
-            Variant::Int(c) => c.max(0) as usize,
-            _ => 0,
-        })
-        .unwrap_or(0)
+    let Some(node) = tree.get_node(node_id) else {
+        return 0;
+    };
+    if node.has_property(BONE_COUNT_KEY) {
+        if let Variant::Int(c) = node.get_property(BONE_COUNT_KEY) {
+            return c.max(0) as usize;
+        }
+    }
+    // Fast path: no bone records at all (the common case for every non-skeleton
+    // node this is asked about).
+    if !node.has_property(&bone_name_key(0)) {
+        return 0;
+    }
+    let mut count = 1usize;
+    while node.has_property(&bone_name_key(count)) {
+        count += 1;
+    }
+    count
+}
+
+/// Materializes the inferred bone count of a scene-loaded skeleton into the
+/// explicit `_bone_count` key (pat-0q2kx.3).
+///
+/// [`get_bone_count`] can infer the count from the `bones/{idx}/…` records a
+/// `.tscn` carries, but that scan runs on every bone query. Godot materializes
+/// the bone array once at load; this does the same the first time the runtime
+/// touches the skeleton, so the per-frame pose walks stay O(1) per lookup.
+pub fn cache_bone_count(tree: &mut SceneTree, node_id: NodeId) {
+    let already = tree
+        .get_node(node_id)
+        .map(|n| n.has_property(BONE_COUNT_KEY))
+        .unwrap_or(true);
+    if already {
+        return;
+    }
+    let count = get_bone_count(tree, node_id);
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(BONE_COUNT_KEY, Variant::Int(count as i64));
+    }
 }
 
 /// Finds a bone by name, returning its index or `None`.
@@ -372,6 +411,44 @@ pub fn bone_pose_array(tree: &SceneTree, node_id: NodeId) -> Vec<Transform3D> {
     let count = get_bone_count(tree, node_id);
     (0..count)
         .map(|i| get_bone_global_pose(tree, node_id, i))
+        .collect()
+}
+
+/// Composes bone `idx`'s **rest** transform up the parent chain, ignoring any
+/// pose override.
+///
+/// This is `get_bone_global_pose` evaluated at the bind pose — Godot's
+/// `Skeleton3D.get_bone_global_rest()`. It is what a default `Skin` is built
+/// from: each bind's inverse bind matrix is the inverse of this transform.
+pub fn get_bone_global_rest(tree: &SceneTree, node_id: NodeId, idx: usize) -> Transform3D {
+    let count = get_bone_count(tree, node_id);
+    if idx >= count {
+        return Transform3D::IDENTITY;
+    }
+    let mut chain = Vec::new();
+    let mut current = idx as i64;
+    while current >= 0 && (current as usize) < count {
+        chain.push(current as usize);
+        current = get_bone_parent(tree, node_id, current as usize);
+    }
+    chain.reverse();
+
+    let mut global = Transform3D::IDENTITY;
+    for bone_idx in chain {
+        global = global * get_bone_rest(tree, node_id, bone_idx);
+    }
+    global
+}
+
+/// Gathers the global **rest** transform of every bone, indexed by bone index.
+///
+/// Mirrors [`bone_pose_array`] for the bind pose. Godot's
+/// `Skeleton3D.create_skin_from_rest_transforms()` builds its `Skin` from
+/// exactly this array.
+pub fn bone_rest_array(tree: &SceneTree, node_id: NodeId) -> Vec<Transform3D> {
+    let count = get_bone_count(tree, node_id);
+    (0..count)
+        .map(|i| get_bone_global_rest(tree, node_id, i))
         .collect()
 }
 
@@ -768,6 +845,168 @@ fn solve_ccd(
             let mut new_pose = pose;
             new_pose.basis = frame.inverse() * delta * frame * pose.basis;
             set_bone_pose(tree, skeleton_id, joint, new_pose);
+        }
+    }
+}
+
+// ===========================================================================
+// Per-frame runtime pass (pat-0q2kx.3)
+// ===========================================================================
+
+/// Godot's `Skeleton3D` class name.
+pub const SKELETON_CLASS: &str = "Skeleton3D";
+/// Godot's `BoneAttachment3D` class name.
+pub const BONE_ATTACHMENT_CLASS: &str = "BoneAttachment3D";
+
+/// Returns every `Skeleton3D` node in the tree, in tree order.
+pub fn skeletons_in_tree(tree: &SceneTree) -> Vec<NodeId> {
+    tree.all_nodes_in_tree_order()
+        .into_iter()
+        .filter(|&id| {
+            tree.get_node(id)
+                .map(|n| n.class_name() == SKELETON_CLASS)
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Routes `AnimationPlayer` 3D bone tracks onto `Skeleton3D` bone poses
+/// (pat-0q2kx.3).
+///
+/// In Godot a skeletal clip keys `Skeleton3D:BoneName` with `position_3d` /
+/// `rotation_3d` / `scale_3d` tracks; the mixer writes them through
+/// `set_bone_pose_position/_rotation/_scale` rather than as node properties,
+/// which is why a keyframed rig deforms at all. The generic property-track path
+/// cannot do this — it has no notion of a bone — so this pass pairs each sampled
+/// value with its track type (`AnimationPlayer::current_track_types`) and writes
+/// the bone components for any track whose target resolves to a `Skeleton3D`
+/// whose bone names include the track's sub-path.
+///
+/// Runs *before* [`process_modifiers`], matching Godot's order: modifiers (IK)
+/// layer on top of the animated pose rather than being overwritten by it.
+///
+/// NOTE: `SceneTree::process_animations` runs first and, having no bone concept,
+/// also drops each bone track's value into a same-named node property on the
+/// `Skeleton3D` (`"Tip"`, etc.). That stray property is inert — nothing reads
+/// it — but suppressing it belongs in the property-track loop itself and is left
+/// as a follow-up.
+pub fn apply_animation_bone_tracks(tree: &mut SceneTree) {
+    use crate::animation::TrackType;
+    use std::collections::HashMap;
+
+    fn is_bone_track(t: TrackType) -> bool {
+        matches!(
+            t,
+            TrackType::Position3D | TrackType::Rotation3D | TrackType::Scale3D
+        )
+    }
+
+    // Gather while the tree is only borrowed immutably, then apply.
+    let mut writes: Vec<(NodeId, usize, TrackType, Variant)> = Vec::new();
+    for id in tree.all_nodes_in_tree_order() {
+        let player = match tree.get_animation_player(id) {
+            Some(p) => p,
+            None => continue,
+        };
+        let types: HashMap<(String, String), TrackType> = player
+            .current_track_types()
+            .into_iter()
+            .filter(|(_, _, t)| is_bone_track(*t))
+            .map(|(n, p, t)| ((n, p), t))
+            .collect();
+        if types.is_empty() {
+            continue;
+        }
+        // Same base-node resolution the property-track path uses: the player's
+        // `root_node`, relative to the node the player is attached to.
+        let root_node = player.root_node.clone();
+        let base = if root_node.is_empty() || root_node == "." {
+            id
+        } else {
+            tree.get_node_or_null(id, &root_node).unwrap_or(id)
+        };
+
+        for (track_node, prop, value) in player.get_current_values_targeted() {
+            let track_type = match types.get(&(track_node.clone(), prop.clone())) {
+                Some(t) => *t,
+                None => continue,
+            };
+            let target = if track_node.is_empty() || track_node == "." {
+                base
+            } else {
+                match tree.get_node_or_null(base, &track_node) {
+                    Some(t) => t,
+                    None => continue,
+                }
+            };
+            if tree.get_node(target).map(|n| n.class_name()) != Some(SKELETON_CLASS) {
+                continue;
+            }
+            // The track's sub-path names the bone (`Skeleton3D:BoneName`).
+            let bone = match find_bone(tree, target, &prop) {
+                Some(b) => b,
+                None => continue,
+            };
+            writes.push((target, bone, track_type, value));
+        }
+    }
+
+    for (skeleton, bone, track_type, value) in writes {
+        match (track_type, value) {
+            (TrackType::Position3D, Variant::Vector3(v)) => {
+                set_bone_pose_position(tree, skeleton, bone, v)
+            }
+            (TrackType::Rotation3D, Variant::Quaternion(q)) => {
+                set_bone_pose_rotation(tree, skeleton, bone, q)
+            }
+            (TrackType::Scale3D, Variant::Vector3(v)) => {
+                set_bone_pose_scale(tree, skeleton, bone, v)
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Runs the per-frame `Skeleton3D` update for every skeleton in the tree
+/// (pat-0q2kx.3).
+///
+/// This is the runtime caller Godot has as `NOTIFICATION_UPDATE_SKELETON`
+/// (`upstream/godot/scene/3d/skeleton_3d.cpp`) and Patina previously lacked, so
+/// [`process_modifiers`] and [`update_bone_attachment`] never ran outside tests
+/// and a rigged scene stayed frozen at its rest pose. Per skeleton, in Godot's
+/// order:
+///
+/// 1. animated bone poses ([`apply_animation_bone_tracks`], run once for the
+///    whole tree since one player can drive several skeletons),
+/// 2. the modifier stack ([`process_modifiers`] — IK on top of animation),
+/// 3. `BoneAttachment3D` children, which snap to their bone's final global pose.
+///
+/// The resulting poses are what the render bridge reads via [`bone_pose_array`]
+/// to skin bound meshes.
+pub fn process_skeletons(tree: &mut SceneTree) {
+    let skeletons = skeletons_in_tree(tree);
+    for &skeleton in &skeletons {
+        cache_bone_count(tree, skeleton);
+    }
+
+    apply_animation_bone_tracks(tree);
+
+    for skeleton in skeletons {
+        process_modifiers(tree, skeleton);
+
+        // Godot's BoneAttachment3D reads its bone from its parent Skeleton3D.
+        let children = tree
+            .get_node(skeleton)
+            .map(|n| n.children().to_vec())
+            .unwrap_or_default();
+        for child in children {
+            let is_attachment = tree
+                .get_node(child)
+                .map(|n| n.class_name() == BONE_ATTACHMENT_CLASS)
+                .unwrap_or(false);
+            if is_attachment {
+                update_bone_attachment(tree, skeleton, child);
+            }
         }
     }
 }
@@ -1401,5 +1640,175 @@ mod tests {
         let applied = update_bone_attachment(&mut tree, skel, attach)
             .expect("attachment resolves bone by name");
         assert_eq!(applied.origin, pos);
+    }
+
+    // -- Per-frame runtime pass (pat-0q2kx.3) --------------------------------
+
+    /// Builds a two-bone skeleton the way a `.tscn` does: `bones/{idx}/…`
+    /// records with **no** `_bone_count` key.
+    fn scene_style_skeleton(tree: &mut SceneTree) -> NodeId {
+        let root = tree.root_id();
+        let skel = tree
+            .add_child(root, Node::new("Skeleton3D", "Skeleton3D"))
+            .unwrap();
+        let node = tree.get_node_mut(skel).unwrap();
+        node.set_property("bones/0/name", Variant::String("Root".into()));
+        node.set_property("bones/0/parent", Variant::Int(-1));
+        node.set_property("bones/0/rest", Variant::Transform3D(Transform3D::IDENTITY));
+        node.set_property("bones/1/name", Variant::String("Tip".into()));
+        node.set_property("bones/1/parent", Variant::Int(0));
+        node.set_property(
+            "bones/1/rest",
+            Variant::Transform3D(Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(0.0, 2.0, 0.0),
+            }),
+        );
+        skel
+    }
+
+    #[test]
+    fn bone_count_infers_from_scene_loaded_records() {
+        // A `.tscn` Skeleton3D carries no `_bone_count`; without inference every
+        // bone API on a scene-loaded rig sees zero bones.
+        let mut tree = make_tree();
+        let skel = scene_style_skeleton(&mut tree);
+        assert_eq!(get_bone_count(&tree, skel), 2);
+        assert_eq!(get_bone_name(&tree, skel, 1).as_deref(), Some("Tip"));
+        assert_eq!(find_bone(&tree, skel, "Tip"), Some(1));
+        assert_eq!(get_bone_parent(&tree, skel, 1), 0);
+    }
+
+    #[test]
+    fn explicit_bone_count_wins_over_inference() {
+        let mut tree = make_tree();
+        let skel = scene_style_skeleton(&mut tree);
+        // add_bone maintains the explicit key; it must remain authoritative.
+        let idx = add_bone(&mut tree, skel, "Extra");
+        assert_eq!(idx, 2, "next index continues past the inferred bones");
+        assert_eq!(get_bone_count(&tree, skel), 3);
+    }
+
+    #[test]
+    fn global_rest_ignores_pose_overrides() {
+        let mut tree = make_tree();
+        let skel = scene_style_skeleton(&mut tree);
+        set_bone_pose_position(&mut tree, skel, 1, Vector3::new(9.0, 9.0, 9.0));
+
+        // The pose moves the global *pose* but must not touch the global rest.
+        assert_ne!(
+            get_bone_global_pose(&tree, skel, 1).origin,
+            Vector3::new(0.0, 2.0, 0.0)
+        );
+        assert_eq!(
+            get_bone_global_rest(&tree, skel, 1).origin,
+            Vector3::new(0.0, 2.0, 0.0)
+        );
+        let rests = bone_rest_array(&tree, skel);
+        assert_eq!(rests.len(), 2);
+        assert_eq!(rests[0].origin, Vector3::ZERO);
+        assert_eq!(rests[1].origin, Vector3::new(0.0, 2.0, 0.0));
+    }
+
+    #[test]
+    fn process_skeletons_runs_modifiers_and_attachments() {
+        let mut tree = make_tree();
+        let skel = scene_style_skeleton(&mut tree);
+
+        // A FABRIK3D aimed sideways, plus an attachment riding the tip bone.
+        let ik = tree.add_child(skel, Node::new("IK", "FABRIK3D")).unwrap();
+        {
+            let n = tree.get_node_mut(ik).unwrap();
+            n.set_property(IK_ROOT_BONE_KEY, Variant::Int(0));
+            n.set_property(IK_TIP_BONE_KEY, Variant::Int(1));
+            n.set_property(IK_ITERATIONS_KEY, Variant::Int(10));
+            n.set_property(
+                IK_TARGET_POSITION_KEY,
+                Variant::Vector3(Vector3::new(2.0, 0.0, 0.0)),
+            );
+        }
+        let attach = tree
+            .add_child(skel, Node::new("Hat", "BoneAttachment3D"))
+            .unwrap();
+        set_bone_attachment_bone_name(&mut tree, attach, "Tip");
+
+        let before = get_bone_global_pose(&tree, skel, 1).origin;
+        process_skeletons(&mut tree);
+        let after = get_bone_global_pose(&tree, skel, 1).origin;
+
+        assert_ne!(
+            before, after,
+            "the modifier stack must run without a manual process_modifiers call"
+        );
+        // The attachment followed the bone to its solved pose in the same pass.
+        match tree.get_node(attach).unwrap().get_property("transform") {
+            Variant::Transform3D(t) => assert_eq!(t.origin, after),
+            other => panic!("attachment transform not updated: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn process_skeletons_skips_non_skeleton_nodes() {
+        // A BoneAttachment3D parented to something that is not a Skeleton3D, and
+        // a modifier under a plain Node3D, must both be left alone.
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let plain = tree.add_child(root, Node::new("Plain", "Node3D")).unwrap();
+        let attach = tree
+            .add_child(plain, Node::new("Hat", "BoneAttachment3D"))
+            .unwrap();
+        set_bone_attachment_bone_name(&mut tree, attach, "Tip");
+
+        process_skeletons(&mut tree);
+
+        assert_eq!(
+            tree.get_node(attach).unwrap().get_property("transform"),
+            Variant::Nil,
+            "a BoneAttachment3D outside a Skeleton3D must not be repositioned"
+        );
+    }
+
+    #[test]
+    fn animation_bone_tracks_write_bone_poses() {
+        use crate::animation::{Animation, AnimationPlayer, AnimationTrack, KeyFrame, TrackType};
+
+        let mut tree = make_tree();
+        let skel = scene_style_skeleton(&mut tree);
+        let root = tree.root_id();
+        let player_node = tree
+            .add_child(root, Node::new("AnimationPlayer", "AnimationPlayer"))
+            .unwrap();
+
+        // Godot keys a skeletal clip as `Skeleton3D:BoneName` with a
+        // position_3d / rotation_3d / scale_3d track.
+        let mut anim = Animation::new("pose", 1.0);
+        let mut pos = AnimationTrack::with_type("Skeleton3D", "Tip", TrackType::Position3D);
+        pos.add_keyframe(KeyFrame::linear(
+            0.0,
+            Variant::Vector3(Vector3::new(3.0, 0.0, 0.0)),
+        ));
+        anim.tracks.push(pos);
+
+        let mut player = AnimationPlayer::new();
+        player.root_node = "..".into();
+        player.add_animation(anim);
+        player.play("pose");
+        tree.attach_animation_player(player_node, player).unwrap();
+
+        // Before: the bone sits at its rest pose.
+        assert_eq!(get_bone_pose_position(&tree, skel, 1), Vector3::ZERO);
+
+        apply_animation_bone_tracks(&mut tree);
+
+        assert_eq!(
+            get_bone_pose_position(&tree, skel, 1),
+            Vector3::new(3.0, 0.0, 0.0),
+            "a position_3d track targeting Skeleton3D:Tip must write the bone pose"
+        );
+        assert_eq!(
+            get_bone_global_pose(&tree, skel, 1).origin,
+            Vector3::new(3.0, 2.0, 0.0),
+            "the animated pose must compose with the bone's rest"
+        );
     }
 }

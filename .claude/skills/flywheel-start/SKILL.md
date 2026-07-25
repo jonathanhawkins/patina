@@ -118,10 +118,12 @@ ROWS="${GRID%%x*}"
 COLS="${GRID##*x}"
 WORKERS=$((ROWS * COLS))
 
+# Workers run Opus 5 (explicit full model id, not the `opus` alias, so it stays
+# pinned to Opus 5 even as "latest Opus" shifts).
 /Users/bone/dev/games/patina/apps/orchestrator/crate/target/release/patina-orchestrator launch \
   --session "$SESSION" \
   --workers "$WORKERS" \
-  --model "claude --model opus --dangerously-skip-permissions" \
+  --model "claude --model claude-opus-5 --dangerously-skip-permissions" \
   --project-root /Users/bone/dev/games/patina \
   --with-coordinator \
   --interval 8 \

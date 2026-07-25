@@ -144,23 +144,56 @@ impl AudioServerBridge {
                 self.last_mix = self.server.mix(frames);
             }
         }
+
+        // Publish each player's live position AFTER mixing, so a script reading
+        // `get_playback_position()` next frame sees the position this frame's
+        // audio actually reached (Godot `AudioStreamPlayer.get_playback_position`,
+        // pat-0q2kx.5). Mixing is what advances the playhead, so publishing
+        // before it would report last frame's value.
+        for id in &player_ids {
+            self.publish_playback_position(tree, *id);
+        }
+    }
+
+    /// Writes the live playback position of `id`'s voice onto its node as
+    /// `playback_position` (seconds). A voice that has ended or was never
+    /// started reports `0.0`, matching Godot.
+    fn publish_playback_position(&mut self, tree: &mut SceneTree, id: NodeId) {
+        let pos = self
+            .players
+            .get(&id)
+            .and_then(|p| p.playback_id())
+            .and_then(|pid| self.server.stream_position(pid))
+            .unwrap_or(0.0);
+        if let Some(node) = tree.get_node_mut(id) {
+            node.set_property("playback_position", Variant::Float(f64::from(pos)));
+        }
     }
 
     fn sync_player_node(&mut self, tree: &mut SceneTree, id: NodeId) {
-        let (stream_path, volume_db, autoplay, playing_prop, bus) = {
+        let (stream_path, volume_db, autoplay, playing_prop, bus, seek_request, paused_prop, pitch) = {
             let Some(node) = tree.get_node(id) else {
                 return;
             };
             let as_bool = |key: &str| matches!(node.get_property(key), Variant::Bool(true));
-            let stream_path = match node.get_property("stream") {
-                Variant::String(s) => s,
-                _ => String::new(),
+            let as_f32 = |key: &str| match node.get_property(key) {
+                Variant::Float(f) => Some(f as f32),
+                Variant::Int(i) => Some(i as f32),
+                _ => None,
             };
-            let volume_db = match node.get_property("volume_db") {
-                Variant::Float(f) => f as f32,
-                Variant::Int(i) => i as f32,
-                _ => 0.0,
+            // Godot's `stream` is a `Ref<AudioStream>`; in a `.tscn` it is
+            // `ExtResource("id")` pointing at an `[ext_resource]` header, not a
+            // path. `PackedScene` resolves that reference to the referenced file
+            // under an `__extres__stream` companion, so prefer it and fall back
+            // to a plain path string (the programmatic form) (pat-0q2kx.6).
+            let stream_path = match node.get_property("__extres__stream") {
+                Variant::String(s) if !s.is_empty() => s,
+                _ => match node.get_property("stream") {
+                    Variant::String(s) => s,
+                    _ => String::new(),
+                },
             };
+            let volume_db = as_f32("volume_db").unwrap_or(0.0);
             let bus = match node.get_property("bus") {
                 Variant::String(s) => s,
                 _ => "Master".to_owned(),
@@ -171,11 +204,36 @@ impl AudioServerBridge {
                 as_bool("autoplay"),
                 as_bool("playing"),
                 bus,
+                // `seek_request` is the interpreter's one-shot channel for
+                // `AudioStreamPlayer.seek(pos)` / `play(from)`; absent (Nil)
+                // means "no seek this frame". Drained below.
+                as_f32("seek_request"),
+                as_bool("stream_paused"),
+                // Godot's default pitch_scale is 1.0, not 0.
+                as_f32("pitch_scale").unwrap_or(1.0),
             )
         };
 
+        // Godot pauses a player's stream when the tree pauses and the node's
+        // effective process mode cannot run (audio_stream_player_internal.cpp:97-131
+        // `set_stream_paused(!node->can_process())` on NOTIFICATION_PAUSED).
+        let can_process = tree.should_process_node(id);
+
         let first_sight = self.seen.insert(id);
         let resolved = if stream_path.is_empty() {
+            None
+        } else if is_unresolved_resource_ref(&stream_path) {
+            // The scene named a resource but nothing resolved it to a file. Say
+            // so — this is precisely the failure that used to present as a
+            // player that simply never made a sound (pat-0q2kx.6).
+            if first_sight {
+                tracing::warn!(
+                    node = %tree.get_node(id).map(|n| n.name().to_owned()).unwrap_or_default(),
+                    stream = %stream_path,
+                    "AudioStreamPlayer stream is an unresolved resource reference; \
+                     the player will be silent"
+                );
+            }
             None
         } else {
             Some(self.resolve_stream_path(&stream_path))
@@ -192,29 +250,43 @@ impl AudioServerBridge {
         // no buffer was injected directly.
         if first_sight && !player.has_stream() {
             if let Some(path) = resolved {
-                if let Ok(buffer) = self.importer.load_buffer(&path) {
-                    player.set_stream(buffer);
+                // A failed import used to be discarded here, so a missing or
+                // undecodable file was indistinguishable from success: the
+                // player just stayed silent. Report it (pat-0q2kx.6).
+                match self.importer.load_buffer(&path) {
+                    Ok(buffer) => player.set_stream(buffer),
+                    Err(err) => tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "AudioStreamPlayer stream failed to load; the player will be silent"
+                    ),
                 }
             }
         }
 
-        let audible = player.is_playing(&self.server);
+        // A *paused* voice is still alive — it just mixes to silence. Branching
+        // on `is_playing` alone (which is false for both "paused" and "gone")
+        // would make a paused stream look like it ran out, stopping it and
+        // firing `finished`. Distinguish the two by asking the server for the
+        // voice's actual state (pat-0q2kx.5).
+        let voice_state = player
+            .playback_id()
+            .and_then(|pid| self.server.stream_state(pid));
+        let voice_alive = voice_state.is_some();
+
         if first_sight && (autoplay || playing_prop) {
             if player.play(&mut self.server).is_some() {
                 if let Some(node) = tree.get_node_mut(id) {
                     node.set_property("playing", Variant::Bool(true));
                 }
             }
-            return;
-        }
-
-        if playing_prop && !audible && !player.playing_flag() {
+        } else if playing_prop && !voice_alive && !player.playing_flag() {
             // Script flipped `playing` on: start the stream.
             player.play(&mut self.server);
-        } else if !playing_prop && audible {
-            // Script flipped `playing` off: stop the stream.
+        } else if !playing_prop && voice_alive {
+            // Script flipped `playing` off: stop the stream, paused or not.
             player.stop(&mut self.server);
-        } else if player.playing_flag() && !audible {
+        } else if player.playing_flag() && !voice_alive {
             // Stream ran out on its own: reflect that and notify scripts.
             player.stop(&mut self.server);
             if let Some(node) = tree.get_node_mut(id) {
@@ -222,6 +294,40 @@ impl AudioServerBridge {
             }
             tree.emit_signal(id, "finished", &[]);
         }
+
+        // -- live-voice sync -------------------------------------------------
+        // Everything below drives the voice that is playing *right now*. Before
+        // pat-0q2kx.5 these node properties were written by the interpreter and
+        // read by nobody, so `seek`, `stream_paused` and `pitch_scale` silently
+        // no-opped behind green tests.
+        let Some(pid) = player.playback_id() else {
+            return;
+        };
+
+        // Volume and pitch track the node every frame, not just at `play()`, so
+        // assigning `pitch_scale`/`volume_db` mid-playback is audible.
+        player.set_pitch_scale(pitch);
+        if let Some(stream) = self.server.stream_mut(pid) {
+            stream.set_volume_db(volume_db);
+            stream.set_pitch_scale(pitch.max(0.01));
+            if let Some(pos) = seek_request {
+                stream.seek(pos);
+            }
+        }
+
+        // Drain the one-shot seek channel so the same request is not re-applied
+        // every frame (which would pin the playhead in place).
+        if seek_request.is_some() {
+            if let Some(node) = tree.get_node_mut(id) {
+                node.set_property("seek_request", Variant::Nil);
+            }
+        }
+
+        // Effective pause = the script's `stream_paused` OR the tree pausing a
+        // node that cannot process. Pausing preserves position; `playing` stays
+        // true so `is_playing()` still reports true, as Godot does.
+        self.server
+            .set_stream_paused(pid, paused_prop || !can_process);
     }
 }
 
@@ -229,6 +335,22 @@ impl Default for AudioServerBridge {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Whether `raw` is still a `.tscn` resource *reference* rather than a usable
+/// path (pat-0q2kx.6).
+///
+/// Both spellings occur: the raw call form this project's `.tscn` parser stores
+/// (`ExtResource("1_abc")`) and the `ExtResource:1_abc` form `gdresource`'s
+/// value parser produces; `SubResource` appears the same way for streams with
+/// embedded data. Treating any of them as a filename would hand the importer a
+/// bogus path, which is how this failure used to hide.
+fn is_unresolved_resource_ref(raw: &str) -> bool {
+    let t = raw.trim();
+    t.starts_with("ExtResource(")
+        || t.starts_with("ExtResource:")
+        || t.starts_with("SubResource(")
+        || t.starts_with("SubResource:")
 }
 
 impl std::fmt::Debug for AudioServerBridge {

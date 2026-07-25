@@ -183,6 +183,9 @@ pub enum VariantType {
     Array,
     Dictionary,
     Callable,
+    /// A bound `object.signal_name` pair (Godot's `Signal` builtin).
+    /// Placed next to `Callable` to mirror Godot's own adjacency.
+    Signal,
     Resource,
     PackedByteArray,
     PackedInt32Array,
@@ -241,6 +244,19 @@ pub enum Variant {
     Dictionary(Dictionary),
     /// A callable reference (method or lambda).
     Callable(Box<CallableRef>),
+    /// A signal bound to the object that declares it (Godot's `Signal`
+    /// builtin), as produced by `object.signal_name` (pat-0q2kx.9).
+    ///
+    /// The object is carried as a raw `ObjectId` rather than a reference so a
+    /// `Signal` stays a plain value. Binding the object is the whole point:
+    /// before this, a bareword signal resolved to a name-only await token, so
+    /// `await $ButtonA.pressed` was resumed by `$ButtonB.pressed` too.
+    Signal {
+        /// Raw `ObjectId` of the object that owns the signal.
+        object_id: u64,
+        /// The signal's name.
+        name: String,
+    },
     /// A loaded resource.
     Resource(Box<ResourceRef>),
     /// A tightly-packed array of bytes (`PackedByteArray`).
@@ -298,6 +314,7 @@ impl Variant {
             Self::PackedVector2Array(_) => VariantType::PackedVector2Array,
             Self::PackedVector3Array(_) => VariantType::PackedVector3Array,
             Self::PackedColorArray(_) => VariantType::PackedColorArray,
+            Self::Signal { .. } => VariantType::Signal,
         }
     }
 
@@ -321,6 +338,9 @@ impl Variant {
             Self::Array(a) => !a.is_empty(),
             Self::Dictionary(d) => !d.is_empty(),
             Self::Callable(_) => true,
+            // Godot: a Signal is falsy only when null — i.e. bound to nothing.
+            // `Signal.is_null()` reports the same condition.
+            Self::Signal { object_id, name } => *object_id != 0 && !name.is_empty(),
             Self::Resource(_) => true,
             // Packed arrays follow Array truthiness: empty is falsy.
             Self::PackedByteArray(v) => !v.is_empty(),
@@ -786,6 +806,9 @@ impl fmt::Display for Variant {
             Self::PackedVector2Array(v) => write!(f, "[PackedVector2Array; len={}]", v.len()),
             Self::PackedVector3Array(v) => write!(f, "[PackedVector3Array; len={}]", v.len()),
             Self::PackedColorArray(v) => write!(f, "[PackedColorArray; len={}]", v.len()),
+            Self::Signal { object_id, name } => {
+                write!(f, "Signal(<Object#{object_id}>, \"{name}\")")
+            }
         }
     }
 }
@@ -814,6 +837,7 @@ impl fmt::Display for VariantType {
             Self::Array => "Array",
             Self::Dictionary => "Dictionary",
             Self::Callable => "Callable",
+            Self::Signal => "Signal",
             Self::Resource => "Resource",
             Self::PackedByteArray => "PackedByteArray",
             Self::PackedInt32Array => "PackedInt32Array",

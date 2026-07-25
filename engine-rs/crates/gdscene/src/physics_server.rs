@@ -864,6 +864,26 @@ impl PhysicsServer {
             let was_on_floor = bool_prop(tree, node_id, "is_on_floor", false);
             let stored_platform_vel = vec2_prop(tree, node_id, "platform_velocity", Vector2::ZERO);
 
+            // Godot only moves a CharacterBody2D when the script calls
+            // `move_and_slide()`; the engine never auto-moves it. Patina used to
+            // move every kinematic body with a velocity, so a scripted body
+            // drifted whether or not it asked to (pat-0q2kx.16).
+            //
+            // The gate applies only to **scripted** bodies: a body with no
+            // script has nothing that could call `move_and_slide`, and scenes
+            // and tests that drive `velocity` directly rely on the old
+            // behavior, so those keep auto-moving.
+            if tree.has_script(node_id) {
+                if !bool_prop(tree, node_id, "_move_and_slide_requested", false) {
+                    continue;
+                }
+                // One-shot: the request is consumed by this step, so a script
+                // that stops calling move_and_slide stops moving.
+                if let Some(node) = tree.get_node_mut(node_id) {
+                    node.set_property("_move_and_slide_requested", Variant::Bool(false));
+                }
+            }
+
             // Skip idle bodies unless a moving platform would still carry them.
             if velocity.length_squared() < 1e-8 && stored_platform_vel.length_squared() < 1e-8 {
                 continue;

@@ -161,6 +161,25 @@ impl PackedScene {
                             tracing::warn!("skipping unparseable multi-line value for key '{key}'");
                         }
                     }
+                } else if let Some(ref sub_id) = current_sub {
+                    // `[sub_resource]` bodies span lines too: Godot writes an
+                    // Animation's `tracks/N/keys` dictionary and an
+                    // AnimationLibrary's `_data` map across several lines
+                    // (pat-0q2kx.1). Without this branch the whole keyframe
+                    // table was silently dropped.
+                    match parse_variant_value(acc.trim()) {
+                        Ok(value) => {
+                            sub_resource_props
+                                .entry(sub_id.clone())
+                                .or_default()
+                                .insert(key, value);
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "skipping unparseable multi-line sub-resource value for key '{key}'"
+                            );
+                        }
+                    }
                 }
                 continue;
             }
@@ -334,11 +353,20 @@ impl PackedScene {
                 // Property lines inside a [sub_resource] section (e.g. a
                 // BoxShape3D's `size`), kept so the gizmo can use real extents.
                 if let Some((key, value_str)) = line.split_once('=') {
-                    if let Ok(value) = parse_variant_value(value_str.trim()) {
+                    let key = key.trim();
+                    let value_str = value_str.trim();
+                    // Container values continue onto following lines, exactly as
+                    // for node properties above (Animation `tracks/N/keys`,
+                    // AnimationLibrary `_data`).
+                    if bracket_depth(value_str) > 0 {
+                        pending_prop = Some((key.to_string(), value_str.to_string()));
+                        continue;
+                    }
+                    if let Ok(value) = parse_variant_value(value_str) {
                         sub_resource_props
                             .entry(sub_id.clone())
                             .or_default()
-                            .insert(key.trim().to_string(), value);
+                            .insert(key.to_string(), value);
                     }
                 }
             }
@@ -460,6 +488,39 @@ impl PackedScene {
                 .collect();
             for (k, v) in params {
                 tmpl.properties.insert(k, v);
+            }
+        }
+
+        // Resolve every `prop = ExtResource("id")` reference to the referenced
+        // resource's path, stored under an `__extres__<prop>` companion
+        // (pat-0q2kx.6).
+        //
+        // Godot's `[ext_resource]` header carries the `path` for each id, and a
+        // node property that names one (`stream`, `mesh`, `texture`, …) is a
+        // `Ref<Resource>` to that file. Until now only `script` was resolved, so
+        // every other consumer saw the literal string `ExtResource("id")` and
+        // silently failed to load anything — an `AudioStreamPlayer` in a genuine
+        // Godot scene was mute for exactly this reason.
+        //
+        // The companion key (rather than overwriting `prop`) keeps the raw ref
+        // intact for scene round-trip and the inspector, matching how
+        // `__viewport_mesh__` / `__resref__<prop>` already work.
+        for tmpl in &mut templates {
+            let resolved: Vec<(String, String)> = tmpl
+                .properties
+                .iter()
+                .filter_map(|(k, v)| {
+                    let s = match v {
+                        Variant::String(s) => s,
+                        _ => return None,
+                    };
+                    let id = parse_ext_resource_ref(s)?;
+                    let entry = ext_resources.get(&id)?;
+                    Some((format!("__extres__{k}"), entry.path.clone()))
+                })
+                .collect();
+            for (key, path) in resolved {
+                tmpl.properties.insert(key, Variant::String(path));
             }
         }
 
@@ -1018,9 +1079,13 @@ fn parse_groups_attr(raw: &str) -> Vec<String> {
 /// Parses an `ExtResource("id")` value string and returns the id.
 fn parse_ext_resource_ref(value: &str) -> Option<String> {
     let trimmed = value.trim();
-    let inner = trimmed.strip_prefix("ExtResource(")?;
-    let inner = inner.strip_suffix(')')?;
-    let id = inner.trim().trim_matches('"');
+    // Two spellings reach us: the raw `.tscn` call form stored by this parser,
+    // and the `ExtResource:<id>` form `gdresource::loader::parse_variant_value`
+    // produces for sub-resource property blocks (pat-0q2kx.6).
+    let id = match trimmed.strip_prefix("ExtResource(") {
+        Some(inner) => inner.strip_suffix(')')?.trim().trim_matches('"'),
+        None => trimmed.strip_prefix("ExtResource:")?.trim(),
+    };
     if id.is_empty() {
         None
     } else {
@@ -1106,6 +1171,16 @@ pub fn add_packed_scene_to_tree(
     // Wire any signal connections from the packed scene.
     wire_connections(tree, new_root_id, &scene.connections);
 
+    // Build a real AnimationPlayer for every `AnimationPlayer` node the scene
+    // declared, from its `libraries`/`autoplay`, and start its autoplay clip
+    // (pat-0q2kx.1). Godot does this when the player enters the tree.
+    crate::animation_tscn::attach_scene_animation_players(tree, new_root_id, scene);
+
+    // Build the graph for every `AnimationTree` node from its `tree_root`
+    // sub-resources (pat-0q2kx.2). Runs after the players above because a tree
+    // resolves its clip library from the player at its `anim_player` path.
+    crate::animation_tree_tscn::attach_scene_animation_trees(tree, new_root_id, scene);
+
     // Auto-assign `current = true` to the first Camera3D in the instanced
     // scene if no camera already has it set. Godot does this automatically
     // when a Camera3D enters the viewport.
@@ -1177,6 +1252,10 @@ where
     }
 
     wire_connections(tree, new_root_id, &scene.connections);
+
+    crate::animation_tscn::attach_scene_animation_players(tree, new_root_id, scene);
+
+    crate::animation_tree_tscn::attach_scene_animation_trees(tree, new_root_id, scene);
 
     auto_assign_current_camera(tree, new_root_id);
 
@@ -3198,5 +3277,109 @@ material_override = SubResource("ShaderMaterial_1")
         assert!(scene.connections()[0].binds.is_empty());
         assert!(scene.editable_instances().is_empty());
         assert!(scene.placeholder_nodes().is_empty());
+    }
+
+    // -- ExtResource path resolution (pat-0q2kx.6) ---------------------------
+
+    /// Every `prop = ExtResource("id")` gains an `__extres__<prop>` companion
+    /// holding the path from its `[ext_resource]` header, while the raw ref
+    /// stays on the property itself. Before this, only `script` resolved, so a
+    /// scene's `stream` / `texture` / `mesh` reference was an unusable literal.
+    #[test]
+    fn ext_resource_properties_resolve_to_their_paths() {
+        let tscn = r#"[gd_scene load_steps=3 format=3]
+
+[ext_resource type="AudioStreamWAV" path="res://sfx/beep.wav" id="1_beep"]
+[ext_resource type="Texture2D" path="res://art/icon.png" id="2_icon"]
+
+[node name="World" type="Node"]
+
+[node name="Beeper" type="AudioStreamPlayer" parent="."]
+stream = ExtResource("1_beep")
+autoplay = true
+
+[node name="Icon" type="Sprite2D" parent="."]
+texture = ExtResource("2_icon")
+"#;
+        let scene = PackedScene::from_tscn(tscn).expect("parse");
+        let nodes = scene.instance().expect("instance");
+
+        let beeper = nodes.iter().find(|n| n.name() == "Beeper").expect("Beeper");
+        assert_eq!(
+            beeper.get_property("__extres__stream"),
+            Variant::String("res://sfx/beep.wav".into())
+        );
+        // The raw reference is preserved for round-trip and the inspector.
+        assert_eq!(
+            beeper.get_property("stream"),
+            Variant::String("ExtResource(\"1_beep\")".into())
+        );
+        // Non-reference properties are untouched.
+        assert_eq!(beeper.get_property("autoplay"), Variant::Bool(true));
+
+        let icon = nodes.iter().find(|n| n.name() == "Icon").expect("Icon");
+        assert_eq!(
+            icon.get_property("__extres__texture"),
+            Variant::String("res://art/icon.png".into())
+        );
+    }
+
+    /// A reference to an id with no `[ext_resource]` header resolves to
+    /// nothing rather than inventing a path.
+    #[test]
+    fn ext_resource_ref_to_unknown_id_is_not_resolved() {
+        let tscn = r#"[gd_scene format=3]
+
+[node name="World" type="Node"]
+
+[node name="Beeper" type="AudioStreamPlayer" parent="."]
+stream = ExtResource("nope")
+"#;
+        let scene = PackedScene::from_tscn(tscn).expect("parse");
+        let nodes = scene.instance().expect("instance");
+        let beeper = nodes.iter().find(|n| n.name() == "Beeper").expect("Beeper");
+        assert_eq!(beeper.get_property("__extres__stream"), Variant::Nil);
+    }
+
+    /// The companion is internal: it must never be written back out as a scene
+    /// property, or a save would invent a key Godot does not know.
+    #[test]
+    fn extres_companion_is_not_saved_back_to_tscn() {
+        let tscn = r#"[gd_scene load_steps=2 format=3]
+
+[ext_resource type="AudioStreamWAV" path="res://sfx/beep.wav" id="1_beep"]
+
+[node name="World" type="Node"]
+
+[node name="Beeper" type="AudioStreamPlayer" parent="."]
+stream = ExtResource("1_beep")
+"#;
+        let scene = PackedScene::from_tscn(tscn).expect("parse");
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).expect("instance");
+
+        let saved = crate::scene_saver::TscnSaver::save_tree(&tree, scene_root);
+        assert!(
+            !saved.contains("__extres__"),
+            "internal companion leaked into the saved scene:\n{saved}"
+        );
+    }
+
+    #[test]
+    fn parse_ext_resource_ref_accepts_both_spellings() {
+        // The `.tscn` call form this parser stores...
+        assert_eq!(
+            parse_ext_resource_ref("ExtResource(\"1_abc\")").as_deref(),
+            Some("1_abc")
+        );
+        // ...and the form `gdresource`'s value parser produces.
+        assert_eq!(
+            parse_ext_resource_ref("ExtResource:1_abc").as_deref(),
+            Some("1_abc")
+        );
+        assert_eq!(parse_ext_resource_ref("res://plain/path.wav"), None);
+        assert_eq!(parse_ext_resource_ref("SubResource(\"1\")"), None);
+        assert_eq!(parse_ext_resource_ref("ExtResource()"), None);
     }
 }

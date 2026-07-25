@@ -593,7 +593,7 @@ const BUTTON_CLASSES: &[&str] = &[
 /// Returns `true` if the node is a `BaseButton` (or a subclass such as
 /// `Button`/`CheckBox`). Checks ClassDB inheritance first, then falls back to a
 /// known-class list (mirroring [`crate::control_render`]'s control detection).
-fn node_is_base_button(tree: &SceneTree, node_id: NodeId) -> bool {
+pub fn node_is_base_button(tree: &SceneTree, node_id: NodeId) -> bool {
     tree.get_node(node_id)
         .map(|n| n.is_class("BaseButton") || BUTTON_CLASSES.contains(&n.class_name()))
         .unwrap_or(false)

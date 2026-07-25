@@ -1433,8 +1433,214 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("tip_bone", Variant::Int(-1)))
             .property(PropertyInfo::new("iterations", Variant::Int(10))),
     );
-    register_class(ClassRegistration::new("AnimationPlayer").parent("Node"));
-    register_class(ClassRegistration::new("AnimationTree").parent("Node"));
+    // Animation resources + the Node <- AnimationMixer <- Player/Tree chain
+    // (pat-0q2kx.1). `Animation` and `AnimationLibrary` were absent entirely, so
+    // `Animation.new()` was not script-constructible and a `.tscn`
+    // `[sub_resource type="Animation"]` had no class to resolve; the two mixers
+    // hung directly off `Node`, collapsing Godot's real hierarchy
+    // (upstream/godot/doc/classes/AnimationPlayer.xml inherits AnimationMixer).
+    register_class(
+        ClassRegistration::new("Animation")
+            .parent("Resource")
+            .property(PropertyInfo::new("length", Variant::Float(1.0)))
+            .property(PropertyInfo::new("loop_mode", Variant::Int(0)))
+            .property(PropertyInfo::new("step", Variant::Float(0.033_333_335)))
+            .property(PropertyInfo::new("capture_included", Variant::Bool(false))),
+    );
+    register_class(ClassRegistration::new("AnimationLibrary").parent("Resource"));
+    register_class(
+        ClassRegistration::new("AnimationMixer")
+            .parent("Node")
+            .abstract_class()
+            .property(PropertyInfo::new("active", Variant::Bool(true)))
+            .property(PropertyInfo::new("deterministic", Variant::Bool(false)))
+            .property(PropertyInfo::new("reset_on_save", Variant::Bool(true)))
+            .property(PropertyInfo::new("root_motion_local", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "root_motion_track",
+                Variant::NodePath(gdcore::node_path::NodePath::new("")),
+            ))
+            .property(PropertyInfo::new(
+                "root_node",
+                Variant::NodePath(gdcore::node_path::NodePath::new("..")),
+            ))
+            .property(PropertyInfo::new("audio_max_polyphony", Variant::Int(32)))
+            .property(PropertyInfo::new("callback_mode_process", Variant::Int(1)))
+            .property(PropertyInfo::new("callback_mode_method", Variant::Int(0)))
+            .property(PropertyInfo::new("callback_mode_discrete", Variant::Int(1)))
+            .signal(SignalInfo::new("animation_started").arg("anim_name"))
+            .signal(SignalInfo::new("animation_finished").arg("anim_name"))
+            .signal(
+                SignalInfo::new("animation_changed")
+                    .arg("old_name")
+                    .arg("new_name"),
+            )
+            .signal(SignalInfo::new("animation_libraries_updated"))
+            .signal(SignalInfo::new("animation_list_changed"))
+            .signal(SignalInfo::new("caches_cleared"))
+            .signal(SignalInfo::new("mixer_applied"))
+            .signal(SignalInfo::new("mixer_updated")),
+    );
+    register_class(
+        ClassRegistration::new("AnimationPlayer")
+            .parent("AnimationMixer")
+            .property(PropertyInfo::new(
+                "autoplay",
+                Variant::StringName(gdcore::string_name::StringName::new("")),
+            ))
+            .property(PropertyInfo::new(
+                "current_animation",
+                Variant::StringName(gdcore::string_name::StringName::new("")),
+            ))
+            .property(PropertyInfo::new("speed_scale", Variant::Float(1.0)))
+            .property(PropertyInfo::new(
+                "playback_default_blend_time",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new("playback_auto_capture", Variant::Bool(true)))
+            .property(PropertyInfo::new(
+                "movie_quit_on_finish",
+                Variant::Bool(false),
+            ))
+            .signal(SignalInfo::new("current_animation_changed").arg("name"))
+            .signal(SignalInfo::new("animation_changed").arg("old_name").arg("new_name")),
+    );
+    register_class(ClassRegistration::new("AnimationTree").parent("AnimationMixer"));
+
+    // -- Tween + the Tweener family (pat-0q2kx.4) ---------------------------
+    //
+    // The tween engine (gdscene/src/tween.rs) and its five tweener kinds have
+    // existed and been tested for a long time, but ClassDB knew none of them:
+    // `ClassDB.class_exists("Tween")` was false and the object a script gets
+    // back from `create_tween()` was not introspectable.
+    //
+    // Schema diffed against `fixtures/editor_oracle/godot_extension_api.json`.
+    // ⚠️ `Tweener` is the one ABSTRACT member — a script never constructs one;
+    // it receives them from the `tween_*` factory methods. Note also that
+    // `Tween` is a `RefCounted`, NOT a Resource: a tween is a live playback
+    // object, never saved.
+    if !class_exists("Tween") {
+        register_class(
+            ClassRegistration::new("Tween")
+                .parent("RefCounted")
+                .method(MethodInfo::new("tween_property", 4))
+                .method(MethodInfo::new("tween_interval", 1))
+                .method(MethodInfo::new("tween_callback", 1))
+                .method(MethodInfo::new("tween_method", 4))
+                .method(MethodInfo::new("tween_subtween", 1))
+                .method(MethodInfo::new("custom_step", 1))
+                .method(MethodInfo::new("stop", 0))
+                .method(MethodInfo::new("pause", 0))
+                .method(MethodInfo::new("play", 0))
+                .method(MethodInfo::new("kill", 0))
+                .method(MethodInfo::new("get_total_elapsed_time", 0))
+                .method(MethodInfo::new("is_running", 0))
+                .method(MethodInfo::new("is_valid", 0))
+                .method(MethodInfo::new("bind_node", 1))
+                .method(MethodInfo::new("set_process_mode", 1))
+                .method(MethodInfo::new("set_pause_mode", 1))
+                .method(MethodInfo::new("set_ignore_time_scale", 1))
+                .method(MethodInfo::new("set_parallel", 1))
+                .method(MethodInfo::new("set_loops", 1))
+                .method(MethodInfo::new("get_loops_left", 0))
+                .method(MethodInfo::new("set_speed_scale", 1))
+                .method(MethodInfo::new("set_trans", 1))
+                .method(MethodInfo::new("set_ease", 1))
+                .method(MethodInfo::new("parallel", 0))
+                .method(MethodInfo::new("chain", 0))
+                .method(MethodInfo::new("interpolate_value", 6))
+                .signal(SignalInfo::new("step_finished").arg("idx"))
+                .signal(SignalInfo::new("loop_finished").arg("loop_count"))
+                .signal(SignalInfo::new("finished"))
+                .enumeration(
+                    EnumInfo::new("TweenProcessMode")
+                        .constant("TWEEN_PROCESS_PHYSICS", 0)
+                        .constant("TWEEN_PROCESS_IDLE", 1),
+                )
+                .enumeration(
+                    EnumInfo::new("TweenPauseMode")
+                        .constant("TWEEN_PAUSE_BOUND", 0)
+                        .constant("TWEEN_PAUSE_STOP", 1)
+                        .constant("TWEEN_PAUSE_PROCESS", 2),
+                )
+                // ⚠️ These are consecutive with NO gaps, and QUINT/QUART sit
+                // between SINE and QUAD rather than after CUBIC — copying the
+                // "obvious" order gets TRANS_QUAD and TRANS_CUBIC wrong.
+                .enumeration(
+                    EnumInfo::new("TransitionType")
+                        .constant("TRANS_LINEAR", 0)
+                        .constant("TRANS_SINE", 1)
+                        .constant("TRANS_QUINT", 2)
+                        .constant("TRANS_QUART", 3)
+                        .constant("TRANS_QUAD", 4)
+                        .constant("TRANS_EXPO", 5)
+                        .constant("TRANS_ELASTIC", 6)
+                        .constant("TRANS_CUBIC", 7)
+                        .constant("TRANS_CIRC", 8)
+                        .constant("TRANS_BOUNCE", 9)
+                        .constant("TRANS_BACK", 10)
+                        .constant("TRANS_SPRING", 11),
+                )
+                .enumeration(
+                    EnumInfo::new("EaseType")
+                        .constant("EASE_IN", 0)
+                        .constant("EASE_OUT", 1)
+                        .constant("EASE_IN_OUT", 2)
+                        .constant("EASE_OUT_IN", 3),
+                ),
+        );
+    }
+    if !class_exists("Tweener") {
+        register_class(
+            ClassRegistration::new("Tweener")
+                .parent("RefCounted")
+                .abstract_class()
+                .signal(SignalInfo::new("finished")),
+        );
+    }
+    // ⚠️ Each concrete tweener binds a DIFFERENT setter subset — they are not
+    // uniform. Only PropertyTweener has `from`/`from_current`/`as_relative`/
+    // `set_custom_interpolator`; IntervalTweener declares nothing of its own;
+    // MethodTweener has trans/ease but Callback/Subtween have only `set_delay`.
+    if !class_exists("PropertyTweener") {
+        register_class(
+            ClassRegistration::new("PropertyTweener")
+                .parent("Tweener")
+                .method(MethodInfo::new("from", 1))
+                .method(MethodInfo::new("from_current", 0))
+                .method(MethodInfo::new("as_relative", 0))
+                .method(MethodInfo::new("set_trans", 1))
+                .method(MethodInfo::new("set_ease", 1))
+                .method(MethodInfo::new("set_custom_interpolator", 1))
+                .method(MethodInfo::new("set_delay", 1)),
+        );
+    }
+    if !class_exists("IntervalTweener") {
+        register_class(ClassRegistration::new("IntervalTweener").parent("Tweener"));
+    }
+    if !class_exists("CallbackTweener") {
+        register_class(
+            ClassRegistration::new("CallbackTweener")
+                .parent("Tweener")
+                .method(MethodInfo::new("set_delay", 1)),
+        );
+    }
+    if !class_exists("MethodTweener") {
+        register_class(
+            ClassRegistration::new("MethodTweener")
+                .parent("Tweener")
+                .method(MethodInfo::new("set_delay", 1))
+                .method(MethodInfo::new("set_trans", 1))
+                .method(MethodInfo::new("set_ease", 1)),
+        );
+    }
+    if !class_exists("SubtweenTweener") {
+        register_class(
+            ClassRegistration::new("SubtweenTweener")
+                .parent("Tweener")
+                .method(MethodInfo::new("set_delay", 1)),
+        );
+    }
 
     // AnimationNode* resource hierarchy (pat-nzgdu.95): the graph-node resources
     // an AnimationTree's tree_root is built from. Registering them lets ClassDB
@@ -1829,8 +2035,17 @@ pub fn register_3d_classes() {
     register_class(ClassRegistration::new("CSGCylinder3D").parent("CSGShape3D"));
     register_class(ClassRegistration::new("CSGCombiner3D").parent("CSGShape3D"));
     // VisualScript is deprecated but inherits Script → Resource in Godot's hierarchy.
+    //
+    // `Resource` is a `RefCounted` (core/io/resource.h: `class Resource : public
+    // RefCounted`), so `RefCounted` must exist or the chain from every resource
+    // type — Material, Mesh, Texture, … — stops dead at `Resource` and never
+    // reaches `Object` (pat-nzgdu.98). This function bootstraps neither Object's
+    // ref-counted half nor any other `register_*_classes`, so it guards here.
+    if !class_exists("RefCounted") {
+        register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("Object"));
+        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
     }
     register_class(ClassRegistration::new("VisualScript").parent("Resource"));
 
@@ -2851,7 +3066,7 @@ pub fn register_2d_classes() {
         register_class(node_class());
     }
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("Object"));
+        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
     }
 
     // -- StyleBox resource family (pat-nzgdu.90). Registering these lets ClassDB
@@ -3535,8 +3750,16 @@ pub fn register_viewport_classes() {
     if !class_exists("Node") {
         register_class(node_class());
     }
+    // `Resource` is a `RefCounted`, so the ref-counted base has to be present
+    // before any resource chain can reach `Object` (pat-nzgdu.98). This path
+    // only picks `RefCounted` up transitively, via the
+    // `register_rendering_device_classes()` call far below — guard it here so
+    // the base cannot depend on statement order inside this function.
+    if !class_exists("RefCounted") {
+        register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("Object"));
+        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
     }
 
     // Viewport is abstract in Godot (Window / SubViewport are concrete).
@@ -4045,7 +4268,7 @@ fn register_rendering_device_classes() {
         register_class(object_class());
     }
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("Object"));
+        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
     }
     // `RefCounted` is not registered anywhere else in this module's viewport
     // path, and an unregistered base silently severs the chain from `Object`
@@ -4740,7 +4963,7 @@ pub fn register_audio_classes() {
     // `Resource` needs its own guard: this function ensures Object/Node/RefCounted
     // but never Resource, and every class below descends from it.
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("Object"));
+        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
     }
     if !class_exists("AudioStream") {
         // GDREGISTER_CLASS in servers/register_server_types.cpp:166 — concrete,
@@ -5264,7 +5487,7 @@ pub fn register_io_classes() {
     // guard it here rather than relying on `register_gltf_classes` happening to
     // do it first.
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("Object"));
+        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
     }
     if !class_exists("PackedDataContainer") {
         register_class(
@@ -5365,7 +5588,7 @@ fn register_gltf_classes() {
         register_class(ClassRegistration::new("RefCounted").parent("Object"));
     }
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("Object"));
+        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
     }
 
     register_class(
@@ -6048,8 +6271,13 @@ fn register_navigation_resource_classes() {
     if !class_exists("Object") {
         register_class(object_class());
     }
+    // `Resource` hangs off `RefCounted`, so re-guard that too rather than
+    // relying on the caller having done it (pat-nzgdu.98).
+    if !class_exists("RefCounted") {
+        register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("Object"));
+        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
     }
 
     if !class_exists("NavigationPolygon") {
@@ -8111,6 +8339,8 @@ mod tests {
                 "TextureLayered",
                 "Texture",
                 "Resource",
+                // Resource is a RefCounted, not a direct Object (pat-0q2kx.7).
+                "RefCounted",
                 "Object",
             ]
         );

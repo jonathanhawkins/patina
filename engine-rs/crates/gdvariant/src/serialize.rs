@@ -106,6 +106,12 @@ pub fn to_json(v: &Variant) -> Value {
             }),
             _ => json!({ "type": "Callable", "value": format!("{c:?}") }),
         },
+        // A Signal carries the object it is bound to, so it serialises like a
+        // Callable's method form (pat-0q2kx.9).
+        Variant::Signal { object_id, name } => json!({
+            "type": "Signal",
+            "value": { "object_id": object_id, "name": name }
+        }),
         Variant::Resource(r) => {
             let props: serde_json::Map<String, Value> = r
                 .properties
@@ -253,6 +259,12 @@ pub fn from_json(val: &Value) -> Option<Variant> {
                 // Legacy debug-string format — can't reconstruct, return None
                 None
             }
+        }
+        "Signal" => {
+            let sig_obj = obj.get("value")?.as_object()?;
+            let object_id = sig_obj.get("object_id")?.as_u64()?;
+            let name = sig_obj.get("name")?.as_str()?.to_owned();
+            Some(Variant::Signal { object_id, name })
         }
         "Color" => {
             let arr = obj.get("value")?.as_array()?;
@@ -572,6 +584,18 @@ mod tests {
             Vector2::new(10.0, 20.0),
             Vector2::new(100.0, 50.0),
         ));
+        assert_eq!(roundtrip(v.clone()), v);
+    }
+
+    #[test]
+    fn roundtrip_signal() {
+        // A Signal keeps both halves — the bound object and the name — so a
+        // serialised signal still identifies which object it came from
+        // (pat-0q2kx.9).
+        let v = Variant::Signal {
+            object_id: 4242,
+            name: "pressed".to_string(),
+        };
         assert_eq!(roundtrip(v.clone()), v);
     }
 

@@ -7,8 +7,82 @@
 use std::fmt;
 
 use crate::animation::interpolate_variant;
+use gdcore::math::{Color, Vector2, Vector3};
 use gdcore::ObjectId;
 use gdvariant::Variant;
+
+// ---------------------------------------------------------------------------
+// Property-path subnames
+// ---------------------------------------------------------------------------
+//
+// Godot addresses a *component* of a composite property with a `NodePath`
+// subname — `tween_property($Sprite, "position:x", ...)` animates only the X of
+// a `Vector2`. Patina's `Node` property bag is flat (`set_property` is a map
+// insert), so writing `"position:x"` straight through would mint a junk
+// `"position:x"` key and leave `position` untouched. These helpers decompose the
+// path instead (pat-0q2kx.4).
+
+/// Splits `property[:subname]` into its parts.
+///
+/// Only the first `:` separates — Godot allows deeper chains
+/// (`transform:origin:x`), which are not modelled here and arrive as a single
+/// subname that no branch matches, so the write is skipped rather than
+/// corrupting the property.
+pub fn split_property_path(path: &str) -> (&str, Option<&str>) {
+    match path.split_once(':') {
+        Some((prop, sub)) => (prop, Some(sub)),
+        None => (path, None),
+    }
+}
+
+/// Reads the `sub` component out of a composite value.
+///
+/// Returns `None` when `value` has no such component, which callers treat as
+/// "not animatable" rather than substituting a zero.
+pub fn read_subname(value: &Variant, sub: &str) -> Option<Variant> {
+    let f = match (value, sub) {
+        (Variant::Vector2(v), "x") => v.x,
+        (Variant::Vector2(v), "y") => v.y,
+        (Variant::Vector3(v), "x") => v.x,
+        (Variant::Vector3(v), "y") => v.y,
+        (Variant::Vector3(v), "z") => v.z,
+        (Variant::Color(c), "r") => c.r,
+        (Variant::Color(c), "g") => c.g,
+        (Variant::Color(c), "b") => c.b,
+        (Variant::Color(c), "a") => c.a,
+        _ => return None,
+    };
+    Some(Variant::Float(f as f64))
+}
+
+/// Returns `base` with its `sub` component replaced by `component`.
+///
+/// `None` when the pair is not a component of a type we model — the caller then
+/// leaves the property alone.
+pub fn write_subname(base: &Variant, sub: &str, component: &Variant) -> Option<Variant> {
+    let f = match component {
+        Variant::Float(v) => *v as f32,
+        Variant::Int(v) => *v as f32,
+        _ => return None,
+    };
+    Some(match (base, sub) {
+        (Variant::Vector2(v), "x") => Variant::Vector2(Vector2 { x: f, y: v.y }),
+        (Variant::Vector2(v), "y") => Variant::Vector2(Vector2 { x: v.x, y: f }),
+        (Variant::Vector3(v), "x") => Variant::Vector3(Vector3 { x: f, ..*v }),
+        (Variant::Vector3(v), "y") => Variant::Vector3(Vector3 { y: f, ..*v }),
+        (Variant::Vector3(v), "z") => Variant::Vector3(Vector3 { z: f, ..*v }),
+        (Variant::Color(c), "r") => Variant::Color(Color { r: f, ..*c }),
+        (Variant::Color(c), "g") => Variant::Color(Color { g: f, ..*c }),
+        (Variant::Color(c), "b") => Variant::Color(Color { b: f, ..*c }),
+        (Variant::Color(c), "a") => Variant::Color(Color { a: f, ..*c }),
+        // An absent property reads as Nil; a bare `x`/`y` on it is most likely a
+        // Vector2 the scene never wrote, so materialise one rather than dropping
+        // the animation.
+        (Variant::Nil, "x") => Variant::Vector2(Vector2 { x: f, y: 0.0 }),
+        (Variant::Nil, "y") => Variant::Vector2(Vector2 { x: 0.0, y: f }),
+        _ => return None,
+    })
+}
 
 // ---------------------------------------------------------------------------
 // TweenId
@@ -27,6 +101,15 @@ impl TweenId {
     /// Returns the raw `u64` value.
     pub fn raw(self) -> u64 {
         self.0.raw()
+    }
+
+    /// Rebuilds a `TweenId` from a raw `u64`.
+    ///
+    /// GDScript holds a tween as a `Variant::ObjectId` handle, so the scripting
+    /// bridge round-trips through the raw value (pat-0q2kx.4). The id is only
+    /// meaningful against the tween store that issued it.
+    pub fn from_raw(v: u64) -> Self {
+        Self(ObjectId::from_raw(v))
     }
 }
 
@@ -239,6 +322,13 @@ pub struct TweenStep {
     pub kind: TweenerKind,
     /// Script method name for `Method`/`Callback` steps (empty otherwise).
     pub method: String,
+    /// The node this step writes to, as a raw `ObjectId`, or `None` to target
+    /// the tween's owning node (the pre-existing behaviour).
+    ///
+    /// Godot's `Tween.tween_property(object, ...)` takes the target object
+    /// explicitly, so `node.create_tween().tween_property($Sprite, ...)`
+    /// animates the *sprite*, not the script's own node (pat-0q2kx.4).
+    pub target: Option<u64>,
     /// Callback fire-once guard (re-armed on loop).
     fired: bool,
     /// The nested tween for a `Subtween` step (Godot `tween_subtween`,
@@ -267,9 +357,18 @@ impl TweenStep {
             parallel: false,
             kind: TweenerKind::Property,
             method: String::new(),
+            target: None,
             fired: false,
             subtween: None,
         }
+    }
+
+    /// Directs this step at an explicit node (raw `ObjectId`) instead of the
+    /// tween's owning node. Mirrors the `object` argument of Godot's
+    /// `Tween.tween_property` (pat-0q2kx.4).
+    pub fn with_target(mut self, target: u64) -> Self {
+        self.target = Some(target);
+        self
     }
 
     /// Creates a `tween_method` step: interpolates `start`..`end` over
@@ -552,6 +651,32 @@ impl Tween {
             if step.kind == TweenerKind::Subtween {
                 if let Some(sub) = step.subtween.as_ref() {
                     out.extend(sub.get_current_values());
+                }
+            }
+        }
+        out
+    }
+
+    /// Like [`get_current_values`](Tween::get_current_values), but carries each
+    /// step's explicit [`target`](TweenStep::target) node.
+    ///
+    /// `None` means "the tween's owning node". Consumers that can resolve a
+    /// node id (i.e. the scene tree) should prefer this so
+    /// `tween_property($Sprite, ...)` writes to the sprite rather than to the
+    /// script's own node (pat-0q2kx.4).
+    pub fn get_current_values_targeted(&self) -> Vec<(Option<u64>, String, Variant)> {
+        let mut out: Vec<(Option<u64>, String, Variant)> = self
+            .steps
+            .iter()
+            .filter(|s| s.kind == TweenerKind::Property)
+            .map(|s| (s.target, s.property_path.clone(), s.current_value()))
+            .collect();
+        // Bubble nested subtween values up, exactly as `get_current_values`
+        // does — a nested step keeps its own targets.
+        for step in &self.steps {
+            if step.kind == TweenerKind::Subtween {
+                if let Some(sub) = step.subtween.as_ref() {
+                    out.extend(sub.get_current_values_targeted());
                 }
             }
         }

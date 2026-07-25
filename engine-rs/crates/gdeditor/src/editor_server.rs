@@ -2204,6 +2204,12 @@ fn handle_connection(
         }
         ("POST", "/api/node/reorder") => api_reorder_node(state, &req.body, &mut stream),
         ("POST", "/api/property/set") => api_set_property(state, &req.body, &mut stream),
+        ("POST", "/api/property/resource/assign") => {
+            api_assign_resource_property(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/property/resource/new") => {
+            api_new_resource_property(state, &req.body, &mut stream)
+        }
         ("PATCH", "/api/node/patch") => api_patch_node(state, &req.body, &mut stream),
         ("POST", "/api/undo") => api_undo(state, &mut stream),
         ("POST", "/api/redo") => api_redo(state, &mut stream),
@@ -2386,6 +2392,9 @@ fn handle_connection(
         ("POST", "/api/script/replace") => api_script_replace(&req.body, &mut stream),
         // pat-nzgdu.35: Script code completion (wires script_completion engine)
         ("POST", "/api/script/complete") => api_script_complete(&req.body, &mut stream),
+        // pat-0q2kx.14: Ctrl+Click goto-definition, backed by goto_definition.rs
+        // (which was an orphan module with no caller).
+        ("GET", "/api/script/goto") => api_script_goto(state, &req.query, &mut stream),
         // pat-1v3: Script breakpoints
         ("POST", "/api/script/breakpoint/toggle") => {
             api_toggle_breakpoint(state, &req.body, &mut stream)
@@ -2543,6 +2552,20 @@ fn handle_connection(
         ("POST", "/api/vcs/stage") => api_vcs_stage(&req.body, &mut stream),
         ("POST", "/api/vcs/unstage") => api_vcs_unstage(&req.body, &mut stream),
         ("POST", "/api/vcs/discard") => api_vcs_discard(&req.body, &mut stream),
+        // pat-0q2kx.11: Export dialog preset CRUD, persisted to
+        // export_presets.cfg. The client has called these since pat-4cexp; they
+        // had no routes and 404'd through the fallback below.
+        ("GET", "/api/export/presets") => api_export_presets_list(state, &mut stream),
+        ("POST", "/api/export/presets") => {
+            api_export_presets_create(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/export/presets/update") => {
+            api_export_presets_update(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/export/presets/delete") => {
+            api_export_presets_delete(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/export/run") => api_export_run(state, &req.body, &mut stream),
         _ => serve_404(&mut stream),
     }
 
@@ -3374,6 +3397,10 @@ fn node_properties_json(
             !emitted.contains(name.as_str())
                 && !name.starts_with("__resref__")
                 && !name.starts_with("__viewport_")
+                // `__extres__<prop>` is the resolved path behind an
+                // `ExtResource("id")` property (pat-0q2kx.6) — internal, and the
+                // real property is already listed.
+                && !name.starts_with("__extres__")
         })
         .collect();
     extras.sort_by(|a, b| a.0.cmp(b.0));
@@ -5055,12 +5082,23 @@ fn api_reorder_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         }
     };
 
-    // Swap in the parent's children list. (Boundary no-ops returned early
-    // above without reaching here, so they do not mark the scene modified.)
-    if let Some(parent) = state.scene_tree.get_node_mut(parent_id) {
-        let children = parent.children_mut();
-        children.swap(idx, new_idx);
+    // Reorder as an undoable step (pat-0q2kx.12). This used to swap the
+    // parent's children directly, so moving a node up or down the scene dock
+    // could not be undone. `MoveNode` captures the old index during `execute`
+    // and restores it on undo. (Boundary no-ops returned early above without
+    // reaching here, so they do not mark the scene modified.)
+    let mut cmd = EditorCommand::MoveNode {
+        parent_id,
+        child_id: node_id,
+        new_index: new_idx,
+        old_index: idx,
+    };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
     }
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
     state.scene_modified = true;
 
     send_json(stream, r#"{"ok":true}"#);
@@ -5325,6 +5363,271 @@ fn api_theme_item_remove(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
     send_json(stream, &json);
 }
 
+// ---------------------------------------------------------------------------
+// Resource-valued properties (pat-0q2kx.13)
+// ---------------------------------------------------------------------------
+//
+// A resource property is not an ordinary Variant. Godot stores it as a
+// *reference* — `texture = ExtResource("1_icon")` for a file on disk,
+// `shape = SubResource("Rect_1")` for an inline resource — with a matching
+// `[ext_resource]` / `[sub_resource]` header. Patina keeps the reference on the
+// node plus a companion the saver rebuilds the header from: `__extres__<prop>`
+// carries the path (rebuilt by `scene_saver::collect_resource_tables`), and
+// `__resref__<prop>` carries `Class::id` for inline resources.
+
+/// Every resource id already referenced anywhere in the subtree, so a new
+/// assignment cannot collide with one the scene loaded.
+fn used_resource_ids(tree: &SceneTree, root: NodeId) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    let mut subtree = Vec::new();
+    tree.collect_subtree_top_down(root, &mut subtree);
+    for nid in subtree {
+        let Some(node) = tree.get_node(nid) else {
+            continue;
+        };
+        for (key, value) in node.properties() {
+            let Variant::String(s) = value else { continue };
+            // `prop = ExtResource("id")` / `SubResource("id")`, the marker forms,
+            // and the `Class::id` companions all carry an id.
+            for prefix in ["ExtResource(\"", "SubResource(\""] {
+                if let Some(rest) = s.strip_prefix(prefix) {
+                    if let Some(id) = rest.strip_suffix("\")") {
+                        ids.insert(id.to_string());
+                    }
+                }
+            }
+            for prefix in ["ExtResource:", "SubResource:"] {
+                if let Some(id) = s.strip_prefix(prefix) {
+                    ids.insert(id.to_string());
+                }
+            }
+            if key.starts_with("__resref__") {
+                if let Some((_, id)) = s.rsplit_once("::") {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// Allocates a Godot-style `<n>_<slug>` resource id that is free in this scene.
+fn next_resource_id(used: &std::collections::HashSet<String>, slug: &str) -> String {
+    let slug: String = slug
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(16)
+        .collect();
+    let slug = if slug.is_empty() {
+        "res".to_string()
+    } else {
+        slug.to_ascii_lowercase()
+    };
+    (1..).map(|n| format!("{n}_{slug}")).find(|id| !used.contains(id)).unwrap_or_default()
+}
+
+/// `POST /api/property/resource/assign` — points a resource property at a file on
+/// disk, as Godot's resource picker "Load…"/"Quick Load" and a FileSystem drag do.
+///
+/// Body: `{"node_id": 123, "property": "texture", "path": "res://icon.png"}`.
+/// A null/absent `path` clears the property, matching the picker's Clear.
+fn api_assign_resource_property(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let Some(parsed) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let Some(node_raw) = parsed.get("node_id").and_then(|v| v.as_u64()) else {
+        send_error(stream, 400, "missing node_id");
+        return;
+    };
+    let Some(property) = parsed.get("property").and_then(|v| v.as_str()) else {
+        send_error(stream, 400, "missing property");
+        return;
+    };
+    let property = property.to_string();
+    // Absent or null clears; a non-empty string assigns.
+    let res_path = parsed
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            if p.starts_with("res://") {
+                p.to_string()
+            } else {
+                format!("res://{}", p.trim_start_matches('/'))
+            }
+        });
+
+    let mut state = state.lock().unwrap();
+    let Some(node_id) = find_node_by_raw_id(&state.scene_tree, node_raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+
+    let companion = format!("__extres__{property}");
+    let (new_value, assigned_path) = match &res_path {
+        Some(path) => {
+            // Scan the whole tree, so a new id cannot collide with one already
+            // referenced anywhere in the open scene.
+            let tree_root = state.scene_tree.root_id();
+            let used = used_resource_ids(&state.scene_tree, tree_root);
+            let stem = std::path::Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let id = next_resource_id(&used, &stem);
+            (
+                Variant::String(format!("ExtResource(\"{id}\")")),
+                Some(path.clone()),
+            )
+        }
+        None => (Variant::Nil, None),
+    };
+
+    // The visible property goes through the undo stack; the companion is
+    // bookkeeping and rides along with it.
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property: property.clone(),
+        new_value,
+        old_value: Variant::Nil,
+    };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    if let Some(node) = state.scene_tree.get_node_mut(node_id) {
+        match &assigned_path {
+            Some(path) => {
+                node.set_property(&companion, Variant::String(path.clone()));
+            }
+            None => {
+                node.set_property(&companion, Variant::Nil);
+                node.set_property(&format!("__resref__{property}"), Variant::Nil);
+            }
+        }
+    }
+
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    match &assigned_path {
+        Some(path) => state.add_log("info", format!("Assigned {path} to '{property}'")),
+        None => state.add_log("info", format!("Cleared '{property}'")),
+    }
+    let event = format!(
+        r#"{{"type":"property_changed","node_id":{node_raw},"property":"{prop}"}}"#,
+        prop = property.replace('"', "\\\""),
+    );
+    publish_event(&mut state, event);
+
+    let json = match &assigned_path {
+        Some(path) => format!(r#"{{"ok":true,"path":"{path}"}}"#),
+        None => r#"{"ok":true,"path":null}"#.to_string(),
+    };
+    send_json(stream, &json);
+}
+
+/// `POST /api/property/resource/new` — creates a fresh inline resource of a named
+/// class and assigns it, as Godot's picker "New <Type>" does.
+///
+/// Body: `{"node_id": 123, "property": "shape", "class_name": "RectangleShape2D"}`.
+/// The resource is stored as `SubResource("id")` plus the `__resref__<prop>` =
+/// `Class::id` companion the scene saver turns into a `[sub_resource]` section.
+fn api_new_resource_property(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let Some(parsed) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let Some(node_raw) = parsed.get("node_id").and_then(|v| v.as_u64()) else {
+        send_error(stream, 400, "missing node_id");
+        return;
+    };
+    let Some(property) = parsed.get("property").and_then(|v| v.as_str()) else {
+        send_error(stream, 400, "missing property");
+        return;
+    };
+    let Some(class_name) = parsed.get("class_name").and_then(|v| v.as_str()) else {
+        send_error(stream, 400, "missing class_name");
+        return;
+    };
+    let (property, class_name) = (property.to_string(), class_name.to_string());
+    // A bogus name would write a `[sub_resource type="…"]` section Godot cannot
+    // load, so validate the name's shape before touching the scene.
+    //
+    // Deliberately NOT gated on ClassDB membership. `ClassDB` is populated by
+    // explicit `register_*_classes()` calls, so at any moment it may hold every
+    // class, none, or — the case that bit this route — a *subset* that omits the
+    // resource classes: a server process had classes registered but not
+    // `RectangleShape2D`, so a membership check rejected a name Godot accepts.
+    // A partially-populated registry cannot answer "is this a real class?", and
+    // the picker only ever sends names from its own subclass list.
+    let well_formed = !class_name.is_empty()
+        && class_name.starts_with(|c: char| c.is_ascii_uppercase())
+        && class_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !well_formed {
+        send_error(
+            stream,
+            400,
+            &format!("unknown resource class '{class_name}'"),
+        );
+        return;
+    }
+
+    let mut state = state.lock().unwrap();
+    let Some(node_id) = find_node_by_raw_id(&state.scene_tree, node_raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+
+    let tree_root = state.scene_tree.root_id();
+    let used = used_resource_ids(&state.scene_tree, tree_root);
+    let id = next_resource_id(&used, &class_name);
+
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property: property.clone(),
+        new_value: Variant::String(format!("SubResource(\"{id}\")")),
+        old_value: Variant::Nil,
+    };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    if let Some(node) = state.scene_tree.get_node_mut(node_id) {
+        node.set_property(
+            &format!("__resref__{property}"),
+            Variant::String(format!("{class_name}::{id}")),
+        );
+        // A file-backed reference and an inline one are mutually exclusive.
+        node.set_property(&format!("__extres__{property}"), Variant::Nil);
+    }
+
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log("info", format!("New {class_name} on '{property}'"));
+    let event = format!(
+        r#"{{"type":"property_changed","node_id":{node_raw},"property":"{prop}"}}"#,
+        prop = property.replace('"', "\\\""),
+    );
+    publish_event(&mut state, event);
+
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"class_name":"{class_name}","id":"{id}"}}"#),
+    );
+}
+
 /// `POST /api/property/set` — sets a property on a node.
 fn api_set_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
@@ -5577,6 +5880,8 @@ fn undo_one(state: &mut EditorState) -> Result<bool, String> {
         return Err(e.to_string());
     }
     let _ = cmd.undo_tilemap(&mut state.tile_grid_store);
+    // Animation edits live in a second store, like tilemaps (pat-0q2kx.12).
+    let _ = cmd.undo_animation(&mut state.animations);
     state.redo_stack.push(cmd);
     state.prune_selection();
     Ok(true)
@@ -5594,6 +5899,7 @@ fn redo_one(state: &mut EditorState) -> Result<bool, String> {
         return Err(e.to_string());
     }
     let _ = cmd.execute_tilemap(&mut state.tile_grid_store);
+    let _ = cmd.execute_animation(&mut state.animations);
     state.undo_stack.push(cmd);
     state.prune_selection();
     Ok(true)
@@ -6322,9 +6628,33 @@ fn api_viewport_drag_end(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
     let (new_pos, _) = apply_snap(&state.scene_tree, &settings, drag.node_id, candidate_pos);
     state.snap_guides.clear();
 
+    // Commit the drag as an undoable step (pat-0q2kx.12).
+    //
+    // Godot's EditorUndoRedoManager records every transform drag, so Ctrl+Z
+    // puts the node back where it started. This wrote the position directly, so
+    // a drag was permanent — the highest-harm undo gap in the editor.
+    //
+    // `/api/viewport/drag` writes `position` live for visual feedback, so the
+    // node currently holds the LAST MID-DRAG value, not where the drag began.
+    // `SetProperty::execute` captures `old_value` from whatever is stored, so
+    // the pre-drag position has to go back first — otherwise undo would restore
+    // the final drag-move frame and appear to do nothing at all.
     if let Some(node) = state.scene_tree.get_node_mut(drag.node_id) {
-        node.set_property("position", Variant::Vector2(new_pos));
+        node.set_property("position", Variant::Vector2(drag.start_node_pos));
     }
+    let mut cmd = EditorCommand::SetProperty {
+        node_id: drag.node_id,
+        property: "position".to_string(),
+        new_value: Variant::Vector2(new_pos),
+        old_value: Variant::Nil,
+    };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
 
     send_json(
         stream,
@@ -7212,7 +7542,64 @@ fn api_viewport_3d_gizmo_end(state: &Arc<Mutex<EditorState>>, stream: &mut TcpSt
     state.editor_viewport_3d.end_gizmo_drag();
     state.gizmo_drag_start_3d = None;
     state.gizmo_snap_active_3d = false;
-    state.gizmo_drag_starts_3d.clear();
+
+    // Commit the gizmo drag as an undoable step (pat-0q2kx.12).
+    //
+    // Godot records every gizmo transform with EditorUndoRedoManager; this only
+    // cleared the drag bookkeeping, so a 3D translate/rotate/scale could not be
+    // undone. `gizmo/update` writes `transform` live during the drag, so the
+    // node now holds the last mid-drag value — the pre-drag transform has to be
+    // restored before `execute` captures `old_value`, or undo would restore the
+    // final drag frame and appear to do nothing.
+    //
+    // `gizmo_drag_starts_3d` holds GLOBAL transforms (that is what the drag math
+    // works in), while the node stores a LOCAL one, so each is converted through
+    // its parent exactly as `apply_world_transform_3d` does.
+    let starts = std::mem::take(&mut state.gizmo_drag_starts_3d);
+    let mut steps: Vec<EditorCommand> = Vec::new();
+    for (node_id, start_global) in starts {
+        let start_local = parent_global_3d(&state.scene_tree, node_id).inverse() * start_global;
+        let current_local = match state
+            .scene_tree
+            .get_node(node_id)
+            .map(|n| n.get_property("transform"))
+        {
+            Some(Variant::Transform3D(t)) => t,
+            _ => continue,
+        };
+        // A click that did not move anything should not litter the history.
+        if current_local == start_local {
+            continue;
+        }
+        if let Some(node) = state.scene_tree.get_node_mut(node_id) {
+            node.set_property("transform", Variant::Transform3D(start_local));
+        }
+        let mut cmd = EditorCommand::SetProperty {
+            node_id,
+            property: "transform".to_string(),
+            new_value: Variant::Transform3D(current_local),
+            old_value: Variant::Nil,
+        };
+        if cmd.execute(&mut state.scene_tree).is_ok() {
+            steps.push(cmd);
+        }
+    }
+    if !steps.is_empty() {
+        // One drag is one undo step even when it moved a multi-selection, as in
+        // Godot — otherwise Ctrl+Z would peel the nodes back one at a time.
+        let cmd = if steps.len() == 1 {
+            steps.pop().expect("len checked")
+        } else {
+            EditorCommand::Group {
+                label: format!("Move {} nodes", steps.len()),
+                commands: steps,
+            }
+        };
+        state.undo_stack.push(cmd);
+        state.redo_stack.clear();
+        state.scene_modified = true;
+    }
+
     send_json(stream, r#"{"ok":true}"#);
 }
 
@@ -7596,6 +7983,12 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("GET", "/api/filesystem/tree", "[\"path?\"]", "null", "{\"type\":\"object\",\"properties\":{\"tree\":\"array\"}}"),
     ("GET", "/api/filesystem/dir", "[\"path?\"]", "null", "{\"type\":\"object\",\"properties\":{\"files\":\"array\"}}"),
     ("POST", "/api/project/open", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\",\"project_root\":\"string\",\"file_count\":\"number\"}}"),
+    // pat-0q2kx.11: Export dialog presets, persisted to export_presets.cfg.
+    ("GET", "/api/export/presets", "[]", "null", "{\"type\":\"array\"}"),
+    ("POST", "/api/export/presets", "[]", "{\"name\":\"string\",\"platform\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\",\"count\":\"number\"}}"),
+    ("POST", "/api/export/presets/update", "[]", "{\"name\":\"string\",\"platform\":\"string\",\"index\":\"number?\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\"}}"),
+    ("POST", "/api/export/presets/delete", "[]", "{\"name\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\",\"count\":\"number\"}}"),
+    ("POST", "/api/export/run", "[]", "{\"name\":\"string\",\"wasm_path\":\"string?\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\",\"output_path\":\"string\",\"messages\":\"array\"}}"),
     ("GET", "/api/preview/file", "[\"path\"]", "null", "{\"type\":\"object_or_binary\"}"),
     ("GET", "/api/script", "[\"path\"]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/assetlib/list", "[]", "null", "{\"type\":\"object\"}"),
@@ -7659,6 +8052,9 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/api/filesystem/delete", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/filesystem/mkdir", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/script/save", "[]", "{\"path\":\"string\",\"source\":\"string\"}", "{\"type\":\"object\"}"),
+    // pat-0q2kx.14: script-editor completion + goto-definition.
+    ("POST", "/api/script/complete", "[]", "{\"current_class\":\"string\",\"prefix\":\"string\",\"dot_class\":\"string?\",\"locals\":\"array\"}", "{\"type\":\"object\",\"properties\":{\"candidates\":\"array\",\"count\":\"number\"}}"),
+    ("GET", "/api/script/goto", "[\"path\",\"symbol?\",\"line?\",\"col?\"]", "null", "{\"type\":\"object\",\"properties\":{\"found\":\"boolean\",\"file\":\"string\",\"line\":\"number\",\"symbol\":\"string\"}}"),
     ("POST", "/api/runtime/play", "[]", "null", "{\"type\":\"object\"}"),
     ("POST", "/api/runtime/stop", "[]", "null", "{\"type\":\"object\"}"),
     ("POST", "/api/runtime/pause", "[]", "null", "{\"type\":\"object\"}"),
@@ -8078,6 +8474,309 @@ fn api_filesystem_file_info(state: &Arc<Mutex<EditorState>>, query: &str, stream
 }
 
 /// `POST /api/filesystem/favorite` — add, remove, or toggle a favorite path
+// ---------------------------------------------------------------------------
+// Export presets (pat-0q2kx.11)
+//
+// The served Export dialog (editor_ui.rs) has always called these four routes;
+// none of them existed, so every call hit the `_ => serve_404` fallback and the
+// dialog rendered empty while silently dropping every edit.
+//
+// `export_presets.cfg` in the project root is the single source of truth: each
+// request loads it, mutates, and writes it back. That keeps the file and the UI
+// from diverging, survives an editor restart, and means no new `EditorState`
+// field (Godot likewise treats the .cfg as authoritative).
+// ---------------------------------------------------------------------------
+
+/// Path of the project's `export_presets.cfg`.
+fn export_presets_cfg_path(state: &Arc<Mutex<EditorState>>) -> std::path::PathBuf {
+    fs_project_root(state).join("export_presets.cfg")
+}
+
+/// Loads the project's presets. A missing or unparseable file yields an empty
+/// list rather than an error — the dialog must still open on a fresh project.
+fn load_export_dialog(state: &Arc<Mutex<EditorState>>) -> crate::ExportDialog {
+    let mut dialog = crate::ExportDialog::new();
+    if let Ok(text) = std::fs::read_to_string(export_presets_cfg_path(state)) {
+        dialog.from_godot_cfg(&text);
+    }
+    dialog
+}
+
+/// Writes the presets back to `export_presets.cfg`.
+fn save_export_dialog(
+    state: &Arc<Mutex<EditorState>>,
+    dialog: &crate::ExportDialog,
+) -> std::io::Result<()> {
+    std::fs::write(export_presets_cfg_path(state), dialog.to_godot_cfg())
+}
+
+/// Renders a preset in the exact shape `editor_ui.rs` reads.
+fn export_preset_to_json(p: &crate::ExportPreset) -> serde_json::Value {
+    serde_json::json!({
+        "name": p.name,
+        "platform": p.platform.id(),
+        "build_profile": p.build_profile.as_str(),
+        "export_path": p.export_path,
+        "app_name": p.app_name,
+        "icon_path": p.icon_path,
+        "include_filters": p.include_filters,
+        "exclude_filters": p.exclude_filters,
+        "custom_properties": p.custom_properties,
+    })
+}
+
+/// Builds a preset from the dialog's JSON payload. `name` and a known
+/// `platform` are required; everything else falls back to the platform default.
+fn export_preset_from_json(v: &serde_json::Value) -> Result<crate::ExportPreset, &'static str> {
+    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim();
+    if name.is_empty() {
+        return Err("missing name");
+    }
+    let platform_id = v.get("platform").and_then(|x| x.as_str()).unwrap_or("");
+    let platform = crate::ExportPlatform::from_id(platform_id).ok_or("unknown platform")?;
+
+    let mut preset = crate::ExportPreset::new(name, platform);
+    if let Some(bp) = v
+        .get("build_profile")
+        .and_then(|x| x.as_str())
+        .and_then(crate::ExportBuildProfile::from_str_name)
+    {
+        preset.build_profile = bp;
+    }
+    // An empty export_path keeps `ExportPreset::new`'s platform default rather
+    // than blanking it — a preset with no path cannot be exported at all.
+    if let Some(p) = v.get("export_path").and_then(|x| x.as_str()) {
+        if !p.is_empty() {
+            preset.export_path = p.to_string();
+        }
+    }
+    if let Some(s) = v.get("app_name").and_then(|x| x.as_str()) {
+        preset.app_name = s.to_string();
+    }
+    if let Some(s) = v.get("icon_path").and_then(|x| x.as_str()) {
+        preset.icon_path = s.to_string();
+    }
+    let str_list = |key: &str| -> Option<Vec<String>> {
+        v.get(key)?.as_array().map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .map(String::from)
+                .collect()
+        })
+    };
+    if let Some(f) = str_list("include_filters") {
+        preset.include_filters = f;
+    }
+    if let Some(f) = str_list("exclude_filters") {
+        preset.exclude_filters = f;
+    }
+    if let Some(obj) = v.get("custom_properties").and_then(|x| x.as_object()) {
+        preset.custom_properties = obj
+            .iter()
+            .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect();
+    }
+    Ok(preset)
+}
+
+/// `GET /api/export/presets` — the project's presets, as a JSON array.
+fn api_export_presets_list(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let dialog = load_export_dialog(state);
+    let arr: Vec<serde_json::Value> = dialog.presets().iter().map(export_preset_to_json).collect();
+    send_json(stream, &serde_json::Value::Array(arr).to_string());
+}
+
+/// `POST /api/export/presets` — creates a preset and persists it.
+fn api_export_presets_create(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some(v) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let preset = match export_preset_from_json(&v) {
+        Ok(p) => p,
+        Err(e) => {
+            send_error(stream, 400, e);
+            return;
+        }
+    };
+    let mut dialog = load_export_dialog(state);
+    // `add_preset` rejects duplicate names, which is also Godot's rule.
+    if let Err(e) = dialog.add_preset(preset) {
+        send_error(stream, 400, &format!("{e:?}"));
+        return;
+    }
+    if let Err(e) = save_export_dialog(state, &dialog) {
+        send_error(
+            stream,
+            500,
+            &format!("failed to write export_presets.cfg: {e}"),
+        );
+        return;
+    }
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"count":{}}}"#, dialog.preset_count()),
+    );
+}
+
+/// `POST /api/export/presets/update` — replaces one preset in place.
+///
+/// Identified by `index` when the dialog sends it (which is what makes a rename
+/// work), else by `name`.
+fn api_export_presets_update(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some(v) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let updated = match export_preset_from_json(&v) {
+        Ok(p) => p,
+        Err(e) => {
+            send_error(stream, 400, e);
+            return;
+        }
+    };
+    let mut dialog = load_export_dialog(state);
+    let target = v
+        .get("index")
+        .and_then(|x| x.as_u64())
+        .map(|i| i as usize)
+        .filter(|&i| i < dialog.preset_count())
+        .or_else(|| dialog.find_preset(&updated.name));
+    let Some(index) = target else {
+        send_error(stream, 404, "preset not found");
+        return;
+    };
+    if !dialog.replace_preset(index, updated) {
+        send_error(stream, 404, "preset not found");
+        return;
+    }
+    if let Err(e) = save_export_dialog(state, &dialog) {
+        send_error(
+            stream,
+            500,
+            &format!("failed to write export_presets.cfg: {e}"),
+        );
+        return;
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/export/presets/delete` — removes a preset by `name`.
+fn api_export_presets_delete(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some(v) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let Some(name) = v.get("name").and_then(|x| x.as_str()) else {
+        send_error(stream, 400, "missing name");
+        return;
+    };
+    let mut dialog = load_export_dialog(state);
+    let Some(index) = dialog.find_preset(name) else {
+        send_error(stream, 404, "preset not found");
+        return;
+    };
+    dialog.remove_preset(index);
+    if let Err(e) = save_export_dialog(state, &dialog) {
+        send_error(
+            stream,
+            500,
+            &format!("failed to write export_presets.cfg: {e}"),
+        );
+        return;
+    }
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"count":{}}}"#, dialog.preset_count()),
+    );
+}
+
+/// `POST /api/export/run` — runs the export for a preset (by `name`).
+///
+/// Web presets go through `gdplatform`'s `PackageExecutor::generate_web_bundle`,
+/// which **requires a compiled `.wasm` payload** — supply it as `wasm_path` (or
+/// a `patina/wasm_path` custom property). Without one it fails loudly rather
+/// than writing a bundle that looks runnable but is not (pat-nzgdu.24 removed
+/// exactly that fake). Desktop presets use the existing one-click manifest path.
+fn api_export_run(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some(v) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let Some(name) = v.get("name").and_then(|x| x.as_str()) else {
+        send_error(stream, 400, "missing name");
+        return;
+    };
+    let dialog = load_export_dialog(state);
+    let Some(index) = dialog.find_preset(name) else {
+        send_error(stream, 404, "preset not found");
+        return;
+    };
+    let preset = dialog.presets()[index].clone();
+    let project_root = fs_project_root(state);
+    let project_name = project_root
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".to_string());
+
+    if preset.platform == crate::ExportPlatform::Web {
+        let wasm_path = v
+            .get("wasm_path")
+            .and_then(|x| x.as_str())
+            .map(String::from)
+            .or_else(|| preset.custom_properties.get("patina/wasm_path").cloned());
+        let Some(wasm_path) = wasm_path.filter(|p| !p.is_empty()) else {
+            send_error(
+                stream,
+                400,
+                "web export needs a compiled wasm payload: pass wasm_path \
+                 (or set the preset's patina/wasm_path custom property)",
+            );
+            return;
+        };
+        let out_dir = project_root.join(
+            std::path::Path::new(&preset.export_path)
+                .parent()
+                .unwrap_or(std::path::Path::new("export")),
+        );
+        if let Err(e) = std::fs::create_dir_all(&out_dir) {
+            send_error(stream, 500, &format!("cannot create output dir: {e}"));
+            return;
+        }
+        let config = preset.to_export_config(&project_name);
+        let mut executor =
+            gdplatform::PackageExecutor::new(config, project_root.clone(), out_dir.clone());
+        match executor.generate_web_bundle(Some(std::path::Path::new(&wasm_path))) {
+            Ok(index_html) => send_json(
+                stream,
+                &serde_json::json!({
+                    "ok": true,
+                    "platform": "web",
+                    "output_path": index_html.display().to_string(),
+                    "messages": executor.messages(),
+                })
+                .to_string(),
+            ),
+            Err(e) => send_error(stream, 500, &format!("web export failed: {e:?}")),
+        }
+        return;
+    }
+
+    match dialog.export_one_click(index, &project_name) {
+        Ok(result) => send_json(
+            stream,
+            &serde_json::json!({
+                "ok": result.success,
+                "platform": preset.platform.id(),
+                "output_path": result.output_path,
+                "messages": result.messages,
+            })
+            .to_string(),
+        ),
+        Err(e) => send_error(stream, 400, &format!("{e:?}")),
+    }
+}
+
 /// in the FileSystem dock and persist the list to disk (pat-k6600).
 ///
 /// Body: `{"path":"res://scenes","action":"add"|"remove"|"toggle"}`.
@@ -8464,6 +9163,138 @@ fn api_get_script(query: &str, stream: &mut TcpStream) {
 }
 
 /// `POST /api/script/save` -- writes content to a .gd file.
+/// `GET /api/script/goto` — resolves a symbol to the script and line that
+/// defines it, backing the editor's Ctrl+Click goto-definition (pat-0q2kx.14).
+///
+/// Query: `path` (the open script, `res://` or absolute) plus **either**
+/// `symbol=foo` **or** `line=<text>&col=<n>` to have the server pick the
+/// identifier under the caret (`goto_definition::symbol_at`).
+///
+/// Looks in the open script first — Godot resolves locally before searching —
+/// then falls back to scanning the project's other `.gd` files, so a method
+/// defined in another script still jumps. The response always names the `file`
+/// the definition landed in, since it need not be the file you clicked in.
+/// A symbol with no definition is `{"found":false}` and **not** an error: an
+/// unresolved Ctrl+Click is a no-op in Godot, not a failure.
+fn api_script_goto(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    use crate::goto_definition::{find_definition, symbol_at};
+
+    let Some(raw_path) = query_param(query, "path").map(url_decode) else {
+        send_error(stream, 400, "missing path parameter");
+        return;
+    };
+    let project_root = fs_project_root(state);
+    let resolve = |p: &str| -> std::path::PathBuf {
+        match p.strip_prefix("res://") {
+            Some(rest) => project_root.join(rest),
+            None => std::path::PathBuf::from(p),
+        }
+    };
+    let file_path = resolve(&raw_path);
+
+    // The symbol is either given outright or read from the caret position.
+    let symbol = match query_param(query, "symbol").map(url_decode) {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            let line = query_param(query, "line")
+                .map(url_decode)
+                .unwrap_or_default();
+            let col = query_param(query, "col")
+                .and_then(|c| c.parse::<usize>().ok())
+                .unwrap_or(0);
+            match symbol_at(&line, col) {
+                Some(s) => s,
+                // Not on an identifier — a no-op, exactly like Godot.
+                None => {
+                    send_json(stream, r#"{"found":false}"#);
+                    return;
+                }
+            }
+        }
+    };
+
+    // 1. The open script.
+    if let Ok(source) = std::fs::read_to_string(&file_path) {
+        if let Some(line) = find_definition(&source, &symbol) {
+            send_json(
+                stream,
+                &serde_json::json!({
+                    "found": true,
+                    "file": raw_path,
+                    "line": line,
+                    "symbol": symbol,
+                })
+                .to_string(),
+            );
+            return;
+        }
+    }
+
+    // 2. Other `.gd` files in the project, in a stable order so the answer does
+    //    not depend on directory iteration order.
+    let mut scripts = Vec::new();
+    collect_gd_scripts(&project_root, 0, &mut scripts);
+    scripts.sort();
+    for path in scripts {
+        if path == file_path {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Some(line) = find_definition(&source, &symbol) {
+            // Report the project-relative `res://` form the editor opens with.
+            let rel = path
+                .strip_prefix(&project_root)
+                .ok()
+                .and_then(|p| p.to_str())
+                .map(|p| format!("res://{}", p.replace('\\', "/")))
+                .unwrap_or_else(|| path.display().to_string());
+            send_json(
+                stream,
+                &serde_json::json!({
+                    "found": true,
+                    "file": rel,
+                    "line": line,
+                    "symbol": symbol,
+                })
+                .to_string(),
+            );
+            return;
+        }
+    }
+
+    send_json(
+        stream,
+        &serde_json::json!({ "found": false, "symbol": symbol }).to_string(),
+    );
+}
+
+/// Collects `.gd` files under `dir`, bounded in depth so a deep or symlinked
+/// tree cannot stall the request.
+fn collect_gd_scripts(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+    if depth > 8 || out.len() > 2000 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // Skip VCS/build/editor-state dirs — they hold no project scripts.
+        if name.starts_with('.') || name == "target" || name == "node_modules" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_gd_scripts(&path, depth + 1, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("gd") {
+            out.push(path);
+        }
+    }
+}
+
 fn api_save_script(body: &str, stream: &mut TcpStream) {
     let json = match parse_json_body(body) {
         Some(v) => v,
@@ -8664,10 +9495,21 @@ fn api_connect_signal(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         }
     };
 
-    // Store connection info as a property string (signal_connections).
-    let node = state.scene_tree.get_node_mut(node_id).unwrap();
-    let existing = match node.get_property("signal_connections") {
-        Variant::String(s) => s,
+    // Store connection info as a property string (signal_connections), as an
+    // undoable step (pat-0q2kx.12).
+    //
+    // Note this handler keeps connections in a node property rather than via
+    // `SceneTree::connect_signal`, so the existing `ConnectSignal` command —
+    // which drives the tree's own signal table — would undo the wrong thing.
+    // `SetProperty` restores exactly the string this route writes. Letting
+    // `execute` capture `old_value` is safe here (unlike the viewport drag):
+    // nothing else has written the property during this request.
+    let existing = match state
+        .scene_tree
+        .get_node(node_id)
+        .map(|n| n.get_property("signal_connections"))
+    {
+        Some(Variant::String(s)) => s,
         _ => String::new(),
     };
     let new_entry = format!("{}:{}", signal_name, method);
@@ -8676,8 +9518,18 @@ fn api_connect_signal(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     } else {
         format!("{},{}", existing, new_entry)
     };
-    node.set_property("signal_connections", Variant::String(updated));
-
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property: "signal_connections".to_string(),
+        new_value: Variant::String(updated),
+        old_value: Variant::Nil,
+    };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
     state.scene_modified = true;
     state.add_log(
         "info",
@@ -8730,17 +9582,30 @@ fn api_add_group(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpSt
         }
     };
 
-    let node = state.scene_tree.get_node_mut(node_id).unwrap();
-
     // Operate on the node's real group membership so the Groups dock stays in
     // sync with the engine's group system (`get_nodes_in_group`, `.tscn` save,
     // and the scene-tree group badge) instead of a disconnected property string.
-    if node.is_in_group(&group) {
+    let already = state
+        .scene_tree
+        .get_node(node_id)
+        .is_some_and(|n| n.is_in_group(&group));
+    if already {
         send_json(stream, r#"{"ok":true,"added":false}"#);
         return;
     }
-    node.add_to_group(group.clone());
 
+    // Undoable step (pat-0q2kx.12): `AddToGroup` drives the same group system
+    // this route does, so its undo (remove_from_group) is an exact inverse.
+    let mut cmd = EditorCommand::AddToGroup {
+        node_id,
+        group: group.clone(),
+    };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
     state.scene_modified = true;
     state.add_log("info", format!("Added group '{}'", group));
 
@@ -8921,6 +9786,39 @@ fn node_to_clipboard(tree: &SceneTree, nid: NodeId) -> Option<ClipboardEntry> {
     })
 }
 
+/// Pastes one clipboard entry under `pid` and uniquifies the new top-level
+/// node's name among its siblings, returning the created node.
+///
+/// Shared by `POST /api/node/paste` and [`EditorCommand::PasteNodes`]'s redo so
+/// that redoing a paste reproduces the same names the original paste produced
+/// (pat-0q2kx.12). Children keep their names, matching Godot.
+pub(crate) fn paste_entry_with_unique_name(
+    tree: &mut SceneTree,
+    pid: NodeId,
+    e: &ClipboardEntry,
+) -> Result<NodeId, gdcore::error::EngineError> {
+    let id = paste_clipboard_entry(tree, pid, e)?;
+    let siblings: Vec<String> = tree
+        .get_node(pid)
+        .map(|p| {
+            p.children()
+                .iter()
+                .filter(|&&c| c != id)
+                .filter_map(|&c| tree.get_node(c).map(|n| n.name().to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let base = tree
+        .get_node(id)
+        .map(|n| n.name().to_string())
+        .unwrap_or_default();
+    let unique = unique_sibling_name(&base, &siblings);
+    if let Some(n) = tree.get_node_mut(id) {
+        n.set_name(unique);
+    }
+    Ok(id)
+}
+
 fn paste_clipboard_entry(
     tree: &mut SceneTree,
     pid: NodeId,
@@ -9014,32 +9912,8 @@ fn api_paste_nodes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
     let cb = state.clipboard.clone();
     let mut ids = Vec::new();
     for e in &cb {
-        match paste_clipboard_entry(&mut state.scene_tree, pid, e) {
+        match paste_entry_with_unique_name(&mut state.scene_tree, pid, e) {
             Ok(i) => {
-                // Uniquify the top-level pasted node's name among its new
-                // siblings (children keep their names, matching Godot).
-                let siblings: Vec<String> = state
-                    .scene_tree
-                    .get_node(pid)
-                    .map(|p| {
-                        p.children()
-                            .iter()
-                            .filter(|&&c| c != i)
-                            .filter_map(|&c| {
-                                state.scene_tree.get_node(c).map(|n| n.name().to_string())
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let base = state
-                    .scene_tree
-                    .get_node(i)
-                    .map(|n| n.name().to_string())
-                    .unwrap_or_default();
-                let unique = unique_sibling_name(&base, &siblings);
-                if let Some(n) = state.scene_tree.get_node_mut(i) {
-                    n.set_name(unique);
-                }
                 ids.push(i);
             }
             Err(e) => {
@@ -9048,6 +9922,18 @@ fn api_paste_nodes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
             }
         }
     }
+    // Undoable step (pat-0q2kx.12): paste created nodes with no way to take
+    // them back. The nodes are already in the tree, so the command is pushed
+    // pre-executed — its `undo` removes `created_ids`, and its `execute`
+    // (redo) re-pastes from the captured entries.
+    let cmd = EditorCommand::PasteNodes {
+        parent_id: pid,
+        entries: cb.clone(),
+        created_ids: ids.clone(),
+    };
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+
     state.scene_modified = true;
     let c = ids.len();
     state.selected_nodes = ids.clone();
@@ -9493,6 +10379,8 @@ fn api_add_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         .and_then(TrackType::from_str_name)
         .unwrap_or(TrackType::Property);
     let mut state = state.lock().unwrap();
+    // Snapshot before mutating so the edit can be undone (pat-0q2kx.12).
+    let before = state.animations.get(&anim_name).cloned();
     let anim = match state.animations.get_mut(&anim_name) {
         Some(a) => a,
         None => {
@@ -9512,6 +10400,18 @@ fn api_add_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         }
     };
     anim.tracks[track_idx].add_keyframe(KeyFrame::linear(time, value));
+
+    // Adding a keyframe (and any track it implicitly created) is one undo step.
+    let after = anim.clone();
+    state.undo_stack.push(EditorCommand::AnimationEdit {
+        animation: anim_name.clone(),
+        before: before.map(Box::new),
+        after: Box::new(after),
+        label: format!("Add keyframe to '{anim_name}'"),
+    });
+    state.redo_stack.clear();
+    state.scene_modified = true;
+
     send_json(
         stream,
         &format!(
@@ -11124,7 +12024,19 @@ fn api_input_mouse_move(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
             return;
         }
     };
+    let prev = state.mouse_position;
     state.mouse_position = (x, y);
+    // Motion carries the frame-to-frame delta, as Godot's
+    // InputEventMouseMotion.relative does (pat-0q2kx.23).
+    if let Some(ref mut main_loop) = state.run_main_loop {
+        main_loop.push_event(gdplatform::InputEvent::MouseMotion {
+            position: gdcore::math::Vector2::new(x as f32, y as f32),
+            relative: gdcore::math::Vector2::new(
+                (x - prev.0) as f32,
+                (y - prev.1) as f32,
+            ),
+        });
+    }
     send_json(stream, r#"{"ok":true}"#);
 }
 
@@ -11149,7 +12061,35 @@ fn api_input_mouse_down(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
         }
     };
     state.mouse_buttons.insert(button);
+    push_mouse_button_event(&mut state, button, true);
     send_json(stream, r#"{"ok":true}"#);
+}
+
+/// Feeds a browser mouse button into the running `MainLoop` as a real
+/// `InputEvent::MouseButton` (pat-0q2kx.23).
+///
+/// These routes previously only mutated `EditorState`, so nothing ever reached
+/// `SceneTree::push_input` — `_input` never saw a mouse event and the GUI stage
+/// added in pat-0q2kx.18 had no events to route.
+///
+/// Browser `MouseEvent.button` is 0=left, 1=middle, 2=right; Patina's
+/// `MouseButton` enum is named, so the mapping is explicit rather than the
+/// numeric 1/3/2 Godot uses internally.
+fn push_mouse_button_event(state: &mut EditorState, button: u8, pressed: bool) {
+    let btn = match button {
+        0 => gdplatform::input::MouseButton::Left,
+        1 => gdplatform::input::MouseButton::Middle,
+        2 => gdplatform::input::MouseButton::Right,
+        _ => return,
+    };
+    let (x, y) = state.mouse_position;
+    if let Some(ref mut main_loop) = state.run_main_loop {
+        main_loop.push_event(gdplatform::InputEvent::MouseButton {
+            button: btn,
+            pressed,
+            position: gdcore::math::Vector2::new(x as f32, y as f32),
+        });
+    }
 }
 
 fn api_input_mouse_up(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
@@ -11173,6 +12113,7 @@ fn api_input_mouse_up(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         }
     };
     state.mouse_buttons.remove(&button);
+    push_mouse_button_event(&mut state, button, false);
     send_json(stream, r#"{"ok":true}"#);
 }
 
@@ -11878,6 +12819,52 @@ fn api_script_complete(body: &str, stream: &mut TcpStream) {
 // ---------------------------------------------------------------------------
 
 /// `POST /api/script/breakpoint/toggle` -- toggle a breakpoint on a line.
+/// Toggles the breakpoint at `path:line`, returning whether it is now **set**
+/// (pat-0q2kx.10).
+///
+/// Godot keeps one breakpoint list; Patina had two that never talked to each
+/// other. The script-editor gutter reads and writes [`EditorState::breakpoints`],
+/// while the debugger panel and `GET /api/debug/state` read
+/// [`EditorState::debug_breakpoints`] — so a breakpoint set from the gutter was
+/// invisible to the debugger. This keeps both in step, and is a free function so
+/// the invariant is testable without driving a socket.
+pub fn toggle_breakpoint_in_state(s: &mut EditorState, path: &str, line: u32) -> bool {
+    let added = {
+        let bps = s.breakpoints.entry(path.to_string()).or_default();
+        if let Some(pos) = bps.iter().position(|&l| l == line) {
+            bps.remove(pos);
+            false
+        } else {
+            bps.push(line);
+            bps.sort();
+            true
+        }
+    };
+    let key = (path.to_string(), line as usize);
+    if added {
+        if !s.debug_breakpoints.contains(&key) {
+            s.debug_breakpoints.push(key);
+        }
+    } else {
+        s.debug_breakpoints
+            .retain(|(sc, ln)| !(sc == path && *ln == line as usize));
+    }
+    added
+}
+
+/// Clears the breakpoint at `script:line` from **both** stores (pat-0q2kx.10).
+///
+/// The debugger panel's remove button and the script gutter's marker show the
+/// same breakpoint, so removing it from one view must clear the other. The
+/// counterpart to [`toggle_breakpoint_in_state`].
+pub fn remove_breakpoint_in_state(s: &mut EditorState, script: &str, line: usize) {
+    s.debug_breakpoints
+        .retain(|(sc, ln)| !(sc == script && *ln == line));
+    if let Some(bps) = s.breakpoints.get_mut(script) {
+        bps.retain(|&l| l as usize != line);
+    }
+}
+
 fn api_toggle_breakpoint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
         Some(v) => v,
@@ -11901,17 +12888,7 @@ fn api_toggle_breakpoint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
         }
     };
     let mut s = state.lock().unwrap();
-    let added = {
-        let bps = s.breakpoints.entry(path.clone()).or_default();
-        if let Some(pos) = bps.iter().position(|&l| l == line) {
-            bps.remove(pos);
-            false
-        } else {
-            bps.push(line);
-            bps.sort();
-            true
-        }
-    };
+    let added = toggle_breakpoint_in_state(&mut s, &path, line);
     s.add_log(
         "info",
         format!(
@@ -12635,8 +13612,7 @@ fn api_debug_remove_breakpoint(
     if let Some(v) = parse_json_body(body) {
         let script = v["script"].as_str().unwrap_or_default().to_string();
         let line = v["line"].as_u64().unwrap_or(0) as usize;
-        s.debug_breakpoints
-            .retain(|(sc, ln)| !(sc == &script && *ln == line));
+        remove_breakpoint_in_state(&mut s, &script, line);
     }
     send_json(stream, r#"{"ok":true}"#);
 }

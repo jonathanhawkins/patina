@@ -25,4 +25,8 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# Lets tests assert on emitted diagnostics — pat-0q2kx.6 requires that a scene
+# naming a missing audio stream WARNS rather than failing silently, which is
+# only observable through the tracing output.
+tracing-subscriber = { workspace = true }
 

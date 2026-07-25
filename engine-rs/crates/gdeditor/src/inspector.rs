@@ -1229,6 +1229,10 @@ impl PropertyEditor {
             VariantType::Array => Self::Array,
             VariantType::Dictionary => Self::Dictionary,
             VariantType::Callable => Self::Callable,
+            // A Signal is a live object binding, not an editable property
+            // value — Godot's inspector shows no editor for one either
+            // (pat-0q2kx.9).
+            VariantType::Signal => Self::None,
             VariantType::Resource => Self::ResourcePicker,
             // Packed arrays edit through the generic array widget.
             VariantType::PackedByteArray

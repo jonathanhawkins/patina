@@ -1425,7 +1425,19 @@ impl MainLoop {
 
         // -- animation / tween phase --
         self.tree.process_animations(delta_secs);
+        // AnimationTree nodes advance in the same phase as the players they pull
+        // clips from, after them so a tree's blended pose wins where both write
+        // the same property (pat-0q2kx.2).
+        self.tree.process_animation_trees(delta_secs);
         self.tree.process_tweens(delta_secs);
+
+        // -- skeleton phase (pat-0q2kx.3) --
+        // Godot's NOTIFICATION_UPDATE_SKELETON: after the mixer has written
+        // poses, each Skeleton3D routes its 3D bone tracks onto bone poses, runs
+        // its SkeletonModifier3D stack (IK layers on top of animation), then
+        // snaps BoneAttachment3D children to their bone. The render bridge reads
+        // the resulting poses to skin bound MeshInstance3D meshes.
+        crate::skeleton3d::process_skeletons(&mut self.tree);
 
         // -- particle phase (pat-u3l8c.4) --
         // Advance CPU particle simulators for emitting particle nodes so that

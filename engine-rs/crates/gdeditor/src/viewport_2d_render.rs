@@ -16,6 +16,7 @@ use gdrender2d::draw;
 use gdrender2d::font::{draw_string, BitmapFont};
 use gdrender2d::renderer::FrameBuffer;
 use gdscene::control::TextAlign;
+use gdscene::control_render::ControlDrawItem;
 use gdscene::{control, node2d, SceneTree};
 use gdvariant::Variant;
 
@@ -301,6 +302,174 @@ pub const RUNTIME_CLEAR_COLOR: Color = Color::new(0.3, 0.3, 0.3, 1.0);
 pub fn build_runtime_render_list(tree: &SceneTree) -> Vec<Render2DItem> {
     collect_canvas_items(tree)
 }
+
+/// Lays out and draws the running scene's `Control` subtree into render items the
+/// 2D rasterizer already understands (pat-0q2kx.19).
+///
+/// Before this, the Play view drew only Sprite2D/Polygon2D/Line2D/ColorRect/Label
+/// and every other control fell through to [`Render2DKind::Marker`] — so a themed
+/// UI rendered as a scatter of markers at the origin, with containers never laid
+/// out. Two things happen here, in Godot's order:
+///
+/// 1. every container is sorted (`Container::_sort_children`), parents before
+///    children, so child rects are real rather than all sitting at the origin;
+/// 2. the control tree is drawn by [`gdscene::control_render`] — the same themed
+///    pass the unit tests exercise — and its primitives are mapped onto
+///    [`Render2DKind`], so no per-control drawing rule is duplicated here.
+///
+/// `z_index` carries the walk's paint order (parents first) and is offset by
+/// [`CONTROL_Z_BASE`] so UI composites above plain 2D nodes, which is what a
+/// Godot scene with a UI layer looks like.
+pub fn build_control_render_items(
+    tree: &mut SceneTree,
+    root: gdscene::NodeId,
+    size: Vector2,
+) -> Vec<Render2DItem> {
+    // (1) Lay out containers first. `sort_container_tree` recurses, but it must be
+    // entered at every container that is *not* nested inside another container —
+    // entering at the subtree root would skip a container whose parent is a plain
+    // Control (e.g. Panel > VBoxContainer).
+    let mut subtree = Vec::new();
+    tree.collect_subtree_top_down(root, &mut subtree);
+    for id in subtree {
+        let is_container = tree
+            .get_node(id)
+            .map(|n| control::is_container_class_name(n.class_name()))
+            .unwrap_or(false);
+        if is_container {
+            control::sort_container_tree(tree, id, size);
+        }
+    }
+
+    // (2) Draw, then translate each primitive into a render item. Positions are
+    // already global viewport space, so the item transform is a pure translation.
+    let theme = gdscene::theme::Theme::default_theme();
+    let items = gdscene::control_render::control_draw_items(tree, root, &theme, size);
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let (transform, z, kind) = match item {
+            ControlDrawItem::Rect {
+                rect,
+                color,
+                filled,
+                z,
+            } => {
+                if filled {
+                    (
+                        Transform2D::translated(rect.position),
+                        z,
+                        Render2DKind::ColorRect {
+                            size: rect.size,
+                            color,
+                        },
+                    )
+                } else {
+                    // No stroked-rect kind exists; a closed polyline is the
+                    // faithful equivalent and the rasterizer already draws it.
+                    let (p, s) = (rect.position, rect.size);
+                    (
+                        Transform2D::IDENTITY,
+                        z,
+                        Render2DKind::Line {
+                            points: vec![
+                                p,
+                                Vector2::new(p.x + s.x, p.y),
+                                Vector2::new(p.x + s.x, p.y + s.y),
+                                Vector2::new(p.x, p.y + s.y),
+                                p,
+                            ],
+                            width: 1.0,
+                            color,
+                        },
+                    )
+                }
+            }
+            ControlDrawItem::Circle {
+                center,
+                radius,
+                color,
+                z,
+            } => {
+                // Approximated as a filled polygon — a radio indicator drawn as a
+                // square would read as a checkbox.
+                const SEGMENTS: usize = 16;
+                let points = (0..SEGMENTS)
+                    .map(|i| {
+                        let a = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+                        Vector2::new(center.x + radius * a.cos(), center.y + radius * a.sin())
+                    })
+                    .collect();
+                (
+                    Transform2D::IDENTITY,
+                    z,
+                    Render2DKind::Polygon { points, color },
+                )
+            }
+            ControlDrawItem::Line {
+                from,
+                to,
+                color,
+                width,
+                z,
+            } => (
+                Transform2D::IDENTITY,
+                z,
+                Render2DKind::Line {
+                    points: vec![from, to],
+                    width,
+                    color,
+                },
+            ),
+            ControlDrawItem::Text {
+                text,
+                position,
+                font_size,
+                z,
+                ..
+            } => (
+                Transform2D::translated(position),
+                z,
+                Render2DKind::Text {
+                    text,
+                    font_size: font_size as i64,
+                    h_align: TextAlign::Left,
+                },
+            ),
+            ControlDrawItem::Texture {
+                texture_path,
+                rect,
+                z,
+                ..
+            } => (
+                Transform2D::translated(rect.position),
+                z,
+                Render2DKind::Sprite {
+                    texture: texture_path,
+                    offset: Vector2::ZERO,
+                    flip_h: false,
+                    flip_v: false,
+                },
+            ),
+        };
+        out.push(Render2DItem {
+            // Control primitives are not one-per-node, so there is no single node
+            // id to attribute them to; 0 marks "not pickable as a node".
+            node_id: 0,
+            global_transform: transform,
+            // Each primitive already carries its own themed colour, so the
+            // item-level tint stays neutral.
+            modulate: Color::new(1.0, 1.0, 1.0, 1.0),
+            z_index: CONTROL_Z_BASE + z as i64,
+            canvas_layer: 0,
+            kind,
+        });
+    }
+    out
+}
+
+/// Paint-order floor for control primitives, so a themed UI composites above the
+/// plain 2D nodes of the same canvas layer (Godot scenes put UI on top).
+pub const CONTROL_Z_BASE: i64 = 1 << 20;
 
 /// Rasterizes an ordered runtime render list into a fresh [`FrameBuffer`],
 /// drawing the real CanvasItem pixels a running 2D game would show: textured

@@ -115,6 +115,50 @@ impl AudioServer {
             .map(|(_, s)| &mut s.playback)
     }
 
+    /// Suspends or resumes a live stream **without dropping the voice**
+    /// (Godot's `AudioStreamPlayer.stream_paused`, pat-0q2kx.5).
+    ///
+    /// A paused stream keeps its position and stays in the stream table —
+    /// [`mix`](Self::mix) skips non-`Playing` streams, so it contributes
+    /// silence, and only `Stopped` streams are evicted. That is what makes
+    /// resume-from-position work where `stop`/`play` would restart at zero.
+    ///
+    /// Returns `false` when `id` is not a live stream. Pausing an already-paused
+    /// stream (or resuming a playing one) is a no-op; a `Stopped` stream is not
+    /// resurrected by resuming, since its voice is already gone.
+    pub fn set_stream_paused(&mut self, id: PlaybackId, paused: bool) -> bool {
+        let Some(playback) = self.stream_mut(id) else {
+            return false;
+        };
+        match (paused, playback.state()) {
+            (true, PlaybackState::Playing) => playback.pause(),
+            (false, PlaybackState::Paused) => playback.play(),
+            _ => {}
+        }
+        true
+    }
+
+    /// The playback state of a live stream, or `None` when `id` names no stream
+    /// (it finished and was evicted, or was explicitly stopped).
+    ///
+    /// Distinguishes "paused, still alive" from "gone", which
+    /// [`is_playing`](Self::is_playing) cannot — it reports `false` for both.
+    pub fn stream_state(&self, id: PlaybackId) -> Option<PlaybackState> {
+        self.streams
+            .iter()
+            .find(|(pid, _)| *pid == id)
+            .map(|(_, s)| s.playback.state())
+    }
+
+    /// The live playback position of a stream in seconds, or `None` when `id`
+    /// names no stream.
+    pub fn stream_position(&self, id: PlaybackId) -> Option<f32> {
+        self.streams
+            .iter()
+            .find(|(pid, _)| *pid == id)
+            .map(|(_, s)| s.playback.get_playback_position())
+    }
+
     /// Redirects a live stream to a different mixer bus. Used for Godot's
     /// `Area3D`/`Area2D` audio-bus override: when a source node enters an area
     /// with `audio_bus_override` enabled, its voice is rerouted to the area's
@@ -957,5 +1001,91 @@ bus/2/send = "Master"
         let output = server.mix(1);
         // B receives 0.3 direct + 0.2 from A = 0.5; Master receives 0.5 + 0.1 = 0.6.
         assert!((output[0] - 0.6).abs() < 1e-4, "got {}", output[0]);
+    }
+
+    // -- paused-voice controls (pat-0q2kx.5) --------------------------------
+    //
+    // `stop`/`play` cannot express Godot's `stream_paused`: stopping evicts the
+    // voice and resets position to 0, so resuming would restart the sound.
+    // These cover the pause path that keeps the voice alive at its position.
+
+    #[test]
+    fn paused_voice_stays_alive_and_mixes_silence() {
+        let mut server = AudioServer::new();
+        let id = server.play(make_dc_buffer(0.5, 44100));
+        assert!(
+            (server.mix(1)[0] - 0.5).abs() < 1e-4,
+            "audible before pause"
+        );
+
+        assert!(server.set_stream_paused(id, true), "stream is live");
+        assert_eq!(
+            server.stream_state(id),
+            Some(PlaybackState::Paused),
+            "pausing must not evict the voice — only Stopped streams are dropped"
+        );
+        assert_eq!(
+            server.active_stream_count(),
+            1,
+            "the paused voice is still in the stream table"
+        );
+        assert_eq!(server.mix(1)[0], 0.0, "a paused voice mixes to silence");
+    }
+
+    #[test]
+    fn paused_voice_resumes_from_the_same_position() {
+        let mut server = AudioServer::new();
+        let id = server.play(make_dc_buffer(0.5, 44100));
+        server.mix(64);
+        let at_pause = server.stream_position(id).expect("live stream");
+        assert!(at_pause > 0.0, "position advanced before pausing");
+
+        server.set_stream_paused(id, true);
+        server.mix(64);
+        assert_eq!(
+            server.stream_position(id),
+            Some(at_pause),
+            "position must freeze while paused, not advance or reset"
+        );
+
+        server.set_stream_paused(id, false);
+        assert_eq!(server.stream_state(id), Some(PlaybackState::Playing));
+        server.mix(64);
+        let after = server.stream_position(id).expect("still live");
+        assert!(
+            after > at_pause,
+            "resuming continues from the frozen position ({at_pause}), got {after}"
+        );
+    }
+
+    #[test]
+    fn paused_voice_controls_reject_dead_handles() {
+        let mut server = AudioServer::new();
+        let id = server.play(make_dc_buffer(0.5, 44100));
+        server.stop(id);
+
+        assert!(
+            !server.set_stream_paused(id, true),
+            "a stopped stream has no voice to pause"
+        );
+        assert_eq!(server.stream_state(id), None);
+        assert_eq!(server.stream_position(id), None);
+    }
+
+    #[test]
+    fn paused_voice_resume_does_not_resurrect_a_stopped_stream() {
+        let mut server = AudioServer::new();
+        let id = server.play(make_dc_buffer(0.5, 44100));
+        server.set_stream_paused(id, true);
+        // Resuming a *paused* stream plays; there is no path that revives a
+        // stream the server already evicted.
+        server.set_stream_paused(id, false);
+        assert_eq!(server.stream_state(id), Some(PlaybackState::Playing));
+
+        server.stop(id);
+        assert!(
+            !server.set_stream_paused(id, false),
+            "evicted stays evicted"
+        );
     }
 }

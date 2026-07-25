@@ -448,6 +448,9 @@ fn encode_into(value: &Variant, out: &mut Vec<u8>, depth: u32) -> Result<(), Var
             }
         }
         Variant::Callable(_) => return Err(VariantEncodeError::Unsupported(VariantType::Callable)),
+        // Godot's `encode_variant` refuses SIGNAL for the same reason it refuses
+        // CALLABLE: the value is a live binding to an object, not data.
+        Variant::Signal { .. } => return Err(VariantEncodeError::Unsupported(VariantType::Signal)),
         Variant::Resource(_) => return Err(VariantEncodeError::Unsupported(VariantType::Resource)),
     }
 

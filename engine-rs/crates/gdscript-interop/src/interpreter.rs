@@ -977,8 +977,21 @@ impl Interpreter {
         signal_name: &str,
         args: &[Variant],
     ) -> Result<Vec<String>, RuntimeError> {
+        self.notify_await_signal_from(None, signal_name, args)
+    }
+
+    /// [`notify_await_signal`](Self::notify_await_signal) with the emitting
+    /// object's raw `ObjectId`, so an `await` bound to one object is not
+    /// resumed by a same-named signal from another (pat-0q2kx.9).
+    pub fn notify_await_signal_from(
+        &mut self,
+        source: Option<u64>,
+        signal_name: &str,
+        args: &[Variant],
+    ) -> Result<Vec<String>, RuntimeError> {
         let value = args.first().cloned().unwrap_or(Variant::Nil);
-        self.coroutine_host.notify_signal(signal_name, value);
+        self.coroutine_host
+            .notify_signal_from(source, signal_name, value);
         self.resume_ready_coroutines()
     }
 
@@ -1012,6 +1025,23 @@ impl Interpreter {
             return Ok(Vec::new());
         }
         self.resume_with_instance_self(instance, |i| i.notify_await_signal(signal_name, args))
+    }
+
+    /// [`notify_instance_await_signal`](Self::notify_instance_await_signal)
+    /// carrying the emitting object's raw `ObjectId` (pat-0q2kx.9).
+    pub fn notify_instance_await_signal_from(
+        &mut self,
+        instance: &mut ClassInstance,
+        source: Option<u64>,
+        signal_name: &str,
+        args: &[Variant],
+    ) -> Result<Vec<String>, RuntimeError> {
+        if self.coroutine_host.suspended_count() == 0 {
+            return Ok(Vec::new());
+        }
+        self.resume_with_instance_self(instance, |i| {
+            i.notify_await_signal_from(source, signal_name, args)
+        })
     }
 
     /// Installs `instance` as `self_instance` (registering its methods so a
@@ -1688,7 +1718,37 @@ impl Interpreter {
                     // same-named local shadows it (checked above). (pat-nzgdu.6)
                     if let Some(ref inst) = self.self_instance {
                         if inst.class_def.signals.iter().any(|s| s == name) {
-                            return Ok(crate::coroutine::AwaitTarget::signal_variant(name));
+                            // In Godot a bareword signal IS a `Signal` value
+                            // bound to `self` — `my_signal.emit(x)` and
+                            // `await my_signal` are both just uses of it. When
+                            // we know which node we are, bind it; otherwise
+                            // fall back to the legacy name-only awaitable
+                            // (pat-0q2kx.9).
+                            return Ok(match self.current_node_id {
+                                Some(id) => Variant::Signal {
+                                    object_id: id,
+                                    name: name.to_string(),
+                                },
+                                None => crate::coroutine::AwaitTarget::signal_variant(name),
+                            });
+                        }
+                    }
+                    // A bareword naming a method declared on this script is a
+                    // `Callable` bound to it — that is how Godot 4 writes
+                    // `sig.connect(_on_pressed)` with no `Callable(...)`
+                    // wrapper. Resolved after locals / members / node
+                    // properties / signals so any of those shadow it, matching
+                    // Godot's order. Only plain identifiers reach here; a real
+                    // call `foo()` is an `Expr::Call` handled elsewhere, so this
+                    // cannot turn a call into a value (pat-0q2kx.9).
+                    if let Some(ref inst) = self.self_instance {
+                        if inst.class_def.methods.contains_key(name) {
+                            return Ok(Variant::Callable(Box::new(CallableRef::Method {
+                                // 0 means "the calling object" for a Callable;
+                                // `callable_target` resolves it when connecting.
+                                target_id: self.current_node_id.unwrap_or(0),
+                                method: name.to_string(),
+                            })));
                         }
                     }
                     // @GlobalScope named constants (KEY_*/OK/ERR_*/TYPE_*/...) are
@@ -1787,7 +1847,7 @@ impl Interpreter {
                             let callable = callable.clone();
                             return self.invoke_callable(&callable, &evaluated_args);
                         }
-                        self.call_user_func(name, &evaluated_args)
+                        self.call_self_func_or_native(name, &evaluated_args)
                     }
                     Expr::MemberAccess { object, member } => {
                         // Handle self.method() — dispatch to class methods
@@ -1796,7 +1856,7 @@ impl Interpreter {
                             if let Some(result) = self.try_builtin(member, &evaluated_args)? {
                                 return Ok(result);
                             }
-                            return self.call_user_func(member, &evaluated_args);
+                            return self.call_self_func_or_native(member, &evaluated_args);
                         }
                         // Handle Input singleton: Input.is_action_pressed(), etc.
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "Input") {
@@ -1967,6 +2027,17 @@ impl Interpreter {
                 // ObjectId property access via scene_access
                 if let Variant::ObjectId(oid) = &obj {
                     if let Some(ref access) = self.scene_access {
+                        // `$Other.my_signal` is a `Signal` value in Godot, not a
+                        // property. Checked before the property read because a
+                        // signal has no property entry, so this used to return
+                        // Nil and `$B.pressed.connect(cb)` was impossible
+                        // (pat-0q2kx.9).
+                        if access.node_has_signal(oid.raw(), member) {
+                            return Ok(Variant::Signal {
+                                object_id: oid.raw(),
+                                name: member.clone(),
+                            });
+                        }
                         let val = access.get_node_property(oid.raw(), member);
                         return Ok(val);
                     }
@@ -2524,6 +2595,27 @@ impl Interpreter {
                     }
                 }
                 Ok(Some(crate::coroutine::AwaitTarget::timer_variant(secs)))
+            }
+            // Godot: `Node.create_tween()` returns an already-running Tween
+            // bound to the tree. The handle is a `Variant::ObjectId`, so the
+            // fluent chain `create_tween().tween_property(...)` dispatches
+            // through `call_method_on`'s tween arm (pat-0q2kx.4). Before this,
+            // `create_tween` hit the unknown-function path — scripts could not
+            // make a tween at all, and `SceneTree::create_tween` had only test
+            // callers.
+            "create_tween" => {
+                let node_id = match self.current_node_id {
+                    Some(id) => id,
+                    // Godot returns null for a node outside the tree; a bare
+                    // interpreter with no owning node is the same situation.
+                    None => return Ok(Some(Variant::Nil)),
+                };
+                if let Some(ref mut access) = self.scene_access {
+                    if let Some(raw) = access.create_tween(node_id) {
+                        return Ok(Some(Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw))));
+                    }
+                }
+                Ok(Some(Variant::Nil))
             }
             "wait_signal" => {
                 if args.len() != 1 {
@@ -4653,8 +4745,136 @@ impl Interpreter {
             if is_encoded_object_as_id_handle(*oid) {
                 return call_encoded_object_as_id_instance(*oid, method, args);
             }
+            // Tween handles (pat-0q2kx.4). Unlike the families above, a tween id
+            // carries no tag bit — it is drawn from the same `ObjectId` counter
+            // as nodes — so only the host can say whether this id names a live
+            // tween. `None` means "not a tween", and we fall through to the
+            // node arms below. This MUST run before them: `Tween` shares the
+            // method names `play`/`stop`/`pause`/`kill`/`set_loops` with
+            // AudioStreamPlayer and AnimationPlayer, which would otherwise
+            // swallow the call and set `playing` on a nonexistent node.
+            if let Some(ref mut access) = self.scene_access {
+                if let Some(result) = access.tween_call(oid.raw(), method, args) {
+                    return Ok(result);
+                }
+            }
         }
         match obj {
+            // -- Godot's `Signal` builtin (pat-0q2kx.9) ----------------------
+            //
+            // `$B.pressed.connect(cb)` / `sig.emit(x)` / `sig.is_connected(cb)`.
+            // The value carries its own object, so every call routes to *that*
+            // object's SignalStore rather than matching by name globally.
+            Variant::Signal { object_id, name } => {
+                let source = *object_id;
+                // Captured before the mutable `scene_access` borrow below.
+                let self_node = self.current_node_id;
+                match method {
+                    "get_name" => return Ok(Variant::String(name.clone())),
+                    "get_object" => {
+                        return Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(source)))
+                    }
+                    "get_object_id" => return Ok(Variant::Int(source as i64)),
+                    // Godot: a Signal is null when it is bound to nothing.
+                    "is_null" => return Ok(Variant::Bool(source == 0 || name.is_empty())),
+                    _ => {}
+                }
+
+                let access = match self.scene_access.as_deref_mut() {
+                    Some(a) => a,
+                    None => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Signal methods require scene access".into(),
+                        )))
+                    }
+                };
+                match method {
+                    "emit" => {
+                        access.emit_signal(source, name, args);
+                        Ok(Variant::Nil)
+                    }
+                    "connect" | "disconnect" | "is_connected" => {
+                        // Godot 4 takes a Callable. `Callable(self, "m")` has
+                        // target_id 0 meaning "the calling object", so resolve
+                        // that against the current node.
+                        let (target, target_method) = match args.first() {
+                            Some(v) => match callable_target(v, self_node) {
+                                Some(t) => t,
+                                None => {
+                                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                        format!("Signal.{method}() expects a Callable"),
+                                    )))
+                                }
+                            },
+                            None => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    format!("Signal.{method}() requires a Callable"),
+                                )))
+                            }
+                        };
+                        match method {
+                            "connect" => {
+                                // Optional Godot ConnectFlags second argument.
+                                let flags = match args.get(1) {
+                                    Some(Variant::Int(i)) => *i,
+                                    _ => 0,
+                                };
+                                access.connect_signal_flags(
+                                    source,
+                                    name,
+                                    target,
+                                    &target_method,
+                                    flags,
+                                    &[],
+                                );
+                                // Godot returns an Error code; OK == 0.
+                                Ok(Variant::Int(0))
+                            }
+                            "disconnect" => {
+                                access.disconnect_signal(source, name, target, &target_method);
+                                Ok(Variant::Nil)
+                            }
+                            _ => Ok(Variant::Bool(access.is_signal_connected(
+                                source,
+                                name,
+                                target,
+                                &target_method,
+                            ))),
+                        }
+                    }
+                    "get_connections" => {
+                        let conns: Vec<Variant> = access
+                            .signal_connections(source, name)
+                            .into_iter()
+                            .map(|(t, m)| {
+                                let mut d = Dictionary::new();
+                                d.insert(
+                                    "callable",
+                                    Variant::Callable(Box::new(CallableRef::Method {
+                                        target_id: t,
+                                        method: m,
+                                    })),
+                                );
+                                d.insert(
+                                    "signal",
+                                    Variant::Signal {
+                                        object_id: source,
+                                        name: name.clone(),
+                                    },
+                                );
+                                Variant::Dictionary(d)
+                            })
+                            .collect();
+                        Ok(Variant::Array(conns))
+                    }
+                    "has_connections" => {
+                        Ok(Variant::Bool(!access.signal_connections(source, name).is_empty()))
+                    }
+                    other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                        format!("Signal.{other}"),
+                    ))),
+                }
+            }
             Variant::Array(arr) => match method {
                 "size" | "length" => Ok(Variant::Int(arr.len() as i64)),
                 "is_empty" => Ok(Variant::Bool(arr.is_empty())),
@@ -5708,38 +5928,63 @@ impl Interpreter {
                         }
                     }
                     "connect" => {
-                        if args.len() < 3 {
+                        if args.len() < 2 {
                             return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                                "connect() needs signal, target, method".into(),
+                                "connect() needs a signal and a target".into(),
                             )));
                         }
                         let signal = match &args[0] {
                             Variant::String(s) => s.clone(),
+                            Variant::StringName(s) => s.as_str().to_string(),
                             _ => {
                                 return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                                     "connect() signal must be string".into(),
                                 )))
                             }
                         };
-                        let target_id = match &args[1] {
-                            Variant::ObjectId(tid) => tid.raw(),
+                        let self_node = self.current_node_id;
+                        // Two accepted shapes (pat-0q2kx.9):
+                        //   Godot 4  — connect(signal, Callable[, flags])
+                        //   legacy   — connect(signal, ObjectId, method[, flags])
+                        // Godot 4 removed the 3-arg form, but Patina scripts
+                        // predate first-class Callables, so both are honoured
+                        // and the flags argument shifts accordingly.
+                        let (target_id, method_name, flags_index) = match &args[1] {
+                            Variant::Callable(_) => {
+                                match callable_target(&args[1], self_node) {
+                                    Some((t, m)) => (t, m, 2),
+                                    None => {
+                                        return Err(RuntimeError::new(
+                                            RuntimeErrorKind::TypeError(
+                                                "connect() Callable has no bindable target/method"
+                                                    .into(),
+                                            ),
+                                        ))
+                                    }
+                                }
+                            }
+                            Variant::ObjectId(tid) => {
+                                let m = match args.get(2) {
+                                    Some(Variant::String(s)) => s.clone(),
+                                    Some(Variant::StringName(s)) => s.as_str().to_string(),
+                                    _ => {
+                                        return Err(RuntimeError::new(
+                                            RuntimeErrorKind::TypeError(
+                                                "connect() method must be string".into(),
+                                            ),
+                                        ))
+                                    }
+                                };
+                                (tid.raw(), m, 3)
+                            }
                             _ => {
                                 return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                                    "connect() target must be ObjectId".into(),
+                                    "connect() target must be a Callable or ObjectId".into(),
                                 )))
                             }
                         };
-                        let method_name = match &args[2] {
-                            Variant::String(s) => s.clone(),
-                            _ => {
-                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                                    "connect() method must be string".into(),
-                                )))
-                            }
-                        };
-                        // Optional 4th arg = Godot ConnectFlags bitmask
-                        // (DEFERRED=1, ONE_SHOT=4, ...). Older callers omit it.
-                        let flags = match args.get(3) {
+                        // Godot ConnectFlags bitmask (DEFERRED=1, ONE_SHOT=4, …).
+                        let flags = match args.get(flags_index) {
                             Some(Variant::Int(f)) => *f,
                             _ => 0,
                         };
@@ -5963,6 +6208,25 @@ impl Interpreter {
                     // the `_` arm below and threw `UndefinedFunction("ObjectId.play")`.
                     "play" => {
                         if let Some(ref mut access) = self.scene_access {
+                            // `AnimationPlayer.play("walk")` names a *clip*,
+                            // while `AudioStreamPlayer.play(0.5)` names a seek
+                            // position — both land here as `ObjectId.play`.
+                            // Route to the attached AnimationPlayer first; only
+                            // a node without one falls through to the audio
+                            // semantics below (pat-0q2kx.1). Before this,
+                            // `$AnimationPlayer.play("walk")` silently dropped
+                            // the clip name and set `playing = true` instead.
+                            let anim_clip = match args.first() {
+                                Some(Variant::String(s)) => Some(s.clone()),
+                                Some(Variant::StringName(s)) => Some(s.as_str().to_string()),
+                                None => Some(String::new()),
+                                _ => None,
+                            };
+                            if let Some(clip) = anim_clip {
+                                if access.animation_player_play(id, &clip) {
+                                    return Ok(Variant::Nil);
+                                }
+                            }
                             // Optional `from` position: request a seek first.
                             if let Some(from) = args.first() {
                                 let pos = match from {
@@ -5988,6 +6252,9 @@ impl Interpreter {
                     }
                     "stop" => {
                         if let Some(ref mut access) = self.scene_access {
+                            if access.animation_player_stop(id) {
+                                return Ok(Variant::Nil);
+                            }
                             access.set_node_property(id, "playing", Variant::Bool(false));
                             Ok(Variant::Nil)
                         } else {
@@ -5998,6 +6265,9 @@ impl Interpreter {
                     }
                     "is_playing" => {
                         if let Some(ref access) = self.scene_access {
+                            if let Some(playing) = access.animation_player_is_playing(id) {
+                                return Ok(Variant::Bool(playing));
+                            }
                             Ok(Variant::Bool(matches!(
                                 access.get_node_property(id, "playing"),
                                 Variant::Bool(true)
@@ -6015,6 +6285,9 @@ impl Interpreter {
                                 Some(Variant::Int(i)) => *i as f64,
                                 _ => 0.0,
                             };
+                            if access.animation_player_seek(id, pos) {
+                                return Ok(Variant::Nil);
+                            }
                             access.set_node_property(id, "seek_request", Variant::Float(pos));
                             Ok(Variant::Nil)
                         } else {
@@ -6023,8 +6296,27 @@ impl Interpreter {
                             )))
                         }
                     }
+                    // `AnimationPlayer.get_current_animation()` — the playing
+                    // clip, or "" when stopped (pat-0q2kx.1). Answered from the
+                    // live player so a script reading it in the same frame as
+                    // its own `play()` sees the new clip, not last frame's.
+                    "get_current_animation" => {
+                        if let Some(ref access) = self.scene_access {
+                            if let Some(name) = access.animation_player_current(id) {
+                                return Ok(Variant::String(name));
+                            }
+                            Ok(access.get_node_property(id, "current_animation"))
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
                     "get_playback_position" => {
                         if let Some(ref access) = self.scene_access {
+                            if let Some(pos) = access.animation_player_position(id) {
+                                return Ok(Variant::Float(pos));
+                            }
                             Ok(match access.get_node_property(id, "playback_position") {
                                 v @ Variant::Float(_) => v,
                                 Variant::Int(i) => Variant::Float(i as f64),
@@ -6350,9 +6642,77 @@ impl Interpreter {
                             .unwrap_or_else(|| "Object".to_string());
                         Ok(Variant::String(format!("<{cls}#{id}>")))
                     }
-                    _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
-                        format!("ObjectId.{method}"),
-                    ))),
+                    // Godot `Object.call(name, ...)` / `Object.callv(name, args)`
+                    // run `name` on the target object (pat-0q2kx.8). `call`
+                    // spreads its trailing arguments; `callv` takes them as one
+                    // array.
+                    "call" | "callv" => {
+                        let name = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.as_str().to_string(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    format!("{method}() takes a method name"),
+                                )))
+                            }
+                        };
+                        let call_args: Vec<Variant> = if method == "callv" {
+                            match args.get(1) {
+                                Some(Variant::Array(items)) => items.clone(),
+                                None | Some(Variant::Nil) => Vec::new(),
+                                _ => {
+                                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                        "callv() takes (method, args_array)".into(),
+                                    )))
+                                }
+                            }
+                        } else {
+                            args[1..].to_vec()
+                        };
+                        self.call_object_method(id, &name, &call_args)
+                    }
+                    // Godot `Object.has_method` reports script and native methods.
+                    "has_method" => {
+                        let name = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.as_str().to_string(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "has_method() takes a method name".into(),
+                                )))
+                            }
+                        };
+                        let has = match &self.scene_access {
+                            Some(access) => access.node_has_method(id, &name),
+                            // No scene access: the only script we can see is the
+                            // running one, so answer for it.
+                            None => self.function_registry.get(&name).is_some(),
+                        };
+                        Ok(Variant::Bool(has))
+                    }
+                    // Godot `Object.get_method_argument_count` — -1 when unknown,
+                    // as Godot returns for a method it cannot find.
+                    "get_method_argument_count" => {
+                        let name = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.as_str().to_string(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "get_method_argument_count() takes a method name".into(),
+                                )))
+                            }
+                        };
+                        let count = self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|access| access.node_method_argument_count(id, &name))
+                            .unwrap_or(-1);
+                        Ok(Variant::Int(count))
+                    }
+                    // An unknown method may still be a script method on the target
+                    // object — Godot dispatches those through `Object::call`
+                    // (pat-0q2kx.8). Reports "no such method" if it is not.
+                    _ => self.call_object_method(id, method, args),
                 }
             }
             Variant::Callable(callable_ref) => match method {
@@ -6762,13 +7122,94 @@ impl Interpreter {
         })
     }
 
+    /// Runs `method` on the object `id` and returns its value — Godot's
+    /// `Object::call` reaching a scripted object
+    /// (upstream/godot/core/object/object.cpp `Object::callv`), which dispatches
+    /// onto the *target's* script (pat-0q2kx.8).
+    ///
+    /// A call whose target is the script already running stays inside this
+    /// interpreter, so recursion and local state behave as they do within one
+    /// script. Anything else goes through the host onto the target's own script.
+    /// A target that does not respond is `UndefinedFunction`, matching Godot's
+    /// "nonexistent function" on a valid object; a method that raised yields
+    /// `Nil`, as a failed call in Godot has no value.
+    /// A bare `foo()` or `self.foo()` call: the running script's own function
+    /// first, then the engine's native method for this node's class — Godot's
+    /// `Object::callp` order (upstream/godot/core/object/object.cpp).
+    ///
+    /// Without the second half, a `CharacterBody2D` script calling
+    /// `move_and_slide()` with no receiver died on `UndefinedFunction`, since
+    /// the interpreter only knew script-defined functions here (pat-0q2kx.16).
+    fn call_self_func_or_native(
+        &mut self,
+        name: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        match self.call_user_func(name, args) {
+            Err(e) if matches!(e.kind, RuntimeErrorKind::UndefinedFunction(_)) => {
+                if let Some(id) = self.current_node_id {
+                    if let Some(ref mut access) = self.scene_access {
+                        if let Some(value) = access.call_node_method(id, name, args) {
+                            return Ok(value);
+                        }
+                    }
+                }
+                Err(e)
+            }
+            other => other,
+        }
+    }
+
+    fn call_object_method(
+        &mut self,
+        id: u64,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        if self.current_node_id == Some(id) {
+            return self.call_self_func_or_native(method, args);
+        }
+        let responds = self
+            .scene_access
+            .as_ref()
+            .map(|access| access.node_has_method(id, method))
+            .unwrap_or(false);
+        if let Some(ref mut access) = self.scene_access {
+            if let Some(value) = access.call_script_method(id, method, args) {
+                return Ok(value);
+            }
+            // Godot's `Object::callp` tries the script instance, then the
+            // ClassDB method bind. Native methods run here so `$Body.
+            // move_and_slide()` / `other.add_to_group("enemies")` resolve
+            // instead of throwing UndefinedFunction (pat-0q2kx.16). Ordered
+            // before the `responds` check so a native call returns its real
+            // value rather than the Nil placeholder.
+            if let Some(value) = access.call_node_method(id, method, args) {
+                return Ok(value);
+            }
+        }
+        if responds {
+            return Ok(Variant::Nil);
+        }
+        Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("ObjectId.{method}"),
+        )))
+    }
+
     fn invoke_callable_impl(
         &mut self,
         callable: &CallableRef,
         args: &[Variant],
     ) -> Result<Variant, RuntimeError> {
         match callable {
-            CallableRef::Method { method, .. } => {
+            CallableRef::Method { target_id, method } => {
+                // A Callable carries its target object, so `Callable(obj, "m")`
+                // must run `m` ON `obj` (core/variant/callable.cpp) — dropping
+                // the target ran it on whichever script happened to be calling.
+                // `target_id` 0 means "self", as does the running script's own id.
+                if *target_id != 0 {
+                    return self.call_object_method(*target_id, method, args);
+                }
                 // Try to call as a user-defined function
                 self.call_user_func(method, args)
             }
@@ -7092,6 +7533,30 @@ impl Interpreter {
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || {
             self.call_instance_method_impl(instance, method_name, args)
         })
+    }
+
+    /// Invokes `setter_name` on `instance` **as a property setter**, so a write to
+    /// the property from inside the setter body lands on the backing store instead
+    /// of re-entering the setter (pat-0q2kx.17).
+    ///
+    /// The assignment path recognises "already inside this setter" by comparing
+    /// [`current_function`](Self::current_function) against the setter's name, but
+    /// [`call_instance_method`](Self::call_instance_method) does not set
+    /// `current_function` — so calling a setter through it fires the body once,
+    /// then the body's own `self.prop = value` fires it a *second* time before the
+    /// guard engages. This wrapper sets the marker for the duration of the call
+    /// and restores it afterwards, which is what an engine-side write
+    /// (`Object::set`, a `.tscn` property override) needs.
+    pub fn call_property_setter(
+        &mut self,
+        instance: &mut ClassInstance,
+        setter_name: &str,
+        value: Variant,
+    ) -> Result<Variant, RuntimeError> {
+        let previous = self.current_function.replace(setter_name.to_string());
+        let result = self.call_instance_method(instance, setter_name, &[value]);
+        self.current_function = previous;
+        result
     }
 
     fn call_instance_method_impl(
@@ -11289,6 +11754,35 @@ fn call_config_file_instance(
 
 /// Returns `true` if the identifier is a known Godot node class name that
 /// supports `.new()` for runtime instantiation.
+/// Resolves the `(target_object, method_name)` a signal connection should
+/// store from a `Callable` argument (pat-0q2kx.9).
+///
+/// `Callable(self, "m")` records `target_id == 0` meaning "the calling object",
+/// so an explicit 0 resolves against `self_node`. A plain String/StringName is
+/// also accepted: Patina scripts predate first-class Callables, and Godot 3's
+/// `connect(sig, obj, "method")` form still reaches here through the
+/// object-level `connect` arm.
+fn callable_target(v: &Variant, self_node: Option<u64>) -> Option<(u64, String)> {
+    match v {
+        Variant::Callable(c) => match c.inner_callable() {
+            CallableRef::Method { target_id, method } => {
+                let target = if *target_id == 0 {
+                    self_node?
+                } else {
+                    *target_id
+                };
+                Some((target, method.clone()))
+            }
+            // A lambda has no bindable target/method name to store in the
+            // SignalStore, so it cannot be connected here.
+            _ => None,
+        },
+        Variant::String(s) => Some((self_node?, s.clone())),
+        Variant::StringName(s) => Some((self_node?, s.as_str().to_string())),
+        _ => None,
+    }
+}
+
 fn is_node_class_name(name: &str) -> bool {
     matches!(
         name,

@@ -4,15 +4,20 @@
 //! produces sampled property values from an [`Animation`] library. Supported
 //! node types are [`AnimationNode::Animation`], [`AnimationNode::Blend2`],
 //! [`AnimationNode::Blend3`], [`AnimationNode::OneShot`],
-//! [`AnimationNode::BlendSpace1D`], [`AnimationNode::BlendSpace2D`], and
-//! [`AnimationNode::StateMachine`].
+//! [`AnimationNode::BlendSpace1D`], [`AnimationNode::BlendSpace2D`],
+//! [`AnimationNode::StateMachine`], and [`AnimationNode::Named`] (a naming
+//! wrapper that makes a node's `parameters/<name>/...` entries addressable).
+//!
+//! A tree stored in the [`SceneTree`] is advanced every frame by
+//! [`SceneTree::process_animation_trees`]; graphs are built from a `.tscn` by
+//! [`crate::animation_tree_tscn`].
 
 use std::collections::HashMap;
 
 use gdcore::math::Vector2;
 use gdvariant::Variant;
 
-use crate::animation::{blend_animations, interpolate_variant, Animation};
+use crate::animation::{interpolate_variant, Animation};
 use crate::node::NodeId;
 use crate::scene_tree::SceneTree;
 
@@ -46,6 +51,19 @@ pub enum AnimationNode {
     /// State machine that plays one animation at a time and crossfades
     /// between states when transitions fire.
     StateMachine(StateMachine),
+    /// A named pass-through wrapper around `inner`, carrying the graph-node name
+    /// the node has in a `.tscn`/`.tres` (a state name, or a blend-tree node
+    /// name). The name is what makes Godot's `parameters/<name>/...` entries
+    /// addressable: during [`AnimationTree::advance`] the tree copies
+    /// `parameters/<name>/blend_amount`, `parameters/<name>/blend_position`, and
+    /// `parameters/<name>/request` onto the wrapped node before evaluating it.
+    /// Sampling is transparent — a `Named` samples exactly as `inner` does.
+    Named {
+        /// The graph node's name, as written in the scene/resource file.
+        name: String,
+        /// The wrapped node.
+        inner: Box<AnimationNode>,
+    },
 }
 
 /// A 1D blend space. Points are sorted by `position` on insert.
@@ -111,7 +129,20 @@ pub struct OneShot {
     pub elapsed: f64,
     pub active: bool,
     prev_trigger: bool,
+    /// Last `parameters/<name>/request` value seen through a wrapping
+    /// [`AnimationNode::Named`], so a request only acts on its rising edge
+    /// (Godot clears the request after processing it; we latch instead).
+    prev_request: i64,
 }
+
+/// Godot `AnimationNodeOneShot.ONE_SHOT_REQUEST_NONE`.
+pub const ONE_SHOT_REQUEST_NONE: i64 = 0;
+/// Godot `AnimationNodeOneShot.ONE_SHOT_REQUEST_FIRE`.
+pub const ONE_SHOT_REQUEST_FIRE: i64 = 1;
+/// Godot `AnimationNodeOneShot.ONE_SHOT_REQUEST_ABORT`.
+pub const ONE_SHOT_REQUEST_ABORT: i64 = 2;
+/// Godot `AnimationNodeOneShot.ONE_SHOT_REQUEST_FADE_OUT`.
+pub const ONE_SHOT_REQUEST_FADE_OUT: i64 = 3;
 
 impl OneShot {
     pub fn new(base: AnimationNode, shot: AnimationNode) -> Self {
@@ -125,6 +156,29 @@ impl OneShot {
             elapsed: 0.0,
             active: false,
             prev_trigger: false,
+            prev_request: ONE_SHOT_REQUEST_NONE,
+        }
+    }
+
+    /// Starts the shot from the beginning (Godot `ONE_SHOT_REQUEST_FIRE`).
+    pub fn fire(&mut self) {
+        reset_node_time(&mut self.shot);
+        self.active = true;
+        self.elapsed = 0.0;
+    }
+
+    /// Stops the shot immediately, leaving only `base` (Godot
+    /// `ONE_SHOT_REQUEST_ABORT`).
+    pub fn abort(&mut self) {
+        self.active = false;
+        self.elapsed = 0.0;
+    }
+
+    /// Jumps to the start of the fade-out phase (Godot
+    /// `ONE_SHOT_REQUEST_FADE_OUT`). A no-op when the shot is not active.
+    pub fn fade_out_now(&mut self) {
+        if self.active {
+            self.elapsed = self.elapsed.max(self.fade_in + self.shot_length);
         }
     }
 
@@ -290,12 +344,26 @@ pub struct AnimationTree {
     pub parameters: HashMap<String, bool>,
     /// Godot-style `parameters/...` map keyed by string path (e.g.
     /// `"parameters/blend/blend_amount"`), holding arbitrary [`Variant`]
-    /// values. Additive foundation for the Godot `AnimationTree.set()/get()`
-    /// parameter surface; distinct from the boolean `parameters` map above
-    /// (which drives transition conditions). Not yet consulted by the eval
-    /// path — the eval migration is a separate follow-up.
+    /// values — the `AnimationTree.set()/get()` parameter surface.
+    ///
+    /// This map **drives evaluation**: `parameters/conditions/<name>` resolves a
+    /// transition condition (Godot stores an `advance_condition` as the
+    /// `conditions/<name>` parameter), and `parameters/<node>/blend_amount`,
+    /// `parameters/<node>/blend_position`, `parameters/<node>/request` drive any
+    /// graph node wrapped in [`AnimationNode::Named`]. The boolean `parameters`
+    /// map above remains supported for hand-built trees; an entry here wins over
+    /// it for the same condition name.
     pub params: HashMap<String, Variant>,
     pub active: bool,
+    /// Godot `AnimationMixer.root_node` — the node that track paths resolve
+    /// against, relative to the node the tree is attached to. Default `".."`
+    /// (the tree node's parent), matching Godot's documented default.
+    pub root_node: String,
+    /// Godot `AnimationTree.anim_player` — the `AnimationPlayer` this tree pulls
+    /// its clip library from, as a node path relative to the tree node. Empty by
+    /// default (Godot's `NodePath("")`); recorded for round-tripping and for the
+    /// scene-load wiring pass.
+    pub anim_player: String,
 }
 
 impl AnimationTree {
@@ -306,6 +374,8 @@ impl AnimationTree {
             parameters: HashMap::new(),
             params: HashMap::new(),
             active: true,
+            root_node: "..".to_string(),
+            anim_player: String::new(),
         }
     }
 
@@ -326,8 +396,8 @@ impl AnimationTree {
     /// `"parameters/blend/blend_amount"`) to an arbitrary [`Variant`].
     /// Mirrors Godot's `AnimationTree.set("parameters/...", value)`.
     ///
-    /// This is the additive `parameters/...` map only — it does not feed the
-    /// eval path yet (the eval migration is a separate follow-up).
+    /// The value is consulted by the next [`advance`](Self::advance): see
+    /// [`params`](Self::params) for the recognised paths.
     pub fn set_parameter(&mut self, path: impl Into<String>, value: Variant) {
         self.params.insert(path.into(), value);
     }
@@ -367,7 +437,8 @@ impl AnimationTree {
         }
     }
 
-    /// Advances all time-dependent nodes by `delta` seconds.
+    /// Advances all time-dependent nodes by `delta` seconds, resolving
+    /// transition conditions and blend parameters from both parameter maps.
     pub fn advance(&mut self, delta: f64) {
         if !self.active || delta == 0.0 {
             return;
@@ -376,14 +447,42 @@ impl AnimationTree {
             Some(r) => r,
             None => return,
         };
-        advance_node(&mut root, delta, &self.animations, &self.parameters);
+        let params = EvalParams {
+            bools: &self.parameters,
+            vars: &self.params,
+        };
+        // The root node is unnamed in Godot, so its own parameters live directly
+        // at `parameters/<param>` (e.g. `parameters/blend_position` for a root
+        // blend space). Named children are handled inside `advance_node`.
+        apply_named_params("", &mut root, params);
+        advance_node(&mut root, delta, &self.animations, params);
         self.root = Some(root);
     }
 
-    /// Samples the current values of the graph.
+    /// Samples the current values of the graph as `(property_path, value)` pairs.
+    ///
+    /// Track node paths are dropped — every value is reported by property alone.
+    /// Use [`get_current_values_targeted`](Self::get_current_values_targeted)
+    /// when the caller needs to resolve each value's target node.
     pub fn get_current_values(&self) -> Vec<(String, Variant)> {
+        self.get_current_values_targeted()
+            .into_iter()
+            .map(|(_, prop, value)| (prop, value))
+            .collect()
+    }
+
+    /// Samples the current values of the graph as
+    /// `(node_path, property_path, value)` triples, where `node_path` is the
+    /// track's path relative to [`root_node`](Self::root_node) (empty or `"."`
+    /// means `root_node` itself). Mirrors
+    /// [`AnimationPlayer::get_current_values_targeted`](crate::animation::AnimationPlayer::get_current_values_targeted)
+    /// so a tree can drive several nodes, as Godot's mixer does.
+    pub fn get_current_values_targeted(&self) -> Vec<(String, String, Variant)> {
         match &self.root {
-            Some(root) => sample_node(root, &self.animations),
+            Some(root) => sample_node(root, &self.animations)
+                .into_iter()
+                .map(|((node_path, prop), value)| (node_path, prop, value))
+                .collect(),
             None => Vec::new(),
         }
     }
@@ -400,11 +499,12 @@ impl Default for AnimationTree {
 /// one-shots, animation leaves) by `delta`, samples the blended property values,
 /// and writes each `(property_path, value)` onto `node_id`.
 ///
-/// This is the runtime bridge from a graph-based AnimationTree to actual node
-/// properties — the "advance clocks + apply blended pose to nodes" half of
-/// runtime AnimationTree support. (Storing the tree in the [`SceneTree`] arena
-/// for automatic per-frame driving, alongside `animation_players`, is the
-/// remaining follow-up and lives in `scene_tree.rs`.)
+/// Every sampled value is written to `node_id` itself, ignoring track node
+/// paths. For the scene-driven path — a tree stored in the [`SceneTree`] and
+/// ticked every frame, with each track resolved against the tree's
+/// [`root_node`](AnimationTree::root_node) — see
+/// [`SceneTree::attach_animation_tree`] and
+/// [`SceneTree::process_animation_trees`].
 pub fn advance_and_apply(
     tree: &mut AnimationTree,
     scene: &mut SceneTree,
@@ -424,11 +524,135 @@ pub fn advance_and_apply(
 // Evaluation
 // ---------------------------------------------------------------------------
 
+/// A sampled value's target: `(node_path, property_path)`. `node_path` is the
+/// track's node path relative to the mixer's `root_node` (empty or `"."` means
+/// `root_node` itself). Values blend by this whole key, so two clips only blend
+/// where they drive the same property **of the same node**.
+type TrackKey = (String, String);
+
+/// The parameter sources consulted while evaluating a graph: the legacy boolean
+/// condition map and the Godot-style `parameters/...` [`Variant`] map.
+#[derive(Clone, Copy)]
+struct EvalParams<'a> {
+    bools: &'a HashMap<String, bool>,
+    vars: &'a HashMap<String, Variant>,
+}
+
+impl EvalParams<'_> {
+    /// Resolves a transition condition / one-shot trigger by name. Godot stores a
+    /// transition's `advance_condition` as the `conditions/<name>` parameter, so
+    /// the tree-level path is `parameters/conditions/<name>`; that entry wins
+    /// over the legacy boolean map, which hand-built trees still use. An empty
+    /// name is never satisfied (an unconditional edge only fires via `travel`).
+    fn condition(&self, name: &str) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+        if let Some(v) = variant_bool(self.vars.get(&format!("parameters/conditions/{name}"))) {
+            return v;
+        }
+        if let Some(v) = self.bools.get(name) {
+            return *v;
+        }
+        variant_bool(self.vars.get(name)).unwrap_or(false)
+    }
+
+    /// Numeric parameter at `path` (`Float` or `Int`), as `f32`.
+    fn float(&self, path: &str) -> Option<f32> {
+        match self.vars.get(path) {
+            Some(Variant::Float(f)) => Some(*f as f32),
+            Some(Variant::Int(i)) => Some(*i as f32),
+            _ => None,
+        }
+    }
+
+    /// [`Vector2`] parameter at `path`.
+    fn vector2(&self, path: &str) -> Option<Vector2> {
+        match self.vars.get(path) {
+            Some(Variant::Vector2(v)) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Integer parameter at `path`. A `Bool` coerces (`true` = 1) so a script
+    /// that sets a one-shot request with `true` still fires it.
+    fn int(&self, path: &str) -> Option<i64> {
+        match self.vars.get(path) {
+            Some(Variant::Int(i)) => Some(*i),
+            Some(Variant::Bool(b)) => Some(*b as i64),
+            _ => None,
+        }
+    }
+}
+
+/// Reads a [`Variant`] as a bool, accepting Godot's numeric truthiness
+/// (`Int`/`Float` non-zero) as well as `Bool`.
+fn variant_bool(value: Option<&Variant>) -> Option<bool> {
+    match value {
+        Some(Variant::Bool(b)) => Some(*b),
+        Some(Variant::Int(i)) => Some(*i != 0),
+        Some(Variant::Float(f)) => Some(*f != 0.0),
+        _ => None,
+    }
+}
+
+/// The Godot parameter path for `param` on the graph node called `name`. The
+/// root node is unnamed, so its parameters sit directly under `parameters/`.
+fn param_path(name: &str, param: &str) -> String {
+    if name.is_empty() {
+        format!("parameters/{param}")
+    } else {
+        format!("parameters/{name}/{param}")
+    }
+}
+
+/// Copies the `parameters/<name>/...` entries addressed to a
+/// [`AnimationNode::Named`] wrapper onto the node it wraps, before that node is
+/// advanced. Mirrors how Godot's graph nodes read their own parameters.
+fn apply_named_params(name: &str, inner: &mut AnimationNode, params: EvalParams<'_>) {
+    match inner {
+        AnimationNode::Blend2 { weight, .. } | AnimationNode::Blend3 { weight, .. } => {
+            if let Some(w) = params.float(&param_path(name, "blend_amount")) {
+                *weight = w;
+            }
+        }
+        AnimationNode::BlendSpace1D(bs) => {
+            if let Some(p) = params.float(&param_path(name, "blend_position")) {
+                bs.blend_position = p;
+            }
+        }
+        AnimationNode::BlendSpace2D(bs) => {
+            if let Some(p) = params.vector2(&param_path(name, "blend_position")) {
+                bs.blend_position = p;
+            }
+        }
+        AnimationNode::OneShot(one_shot) => {
+            let request = params
+                .int(&param_path(name, "request"))
+                .unwrap_or(ONE_SHOT_REQUEST_NONE);
+            // Act on the rising edge only: Godot clears the request once it has
+            // been processed, while our map keeps whatever the script last set.
+            if request != one_shot.prev_request {
+                match request {
+                    ONE_SHOT_REQUEST_FIRE => one_shot.fire(),
+                    ONE_SHOT_REQUEST_ABORT => one_shot.abort(),
+                    ONE_SHOT_REQUEST_FADE_OUT => one_shot.fade_out_now(),
+                    _ => {}
+                }
+            }
+            one_shot.prev_request = request;
+        }
+        AnimationNode::Animation { .. }
+        | AnimationNode::StateMachine(_)
+        | AnimationNode::Named { .. } => {}
+    }
+}
+
 fn advance_node(
     node: &mut AnimationNode,
     delta: f64,
     library: &HashMap<String, Animation>,
-    params: &HashMap<String, bool>,
+    params: EvalParams<'_>,
 ) {
     match node {
         AnimationNode::Animation { name, position } => {
@@ -456,6 +680,12 @@ fn advance_node(
             bs.elapsed += delta;
         }
         AnimationNode::StateMachine(sm) => advance_state_machine(sm, delta, library, params),
+        AnimationNode::Named { name, inner } => {
+            // Parameters land on the wrapped node before it advances, so a value
+            // set this frame takes effect on this frame.
+            apply_named_params(name, inner, params);
+            advance_node(inner, delta, library, params);
+        }
     }
 }
 
@@ -463,7 +693,7 @@ fn advance_state_machine(
     sm: &mut StateMachine,
     delta: f64,
     library: &HashMap<String, Animation>,
-    params: &HashMap<String, bool>,
+    params: EvalParams<'_>,
 ) {
     sm.elapsed += delta;
 
@@ -498,9 +728,7 @@ fn advance_state_machine(
             let triggered = sm
                 .transitions
                 .iter()
-                .find(|t| {
-                    t.from == sm.current && params.get(&t.condition).copied().unwrap_or(false)
-                })
+                .find(|t| t.from == sm.current && params.condition(&t.condition))
                 .cloned();
 
             if let Some(t) = triggered {
@@ -561,6 +789,7 @@ fn reset_node_time(node: &mut AnimationNode) {
             sm.elapsed = 0.0;
             sm.transition = None;
         }
+        AnimationNode::Named { inner, .. } => reset_node_time(inner),
         AnimationNode::BlendSpace1D(_) | AnimationNode::BlendSpace2D(_) => {}
     }
 }
@@ -569,15 +798,12 @@ fn advance_one_shot(
     one_shot: &mut OneShot,
     delta: f64,
     library: &HashMap<String, Animation>,
-    params: &HashMap<String, bool>,
+    params: EvalParams<'_>,
 ) {
     let trigger = if one_shot.trigger_param.is_empty() {
         false
     } else {
-        params
-            .get(&one_shot.trigger_param)
-            .copied()
-            .unwrap_or(false)
+        params.condition(&one_shot.trigger_param)
     };
 
     if !one_shot.active && trigger && !one_shot.prev_trigger {
@@ -601,10 +827,10 @@ fn advance_one_shot(
 fn sample_node(
     node: &AnimationNode,
     library: &HashMap<String, Animation>,
-) -> Vec<(String, Variant)> {
+) -> Vec<(TrackKey, Variant)> {
     match node {
         AnimationNode::Animation { name, position } => match library.get(name) {
-            Some(anim) => anim.sample_all(*position),
+            Some(anim) => sample_clip_targeted(anim, *position),
             None => Vec::new(),
         },
         AnimationNode::Blend2 { a, b, weight } => {
@@ -636,13 +862,16 @@ fn sample_node(
         AnimationNode::BlendSpace1D(space) => sample_blend_space_1d(space, library),
         AnimationNode::BlendSpace2D(space) => sample_blend_space_2d(space, library),
         AnimationNode::StateMachine(sm) => sample_state_machine(sm, library),
+        // A name is metadata for parameter addressing only — it does not change
+        // what the wrapped node produces.
+        AnimationNode::Named { inner, .. } => sample_node(inner, library),
     }
 }
 
 fn sample_state_machine(
     sm: &StateMachine,
     library: &HashMap<String, Animation>,
-) -> Vec<(String, Variant)> {
+) -> Vec<(TrackKey, Variant)> {
     let current = match sm.states.get(&sm.current) {
         Some(n) => n,
         None => return Vec::new(),
@@ -664,7 +893,7 @@ fn sample_state_machine(
 fn sample_blend_space_1d(
     space: &BlendSpace1D,
     library: &HashMap<String, Animation>,
-) -> Vec<(String, Variant)> {
+) -> Vec<(TrackKey, Variant)> {
     if space.points.is_empty() {
         return Vec::new();
     }
@@ -702,7 +931,7 @@ fn sample_blend_space_1d(
             // time rather than being frozen at t=0.
             let ta = space.elapsed.rem_euclid(anim_a.length.max(f64::EPSILON));
             let tb = space.elapsed.rem_euclid(anim_b.length.max(f64::EPSILON));
-            return blend_animations(anim_a, anim_b, ta, tb, t);
+            return blend_clips_targeted(anim_a, anim_b, ta, tb, t);
         }
     }
     Vec::new()
@@ -711,7 +940,7 @@ fn sample_blend_space_1d(
 fn sample_blend_space_2d(
     space: &BlendSpace2D,
     library: &HashMap<String, Animation>,
-) -> Vec<(String, Variant)> {
+) -> Vec<(TrackKey, Variant)> {
     if space.points.is_empty() {
         return Vec::new();
     }
@@ -728,7 +957,7 @@ fn sample_blend_space_2d(
 fn bilinear_sample(
     space: &BlendSpace2D,
     library: &HashMap<String, Animation>,
-) -> Option<Vec<(String, Variant)>> {
+) -> Option<Vec<(TrackKey, Variant)>> {
     let mut xs: Vec<f32> = space.points.iter().map(|(p, _)| p.x).collect();
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
     xs.dedup();
@@ -761,15 +990,15 @@ fn bilinear_sample(
     let a01 = library.get(n01)?;
     let a11 = library.get(n11)?;
 
-    let bottom = blend_animations(a00, a10, 0.0, 0.0, bx);
-    let top = blend_animations(a01, a11, 0.0, 0.0, bx);
+    let bottom = blend_clips_targeted(a00, a10, 0.0, 0.0, bx);
+    let top = blend_clips_targeted(a01, a11, 0.0, 0.0, bx);
     Some(blend_value_lists(&bottom, &top, by))
 }
 
 fn nearest_point(
     space: &BlendSpace2D,
     library: &HashMap<String, Animation>,
-) -> Vec<(String, Variant)> {
+) -> Vec<(TrackKey, Variant)> {
     let mut best: Option<(&str, f32)> = None;
     for (pos, name) in &space.points {
         let d = (*pos - space.blend_position).length_squared();
@@ -778,16 +1007,32 @@ fn nearest_point(
         }
     }
     match best.and_then(|(n, _)| library.get(n)) {
-        Some(anim) => anim.sample_all(0.0),
+        Some(anim) => sample_clip_targeted(anim, 0.0),
         None => Vec::new(),
     }
 }
 
-fn sample_library(library: &HashMap<String, Animation>, name: &str) -> Vec<(String, Variant)> {
-    match library.get(name) {
-        Some(a) => a.sample_all(0.0),
-        None => Vec::new(),
-    }
+/// Samples every track of `anim` at `time`, keyed by `(node_path, property)` so
+/// blending pairs values per target node and the caller can resolve each one.
+fn sample_clip_targeted(anim: &Animation, time: f64) -> Vec<(TrackKey, Variant)> {
+    anim.sample_all_targeted(time)
+        .into_iter()
+        .map(|(node_path, prop, value)| ((node_path, prop), value))
+        .collect()
+}
+
+/// Blends two clips sampled at their own times, weighting `b` by `weight`.
+/// The targeted counterpart of [`crate::animation::blend_animations`].
+fn blend_clips_targeted(
+    a: &Animation,
+    b: &Animation,
+    ta: f64,
+    tb: f64,
+    weight: f32,
+) -> Vec<(TrackKey, Variant)> {
+    let va = sample_clip_targeted(a, ta);
+    let vb = sample_clip_targeted(b, tb);
+    blend_value_lists(&va, &vb, weight)
 }
 
 /// Samples a single clip from `library` at `elapsed` seconds, looped to the
@@ -797,18 +1042,18 @@ fn sample_clip_at(
     library: &HashMap<String, Animation>,
     name: &str,
     elapsed: f64,
-) -> Vec<(String, Variant)> {
+) -> Vec<(TrackKey, Variant)> {
     match library.get(name) {
-        Some(a) => a.sample_all(elapsed.rem_euclid(a.length.max(f64::EPSILON))),
+        Some(a) => sample_clip_targeted(a, elapsed.rem_euclid(a.length.max(f64::EPSILON))),
         None => Vec::new(),
     }
 }
 
 fn blend_value_lists(
-    a: &[(String, Variant)],
-    b: &[(String, Variant)],
+    a: &[(TrackKey, Variant)],
+    b: &[(TrackKey, Variant)],
     weight: f32,
-) -> Vec<(String, Variant)> {
+) -> Vec<(TrackKey, Variant)> {
     let w = weight.clamp(0.0, 1.0);
     if w <= 0.0 {
         return a.to_vec();
@@ -816,12 +1061,12 @@ fn blend_value_lists(
     if w >= 1.0 {
         return b.to_vec();
     }
-    let b_map: HashMap<&str, &Variant> = b.iter().map(|(k, v)| (k.as_str(), v)).collect();
+    let b_map: HashMap<&TrackKey, &Variant> = b.iter().map(|(k, v)| (k, v)).collect();
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::with_capacity(a.len().max(b.len()));
     for (prop, va) in a {
-        seen.insert(prop.as_str());
-        if let Some(vb) = b_map.get(prop.as_str()) {
+        seen.insert(prop);
+        if let Some(vb) = b_map.get(prop) {
             let blended = interpolate_variant(va, vb, w).unwrap_or_else(|| {
                 if w < 0.5 {
                     va.clone()
@@ -835,7 +1080,7 @@ fn blend_value_lists(
         }
     }
     for (prop, vb) in b {
-        if !seen.contains(prop.as_str()) {
+        if !seen.contains(prop) {
             result.push((prop.clone(), vb.clone()));
         }
     }
@@ -1106,5 +1351,223 @@ mod tests {
             .get_parameter_float("parameters/count")
             .expect("int coerces to float");
         assert!((f - 2.0).abs() < 1e-6, "f={f}");
+    }
+
+    // -- the `parameters/...` map drives evaluation (pat-0q2kx.2) ------------
+
+    fn state_of(tree: &AnimationTree) -> String {
+        match &tree.root {
+            Some(AnimationNode::StateMachine(sm)) => sm.current.clone(),
+            other => panic!("root is not a state machine: {other:?}"),
+        }
+    }
+
+    fn two_state_machine() -> AnimationTree {
+        let mut tree = AnimationTree::new();
+        tree.add_animation(ramp_anim("idle", 0.0, 1.0));
+        tree.add_animation(ramp_anim("run", 0.0, 100.0));
+        let mut sm = StateMachine::new();
+        sm.states.insert("idle".into(), anim_state("idle"));
+        sm.states.insert("run".into(), anim_state("run"));
+        sm.current = "idle".into();
+        sm.transitions.push(StateTransition {
+            from: "idle".into(),
+            to: "run".into(),
+            condition: "run".into(),
+            crossfade: 0.0,
+        });
+        tree.set_root(AnimationNode::StateMachine(sm));
+        tree
+    }
+
+    #[test]
+    fn condition_parameter_drives_state_transition() {
+        let mut tree = two_state_machine();
+
+        // Unset condition: the machine holds its state.
+        tree.advance(0.1);
+        assert_eq!(state_of(&tree), "idle");
+
+        // Godot addresses a transition's `advance_condition` as the tree
+        // parameter `parameters/conditions/<name>`.
+        tree.set_parameter("parameters/conditions/run", Variant::Bool(true));
+        tree.advance(0.1);
+        assert_eq!(state_of(&tree), "run", "condition parameter fires the edge");
+    }
+
+    #[test]
+    fn condition_parameter_wins_over_stale_bool_map() {
+        let mut tree = two_state_machine();
+        // A hand-built tree may have set the legacy boolean map; the Godot-style
+        // parameter is authoritative when both are present.
+        tree.set_param("run", false);
+        tree.set_parameter("parameters/conditions/run", Variant::Bool(true));
+        tree.advance(0.1);
+        assert_eq!(state_of(&tree), "run");
+    }
+
+    #[test]
+    fn legacy_bool_param_still_drives_transition() {
+        let mut tree = two_state_machine();
+        tree.set_param("run", true);
+        tree.advance(0.1);
+        assert_eq!(state_of(&tree), "run", "set_param must keep working");
+    }
+
+    #[test]
+    fn named_blend_position_parameter_drives_blend_space() {
+        let mut tree = AnimationTree::new();
+        tree.add_animation(simple_anim("a", 0.0));
+        tree.add_animation(simple_anim("b", 100.0));
+        let mut bs = BlendSpace1D::new();
+        bs.add_point(0.0, "a");
+        bs.add_point(1.0, "b");
+        tree.set_root(AnimationNode::Named {
+            name: "space".into(),
+            inner: Box::new(AnimationNode::BlendSpace1D(bs)),
+        });
+
+        // Position 0 (the default) samples clip "a" alone.
+        tree.advance(0.1);
+        assert!(float_of(&tree.get_current_values(), "x") < 1.0);
+
+        // `parameters/<node>/blend_position` moves it fully onto clip "b".
+        tree.set_parameter("parameters/space/blend_position", Variant::Float(1.0));
+        tree.advance(0.1);
+        let x = float_of(&tree.get_current_values(), "x");
+        assert!((x - 100.0).abs() < 1e-3, "blend position ignored: x={x}");
+    }
+
+    #[test]
+    fn root_blend_position_parameter_has_no_node_prefix() {
+        // Godot's root graph node is unnamed, so its parameters live directly
+        // under `parameters/` — here `parameters/blend_position`.
+        let mut tree = AnimationTree::new();
+        tree.add_animation(simple_anim("a", 0.0));
+        tree.add_animation(simple_anim("b", 100.0));
+        let mut bs = BlendSpace1D::new();
+        bs.add_point(0.0, "a");
+        bs.add_point(1.0, "b");
+        tree.set_root(AnimationNode::BlendSpace1D(bs));
+
+        tree.set_parameter("parameters/blend_position", Variant::Float(1.0));
+        tree.advance(0.1);
+        let x = float_of(&tree.get_current_values(), "x");
+        assert!(
+            (x - 100.0).abs() < 1e-3,
+            "root blend position ignored: x={x}"
+        );
+    }
+
+    #[test]
+    fn one_shot_request_parameter_fires_once() {
+        let mut tree = AnimationTree::new();
+        tree.add_animation(simple_anim("base", 0.0));
+        tree.add_animation(simple_anim("hit", 50.0));
+        let one_shot = OneShot::new(
+            AnimationNode::Animation {
+                name: "base".into(),
+                position: 0.0,
+            },
+            AnimationNode::Animation {
+                name: "hit".into(),
+                position: 0.0,
+            },
+        )
+        .with_shot_length(0.5);
+        tree.set_root(AnimationNode::Named {
+            name: "OneShot".into(),
+            inner: Box::new(AnimationNode::OneShot(one_shot)),
+        });
+
+        // Idle: only the base pose.
+        tree.advance(0.1);
+        assert!(float_of(&tree.get_current_values(), "x").abs() < 1e-3);
+
+        // ONE_SHOT_REQUEST_FIRE starts the shot, which then owns the pose.
+        tree.set_parameter(
+            "parameters/OneShot/request",
+            Variant::Int(ONE_SHOT_REQUEST_FIRE),
+        );
+        tree.advance(0.1);
+        let x = float_of(&tree.get_current_values(), "x");
+        assert!((x - 50.0).abs() < 1e-3, "one-shot request ignored: x={x}");
+
+        // The request latches: once the shot has run its course it does not
+        // restart while the same request value is still in the map.
+        tree.advance(0.5);
+        tree.advance(0.1);
+        let x = float_of(&tree.get_current_values(), "x");
+        assert!(
+            x.abs() < 1e-3,
+            "one-shot re-fired from a stale request: x={x}"
+        );
+    }
+
+    #[test]
+    fn one_shot_abort_request_stops_the_shot() {
+        let mut tree = AnimationTree::new();
+        tree.add_animation(simple_anim("base", 0.0));
+        tree.add_animation(simple_anim("hit", 50.0));
+        tree.set_root(AnimationNode::Named {
+            name: "OneShot".into(),
+            inner: Box::new(AnimationNode::OneShot(
+                OneShot::new(
+                    AnimationNode::Animation {
+                        name: "base".into(),
+                        position: 0.0,
+                    },
+                    AnimationNode::Animation {
+                        name: "hit".into(),
+                        position: 0.0,
+                    },
+                )
+                .with_shot_length(10.0),
+            )),
+        });
+        tree.set_parameter(
+            "parameters/OneShot/request",
+            Variant::Int(ONE_SHOT_REQUEST_FIRE),
+        );
+        tree.advance(0.1);
+        assert!((float_of(&tree.get_current_values(), "x") - 50.0).abs() < 1e-3);
+
+        tree.set_parameter(
+            "parameters/OneShot/request",
+            Variant::Int(ONE_SHOT_REQUEST_ABORT),
+        );
+        tree.advance(0.1);
+        assert!(
+            float_of(&tree.get_current_values(), "x").abs() < 1e-3,
+            "abort must drop back to the base pose"
+        );
+    }
+
+    #[test]
+    fn targeted_values_keep_each_track_node_path() {
+        let mut anim = Animation::new("walk", 1.0);
+        let mut track = AnimationTrack::with_node("Sprite", "x");
+        track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(7.0)));
+        track.add_keyframe(KeyFrame::linear(1.0, Variant::Float(7.0)));
+        anim.tracks.push(track);
+
+        let mut tree = AnimationTree::new();
+        tree.add_animation(anim);
+        tree.set_root(AnimationNode::Animation {
+            name: "walk".into(),
+            position: 0.0,
+        });
+
+        let targeted = tree.get_current_values_targeted();
+        assert_eq!(
+            targeted,
+            vec![("Sprite".to_string(), "x".to_string(), Variant::Float(7.0))],
+            "a track's node path must survive sampling"
+        );
+        // The property-only view stays as it was for existing callers.
+        assert_eq!(
+            tree.get_current_values(),
+            vec![("x".to_string(), Variant::Float(7.0))]
+        );
     }
 }

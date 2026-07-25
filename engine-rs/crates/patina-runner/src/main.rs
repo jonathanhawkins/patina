@@ -340,6 +340,11 @@ fn run_project_from_godot(arg_path: &Path, args: &Args) {
     // pat-nzgdu.15: honor project.godot physics config (tick rate + 2D/3D
     // gravity) before running any frames, mirroring Godot's boot.
     main_loop.configure_from_project_settings(&booted.settings);
+    // Install the project's `[input]` action map (pat-0q2kx.22). `boot_project`
+    // has always parsed it — the line above even logs its action count — but
+    // nothing ever handed it to the loop, so every `Input.is_action_pressed`
+    // in a running project resolved against an empty map.
+    main_loop.set_input_map(booted.input_map);
     // Register 2D physics bodies so RigidBody2D/etc. actually simulate under the
     // honored gravity (2D bodies are not auto-registered by `step`).
     main_loop.register_physics_bodies();

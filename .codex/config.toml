@@ -1,0 +1,5 @@
+[mcp_servers.mcp-agent-mail]
+url = "http://127.0.0.1:8765/api/"
+
+[mcp_servers.mcp-agent-mail.http_headers]
+Authorization = "Bearer 2682e5cd154ab3ea2d8fcce03861f1fc49ac12583721c00efa54a8dd1b7c3c3c"

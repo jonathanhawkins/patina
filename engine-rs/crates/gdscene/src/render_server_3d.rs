@@ -23,11 +23,16 @@ use gdserver3d::viewport::Viewport3D;
 use crate::node::NodeId;
 use crate::node3d;
 use crate::scene_tree::SceneTree;
+use crate::skeleton3d;
 
 /// Maps scene tree NodeIds to render server Instance3DIds (for MeshInstance3D).
 #[derive(Debug, Default)]
 struct InstanceMap {
     node_to_instance: HashMap<NodeId, Instance3DId>,
+    /// The undeformed mesh each instance was created from. A skinned instance is
+    /// re-deformed from this every frame, so skinning never compounds on the
+    /// previous frame's result (pat-0q2kx.3).
+    node_to_base_mesh: HashMap<NodeId, Mesh3D>,
 }
 
 /// Maps MultiMeshInstance3D NodeIds to their expanded render instance IDs.
@@ -217,6 +222,12 @@ pub struct RenderServer3DAdapter {
     frame_counter: u64,
     /// Stored last frame data for comparison.
     last_frame: Option<FrameBuffer3D>,
+    /// Deformed vertex positions the last skeleton sync submitted, per
+    /// MeshInstance3D node (pat-0q2kx.3). Exposed by [`skinned_vertices`] so a
+    /// caller can confirm the skeleton actually reached the render path.
+    ///
+    /// [`skinned_vertices`]: RenderServer3DAdapter::skinned_vertices
+    skinned_vertices: HashMap<NodeId, Vec<Vector3>>,
 }
 
 impl RenderServer3DAdapter {
@@ -233,12 +244,23 @@ impl RenderServer3DAdapter {
             viewport_height: height,
             frame_counter: 0,
             last_frame: None,
+            skinned_vertices: HashMap::new(),
         }
     }
 
     /// Returns the current frame counter.
     pub fn frame_counter(&self) -> u64 {
         self.frame_counter
+    }
+
+    /// The skinned vertex positions submitted for `node` on the last synced
+    /// frame, or `None` when that MeshInstance3D is not driven by a skeleton
+    /// (pat-0q2kx.3).
+    ///
+    /// Like [`lights`](Self::lights), this exposes what the sync pass actually
+    /// wrote — here, the mesh the skeleton's live bone poses produced.
+    pub fn skinned_vertices(&self, node: NodeId) -> Option<&[Vector3]> {
+        self.skinned_vertices.get(&node).map(|v| v.as_slice())
     }
 
     /// The light records the last scene sync produced (pat-nzgdu.121).
@@ -484,11 +506,31 @@ impl RenderServer3DAdapter {
                             let new_id = self.renderer.create_instance();
                             // Resolve mesh type from the node's properties.
                             let mesh = Self::resolve_mesh(tree, nid);
+                            self.instance_map
+                                .node_to_base_mesh
+                                .insert(nid, mesh.clone());
                             self.renderer.set_mesh(new_id, mesh);
                             self.renderer.set_material(new_id, Material3D::default());
                             self.instance_map.node_to_instance.insert(nid, new_id);
                             new_id
                         };
+
+                    // -- skeletal skinning (pat-0q2kx.3) --
+                    // Godot: a MeshInstance3D bound to a Skeleton3D is deformed
+                    // by that skeleton's live bone poses before rasterization
+                    // (RenderingServer skeleton storage -> skinning). Re-skin
+                    // from the undeformed base every frame so the pose the
+                    // skeleton phase just computed is what gets drawn.
+                    if let Some(skeleton) = Self::resolve_skeleton(tree, nid) {
+                        let base = self.instance_map.node_to_base_mesh.get(&nid);
+                        if let Some(base) = base.filter(|m| m.is_skinned()) {
+                            let poses = skeleton3d::bone_pose_array(tree, skeleton);
+                            let skin = Self::resolve_skin(tree, skeleton);
+                            let skinned = gdserver3d::skin::skin_mesh(base, &skin, &poses);
+                            self.skinned_vertices.insert(nid, skinned.vertices.clone());
+                            self.renderer.set_mesh(inst_id, skinned);
+                        }
+                    }
 
                     self.renderer.set_transform(inst_id, transform);
                     self.renderer.set_visible(inst_id, visible);
@@ -525,9 +567,60 @@ impl RenderServer3DAdapter {
             if let Some(inst_id) = self.instance_map.node_to_instance.remove(&nid) {
                 self.renderer.free_instance(inst_id);
             }
+            self.instance_map.node_to_base_mesh.remove(&nid);
+            self.skinned_vertices.remove(&nid);
         }
 
         visible_count
+    }
+
+    /// Resolves the `Skeleton3D` that deforms a MeshInstance3D, if any
+    /// (pat-0q2kx.3).
+    ///
+    /// Follows Godot's `MeshInstance3D.skeleton` NodePath, which defaults to
+    /// `NodePath("..")` — the parent — so a mesh parented to a Skeleton3D is
+    /// skinned without any explicit property. The resolved node must actually be
+    /// a `Skeleton3D`; anything else (the common case of a mesh whose parent is
+    /// a plain Node3D) yields `None`.
+    fn resolve_skeleton(tree: &SceneTree, nid: NodeId) -> Option<NodeId> {
+        let path = match tree.get_node(nid).map(|n| n.get_property("skeleton")) {
+            Some(gdvariant::Variant::NodePath(p)) => p.to_string(),
+            Some(gdvariant::Variant::String(s)) if !s.is_empty() => s,
+            // Godot's default for the property when unset.
+            _ => "..".to_string(),
+        };
+        let target = tree.get_node_or_null(nid, &path)?;
+        let is_skeleton = tree
+            .get_node(target)
+            .map(|n| n.class_name() == skeleton3d::SKELETON_CLASS)
+            .unwrap_or(false);
+        if is_skeleton {
+            Some(target)
+        } else {
+            None
+        }
+    }
+
+    /// Builds the [`Skin`] used to deform a mesh bound to `skeleton`
+    /// (pat-0q2kx.3).
+    ///
+    /// Godot's MeshInstance3D registers its `skin` with the skeleton, and when
+    /// none is set the skeleton supplies the default from its rest pose
+    /// (`Skeleton3D.create_skin_from_rest_transforms()`): one bind per bone whose
+    /// inverse bind matrix is that bone's global rest inverted. At rest each
+    /// per-bind matrix is then the identity, so an un-posed rig renders
+    /// undeformed.
+    ///
+    /// [`Skin`]: gdserver3d::skin::Skin
+    fn resolve_skin(tree: &SceneTree, skeleton: NodeId) -> gdserver3d::skin::Skin {
+        let mut skin = gdserver3d::skin::Skin::new();
+        for (bone, rest) in skeleton3d::bone_rest_array(tree, skeleton)
+            .into_iter()
+            .enumerate()
+        {
+            skin.add_bind_from_rest(bone, rest);
+        }
+        skin
     }
 
     /// Syncs MultiMeshInstance3D nodes from the scene tree to the render server.
@@ -1280,6 +1373,20 @@ pub fn mesh3d_from_gltf_resource(resource: &gdresource::Resource) -> Option<Mesh
         .and_then(extract_index_array)
         .unwrap_or_default();
 
+    // Skinning influences (glTF JOINTS_0 / WEIGHTS_0), stored flattened by the
+    // importer. Only kept when both are present and parallel to the positions —
+    // `Mesh3D::is_skinned` requires that, and a half-rigged mesh would silently
+    // skin some vertices to bind 0 (pat-0q2kx.3).
+    let bone_indices = first_sub
+        .get_property("bone_indices")
+        .and_then(extract_bone_index_array)
+        .unwrap_or_default();
+    let bone_weights = first_sub
+        .get_property("bone_weights")
+        .and_then(extract_bone_weight_array)
+        .unwrap_or_default();
+    let rigged = bone_indices.len() == vertices.len() && bone_weights.len() == vertices.len();
+
     let mut mesh = Mesh3D {
         vertices,
         normals,
@@ -1287,6 +1394,8 @@ pub fn mesh3d_from_gltf_resource(resource: &gdresource::Resource) -> Option<Mesh
         indices,
         primitive_type: PrimitiveType::Triangles,
         surfaces: Vec::new(),
+        bone_indices: if rigged { bone_indices } else { Vec::new() },
+        bone_weights: if rigged { bone_weights } else { Vec::new() },
         ..Default::default()
     };
 
@@ -1591,6 +1700,57 @@ fn extract_uv_array(v: &gdvariant::Variant) -> Option<Vec<[f32; 2]>> {
     } else {
         None
     }
+}
+
+/// Unflattens a `[i0, i1, i2, i3, i0, ...]` int array into per-vertex bone
+/// index quads (pat-0q2kx.3). Returns `None` when the length is not a multiple
+/// of four or an element is not an int.
+fn extract_bone_index_array(v: &gdvariant::Variant) -> Option<Vec<[u32; 4]>> {
+    let arr = match v {
+        gdvariant::Variant::Array(a) => a,
+        _ => return None,
+    };
+    if arr.len() % 4 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(arr.len() / 4);
+    for quad in arr.chunks(4) {
+        let mut q = [0u32; 4];
+        for (slot, item) in q.iter_mut().zip(quad) {
+            match item {
+                gdvariant::Variant::Int(i) => *slot = (*i).max(0) as u32,
+                _ => return None,
+            }
+        }
+        out.push(q);
+    }
+    Some(out)
+}
+
+/// Unflattens a `[w0, w1, w2, w3, w0, ...]` float array into per-vertex bone
+/// weight quads (pat-0q2kx.3). Returns `None` when the length is not a multiple
+/// of four or an element is not numeric.
+fn extract_bone_weight_array(v: &gdvariant::Variant) -> Option<Vec<[f32; 4]>> {
+    let arr = match v {
+        gdvariant::Variant::Array(a) => a,
+        _ => return None,
+    };
+    if arr.len() % 4 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(arr.len() / 4);
+    for quad in arr.chunks(4) {
+        let mut q = [0f32; 4];
+        for (slot, item) in q.iter_mut().zip(quad) {
+            match item {
+                gdvariant::Variant::Float(f) => *slot = *f as f32,
+                gdvariant::Variant::Int(i) => *slot = *i as f32,
+                _ => return None,
+            }
+        }
+        out.push(q);
+    }
+    Some(out)
 }
 
 /// Extracts `Vec<u32>` from a `Variant::Array` of `Variant::Int`.

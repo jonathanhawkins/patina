@@ -632,6 +632,9 @@ pub fn variant_type_code(v: &Variant) -> i64 {
         VariantType::ObjectId => 24,
         VariantType::Resource => 24,
         VariantType::Callable => 25,
+        // TYPE_SIGNAL — the 26 that the Callable→Dictionary gap was leaving
+        // unused; matches the `"TYPE_SIGNAL" => 26` global constant above.
+        VariantType::Signal => 26,
         VariantType::Dictionary => 27,
         VariantType::Array => 28,
         VariantType::PackedByteArray => 29,

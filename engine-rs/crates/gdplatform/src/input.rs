@@ -1506,11 +1506,21 @@ fn godot_keycode_to_key(code: i64) -> Option<Key> {
         4194308 => Some(Key::Backspace),
         4194312 => Some(Key::Delete),
         4194311 => Some(Key::Insert),
-        4194313 => Some(Key::Home),
-        4194314 => Some(Key::End),
-        4194315 => Some(Key::PageUp),
-        4194316 => Some(Key::PageDown),
-        4194317 => Some(Key::CapsLock),
+        // Godot's navigation block, from `core/os/keyboard.h` (SPECIAL =
+        // 0x400000): HOME = SPECIAL|0x0D = 4194317, END = 0x0E, PAGEUP = 0x13,
+        // PAGEDOWN = 0x14, CAPSLOCK = 0x19 (pat-0q2kx.20).
+        //
+        // These were previously shifted four slots low — 4194313 mapped to Home
+        // when it is really PAUSE — so a `project.godot` binding to KEY_HOME
+        // silently resolved to CapsLock and every arrow/navigation keycode in
+        // this range bound to the wrong key. Values Patina's `Key` enum has no
+        // variant for (PAUSE/PRINT/SYSREQ/CLEAR) are left unmapped rather than
+        // aliased onto an unrelated key.
+        4194317 => Some(Key::Home),
+        4194318 => Some(Key::End),
+        4194323 => Some(Key::PageUp),
+        4194324 => Some(Key::PageDown),
+        4194329 => Some(Key::CapsLock),
         44 => Some(Key::Comma),
         46 => Some(Key::Period),
         47 => Some(Key::Slash),
@@ -1611,6 +1621,99 @@ impl InputMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Godot KEY_* mapping (pat-0q2kx.20) ---------------------------------
+    //
+    // Ground truth: `upstream/godot/core/os/keyboard.h`, where `SPECIAL =
+    // 0x400000` and the navigation block runs INSERT = SPECIAL|0x07, DELETE
+    // 0x08, PAUSE 0x09, PRINT 0x0A, SYSREQ 0x0B, CLEAR 0x0C, HOME 0x0D, END
+    // 0x0E, arrows 0x0F..0x12, PAGEUP 0x13, PAGEDOWN 0x14, CAPSLOCK 0x19.
+    //
+    // The table was shifted four slots low through this range: 4194313 (really
+    // PAUSE) mapped to Home, and 4194317 — Godot's actual HOME — mapped to
+    // CapsLock. A `project.godot` binding of KEY_HOME therefore resolved
+    // silently to Caps Lock, and nothing failed, because no test pinned these
+    // against the enum they come from.
+
+    /// `SPECIAL` base from `core/os/keyboard.h`; each constant is written as
+    /// `SPECIAL | offset` so it diffs against the header by eye.
+    const SPECIAL: i64 = 0x40_0000;
+
+    #[test]
+    fn navigation_keycodes_match_godot_enum() {
+        assert_eq!(
+            godot_keycode_to_key(SPECIAL | 0x0D),
+            Some(Key::Home),
+            "HOME"
+        );
+        assert_eq!(godot_keycode_to_key(SPECIAL | 0x0E), Some(Key::End), "END");
+        assert_eq!(
+            godot_keycode_to_key(SPECIAL | 0x13),
+            Some(Key::PageUp),
+            "PAGEUP"
+        );
+        assert_eq!(
+            godot_keycode_to_key(SPECIAL | 0x14),
+            Some(Key::PageDown),
+            "PAGEDOWN"
+        );
+        assert_eq!(
+            godot_keycode_to_key(SPECIAL | 0x19),
+            Some(Key::CapsLock),
+            "CAPSLOCK"
+        );
+    }
+
+    #[test]
+    fn arrow_and_edit_keycodes_match_godot_enum() {
+        // Already correct; pinned so the fix above cannot regress them.
+        assert_eq!(
+            godot_keycode_to_key(SPECIAL | 0x0F),
+            Some(Key::Left),
+            "LEFT"
+        );
+        assert_eq!(godot_keycode_to_key(SPECIAL | 0x10), Some(Key::Up), "UP");
+        assert_eq!(
+            godot_keycode_to_key(SPECIAL | 0x11),
+            Some(Key::Right),
+            "RIGHT"
+        );
+        assert_eq!(
+            godot_keycode_to_key(SPECIAL | 0x12),
+            Some(Key::Down),
+            "DOWN"
+        );
+        assert_eq!(
+            godot_keycode_to_key(SPECIAL | 0x07),
+            Some(Key::Insert),
+            "INSERT"
+        );
+        assert_eq!(
+            godot_keycode_to_key(SPECIAL | 0x08),
+            Some(Key::Delete),
+            "DELETE"
+        );
+    }
+
+    /// The four codes that previously *stole* the navigation keys are Godot's
+    /// PAUSE/PRINT/SYSREQ/CLEAR. Patina's `Key` enum has no variant for them, so
+    /// they must resolve to `None` rather than aliasing onto an unrelated key —
+    /// a wrong mapping is worse than an absent one, because it binds silently.
+    #[test]
+    fn unmodelled_special_keys_do_not_alias_onto_other_keys() {
+        for (offset, name) in [
+            (0x09, "PAUSE"),
+            (0x0A, "PRINT"),
+            (0x0B, "SYSREQ"),
+            (0x0C, "CLEAR"),
+        ] {
+            assert_eq!(
+                godot_keycode_to_key(SPECIAL | offset),
+                None,
+                "{name} has no Key variant and must not alias onto another key"
+            );
+        }
+    }
 
     // pat-u3l8c.22: mouse mode, programmatic actions, joypad enumeration and
     // vibration state (the gdplatform foundation for the Input singleton).

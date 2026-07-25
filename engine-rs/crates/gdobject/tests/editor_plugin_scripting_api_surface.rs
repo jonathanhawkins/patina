@@ -129,7 +129,12 @@ fn editor_settings_surface_is_godots_not_the_beads() {
     // its own, so there is nothing inherited to assert here; that gap is
     // pre-existing and not this bead's.)
     assert!(is_parent_class("EditorSettings", "Resource"));
-    assert!(!is_parent_class("EditorSettings", "RefCounted"));
+    // ⚠️ This used to assert the NEGATION, locking in a real bug: Patina
+    // registered `Resource` under `Object`, making `Resource` and `RefCounted`
+    // siblings. Godot has `class Resource : public RefCounted`
+    // (core/io/resource.h; extension_api Resource <- RefCounted <- Object), so
+    // every Resource — this one included — IS a RefCounted (pat-0q2kx.7).
+    assert!(is_parent_class("EditorSettings", "RefCounted"));
 
     // EditorSettings declares no properties in Godot — its whole surface is the
     // get/set/has methods above. Inventing one would be schema fiction.

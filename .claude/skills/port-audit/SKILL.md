@@ -180,6 +180,12 @@ br update "$ID" --acceptance-criteria "$CRITERIA"
 `$PRIO`: the verified 0–3 priority. `$CRITERIA` must be the observable app-level
 behavior and end with `(test: \`snake_case_name\`)`.
 
+`br` rejects any single label over **50 chars** (`VALIDATION_FAILED … label: exceeds
+50 characters`). The `subsys:` prefix is 7 chars, so `$KEY` must be ≤ 43 — the
+critic's supplemental keys are long descriptive phrases (e.g.
+`utility-function-argument-and-return-semantics`), so truncate: `subsys:${KEY:0:43}`.
+The full key still lives verbatim in the `[audit-key:]` marker in the body.
+
 For a large batch, creating with `--no-auto-flush` (on both `br create` and
 `br update`) is much faster, but it leaves the new beads **DB-only** — a plain
 `br sync` will NOT export them (it reports "JSONL is current"). You MUST finish with

@@ -1027,6 +1027,26 @@ impl AnimationPlayer {
         }
     }
 
+    /// The track *kind* of every `(node_path, property_path)` pair in the
+    /// current animation (pat-0q2kx.3).
+    ///
+    /// [`get_current_values_targeted`](Self::get_current_values_targeted) erases
+    /// the track type, but a value's destination depends on it: Godot's
+    /// `position_3d` / `rotation_3d` / `scale_3d` tracks whose path resolves to a
+    /// `Skeleton3D` address a **bone pose** (`Skeleton3D:BoneName`), not a node
+    /// property. This exposes the type so a caller can pair the two and route
+    /// bone tracks into `skeleton3d::set_bone_pose_*`.
+    pub fn current_track_types(&self) -> Vec<(String, String, TrackType)> {
+        match self.current.as_ref().and_then(|n| self.animations.get(n)) {
+            Some(anim) => anim
+                .tracks
+                .iter()
+                .map(|t| (t.node_path.clone(), t.property_path.clone(), t.track_type))
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
     /// Returns the property paths of the current animation that must NOT be
     /// applied to nodes as ordinary properties: method-track paths (dispatched
     /// as calls) and the root-motion track (applied as a transform delta).
