@@ -624,7 +624,10 @@ mod tests {
     #[test]
     fn kelvin_below_neutral_is_warm_above_is_cool() {
         let warm = kelvin_to_rgb(3000.0);
-        assert!(warm.r > warm.g && warm.g > warm.b, "3000K must be warm, got {warm:?}");
+        assert!(
+            warm.r > warm.g && warm.g > warm.b,
+            "3000K must be warm, got {warm:?}"
+        );
 
         let cool = kelvin_to_rgb(20000.0);
         assert!(cool.b > cool.r, "20000K must be cool, got {cool:?}");
@@ -667,7 +670,10 @@ mod tests {
         let light = Light3D::directional(Light3DId(1));
         assert_eq!(light.cull_mask, u32::MAX);
         for layer in [1u32, 2, 16, 32] {
-            assert!(light.affects_layer(layer), "layer {layer} must be lit by default");
+            assert!(
+                light.affects_layer(layer),
+                "layer {layer} must be lit by default"
+            );
         }
     }
 

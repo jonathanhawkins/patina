@@ -16,6 +16,13 @@ ogg = "0.8"
 minimp3 = "0.6"
 thiserror.workspace = true
 tracing.workspace = true
+
+# cpal drives the native audio device and does not build for wasm32, which is
+# why `patina-web` had to exclude gdaudio entirely (pat-0q2kx.59). Everything
+# else in this crate — mixer, server, decoders, effects — is portable Rust, so
+# gating the device layer here lets the whole audio stack compile to wasm and
+# feed an AudioWorklet instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal = "0.15"
 
 [dev-dependencies]

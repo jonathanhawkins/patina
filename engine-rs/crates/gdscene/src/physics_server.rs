@@ -323,10 +323,7 @@ fn has_collision_shape_child(tree: &SceneTree, parent_id: NodeId) -> bool {
                     // only collider is a disabled polygon looks like a body
                     // authored with no shapes at all, and gets the legacy
                     // default circle instead of no collision (pat-0q2kx.34).
-                    matches!(
-                        n.class_name(),
-                        "CollisionShape2D" | "CollisionPolygon2D"
-                    )
+                    matches!(n.class_name(), "CollisionShape2D" | "CollisionPolygon2D")
                 })
                 .unwrap_or(false)
         })
@@ -2438,9 +2435,9 @@ mod tests {
                 Vector2::ZERO,
                 "a disabled-only body gets the degenerate no-collision shape"
             ),
-            Shape2D::Circle { radius } => panic!(
-                "a disabled polygon must not become a {radius}px default circle"
-            ),
+            Shape2D::Circle { radius } => {
+                panic!("a disabled polygon must not become a {radius}px default circle")
+            }
             other => panic!("expected the degenerate shape, got {other:?}"),
         }
     }

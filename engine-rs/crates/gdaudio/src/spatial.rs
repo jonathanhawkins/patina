@@ -611,7 +611,7 @@ mod tests {
     fn player2d_pans_right_for_source_on_the_right() {
         let src = AudioStreamPlayer2D::new(Vector2::new(400.0, 0.0));
         let res = src.compute_spatial_2d(Vector2::ZERO, 400.0); // half-width 400
-        // Source at +half_width -> full right: right gain dominates.
+                                                                // Source at +half_width -> full right: right gain dominates.
         assert!(res.pan_right > res.pan_left, "{res:?}");
         assert!(res.pan_right > 0.98, "near full right: {res:?}");
     }

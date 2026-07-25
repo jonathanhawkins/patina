@@ -183,20 +183,27 @@ pub fn parse_structured_payload(body: &str, fallback_bead_id: &str) -> Option<St
     None
 }
 
-/// Whether the body carries an explicit request to keep the bead open.
+/// Whether the body carries an explicit request in prose to keep the bead open.
 ///
-/// Only imperative phrasings count. Workers have been writing these in prose
-/// for months and watching the bead auto-close anyway (pat-k5o8f); a bare word
-/// like "partial" is deliberately NOT enough, since it shows up in ordinary
-/// notes ("partial implementation of the parser") where no such request is
-/// meant.
+/// Only English imperatives addressed to the coordinator count. Workers have
+/// been writing these for months and watching the bead auto-close anyway
+/// (pat-k5o8f); a bare word like "partial" is deliberately NOT enough, since it
+/// shows up in ordinary notes ("partial implementation of the parser") where no
+/// such request is meant.
+///
+/// **The machine spellings are deliberately absent here.** `partial: true` and
+/// `status: partial` are read from the JSON payload by
+/// [`parse_structured_payload`], which is authoritative for them. Matching them
+/// in prose too made the detector fire on any message that *described* the
+/// feature — including a completion whose notes explained why an earlier message
+/// had set the flag. That is not hypothetical: it looped a bead through the
+/// verifier every ~9 seconds on 2026-07-25, because documenting the flag set
+/// the flag.
 pub fn body_requests_keep_open(body: &str) -> bool {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        // `r#""#` because the pattern itself contains a quote (an optional one
-        // before `partial`, for `"status": "partial"` in a JSON-ish body).
         Regex::new(
-            r#"(?i)(keep[- ]?open\b|keep\s+(?:this\s+)?bead\s+open|(?:do\s+not|don't|dont)\s+close|partial\s*[:=]\s*true|\bpartial\s+completion\b|status\s*[:=]\s*"?partial)"#,
+            r"(?i)(keep[- ]?open\b|keep\s+(?:this\s+)?bead\s+open|(?:do\s+not|don't|dont)\s+close\s+(?:this\s+)?bead)",
         )
         .unwrap()
     });

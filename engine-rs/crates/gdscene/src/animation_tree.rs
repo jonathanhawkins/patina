@@ -51,6 +51,52 @@ pub enum AnimationNode {
     /// State machine that plays one animation at a time and crossfades
     /// between states when transitions fire.
     StateMachine(StateMachine),
+    /// Godot `AnimationNodeAdd2` — lays `add` additively over `base`, scaled by
+    /// `amount`. Additive, not interpolating: at `amount = 1` the result is
+    /// `base + add`, not `add` (pat-0q2kx.53).
+    Add2 {
+        base: Box<AnimationNode>,
+        add: Box<AnimationNode>,
+        amount: f32,
+    },
+    /// Godot `AnimationNodeAdd3` — `amount` in `[-1, 1]` picks which additive
+    /// layer applies: the `neg` input below zero, `pos` above, neither at zero.
+    Add3 {
+        base: Box<AnimationNode>,
+        neg: Box<AnimationNode>,
+        pos: Box<AnimationNode>,
+        amount: f32,
+    },
+    /// Godot `AnimationNodeSub2` — subtracts `sub` from `base`, the inverse of
+    /// [`Add2`](AnimationNode::Add2) and how a pose difference is extracted.
+    Sub2 {
+        base: Box<AnimationNode>,
+        sub: Box<AnimationNode>,
+        amount: f32,
+    },
+    /// Godot `AnimationNodeTimeScale` — multiplies the delta flowing into
+    /// `child`, so the subtree plays faster, slower, or (at `0.0`) freezes.
+    ///
+    /// ⚠️ A negative scale runs the subtree backwards, which Godot allows.
+    TimeScale {
+        child: Box<AnimationNode>,
+        scale: f64,
+    },
+    /// Godot `AnimationNodeTimeSeek` — jumps `child` to an absolute time when a
+    /// seek is requested, then clears the request.
+    ///
+    /// Godot's convention: a `seek_request` below zero means "no request", so
+    /// seeking to `0.0` is expressible and distinct from idle.
+    TimeSeek {
+        child: Box<AnimationNode>,
+        seek_request: f64,
+    },
+    /// Godot `AnimationNodeTransition` — crossfades between named inputs,
+    /// switching on request.
+    Transition(TransitionNode),
+    /// Godot `AnimationNodeBlendTree` — a named container whose `output` node is
+    /// what the tree evaluates, with per-node track filters (pat-0q2kx.53).
+    BlendTree(BlendTree),
     /// A named pass-through wrapper around `inner`, carrying the graph-node name
     /// the node has in a `.tscn`/`.tres` (a state name, or a blend-tree node
     /// name). The name is what makes Godot's `parameters/<name>/...` entries
@@ -133,6 +179,164 @@ pub struct OneShot {
     /// [`AnimationNode::Named`], so a request only acts on its rising edge
     /// (Godot clears the request after processing it; we latch instead).
     prev_request: i64,
+}
+
+/// Godot `AnimationNodeTransition.switch_mode` (pat-0q2kx.53).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SwitchMode {
+    /// `SWITCH_MODE_IMMEDIATE` — switch as soon as the request arrives,
+    /// restarting the new input from zero (Godot's default).
+    #[default]
+    Immediate,
+    /// `SWITCH_MODE_SYNC` — switch at once but carry the old input's playback
+    /// position across, so a walk→run swap keeps the stride in phase.
+    Sync,
+    /// `SWITCH_MODE_AT_END` — defer the switch until the current input's clip
+    /// finishes, so a swing animation is never cut mid-arc.
+    AtEnd,
+}
+
+impl SwitchMode {
+    /// Maps Godot's integer enum value; unknown values fall back to
+    /// `Immediate`, which is the mode that always makes progress.
+    pub fn from_godot_int(value: i64) -> Self {
+        match value {
+            1 => Self::Sync,
+            2 => Self::AtEnd,
+            _ => Self::Immediate,
+        }
+    }
+}
+
+/// Godot `AnimationNodeTransition` — crossfades between named inputs
+/// (pat-0q2kx.53).
+#[derive(Debug, Clone)]
+pub struct TransitionNode {
+    /// The inputs, in declaration order, as `(name, node)`.
+    pub inputs: Vec<(String, AnimationNode)>,
+    /// Index of the input currently playing.
+    pub current: usize,
+    /// Crossfade duration in seconds; `0.0` cuts instantly.
+    pub xfade_time: f64,
+    /// How a requested switch is timed.
+    pub switch_mode: SwitchMode,
+    /// The input being faded out, and how far through the fade we are.
+    pub fading_from: Option<usize>,
+    /// Seconds elapsed in the active crossfade.
+    pub fade_elapsed: f64,
+    /// A switch waiting for the current clip to end (`SwitchMode::AtEnd`).
+    pub pending: Option<usize>,
+    /// Last `parameters/<name>/current_index` seen, so a switch acts on change
+    /// rather than re-firing every frame.
+    prev_request: i64,
+}
+
+impl TransitionNode {
+    /// Builds a transition over `inputs`, starting on the first.
+    pub fn new(inputs: Vec<(String, AnimationNode)>) -> Self {
+        Self {
+            inputs,
+            current: 0,
+            xfade_time: 0.0,
+            switch_mode: SwitchMode::Immediate,
+            fading_from: None,
+            fade_elapsed: 0.0,
+            pending: None,
+            prev_request: -1,
+        }
+    }
+
+    /// The name of the input currently playing, if any.
+    pub fn current_name(&self) -> Option<&str> {
+        self.inputs.get(self.current).map(|(n, _)| n.as_str())
+    }
+
+    /// Requests a switch to `index`, honouring [`SwitchMode`].
+    ///
+    /// Out-of-range indices and a request for the input already playing are
+    /// ignored, so a script re-setting the same value every frame does not
+    /// restart the clip forever.
+    pub fn request_switch(&mut self, index: usize) {
+        if index >= self.inputs.len() || index == self.current {
+            return;
+        }
+        match self.switch_mode {
+            SwitchMode::AtEnd => self.pending = Some(index),
+            SwitchMode::Immediate => {
+                reset_node_time(&mut self.inputs[index].1);
+                self.begin_fade(index);
+            }
+            // Sync keeps the incoming input's clock as-is, so it picks up in
+            // phase with the outgoing one instead of restarting.
+            SwitchMode::Sync => self.begin_fade(index),
+        }
+    }
+
+    fn begin_fade(&mut self, index: usize) {
+        self.fading_from = Some(self.current);
+        self.fade_elapsed = 0.0;
+        self.current = index;
+    }
+
+    /// Fraction of the crossfade completed: `1.0` when not fading.
+    pub fn fade_factor(&self) -> f32 {
+        match self.fading_from {
+            None => 1.0,
+            Some(_) if self.xfade_time <= 0.0 => 1.0,
+            Some(_) => (self.fade_elapsed / self.xfade_time).clamp(0.0, 1.0) as f32,
+        }
+    }
+}
+
+/// Godot `AnimationNodeBlendTree` — a named container of graph nodes
+/// (pat-0q2kx.53).
+///
+/// ⚠️ Connections are resolved into the nodes' own child links when the graph is
+/// built (a `.tscn`'s `node_connections` become the `Box` children of the
+/// consuming node), so evaluation walks the inline tree from `output`. That
+/// keeps the delta flowing *down* the graph, which is what makes
+/// [`TimeScale`](AnimationNode::TimeScale) work at all — a flat "advance every
+/// named node once" model would lose the scaled delta on the way down.
+/// `nodes` therefore holds the named entries for parameter addressing and
+/// filtering, and `output` names the one that is evaluated.
+#[derive(Debug, Clone, Default)]
+pub struct BlendTree {
+    /// Graph nodes by their name in the `.tscn`.
+    pub nodes: HashMap<String, AnimationNode>,
+    /// The name of the node feeding the tree's output.
+    pub output: String,
+    /// Per-node track filters (Godot `AnimationNode.filters`), keyed by node
+    /// name. Tracks matching an entry are dropped from that node's output.
+    ///
+    /// ⚠️ CURRENT LIMIT: only the entry for [`output`](Self::output) is applied.
+    /// Filtering a node *inside* the graph would need the filter map threaded
+    /// through `sample_node`'s recursion, since children are inline links rather
+    /// than name lookups. Filtering the tree's output — the common case, and the
+    /// one that makes an additive layer skip a track — works.
+    pub filters: HashMap<String, Vec<String>>,
+}
+
+impl BlendTree {
+    /// An empty blend tree whose output is the node named `output`.
+    pub fn new(output: impl Into<String>) -> Self {
+        Self {
+            nodes: HashMap::new(),
+            output: output.into(),
+            filters: HashMap::new(),
+        }
+    }
+
+    /// Adds a named node, replacing any node already under that name.
+    pub fn with_node(mut self, name: impl Into<String>, node: AnimationNode) -> Self {
+        self.nodes.insert(name.into(), node);
+        self
+    }
+
+    /// Filters the tracks a named node contributes.
+    pub fn with_filter(mut self, name: impl Into<String>, paths: Vec<String>) -> Self {
+        self.filters.insert(name.into(), paths);
+        self
+    }
 }
 
 /// Godot `AnimationNodeOneShot.ONE_SHOT_REQUEST_NONE`.
@@ -642,8 +846,43 @@ fn apply_named_params(name: &str, inner: &mut AnimationNode, params: EvalParams<
             }
             one_shot.prev_request = request;
         }
+        // Godot addresses the additive nodes' weight as `add_amount`
+        // (Add2/Add3) and `sub_amount` (Sub2), not `blend_amount`.
+        AnimationNode::Add2 { amount, .. } | AnimationNode::Add3 { amount, .. } => {
+            if let Some(a) = params.float(&param_path(name, "add_amount")) {
+                *amount = a;
+            }
+        }
+        AnimationNode::Sub2 { amount, .. } => {
+            if let Some(a) = params.float(&param_path(name, "sub_amount")) {
+                *amount = a;
+            }
+        }
+        AnimationNode::TimeScale { scale, .. } => {
+            if let Some(s) = params.float(&param_path(name, "scale")) {
+                *scale = s as f64;
+            }
+        }
+        AnimationNode::TimeSeek { seek_request, .. } => {
+            if let Some(t) = params.float(&param_path(name, "seek_request")) {
+                *seek_request = t as f64;
+            }
+        }
+        AnimationNode::Transition(t) => {
+            // Godot drives a transition through `current_index` (and mirrors it
+            // in `current_state`); a switch fires when the value CHANGES, so a
+            // script re-setting the same index does not restart the clip.
+            let request = params
+                .int(&param_path(name, "current_index"))
+                .unwrap_or(t.prev_request);
+            if request != t.prev_request && request >= 0 {
+                t.request_switch(request as usize);
+            }
+            t.prev_request = request;
+        }
         AnimationNode::Animation { .. }
         | AnimationNode::StateMachine(_)
+        | AnimationNode::BlendTree(_)
         | AnimationNode::Named { .. } => {}
     }
 }
@@ -680,6 +919,44 @@ fn advance_node(
             bs.elapsed += delta;
         }
         AnimationNode::StateMachine(sm) => advance_state_machine(sm, delta, library, params),
+        AnimationNode::Add2 { base, add, .. } => {
+            advance_node(base, delta, library, params);
+            advance_node(add, delta, library, params);
+        }
+        AnimationNode::Add3 { base, neg, pos, .. } => {
+            advance_node(base, delta, library, params);
+            advance_node(neg, delta, library, params);
+            advance_node(pos, delta, library, params);
+        }
+        AnimationNode::Sub2 { base, sub, .. } => {
+            advance_node(base, delta, library, params);
+            advance_node(sub, delta, library, params);
+        }
+        // The whole point of TimeScale: the subtree sees a scaled delta.
+        AnimationNode::TimeScale { child, scale } => {
+            advance_node(child, delta * *scale, library, params)
+        }
+        AnimationNode::TimeSeek {
+            child,
+            seek_request,
+        } => {
+            if *seek_request >= 0.0 {
+                let target = *seek_request;
+                // Godot clears the request once consumed, so a seek fires once
+                // rather than pinning the subtree to that time every frame.
+                *seek_request = -1.0;
+                seek_node_to(child, target);
+            } else {
+                advance_node(child, delta, library, params);
+            }
+        }
+        AnimationNode::Transition(t) => advance_transition(t, delta, library, params),
+        AnimationNode::BlendTree(bt) => {
+            let output = bt.output.clone();
+            if let Some(node) = bt.nodes.get_mut(&output) {
+                advance_node(node, delta, library, params);
+            }
+        }
         AnimationNode::Named { name, inner } => {
             // Parameters land on the wrapped node before it advances, so a value
             // set this frame takes effect on this frame.
@@ -766,6 +1043,162 @@ fn advance_state_machine(
     }
 }
 
+/// Jumps every `Animation` clip beneath `node` to `time` (pat-0q2kx.53).
+///
+/// Backs [`AnimationNode::TimeSeek`]. Times are wrapped into each clip's own
+/// length, so seeking past the end of a short clip lands somewhere sensible
+/// rather than freezing it at its last frame.
+fn seek_node_to(node: &mut AnimationNode, time: f64) {
+    match node {
+        AnimationNode::Animation { position, .. } => *position = time.max(0.0),
+        AnimationNode::Blend2 { a, b, .. } => {
+            seek_node_to(a, time);
+            seek_node_to(b, time);
+        }
+        AnimationNode::Blend3 { a, b, c, .. } => {
+            seek_node_to(a, time);
+            seek_node_to(b, time);
+            seek_node_to(c, time);
+        }
+        AnimationNode::Add2 { base, add, .. } => {
+            seek_node_to(base, time);
+            seek_node_to(add, time);
+        }
+        AnimationNode::Add3 { base, neg, pos, .. } => {
+            seek_node_to(base, time);
+            seek_node_to(neg, time);
+            seek_node_to(pos, time);
+        }
+        AnimationNode::Sub2 { base, sub, .. } => {
+            seek_node_to(base, time);
+            seek_node_to(sub, time);
+        }
+        AnimationNode::TimeScale { child, .. } | AnimationNode::TimeSeek { child, .. } => {
+            seek_node_to(child, time)
+        }
+        AnimationNode::OneShot(one_shot) => {
+            seek_node_to(&mut one_shot.base, time);
+            seek_node_to(&mut one_shot.shot, time);
+        }
+        AnimationNode::BlendSpace1D(bs) => bs.elapsed = time.max(0.0),
+        AnimationNode::BlendSpace2D(bs) => bs.elapsed = time.max(0.0),
+        AnimationNode::StateMachine(sm) => sm.elapsed = time.max(0.0),
+        AnimationNode::Transition(t) => {
+            if let Some((_, node)) = t.inputs.get_mut(t.current) {
+                seek_node_to(node, time);
+            }
+        }
+        AnimationNode::BlendTree(bt) => {
+            let output = bt.output.clone();
+            if let Some(node) = bt.nodes.get_mut(&output) {
+                seek_node_to(node, time);
+            }
+        }
+        AnimationNode::Named { inner, .. } => seek_node_to(inner, time),
+    }
+}
+
+/// Whether every clip beneath `node` has reached the end of its current pass.
+///
+/// Backs [`SwitchMode::AtEnd`]: the deferred switch waits for this. A node with
+/// no clip under it reports `true`, since there is nothing to wait for and a
+/// pending switch must never wedge.
+fn node_clip_position(node: &AnimationNode) -> Option<f64> {
+    match node {
+        AnimationNode::Animation { position, .. } => Some(*position),
+        AnimationNode::Named { inner, .. } => node_clip_position(inner),
+        AnimationNode::TimeScale { child, .. } | AnimationNode::TimeSeek { child, .. } => {
+            node_clip_position(child)
+        }
+        AnimationNode::Blend2 { a, .. } => node_clip_position(a),
+        AnimationNode::Blend3 { b, .. } => node_clip_position(b),
+        AnimationNode::Add2 { base, .. }
+        | AnimationNode::Add3 { base, .. }
+        | AnimationNode::Sub2 { base, .. } => node_clip_position(base),
+        _ => None,
+    }
+}
+
+fn advance_transition(
+    t: &mut TransitionNode,
+    delta: f64,
+    library: &HashMap<String, Animation>,
+    params: EvalParams<'_>,
+) {
+    // ⚠️ "The clip finished" is detected by WRAP, comparing the outgoing
+    // input's position across this advance: `advance_node` wraps with
+    // `rem_euclid`, so a position that moved BACKWARDS is one that just
+    // completed a pass. Testing "is the position near the end (or near zero)"
+    // instead looks true on the very first frame — a clip sitting at 0.0 has
+    // not finished, it has not started — and fires the pending switch
+    // immediately, which defeats the entire point of at-end.
+    let before = t
+        .inputs
+        .get(t.current)
+        .and_then(|(_, n)| node_clip_position(n));
+
+    if t.fading_from.is_some() {
+        t.fade_elapsed += delta;
+        if t.fade_elapsed >= t.xfade_time {
+            t.fading_from = None;
+            t.fade_elapsed = 0.0;
+        }
+    }
+
+    // Both the incoming and the outgoing input advance while they crossfade, or
+    // the outgoing one would freeze mid-fade.
+    if let Some(from) = t.fading_from {
+        if let Some((_, node)) = t.inputs.get_mut(from) {
+            advance_node(node, delta, library, params);
+        }
+    }
+    let current = t.current;
+    if let Some((_, node)) = t.inputs.get_mut(current) {
+        advance_node(node, delta, library, params);
+    }
+
+    // Now that the outgoing input has advanced, a pending at-end switch fires
+    // if its clip wrapped during this frame.
+    if let Some(target) = t.pending {
+        let after = t
+            .inputs
+            .get(t.current)
+            .and_then(|(_, n)| node_clip_position(n));
+        let wrapped = match (before, after) {
+            (Some(b), Some(a)) => a < b,
+            // An input with no clip under it has nothing to wait for; letting
+            // the switch through beats wedging it forever.
+            _ => true,
+        };
+        if wrapped {
+            t.pending = None;
+            reset_node_time(&mut t.inputs[target].1);
+            t.begin_fade(target);
+        }
+    }
+}
+
+fn sample_transition(
+    t: &TransitionNode,
+    library: &HashMap<String, Animation>,
+) -> Vec<(TrackKey, Variant)> {
+    let to_values = match t.inputs.get(t.current) {
+        Some((_, node)) => sample_node(node, library),
+        None => return Vec::new(),
+    };
+    let Some(from) = t.fading_from else {
+        return to_values;
+    };
+    if t.xfade_time <= 0.0 {
+        return to_values;
+    }
+    let from_values = match t.inputs.get(from) {
+        Some((_, node)) => sample_node(node, library),
+        None => return to_values,
+    };
+    blend_value_lists(&from_values, &to_values, t.fade_factor())
+}
+
 fn reset_node_time(node: &mut AnimationNode) {
     match node {
         AnimationNode::Animation { position, .. } => *position = 0.0,
@@ -790,6 +1223,35 @@ fn reset_node_time(node: &mut AnimationNode) {
             sm.transition = None;
         }
         AnimationNode::Named { inner, .. } => reset_node_time(inner),
+        AnimationNode::Add2 { base, add, .. } => {
+            reset_node_time(base);
+            reset_node_time(add);
+        }
+        AnimationNode::Add3 { base, neg, pos, .. } => {
+            reset_node_time(base);
+            reset_node_time(neg);
+            reset_node_time(pos);
+        }
+        AnimationNode::Sub2 { base, sub, .. } => {
+            reset_node_time(base);
+            reset_node_time(sub);
+        }
+        AnimationNode::TimeScale { child, .. } | AnimationNode::TimeSeek { child, .. } => {
+            reset_node_time(child)
+        }
+        AnimationNode::Transition(t) => {
+            for (_, node) in t.inputs.iter_mut() {
+                reset_node_time(node);
+            }
+            t.fading_from = None;
+            t.fade_elapsed = 0.0;
+            t.pending = None;
+        }
+        AnimationNode::BlendTree(bt) => {
+            for node in bt.nodes.values_mut() {
+                reset_node_time(node);
+            }
+        }
         AnimationNode::BlendSpace1D(_) | AnimationNode::BlendSpace2D(_) => {}
     }
 }
@@ -862,6 +1324,50 @@ fn sample_node(
         AnimationNode::BlendSpace1D(space) => sample_blend_space_1d(space, library),
         AnimationNode::BlendSpace2D(space) => sample_blend_space_2d(space, library),
         AnimationNode::StateMachine(sm) => sample_state_machine(sm, library),
+        AnimationNode::Add2 { base, add, amount } => {
+            let b = sample_node(base, library);
+            let a = sample_node(add, library);
+            add_value_lists(&b, &a, *amount, 1.0)
+        }
+        AnimationNode::Add3 {
+            base,
+            neg,
+            pos,
+            amount,
+        } => {
+            let b = sample_node(base, library);
+            let w = amount.clamp(-1.0, 1.0);
+            if w < 0.0 {
+                let n = sample_node(neg, library);
+                add_value_lists(&b, &n, -w, 1.0)
+            } else if w > 0.0 {
+                let p = sample_node(pos, library);
+                add_value_lists(&b, &p, w, 1.0)
+            } else {
+                b
+            }
+        }
+        AnimationNode::Sub2 { base, sub, amount } => {
+            let b = sample_node(base, library);
+            let s = sample_node(sub, library);
+            add_value_lists(&b, &s, *amount, -1.0)
+        }
+        // Time nodes are pass-through at sample time — they only ever changed
+        // *when* the child was advanced to.
+        AnimationNode::TimeScale { child, .. } | AnimationNode::TimeSeek { child, .. } => {
+            sample_node(child, library)
+        }
+        AnimationNode::Transition(t) => sample_transition(t, library),
+        AnimationNode::BlendTree(bt) => match bt.nodes.get(&bt.output) {
+            Some(node) => {
+                let values = sample_node(node, library);
+                match bt.filters.get(&bt.output) {
+                    Some(f) => filter_value_lists(&values, f),
+                    None => values,
+                }
+            }
+            None => Vec::new(),
+        },
         // A name is metadata for parameter addressing only — it does not change
         // what the wrapped node produces.
         AnimationNode::Named { inner, .. } => sample_node(inner, library),
@@ -1049,6 +1555,105 @@ fn sample_clip_at(
     }
 }
 
+/// Scales `delta` by `amount` and adds it to `base`, for the additive nodes
+/// (pat-0q2kx.53).
+///
+/// Returns `None` for a type with no meaningful addition (strings, bools,
+/// object references) — the caller keeps the base value untouched rather than
+/// inventing one. `sign` is `+1.0` for Add2/Add3 and `-1.0` for Sub2, so both
+/// directions run through one implementation.
+fn variant_add_scaled(base: &Variant, delta: &Variant, amount: f32, sign: f32) -> Option<Variant> {
+    let k = (amount * sign) as f64;
+    match (base, delta) {
+        (Variant::Float(b), Variant::Float(d)) => Some(Variant::Float(b + d * k)),
+        // ⚠️ Int stays Int: rounding here rather than truncating keeps a
+        // half-way additive step from always biasing toward zero.
+        (Variant::Int(b), Variant::Int(d)) => {
+            Some(Variant::Int(b + (*d as f64 * k).round() as i64))
+        }
+        (Variant::Vector2(b), Variant::Vector2(d)) => Some(Variant::Vector2(
+            gdcore::math::Vector2::new(b.x + d.x * k as f32, b.y + d.y * k as f32),
+        )),
+        (Variant::Vector3(b), Variant::Vector3(d)) => {
+            Some(Variant::Vector3(gdcore::math::Vector3::new(
+                b.x + d.x * k as f32,
+                b.y + d.y * k as f32,
+                b.z + d.z * k as f32,
+            )))
+        }
+        (Variant::Color(b), Variant::Color(d)) => Some(Variant::Color(gdcore::math::Color::new(
+            b.r + d.r * k as f32,
+            b.g + d.g * k as f32,
+            b.b + d.b * k as f32,
+            b.a + d.a * k as f32,
+        ))),
+        _ => None,
+    }
+}
+
+/// Additive blend for `AnimationNodeAdd2`/`Add3`/`Sub2` (pat-0q2kx.53).
+///
+/// Godot's additive nodes layer a second pose *on top of* the base rather than
+/// interpolating toward it, so a punch animation can play over a run without
+/// replacing it.
+///
+/// ⚠️ Unlike [`blend_value_lists`], a track present only in `delta` is DROPPED,
+/// not adopted: additive blending has nothing to add it to, and emitting the raw
+/// delta as if it were a pose is how an additive layer ends up snapping a bone
+/// to a garbage transform. Godot likewise only touches tracks the base drives.
+fn add_value_lists(
+    base: &[(TrackKey, Variant)],
+    delta: &[(TrackKey, Variant)],
+    amount: f32,
+    sign: f32,
+) -> Vec<(TrackKey, Variant)> {
+    if amount == 0.0 {
+        return base.to_vec();
+    }
+    let delta_map: HashMap<&TrackKey, &Variant> = delta.iter().map(|(k, v)| (k, v)).collect();
+    base.iter()
+        .map(|(key, base_value)| {
+            let value = delta_map
+                .get(key)
+                .and_then(|d| variant_add_scaled(base_value, d, amount, sign))
+                .unwrap_or_else(|| base_value.clone());
+            (key.clone(), value)
+        })
+        .collect()
+}
+
+/// Drops every track whose *node path* matches one of `filters`
+/// (pat-0q2kx.53).
+///
+/// Godot's `AnimationNode.filters` are `NodePath`s naming the tracks a node
+/// must not contribute, letting an upper-body additive layer leave the legs to
+/// the base pose. A filter entry may name the node alone (`"Skeleton"`) or a
+/// specific property (`"Skeleton:position"`); both spellings are honoured
+/// because a `.tscn` uses either.
+fn filter_value_lists(
+    values: &[(TrackKey, Variant)],
+    filters: &[String],
+) -> Vec<(TrackKey, Variant)> {
+    if filters.is_empty() {
+        return values.to_vec();
+    }
+    values
+        .iter()
+        .filter(|((node_path, prop), _)| {
+            !filters.iter().any(|f| {
+                // ⚠️ Three spellings, all of which appear in practice: the node
+                // alone ("Skeleton"), the qualified track ("Skeleton:position"),
+                // and the bare property ("position") — the last matters because
+                // a track authored without a node path stores an EMPTY
+                // node_path and carries its name in `prop`, so node-only
+                // matching would silently filter nothing.
+                f == node_path || *f == format!("{node_path}:{prop}") || f == prop
+            })
+        })
+        .cloned()
+        .collect()
+}
+
 fn blend_value_lists(
     a: &[(TrackKey, Variant)],
     b: &[(TrackKey, Variant)],
@@ -1119,6 +1724,303 @@ mod tests {
     #[test]
     fn tree_empty_produces_no_values() {
         let tree = AnimationTree::new();
+        assert!(tree.get_current_values().is_empty());
+    }
+
+    // -- BlendTree node kinds (pat-0q2kx.53) --------------------------------
+
+    fn leaf(name: &str) -> AnimationNode {
+        AnimationNode::Animation {
+            name: name.into(),
+            position: 0.0,
+        }
+    }
+
+    /// A tree with `base`=1.0 and `add`=2.0 clips loaded, rooted at `root`.
+    fn tree_with(root: AnimationNode) -> AnimationTree {
+        let mut tree = AnimationTree::new();
+        tree.add_animation(simple_anim("base", 1.0));
+        tree.add_animation(simple_anim("add", 2.0));
+        tree.set_root(root);
+        tree
+    }
+
+    /// ⚠️ Additive, NOT interpolating: at amount 1.0 the result is base+add
+    /// (3.0), where a Blend2 would have produced just `add` (2.0). Getting this
+    /// wrong is the whole reason Add2 cannot be spelled as a Blend2.
+    #[test]
+    fn add2_layers_the_second_input_on_top_of_the_base() {
+        let tree = tree_with(AnimationNode::Add2 {
+            base: Box::new(leaf("base")),
+            add: Box::new(leaf("add")),
+            amount: 1.0,
+        });
+        assert_eq!(float_of(&tree.get_current_values(), "x"), 3.0);
+    }
+
+    #[test]
+    fn add2_amount_scales_the_added_layer() {
+        let tree = tree_with(AnimationNode::Add2 {
+            base: Box::new(leaf("base")),
+            add: Box::new(leaf("add")),
+            amount: 0.5,
+        });
+        assert_eq!(float_of(&tree.get_current_values(), "x"), 2.0, "1 + 2*0.5");
+    }
+
+    #[test]
+    fn add2_at_zero_leaves_the_base_untouched() {
+        let tree = tree_with(AnimationNode::Add2 {
+            base: Box::new(leaf("base")),
+            add: Box::new(leaf("add")),
+            amount: 0.0,
+        });
+        assert_eq!(float_of(&tree.get_current_values(), "x"), 1.0);
+    }
+
+    #[test]
+    fn sub2_subtracts_the_second_input() {
+        let tree = tree_with(AnimationNode::Sub2 {
+            base: Box::new(leaf("base")),
+            sub: Box::new(leaf("add")),
+            amount: 1.0,
+        });
+        assert_eq!(float_of(&tree.get_current_values(), "x"), -1.0, "1 - 2");
+    }
+
+    /// Add3 picks a side by the sign of `amount`, and neither at zero.
+    #[test]
+    fn add3_selects_its_layer_by_the_sign_of_the_amount() {
+        let build = |amount: f32| {
+            let mut tree = AnimationTree::new();
+            tree.add_animation(simple_anim("base", 1.0));
+            tree.add_animation(simple_anim("neg", 10.0));
+            tree.add_animation(simple_anim("pos", 100.0));
+            tree.set_root(AnimationNode::Add3 {
+                base: Box::new(leaf("base")),
+                neg: Box::new(leaf("neg")),
+                pos: Box::new(leaf("pos")),
+                amount,
+            });
+            float_of(&tree.get_current_values(), "x")
+        };
+        assert_eq!(build(-1.0), 11.0, "the negative side adds the neg layer");
+        assert_eq!(build(1.0), 101.0, "the positive side adds the pos layer");
+        assert_eq!(build(0.0), 1.0, "zero adds neither");
+    }
+
+    /// A track only the additive input drives is DROPPED, not adopted — an
+    /// additive layer must never introduce a pose of its own.
+    #[test]
+    fn additive_ignores_tracks_the_base_does_not_drive() {
+        let mut tree = AnimationTree::new();
+        tree.add_animation(simple_anim("base", 1.0));
+        let mut extra = Animation::new("add", 1.0);
+        let mut track = AnimationTrack::new("y");
+        track.add_keyframe(KeyFrame::linear(0.0, Variant::Float(9.0)));
+        extra.tracks.push(track);
+        tree.add_animation(extra);
+        tree.set_root(AnimationNode::Add2 {
+            base: Box::new(leaf("base")),
+            add: Box::new(leaf("add")),
+            amount: 1.0,
+        });
+
+        let values = tree.get_current_values();
+        assert_eq!(float_of(&values, "x"), 1.0, "the base track is untouched");
+        assert!(
+            !values.iter().any(|(p, _)| p == "y"),
+            "a track only the additive input drives must not appear: {values:?}"
+        );
+    }
+
+    /// TimeScale multiplies the delta flowing into its subtree, so a 2x scale
+    /// reaches a clip's midpoint in half the wall-clock time.
+    #[test]
+    fn time_scale_multiplies_the_child_delta() {
+        let mut tree = AnimationTree::new();
+        tree.add_animation(simple_anim("base", 1.0));
+        tree.set_root(AnimationNode::TimeScale {
+            child: Box::new(leaf("base")),
+            scale: 2.0,
+        });
+        tree.advance(0.25);
+
+        // The clip is 1s long, so 0.25s at 2x lands at 0.5.
+        match tree.root.as_ref().unwrap() {
+            AnimationNode::TimeScale { child, .. } => match child.as_ref() {
+                AnimationNode::Animation { position, .. } => {
+                    assert!((position - 0.5).abs() < 1e-6, "position {position}");
+                }
+                other => panic!("expected an Animation leaf, got {other:?}"),
+            },
+            other => panic!("expected TimeScale, got {other:?}"),
+        }
+    }
+
+    /// A zero scale freezes the subtree rather than advancing it.
+    #[test]
+    fn time_scale_of_zero_freezes_the_subtree() {
+        let mut tree = AnimationTree::new();
+        tree.add_animation(simple_anim("base", 1.0));
+        tree.set_root(AnimationNode::TimeScale {
+            child: Box::new(leaf("base")),
+            scale: 0.0,
+        });
+        tree.advance(0.5);
+        match tree.root.as_ref().unwrap() {
+            AnimationNode::TimeScale { child, .. } => match child.as_ref() {
+                AnimationNode::Animation { position, .. } => assert_eq!(*position, 0.0),
+                other => panic!("expected an Animation leaf, got {other:?}"),
+            },
+            other => panic!("expected TimeScale, got {other:?}"),
+        }
+    }
+
+    /// A seek jumps the subtree's clock, then CLEARS the request — otherwise
+    /// the subtree would be pinned to that time every frame afterwards.
+    #[test]
+    fn time_seek_jumps_once_then_clears_the_request() {
+        let mut tree = AnimationTree::new();
+        tree.add_animation(simple_anim("base", 1.0));
+        tree.set_root(AnimationNode::TimeSeek {
+            child: Box::new(leaf("base")),
+            seek_request: 0.75,
+        });
+
+        tree.advance(0.1);
+        let (request, position) = match tree.root.as_ref().unwrap() {
+            AnimationNode::TimeSeek {
+                child,
+                seek_request,
+            } => match child.as_ref() {
+                AnimationNode::Animation { position, .. } => (*seek_request, *position),
+                other => panic!("expected an Animation leaf, got {other:?}"),
+            },
+            other => panic!("expected TimeSeek, got {other:?}"),
+        };
+        assert!((position - 0.75).abs() < 1e-6, "seeked to {position}");
+        assert!(request < 0.0, "the request must be cleared, got {request}");
+
+        // The next frame advances normally from the seeked position.
+        tree.advance(0.1);
+        match tree.root.as_ref().unwrap() {
+            AnimationNode::TimeSeek { child, .. } => match child.as_ref() {
+                AnimationNode::Animation { position, .. } => {
+                    assert!((position - 0.85).abs() < 1e-6, "position {position}");
+                }
+                other => panic!("expected an Animation leaf, got {other:?}"),
+            },
+            other => panic!("expected TimeSeek, got {other:?}"),
+        }
+    }
+
+    /// An immediate switch changes the output on the spot when there is no
+    /// crossfade time.
+    #[test]
+    fn transition_switches_immediately_without_a_crossfade() {
+        let mut t =
+            TransitionNode::new(vec![("a".into(), leaf("base")), ("b".into(), leaf("add"))]);
+        assert_eq!(t.current_name(), Some("a"));
+        t.request_switch(1);
+        assert_eq!(t.current_name(), Some("b"));
+
+        let tree = tree_with(AnimationNode::Transition(t));
+        assert_eq!(float_of(&tree.get_current_values(), "x"), 2.0);
+    }
+
+    /// ⚠️ `at_end` must WAIT for the clip to finish. A switch that took effect
+    /// immediately here would cut the outgoing animation mid-arc — the exact
+    /// thing the mode exists to prevent.
+    #[test]
+    fn transition_at_end_defers_the_switch_until_the_clip_finishes() {
+        let mut t =
+            TransitionNode::new(vec![("a".into(), leaf("base")), ("b".into(), leaf("add"))]);
+        t.switch_mode = SwitchMode::AtEnd;
+        t.request_switch(1);
+
+        assert_eq!(t.current_name(), Some("a"), "the switch is only pending");
+        assert_eq!(t.pending, Some(1));
+
+        let mut tree = tree_with(AnimationNode::Transition(t));
+        // Part-way through the 1s clip: still on the old input.
+        tree.advance(0.3);
+        assert_eq!(float_of(&tree.get_current_values(), "x"), 1.0);
+
+        // Past the end of the clip: the pending switch fires.
+        tree.advance(0.8);
+        assert_eq!(
+            float_of(&tree.get_current_values(), "x"),
+            2.0,
+            "the deferred switch must fire once the clip completes"
+        );
+    }
+
+    /// **The acceptance test.** A BlendTree root — TimeScale over an Add2 of two
+    /// clips, with a filter excluding a track — produces the correct per-track
+    /// mix through the ordinary advance/sample path.
+    #[test]
+    fn animation_tree_blend_tree_nodes_runtime() {
+        let mut tree = AnimationTree::new();
+        tree.add_animation(simple_anim("base", 1.0));
+        tree.add_animation(simple_anim("add", 2.0));
+
+        // A second track on the base clip, so the filter has something to drop.
+        let mut base_two_track = simple_anim("base2", 1.0);
+        let mut extra = AnimationTrack::new("y");
+        extra.add_keyframe(KeyFrame::linear(0.0, Variant::Float(5.0)));
+        extra.add_keyframe(KeyFrame::linear(1.0, Variant::Float(5.0)));
+        base_two_track.tracks.push(extra);
+        tree.add_animation(base_two_track);
+
+        let graph = AnimationNode::TimeScale {
+            scale: 2.0,
+            child: Box::new(AnimationNode::Add2 {
+                base: Box::new(leaf("base2")),
+                add: Box::new(leaf("add")),
+                amount: 0.5,
+            }),
+        };
+        tree.set_root(AnimationNode::BlendTree(
+            BlendTree::new("out")
+                .with_node("out", graph)
+                .with_filter("out", vec!["y".to_string()]),
+        ));
+
+        tree.advance(0.1);
+        let values = tree.get_current_values();
+
+        // base(1.0) + add(2.0) * 0.5 = 2.0 on the shared track.
+        assert_eq!(float_of(&values, "x"), 2.0);
+        // …and the filtered track is gone, while the unfiltered one survives.
+        assert!(
+            !values.iter().any(|(p, _)| p == "y"),
+            "the filtered track must not reach the output: {values:?}"
+        );
+
+        // The TimeScale really scaled the delta on the way down.
+        match tree.root.as_ref().unwrap() {
+            AnimationNode::BlendTree(bt) => match bt.nodes.get("out") {
+                Some(AnimationNode::TimeScale { child, .. }) => match child.as_ref() {
+                    AnimationNode::Add2 { base, .. } => match base.as_ref() {
+                        AnimationNode::Animation { position, .. } => {
+                            assert!((position - 0.2).abs() < 1e-6, "0.1s at 2x = {position}");
+                        }
+                        other => panic!("expected an Animation leaf, got {other:?}"),
+                    },
+                    other => panic!("expected Add2, got {other:?}"),
+                },
+                other => panic!("expected a TimeScale output node, got {other:?}"),
+            },
+            other => panic!("expected BlendTree, got {other:?}"),
+        }
+    }
+
+    /// A blend tree whose `output` names a node that does not exist produces
+    /// nothing rather than panicking.
+    #[test]
+    fn blend_tree_with_a_missing_output_samples_empty() {
+        let tree = tree_with(AnimationNode::BlendTree(BlendTree::new("nope")));
         assert!(tree.get_current_values().is_empty());
     }
 

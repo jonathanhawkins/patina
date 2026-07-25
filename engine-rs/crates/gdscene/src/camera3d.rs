@@ -168,9 +168,7 @@ impl Projection {
     pub fn create_orthogonal(size: f32, aspect: f32, z_near: f32, z_far: f32) -> Self {
         let half_h = size * 0.5;
         let half_w = half_h * aspect;
-        Self::create_orthogonal_off_center(
-            -half_w, half_w, -half_h, half_h, z_near, z_far,
-        )
+        Self::create_orthogonal_off_center(-half_w, half_w, -half_h, half_h, z_near, z_far)
     }
 
     /// Creates an orthographic projection from explicit bounds.
@@ -241,9 +239,7 @@ impl Projection {
         // Row 0: m[0][r], Row 1: m[1][r], Row 2: m[2][r], Row 3: m[3][r]
         // But we store column-major: m[col][row].
 
-        let row = |r: usize| -> [f32; 4] {
-            [m[0][r], m[1][r], m[2][r], m[3][r]]
-        };
+        let row = |r: usize| -> [f32; 4] { [m[0][r], m[1][r], m[2][r], m[3][r]] };
 
         let r0 = row(0);
         let r1 = row(1);
@@ -258,36 +254,21 @@ impl Projection {
             let inv = 1.0 / len;
             // Gribb-Hartmann gives planes where ax+by+cz+d >= 0 means "inside".
             // Plane::distance_to(p) = normal·p - self.d, so negate d to match.
-            Plane::new(
-                Vector3::new(a * inv, b * inv, c * inv),
-                -d * inv,
-            )
+            Plane::new(Vector3::new(a * inv, b * inv, c * inv), -d * inv)
         };
 
         // Left:   row3 + row0
-        let left = make_plane(
-            r3[0] + r0[0], r3[1] + r0[1], r3[2] + r0[2], r3[3] + r0[3],
-        );
+        let left = make_plane(r3[0] + r0[0], r3[1] + r0[1], r3[2] + r0[2], r3[3] + r0[3]);
         // Right:  row3 - row0
-        let right = make_plane(
-            r3[0] - r0[0], r3[1] - r0[1], r3[2] - r0[2], r3[3] - r0[3],
-        );
+        let right = make_plane(r3[0] - r0[0], r3[1] - r0[1], r3[2] - r0[2], r3[3] - r0[3]);
         // Bottom: row3 + row1
-        let bottom = make_plane(
-            r3[0] + r1[0], r3[1] + r1[1], r3[2] + r1[2], r3[3] + r1[3],
-        );
+        let bottom = make_plane(r3[0] + r1[0], r3[1] + r1[1], r3[2] + r1[2], r3[3] + r1[3]);
         // Top:    row3 - row1
-        let top = make_plane(
-            r3[0] - r1[0], r3[1] - r1[1], r3[2] - r1[2], r3[3] - r1[3],
-        );
+        let top = make_plane(r3[0] - r1[0], r3[1] - r1[1], r3[2] - r1[2], r3[3] - r1[3]);
         // Near:   row3 + row2
-        let near = make_plane(
-            r3[0] + r2[0], r3[1] + r2[1], r3[2] + r2[2], r3[3] + r2[3],
-        );
+        let near = make_plane(r3[0] + r2[0], r3[1] + r2[1], r3[2] + r2[2], r3[3] + r2[3]);
         // Far:    row3 - row2
-        let far = make_plane(
-            r3[0] - r2[0], r3[1] - r2[1], r3[2] - r2[2], r3[3] - r2[3],
-        );
+        let far = make_plane(r3[0] - r2[0], r3[1] - r2[1], r3[2] - r2[2], r3[3] - r2[3]);
 
         [left, right, bottom, top, near, far]
     }
@@ -309,24 +290,34 @@ impl Projection {
         let mut inv = [[0.0f32; 4]; 4];
 
         // Compute cofactors
-        inv[0][0] = m[1][1] * m[2][2] * m[3][3] - m[1][1] * m[2][3] * m[3][2]
-            - m[2][1] * m[1][2] * m[3][3] + m[2][1] * m[1][3] * m[3][2]
-            + m[3][1] * m[1][2] * m[2][3] - m[3][1] * m[1][3] * m[2][2];
+        inv[0][0] =
+            m[1][1] * m[2][2] * m[3][3] - m[1][1] * m[2][3] * m[3][2] - m[2][1] * m[1][2] * m[3][3]
+                + m[2][1] * m[1][3] * m[3][2]
+                + m[3][1] * m[1][2] * m[2][3]
+                - m[3][1] * m[1][3] * m[2][2];
 
-        inv[1][0] = -m[1][0] * m[2][2] * m[3][3] + m[1][0] * m[2][3] * m[3][2]
-            + m[2][0] * m[1][2] * m[3][3] - m[2][0] * m[1][3] * m[3][2]
-            - m[3][0] * m[1][2] * m[2][3] + m[3][0] * m[1][3] * m[2][2];
+        inv[1][0] = -m[1][0] * m[2][2] * m[3][3]
+            + m[1][0] * m[2][3] * m[3][2]
+            + m[2][0] * m[1][2] * m[3][3]
+            - m[2][0] * m[1][3] * m[3][2]
+            - m[3][0] * m[1][2] * m[2][3]
+            + m[3][0] * m[1][3] * m[2][2];
 
-        inv[2][0] = m[1][0] * m[2][1] * m[3][3] - m[1][0] * m[2][3] * m[3][1]
-            - m[2][0] * m[1][1] * m[3][3] + m[2][0] * m[1][3] * m[3][1]
-            + m[3][0] * m[1][1] * m[2][3] - m[3][0] * m[1][3] * m[2][1];
+        inv[2][0] =
+            m[1][0] * m[2][1] * m[3][3] - m[1][0] * m[2][3] * m[3][1] - m[2][0] * m[1][1] * m[3][3]
+                + m[2][0] * m[1][3] * m[3][1]
+                + m[3][0] * m[1][1] * m[2][3]
+                - m[3][0] * m[1][3] * m[2][1];
 
-        inv[3][0] = -m[1][0] * m[2][1] * m[3][2] + m[1][0] * m[2][2] * m[3][1]
-            + m[2][0] * m[1][1] * m[3][2] - m[2][0] * m[1][2] * m[3][1]
-            - m[3][0] * m[1][1] * m[2][2] + m[3][0] * m[1][2] * m[2][1];
+        inv[3][0] = -m[1][0] * m[2][1] * m[3][2]
+            + m[1][0] * m[2][2] * m[3][1]
+            + m[2][0] * m[1][1] * m[3][2]
+            - m[2][0] * m[1][2] * m[3][1]
+            - m[3][0] * m[1][1] * m[2][2]
+            + m[3][0] * m[1][2] * m[2][1];
 
-        let det = m[0][0] * inv[0][0] + m[0][1] * inv[1][0]
-            + m[0][2] * inv[2][0] + m[0][3] * inv[3][0];
+        let det =
+            m[0][0] * inv[0][0] + m[0][1] * inv[1][0] + m[0][2] * inv[2][0] + m[0][3] * inv[3][0];
 
         if det.abs() < 1e-10 {
             return Self::IDENTITY;
@@ -334,53 +325,83 @@ impl Projection {
 
         let inv_det = 1.0 / det;
 
-        inv[0][1] = -m[0][1] * m[2][2] * m[3][3] + m[0][1] * m[2][3] * m[3][2]
-            + m[2][1] * m[0][2] * m[3][3] - m[2][1] * m[0][3] * m[3][2]
-            - m[3][1] * m[0][2] * m[2][3] + m[3][1] * m[0][3] * m[2][2];
+        inv[0][1] = -m[0][1] * m[2][2] * m[3][3]
+            + m[0][1] * m[2][3] * m[3][2]
+            + m[2][1] * m[0][2] * m[3][3]
+            - m[2][1] * m[0][3] * m[3][2]
+            - m[3][1] * m[0][2] * m[2][3]
+            + m[3][1] * m[0][3] * m[2][2];
 
-        inv[1][1] = m[0][0] * m[2][2] * m[3][3] - m[0][0] * m[2][3] * m[3][2]
-            - m[2][0] * m[0][2] * m[3][3] + m[2][0] * m[0][3] * m[3][2]
-            + m[3][0] * m[0][2] * m[2][3] - m[3][0] * m[0][3] * m[2][2];
+        inv[1][1] =
+            m[0][0] * m[2][2] * m[3][3] - m[0][0] * m[2][3] * m[3][2] - m[2][0] * m[0][2] * m[3][3]
+                + m[2][0] * m[0][3] * m[3][2]
+                + m[3][0] * m[0][2] * m[2][3]
+                - m[3][0] * m[0][3] * m[2][2];
 
-        inv[2][1] = -m[0][0] * m[2][1] * m[3][3] + m[0][0] * m[2][3] * m[3][1]
-            + m[2][0] * m[0][1] * m[3][3] - m[2][0] * m[0][3] * m[3][1]
-            - m[3][0] * m[0][1] * m[2][3] + m[3][0] * m[0][3] * m[2][1];
+        inv[2][1] = -m[0][0] * m[2][1] * m[3][3]
+            + m[0][0] * m[2][3] * m[3][1]
+            + m[2][0] * m[0][1] * m[3][3]
+            - m[2][0] * m[0][3] * m[3][1]
+            - m[3][0] * m[0][1] * m[2][3]
+            + m[3][0] * m[0][3] * m[2][1];
 
-        inv[3][1] = m[0][0] * m[2][1] * m[3][2] - m[0][0] * m[2][2] * m[3][1]
-            - m[2][0] * m[0][1] * m[3][2] + m[2][0] * m[0][2] * m[3][1]
-            + m[3][0] * m[0][1] * m[2][2] - m[3][0] * m[0][2] * m[2][1];
+        inv[3][1] =
+            m[0][0] * m[2][1] * m[3][2] - m[0][0] * m[2][2] * m[3][1] - m[2][0] * m[0][1] * m[3][2]
+                + m[2][0] * m[0][2] * m[3][1]
+                + m[3][0] * m[0][1] * m[2][2]
+                - m[3][0] * m[0][2] * m[2][1];
 
-        inv[0][2] = m[0][1] * m[1][2] * m[3][3] - m[0][1] * m[1][3] * m[3][2]
-            - m[1][1] * m[0][2] * m[3][3] + m[1][1] * m[0][3] * m[3][2]
-            + m[3][1] * m[0][2] * m[1][3] - m[3][1] * m[0][3] * m[1][2];
+        inv[0][2] =
+            m[0][1] * m[1][2] * m[3][3] - m[0][1] * m[1][3] * m[3][2] - m[1][1] * m[0][2] * m[3][3]
+                + m[1][1] * m[0][3] * m[3][2]
+                + m[3][1] * m[0][2] * m[1][3]
+                - m[3][1] * m[0][3] * m[1][2];
 
-        inv[1][2] = -m[0][0] * m[1][2] * m[3][3] + m[0][0] * m[1][3] * m[3][2]
-            + m[1][0] * m[0][2] * m[3][3] - m[1][0] * m[0][3] * m[3][2]
-            - m[3][0] * m[0][2] * m[1][3] + m[3][0] * m[0][3] * m[1][2];
+        inv[1][2] = -m[0][0] * m[1][2] * m[3][3]
+            + m[0][0] * m[1][3] * m[3][2]
+            + m[1][0] * m[0][2] * m[3][3]
+            - m[1][0] * m[0][3] * m[3][2]
+            - m[3][0] * m[0][2] * m[1][3]
+            + m[3][0] * m[0][3] * m[1][2];
 
-        inv[2][2] = m[0][0] * m[1][1] * m[3][3] - m[0][0] * m[1][3] * m[3][1]
-            - m[1][0] * m[0][1] * m[3][3] + m[1][0] * m[0][3] * m[3][1]
-            + m[3][0] * m[0][1] * m[1][3] - m[3][0] * m[0][3] * m[1][1];
+        inv[2][2] =
+            m[0][0] * m[1][1] * m[3][3] - m[0][0] * m[1][3] * m[3][1] - m[1][0] * m[0][1] * m[3][3]
+                + m[1][0] * m[0][3] * m[3][1]
+                + m[3][0] * m[0][1] * m[1][3]
+                - m[3][0] * m[0][3] * m[1][1];
 
-        inv[3][2] = -m[0][0] * m[1][1] * m[3][2] + m[0][0] * m[1][2] * m[3][1]
-            + m[1][0] * m[0][1] * m[3][2] - m[1][0] * m[0][2] * m[3][1]
-            - m[3][0] * m[0][1] * m[1][2] + m[3][0] * m[0][2] * m[1][1];
+        inv[3][2] = -m[0][0] * m[1][1] * m[3][2]
+            + m[0][0] * m[1][2] * m[3][1]
+            + m[1][0] * m[0][1] * m[3][2]
+            - m[1][0] * m[0][2] * m[3][1]
+            - m[3][0] * m[0][1] * m[1][2]
+            + m[3][0] * m[0][2] * m[1][1];
 
-        inv[0][3] = -m[0][1] * m[1][2] * m[2][3] + m[0][1] * m[1][3] * m[2][2]
-            + m[1][1] * m[0][2] * m[2][3] - m[1][1] * m[0][3] * m[2][2]
-            - m[2][1] * m[0][2] * m[1][3] + m[2][1] * m[0][3] * m[1][2];
+        inv[0][3] = -m[0][1] * m[1][2] * m[2][3]
+            + m[0][1] * m[1][3] * m[2][2]
+            + m[1][1] * m[0][2] * m[2][3]
+            - m[1][1] * m[0][3] * m[2][2]
+            - m[2][1] * m[0][2] * m[1][3]
+            + m[2][1] * m[0][3] * m[1][2];
 
-        inv[1][3] = m[0][0] * m[1][2] * m[2][3] - m[0][0] * m[1][3] * m[2][2]
-            - m[1][0] * m[0][2] * m[2][3] + m[1][0] * m[0][3] * m[2][2]
-            + m[2][0] * m[0][2] * m[1][3] - m[2][0] * m[0][3] * m[1][2];
+        inv[1][3] =
+            m[0][0] * m[1][2] * m[2][3] - m[0][0] * m[1][3] * m[2][2] - m[1][0] * m[0][2] * m[2][3]
+                + m[1][0] * m[0][3] * m[2][2]
+                + m[2][0] * m[0][2] * m[1][3]
+                - m[2][0] * m[0][3] * m[1][2];
 
-        inv[2][3] = -m[0][0] * m[1][1] * m[2][3] + m[0][0] * m[1][3] * m[2][1]
-            + m[1][0] * m[0][1] * m[2][3] - m[1][0] * m[0][3] * m[2][1]
-            - m[2][0] * m[0][1] * m[1][3] + m[2][0] * m[0][3] * m[1][1];
+        inv[2][3] = -m[0][0] * m[1][1] * m[2][3]
+            + m[0][0] * m[1][3] * m[2][1]
+            + m[1][0] * m[0][1] * m[2][3]
+            - m[1][0] * m[0][3] * m[2][1]
+            - m[2][0] * m[0][1] * m[1][3]
+            + m[2][0] * m[0][3] * m[1][1];
 
-        inv[3][3] = m[0][0] * m[1][1] * m[2][2] - m[0][0] * m[1][2] * m[2][1]
-            - m[1][0] * m[0][1] * m[2][2] + m[1][0] * m[0][2] * m[2][1]
-            + m[2][0] * m[0][1] * m[1][2] - m[2][0] * m[0][2] * m[1][1];
+        inv[3][3] =
+            m[0][0] * m[1][1] * m[2][2] - m[0][0] * m[1][2] * m[2][1] - m[1][0] * m[0][1] * m[2][2]
+                + m[1][0] * m[0][2] * m[2][1]
+                + m[2][0] * m[0][1] * m[1][2]
+                - m[2][0] * m[0][2] * m[1][1];
 
         for col in &mut inv {
             for val in col.iter_mut() {
@@ -818,12 +839,7 @@ pub fn project_position(
         return cam_transform.origin;
     }
 
-    let dir = Vector3::new(
-        view_point[0] / w,
-        view_point[1] / w,
-        view_point[2] / w,
-    )
-    .normalized();
+    let dir = Vector3::new(view_point[0] / w, view_point[1] / w, view_point[2] / w).normalized();
 
     // Scale by depth and transform to world space.
     let view_pos = dir * depth;
@@ -851,7 +867,12 @@ pub fn project_ray_origin(
             // For ortho cameras, the ray origin is on the near plane.
             let near = node3d::get_near(tree, node_id) as f32;
             project_position(
-                tree, node_id, screen_point, near, viewport_width, viewport_height,
+                tree,
+                node_id,
+                screen_point,
+                near,
+                viewport_width,
+                viewport_height,
             )
         }
     }
@@ -876,7 +897,12 @@ pub fn project_ray_normal(
             // Ray from camera through the screen point.
             let far = node3d::get_far(tree, node_id) as f32;
             let world_point = project_position(
-                tree, node_id, screen_point, far, viewport_width, viewport_height,
+                tree,
+                node_id,
+                screen_point,
+                far,
+                viewport_width,
+                viewport_height,
             );
             (world_point - cam_transform.origin).normalized()
         }
@@ -1353,13 +1379,7 @@ mod tests {
         node3d::set_fov(&mut tree, cam, 90.0);
 
         // A point directly in front of the camera should project to screen center.
-        let screen = unproject_position(
-            &tree,
-            cam,
-            Vector3::new(0.0, 0.0, -10.0),
-            800,
-            600,
-        );
+        let screen = unproject_position(&tree, cam, Vector3::new(0.0, 0.0, -10.0), 800, 600);
         assert!(approx_eq(screen.x, 400.0));
         assert!(approx_eq(screen.y, 300.0));
     }
@@ -1370,8 +1390,7 @@ mod tests {
         let cam = add_camera(&mut tree, "Cam");
         node3d::set_fov(&mut tree, cam, 90.0);
 
-        let origin =
-            project_ray_origin(&tree, cam, Vector2::new(400.0, 300.0), 800, 600);
+        let origin = project_ray_origin(&tree, cam, Vector2::new(400.0, 300.0), 800, 600);
         // For perspective, ray origin is the camera position (origin).
         assert!(approx_vec3(origin, Vector3::ZERO));
     }
@@ -1382,8 +1401,7 @@ mod tests {
         let cam = add_camera(&mut tree, "Cam");
         node3d::set_fov(&mut tree, cam, 90.0);
 
-        let normal =
-            project_ray_normal(&tree, cam, Vector2::new(400.0, 300.0), 800, 600);
+        let normal = project_ray_normal(&tree, cam, Vector2::new(400.0, 300.0), 800, 600);
         // Center screen should point down -Z.
         assert!(approx_eq(normal.x, 0.0));
         assert!(approx_eq(normal.y, 0.0));

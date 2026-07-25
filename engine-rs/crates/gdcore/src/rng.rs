@@ -132,9 +132,7 @@ impl Rng {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
-        let s = nanos
-            ^ self.state.rotate_left(17)
-            ^ 0x9e3779b97f4a7c15u64;
+        let s = nanos ^ self.state.rotate_left(17) ^ 0x9e3779b97f4a7c15u64;
         self.set_seed(s);
         s
     }
@@ -243,7 +241,10 @@ mod tests {
                 saw_hi = true;
             }
         }
-        assert!(saw_lo && saw_hi, "both inclusive bounds should be reachable");
+        assert!(
+            saw_lo && saw_hi,
+            "both inclusive bounds should be reachable"
+        );
     }
 
     #[test]
@@ -261,7 +262,11 @@ mod tests {
         let mut rng = Rng::with_seed(55);
         for _ in 0..10_000 {
             let v = rng.randf_range(-2.0, 5.0);
-            assert!((-2.0..=5.0).contains(&v), "randf_range out of bounds: {}", v);
+            assert!(
+                (-2.0..=5.0).contains(&v),
+                "randf_range out of bounds: {}",
+                v
+            );
         }
     }
 

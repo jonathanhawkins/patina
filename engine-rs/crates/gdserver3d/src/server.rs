@@ -3,7 +3,7 @@
 use gdcore::math::Color;
 use gdcore::math3d::Transform3D;
 
-use crate::instance::Instance3DId;
+use crate::instance::{GeometryInstanceSettings, Instance3DId};
 use crate::light::{Light3D, Light3DId};
 use crate::material::Material3D;
 use crate::mesh::Mesh3D;
@@ -59,6 +59,20 @@ pub trait RenderingServer3D {
 
     /// Sets visibility for an instance.
     fn set_visible(&mut self, id: Instance3DId, visible: bool);
+
+    /// Sets an instance's `GeometryInstance3D` render settings — shadow casting
+    /// mode, visibility range, transparency, overlay material, cull margins
+    /// (pat-nzgdu.76).
+    ///
+    /// Default implementation is a no-op so renderers that do not model these
+    /// per-instance settings stay trait-compatible, matching
+    /// [`update_reflection_probe`](Self::update_reflection_probe).
+    fn set_geometry_instance_settings(
+        &mut self,
+        _id: Instance3DId,
+        _settings: GeometryInstanceSettings,
+    ) {
+    }
 
     /// Adds a light to the scene and returns its ID.
     fn add_light(&mut self, id: Light3DId);

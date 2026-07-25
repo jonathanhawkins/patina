@@ -93,7 +93,9 @@ fn resource_fs_path(path: &str) -> std::path::PathBuf {
 /// caller to fall back to a path-only placeholder.
 fn load_text_resource(path: &str) -> Option<ResourceRef> {
     let source = std::fs::read_to_string(resource_fs_path(path)).ok()?;
-    let resource = gdresource::TresLoader::new().parse_str(&source, path).ok()?;
+    let resource = gdresource::TresLoader::new()
+        .parse_str(&source, path)
+        .ok()?;
     Some(ResourceRef {
         path: path.to_string(),
         class_name: resource.class_name.clone(),
@@ -1538,6 +1540,20 @@ impl Interpreter {
         };
 
         let Some(current_field) = current_field else {
+            // Members of the affine builtins are whole values, not floats
+            // (`t.origin` is a Vector2, `t.basis` a Basis), so they need the
+            // general read-modify-write below rather than the float path
+            // (pat-0q2kx.50).
+            if let Some(current) = crate::variant_math::member_get(&intermediate, field) {
+                let final_field = self.apply_assign_op(op, &current, &rhs)?;
+                match crate::variant_math::member_set(&intermediate, field, &final_field) {
+                    Some(updated) => {
+                        self.exec_assignment(object, &AssignOp::Assign, updated?)?;
+                        return Ok(true);
+                    }
+                    None => return Ok(false),
+                }
+            }
             return Ok(false);
         };
 
@@ -1971,6 +1987,15 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Call { callee, .. }
                             if matches!(callee.as_ref(), Expr::Ident(n) if n == "get_tree"))
                         {
+                            // SceneTree's own control surface first — change
+                            // scene, quit, pause, group broadcasts (pat-0q2kx.47).
+                            // These are SceneTree methods in Godot, not Node
+                            // ones, so this form is the only place they resolve.
+                            if let Some(result) =
+                                self.try_scene_tree_method(member, &evaluated_args)?
+                            {
+                                return Ok(result);
+                            }
                             if let Some(result) = self.try_builtin(member, &evaluated_args)? {
                                 return Ok(result);
                             }
@@ -2089,10 +2114,15 @@ impl Interpreter {
                             )))
                         }
                     }
-                    _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
-                        "cannot access member on {}",
-                        obj.variant_type()
-                    )))),
+                    // Rect2/Transform2D/Transform3D/Basis/Quaternion/AABB/Plane
+                    // members (`t.origin`, `q.w`, `r.size`) — pat-0q2kx.50.
+                    other => match crate::variant_math::member_get(other, member) {
+                        Some(v) => Ok(v),
+                        None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "cannot access member '{member}' on {}",
+                            obj.variant_type()
+                        )))),
+                    },
                 }
             }
 
@@ -2216,7 +2246,7 @@ impl Interpreter {
                 | "Color"
                 | "Rect2"
                 | "Callable"
-        )
+        ) || crate::variant_math::CONSTRUCTOR_NAMES.contains(&type_name)
     }
 
     /// Implements the `is` operator: does `v` have type `type_name`?
@@ -2232,6 +2262,13 @@ impl Interpreter {
             "Vector3" => matches!(v, Variant::Vector3(_)),
             "Color" => matches!(v, Variant::Color(_)),
             "Callable" => matches!(v, Variant::Callable(_)),
+            "Rect2" => matches!(v, Variant::Rect2(_)),
+            "Transform2D" => matches!(v, Variant::Transform2D(_)),
+            "Transform3D" => matches!(v, Variant::Transform3D(_)),
+            "Quaternion" => matches!(v, Variant::Quaternion(_)),
+            "Basis" => matches!(v, Variant::Basis(_)),
+            "AABB" => matches!(v, Variant::Aabb(_)),
+            "Plane" => matches!(v, Variant::Plane(_)),
             // Objects match `Object` and any class the resource reports.
             "Object" => matches!(v, Variant::ObjectId(_) | Variant::Resource(_)),
             other => {
@@ -2364,11 +2401,16 @@ impl Interpreter {
             (Variant::Vector3(v), Variant::Int(s)) => Ok(Variant::Vector3(*v * *s as f32)),
             (Variant::Float(s), Variant::Vector3(v)) => Ok(Variant::Vector3(*v * *s as f32)),
             (Variant::Int(s), Variant::Vector3(v)) => Ok(Variant::Vector3(*v * *s as f32)),
-            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
-                "cannot multiply {} and {}",
-                lhs.variant_type(),
-                rhs.variant_type()
-            )))),
+            // Transform/Basis/Quaternion products: `t * point`, `a * b`
+            // composition, `q * v` rotation (pat-0q2kx.50).
+            _ => match crate::variant_math::mul(lhs, rhs) {
+                Some(v) => Ok(v),
+                None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "cannot multiply {} and {}",
+                    lhs.variant_type(),
+                    rhs.variant_type()
+                )))),
+            },
         }
     }
 
@@ -2547,6 +2589,200 @@ impl Interpreter {
     // -----------------------------------------------------------------------
     // Function calls
     // -----------------------------------------------------------------------
+
+    /// A string argument to a SceneTree builtin (scene path, group name, method
+    /// name, property name).
+    fn scene_tree_arg_string(
+        name: &str,
+        args: &[Variant],
+        index: usize,
+    ) -> Result<String, RuntimeError> {
+        match args.get(index) {
+            Some(Variant::String(s)) => Ok(s.clone()),
+            Some(Variant::StringName(s)) => Ok(s.as_str().to_string()),
+            Some(Variant::NodePath(p)) => Ok(p.to_string()),
+            other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "{name}() expects a string for argument {index}, got {other:?}"
+            )))),
+        }
+    }
+
+    /// An integer argument to a SceneTree builtin, defaulting when absent —
+    /// Godot's `quit(exit_code = 0)` and the group-call flag word.
+    fn scene_tree_arg_int(
+        name: &str,
+        args: &[Variant],
+        index: usize,
+        default: i64,
+    ) -> Result<i64, RuntimeError> {
+        match args.get(index) {
+            None | Some(Variant::Nil) => Ok(default),
+            Some(Variant::Int(i)) => Ok(*i),
+            Some(Variant::Float(f)) => Ok(*f as i64),
+            Some(Variant::Bool(b)) => Ok(i64::from(*b)),
+            other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "{name}() expects an int for argument {index}, got {other:?}"
+            )))),
+        }
+    }
+
+    /// `SceneTree`'s control surface, as reached by `get_tree().<method>()`
+    /// (pat-0q2kx.47).
+    ///
+    /// Every method here already had a working, unit-tested implementation on
+    /// `SceneTree`; none of them was reachable from a script, so a scene could
+    /// not change, quit, pause, or broadcast to a group — `get_tree().quit()`
+    /// died on `UndefinedFunction`.
+    ///
+    /// Deliberately **not** part of [`try_builtin`]. That runs ahead of user
+    /// functions for a bare call, so exposing names like `quit` or `has_group`
+    /// there would shadow a script's own `func quit()`. These live only on
+    /// `SceneTree` in Godot, and only on this dispatch path here.
+    ///
+    /// `Ok(None)` means "not a SceneTree method", so the caller falls through.
+    fn try_scene_tree_method(
+        &mut self,
+        name: &str,
+        args: &[Variant],
+    ) -> Result<Option<Variant>, RuntimeError> {
+        // Godot's Error enum: OK, and ERR_CANT_OPEN for a scene that will not
+        // load. The idiomatic call discards it, but returning the real code
+        // keeps `if get_tree().change_scene_to_file(p) != OK:` meaningful.
+        const OK: i64 = 0;
+        const ERR_CANT_OPEN: i64 = 19;
+
+        let result = match name {
+            "change_scene_to_file" => {
+                Self::require_args("change_scene_to_file", args, 1)?;
+                let path = Self::scene_tree_arg_string("change_scene_to_file", args, 0)?;
+                let ok = match self.scene_access {
+                    Some(ref mut access) => access.change_scene_to_file(&path),
+                    None => false,
+                };
+                Variant::Int(if ok { OK } else { ERR_CANT_OPEN })
+            }
+            "reload_current_scene" => {
+                let ok = match self.scene_access {
+                    Some(ref mut access) => access.reload_current_scene(),
+                    None => false,
+                };
+                Variant::Int(if ok { OK } else { ERR_CANT_OPEN })
+            }
+            "quit" => {
+                let code = Self::scene_tree_arg_int("quit", args, 0, 0)?;
+                if let Some(ref mut access) = self.scene_access {
+                    access.quit(code);
+                }
+                Variant::Nil
+            }
+            "set_pause" => {
+                Self::require_args("set_pause", args, 1)?;
+                let paused = args[0].is_truthy();
+                if let Some(ref mut access) = self.scene_access {
+                    access.set_tree_paused(paused);
+                }
+                Variant::Nil
+            }
+            "is_paused" => Variant::Bool(
+                self.scene_access
+                    .as_ref()
+                    .map(|a| a.is_tree_paused())
+                    .unwrap_or(false),
+            ),
+            "get_root" => self
+                .scene_access
+                .as_ref()
+                .and_then(|a| a.tree_root())
+                .map(|raw| Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw)))
+                .unwrap_or(Variant::Nil),
+            "get_node_count" => Variant::Int(
+                self.scene_access
+                    .as_ref()
+                    .map(|a| a.tree_node_count())
+                    .unwrap_or(0),
+            ),
+            "get_nodes_in_group" => {
+                Self::require_args("get_nodes_in_group", args, 1)?;
+                let group = Self::scene_tree_arg_string("get_nodes_in_group", args, 0)?;
+                let ids = self
+                    .scene_access
+                    .as_ref()
+                    .map(|a| a.nodes_in_group(&group))
+                    .unwrap_or_default();
+                Variant::Array(
+                    ids.into_iter()
+                        .map(|raw| Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw)))
+                        .collect(),
+                )
+            }
+            "get_first_node_in_group" => {
+                Self::require_args("get_first_node_in_group", args, 1)?;
+                let group = Self::scene_tree_arg_string("get_first_node_in_group", args, 0)?;
+                self.scene_access
+                    .as_ref()
+                    .and_then(|a| a.first_node_in_group(&group))
+                    .map(|raw| Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw)))
+                    .unwrap_or(Variant::Nil)
+            }
+            "has_group" => {
+                Self::require_args("has_group", args, 1)?;
+                let group = Self::scene_tree_arg_string("has_group", args, 0)?;
+                Variant::Bool(
+                    self.scene_access
+                        .as_ref()
+                        .map(|a| a.tree_has_group(&group))
+                        .unwrap_or(false),
+                )
+            }
+            // `call_group(group, method, ...)` and
+            // `call_group_flags(flags, group, method, ...)` differ only by the
+            // leading flag word, and both forward any trailing arguments.
+            "call_group" | "call_group_flags" => {
+                let flagged = name == "call_group_flags";
+                let base = usize::from(flagged);
+                if args.len() < base + 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "{name}() takes at least {} argument(s), got {}",
+                        base + 2,
+                        args.len()
+                    ))));
+                }
+                let flags = if flagged {
+                    Self::scene_tree_arg_int(name, args, 0, 0)?
+                } else {
+                    0
+                };
+                let group = Self::scene_tree_arg_string(name, args, base)?;
+                let method = Self::scene_tree_arg_string(name, args, base + 1)?;
+                let forwarded = args[base + 2..].to_vec();
+                if let Some(ref mut access) = self.scene_access {
+                    access.call_group_flags(flags, &group, &method, &forwarded);
+                }
+                Variant::Nil
+            }
+            "set_group" => {
+                Self::require_args("set_group", args, 3)?;
+                let group = Self::scene_tree_arg_string("set_group", args, 0)?;
+                let property = Self::scene_tree_arg_string("set_group", args, 1)?;
+                let value = args[2].clone();
+                if let Some(ref mut access) = self.scene_access {
+                    access.set_group(&group, &property, value);
+                }
+                Variant::Nil
+            }
+            "notify_group" => {
+                Self::require_args("notify_group", args, 2)?;
+                let group = Self::scene_tree_arg_string("notify_group", args, 0)?;
+                let what = Self::scene_tree_arg_int("notify_group", args, 1, 0)?;
+                if let Some(ref mut access) = self.scene_access {
+                    access.notify_group(&group, what);
+                }
+                Variant::Nil
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(result))
+    }
 
     fn try_builtin(
         &mut self,
@@ -2838,12 +3074,15 @@ impl Interpreter {
                     Variant::Int(i) => Ok(Some(Variant::Int(i.abs()))),
                     Variant::Float(f) => Ok(Some(Variant::Float(f.abs()))),
                     // Componentwise on vectors (Godot `Vector2.abs()` etc.).
-                    Variant::Vector2(v) => Ok(Some(Variant::Vector2(
-                        gdcore::math::Vector2::new(v.x.abs(), v.y.abs()),
-                    ))),
-                    Variant::Vector3(v) => Ok(Some(Variant::Vector3(
-                        gdcore::math::Vector3::new(v.x.abs(), v.y.abs(), v.z.abs()),
-                    ))),
+                    Variant::Vector2(v) => Ok(Some(Variant::Vector2(gdcore::math::Vector2::new(
+                        v.x.abs(),
+                        v.y.abs(),
+                    )))),
+                    Variant::Vector3(v) => Ok(Some(Variant::Vector3(gdcore::math::Vector3::new(
+                        v.x.abs(),
+                        v.y.abs(),
+                        v.z.abs(),
+                    )))),
                     other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                         "abs() not supported for {}",
                         other.variant_type()
@@ -3000,12 +3239,15 @@ impl Interpreter {
                     }
                 };
                 match &args[0] {
-                    Variant::Vector2(v) => Ok(Some(Variant::Vector2(
-                        gdcore::math::Vector2::new(fsign(v.x), fsign(v.y)),
-                    ))),
-                    Variant::Vector3(v) => Ok(Some(Variant::Vector3(
-                        gdcore::math::Vector3::new(fsign(v.x), fsign(v.y), fsign(v.z)),
-                    ))),
+                    Variant::Vector2(v) => Ok(Some(Variant::Vector2(gdcore::math::Vector2::new(
+                        fsign(v.x),
+                        fsign(v.y),
+                    )))),
+                    Variant::Vector3(v) => Ok(Some(Variant::Vector3(gdcore::math::Vector3::new(
+                        fsign(v.x),
+                        fsign(v.y),
+                        fsign(v.z),
+                    )))),
                     _ => {
                         let v = to_float(&args[0])?;
                         let s = if v > 0.0 {
@@ -3450,10 +3692,17 @@ impl Interpreter {
                 }
                 Ok(Some(Variant::Float(to_float(&args[0])?.to_degrees())))
             }
+            // The zero-argument forms are Godot's default constructors
+            // (`Vector2()` is `ZERO`, `Color()` is opaque black). They matter
+            // beyond convenience: nested calls like `AABB(Vector3(), size)`
+            // read that way in real scripts (pat-0q2kx.50).
             "Vector2" => {
+                if args.is_empty() {
+                    return Ok(Some(Variant::Vector2(gdcore::math::Vector2::ZERO)));
+                }
                 if args.len() != 2 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "Vector2() takes 2 arguments".into(),
+                        "Vector2() takes 0 or 2 arguments".into(),
                     )));
                 }
                 let x = to_float(&args[0])? as f32;
@@ -3461,9 +3710,12 @@ impl Interpreter {
                 Ok(Some(Variant::Vector2(gdcore::math::Vector2::new(x, y))))
             }
             "Vector3" => {
+                if args.is_empty() {
+                    return Ok(Some(Variant::Vector3(gdcore::math::Vector3::ZERO)));
+                }
                 if args.len() != 3 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "Vector3() takes 3 arguments".into(),
+                        "Vector3() takes 0 or 3 arguments".into(),
                     )));
                 }
                 let x = to_float(&args[0])? as f32;
@@ -3471,7 +3723,16 @@ impl Interpreter {
                 let z = to_float(&args[2])? as f32;
                 Ok(Some(Variant::Vector3(gdcore::math::Vector3::new(x, y, z))))
             }
+            // Rect2/Transform2D/Transform3D/Quaternion/Basis/AABB/Plane: every
+            // one of these had a `Variant` arm and a tested `gdcore` type, but
+            // no way for a script to build one (pat-0q2kx.50).
+            "Rect2" | "Transform2D" | "Transform3D" | "Quaternion" | "Basis" | "AABB" | "Plane" => {
+                crate::variant_math::construct(name, args).map(Some)
+            }
             "Color" => match args.len() {
+                0 => Ok(Some(Variant::Color(gdcore::math::Color::new(
+                    0.0, 0.0, 0.0, 1.0,
+                )))),
                 3 => {
                     let r = to_float(&args[0])? as f32;
                     let g = to_float(&args[1])? as f32;
@@ -3486,7 +3747,7 @@ impl Interpreter {
                     Ok(Some(Variant::Color(gdcore::math::Color::new(r, g, b, a))))
                 }
                 _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                    "Color() takes 3 or 4 arguments".into(),
+                    "Color() takes 0, 3 or 4 arguments".into(),
                 ))),
             },
             "PackedByteArray" => Ok(Some(build_packed_array(
@@ -3675,19 +3936,12 @@ impl Interpreter {
                 };
                 // Componentwise on vectors (Godot `Vector2.snapped(step)`).
                 match (&args[0], &args[1]) {
-                    (Variant::Vector2(v), Variant::Vector2(s)) => {
-                        Ok(Some(Variant::Vector2(gdcore::math::Vector2::new(
-                            snap(v.x, s.x),
-                            snap(v.y, s.y),
-                        ))))
-                    }
-                    (Variant::Vector3(v), Variant::Vector3(s)) => {
-                        Ok(Some(Variant::Vector3(gdcore::math::Vector3::new(
-                            snap(v.x, s.x),
-                            snap(v.y, s.y),
-                            snap(v.z, s.z),
-                        ))))
-                    }
+                    (Variant::Vector2(v), Variant::Vector2(s)) => Ok(Some(Variant::Vector2(
+                        gdcore::math::Vector2::new(snap(v.x, s.x), snap(v.y, s.y)),
+                    ))),
+                    (Variant::Vector3(v), Variant::Vector3(s)) => Ok(Some(Variant::Vector3(
+                        gdcore::math::Vector3::new(snap(v.x, s.x), snap(v.y, s.y), snap(v.z, s.z)),
+                    ))),
                     _ => {
                         let value = to_float(&args[0])?;
                         let step = to_float(&args[1])?;
@@ -4383,7 +4637,11 @@ impl Interpreter {
     }
 
     /// Dispatch an `Input.method()` call through the scene_access input API.
-    fn call_input_method(&mut self, method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    fn call_input_method(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
         match method {
             "is_action_pressed" => {
                 if args.len() != 1 {
@@ -4867,9 +5125,9 @@ impl Interpreter {
                             .collect();
                         Ok(Variant::Array(conns))
                     }
-                    "has_connections" => {
-                        Ok(Variant::Bool(!access.signal_connections(source, name).is_empty()))
-                    }
+                    "has_connections" => Ok(Variant::Bool(
+                        !access.signal_connections(source, name).is_empty(),
+                    )),
                     other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                         format!("Signal.{other}"),
                     ))),
@@ -5857,6 +6115,20 @@ impl Interpreter {
                     format!("Vector3.{method}"),
                 ))),
             },
+            // The affine builtins delegate to `variant_math`, which forwards to
+            // the already-tested `gdcore` implementations (pat-0q2kx.50).
+            Variant::Rect2(_)
+            | Variant::Transform2D(_)
+            | Variant::Transform3D(_)
+            | Variant::Basis(_)
+            | Variant::Quaternion(_)
+            | Variant::Aabb(_)
+            | Variant::Plane(_) => match crate::variant_math::call_method(obj, method, args) {
+                Some(result) => result,
+                None => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                    format!("{}.{method}", obj.variant_type()),
+                ))),
+            },
             Variant::ObjectId(oid) => {
                 let id = oid.raw();
                 match method {
@@ -5950,29 +6222,22 @@ impl Interpreter {
                         // predate first-class Callables, so both are honoured
                         // and the flags argument shifts accordingly.
                         let (target_id, method_name, flags_index) = match &args[1] {
-                            Variant::Callable(_) => {
-                                match callable_target(&args[1], self_node) {
-                                    Some((t, m)) => (t, m, 2),
-                                    None => {
-                                        return Err(RuntimeError::new(
-                                            RuntimeErrorKind::TypeError(
-                                                "connect() Callable has no bindable target/method"
-                                                    .into(),
-                                            ),
-                                        ))
-                                    }
+                            Variant::Callable(_) => match callable_target(&args[1], self_node) {
+                                Some((t, m)) => (t, m, 2),
+                                None => {
+                                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                        "connect() Callable has no bindable target/method".into(),
+                                    )))
                                 }
-                            }
+                            },
                             Variant::ObjectId(tid) => {
                                 let m = match args.get(2) {
                                     Some(Variant::String(s)) => s.clone(),
                                     Some(Variant::StringName(s)) => s.as_str().to_string(),
                                     _ => {
-                                        return Err(RuntimeError::new(
-                                            RuntimeErrorKind::TypeError(
-                                                "connect() method must be string".into(),
-                                            ),
-                                        ))
+                                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                            "connect() method must be string".into(),
+                                        )))
                                     }
                                 };
                                 (tid.raw(), m, 3)
@@ -6167,11 +6432,13 @@ impl Interpreter {
                         }
                         let method = match &args[0] {
                             Variant::String(s) => s.clone(),
-                            other => return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                                format!(
+                            other => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    format!(
                                     "call_deferred() method name must be a String, got {other:?}"
                                 ),
-                            ))),
+                                )))
+                            }
                         };
                         if let Some(ref mut access) = self.scene_access {
                             access.call_deferred(id, &method, &args[1..]);
@@ -6262,6 +6529,72 @@ impl Interpreter {
                                 "no scene access".into(),
                             )))
                         }
+                    }
+                    // AnimationPlayer-only playback verbs (pat-0q2kx.52).
+                    //
+                    // Each arm is guarded on the node actually having an attached
+                    // player (`animation_player_is_playing` answers `None` when it
+                    // does not), so a script's own `pause()`/`queue()` method on
+                    // some other node is NOT shadowed by these builtins.
+                    "pause"
+                        if self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.animation_player_is_playing(id))
+                            .is_some() =>
+                    {
+                        if let Some(ref mut access) = self.scene_access {
+                            access.animation_player_pause(id);
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "queue"
+                        if self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.animation_player_is_playing(id))
+                            .is_some() =>
+                    {
+                        let clip = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.as_str().to_string(),
+                            _ => String::new(),
+                        };
+                        if let Some(ref mut access) = self.scene_access {
+                            access.animation_player_queue(id, &clip);
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "play_backwards"
+                        if self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.animation_player_is_playing(id))
+                            .is_some() =>
+                    {
+                        let clip = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.as_str().to_string(),
+                            _ => String::new(),
+                        };
+                        if let Some(ref mut access) = self.scene_access {
+                            access.animation_player_play_backwards(id, &clip);
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "get_playing_speed"
+                        if self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.animation_player_is_playing(id))
+                            .is_some() =>
+                    {
+                        let speed = self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.animation_player_playing_speed(id))
+                            .unwrap_or(0.0);
+                        Ok(Variant::Float(speed))
                     }
                     "is_playing" => {
                         if let Some(ref access) = self.scene_access {
@@ -8674,7 +9007,15 @@ fn cubic_interpolate_in_time(
 ) -> f64 {
     let lerp = |a: f64, b: f64, t: f64| a + (b - a) * t;
     let t = lerp(0.0, to_t, weight);
-    let a1 = lerp(pre, from, if pre_t == 0.0 { 0.0 } else { (t - pre_t) / -pre_t });
+    let a1 = lerp(
+        pre,
+        from,
+        if pre_t == 0.0 {
+            0.0
+        } else {
+            (t - pre_t) / -pre_t
+        },
+    );
     let a2 = lerp(from, to, if to_t == 0.0 { 0.5 } else { t / to_t });
     let a3 = lerp(
         to,
@@ -8731,7 +9072,9 @@ fn cubic_interpolate_angle_in_time(
     post_t: f64,
 ) -> f64 {
     let (from_rot, to_rot, pre_rot, post_rot) = cubic_angle_frame(from, to, pre, post);
-    cubic_interpolate_in_time(from_rot, to_rot, pre_rot, post_rot, weight, to_t, pre_t, post_t)
+    cubic_interpolate_in_time(
+        from_rot, to_rot, pre_rot, post_rot, weight, to_t, pre_t, post_t,
+    )
 }
 
 /// Godot `bezier_interpolate` (cubic Bézier from `start` to `end`).
@@ -8749,7 +9092,9 @@ fn bezier_derivative(start: f64, control_1: f64, control_2: f64, end: f64, t: f6
     let omt = 1.0 - t;
     let omt2 = omt * omt;
     let t2 = t * t;
-    (control_1 - start) * 3.0 * omt2 + (control_2 - control_1) * 6.0 * omt * t + (end - control_2) * 3.0 * t2
+    (control_1 - start) * 3.0 * omt2
+        + (control_2 - control_1) * 6.0 * omt * t
+        + (end - control_2) * 3.0 * t2
 }
 
 /// Godot `fposmod`: floating modulo whose result carries the sign of `y`.
@@ -8764,8 +9109,16 @@ fn fposmod(x: f64, y: f64) -> f64 {
 /// Godot `step_decimals`: count of significant decimal places in `step`.
 fn step_decimals(step: f64) -> i64 {
     const SD: [f64; 10] = [
-        0.9999, 0.09999, 0.009999, 0.0009999, 0.00009999, 0.000009999, 0.0000009999, 0.00000009999,
-        0.000000009999, 0.0000000009999,
+        0.9999,
+        0.09999,
+        0.009999,
+        0.0009999,
+        0.00009999,
+        0.000009999,
+        0.0000009999,
+        0.00000009999,
+        0.000000009999,
+        0.0000000009999,
     ];
     let abs = step.abs();
     let decs = abs - (abs as i64) as f64;
@@ -8842,7 +9195,11 @@ fn strip_bbcode(s: &str) -> String {
 /// keeps `str_to_var` from re-parsing it as an `int`.
 fn format_gd_float(f: f64) -> String {
     let s = format!("{f}");
-    if s.contains('.') || s.contains('e') || s.contains('E') || s.contains("inf") || s.contains("nan")
+    if s.contains('.')
+        || s.contains('e')
+        || s.contains('E')
+        || s.contains("inf")
+        || s.contains("nan")
     {
         s
     } else {
@@ -9104,11 +9461,15 @@ impl GdTextParser {
             }
             "Vector3" => {
                 let v = self.parse_ctor_floats(3)?;
-                Some(Variant::Vector3(gdcore::math::Vector3::new(v[0], v[1], v[2])))
+                Some(Variant::Vector3(gdcore::math::Vector3::new(
+                    v[0], v[1], v[2],
+                )))
             }
             "Color" => {
                 let v = self.parse_ctor_floats(4)?;
-                Some(Variant::Color(gdcore::math::Color::new(v[0], v[1], v[2], v[3])))
+                Some(Variant::Color(gdcore::math::Color::new(
+                    v[0], v[1], v[2], v[3],
+                )))
             }
             _ => None,
         }
@@ -9329,10 +9690,13 @@ fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
             "WRITE_READ" => Some(Variant::Int(7)),
             _ => None,
         },
-        // @GlobalScope enum-qualified access (`Key.KEY_SPACE`, `Error.OK`, ...).
-        // The 20 bareword global-enum prefixes delegate their member to the flat
-        // @GlobalScope constant table. (pat-nzgdu.7)
-        _ => crate::global_constants::global_enum_member(type_name, member),
+        // `Transform2D.IDENTITY`, `Basis.IDENTITY`, `Plane.PLANE_XY`, ...
+        // (pat-0q2kx.50), then @GlobalScope enum-qualified access
+        // (`Key.KEY_SPACE`, `Error.OK`, ...): the 20 bareword global-enum
+        // prefixes delegate their member to the flat @GlobalScope constant
+        // table (pat-nzgdu.7).
+        _ => crate::variant_math::static_member(type_name, member)
+            .or_else(|| crate::global_constants::global_enum_member(type_name, member)),
     }
 }
 
@@ -9710,7 +10074,11 @@ fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
                 "64" => cfg!(target_pointer_width = "64"),
                 "32" => cfg!(target_pointer_width = "32"),
                 "pc" | "desktop" => {
-                    cfg!(any(target_os = "macos", target_os = "windows", target_os = "linux"))
+                    cfg!(any(
+                        target_os = "macos",
+                        target_os = "windows",
+                        target_os = "linux"
+                    ))
                 }
                 "mobile" => false,
                 _ => false,
@@ -9884,7 +10252,11 @@ fn os_user_data_dir() -> String {
         std::env::var("XDG_DATA_HOME")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.local/share")))
+            .or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| format!("{h}/.local/share"))
+            })
             .unwrap_or_default()
     };
     if base.is_empty() {
@@ -10065,9 +10437,8 @@ fn call_displayserver_via_backend(
     method: &str,
     args: &[Variant],
 ) -> Option<Result<Variant, RuntimeError>> {
-    let size_variant = |(w, h): (i64, i64)| {
-        Variant::Vector2(gdcore::math::Vector2::new(w as f32, h as f32))
-    };
+    let size_variant =
+        |(w, h): (i64, i64)| Variant::Vector2(gdcore::math::Vector2::new(w as f32, h as f32));
     match method {
         "window_get_size" | "window_get_size_with_decorations" => {
             Some(Ok(size_variant(backend.window_size())))
@@ -10102,11 +10473,13 @@ fn call_displayserver_via_backend(
         }
         "tts_is_speaking" => Some(Ok(Variant::Bool(backend.tts_is_speaking()))),
         "tts_get_voices" => Some(Ok(Variant::Array(
-            backend.tts_voices().into_iter().map(Variant::String).collect(),
+            backend
+                .tts_voices()
+                .into_iter()
+                .map(Variant::String)
+                .collect(),
         ))),
-        "tts_get_voices_for_language" => {
-            Some(Ok(Variant::PackedStringArray(backend.tts_voices())))
-        }
+        "tts_get_voices_for_language" => Some(Ok(Variant::PackedStringArray(backend.tts_voices()))),
         "has_feature" => {
             let feature = match args.first() {
                 Some(Variant::Int(i)) => *i,
@@ -10133,9 +10506,9 @@ fn call_displayserver_static(method: &str, args: &[Variant]) -> Result<Variant, 
         // -- Screen / window metrics (headless defaults) -------------------
         "screen_get_dpi" => Ok(Variant::Int(96)),
         "screen_get_scale" | "screen_get_max_scale" => Ok(Variant::Float(1.0)),
-        "screen_get_size" | "window_get_size" | "window_get_size_with_decorations" => Ok(
-            Variant::Vector2(gdcore::math::Vector2::new(1920.0, 1080.0)),
-        ),
+        "screen_get_size" | "window_get_size" | "window_get_size_with_decorations" => {
+            Ok(Variant::Vector2(gdcore::math::Vector2::new(1920.0, 1080.0)))
+        }
         "get_screen_count" => Ok(Variant::Int(1)),
         "screen_get_orientation" => Ok(Variant::Int(0)),
         "window_get_mode" => Ok(Variant::Int(0)),
@@ -11008,7 +11381,10 @@ fn call_undo_redo_instance(
             }
         }
         "has_undo" => Ok(Variant::Bool(UNDO_REDOS.with(|m| {
-            m.borrow().get(&raw).map(|s| s.current >= 0).unwrap_or(false)
+            m.borrow()
+                .get(&raw)
+                .map(|s| s.current >= 0)
+                .unwrap_or(false)
         }))),
         "has_redo" => Ok(Variant::Bool(UNDO_REDOS.with(|m| {
             m.borrow()
@@ -11016,21 +11392,27 @@ fn call_undo_redo_instance(
                 .map(|s| (s.current + 1) < s.history.len() as i64)
                 .unwrap_or(false)
         }))),
-        "is_committing_action" => Ok(Variant::Bool(UNDO_REDOS.with(|m| {
-            m.borrow().get(&raw).map(|s| s.committing).unwrap_or(false)
-        }))),
-        "get_version" => Ok(Variant::Int(UNDO_REDOS.with(|m| {
-            m.borrow().get(&raw).map(|s| s.version as i64).unwrap_or(0)
-        }))),
+        "is_committing_action" => {
+            Ok(Variant::Bool(UNDO_REDOS.with(|m| {
+                m.borrow().get(&raw).map(|s| s.committing).unwrap_or(false)
+            })))
+        }
+        "get_version" => {
+            Ok(Variant::Int(UNDO_REDOS.with(|m| {
+                m.borrow().get(&raw).map(|s| s.version as i64).unwrap_or(0)
+            })))
+        }
         "get_history_count" => Ok(Variant::Int(UNDO_REDOS.with(|m| {
             m.borrow()
                 .get(&raw)
                 .map(|s| s.history.len() as i64)
                 .unwrap_or(0)
         }))),
-        "get_current_action" => Ok(Variant::Int(
-            UNDO_REDOS.with(|m| m.borrow().get(&raw).map(|s| s.current).unwrap_or(-1)),
-        )),
+        "get_current_action" => {
+            Ok(Variant::Int(UNDO_REDOS.with(|m| {
+                m.borrow().get(&raw).map(|s| s.current).unwrap_or(-1)
+            })))
+        }
         "get_current_action_name" => Ok(Variant::String(UNDO_REDOS.with(|m| {
             m.borrow()
                 .get(&raw)
@@ -11265,8 +11647,7 @@ fn call_framebuffercacherd_static(method: &str, args: &[Variant]) -> Result<Vari
 
 /// Standard (RFC 4648) base64 encode with `=` padding.
 fn base64_encode(data: &[u8]) -> String {
-    const CHARS: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -11378,7 +11759,9 @@ fn call_marshalls_static(method: &str, args: &[Variant]) -> Result<Variant, Runt
         ))),
         "base64_to_utf8" => {
             let bytes = base64_decode(&first_str("Marshalls.base64_to_utf8()")?)?;
-            Ok(Variant::String(String::from_utf8_lossy(&bytes).into_owned()))
+            Ok(Variant::String(
+                String::from_utf8_lossy(&bytes).into_owned(),
+            ))
         }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("Marshalls.{other}"),
@@ -11399,9 +11782,7 @@ fn call_resourceuid_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
             Ok(Variant::String(gdresource::uid::id_to_text(id)))
         }
         "text_to_id" => match args.first() {
-            Some(Variant::String(s)) => {
-                Ok(Variant::Int(gdresource::uid::text_to_id(s).raw()))
-            }
+            Some(Variant::String(s)) => Ok(Variant::Int(gdresource::uid::text_to_id(s).raw())),
             _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                 "ResourceUID.text_to_id() expects a uid:// string".into(),
             ))),
@@ -11412,7 +11793,9 @@ fn call_resourceuid_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
                     "ResourceUID.has_id() takes an id".into(),
                 ))
             })?)?;
-            Ok(Variant::Bool(gdresource::uid::id_to_text(id) != "uid://<invalid>"))
+            Ok(Variant::Bool(
+                gdresource::uid::id_to_text(id) != "uid://<invalid>",
+            ))
         }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("ResourceUID.{other}"),
@@ -14299,8 +14682,14 @@ var speed = 10
     #[test]
     fn os_has_feature_known_flags() {
         // Deterministic regardless of build mode / host platform.
-        assert_eq!(run_val("return OS.has_feature(\"template\")\n"), Variant::Bool(true));
-        assert_eq!(run_val("return OS.has_feature(\"editor\")\n"), Variant::Bool(false));
+        assert_eq!(
+            run_val("return OS.has_feature(\"template\")\n"),
+            Variant::Bool(true)
+        );
+        assert_eq!(
+            run_val("return OS.has_feature(\"editor\")\n"),
+            Variant::Bool(false)
+        );
         assert_eq!(
             run_val("return OS.has_feature(\"totally_unknown_feature\")\n"),
             Variant::Bool(false)
@@ -14400,7 +14789,8 @@ var speed = 10
 
     #[test]
     fn classdb_class_has_signal_routes_to_gdobject() {
-        let v = run_val_with_classes("return ClassDB.class_has_signal(\"Node\", \"tree_entered\")\n");
+        let v =
+            run_val_with_classes("return ClassDB.class_has_signal(\"Node\", \"tree_entered\")\n");
         assert_eq!(v, Variant::Bool(true));
         let v = run_val_with_classes("return ClassDB.class_has_signal(\"Node\", \"__nope__\")\n");
         assert_eq!(v, Variant::Bool(false));
@@ -14430,7 +14820,10 @@ var speed = 10
         let Variant::PackedStringArray(items) = v else {
             panic!("expected PackedStringArray, got {v:?}");
         };
-        assert!(items.contains(&"PROCESS_MODE_ALWAYS".to_string()), "{items:?}");
+        assert!(
+            items.contains(&"PROCESS_MODE_ALWAYS".to_string()),
+            "{items:?}"
+        );
     }
 
     #[test]
@@ -15331,7 +15724,12 @@ func fade(alpha):
     fn input_cmd_interp() -> (Interpreter, std::rc::Rc<std::cell::RefCell<InputCmdState>>) {
         let state = std::rc::Rc::new(std::cell::RefCell::new(InputCmdState::default()));
         let mut interp = Interpreter::new();
-        interp.set_scene_access(Box::new(InputCmdAccess { state: state.clone() }), 1);
+        interp.set_scene_access(
+            Box::new(InputCmdAccess {
+                state: state.clone(),
+            }),
+            1,
+        );
         (interp, state)
     }
 
@@ -15361,7 +15759,9 @@ func fade(alpha):
     fn input_get_connected_joypads() {
         let (mut interp, state) = input_cmd_interp();
         state.borrow_mut().joypads = vec![0, 2];
-        let r = interp.run("return Input.get_connected_joypads()\n").unwrap();
+        let r = interp
+            .run("return Input.get_connected_joypads()\n")
+            .unwrap();
         assert_eq!(
             r.return_value,
             Some(Variant::Array(vec![Variant::Int(0), Variant::Int(2)]))
@@ -16374,7 +16774,10 @@ match x:
             run("prints(\"a\", 1, true)\n").output,
             vec!["a 1 true".to_string()]
         );
-        assert_eq!(run("printt(\"a\", \"b\")\n").output, vec!["a\tb".to_string()]);
+        assert_eq!(
+            run("printt(\"a\", \"b\")\n").output,
+            vec!["a\tb".to_string()]
+        );
 
         // str() is variadic and concatenates the string form of every arg.
         assert_eq!(
@@ -16628,9 +17031,7 @@ match x:
             Variant::Int(42)
         );
         assert_eq!(
-            run_val(
-                "return Marshalls.base64_to_variant(Marshalls.variant_to_base64(\"hello\"))\n"
-            ),
+            run_val("return Marshalls.base64_to_variant(Marshalls.variant_to_base64(\"hello\"))\n"),
             Variant::String("hello".into())
         );
         // raw -> base64 is a String; utf8 round-trips through base64.

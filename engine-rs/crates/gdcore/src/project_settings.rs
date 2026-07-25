@@ -138,14 +138,32 @@ impl Default for ProjectSettings {
             project_path: None,
         };
         // Godot defaults
-        ps.set("application/config/name", SettingsValue::String("New Project".into()));
-        ps.set("application/run/main_scene", SettingsValue::String(String::new()));
-        ps.set("physics/common/physics_ticks_per_second", SettingsValue::Int(60));
+        ps.set(
+            "application/config/name",
+            SettingsValue::String("New Project".into()),
+        );
+        ps.set(
+            "application/run/main_scene",
+            SettingsValue::String(String::new()),
+        );
+        ps.set(
+            "physics/common/physics_ticks_per_second",
+            SettingsValue::Int(60),
+        );
         ps.set("physics/2d/default_gravity", SettingsValue::Float(980.0));
         ps.set("physics/3d/default_gravity", SettingsValue::Float(9.8));
-        ps.set("display/window/size/viewport_width", SettingsValue::Int(1152));
-        ps.set("display/window/size/viewport_height", SettingsValue::Int(648));
-        ps.set("rendering/renderer/rendering_method", SettingsValue::String("forward_plus".into()));
+        ps.set(
+            "display/window/size/viewport_width",
+            SettingsValue::Int(1152),
+        );
+        ps.set(
+            "display/window/size/viewport_height",
+            SettingsValue::Int(648),
+        );
+        ps.set(
+            "rendering/renderer/rendering_method",
+            SettingsValue::String("forward_plus".into()),
+        );
         ps
     }
 }
@@ -290,6 +308,56 @@ impl ProjectSettings {
         self.get("display/window/size/viewport_height")
             .and_then(|v| v.as_int())
             .unwrap_or(648)
+    }
+
+    /// The root window's content-scale ("stretch") configuration, assembled
+    /// from `display/window/stretch/*` and the base viewport size
+    /// (pat-nzgdu.87).
+    ///
+    /// Godot seeds the root window's `content_scale_size` from
+    /// `viewport_width`/`viewport_height`, so a project that sets a stretch
+    /// mode but no explicit base resolution still stretches against `1152×648`.
+    pub fn content_scale_config(&self) -> crate::content_scale::ContentScaleConfig {
+        use crate::content_scale::{
+            ContentScaleAspect, ContentScaleConfig, ContentScaleMode, ContentScaleStretch,
+        };
+        ContentScaleConfig {
+            mode: ContentScaleMode::from_setting(
+                self.get("display/window/stretch/mode")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or("disabled"),
+            ),
+            aspect: ContentScaleAspect::from_setting(
+                self.get("display/window/stretch/aspect")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or("keep"),
+            ),
+            // ⚠️ The key is `scale_mode`, NOT `stretch_mode`
+            // (`project_settings.cpp:1779`). Reading the wrong key silently
+            // leaves every project on fractional scaling.
+            stretch: ContentScaleStretch::from_setting(
+                self.get("display/window/stretch/scale_mode")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or("fractional"),
+            ),
+            // ⚠️ A scale of 0 would collapse the canvas; Godot's minimum is
+            // 0.5, so anything at or below zero falls back to 1.0.
+            factor: {
+                let f = self
+                    .get("display/window/stretch/scale")
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(1.0) as f32;
+                if f > 0.0 {
+                    f
+                } else {
+                    1.0
+                }
+            },
+            base_size: crate::math::Vector2::new(
+                self.viewport_width() as f32,
+                self.viewport_height() as f32,
+            ),
+        }
     }
 
     /// The frame-rate cap (`application/run/max_fps`); `0` means uncapped,
@@ -597,7 +665,9 @@ mod tests {
         let ps = ProjectSettings::new();
         let physics = ps.get_section("physics");
         assert!(physics.len() >= 3);
-        assert!(physics.iter().any(|(k, _)| *k == "physics/common/physics_ticks_per_second"));
+        assert!(physics
+            .iter()
+            .any(|(k, _)| *k == "physics/common/physics_ticks_per_second"));
     }
 
     #[test]
@@ -624,7 +694,9 @@ common/physics_ticks_per_second=120
             Some("res://main.tscn")
         );
         assert_eq!(
-            ps.get("physics/common/physics_ticks_per_second").unwrap().as_int(),
+            ps.get("physics/common/physics_ticks_per_second")
+                .unwrap()
+                .as_int(),
             Some(120)
         );
         assert_eq!(
@@ -637,8 +709,14 @@ common/physics_ticks_per_second=120
     fn parse_boolean_values() {
         let content = "[editor]\nplugin/enabled=true\nother/disabled=false\n";
         let ps = ProjectSettings::from_godot_format(content).unwrap();
-        assert_eq!(ps.get("editor/plugin/enabled").unwrap().as_bool(), Some(true));
-        assert_eq!(ps.get("editor/other/disabled").unwrap().as_bool(), Some(false));
+        assert_eq!(
+            ps.get("editor/plugin/enabled").unwrap().as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            ps.get("editor/other/disabled").unwrap().as_bool(),
+            Some(false)
+        );
     }
 
     #[test]
@@ -679,10 +757,16 @@ common/physics_ticks_per_second=120
     #[test]
     fn roundtrip_to_godot_format() {
         let mut ps = ProjectSettings::new();
-        ps.set("application/config/name", SettingsValue::String("Round Trip".into()));
+        ps.set(
+            "application/config/name",
+            SettingsValue::String("Round Trip".into()),
+        );
         let output = ps.to_godot_format();
         let ps2 = ProjectSettings::from_godot_format(&output).unwrap();
-        assert_eq!(ps2.get("application/config/name").unwrap().as_string(), Some("Round Trip"));
+        assert_eq!(
+            ps2.get("application/config/name").unwrap().as_string(),
+            Some("Round Trip")
+        );
     }
 
     #[test]
@@ -723,7 +807,10 @@ common/physics_ticks_per_second=120
     fn settings_value_display() {
         assert_eq!(format!("{}", SettingsValue::Bool(true)), "true");
         assert_eq!(format!("{}", SettingsValue::Int(42)), "42");
-        assert_eq!(format!("{}", SettingsValue::String("hello".into())), "\"hello\"");
+        assert_eq!(
+            format!("{}", SettingsValue::String("hello".into())),
+            "\"hello\""
+        );
         assert_eq!(
             format!("{}", SettingsValue::Vector2(1.0, 2.0)),
             "Vector2(1, 2)"
@@ -733,8 +820,14 @@ common/physics_ticks_per_second=120
     #[test]
     fn overwrite_setting() {
         let mut ps = ProjectSettings::new();
-        ps.set("application/config/name", SettingsValue::String("First".into()));
-        ps.set("application/config/name", SettingsValue::String("Second".into()));
+        ps.set(
+            "application/config/name",
+            SettingsValue::String("First".into()),
+        );
+        ps.set(
+            "application/config/name",
+            SettingsValue::String("Second".into()),
+        );
         assert_eq!(ps.project_name(), "Second");
     }
 
@@ -782,8 +875,14 @@ common/physics_ticks_per_second=120
 
         // project.godot-style overrides read back through the typed getters.
         let mut ps = ProjectSettings::new();
-        ps.set("display/window/size/viewport_width", SettingsValue::Int(800));
-        ps.set("display/window/size/viewport_height", SettingsValue::Int(600));
+        ps.set(
+            "display/window/size/viewport_width",
+            SettingsValue::Int(800),
+        );
+        ps.set(
+            "display/window/size/viewport_height",
+            SettingsValue::Int(600),
+        );
         ps.set("application/run/max_fps", SettingsValue::Int(120));
         ps.set(
             "rendering/environment/defaults/default_clear_color",

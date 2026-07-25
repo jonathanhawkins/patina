@@ -76,6 +76,7 @@ impl AudioOutputStream for CaptureAudioOutput {
 }
 
 /// Shared ring used by the cpal callback and the producer side.
+#[cfg(not(target_arch = "wasm32"))]
 struct SharedRing {
     /// Interleaved f32 samples waiting to be played.
     samples: Vec<f32>,
@@ -90,6 +91,7 @@ struct SharedRing {
 /// On macOS this is CoreAudio; on Windows WASAPI; on Linux ALSA/Pulse via cpal.
 /// If no device is available, [`PlatformAudioOutput::try_open`] returns an error
 /// so callers can fall back to [`crate::sample::NullAudioOutput`].
+#[cfg(not(target_arch = "wasm32"))]
 pub struct PlatformAudioOutput {
     sample_rate: u32,
     channels: u16,
@@ -100,6 +102,7 @@ pub struct PlatformAudioOutput {
 
 /// Errors opening a platform audio device.
 #[derive(Debug, thiserror::Error)]
+#[cfg(not(target_arch = "wasm32"))]
 pub enum PlatformAudioError {
     /// No default output device.
     #[error("no default output device: {0}")]
@@ -112,6 +115,7 @@ pub enum PlatformAudioError {
     Stream(String),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl PlatformAudioOutput {
     /// Open the default output device and start a pull stream.
     pub fn try_open() -> Result<Self, PlatformAudioError> {
@@ -136,15 +140,9 @@ impl PlatformAudioOutput {
         let ring_cb = Arc::clone(&ring);
 
         let stream = match config.sample_format() {
-            cpal::SampleFormat::F32 => {
-                build_stream::<f32>(&device, &config.into(), ring_cb)?
-            }
-            cpal::SampleFormat::I16 => {
-                build_stream::<i16>(&device, &config.into(), ring_cb)?
-            }
-            cpal::SampleFormat::U16 => {
-                build_stream::<u16>(&device, &config.into(), ring_cb)?
-            }
+            cpal::SampleFormat::F32 => build_stream::<f32>(&device, &config.into(), ring_cb)?,
+            cpal::SampleFormat::I16 => build_stream::<i16>(&device, &config.into(), ring_cb)?,
+            cpal::SampleFormat::U16 => build_stream::<u16>(&device, &config.into(), ring_cb)?,
             other => {
                 return Err(PlatformAudioError::Config(format!(
                     "unsupported sample format {other:?}"
@@ -175,6 +173,7 @@ impl PlatformAudioOutput {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -219,6 +218,7 @@ where
         .map_err(|e| PlatformAudioError::Stream(e.to_string()))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl AudioOutputStream for PlatformAudioOutput {
     fn write_samples(&mut self, buffer: &AudioSampleBuffer) -> usize {
         let frames = buffer.frame_count();
@@ -275,7 +275,11 @@ mod tests {
         // stereo interleaved: 256 frames * 2 channels
         assert_eq!(cap.samples.len(), 256 * 2);
         // First left sample should be ~0.25 (mono duplicated into ch0)
-        assert!((cap.samples[0] - 0.25).abs() < 1e-4, "got {}", cap.samples[0]);
+        assert!(
+            (cap.samples[0] - 0.25).abs() < 1e-4,
+            "got {}",
+            cap.samples[0]
+        );
     }
 
     #[test]

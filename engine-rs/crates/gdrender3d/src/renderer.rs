@@ -10,7 +10,7 @@ use gdcore::math3d::Transform3D;
 use gdserver3d::decal::Decal3D;
 use gdserver3d::environment::{BackgroundMode, Environment3D, FogMode};
 use gdserver3d::fog_volume::FogVolume;
-use gdserver3d::instance::{Instance3D, Instance3DId};
+use gdserver3d::instance::{GeometryInstanceSettings, Instance3D, Instance3DId};
 use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::Material3D;
 use gdserver3d::mesh::Mesh3D;
@@ -172,6 +172,16 @@ impl SoftwareRenderer3D {
     /// that a scene's `light_temperature` reached the light's colour.
     pub fn lights(&self) -> &[Light3D] {
         &self.lights
+    }
+
+    /// The render instances currently registered with the renderer.
+    ///
+    /// Lets callers (and tests) read back what a scene sync produced — e.g.
+    /// that a `.tscn`'s `cast_shadow = 0` reached the instance's
+    /// [`GeometryInstanceSettings`](gdserver3d::instance::GeometryInstanceSettings)
+    /// (pat-nzgdu.76).
+    pub fn instances(&self) -> &[Instance3D] {
+        &self.instances
     }
 
     /// Creates a new software renderer in wireframe mode.
@@ -392,7 +402,14 @@ impl SoftwareRenderer3D {
         // Fill background from environment.
         let mut pixels = if let Some(ref env) = viewport.environment {
             let inv_proj = invert_projection(&proj);
-            Self::fill_background(w, h, env, &inv_proj, &viewport.camera_transform, &sky_suns_from_lights(&self.lights))
+            Self::fill_background(
+                w,
+                h,
+                env,
+                &inv_proj,
+                &viewport.camera_transform,
+                &sky_suns_from_lights(&self.lights),
+            )
         } else {
             vec![Color::BLACK; pixel_count]
         };
@@ -400,7 +417,13 @@ impl SoftwareRenderer3D {
         let mut depth_buf = DepthBuffer::new(w, h);
 
         for inst in &self.instances {
-            if !inst.visible {
+            // cast_shadow=ShadowsOnly and visibility_range apply here too
+            // (pat-nzgdu.76) — a wireframe/solid switch must not change *which*
+            // instances are drawn, only how.
+            if !inst.draws_geometry() {
+                continue;
+            }
+            if !inst.is_within_visibility_range(viewport.camera_transform.origin) {
                 continue;
             }
             // Occlusion culling (pat-nzgdu.211).
@@ -531,7 +554,14 @@ impl SoftwareRenderer3D {
         // Fill background from environment.
         let mut pixels = if let Some(ref env) = viewport.environment {
             let inv_proj = invert_projection(&proj);
-            Self::fill_background(w, h, env, &inv_proj, &viewport.camera_transform, &sky_suns_from_lights(&self.lights))
+            Self::fill_background(
+                w,
+                h,
+                env,
+                &inv_proj,
+                &viewport.camera_transform,
+                &sky_suns_from_lights(&self.lights),
+            )
         } else {
             vec![Color::BLACK; pixel_count]
         };
@@ -630,12 +660,35 @@ impl SoftwareRenderer3D {
         let vertex_shader = StandardVertexShader;
 
         for inst in &self.instances {
-            if !inst.visible {
+            // GeometryInstance3D cast_shadow (pat-nzgdu.76): ShadowsOnly casts
+            // into the shadow maps above but is absent from the colour pass.
+            // Covers `visible` too.
+            if !inst.draws_geometry() {
+                continue;
+            }
+            // GeometryInstance3D visibility_range (pat-nzgdu.76): a mesh outside
+            // its LOD distance window is not drawn — but it still reached the
+            // shadow maps above, matching Godot, where the range is a *draw*
+            // decision and shadow casting is governed by cast_shadow alone.
+            if !inst.is_within_visibility_range(viewport.camera_transform.origin) {
                 continue;
             }
             // Occlusion culling (pat-nzgdu.211). Both render paths cull, or a
             // wireframe/solid switch would silently change what is drawn.
             if self.is_occluded(inst, viewport.camera_transform.origin) {
+                continue;
+            }
+
+            // Per-instance opacity: GeometryInstance3D.transparency folded
+            // together with a VISIBILITY_RANGE_FADE_SELF ramp (pat-nzgdu.76).
+            // Fully transparent means nothing to draw at all.
+            let opacity = inst.geometry.opacity_at_distance(
+                viewport
+                    .camera_transform
+                    .origin
+                    .distance_to(inst.transform.origin),
+            );
+            if opacity <= 0.0 {
                 continue;
             }
 
@@ -647,7 +700,10 @@ impl SoftwareRenderer3D {
                 material: Material3D,
             }
 
-            let base_material = inst.material.as_ref().cloned().unwrap_or_default();
+            let mut base_material = inst.material.as_ref().cloned().unwrap_or_default();
+            // Godot scales the surface's alpha by (1 - transparency); the
+            // fragment shaders carry albedo.a straight through to the frame.
+            base_material.albedo.a *= opacity;
             let mut entries: Vec<DrawEntry<'_>> = Vec::new();
 
             if let Some(ref mm) = inst.multimesh {
@@ -658,8 +714,14 @@ impl SoftwareRenderer3D {
                         let per_inst = mm.get_instance_transform(i);
                         let composed = inst.transform * per_inst;
                         let mat = if has_per_instance_colors {
+                            // The per-entry colour replaces albedo wholesale, so
+                            // re-apply the instance opacity on top of it or
+                            // transparency would be silently dropped for
+                            // coloured multimeshes (pat-nzgdu.76).
+                            let mut albedo = mm.get_instance_color(i);
+                            albedo.a *= opacity;
                             Material3D {
-                                albedo: mm.get_instance_color(i),
+                                albedo,
                                 ..base_material.clone()
                             }
                         } else {
@@ -679,6 +741,28 @@ impl SoftwareRenderer3D {
                     transform: inst.transform,
                     material: base_material,
                 });
+            }
+
+            // GeometryInstance3D.material_overlay (pat-nzgdu.76): an extra pass
+            // drawn *over* the surface with a second material.
+            //
+            // ⚠️ The overlay geometry is nudged toward the camera by
+            // `OVERLAY_DEPTH_OFFSET` before being queued. The depth test here is
+            // a strict `<`, so a second pass at the surface's own depth would be
+            // rejected outright and the overlay would never appear. Godot draws
+            // the overlay in a later pass with its own depth handling instead;
+            // this is the software-rasterizer equivalent of a polygon offset.
+            if let Some(ref overlay) = inst.geometry.material_overlay {
+                let camera = viewport.camera_transform.origin;
+                let overlay_entries: Vec<DrawEntry<'_>> = entries
+                    .iter()
+                    .map(|e| DrawEntry {
+                        mesh: e.mesh,
+                        transform: offset_toward(e.transform, camera, OVERLAY_DEPTH_OFFSET),
+                        material: overlay.clone(),
+                    })
+                    .collect();
+                entries.extend(overlay_entries);
             }
 
             for entry in &entries {
@@ -942,8 +1026,7 @@ impl SoftwareRenderer3D {
                 } else if env.fog_sky_affect > 0.0 {
                     // Sky background: blend toward the fog color (base + sun
                     // scatter, no aerial — it *is* the sky) by fog_sky_affect.
-                    let (fog_color, _) =
-                        fog_process(env, 1.0, 0.0, &view_dir_world, suns, None);
+                    let (fog_color, _) = fog_process(env, 1.0, 0.0, &view_dir_world, suns, None);
                     let a = env.fog_sky_affect;
                     pixels[i] = Color::new(
                         lerp(pixels[i].r, fog_color.r, a),
@@ -1340,7 +1423,11 @@ pub fn sample_equirect(
     lerp_c(top, bot, fy)
 }
 
-fn sample_panoramic_sky(mat: &gdserver3d::sky::PanoramicSkyMaterial, dir: &Vector3, energy: f32) -> Color {
+fn sample_panoramic_sky(
+    mat: &gdserver3d::sky::PanoramicSkyMaterial,
+    dir: &Vector3,
+    energy: f32,
+) -> Color {
     if let Some(tex) = mat.texture.as_ref() {
         if !tex.pixels.is_empty() && tex.width > 0 && tex.height > 0 {
             let c = sample_equirect(tex, dir, mat.filter);
@@ -1401,9 +1488,21 @@ fn sample_procedural_sky(
         let t = (1.0 - v_angle).powf(inv_sky_curve).clamp(0.0, 1.0);
         let e = mat.sky_energy_multiplier;
         let mut rgb = (
-            lerp(lin(mat.sky_top_color.r, e), lin(mat.sky_horizon_color.r, e), t),
-            lerp(lin(mat.sky_top_color.g, e), lin(mat.sky_horizon_color.g, e), t),
-            lerp(lin(mat.sky_top_color.b, e), lin(mat.sky_horizon_color.b, e), t),
+            lerp(
+                lin(mat.sky_top_color.r, e),
+                lin(mat.sky_horizon_color.r, e),
+                t,
+            ),
+            lerp(
+                lin(mat.sky_top_color.g, e),
+                lin(mat.sky_horizon_color.g, e),
+                t,
+            ),
+            lerp(
+                lin(mat.sky_top_color.b, e),
+                lin(mat.sky_horizon_color.b, e),
+                t,
+            ),
         );
 
         let cos_angle_max = mat.sun_angle_max.to_radians().cos();
@@ -1452,9 +1551,21 @@ fn sample_procedural_sky(
         let t = (1.0 + v_angle).powf(inv_ground_curve).clamp(0.0, 1.0);
         let e = mat.ground_energy_multiplier;
         (
-            lerp(lin(mat.ground_bottom_color.r, e), lin(mat.ground_horizon_color.r, e), t),
-            lerp(lin(mat.ground_bottom_color.g, e), lin(mat.ground_horizon_color.g, e), t),
-            lerp(lin(mat.ground_bottom_color.b, e), lin(mat.ground_horizon_color.b, e), t),
+            lerp(
+                lin(mat.ground_bottom_color.r, e),
+                lin(mat.ground_horizon_color.r, e),
+                t,
+            ),
+            lerp(
+                lin(mat.ground_bottom_color.g, e),
+                lin(mat.ground_horizon_color.g, e),
+                t,
+            ),
+            lerp(
+                lin(mat.ground_bottom_color.b, e),
+                lin(mat.ground_horizon_color.b, e),
+                t,
+            ),
         )
     };
 
@@ -1601,16 +1712,15 @@ fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
 
 /// Reconstructs a view-space position from a pixel's NDC coordinates and depth,
 /// using the inverse projection. `ndc_z` is the stored (GL-convention) depth.
-fn pixel_view_position(
-    ndc_x: f32,
-    ndc_y: f32,
-    ndc_z: f32,
-    inv_proj: &[[f32; 4]; 4],
-) -> Vector3 {
-    let x = inv_proj[0][0] * ndc_x + inv_proj[1][0] * ndc_y + inv_proj[2][0] * ndc_z + inv_proj[3][0];
-    let y = inv_proj[0][1] * ndc_x + inv_proj[1][1] * ndc_y + inv_proj[2][1] * ndc_z + inv_proj[3][1];
-    let z = inv_proj[0][2] * ndc_x + inv_proj[1][2] * ndc_y + inv_proj[2][2] * ndc_z + inv_proj[3][2];
-    let w = inv_proj[0][3] * ndc_x + inv_proj[1][3] * ndc_y + inv_proj[2][3] * ndc_z + inv_proj[3][3];
+fn pixel_view_position(ndc_x: f32, ndc_y: f32, ndc_z: f32, inv_proj: &[[f32; 4]; 4]) -> Vector3 {
+    let x =
+        inv_proj[0][0] * ndc_x + inv_proj[1][0] * ndc_y + inv_proj[2][0] * ndc_z + inv_proj[3][0];
+    let y =
+        inv_proj[0][1] * ndc_x + inv_proj[1][1] * ndc_y + inv_proj[2][1] * ndc_z + inv_proj[3][1];
+    let z =
+        inv_proj[0][2] * ndc_x + inv_proj[1][2] * ndc_y + inv_proj[2][2] * ndc_z + inv_proj[3][2];
+    let w =
+        inv_proj[0][3] * ndc_x + inv_proj[1][3] * ndc_y + inv_proj[2][3] * ndc_z + inv_proj[3][3];
     if w.abs() > 1e-9 {
         Vector3::new(x / w, y / w, z / w)
     } else {
@@ -1763,6 +1873,36 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
+/// World-space nudge applied to a `material_overlay` pass so it wins the strict
+/// `<` depth test against the surface it overlays (pat-nzgdu.76).
+///
+/// Small enough not to visibly detach the overlay from its surface, large
+/// enough to clear f32 depth quantisation at typical scene scales.
+const OVERLAY_DEPTH_OFFSET: f32 = 0.002;
+
+/// Moves `transform`'s origin `distance` world units toward `target`, leaving
+/// its basis untouched (pat-nzgdu.76).
+///
+/// Returns the transform unchanged when it already sits on `target` — there is
+/// no direction to move along, and normalizing a zero vector would produce NaN
+/// origins that poison every projected vertex.
+fn offset_toward(transform: Transform3D, target: Vector3, distance: f32) -> Transform3D {
+    let delta = target - transform.origin;
+    let len = delta.length();
+    if len <= 1e-6 {
+        return transform;
+    }
+    let scale = distance / len;
+    Transform3D {
+        basis: transform.basis,
+        origin: Vector3::new(
+            transform.origin.x + delta.x * scale,
+            transform.origin.y + delta.y * scale,
+            transform.origin.z + delta.z * scale,
+        ),
+    }
+}
+
 impl Default for SoftwareRenderer3D {
     fn default() -> Self {
         Self::new()
@@ -1802,6 +1942,16 @@ impl RenderingServer3D for SoftwareRenderer3D {
     fn set_visible(&mut self, id: Instance3DId, visible: bool) {
         if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
             inst.visible = visible;
+        }
+    }
+
+    fn set_geometry_instance_settings(
+        &mut self,
+        id: Instance3DId,
+        settings: GeometryInstanceSettings,
+    ) {
+        if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
+            inst.geometry = settings;
         }
     }
 
@@ -1846,11 +1996,7 @@ impl RenderingServer3D for SoftwareRenderer3D {
     }
 
     fn update_reflection_probe(&mut self, probe: &ReflectionProbe) {
-        if let Some(existing) = self
-            .reflection_probes
-            .iter_mut()
-            .find(|p| p.id == probe.id)
-        {
+        if let Some(existing) = self.reflection_probes.iter_mut().find(|p| p.id == probe.id) {
             *existing = probe.clone();
         } else {
             self.reflection_probes.push(probe.clone());
@@ -2441,7 +2587,8 @@ mod tests {
         // Slightly above the horizon: pow(0.9, 4) ≈ 0.656 → still mostly the
         // whitish horizon color (0.6463), not the darker top color (0.385).
         // Endpoints are linearized (Godot's source_color), then mixed in linear.
-        let just_above = sample_procedural_sky(&mat, &Vector3::new(0.0, 0.1, -1.0).normalized(), 1.0, &[]);
+        let just_above =
+            sample_procedural_sky(&mat, &Vector3::new(0.0, 0.1, -1.0).normalized(), 1.0, &[]);
         let t = (1.0f32 - 0.099_503_72).powf(0.6 / 0.15);
         let expected_r = s2l(0.385) + (s2l(0.6463) - s2l(0.385)) * t;
         assert!(
@@ -2461,7 +2608,8 @@ mod tests {
 
         // Just below the horizon: pow(0.98, 30) ≈ 0.545 → a whitish band, not
         // the dark ground_bottom color the old formula produced immediately.
-        let just_below = sample_procedural_sky(&mat, &Vector3::new(0.0, -0.02, -1.0).normalized(), 1.0, &[]);
+        let just_below =
+            sample_procedural_sky(&mat, &Vector3::new(0.0, -0.02, -1.0).normalized(), 1.0, &[]);
         assert!(
             just_below.r > s2l(0.4),
             "ground horizon band must stay bright just below the horizon, got r={:.3}",
@@ -2482,7 +2630,11 @@ mod tests {
     fn procedural_sky_cover_adds_over_sky_hemisphere_only() {
         use gdserver3d::sky::PanoramaTexture;
         // 1×1 opaque cover, linear red 0.7.
-        let cover = PanoramaTexture { width: 1, height: 1, pixels: vec![Color::new(0.7, 0.0, 0.0, 1.0)] };
+        let cover = PanoramaTexture {
+            width: 1,
+            height: 1,
+            pixels: vec![Color::new(0.7, 0.0, 0.0, 1.0)],
+        };
         let mut mat = ProceduralSkyMaterial::default();
         mat.sky_cover = Some(cover);
         let bare = ProceduralSkyMaterial::default();
@@ -2494,7 +2646,8 @@ mod tests {
         assert!(
             (with.r - without.r - 0.7).abs() < 1e-4,
             "sky_cover must add its texture over the sky: with={:.3} without={:.3}",
-            with.r, without.r
+            with.r,
+            without.r
         );
 
         // Ground hemisphere: untouched.
@@ -2509,7 +2662,10 @@ mod tests {
         // Modulate alpha 0 disables the cover entirely.
         mat.sky_cover_modulate = Color::new(1.0, 1.0, 1.0, 0.0);
         let muted = sample_procedural_sky(&mat, &up, 1.0, &[]);
-        assert!((muted.r - without.r).abs() < 1e-6, "modulate.a=0 must hide sky_cover");
+        assert!(
+            (muted.r - without.r).abs() < 1e-6,
+            "modulate.a=0 must hide sky_cover"
+        );
     }
 
     /// Godot's physical-sky `night_sky`: with no sun the whole sky is the
@@ -2518,7 +2674,11 @@ mod tests {
     #[test]
     fn physical_sky_night_sky_no_sun_and_extinction_scaled() {
         use gdserver3d::sky::PanoramaTexture;
-        let stars = PanoramaTexture { width: 1, height: 1, pixels: vec![Color::new(0.1, 0.1, 0.4, 1.0)] };
+        let stars = PanoramaTexture {
+            width: 1,
+            height: 1,
+            pixels: vec![Color::new(0.1, 0.1, 0.4, 1.0)],
+        };
         let mut mat = PhysicalSkyMaterial::default();
         mat.night_sky = Some(stars);
         let bare = PhysicalSkyMaterial::default();
@@ -2532,7 +2692,10 @@ mod tests {
             no_sun
         );
         let no_sun_bare = sample_physical_sky(&bare, &up, 1.0, &[]);
-        assert!(no_sun_bare.r < 1e-6 && no_sun_bare.b < 1e-6, "no night_sky → black");
+        assert!(
+            no_sun_bare.r < 1e-6 && no_sun_bare.b < 1e-6,
+            "no night_sky → black"
+        );
 
         // With a sun overhead-ish, night_sky adds into L0 (× extinction ≈ 1 when
         // looking up through thin atmosphere), brightening the sky.
@@ -2547,7 +2710,8 @@ mod tests {
         assert!(
             with_night.b > without_night.b + 0.01,
             "night_sky must add through thin atmosphere: {:.3} vs {:.3}",
-            with_night.b, without_night.b
+            with_night.b,
+            without_night.b
         );
     }
 
@@ -2607,7 +2771,10 @@ mod tests {
             &mat,
             &Vector3::new(0.0, -1.0, 0.0),
             1.0,
-            &[SkySun { direction: Vector3::new(0.0, -1.0, 0.0), ..sun }],
+            &[SkySun {
+                direction: Vector3::new(0.0, -1.0, 0.0),
+                ..sun
+            }],
         );
         assert!(
             below.r < 0.3,
@@ -2634,13 +2801,20 @@ mod tests {
 
         let suns = sky_suns_from_lights(&[dir_light, no_sky, point]);
         assert_eq!(suns.len(), 1, "only sky-visible directional lights count");
-        assert!((suns[0].direction.y - 1.0).abs() < 1e-6, "direction points toward the sun");
+        assert!(
+            (suns[0].direction.y - 1.0).abs() < 1e-6,
+            "direction points toward the sun"
+        );
         assert!((suns[0].size - 0.5f32.to_radians()).abs() < 1e-6);
 
         let many: Vec<_> = (0..6)
             .map(|i| Light3D::directional(Light3DId(10 + i)))
             .collect();
-        assert_eq!(sky_suns_from_lights(&many).len(), 4, "capped at 4 like Godot");
+        assert_eq!(
+            sky_suns_from_lights(&many).len(),
+            4,
+            "capped at 4 like Godot"
+        );
     }
 
     /// End-to-end: a directional light aimed at the camera puts a sun disc in
@@ -2772,11 +2946,17 @@ mod tests {
             ..Default::default()
         };
         let amb = environment_ambient_color(&env);
-        assert!(amb.r > 0.0 && amb.b > amb.r, "sky ambient must be soft and blue-biased: {amb:?}");
+        assert!(
+            amb.r > 0.0 && amb.b > amb.r,
+            "sky ambient must be soft and blue-biased: {amb:?}"
+        );
         // Halving energy halves the ambient.
         env.ambient_energy = 0.25;
         let amb_half = environment_ambient_color(&env);
-        assert!((amb_half.b - amb.b * 0.5).abs() < 1e-4, "ambient scales with energy");
+        assert!(
+            (amb_half.b - amb.b * 0.5).abs() < 1e-4,
+            "ambient scales with energy"
+        );
 
         // Color source: flat ambient_color (sRGB→linear) × energy.
         let env_c = Environment3D {
@@ -2789,7 +2969,10 @@ mod tests {
         assert!((amb_c.r - s2l(0.5)).abs() < 1e-4 && (amb_c.g - s2l(0.25)).abs() < 1e-4);
 
         // Disabled: black.
-        let env_d = Environment3D { ambient_source: AmbientSource::Disabled, ..Default::default() };
+        let env_d = Environment3D {
+            ambient_source: AmbientSource::Disabled,
+            ..Default::default()
+        };
         assert_eq!(environment_ambient_color(&env_d), Color::BLACK);
     }
 
@@ -2808,17 +2991,26 @@ mod tests {
         // Exponential fog grows with distance: 1 - exp(-dist*density).
         let (color, near) = fog_process(&env, 1.0, 0.0, &up, &[], None);
         let (_, far) = fog_process(&env, 20.0, 0.0, &up, &[], None);
-        assert!((near - (1.0 - (-0.1f32).exp())).abs() < 1e-5, "near amount {near}");
+        assert!(
+            (near - (1.0 - (-0.1f32).exp())).abs() < 1e-5,
+            "near amount {near}"
+        );
         assert!(far > near, "fog must deepen with distance: {near} -> {far}");
         // Fog color is the sRGB fog_light_color in linear (default 0.518,...).
-        assert!((color.r - s2l(0.518)).abs() < 1e-4, "fog color must be linear");
+        assert!(
+            (color.r - s2l(0.518)).abs() < 1e-4,
+            "fog color must be linear"
+        );
 
         // Height fog: below fog_height with positive density it dominates.
         env.fog_height = 0.0;
         env.fog_height_density = 1.0;
         let (_, low) = fog_process(&env, 1.0, -5.0, &up, &[], None); // well below
         let (_, high) = fog_process(&env, 1.0, 5.0, &up, &[], None); // above
-        assert!(low > high, "height fog must be denser below fog_height: {low} vs {high}");
+        assert!(
+            low > high,
+            "height fog must be denser below fog_height: {low} vs {high}"
+        );
 
         // Sun scatter adds the sun color when looking toward the sun.
         env.fog_height_density = 0.0;
@@ -2833,14 +3025,20 @@ mod tests {
         let away = Vector3::new(0.0, 0.0, 1.0);
         let (c_toward, _) = fog_process(&env, 1.0, 0.0, &toward, &[sun], None);
         let (c_away, _) = fog_process(&env, 1.0, 0.0, &away, &[sun], None);
-        assert!(c_toward.r > c_away.r + 0.3, "sun scatter must brighten fog toward the sun");
+        assert!(
+            c_toward.r > c_away.r + 0.3,
+            "sun scatter must brighten fog toward the sun"
+        );
 
         // Aerial perspective blends fog toward the sampled sky color.
         env.fog_sun_scatter = 0.0;
         env.fog_aerial_perspective = 1.0;
         let sky = Color::new(0.05, 0.1, 0.9, 1.0); // vivid blue sky
         let (c_aerial, _) = fog_process(&env, 1.0, 0.0, &up, &[], Some(sky));
-        assert!((c_aerial.b - 0.9).abs() < 1e-4, "aerial=1 → fog color becomes the sky color");
+        assert!(
+            (c_aerial.b - 0.9).abs() < 1e-4,
+            "aerial=1 → fog color becomes the sky color"
+        );
     }
 
     #[test]

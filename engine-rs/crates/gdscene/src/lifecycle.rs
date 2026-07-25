@@ -65,6 +65,44 @@ impl LifecycleManager {
         }
     }
 
+    /// Rewinds a premature enter/ready pass so [`enter_tree`](Self::enter_tree)
+    /// can deliver the real one exactly once (pat-0q2kx.46).
+    ///
+    /// [`SceneTree::add_child`] enters a child the moment it is inserted. That is
+    /// right for a live tree, but wrong when a subtree is *assembled* under an
+    /// already-live root: each node is entered before it has children — so
+    /// `READY` fires parent-first instead of child-first — and before its script
+    /// is attached, so the script sees neither callback. Callers that assemble
+    /// first and dispatch afterwards (the editor's Play flow, autoload
+    /// instantiation) call this to drop that pass: `inside_tree` and `ready` are
+    /// cleared and the `ENTER_TREE`/`READY` entries are removed from every node's
+    /// notification log, leaving exactly one of each once the real dispatch runs.
+    ///
+    /// Signals are deliberately not rewound. Nothing can be connected to a node
+    /// that has not yet run a script callback, so the premature `tree_entered`
+    /// emission had no listeners to reach.
+    pub fn rewind_for_redispatch(tree: &mut SceneTree, subtree_root: NodeId) {
+        let mut ids = Vec::new();
+        tree.collect_subtree_top_down(subtree_root, &mut ids);
+
+        for id in ids {
+            if let Some(node) = tree.get_node_mut(id) {
+                let kept: Vec<_> = node
+                    .notification_log()
+                    .iter()
+                    .copied()
+                    .filter(|n| *n != NOTIFICATION_ENTER_TREE && *n != NOTIFICATION_READY)
+                    .collect();
+                node.clear_notification_log();
+                for n in kept {
+                    node.receive_notification(n);
+                }
+                node.set_inside_tree(false);
+                node.set_ready(false);
+            }
+        }
+    }
+
     /// Dispatches exit-tree notifications for a subtree.
     ///
     /// Call this before removing a subtree from the tree. The sequence is:

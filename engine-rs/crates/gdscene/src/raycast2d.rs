@@ -49,7 +49,10 @@ pub fn set_target_position(tree: &mut SceneTree, node_id: NodeId, target: Vector
 
 /// Reads the ray endpoint in the node's local space.
 pub fn get_target_position(tree: &SceneTree, node_id: NodeId) -> Vector2 {
-    match tree.get_node(node_id).map(|n| n.get_property("target_position")) {
+    match tree
+        .get_node(node_id)
+        .map(|n| n.get_property("target_position"))
+    {
         Some(Variant::Vector2(v)) => v,
         _ => DEFAULT_TARGET_POSITION,
     }
@@ -86,7 +89,10 @@ fn bool_prop_default_false(tree: &SceneTree, node_id: NodeId, key: &str) -> bool
 
 /// The ray's collision mask (Godot default: `1`).
 pub fn get_collision_mask(tree: &SceneTree, node_id: NodeId) -> u32 {
-    match tree.get_node(node_id).map(|n| n.get_property("collision_mask")) {
+    match tree
+        .get_node(node_id)
+        .map(|n| n.get_property("collision_mask"))
+    {
         Some(Variant::Int(i)) => i as u32,
         _ => DEFAULT_COLLISION_MASK,
     }
@@ -241,14 +247,18 @@ fn clear_hit(tree: &mut SceneTree, node_id: NodeId) {
 /// Returns `true` if the last update found a hit.
 pub fn is_colliding(tree: &SceneTree, node_id: NodeId) -> bool {
     matches!(
-        tree.get_node(node_id).map(|n| n.get_property("_hit_colliding")),
+        tree.get_node(node_id)
+            .map(|n| n.get_property("_hit_colliding")),
         Some(Variant::Bool(true))
     )
 }
 
 /// The node the ray hit, if any.
 pub fn get_collider(tree: &SceneTree, node_id: NodeId) -> Option<NodeId> {
-    match tree.get_node(node_id).map(|n| n.get_property("_hit_collider")) {
+    match tree
+        .get_node(node_id)
+        .map(|n| n.get_property("_hit_collider"))
+    {
         Some(Variant::ObjectId(oid)) => Some(NodeId::from_object_id(oid)),
         _ => None,
     }
@@ -264,7 +274,10 @@ pub fn get_collision_point(tree: &SceneTree, node_id: NodeId) -> Vector2 {
 
 /// The surface normal at the last hit.
 pub fn get_collision_normal(tree: &SceneTree, node_id: NodeId) -> Vector2 {
-    match tree.get_node(node_id).map(|n| n.get_property("_hit_normal")) {
+    match tree
+        .get_node(node_id)
+        .map(|n| n.get_property("_hit_normal"))
+    {
         Some(Variant::Vector2(v)) => v,
         _ => Vector2::ZERO,
     }
@@ -377,7 +390,10 @@ mod tests {
         ));
 
         // Legacy keys kept in sync.
-        assert!(matches!(node.get_property("is_colliding"), Variant::Bool(true)));
+        assert!(matches!(
+            node.get_property("is_colliding"),
+            Variant::Bool(true)
+        ));
         match node.get_property("collider") {
             Variant::Int(raw) => assert_eq!(raw as u64, wall_id.raw()),
             other => panic!("legacy `collider` should stay an Int, got {other:?}"),
@@ -429,7 +445,10 @@ mod tests {
         // spanning x ∈ [45,55]; without the exclusion it stops on its own body.
         let mut ray = Node::new("Ray", "RayCast2D");
         ray.set_property("position", Variant::Vector2(Vector2::new(-30.0, 0.0)));
-        ray.set_property("target_position", Variant::Vector2(Vector2::new(100.0, 0.0)));
+        ray.set_property(
+            "target_position",
+            Variant::Vector2(Vector2::new(100.0, 0.0)),
+        );
         let ray_id = tree.add_child(player_id, ray).unwrap();
 
         let mut wall = Node::new("Wall", "StaticBody2D");

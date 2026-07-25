@@ -129,8 +129,14 @@ mod tests {
 
     #[test]
     fn callback_type_int_roundtrip() {
-        assert_eq!(EffectCallbackType::from_i64(0), EffectCallbackType::PreOpaque);
-        assert_eq!(EffectCallbackType::from_i64(1), EffectCallbackType::PostOpaque);
+        assert_eq!(
+            EffectCallbackType::from_i64(0),
+            EffectCallbackType::PreOpaque
+        );
+        assert_eq!(
+            EffectCallbackType::from_i64(1),
+            EffectCallbackType::PostOpaque
+        );
         assert_eq!(EffectCallbackType::from_i64(2), EffectCallbackType::PostSky);
         assert_eq!(
             EffectCallbackType::from_i64(3),
@@ -140,7 +146,10 @@ mod tests {
             EffectCallbackType::from_i64(4),
             EffectCallbackType::PostTransparent
         );
-        assert_eq!(EffectCallbackType::from_i64(99), EffectCallbackType::PreOpaque);
+        assert_eq!(
+            EffectCallbackType::from_i64(99),
+            EffectCallbackType::PreOpaque
+        );
         assert_eq!(EffectCallbackType::PostSky.as_i64(), 2);
     }
 
@@ -175,10 +184,13 @@ mod tests {
         );
 
         assert_eq!(
-            c.effects_for_stage(EffectCallbackType::PostTransparent).len(),
+            c.effects_for_stage(EffectCallbackType::PostTransparent)
+                .len(),
             1
         );
         // No effect targets this stage.
-        assert!(c.effects_for_stage(EffectCallbackType::PreOpaque).is_empty());
+        assert!(c
+            .effects_for_stage(EffectCallbackType::PreOpaque)
+            .is_empty());
     }
 }

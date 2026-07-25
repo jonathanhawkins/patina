@@ -17,7 +17,8 @@ use gdrender2d::font::{draw_string, BitmapFont};
 use gdrender2d::renderer::FrameBuffer;
 use gdscene::control::TextAlign;
 use gdscene::control_render::ControlDrawItem;
-use gdscene::{control, node2d, SceneTree};
+use gdscene::node::NodeId;
+use gdscene::{canvas_order, control, node2d, SceneTree};
 use gdvariant::Variant;
 
 use crate::texture_cache::TextureCache;
@@ -69,6 +70,16 @@ pub enum Render2DKind {
         /// The horizontal text alignment.
         h_align: TextAlign,
     },
+    /// A `GPUParticles2D`/`CPUParticles2D` node's live particles: one textured
+    /// (or solid) quad each, in the emitter's local space (pat-0q2kx.51).
+    Particles {
+        /// The emitter's `texture`, drawn per particle when it can be loaded.
+        /// `None` — or a texture that fails to load — falls back to a solid quad.
+        texture: Option<String>,
+        /// The live particles, in the emitter's local space and in the node's
+        /// `draw_order`.
+        particles: Vec<ParticleQuad>,
+    },
     /// A position marker drawn for a 2D node with no own visual yet (cameras,
     /// empty `Node2D`s, and text nodes that later sub-tasks render) so it stays
     /// visible and pickable in the editor.
@@ -77,6 +88,24 @@ pub enum Render2DKind {
         class: String,
     },
 }
+
+/// One live particle to draw, as published by the runtime particle phase
+/// (`MainLoop::process_particles`) onto the emitter node.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParticleQuad {
+    /// Position in the emitter's local space (the item's global transform maps
+    /// it to the canvas, exactly as for any other local-space geometry).
+    pub position: Vector2,
+    /// The particle's current color, interpolated over its lifetime.
+    pub color: Color,
+    /// Size multiplier for the drawn quad.
+    pub scale: f32,
+}
+
+/// Edge length (px) of the solid quad drawn for a particle at scale 1 when the
+/// emitter has no usable texture. Matches the runtime bridge's
+/// `gdscene::scene_bridge` quad so both surfaces draw the same size.
+const PARTICLE_QUAD_SIZE: f32 = 4.0;
 
 /// One drawable item in the 2D viewport's render list.
 #[derive(Debug, Clone, PartialEq)]
@@ -96,6 +125,10 @@ pub struct Render2DItem {
     /// `(canvas_layer, z_index)`, so a node on a higher layer always draws over
     /// one on a lower layer regardless of `z_index`.
     pub canvas_layer: i64,
+    /// Screen-space rect this item's pixels are confined to, from the nearest
+    /// ancestor with `clip_children` set (Godot's canvas-group clip). `None` means
+    /// unclipped (pat-0q2kx.39).
+    pub clip_rect: Option<Rect2>,
     /// What to draw for this node.
     pub kind: Render2DKind,
 }
@@ -122,8 +155,13 @@ impl Viewport2D {
 /// and the runtime canvas rasterizer ([`build_runtime_render_list`]) so both draw
 /// the same nodes in the same order.
 pub fn collect_canvas_items(tree: &SceneTree) -> Vec<Render2DItem> {
-    let mut items: Vec<Render2DItem> = tree
-        .all_nodes_in_tree_order()
+    // Draw order first, then the layer/z sort — the traversal order is what
+    // survives as the tiebreaker, so Y-sort and `show_behind_parent` have to be
+    // decided here rather than by scene-tree order (pat-0q2kx.39).
+    let mut order: Vec<NodeId> = Vec::new();
+    push_draw_order(tree, tree.root_id(), &mut order);
+
+    let mut items: Vec<Render2DItem> = order
         .into_iter()
         .filter_map(|id| {
             let node = tree.get_node(id)?;
@@ -139,18 +177,67 @@ pub fn collect_canvas_items(tree: &SceneTree) -> Vec<Render2DItem> {
             Some(Render2DItem {
                 node_id: id.raw(),
                 global_transform: node2d::get_global_transform(tree, id),
-                modulate: read_color(tree, id, "modulate"),
-                z_index: node2d::get_z_index(tree, id),
+                // Godot's composite: inherited modulate (the chain's `modulate`,
+                // including this node's own) times this node's `self_modulate`.
+                // Reading only the node's own `modulate` meant a half-alpha parent
+                // did nothing to its children.
+                modulate: canvas_order::effective_modulate(tree, id),
+                // Accumulated when `z_as_relative` (Godot's default), so a child
+                // of a z=10 parent sorts above an absolute z=5 sibling.
+                z_index: canvas_order::effective_z_index(tree, id) as i64,
                 canvas_layer: canvas_layer_for(tree, id),
+                clip_rect: clip_rect_for(tree, id),
                 kind: render_kind_for(tree, id, node.class_name()),
             })
         })
         .collect();
     // Godot draws canvas layers in ascending `layer` order, and within a layer
-    // by ascending `z_index`; a stable sort keeps scene-tree order as the
-    // tiebreaker within the same layer+z.
+    // by ascending `z_index`; a stable sort keeps the draw-order walk above as
+    // the tiebreaker within the same layer+z.
     items.sort_by_key(|i| (i.canvas_layer, i.z_index));
     items
+}
+
+/// Appends `id` and its subtree to `out` in Godot's draw order.
+///
+/// Children come from [`canvas_order::draw_ordered_children`], so a `y_sort_enabled`
+/// parent's children interleave by global Y rather than insertion order. A child
+/// with `show_behind_parent` is emitted *before* its parent, which is exactly what
+/// that flag means (`canvas_item.cpp`).
+fn push_draw_order(tree: &SceneTree, id: NodeId, out: &mut Vec<NodeId>) {
+    let children = canvas_order::draw_ordered_children(tree, id);
+    let (behind, front): (Vec<NodeId>, Vec<NodeId>) = children
+        .into_iter()
+        .partition(|&child| read_bool(tree, child, "show_behind_parent"));
+    for child in behind {
+        push_draw_order(tree, child, out);
+    }
+    out.push(id);
+    for child in front {
+        push_draw_order(tree, child, out);
+    }
+}
+
+/// The screen-space rect an item's pixels are confined to: the rect of its nearest
+/// ancestor with `clip_children` set (pat-0q2kx.39).
+///
+/// The ancestor's extent comes from its `size` property — the Control/`ColorRect`
+/// family — and the rect is axis-aligned at the ancestor's global position. A
+/// clip parent whose extent is implied by a texture instead (a bare `Sprite2D`)
+/// contributes no clip rather than a guessed one.
+fn clip_rect_for(tree: &SceneTree, id: NodeId) -> Option<Rect2> {
+    let mut cursor = tree.get_node(id).and_then(|n| n.parent());
+    while let Some(parent) = cursor {
+        if canvas_order::clip_children_mode(tree, parent) != 0 {
+            let size = match tree.get_node(parent).map(|n| n.get_property("size")) {
+                Some(Variant::Vector2(s)) if s.x > 0.0 && s.y > 0.0 => s,
+                _ => return None,
+            };
+            return Some(Rect2::new(node2d::get_global_position(tree, parent), size));
+        }
+        cursor = tree.get_node(parent).and_then(|n| n.parent());
+    }
+    None
 }
 
 /// Returns the `layer` index of `id`'s nearest `CanvasLayer` ancestor, or `0`
@@ -219,11 +306,60 @@ fn render_kind_for(tree: &SceneTree, id: gdscene::NodeId, class: &str) -> Render
                 h_align: control::get_h_align(tree, id),
             };
         }
+        "GPUParticles2D" | "CPUParticles2D" => {
+            // Only while the scene is running: the particle phase republishes
+            // `_particle_*` every frame, so an idle (not-yet-stepped) emitter has
+            // no arrays and keeps its editor marker.
+            let particles = read_particles(tree, id);
+            if !particles.is_empty() {
+                return Render2DKind::Particles {
+                    texture: node2d::get_texture_path(tree, id),
+                    particles,
+                };
+            }
+        }
         _ => {}
     }
     Render2DKind::Marker {
         class: class.to_owned(),
     }
+}
+
+/// Reads the live particles the runtime published onto a particle emitter node.
+///
+/// `MainLoop::process_particles` writes three parallel internal arrays each
+/// frame — `_particle_positions` (`PackedVector2Array`, emitter-local),
+/// `_particle_colors`, `_particle_scales`. Positions drive the count; a shorter
+/// (or absent) color/scale array falls back to white at scale 1 rather than
+/// dropping the particle, so a partial publish still renders.
+fn read_particles(tree: &SceneTree, id: gdscene::NodeId) -> Vec<ParticleQuad> {
+    let Some(node) = tree.get_node(id) else {
+        return Vec::new();
+    };
+    let positions = match node.get_property("_particle_positions") {
+        Variant::PackedVector2Array(v) => v,
+        _ => return Vec::new(),
+    };
+    let colors = match node.get_property("_particle_colors") {
+        Variant::PackedColorArray(v) => v,
+        _ => Vec::new(),
+    };
+    let scales = match node.get_property("_particle_scales") {
+        Variant::PackedFloat32Array(v) => v,
+        _ => Vec::new(),
+    };
+    positions
+        .into_iter()
+        .enumerate()
+        .map(|(i, position)| ParticleQuad {
+            position,
+            color: colors.get(i).copied().unwrap_or(Color::WHITE),
+            scale: match scales.get(i).copied() {
+                Some(s) if s > 0.0 => s,
+                _ => 1.0,
+            },
+        })
+        .collect()
 }
 
 /// Reads a `Vector2` property, defaulting to [`Vector2::ZERO`] when absent.
@@ -461,6 +597,9 @@ pub fn build_control_render_items(
             modulate: Color::new(1.0, 1.0, 1.0, 1.0),
             z_index: CONTROL_Z_BASE + z as i64,
             canvas_layer: 0,
+            // Control primitives are drawn by their own layout pass, which has
+            // already resolved them inside their container.
+            clip_rect: None,
             kind,
         });
     }
@@ -522,7 +661,8 @@ pub fn camera2d_view_transform(
     let camera = current_camera2d(tree)?;
     let config = node2d::camera2d_config_from_node(tree, camera);
     // The camera's own global position plus its `offset`, as Godot's target.
-    let target = node2d::get_global_transform(tree, camera).origin + node2d::get_camera_offset(tree, camera);
+    let target =
+        node2d::get_global_transform(tree, camera).origin + node2d::get_camera_offset(tree, camera);
     let current = previous_center.unwrap_or(target);
     let center = node2d::compute_camera2d_position(&config, current, target, viewport_size, dt);
 
@@ -536,16 +676,53 @@ pub fn camera2d_view_transform(
     )
 }
 
-/// Pre-multiplies a camera view transform onto every render item.
+/// Pre-multiplies a camera view transform onto every **world-canvas** render item.
 ///
 /// Godot applies the canvas transform once, at the viewport, rather than per node;
 /// folding it into each item's global transform is the equivalent for a flat
 /// render list, and it means the existing rasterizer needs no camera awareness —
 /// it already draws rects and textures *through* the item transform, so zoom
 /// scales sizes as well as positions.
+///
+/// Items on a `CanvasLayer` are skipped: Godot's canvas transform applies to the
+/// default canvas, and a `CanvasLayer` is screen-fixed unless
+/// `follow_viewport_enabled` is set (default **false**,
+/// `doc/classes/CanvasLayer.xml`). That is what keeps a HUD still while the world
+/// scrolls and zooms under it — previously the view was folded into every item,
+/// so a health bar drifted off-screen as soon as the camera moved (pat-0q2kx.40).
+///
+/// KNOWN LIMITATION: a `CanvasLayer` with `layer` explicitly set to `0` is
+/// indistinguishable here from "no CanvasLayer ancestor" and will follow the
+/// camera. Legal in Godot (range -128..128, default 1) but unusual. The exact fix
+/// is a `follows_viewport` flag resolved during item collection, which needs a
+/// field on [`Render2DItem`].
 pub fn apply_camera2d_view(items: &mut [Render2DItem], view: Transform2D) {
     for item in items.iter_mut() {
+        if item.canvas_layer != 0 {
+            continue;
+        }
         item.global_transform = view * item.global_transform;
+    }
+}
+
+/// Applies the root window's content-scale ("stretch") transform to a render
+/// list (pat-nzgdu.87).
+///
+/// ⚠️ Unlike [`apply_camera2d_view`], this applies to **every** item, including
+/// those on a `CanvasLayer`. The camera moves the world under a fixed HUD; the
+/// stretch transform maps the whole finished viewport onto the window, so a HUD
+/// pinned to a `CanvasLayer` has to scale and shift with everything else.
+/// Skipping canvas layers here would leave the HUD at 1:1 while the game around
+/// it scaled — the classic "UI in the corner" bug.
+///
+/// Applied AFTER the camera view, since it is the outermost transform in
+/// Godot's chain (window ← viewport ← canvas layer ← camera ← item).
+pub fn apply_stretch_transform(items: &mut [Render2DItem], stretch: Transform2D) {
+    if stretch == Transform2D::IDENTITY {
+        return;
+    }
+    for item in items.iter_mut() {
+        item.global_transform = stretch * item.global_transform;
     }
 }
 
@@ -559,7 +736,8 @@ pub fn camera2d_center(
 ) -> Option<Vector2> {
     let camera = current_camera2d(tree)?;
     let config = node2d::camera2d_config_from_node(tree, camera);
-    let target = node2d::get_global_transform(tree, camera).origin + node2d::get_camera_offset(tree, camera);
+    let target =
+        node2d::get_global_transform(tree, camera).origin + node2d::get_camera_offset(tree, camera);
     let current = previous_center.unwrap_or(target);
     Some(node2d::compute_camera2d_position(
         &config,
@@ -595,6 +773,10 @@ pub fn rasterize_render_list(
     let font = BitmapFont::builtin();
     for item in items {
         let xform = item.global_transform;
+        // `clip_children` (pat-0q2kx.39): the software rasterizer has no scissor to
+        // set, so a clipped item draws normally and everything it wrote outside its
+        // clip rect is restored afterwards. Only clipped subtrees pay the copy.
+        let clip_snapshot = item.clip_rect.map(|_| fb.pixels.clone());
         match &item.kind {
             Render2DKind::Sprite {
                 texture,
@@ -671,10 +853,93 @@ pub fn rasterize_render_list(
                     );
                 }
             }
+            Render2DKind::Particles { texture, particles } => {
+                // Godot draws one billboard per live particle each frame,
+                // textured by the emitter's `texture`
+                // (`scene/2d/gpu_particles_2d.cpp`). Each quad is centered on the
+                // particle and sized by its `scale`; the emitter's transform is
+                // the item transform, so a `local_coords` emitter carries its
+                // cloud while a global-space one does not (the published
+                // positions already compensate — see
+                // `ParticleSimulator::draw_commands_in_local_space`).
+                let mut textured = false;
+                if let Some(path) = texture.as_ref() {
+                    if let Some(cache) = texture_cache.as_deref_mut() {
+                        if let Some(tex) = cache.get(path) {
+                            let (tw, th) = (tex.width as f32, tex.height as f32);
+                            if tw > 0.0 && th > 0.0 {
+                                for quad in particles {
+                                    let rect = centered_quad(
+                                        quad.position,
+                                        tw * quad.scale,
+                                        th * quad.scale,
+                                    );
+                                    draw::draw_texture_rect_transformed(
+                                        &mut fb,
+                                        tex,
+                                        xform,
+                                        rect,
+                                        None,
+                                        modulate(quad.color, item.modulate),
+                                    );
+                                }
+                                textured = true;
+                            }
+                        }
+                    }
+                }
+                if !textured {
+                    // No texture (or it failed to load): Godot's own untextured
+                    // emitter still shows a point per particle, so fall back to a
+                    // solid quad rather than drawing nothing.
+                    for quad in particles {
+                        let side = PARTICLE_QUAD_SIZE * quad.scale;
+                        let rect = centered_quad(quad.position, side, side);
+                        draw::fill_rect_transformed(
+                            &mut fb,
+                            xform,
+                            rect,
+                            modulate(quad.color, item.modulate),
+                        );
+                    }
+                }
+            }
             Render2DKind::Marker { .. } => {}
+        }
+        if let (Some(rect), Some(before)) = (item.clip_rect, clip_snapshot) {
+            restore_outside_clip(&mut fb, rect, &before);
         }
     }
     fb
+}
+
+/// A `w` × `h` rect centered on `center`, in the same local space as `center` —
+/// the billboard footprint of one particle.
+fn centered_quad(center: Vector2, w: f32, h: f32) -> Rect2 {
+    Rect2::new(
+        Vector2::new(center.x - w / 2.0, center.y - h / 2.0),
+        Vector2::new(w, h),
+    )
+}
+
+/// Puts back every pixel outside `rect`, undoing the part of the last draw that
+/// escaped its `clip_children` ancestor.
+fn restore_outside_clip(fb: &mut FrameBuffer, rect: Rect2, before: &[Color]) {
+    let (x0, y0) = (rect.position.x, rect.position.y);
+    let (x1, y1) = (x0 + rect.size.x, y0 + rect.size.y);
+    for y in 0..fb.height {
+        for x in 0..fb.width {
+            let (px, py) = (x as f32, y as f32);
+            let inside = px >= x0 && px < x1 && py >= y0 && py < y1;
+            if inside {
+                continue;
+            }
+            let index = (y * fb.width + x) as usize;
+            if let (Some(slot), Some(&prev)) = (fb.pixels.get_mut(index), before.get(index)) {
+                *slot = prev;
+            }
+        }
+    }
 }
 
 /// Convenience: [`build_runtime_render_list`] + [`rasterize_render_list`] in one
@@ -776,7 +1041,9 @@ mod tests {
             .add_child(root, Node::new("Ghost", "Sprite2D"))
             .unwrap();
         // A non-2D (spatial) node must never appear in the 2D render list.
-        let node3d_id = tree.add_child(root, Node::new("Spatial", "Node3D")).unwrap();
+        let node3d_id = tree
+            .add_child(root, Node::new("Spatial", "Node3D"))
+            .unwrap();
 
         // The hero sprite: textured, positioned, with an offset and a flip.
         node2d::set_position(&mut tree, sprite, Vector2::new(120.0, 80.0));
@@ -853,7 +1120,9 @@ mod tests {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
-        let poly = tree.add_child(root, Node::new("Poly", "Polygon2D")).unwrap();
+        let poly = tree
+            .add_child(root, Node::new("Poly", "Polygon2D"))
+            .unwrap();
         let line = tree.add_child(root, Node::new("Stroke", "Line2D")).unwrap();
         let rect = tree.add_child(root, Node::new("Bg", "ColorRect")).unwrap();
 
@@ -864,7 +1133,12 @@ mod tests {
             Vector2::new(0.0, 10.0),
         ];
         set_prop(&mut tree, poly, "polygon", points_variant(&tri));
-        set_prop(&mut tree, poly, "color", Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)));
+        set_prop(
+            &mut tree,
+            poly,
+            "color",
+            Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)),
+        );
 
         // Line2D: a two-point green stroke of width 4.
         let pts = [Vector2::new(0.0, 0.0), Vector2::new(20.0, 5.0)];
@@ -880,7 +1154,12 @@ mod tests {
         // ColorRect: a 100x40 blue rectangle positioned at (50, 60).
         node2d::set_position(&mut tree, rect, Vector2::new(50.0, 60.0));
         control::set_size(&mut tree, rect, Vector2::new(100.0, 40.0));
-        set_prop(&mut tree, rect, "color", Variant::Color(Color::new(0.0, 0.0, 1.0, 1.0)));
+        set_prop(
+            &mut tree,
+            rect,
+            "color",
+            Variant::Color(Color::new(0.0, 0.0, 1.0, 1.0)),
+        );
 
         let vp = Viewport2D::new(800, 600);
         let items = vp.build_render_list(&tree);
@@ -935,7 +1214,9 @@ mod tests {
 
         // Three sprites added back, front, mid — but z_index decides draw order.
         let back = tree.add_child(root, Node::new("Back", "Sprite2D")).unwrap();
-        let front = tree.add_child(root, Node::new("Front", "Sprite2D")).unwrap();
+        let front = tree
+            .add_child(root, Node::new("Front", "Sprite2D"))
+            .unwrap();
         let mid = tree.add_child(root, Node::new("Mid", "Sprite2D")).unwrap();
         node2d::set_z_index(&mut tree, back, 0);
         node2d::set_z_index(&mut tree, front, 10);
@@ -946,13 +1227,17 @@ mod tests {
         node2d::set_modulate(&mut tree, mid, tint);
 
         // A hidden node must be skipped entirely.
-        let ghost = tree.add_child(root, Node::new("Ghost", "Sprite2D")).unwrap();
+        let ghost = tree
+            .add_child(root, Node::new("Ghost", "Sprite2D"))
+            .unwrap();
         node2d::set_visible(&mut tree, ghost, false);
 
         // Child under a translated parent inherits the parent's transform.
         let parent = tree.add_child(root, Node::new("Parent", "Node2D")).unwrap();
         node2d::set_position(&mut tree, parent, Vector2::new(100.0, 0.0));
-        let child = tree.add_child(parent, Node::new("Child", "Sprite2D")).unwrap();
+        let child = tree
+            .add_child(parent, Node::new("Child", "Sprite2D"))
+            .unwrap();
         node2d::set_position(&mut tree, child, Vector2::new(10.0, 20.0));
 
         let vp = Viewport2D::new(800, 600);

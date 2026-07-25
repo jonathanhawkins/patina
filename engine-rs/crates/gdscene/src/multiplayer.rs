@@ -158,7 +158,10 @@ mod tests {
             net_id: 999,
             properties: vec![("position".to_string(), "1,2".to_string())],
         };
-        assert!(!repl.apply_sync(&mut tree, &sync), "unknown net_id is a no-op");
+        assert!(
+            !repl.apply_sync(&mut tree, &sync),
+            "unknown net_id is a no-op"
+        );
     }
 
     #[test]

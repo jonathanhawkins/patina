@@ -617,8 +617,12 @@ pub fn variant_type_code(v: &Variant) -> i64 {
         VariantType::Float => 3,
         VariantType::String => 4,
         VariantType::Vector2 => 5,
+        // TYPE_VECTOR2I / TYPE_VECTOR3I — the 6 and 10 the int vectors always
+        // owned in Godot's enum (pat-nzgdu.78).
+        VariantType::Vector2i => 6,
         VariantType::Rect2 => 7,
         VariantType::Vector3 => 9,
+        VariantType::Vector3i => 10,
         VariantType::Transform2D => 11,
         VariantType::Plane => 14,
         VariantType::Quaternion => 15,
@@ -658,8 +662,14 @@ mod tests {
     fn mouse_mode_constants_resolve() {
         assert_eq!(global_constant("MOUSE_MODE_VISIBLE"), Some(Variant::Int(0)));
         assert_eq!(global_constant("MOUSE_MODE_HIDDEN"), Some(Variant::Int(1)));
-        assert_eq!(global_constant("MOUSE_MODE_CAPTURED"), Some(Variant::Int(2)));
-        assert_eq!(global_constant("MOUSE_MODE_CONFINED"), Some(Variant::Int(3)));
+        assert_eq!(
+            global_constant("MOUSE_MODE_CAPTURED"),
+            Some(Variant::Int(2))
+        );
+        assert_eq!(
+            global_constant("MOUSE_MODE_CONFINED"),
+            Some(Variant::Int(3))
+        );
         assert_eq!(
             global_constant("MOUSE_MODE_CONFINED_HIDDEN"),
             Some(Variant::Int(4))

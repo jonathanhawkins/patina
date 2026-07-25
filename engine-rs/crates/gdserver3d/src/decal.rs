@@ -571,7 +571,7 @@ mod tests {
     #[test]
     fn overlaps_aabb_exact_overlap() {
         let d = Decal3D::new(); // size 2x2x2, identity transform
-        // AABB centered at origin with half-extents 1,1,1 — same box
+                                // AABB centered at origin with half-extents 1,1,1 — same box
         assert!(d.overlaps_aabb(Vector3::ZERO, Vector3::ONE));
     }
 

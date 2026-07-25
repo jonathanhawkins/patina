@@ -1027,7 +1027,13 @@ fn arrange_hbox(tree: &mut SceneTree, children: &[NodeId], total: Vector2, sep: 
 /// an oversized child never produces an empty line. `sep` (the container's
 /// `separation` theme override) is used for both the in-line gap between children
 /// and the gap between wrapped lines.
-fn arrange_flow(tree: &mut SceneTree, children: &[NodeId], total: Vector2, sep: f32, vertical: bool) {
+fn arrange_flow(
+    tree: &mut SceneTree,
+    children: &[NodeId],
+    total: Vector2,
+    sep: f32,
+    vertical: bool,
+) {
     if children.is_empty() {
         return;
     }
@@ -2634,8 +2640,7 @@ func _on_pressed():
         );
 
         // (3) A SubViewportContainer forwards a click into sub-viewport space.
-        let mapped =
-            subviewport_container_to_viewport_coord(Vector2::new(100.0, 80.0), true, 2);
+        let mapped = subviewport_container_to_viewport_coord(Vector2::new(100.0, 80.0), true, 2);
         assert_eq!(
             mapped,
             Vector2::new(50.0, 40.0),
@@ -2752,7 +2757,10 @@ func _on_pressed():
 
         // An explicit LTR on the container overrides the RTL ancestor.
         set_layout_direction(&mut tree, cid, LayoutDirection::Ltr);
-        assert!(!is_layout_rtl(&tree, cid), "explicit LTR wins over inheritance");
+        assert!(
+            !is_layout_rtl(&tree, cid),
+            "explicit LTR wins over inheritance"
+        );
     }
 
     /// Godot's LayoutDirection integers round-trip (0=Inherited, 3=RTL).

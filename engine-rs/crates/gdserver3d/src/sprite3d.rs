@@ -448,8 +448,14 @@ mod tests {
 
     #[test]
     fn billboard_mode_unknown_defaults_to_disabled() {
-        assert_eq!(BillboardMode3D::from_godot_int(99), BillboardMode3D::Disabled);
-        assert_eq!(BillboardMode3D::from_godot_int(-1), BillboardMode3D::Disabled);
+        assert_eq!(
+            BillboardMode3D::from_godot_int(99),
+            BillboardMode3D::Disabled
+        );
+        assert_eq!(
+            BillboardMode3D::from_godot_int(-1),
+            BillboardMode3D::Disabled
+        );
     }
 
     #[test]
@@ -710,7 +716,10 @@ mod tests {
         let mut b = Sprite3D::new();
         b.billboard = BillboardMode3D::Particles;
         let cam = Vector3::new(1.0, 2.0, 3.0);
-        assert_eq!(a.billboard_basis(Vector3::ZERO, cam), b.billboard_basis(Vector3::ZERO, cam));
+        assert_eq!(
+            a.billboard_basis(Vector3::ZERO, cam),
+            b.billboard_basis(Vector3::ZERO, cam)
+        );
     }
 
     // ── to_mesh ─────────────────────────────────────────────────────────

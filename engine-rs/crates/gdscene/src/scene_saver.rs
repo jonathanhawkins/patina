@@ -52,6 +52,10 @@ pub fn format_variant_value(v: &Variant) -> String {
         Variant::Vector2(v) => {
             format!("Vector2({}, {})", format_f32(v.x), format_f32(v.y))
         }
+        // Int vectors print as bare integers — `Vector2i(3, 4)`, never
+        // `Vector2i(3.0, 4.0)` — which is what makes the .tscn round-trip
+        // byte-identical to what Godot wrote (pat-nzgdu.78).
+        Variant::Vector2i(v) => format!("Vector2i({}, {})", v.x, v.y),
         Variant::Vector3(v) => {
             format!(
                 "Vector3({}, {}, {})",
@@ -60,6 +64,7 @@ pub fn format_variant_value(v: &Variant) -> String {
                 format_f32(v.z)
             )
         }
+        Variant::Vector3i(v) => format!("Vector3i({}, {}, {})", v.x, v.y, v.z),
         Variant::Color(c) => {
             format!(
                 "Color({}, {}, {}, {})",
@@ -238,6 +243,235 @@ pub fn format_variant_value(v: &Variant) -> String {
     }
 }
 
+/// The `Animation`/`AnimationLibrary` sub-resource text for a scene's
+/// AnimationPlayers, plus the per-player `libraries` line each node section needs
+/// (pat-0q2kx.54).
+struct AnimationTables {
+    /// Rendered `[sub_resource]` sections, ready to append.
+    text: String,
+    /// `node id -> (library sub-resource id, autoplay clip)` for the node writer.
+    players: HashMap<NodeId, (String, Option<String>)>,
+    /// How many sub-resources were emitted (for `load_steps`).
+    count: usize,
+}
+
+impl AnimationTables {
+    fn resource_count(&self) -> usize {
+        self.count
+    }
+
+    /// Properties regenerated for `nid` from its attached player, which the node
+    /// writer must therefore NOT emit from the node's own (parsed) copies.
+    fn skip_keys(&self, nid: NodeId) -> &'static [&'static str] {
+        if self.players.contains_key(&nid) {
+            &["libraries", "autoplay"]
+        } else {
+            &[]
+        }
+    }
+}
+
+/// Serializes every AnimationPlayer's clip library in the saved subtree.
+///
+/// Godot stores an editor-authored animation *inside the scene file*: one
+/// `[sub_resource type="Animation"]` per clip carrying `length`/`loop_mode` and
+/// `tracks/N/*`, gathered by an `[sub_resource type="AnimationLibrary"]` whose
+/// `_data` maps clip names to them. This writes exactly that shape, so
+/// `gdscene::animation_tscn` (and Godot itself) reads back what we saved.
+///
+/// Clip and library ids are derived from the player's node name and the clip
+/// name, so re-saving an unchanged scene produces an unchanged file rather than
+/// churning ids.
+fn collect_animation_tables(tree: &SceneTree, node_ids: &[NodeId]) -> AnimationTables {
+    let mut text = String::new();
+    let mut players: HashMap<NodeId, (String, Option<String>)> = HashMap::new();
+    let mut count = 0usize;
+
+    for &nid in node_ids {
+        let Some(player) = tree.get_animation_player(nid) else {
+            continue;
+        };
+        if player.animations.is_empty() {
+            continue;
+        }
+        let node_name = tree
+            .get_node(nid)
+            .map(|n| n.name().to_string())
+            .unwrap_or_else(|| "AnimationPlayer".to_string());
+        let stem = sanitize_resource_id(&node_name);
+
+        // Deterministic order: a HashMap iteration order would reshuffle the
+        // file on every save and make diffs meaningless.
+        let mut names: Vec<&String> = player.animations.keys().collect();
+        names.sort();
+
+        let mut entries: Vec<(String, String)> = Vec::new();
+        for name in names {
+            let anim = &player.animations[name];
+            let anim_id = format!("Animation_{stem}_{}", sanitize_resource_id(name));
+            writeln!(text, "\n[sub_resource type=\"Animation\" id=\"{anim_id}\"]").unwrap();
+            write_animation_body(&mut text, anim);
+            entries.push((name.clone(), anim_id));
+            count += 1;
+        }
+
+        let lib_id = format!("AnimationLibrary_{stem}");
+        writeln!(
+            text,
+            "\n[sub_resource type=\"AnimationLibrary\" id=\"{lib_id}\"]"
+        )
+        .unwrap();
+        writeln!(text, "_data = {{").unwrap();
+        for (i, (name, anim_id)) in entries.iter().enumerate() {
+            let comma = if i + 1 < entries.len() { "," } else { "" };
+            writeln!(text, "\"{name}\": SubResource(\"{anim_id}\"){comma}").unwrap();
+        }
+        writeln!(text, "}}").unwrap();
+        count += 1;
+
+        players.insert(nid, (lib_id, player.autoplay.clone()));
+    }
+
+    AnimationTables {
+        text,
+        players,
+        count,
+    }
+}
+
+/// Writes one `Animation`'s body: its length, loop mode, and track table.
+fn write_animation_body(out: &mut String, anim: &crate::animation::Animation) {
+    writeln!(out, "resource_name = \"{}\"", anim.name).unwrap();
+    writeln!(out, "length = {}", format_float(anim.length)).unwrap();
+    writeln!(out, "loop_mode = {}", loop_mode_to_int(anim.loop_mode)).unwrap();
+
+    for (i, track) in anim.tracks.iter().enumerate() {
+        let Some(kind) = track_type_to_tscn(track.track_type) else {
+            // A track kind with no Godot text spelling is skipped rather than
+            // written as something Godot would refuse to parse.
+            continue;
+        };
+        writeln!(out, "tracks/{i}/type = \"{kind}\"").unwrap();
+        writeln!(out, "tracks/{i}/imported = false").unwrap();
+        writeln!(out, "tracks/{i}/enabled = true").unwrap();
+        // Godot addresses a track as `NodePath("Child:property")`; an empty
+        // property (3D transform tracks) keeps the bare node path.
+        let path = if track.property_path.is_empty() {
+            track.node_path.clone()
+        } else {
+            format!("{}:{}", track.node_path, track.property_path)
+        };
+        writeln!(out, "tracks/{i}/path = NodePath(\"{path}\")").unwrap();
+        writeln!(
+            out,
+            "tracks/{i}/interp = {}",
+            interpolation_to_int(track.interpolation)
+        )
+        .unwrap();
+        writeln!(out, "tracks/{i}/loop_wrap = true").unwrap();
+
+        let keys = track.keyframes();
+        let times: Vec<String> = keys.iter().map(|k| format_float(k.time)).collect();
+        let transitions: Vec<String> = keys.iter().map(|_| "1".to_string()).collect();
+        let values: Vec<String> = keys
+            .iter()
+            .map(|k| format_variant_value(&k.value))
+            .collect();
+        writeln!(out, "tracks/{i}/keys = {{").unwrap();
+        writeln!(out, "\"times\": PackedFloat32Array({}),", times.join(", ")).unwrap();
+        writeln!(
+            out,
+            "\"transitions\": PackedFloat32Array({}),",
+            transitions.join(", ")
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "\"update\": {},",
+            update_mode_to_int(track.update_mode)
+        )
+        .unwrap();
+        writeln!(out, "\"values\": [{}]", values.join(", ")).unwrap();
+        writeln!(out, "}}").unwrap();
+    }
+}
+
+/// Appends an AnimationPlayer node's `libraries` (and `autoplay`) properties to
+/// its just-written node section, pointing at the library sub-resource emitted
+/// for it (pat-0q2kx.54).
+///
+/// These are written here rather than by `write_node_section` because the
+/// library id is minted while serializing the clips, not stored on the node.
+fn write_animation_player_props(out: &mut String, anims: &AnimationTables, nid: NodeId) {
+    let Some((lib_id, autoplay)) = anims.players.get(&nid) else {
+        return;
+    };
+    writeln!(out, "libraries = {{").unwrap();
+    writeln!(out, "\"\": SubResource(\"{lib_id}\")").unwrap();
+    writeln!(out, "}}").unwrap();
+    if let Some(clip) = autoplay {
+        if !clip.is_empty() {
+            writeln!(out, "autoplay = \"{clip}\"").unwrap();
+        }
+    }
+}
+
+/// Godot's `Animation.LoopMode` integer.
+fn loop_mode_to_int(mode: crate::animation::LoopMode) -> i64 {
+    match mode {
+        crate::animation::LoopMode::None => 0,
+        crate::animation::LoopMode::Linear => 1,
+        crate::animation::LoopMode::PingPong => 2,
+    }
+}
+
+/// The `tracks/N/type` spelling, inverse of `animation_tscn::tscn_track_type`.
+fn track_type_to_tscn(t: crate::animation::TrackType) -> Option<&'static str> {
+    use crate::animation::TrackType;
+    Some(match t {
+        TrackType::Property => "value",
+        TrackType::Method => "method",
+        TrackType::Audio => "audio",
+        TrackType::Position3D => "position_3d",
+        TrackType::Rotation3D => "rotation_3d",
+        TrackType::Scale3D => "scale_3d",
+        TrackType::BlendShape => "blend_shape",
+    })
+}
+
+/// Godot's `Animation.InterpolationType` integer
+/// (`0 = NEAREST, 1 = LINEAR, 2 = CUBIC, 3 = LINEAR_ANGLE, 4 = CUBIC_ANGLE`).
+fn interpolation_to_int(i: crate::animation::TrackInterpolation) -> i64 {
+    use crate::animation::TrackInterpolation;
+    match i {
+        // `PerKey` is this port's default — "use each keyframe's own transition"
+        // — which Godot has no spelling for. LINEAR is the honest text form: it
+        // is what a default-transition keyframe actually interpolates as, and it
+        // is what the parser hands back on re-load.
+        TrackInterpolation::PerKey => 1,
+        TrackInterpolation::Cubic => 2,
+        TrackInterpolation::LinearAngle => 3,
+        TrackInterpolation::CubicAngle => 4,
+    }
+}
+
+/// Godot's `Animation.UpdateMode` integer.
+fn update_mode_to_int(m: crate::animation::TrackUpdateMode) -> i64 {
+    use crate::animation::TrackUpdateMode;
+    match m {
+        TrackUpdateMode::Continuous => 0,
+        TrackUpdateMode::Discrete => 1,
+        TrackUpdateMode::Capture => 3,
+    }
+}
+
+/// Reduces a name to the `[A-Za-z0-9_]` set Godot uses for sub-resource ids.
+fn sanitize_resource_id(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
 /// Formats an f64 without unnecessary trailing zeros, but always with
 /// a decimal point to distinguish from integers.
 fn format_float(f: f64) -> String {
@@ -280,11 +514,16 @@ impl TscnSaver {
         // and `__resref__`/`_instance_path`/`_script_path` companions so the
         // saved scene declares them the way Godot's text saver does.
         let tables = collect_resource_tables(tree, &node_ids);
+        // Every AnimationPlayer's clips become `Animation` sub-resources plus one
+        // `AnimationLibrary` that gathers them, exactly as Godot's text saver
+        // writes them (pat-0q2kx.54). Before this, animations authored in the
+        // editor existed only in memory: saving a scene dropped them silently.
+        let anims = collect_animation_tables(tree, &node_ids);
 
         let mut out = String::new();
         // Header. Godot emits `load_steps` = (ext + sub resources) + 1 whenever
         // any resources exist; a resource-free scene keeps the bare header.
-        let resource_count = tables.ext.len() + tables.sub.len();
+        let resource_count = tables.ext.len() + tables.sub.len() + anims.resource_count();
         if resource_count > 0 {
             writeln!(out, "[gd_scene load_steps={} format=3]", resource_count + 1).unwrap();
         } else {
@@ -307,6 +546,10 @@ impl TscnSaver {
             writeln!(out, "\n[sub_resource type=\"{class}\" id=\"{id}\"]").unwrap();
         }
 
+        // Animation + AnimationLibrary sub-resources, written before the node
+        // sections so the players' `libraries` references resolve on re-load.
+        out.push_str(&anims.text);
+
         // Build a map from NodeId -> relative path within the subtree.
         let mut id_to_path: HashMap<NodeId, String> = HashMap::new();
         id_to_path.insert(root_id, ".".to_string());
@@ -319,7 +562,8 @@ impl TscnSaver {
 
             if nid == root_id {
                 // Root node — no parent attribute.
-                write_node_section(&mut out, node, None);
+                write_node_section(&mut out, node, None, anims.skip_keys(nid));
+                write_animation_player_props(&mut out, &anims, nid);
             } else {
                 // Compute parent path.
                 let parent_id = match node.parent() {
@@ -336,7 +580,8 @@ impl TscnSaver {
                 };
                 id_to_path.insert(nid, node_path);
 
-                write_node_section(&mut out, node, Some(&parent_path));
+                write_node_section(&mut out, node, Some(&parent_path), anims.skip_keys(nid));
+                write_animation_player_props(&mut out, &anims, nid);
             }
         }
 
@@ -504,7 +749,16 @@ fn collect_resource_tables(tree: &SceneTree, node_ids: &[NodeId]) -> ResourceTab
 }
 
 /// Writes a `[node ...]` section for a single node.
-fn write_node_section(out: &mut String, node: &crate::node::Node, parent_path: Option<&str>) {
+/// `skip_keys` names properties the caller regenerates itself — an
+/// AnimationPlayer's `libraries`/`autoplay` are rebuilt from the attached player
+/// (`write_animation_player_props`), so writing the node's own parsed copies too
+/// would duplicate the lines on every re-save (pat-0q2kx.54).
+fn write_node_section(
+    out: &mut String,
+    node: &crate::node::Node,
+    parent_path: Option<&str>,
+    skip_keys: &[&str],
+) {
     out.push('\n');
 
     let name = node.name();
@@ -565,7 +819,7 @@ fn write_node_section(out: &mut String, node: &crate::node::Node, parent_path: O
     // skipped — they were folded into the resource tables / header attributes.
     let mut props: Vec<(&String, &Variant)> = node
         .properties()
-        .filter(|(k, _)| !is_internal_prop(k))
+        .filter(|(k, _)| !is_internal_prop(k) && !skip_keys.contains(&k.as_str()))
         .collect();
     props.sort_by_key(|(k, _)| k.as_str().to_owned());
     for (key, value) in props {
@@ -1185,7 +1439,10 @@ stream = ExtResource("2_snd")
             .get_node_or_null(reloaded_root, "Icon")
             .expect("Icon survives the round-trip");
         assert_eq!(
-            tree2.get_node(icon).unwrap().get_property("__extres__texture"),
+            tree2
+                .get_node(icon)
+                .unwrap()
+                .get_property("__extres__texture"),
             Variant::String("res://icon.png".into()),
             "the reloaded texture must resolve to the same path"
         );

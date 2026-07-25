@@ -259,7 +259,10 @@ mod tests {
         assert_eq!(bind.bone, 3);
         // rest * bind_pose == identity
         let composed = rest * bind.bind_pose;
-        assert!(approx(composed.xform(Vector3::new(1.0, 1.0, 1.0)), Vector3::new(1.0, 1.0, 1.0)));
+        assert!(approx(
+            composed.xform(Vector3::new(1.0, 1.0, 1.0)),
+            Vector3::new(1.0, 1.0, 1.0)
+        ));
     }
 
     #[test]
@@ -294,7 +297,10 @@ mod tests {
         let poses = vec![bone0_rest, bone1_rest];
         let out = skin_mesh(&mesh, &skin, &poses);
         for (a, b) in mesh.vertices.iter().zip(out.vertices.iter()) {
-            assert!(approx(*a, *b), "rest-pose skin moved a vertex: {a:?} -> {b:?}");
+            assert!(
+                approx(*a, *b),
+                "rest-pose skin moved a vertex: {a:?} -> {b:?}"
+            );
         }
         // Skinned output is baked, so its bone arrays are cleared.
         assert!(out.bone_weights.is_empty());
@@ -316,8 +322,14 @@ mod tests {
         assert!(approx(out.vertices[0], mesh.vertices[0]));
         assert!(approx(out.vertices[1], mesh.vertices[1]));
         // Top verts shifted +2 in x.
-        assert!(approx(out.vertices[2], mesh.vertices[2] + Vector3::new(2.0, 0.0, 0.0)));
-        assert!(approx(out.vertices[3], mesh.vertices[3] + Vector3::new(2.0, 0.0, 0.0)));
+        assert!(approx(
+            out.vertices[2],
+            mesh.vertices[2] + Vector3::new(2.0, 0.0, 0.0)
+        ));
+        assert!(approx(
+            out.vertices[3],
+            mesh.vertices[3] + Vector3::new(2.0, 0.0, 0.0)
+        ));
     }
 
     #[test]

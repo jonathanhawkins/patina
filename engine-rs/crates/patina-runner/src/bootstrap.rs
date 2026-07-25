@@ -415,6 +415,27 @@ impl EngineBootstrap {
                 ),
             });
         }
+
+        // Install the DisplayServer backend from the project's configured
+        // viewport, so a script calling `DisplayServer.window_get_size()` sees
+        // the real value instead of the interpreter's old hardcoded 1920x1080
+        // (pat-0q2kx.38). `project_boot::boot_project` installs it for the
+        // runner's own path; this covers everything booting through
+        // `EngineBootstrap`, which does not go through `boot_project`.
+        //
+        // A missing or unreadable project.godot is not a boot failure — many
+        // tests boot a bare scene — so fall back to Godot's default viewport.
+        let settings = gdcore::ProjectSettings::load_godot_project(
+            &self.config.project_dir.join("project.godot"),
+        )
+        .unwrap_or_default();
+        gdcore::display_backend::install_display_backend(std::sync::Arc::new(
+            gdcore::display_backend::HeadlessDisplayBackend::new(
+                settings.viewport_width(),
+                settings.viewport_height(),
+            ),
+        ));
+
         Ok(())
     }
 
@@ -423,6 +444,26 @@ impl EngineBootstrap {
         if self.config.event_tracing {
             tree.event_trace_mut().enable();
         }
+
+        // Install the project's content-scale ("stretch") settings on the root
+        // window (pat-nzgdu.87). Godot seeds the root Window from
+        // `display/window/stretch/*` at boot; without this the whole pipeline
+        // sits at its defaults and a project that asked to be stretched renders
+        // 1:1. As elsewhere in boot, a missing project.godot is not a failure —
+        // a bare scene keeps Godot's defaults.
+        let settings = gdcore::ProjectSettings::load_godot_project(
+            &self.config.project_dir.join("project.godot"),
+        )
+        .unwrap_or_default();
+        let window = tree.root_window_mut();
+        window.config = settings.content_scale_config();
+        // The window starts at the project's configured size; a real resize
+        // later overwrites this through the same field.
+        window.size = gdcore::math::Vector2::new(
+            settings.viewport_width() as f32,
+            settings.viewport_height() as f32,
+        );
+
         self.tree = Some(tree);
         Ok(())
     }
@@ -545,6 +586,41 @@ impl EngineBootstrap {
         // without this the bridge mixes each frame and discards it, so the
         // runner is silent. Prefer an injected sink (tests / web host); else
         // pick the platform default.
+        // Load the project's audio bus layout BEFORE the first frame, the way
+        // Godot's `AudioServer::load_default_bus_layout()` does at startup
+        // (`servers/audio/audio_server.cpp:1626`) — pat-0q2kx.56.
+        //
+        // `AudioMixer::load_bus_layout` existed and was tested but had ZERO
+        // callers, so every project booted with a bare Master bus and any
+        // player naming another bus silently fell back to it.
+        //
+        // A missing or unreadable layout is not a boot failure: Godot boots
+        // with Master only, and so does a bare test scene.
+        let settings = gdcore::ProjectSettings::load_godot_project(
+            &self.config.project_dir.join("project.godot"),
+        )
+        .unwrap_or_default();
+        let layout_path = settings
+            .get("audio/buses/default_bus_layout")
+            .and_then(|v| v.as_string())
+            .unwrap_or("res://default_bus_layout.tres");
+        let layout_file = self
+            .config
+            .project_dir
+            .join(layout_path.trim_start_matches("res://"));
+        if let Ok(text) = std::fs::read_to_string(&layout_file) {
+            let count = main_loop
+                .audio_bridge_mut()
+                .server_mut()
+                .mixer_mut()
+                .load_bus_layout_tres(&text);
+            tracing::debug!(
+                path = %layout_file.display(),
+                buses = count,
+                "loaded audio bus layout"
+            );
+        }
+
         let output = self
             .pending_output
             .take()

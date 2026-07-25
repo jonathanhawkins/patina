@@ -64,7 +64,12 @@ pub struct CharFXTransform {
 
 impl CharFXTransform {
     /// A transform for one glyph, with the effect's defaults applied.
-    pub fn new(absolute_index: usize, range: (usize, usize), elapsed_time: f32, color: Color) -> Self {
+    pub fn new(
+        absolute_index: usize,
+        range: (usize, usize),
+        elapsed_time: f32,
+        color: Color,
+    ) -> Self {
         Self {
             range,
             elapsed_time,
@@ -227,7 +232,8 @@ impl BuiltinEffect {
 fn shake_offset(step: i64, index: usize) -> (f32, f32) {
     // A small integer avalanche (splitmix-style); quality is irrelevant here,
     // decorrelation between neighbouring glyphs is not.
-    let mut h = (step as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (index as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    let mut h = (step as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (index as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     h ^= h >> 30;
     h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     h ^= h >> 27;

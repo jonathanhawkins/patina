@@ -12,12 +12,21 @@ pub enum PlaybackState {
 }
 
 /// How the stream behaves when it reaches the end.
+///
+/// Mirrors Godot's `AudioStreamWAV.LoopMode`
+/// (`LOOP_DISABLED/FORWARD/PINGPONG/BACKWARD`, `doc/classes/AudioStreamWAV.xml`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopMode {
-    /// Stop when the end is reached.
+    /// Stop when the end is reached (`LOOP_DISABLED`).
     None,
-    /// Wrap back to the beginning and continue playing.
+    /// Wrap back to `loop_begin` and continue playing (`LOOP_FORWARD`).
     Forward,
+    /// Bounce between `loop_begin` and `loop_end`, reversing direction at each
+    /// bound (`LOOP_PINGPONG`) — the sample is read forwards, then backwards.
+    PingPong,
+    /// Play the loop region in reverse, wrapping from `loop_begin` back to
+    /// `loop_end` (`LOOP_BACKWARD`).
+    Backward,
 }
 
 /// Controls playback of a single audio stream.
@@ -53,6 +62,9 @@ pub struct AudioStreamPlayback {
     /// Loop end in seconds (Godot `loop_end`); 0.0 means "use `length_secs`".
     /// A forward loop wraps back to `loop_begin_secs` upon reaching this point.
     loop_end_secs: f32,
+    /// Ping-pong phase: `true` while travelling toward `loop_end`, `false` while
+    /// travelling back toward `loop_begin`. Meaningless for the other modes.
+    ping_pong_forward: bool,
 }
 
 impl AudioStreamPlayback {
@@ -71,6 +83,7 @@ impl AudioStreamPlayback {
             linear_gain: 1.0,
             loop_begin_secs: 0.0,
             loop_end_secs: 0.0,
+            ping_pong_forward: true,
         }
     }
 
@@ -124,29 +137,83 @@ impl AudioStreamPlayback {
             return;
         }
 
-        self.position_secs += delta;
+        let (loop_begin, loop_end) = self.loop_window();
 
         match self.loop_mode {
             LoopMode::None => {
+                self.position_secs += delta;
                 if self.position_secs >= self.length_secs {
                     self.stop();
                 }
             }
             LoopMode::Forward => {
-                let loop_end = if self.loop_end_secs > 0.0
-                    && self.loop_end_secs <= self.length_secs
-                {
-                    self.loop_end_secs
-                } else {
-                    self.length_secs
-                };
-                let loop_begin = self.loop_begin_secs.clamp(0.0, loop_end);
+                self.position_secs += delta;
                 if self.position_secs >= loop_end {
                     let span = (loop_end - loop_begin).max(f32::EPSILON);
                     self.position_secs =
                         loop_begin + (self.position_secs - loop_begin).rem_euclid(span);
                 }
             }
+            LoopMode::PingPong => {
+                // Travel toward whichever bound the current phase points at and
+                // reflect off it, so the sample plays forwards, then backwards,
+                // forever. `rem_euclid` over twice the span handles a `delta`
+                // large enough to cross the region more than once.
+                let span = (loop_end - loop_begin).max(f32::EPSILON);
+                if self.ping_pong_forward {
+                    self.position_secs += delta;
+                } else {
+                    self.position_secs -= delta;
+                }
+                let offset = (self.position_secs - loop_begin).rem_euclid(2.0 * span);
+                if offset <= span {
+                    self.position_secs = loop_begin + offset;
+                    self.ping_pong_forward = true;
+                } else {
+                    // Past the far bound: fold back down the return leg.
+                    self.position_secs = loop_begin + (2.0 * span - offset);
+                    self.ping_pong_forward = false;
+                }
+            }
+            LoopMode::Backward => {
+                // The region plays end-to-begin; reaching `loop_begin` wraps
+                // back up to `loop_end`.
+                self.position_secs -= delta;
+                if self.position_secs <= loop_begin {
+                    let span = (loop_end - loop_begin).max(f32::EPSILON);
+                    self.position_secs =
+                        loop_end - (loop_begin - self.position_secs).rem_euclid(span);
+                }
+            }
+        }
+    }
+
+    /// The resolved `[begin, end]` loop region in seconds.
+    ///
+    /// `loop_end_secs == 0.0` (or past the stream) means "to the end of the
+    /// stream", matching Godot's treatment of an unset `loop_end`. `loop_begin`
+    /// is clamped into the region so a malformed pair cannot invert it.
+    pub fn loop_window(&self) -> (f32, f32) {
+        let loop_end = if self.loop_end_secs > 0.0 && self.loop_end_secs <= self.length_secs {
+            self.loop_end_secs
+        } else {
+            self.length_secs
+        };
+        let loop_begin = self.loop_begin_secs.clamp(0.0, loop_end);
+        (loop_begin, loop_end)
+    }
+
+    /// Which way the read cursor travels through the sample right now: `1.0`
+    /// forwards, `-1.0` backwards.
+    ///
+    /// The mixer multiplies its per-frame step by this, so a `Backward` loop (or
+    /// the return leg of a `PingPong`) actually reads descending sample values
+    /// instead of merely moving the playback clock backwards (pat-0q2kx.58).
+    pub fn read_direction(&self) -> f32 {
+        match self.loop_mode {
+            LoopMode::Backward => -1.0,
+            LoopMode::PingPong if !self.ping_pong_forward => -1.0,
+            _ => 1.0,
         }
     }
 
@@ -202,6 +269,18 @@ impl AudioStreamPlayback {
     /// Set the loop mode.
     pub fn set_loop_mode(&mut self, mode: LoopMode) {
         self.loop_mode = mode;
+        // A backward loop plays the region END-to-begin, so its cursor starts at
+        // `loop_end` rather than at 0. Without this a stream switched to
+        // `Backward` while parked at the start reads frame 0 first and only then
+        // jumps to the end — an audible click, and the first sample ascends
+        // (pat-0q2kx.58).
+        if mode == LoopMode::Backward {
+            let (loop_begin, loop_end) = self.loop_window();
+            if self.position_secs <= loop_begin {
+                self.position_secs = loop_end;
+            }
+        }
+        self.ping_pong_forward = true;
     }
 
     /// Loop start in seconds (Godot `loop_begin`).

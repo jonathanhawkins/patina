@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gdcore::error::{EngineError, EngineResult};
-use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
+use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector2i, Vector3, Vector3i};
 use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
 use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
@@ -417,13 +417,18 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
         return parse_packed_color_array(inner);
     }
 
-    // Vector2i(x, y)
+    // Vector2i(x, y) — an INTEGER vector, kept integral.
+    //
+    // These used to be coerced to a float `Vector2` because `Variant` had no int
+    // vector, which silently changed a tile coordinate's type: `Vector2i(3, 4)`
+    // read back as `Vector2(3.0, 4.0)` and saved back out as a float literal
+    // (pat-nzgdu.78).
     if let Some(inner) = try_strip_call(s, "Vector2i") {
         let parts = split_args(inner);
         if parts.len() == 2 {
-            let x = parse_f32(&parts[0])?;
-            let y = parse_f32(&parts[1])?;
-            return Ok(Variant::Vector2(Vector2::new(x, y)));
+            let x = parse_i32(&parts[0])?;
+            let y = parse_i32(&parts[1])?;
+            return Ok(Variant::Vector2i(Vector2i::new(x, y)));
         }
         return Err(EngineError::Parse(format!("invalid Vector2i: {s}")));
     }
@@ -432,10 +437,10 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
     if let Some(inner) = try_strip_call(s, "Vector3i") {
         let parts = split_args(inner);
         if parts.len() == 3 {
-            let x = parse_f32(&parts[0])?;
-            let y = parse_f32(&parts[1])?;
-            let z = parse_f32(&parts[2])?;
-            return Ok(Variant::Vector3(Vector3::new(x, y, z)));
+            let x = parse_i32(&parts[0])?;
+            let y = parse_i32(&parts[1])?;
+            let z = parse_i32(&parts[2])?;
+            return Ok(Variant::Vector3i(Vector3i::new(x, y, z)));
         }
         return Err(EngineError::Parse(format!("invalid Vector3i: {s}")));
     }
@@ -523,7 +528,9 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
             let name = unescape_string(&rest[1..rest.len() - 1]);
             return Ok(Variant::StringName(StringName::new(&name)));
         }
-        return Err(EngineError::Parse(format!("invalid StringName literal: {s}")));
+        return Err(EngineError::Parse(format!(
+            "invalid StringName literal: {s}"
+        )));
     }
 
     // Typed array: `Array[Type]([elem, ...])`. The element type annotation is
@@ -531,10 +538,7 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
     if let Some(rest) = s.strip_prefix("Array[") {
         if let Some(close) = rest.find(']') {
             let after = rest[close + 1..].trim();
-            if let Some(call) = after
-                .strip_prefix('(')
-                .and_then(|c| c.strip_suffix(')'))
-            {
+            if let Some(call) = after.strip_prefix('(').and_then(|c| c.strip_suffix(')')) {
                 let call = call.trim();
                 if let Some(elems) = call.strip_prefix('[').and_then(|c| c.strip_suffix(']')) {
                     return parse_array(elems);
@@ -668,6 +672,17 @@ fn parse_f32(s: &str) -> EngineResult<f32> {
         .map_err(|_| EngineError::Parse(format!("expected float, got: {s}")))
 }
 
+/// Parses an integer component of a `Vector2i`/`Vector3i` literal.
+///
+/// Godot writes these as bare integers; a component with a fractional part is a
+/// malformed int vector rather than something to silently truncate, so it errors
+/// out through the same path as any other unparseable literal (pat-nzgdu.78).
+fn parse_i32(s: &str) -> EngineResult<i32> {
+    s.trim()
+        .parse::<i32>()
+        .map_err(|_| EngineError::Parse(format!("expected int, got: {s}")))
+}
+
 /// Unescapes a Godot-style string (inner content, without surrounding quotes).
 fn unescape_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -753,7 +768,9 @@ fn parse_packed_byte_array(s: &str) -> EngineResult<Variant> {
     let mut result = Vec::with_capacity(parts.len());
     for part in &parts {
         let b = part.trim().parse::<u8>().map_err(|_| {
-            EngineError::Parse(format!("expected byte (0-255) in PackedByteArray, got: {part}"))
+            EngineError::Parse(format!(
+                "expected byte (0-255) in PackedByteArray, got: {part}"
+            ))
         })?;
         result.push(b);
     }
@@ -1095,6 +1112,41 @@ mod tests {
         let typed = parse_variant_value("Array[int]([1, 2, 3])").unwrap();
         let plain = parse_variant_value("[1, 2, 3]").unwrap();
         assert_eq!(typed, plain);
+    }
+
+    /// pat-nzgdu.78 — an int-vector literal keeps its INTEGER type.
+    ///
+    /// These used to come back as float `Vector2`/`Vector3`, because `Variant`
+    /// had no int vector to hold them: a `TileMap` cell authored as
+    /// `Vector2i(3, 4)` loaded as `Vector2(3.0, 4.0)` and saved back out as a
+    /// float literal, so a round-trip rewrote the scene file.
+    #[test]
+    fn tscn_parses_intvec_and_math_literals() {
+        assert_eq!(
+            parse_variant_value("Vector2i(3, 4)").unwrap(),
+            Variant::Vector2i(Vector2i::new(3, 4))
+        );
+        assert_eq!(
+            parse_variant_value("Vector3i(-1, 0, 7)").unwrap(),
+            Variant::Vector3i(Vector3i::new(-1, 0, 7))
+        );
+
+        // ⚠️ The float arms are untouched: `Vector2i` must not be shadowed by
+        // `Vector2`, and `Vector2` must not start yielding an int vector.
+        assert_eq!(
+            parse_variant_value("Vector2(3, 4)").unwrap(),
+            Variant::Vector2(Vector2::new(3.0, 4.0))
+        );
+        assert_eq!(
+            parse_variant_value("Vector3(1.5, 2, 3)").unwrap(),
+            Variant::Vector3(Vector3::new(1.5, 2.0, 3.0))
+        );
+
+        // A fractional component is a malformed int vector, not something to
+        // truncate silently — it takes the same error path as any other
+        // unparseable literal rather than becoming Vector2i(1, 2).
+        assert!(parse_variant_value("Vector2i(1.5, 2)").is_err());
+        assert!(parse_variant_value("Vector3i(1, 2)").is_err());
     }
 
     #[test]

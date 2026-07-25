@@ -17,6 +17,8 @@ pub mod interpreter;
 pub mod parser;
 pub mod tokenizer;
 pub mod type_checker;
+/// Script-facing dispatch for the affine/math builtin Variant types.
+pub mod variant_math;
 pub mod visual_script;
 
 pub use coroutine::{AwaitTarget, CoroutineHost, CoroutineId, SuspendedCoroutine};

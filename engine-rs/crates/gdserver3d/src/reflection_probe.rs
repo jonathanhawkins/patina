@@ -131,8 +131,9 @@ pub fn sample_probes_at(probes: &[ReflectionProbe], world_pos: Vector3) -> Color
         }
         let energy = match probe.ambient_mode {
             ReflectionProbeAmbientMode::Disabled => continue,
-            ReflectionProbeAmbientMode::Environment
-            | ReflectionProbeAmbientMode::ConstantColor => probe.ambient_color_energy,
+            ReflectionProbeAmbientMode::Environment | ReflectionProbeAmbientMode::ConstantColor => {
+                probe.ambient_color_energy
+            }
         };
         r += probe.ambient_color.r * energy * probe.intensity;
         g += probe.ambient_color.g * energy * probe.intensity;

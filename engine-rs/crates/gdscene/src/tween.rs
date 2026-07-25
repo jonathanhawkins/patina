@@ -139,6 +139,13 @@ pub enum EaseType {
     /// Ease in then out (slow start and end).
     #[default]
     InOut,
+    /// Godot `EASE_OUT_IN` — the *out* half first, then the *in* half
+    /// (pat-0q2kx.55).
+    ///
+    /// ⚠️ Not the same as `InOut` reversed: this eases out over the first half
+    /// and in over the second, so the curve is fast-slow-fast rather than
+    /// slow-fast-slow. It is the mode that makes a value linger in the middle.
+    OutIn,
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +172,15 @@ pub enum TransFunc {
     Bounce,
     /// Back (overshoot) easing.
     Back,
+    /// Quartic easing — `t^4` (pat-0q2kx.55).
+    Quart,
+    /// Quintic easing — `t^5` (pat-0q2kx.55).
+    Quint,
+    /// Circular easing — follows a quarter circle (pat-0q2kx.55).
+    Circ,
+    /// Godot `TRANS_SPRING` — a damped oscillation that settles on the target
+    /// (pat-0q2kx.55).
+    Spring,
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +198,7 @@ pub fn ease(t: f64, ease_type: EaseType, trans_func: TransFunc) -> f64 {
         EaseType::In => ease_in(t, trans_func),
         EaseType::Out => ease_out(t, trans_func),
         EaseType::InOut => ease_in_out(t, trans_func),
+        EaseType::OutIn => ease_out_in(t, trans_func),
     }
 }
 
@@ -212,6 +229,12 @@ fn ease_in(t: f64, func: TransFunc) -> f64 {
             let s = 1.70158;
             t * t * ((s + 1.0) * t - s)
         }
+        TransFunc::Quart => t * t * t * t,
+        TransFunc::Quint => t * t * t * t * t,
+        // `Circ::in`: -(sqrt(1 - t^2) - 1)
+        TransFunc::Circ => -((1.0 - t * t).max(0.0).sqrt() - 1.0),
+        // `Spring::in` is defined in terms of `out`: c - out(d - t).
+        TransFunc::Spring => 1.0 - spring_out(1.0 - t),
     }
 }
 
@@ -245,7 +268,36 @@ fn ease_out(t: f64, func: TransFunc) -> f64 {
             let t1 = t - 1.0;
             t1 * t1 * ((s + 1.0) * t1 + s) + 1.0
         }
+        // `Quart::out`: -( (t-1)^4 - 1 )
+        TransFunc::Quart => {
+            let t1 = t - 1.0;
+            1.0 - t1 * t1 * t1 * t1
+        }
+        // `Quint::out`: (t-1)^5 + 1
+        TransFunc::Quint => {
+            let t1 = t - 1.0;
+            t1 * t1 * t1 * t1 * t1 + 1.0
+        }
+        // `Circ::out`: sqrt(1 - (t-1)^2)
+        TransFunc::Circ => {
+            let t1 = t - 1.0;
+            (1.0 - t1 * t1).max(0.0).sqrt()
+        }
+        TransFunc::Spring => spring_out(t),
     }
+}
+
+/// Godot `Spring::out` (`easing_equations.h:418`), normalised to `b = 0`,
+/// `c = 1`, `d = 1` (pat-0q2kx.55).
+///
+/// A damped oscillation whose frequency rises with `t` — the `0.2 + 2.5 t³`
+/// term — multiplied by a `(1-t)^2.2` decay and lifted by a `1 + 1.2(1-t)`
+/// gain. The constants are Godot's and are not derived from anything; they are
+/// transcribed rather than re-invented so a golden-value comparison matches.
+fn spring_out(t: f64) -> f64 {
+    let s = 1.0 - t;
+    ((t * std::f64::consts::PI * (0.2 + 2.5 * t * t * t)).sin() * s.powf(2.2) + t)
+        * (1.0 + (1.2 * s))
 }
 
 fn ease_in_out(t: f64, func: TransFunc) -> f64 {
@@ -253,6 +305,19 @@ fn ease_in_out(t: f64, func: TransFunc) -> f64 {
         ease_in(t * 2.0, func) * 0.5
     } else {
         ease_out(t * 2.0 - 1.0, func) * 0.5 + 0.5
+    }
+}
+
+/// Godot `EaseType::EASE_OUT_IN` — the out half, then the in half
+/// (pat-0q2kx.55).
+///
+/// Mirrors every `out_in` in `easing_equations.h`, all of which are
+/// `t < d/2 ? out(2t, b, c/2, d) : in(2t - d, b + c/2, c/2, d)`.
+fn ease_out_in(t: f64, func: TransFunc) -> f64 {
+    if t < 0.5 {
+        ease_out(t * 2.0, func) * 0.5
+    } else {
+        ease_in(t * 2.0 - 1.0, func) * 0.5 + 0.5
     }
 }
 

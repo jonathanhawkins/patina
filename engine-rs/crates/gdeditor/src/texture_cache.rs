@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 
+use gdcore::math::Color;
 use gdrender2d::texture::{load_png, resolve_res_path, Texture2D};
+use gdvariant::Variant;
 
 /// Cache of loaded textures keyed by their `res://` path.
 ///
@@ -36,7 +38,11 @@ impl TextureCache {
     pub fn get(&mut self, res_path: &str) -> Option<&Texture2D> {
         if !self.cache.contains_key(res_path) {
             let fs_path = resolve_res_path(res_path, &self.project_root);
-            let texture = load_png(&fs_path);
+            // PNG keeps its direct decode; everything else — webp, svg, jpg, ctex,
+            // and a png whose source was replaced by an imported artifact — goes
+            // through the engine's format loader, which nothing used to call
+            // (pat-0q2kx.45). That is why only PNG ever rendered here.
+            let texture = load_png(&fs_path).or_else(|| load_via_format_loader(&fs_path));
             if texture.is_some() {
                 tracing::debug!(
                     "TextureCache: loaded {} ({} bytes)",
@@ -96,6 +102,46 @@ impl Default for TextureCache {
     fn default() -> Self {
         Self::new("")
     }
+}
+
+/// Loads a texture through the engine's registered resource format loaders
+/// (pat-0q2kx.45).
+///
+/// This is what makes `.webp`, `.svg`, `.jpg` and `.ctex` render in the editor
+/// viewport, and what resolves a `.png` whose source was replaced by an imported
+/// artifact: each image importer checks for a `<source>.import` sidecar and loads
+/// the compiled `.godot/imported/*.ctex` instead. `None` when no loader claims the
+/// extension or the file cannot be decoded — the caller keeps its "failed load"
+/// cache entry rather than retrying every frame.
+fn load_via_format_loader(fs_path: &str) -> Option<Texture2D> {
+    let resource = gdresource::importers::ResourceFormatLoader::with_defaults()
+        .load_resource(std::path::Path::new(fs_path))
+        .ok()?;
+    let int_prop = |key: &str| match resource.get_property(key) {
+        Some(Variant::Int(i)) if *i > 0 => Some(*i as u32),
+        _ => None,
+    };
+    let (width, height) = (int_prop("width")?, int_prop("height")?);
+    let pixels: Vec<Color> = match resource.get_property("pixels") {
+        Some(Variant::Array(items)) => items
+            .iter()
+            .filter_map(|v| match v {
+                Variant::Color(c) => Some(*c),
+                _ => None,
+            })
+            .collect(),
+        _ => return None,
+    };
+    // A truncated pixel array would index out of bounds during rasterization, so
+    // require exactly the declared extent rather than padding it.
+    if pixels.len() != (width as usize) * (height as usize) {
+        return None;
+    }
+    Some(Texture2D {
+        width,
+        height,
+        pixels,
+    })
 }
 
 #[cfg(test)]

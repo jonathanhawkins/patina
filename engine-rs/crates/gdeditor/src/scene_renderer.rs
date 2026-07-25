@@ -47,6 +47,7 @@ const COLOR_CONTROL: Color = Color::new(0.7, 0.3, 0.9, 1.0); // purple
 const COLOR_DEFAULT: Color = Color::new(0.8, 0.8, 0.8, 1.0); // white-ish
 const COLOR_SELECTED: Color = Color::new(1.0, 0.85, 0.0, 1.0); // bright amber
 const COLOR_NODE_DOT: Color = Color::new(0.5, 0.5, 0.5, 1.0); // gray
+const COLOR_PARTICLES: Color = Color::new(0.9, 0.6, 1.0, 1.0); // violet emitter glyph
 const COLOR_LABEL_TEXT: Color = Color::new(0.85, 0.85, 0.85, 0.9); // label text
 
 /// Gizmo colors for the transform arrows.
@@ -153,9 +154,10 @@ pub fn render_runtime_frame(
     zoom: f64,
     pan: (f64, f64),
 ) -> FrameBuffer {
-    // A running 2D scene maps world coordinates straight to the viewport
-    // (Camera2D handling is a later sub-task), so the editor's zoom/pan — which
-    // only frame the *editor* preview — are intentionally ignored here.
+    // The editor's zoom/pan only frame the *editor* preview, so they stay out of
+    // the running frame — but the scene's own Camera2D does apply, and used to be
+    // discarded here alongside them, which made a scrolling game impossible to
+    // see in the Game view (pat-0q2kx.40).
     let _ = (zoom, pan);
     if scene_is_3d(tree) {
         let mut vp = viewport_3d.clone();
@@ -167,8 +169,31 @@ pub fn render_runtime_frame(
         // (pat-u3l8c.23) — no editor grid/rulers/gizmos. This branch is
         // texture-less; the texture-cached Play path lives in `examples/editor.rs`,
         // so sprites here fall back to placeholder squares.
-        crate::viewport_2d_render::render_runtime_canvas(
+        // Inlines `render_runtime_canvas` so the Camera2D view can be folded in
+        // between building the list and rasterizing it — the same order the Play
+        // loop in `examples/editor.rs` uses. `apply_camera2d_view` skips
+        // CanvasLayer items, so HUD pixels stay put while the world scrolls.
+        let mut items = crate::viewport_2d_render::build_runtime_render_list(tree);
+        let viewport_size = Vector2::new(width.max(1) as f32, height.max(1) as f32);
+        if let Some(view) = crate::viewport_2d_render::camera2d_view_transform(
             tree,
+            viewport_size,
+            None,
+            1.0 / 60.0,
+        ) {
+            crate::viewport_2d_render::apply_camera2d_view(&mut items, view);
+        }
+        // The root window's content scale is the OUTERMOST transform, applied
+        // after the camera and to CanvasLayer items too (pat-nzgdu.87). The
+        // window here is the Game view's rect, not the project's configured
+        // one, so the project's base resolution is stretched to whatever size
+        // the editor gave us — which is what makes the Game view show the same
+        // framing the exported game would.
+        let mut window = *tree.root_window();
+        window.size = viewport_size;
+        crate::viewport_2d_render::apply_stretch_transform(&mut items, window.stretch_transform());
+        crate::viewport_2d_render::rasterize_render_list(
+            &items,
             width,
             height,
             crate::viewport_2d_render::RUNTIME_CLEAR_COLOR,
@@ -243,6 +268,14 @@ fn render_scene_inner(
                 draw_sprite2d_with_texture(&mut fb, node, pos, z, &mut texture_cache);
             }
             "Camera2D" => draw_camera2d_icon(&mut fb, pos, COLOR_CAMERA2D, z),
+            "GPUParticles2D" | "CPUParticles2D" => {
+                // A stepped emitter shows its live cloud; an idle one (no
+                // published particles) keeps the emitter glyph so the node is
+                // still visible and pickable (pat-0q2kx.51).
+                if !draw_live_particles(&mut fb, node, pos, z) {
+                    draw_node2d_diamond(&mut fb, pos, COLOR_PARTICLES);
+                }
+            }
             "CollisionShape2D" => {
                 draw_collision_shape_from_node(&mut fb, node, pos, z, is_selected)
             }
@@ -539,6 +572,63 @@ fn draw_sprite2d_icon(fb: &mut FrameBuffer, pos: Vector2, color: Color, zoom: f3
 }
 
 /// Draws Sprite2D with texture from cache or blue placeholder.
+/// Edge length (px, at zoom 1) of the quad drawn for one live particle in the
+/// edit viewport. Matches the runtime quad so the preview and the Play frame
+/// agree on particle size.
+const PARTICLE_QUAD_SIZE: f32 = 4.0;
+
+/// Draws a particle emitter's live particles into the edit viewport, returning
+/// whether any were drawn (pat-0q2kx.51).
+///
+/// `MainLoop::process_particles` publishes the live set onto the node every frame
+/// as `_particle_positions` (emitter-local), `_particle_colors`, and
+/// `_particle_scales`; the edit viewport reads the same arrays the Play canvas
+/// does, so a scene being stepped shows moving particles in both. Positions are
+/// emitter-local, so each quad lands at the emitter's screen position plus its
+/// zoom-scaled local offset. Returns `false` when the node has no published
+/// particles (the scene is not running), leaving the caller to draw the emitter
+/// glyph instead.
+fn draw_live_particles(
+    fb: &mut FrameBuffer,
+    node: &gdscene::node::Node,
+    pos: Vector2,
+    zoom: f32,
+) -> bool {
+    let positions = match node.get_property("_particle_positions") {
+        Variant::PackedVector2Array(v) => v,
+        _ => return false,
+    };
+    if positions.is_empty() {
+        return false;
+    }
+    let colors = match node.get_property("_particle_colors") {
+        Variant::PackedColorArray(v) => v,
+        _ => Vec::new(),
+    };
+    let scales = match node.get_property("_particle_scales") {
+        Variant::PackedFloat32Array(v) => v,
+        _ => Vec::new(),
+    };
+    for (i, local) in positions.iter().enumerate() {
+        let scale = match scales.get(i).copied() {
+            Some(s) if s > 0.0 => s,
+            _ => 1.0,
+        };
+        let color = colors.get(i).copied().unwrap_or(Color::WHITE);
+        let side = (PARTICLE_QUAD_SIZE * scale * zoom).max(1.0);
+        let center = Vector2::new(pos.x + local.x * zoom, pos.y + local.y * zoom);
+        draw::fill_rect_blended(
+            fb,
+            Rect2::new(
+                Vector2::new(center.x - side / 2.0, center.y - side / 2.0),
+                Vector2::new(side, side),
+            ),
+            color,
+        );
+    }
+    true
+}
+
 fn draw_sprite2d_with_texture(
     fb: &mut FrameBuffer,
     node: &gdscene::node::Node,
@@ -2429,8 +2519,9 @@ mod tests {
     #[test]
     fn editor_viewport_label_glyph_coverage() {
         // The old fallback drawn for unknown letters: a filled rectangle.
-        const FALLBACK_BOX: [u8; 7] =
-            [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111];
+        const FALLBACK_BOX: [u8; 7] = [
+            0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111,
+        ];
 
         // Every char that appears in the demo scene's node labels and ruler
         // ticks must map to a real glyph — not the tofu box, not blank.

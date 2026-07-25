@@ -527,10 +527,7 @@ fn backfill_effect_ends(spans: &mut [TextSpan]) {
         // Walk the whole application: same effect start, uninterrupted.
         let mut j = i;
         let mut end = start;
-        while j < spans.len()
-            && spans[j].effect.is_some()
-            && spans[j].effect_range.0 == start
-        {
+        while j < spans.len() && spans[j].effect.is_some() && spans[j].effect_range.0 == start {
             end = spans[j].char_offset + spans[j].text.chars().count();
             j += 1;
         }

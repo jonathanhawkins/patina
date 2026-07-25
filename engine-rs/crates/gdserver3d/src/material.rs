@@ -366,10 +366,22 @@ mod tests {
     fn bilinear_at_texel_centers_returns_exact_texel() {
         let t = checker_2x2();
         // Texel centres sit at (i + 0.5) / size = 0.25 and 0.75.
-        assert_eq!(t.sample_bilinear(0.25, 0.25), Color::new(1.0, 0.0, 0.0, 1.0));
-        assert_eq!(t.sample_bilinear(0.75, 0.25), Color::new(0.0, 1.0, 0.0, 1.0));
-        assert_eq!(t.sample_bilinear(0.25, 0.75), Color::new(0.0, 0.0, 1.0, 1.0));
-        assert_eq!(t.sample_bilinear(0.75, 0.75), Color::new(1.0, 1.0, 1.0, 1.0));
+        assert_eq!(
+            t.sample_bilinear(0.25, 0.25),
+            Color::new(1.0, 0.0, 0.0, 1.0)
+        );
+        assert_eq!(
+            t.sample_bilinear(0.75, 0.25),
+            Color::new(0.0, 1.0, 0.0, 1.0)
+        );
+        assert_eq!(
+            t.sample_bilinear(0.25, 0.75),
+            Color::new(0.0, 0.0, 1.0, 1.0)
+        );
+        assert_eq!(
+            t.sample_bilinear(0.75, 0.75),
+            Color::new(1.0, 1.0, 1.0, 1.0)
+        );
     }
 
     #[test]

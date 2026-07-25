@@ -492,8 +492,20 @@ pub fn stale_json(days: u32) -> Result<String> {
 // ─── Comments ────────────────────────────────────────────────────────────
 
 /// Add a comment to a bead (for coordinator notes, rejection reasons, etc.)
+///
+/// The flag is `--message`, NOT `--text`: `br comments add` accepts
+/// `<ID> [TEXT]...` positionally, `--message <MESSAGE>`, or `--file <FILE>`, and
+/// rejects the call outright on an unknown flag. This function carried `--text`
+/// from the day it was written and nobody noticed, because until pat-k5o8f it
+/// had **zero callers** — the moment the partial-completion path started
+/// depending on it, every partial failed and its completion was retried forever
+/// (one verifier re-run every ~9 s on an already-passing bead).
+///
+/// `--message` is preferred over the positional form because comment bodies
+/// start with markdown (`## ...`) and a leading `-` in any future body would be
+/// parsed as a flag.
 pub fn comment_add(bead_id: &str, text: &str) -> Result<()> {
-    run_br(&["comments", "add", bead_id, "--text", text])?;
+    run_br(&["comments", "add", bead_id, "--message", text])?;
     Ok(())
 }
 
@@ -799,6 +811,30 @@ mod tests {
         assert!(
             !fn_body.contains("--merge"),
             "REGRESSION: sync() must NOT use --merge (causes 30-43s WAL lock hangs)"
+        );
+    }
+
+    /// Regression: `br comments add` rejects `--text`, and this function's only
+    /// caller is the partial-completion path — a wrong flag there fails every
+    /// partial and retries the completion forever (observed 2026-07-25, one
+    /// verifier re-run every ~9 s on an already-passing bead).
+    #[test]
+    fn test_comment_add_uses_the_message_flag() {
+        let source = include_str!("br.rs");
+        let start = source
+            .find("pub fn comment_add(")
+            .expect("comment_add must exist");
+        let end = source[start..].find("\n}").unwrap_or(400);
+        let body = &source[start..start + end];
+
+        assert!(
+            body.contains("\"--message\""),
+            "comment_add must pass --message: br comments add accepts \
+             <ID> [TEXT]..., --message or --file, and errors on anything else"
+        );
+        assert!(
+            !body.contains("\"--text\""),
+            "--text is not a br flag; it silently failed every call"
         );
     }
 

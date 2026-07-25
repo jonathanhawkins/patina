@@ -412,6 +412,31 @@ pub trait SceneAccess {
         false
     }
 
+    /// Pause the AnimationPlayer attached to `node`, preserving its playhead
+    /// (Godot `pause()`, unlike `stop()` which rewinds). Returns `false` if
+    /// `node` has no player (pat-0q2kx.52).
+    fn animation_player_pause(&mut self, _node: u64) -> bool {
+        false
+    }
+
+    /// Queue `name` to play after the current clip finishes (Godot `queue()`).
+    /// Returns `false` if `node` has no player.
+    fn animation_player_queue(&mut self, _node: u64, _name: &str) -> bool {
+        false
+    }
+
+    /// Play `name` backwards from its end (Godot `play_backwards`). Returns
+    /// `false` if `node` has no player.
+    fn animation_player_play_backwards(&mut self, _node: u64, _name: &str) -> bool {
+        false
+    }
+
+    /// The effective playback speed (`speed_scale * custom_speed`, `0.0` when
+    /// stopped), or `None` when `node` has no player.
+    fn animation_player_playing_speed(&self, _node: u64) -> Option<f64> {
+        None
+    }
+
     /// Whether the AnimationPlayer attached to `node` is playing, or `None`
     /// when `node` has no attached player.
     fn animation_player_is_playing(&self, _node: u64) -> Option<bool> {
@@ -458,6 +483,81 @@ pub trait SceneAccess {
     fn tween_call(&mut self, _tween: u64, _method: &str, _args: &[Variant]) -> Option<Variant> {
         None
     }
+
+    // -- SceneTree control surface (pat-0q2kx.47) --------------------------
+    //
+    // How a Godot script drives scene flow: `get_tree().change_scene_to_file()`,
+    // `.quit()`, `.set_pause()`, and the group broadcasts. Every one of these is
+    // already implemented and unit-tested engine-side, but nothing on this trait
+    // exposed them, so the interpreter's `get_tree()` path fell through to
+    // `UndefinedFunction` and a script could not change scene, quit, pause or
+    // broadcast at all. Defaults keep non-tree implementors (test mocks)
+    // compiling; each answers as "no tree to control".
+
+    /// Queues Godot's `SceneTree.change_scene_to_file`. `false` when the path
+    /// cannot be loaded or parsed.
+    ///
+    /// The swap is deferred to the next frame boundary, as in Godot, so the
+    /// calling frame finishes in the old scene and the caller is not freed
+    /// underneath itself mid-callback.
+    fn change_scene_to_file(&mut self, _path: &str) -> bool {
+        false
+    }
+
+    /// `SceneTree.reload_current_scene`. `false` when there is no current scene
+    /// or it cannot be re-instantiated.
+    fn reload_current_scene(&mut self) -> bool {
+        false
+    }
+
+    /// `SceneTree.quit(exit_code)` — records the quit request. It does not stop
+    /// execution itself; the host loop polls it at the frame boundary, so the
+    /// calling frame still completes.
+    fn quit(&mut self, _exit_code: i64) {}
+
+    /// `SceneTree.set_pause` — the `paused` property's setter.
+    fn set_tree_paused(&mut self, _paused: bool) {}
+
+    /// `SceneTree.is_paused`.
+    fn is_tree_paused(&self) -> bool {
+        false
+    }
+
+    /// `SceneTree.get_root` — the `/root` node as an object handle.
+    fn tree_root(&self) -> Option<u64> {
+        None
+    }
+
+    /// `SceneTree.get_node_count`.
+    fn tree_node_count(&self) -> i64 {
+        0
+    }
+
+    /// `SceneTree.get_nodes_in_group`, in tree order.
+    fn nodes_in_group(&self, _group: &str) -> Vec<u64> {
+        Vec::new()
+    }
+
+    /// `SceneTree.get_first_node_in_group`.
+    fn first_node_in_group(&self, _group: &str) -> Option<u64> {
+        None
+    }
+
+    /// `SceneTree.has_group` — whether any node belongs to `group`.
+    fn tree_has_group(&self, _group: &str) -> bool {
+        false
+    }
+
+    /// `SceneTree.call_group_flags`. `flags` of 0 is plain `call_group`;
+    /// GROUP_CALL_REVERSE/GROUP_CALL_DEFERRED are honored by the host.
+    fn call_group_flags(&mut self, _flags: i64, _group: &str, _method: &str, _args: &[Variant]) {}
+
+    /// `SceneTree.set_group` — set `property` on every member of `group`.
+    fn set_group(&mut self, _group: &str, _property: &str, _value: Variant) {}
+
+    /// `SceneTree.notify_group` — deliver notification code `what` to every
+    /// member of `group`.
+    fn notify_group(&mut self, _group: &str, _what: i64) {}
 
     // -- Object metadata (pat-nzgdu.30) ------------------------------------
     //

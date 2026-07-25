@@ -289,7 +289,10 @@ mod tests {
         mm.set_instance_custom_data(1, Color::new(0.25, 0.5, 0.75, 1.0));
         assert_eq!(mm.instance_custom_data.len(), 3);
         assert!(mm.use_custom_data);
-        assert_eq!(mm.get_instance_custom_data(1), Color::new(0.25, 0.5, 0.75, 1.0));
+        assert_eq!(
+            mm.get_instance_custom_data(1),
+            Color::new(0.25, 0.5, 0.75, 1.0)
+        );
         assert_eq!(mm.get_instance_custom_data(0), Color::TRANSPARENT);
         // Resizing keeps custom data in step with the instance count.
         mm.set_instance_count(4);
@@ -302,11 +305,19 @@ mod tests {
         let mut mm = MultiMesh3D::new(5);
         // -1 sentinel -> all instances.
         assert_eq!(mm.visible_count(), 5);
-        assert_eq!(mm.flatten_visible_instance_data(Transform3D::IDENTITY).len(), 5);
+        assert_eq!(
+            mm.flatten_visible_instance_data(Transform3D::IDENTITY)
+                .len(),
+            5
+        );
         // Limit to 2.
         mm.visible_instance_count = 2;
         assert_eq!(mm.visible_count(), 2);
-        assert_eq!(mm.flatten_visible_instance_data(Transform3D::IDENTITY).len(), 2);
+        assert_eq!(
+            mm.flatten_visible_instance_data(Transform3D::IDENTITY)
+                .len(),
+            2
+        );
         // Over-count clamps to the instance count.
         mm.visible_instance_count = 99;
         assert_eq!(mm.visible_count(), 5);

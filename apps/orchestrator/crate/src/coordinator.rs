@@ -515,11 +515,17 @@ impl Coordinator {
     /// Record a verified-but-incomplete completion and put the bead back in the
     /// queue instead of closing it (pat-k5o8f).
     ///
-    /// The comment is written *before* the reopen, and its failure aborts the
-    /// whole operation: a bead that returns to the queue without its scope note
-    /// has lost the very information this path exists to preserve, and would be
-    /// picked up by the next worker as if nothing had been done. Better to
-    /// leave the completion unacked and retry than to reopen blind.
+    /// The comment is written before the reopen — a bead back in the queue
+    /// without its scope note has lost the information this path exists to
+    /// preserve — but a failed comment does **not** abort the operation.
+    ///
+    /// It used to. That cost a live retry loop on 2026-07-25: `comment_add`
+    /// passed a flag `br` does not accept, so every attempt failed, the
+    /// completion was deliberately left unacked "to retry next cycle", and the
+    /// coordinator re-verified an already-passing bead every ~9 seconds
+    /// forever. A persistent failure retried unboundedly is worse than a
+    /// degraded success: the reopen still happens, the scope still reaches the
+    /// worker by mail, and the error is loud in the log.
     fn handle_partial_completion(&self, vr: &VerifyResult) -> Result<()> {
         let comment = partial_scope_comment(
             &vr.worker,
@@ -534,7 +540,14 @@ impl Coordinator {
             );
             return Ok(());
         }
-        br::comment_add(&vr.bead_id, &comment)?;
+        if let Err(e) = br::comment_add(&vr.bead_id, &comment) {
+            tracing::error!(
+                bead = %vr.bead_id,
+                error = %e,
+                "PARTIAL scope comment could not be written — reopening anyway; \
+                 the remaining scope survives only in the worker message"
+            );
+        }
         br::reopen(&vr.bead_id)?;
         tracing::info!(
             bead = %vr.bead_id,

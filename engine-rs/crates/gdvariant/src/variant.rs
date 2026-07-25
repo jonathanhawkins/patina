@@ -4,12 +4,12 @@
 //! This implementation covers the subset needed for Phase 3 (headless
 //! runtime): scalars, strings, math types, collections, and object refs.
 
+use crate::dictionary::Dictionary;
 use gdcore::id::ObjectId;
-use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
+use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector2i, Vector3, Vector3i};
 use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
 use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
-use crate::dictionary::Dictionary;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -170,7 +170,13 @@ pub enum VariantType {
     StringName,
     NodePath,
     Vector2,
+    /// Integer 2D vector (Godot `Vector2i`) — kept distinct from
+    /// [`Vector2`](Self::Vector2) so a `.tscn` literal round-trips as an int
+    /// vector rather than a float one (pat-nzgdu.78).
+    Vector2i,
     Vector3,
+    /// Integer 3D vector (Godot `Vector3i`).
+    Vector3i,
     Rect2,
     Transform2D,
     Color,
@@ -218,8 +224,13 @@ pub enum Variant {
     NodePath(NodePath),
     /// A 2D vector.
     Vector2(Vector2),
+    /// An integer 2D vector (Godot `Vector2i`): tile/grid coordinates, which
+    /// lose their exactness if carried as floats (pat-nzgdu.78).
+    Vector2i(Vector2i),
     /// A 3D vector.
     Vector3(Vector3),
+    /// An integer 3D vector (Godot `Vector3i`).
+    Vector3i(Vector3i),
     /// An axis-aligned 2D rectangle.
     Rect2(Rect2),
     /// A 2D affine transform.
@@ -291,7 +302,9 @@ impl Variant {
             Self::StringName(_) => VariantType::StringName,
             Self::NodePath(_) => VariantType::NodePath,
             Self::Vector2(_) => VariantType::Vector2,
+            Self::Vector2i(_) => VariantType::Vector2i,
             Self::Vector3(_) => VariantType::Vector3,
+            Self::Vector3i(_) => VariantType::Vector3i,
             Self::Rect2(_) => VariantType::Rect2,
             Self::Transform2D(_) => VariantType::Transform2D,
             Self::Color(_) => VariantType::Color,
@@ -771,7 +784,9 @@ impl fmt::Display for Variant {
             Self::StringName(sn) => write!(f, "&{sn}"),
             Self::NodePath(np) => write!(f, "NodePath(\"{np}\")"),
             Self::Vector2(v) => write!(f, "({}, {})", v.x, v.y),
+            Self::Vector2i(v) => write!(f, "({}, {})", v.x, v.y),
             Self::Vector3(v) => write!(f, "({}, {}, {})", v.x, v.y, v.z),
+            Self::Vector3i(v) => write!(f, "({}, {}, {})", v.x, v.y, v.z),
             Self::Rect2(r) => write!(
                 f,
                 "[({}, {}), ({}, {})]",
@@ -824,7 +839,9 @@ impl fmt::Display for VariantType {
             Self::StringName => "StringName",
             Self::NodePath => "NodePath",
             Self::Vector2 => "Vector2",
+            Self::Vector2i => "Vector2i",
             Self::Vector3 => "Vector3",
+            Self::Vector3i => "Vector3i",
             Self::Rect2 => "Rect2",
             Self::Transform2D => "Transform2D",
             Self::Color => "Color",
@@ -1114,7 +1131,10 @@ mod tests {
 
     #[test]
     fn packed_type_display_names() {
-        assert_eq!(format!("{}", VariantType::PackedByteArray), "PackedByteArray");
+        assert_eq!(
+            format!("{}", VariantType::PackedByteArray),
+            "PackedByteArray"
+        );
         assert_eq!(
             format!("{}", VariantType::PackedInt32Array),
             "PackedInt32Array"
@@ -1142,7 +1162,10 @@ mod tests {
         let v = Variant::PackedInt32Array(vec![1, 2, 3]);
         assert_eq!(v.packed_len(), Some(3));
         assert_eq!(v.packed_is_empty(), Some(false));
-        assert_eq!(Variant::PackedInt32Array(vec![]).packed_is_empty(), Some(true));
+        assert_eq!(
+            Variant::PackedInt32Array(vec![]).packed_is_empty(),
+            Some(true)
+        );
         // Non-packed values return None.
         assert_eq!(Variant::Int(5).packed_len(), None);
         assert!(!Variant::Int(5).is_packed_array());
@@ -1207,14 +1230,20 @@ mod tests {
     #[test]
     fn packed_slice_semantics() {
         let v = Variant::PackedInt64Array(vec![0, 1, 2, 3, 4]);
-        assert_eq!(v.packed_slice(1, 3), Some(Variant::PackedInt64Array(vec![1, 2])));
+        assert_eq!(
+            v.packed_slice(1, 3),
+            Some(Variant::PackedInt64Array(vec![1, 2]))
+        );
         // Negative indices count from the end.
         assert_eq!(
             v.packed_slice(-2, 5),
             Some(Variant::PackedInt64Array(vec![3, 4]))
         );
         // Clamped / inverted ranges yield empty, keeping the packed type.
-        assert_eq!(v.packed_slice(3, 1), Some(Variant::PackedInt64Array(vec![])));
+        assert_eq!(
+            v.packed_slice(3, 1),
+            Some(Variant::PackedInt64Array(vec![]))
+        );
     }
 
     #[test]
@@ -1246,8 +1275,7 @@ mod tests {
         );
         // Vector2(1,2) → two f32 = 8 bytes.
         assert_eq!(
-            Variant::PackedVector2Array(vec![Vector2::new(1.0, 2.0)])
-                .packed_to_byte_array(),
+            Variant::PackedVector2Array(vec![Vector2::new(1.0, 2.0)]).packed_to_byte_array(),
             Some(Variant::PackedByteArray(vec![
                 0x00, 0x00, 0x80, 0x3F, 0x00, 0x00, 0x00, 0x40
             ]))

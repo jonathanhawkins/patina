@@ -816,6 +816,61 @@ impl ResourceFormatLoader {
     }
 }
 
+/// The engine-wide resource load entry point: `res://` resolution plus format
+/// dispatch through [`ResourceFormatLoader::with_defaults`] (pat-0q2kx.45).
+///
+/// The format loaders and the `.import` remap resolution were fully implemented
+/// and tested, but **nothing at runtime called them** — the interpreter's `load()`
+/// guessed from the extension and returned empty placeholders, and the editor's
+/// texture cache called a PNG-only decoder. Anything that needs a resource should
+/// come through here so all four consumers agree on what a path means.
+///
+/// Remap handling is inherited from the individual importers: `import_image` and
+/// `import_webp` each check for a `<source>.import` sidecar and load the compiled
+/// `.godot/imported/*.ctex` artifact instead, so a source file that has been
+/// removed after import still resolves.
+#[derive(Debug)]
+pub struct UnifiedLoader {
+    loader: ResourceFormatLoader,
+    project_root: PathBuf,
+}
+
+impl UnifiedLoader {
+    /// Creates a loader rooted at `project_root`, the directory holding
+    /// `project.godot`, used to resolve `res://` paths.
+    pub fn new(project_root: impl Into<PathBuf>) -> Self {
+        Self {
+            loader: ResourceFormatLoader::with_defaults(),
+            project_root: project_root.into(),
+        }
+    }
+
+    /// Whether some registered format loader claims this path's extension.
+    pub fn can_load_path(&self, path: &str) -> bool {
+        match Path::new(path).extension().and_then(|e| e.to_str()) {
+            Some(ext) => self.loader.can_load(ext),
+            None => false,
+        }
+    }
+
+    /// Loads a `res://`-style (or plain filesystem) path.
+    ///
+    /// `res://` prefixes resolve against the project root; anything else is taken
+    /// as a filesystem path so callers holding an already-resolved path — the
+    /// editor's texture cache, for one — need no special case.
+    pub fn load(&self, path: &str) -> EngineResult<Arc<Resource>> {
+        self.loader.load_resource(&self.resolve(path))
+    }
+
+    /// Maps a `res://` path onto the filesystem. Non-`res://` paths pass through.
+    pub fn resolve(&self, path: &str) -> PathBuf {
+        match path.strip_prefix("res://") {
+            Some(rel) => self.project_root.join(rel),
+            None => PathBuf::from(path),
+        }
+    }
+}
+
 impl std::fmt::Debug for ResourceFormatLoader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResourceFormatLoader")

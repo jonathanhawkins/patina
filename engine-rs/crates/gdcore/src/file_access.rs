@@ -454,7 +454,9 @@ impl FileAccess {
         let fa = Self::open(path, mode)?;
         let seq = NEXT_FILE_HANDLE.fetch_add(1, Ordering::Relaxed);
         let raw = FILE_HANDLE_TAG | seq;
-        file_handles().get_or_insert_with(HashMap::new).insert(raw, fa);
+        file_handles()
+            .get_or_insert_with(HashMap::new)
+            .insert(raw, fa);
         Ok(ObjectId::from_raw(raw))
     }
 
@@ -782,7 +784,9 @@ impl DirAccess {
         let da = Self::open(path)?;
         let seq = NEXT_DIR_HANDLE.fetch_add(1, Ordering::Relaxed);
         let raw = DIR_HANDLE_TAG | seq;
-        dir_handles().get_or_insert_with(HashMap::new).insert(raw, da);
+        dir_handles()
+            .get_or_insert_with(HashMap::new)
+            .insert(raw, da);
         Ok(ObjectId::from_raw(raw))
     }
 

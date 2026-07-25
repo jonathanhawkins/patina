@@ -337,6 +337,89 @@ impl Basis {
         x_unit && y_unit && z_unit && xy_perp && xz_perp && yz_perp && det_one
     }
 
+    /// Returns the pure-rotation part of this basis: orthonormalized, with a
+    /// mirrored basis (negative determinant) flipped back to right-handed.
+    ///
+    /// Godot: `Basis::get_rotation_basis` (`core/math/basis.cpp`).
+    pub fn get_rotation_basis(self) -> Self {
+        let m = self.orthonormalized();
+        if m.determinant() < 0.0 {
+            Self {
+                x: -m.x,
+                y: -m.y,
+                z: -m.z,
+            }
+        } else {
+            m
+        }
+    }
+
+    /// Converts an orthonormal basis to the equivalent unit quaternion.
+    ///
+    /// This is the inverse of [`Basis::from_quaternion`]. The classic
+    /// trace-based extraction, with the three fallback branches that avoid the
+    /// near-zero divisor when the trace is negative.
+    ///
+    /// Godot: `Basis::get_quaternion` (`core/math/basis.cpp`).
+    pub fn to_quaternion(self) -> Quaternion {
+        // `m[row][col]`, with our columns stored as `x`/`y`/`z`.
+        let (m00, m11, m22) = (self.x.x, self.y.y, self.z.z);
+        let trace = m00 + m11 + m22;
+        if trace > 0.0 {
+            let s = (trace + 1.0).sqrt() * 2.0;
+            Quaternion::new(
+                (self.y.z - self.z.y) / s,
+                (self.z.x - self.x.z) / s,
+                (self.x.y - self.y.x) / s,
+                0.25 * s,
+            )
+        } else if m00 > m11 && m00 > m22 {
+            let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
+            Quaternion::new(
+                0.25 * s,
+                (self.y.x + self.x.y) / s,
+                (self.z.x + self.x.z) / s,
+                (self.y.z - self.z.y) / s,
+            )
+        } else if m11 > m22 {
+            let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
+            Quaternion::new(
+                (self.y.x + self.x.y) / s,
+                0.25 * s,
+                (self.z.y + self.y.z) / s,
+                (self.z.x - self.x.z) / s,
+            )
+        } else {
+            let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
+            Quaternion::new(
+                (self.z.x + self.x.z) / s,
+                (self.z.y + self.y.z) / s,
+                0.25 * s,
+                (self.x.y - self.y.x) / s,
+            )
+        }
+    }
+
+    /// Returns the rotation of this basis as a quaternion, discarding scale.
+    ///
+    /// Godot: `Basis::get_rotation_quaternion`.
+    pub fn get_rotation_quaternion(self) -> Quaternion {
+        self.get_rotation_basis().to_quaternion()
+    }
+
+    /// Builds a basis from a rotation quaternion and a per-axis scale
+    /// (`R * diag(scale)`).
+    ///
+    /// Godot: `Basis::set_quaternion_scale`.
+    pub fn from_quaternion_scale(q: Quaternion, scale: Vector3) -> Self {
+        let r = Self::from_quaternion(q);
+        Self {
+            x: r.x * scale.x,
+            y: r.y * scale.y,
+            z: r.z * scale.z,
+        }
+    }
+
     /// Returns an orthonormalized copy of this basis using Gram-Schmidt.
     pub fn orthonormalized(self) -> Self {
         let x = self.x.normalized();
@@ -451,6 +534,25 @@ impl Mul for Transform3D {
     }
 }
 
+impl Transform3D {
+    /// Interpolates towards `to` by `weight`, decomposing each transform into
+    /// rotation / scale / origin: the rotation slerps, the scale and origin
+    /// lerp. A component-wise matrix lerp would shear the basis instead.
+    ///
+    /// Godot: `Transform3D::interpolate_with` (`core/math/transform_3d.cpp`).
+    pub fn interpolate_with(self, to: Transform3D, weight: f32) -> Self {
+        let src_rot = self.basis.get_rotation_quaternion();
+        let dst_rot = to.basis.get_rotation_quaternion();
+        Self {
+            basis: Basis::from_quaternion_scale(
+                src_rot.slerp(dst_rot, weight).normalized(),
+                self.basis.get_scale().lerp(to.basis.get_scale(), weight),
+            ),
+            origin: self.origin.lerp(to.origin, weight),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AABB
 // ---------------------------------------------------------------------------
@@ -552,6 +654,85 @@ impl Aabb {
             if idx & 4 == 0 { self.position.z } else { end.z },
         )
     }
+
+    /// Returns the end corner (`position + size`).
+    ///
+    /// Godot: `AABB.end` / `get_end`.
+    pub fn get_end(self) -> Vector3 {
+        self.position + self.size
+    }
+
+    /// Returns a copy grown by `amount` on all six sides.
+    ///
+    /// Godot: `AABB.grow` (`core/math/aabb.h`).
+    pub fn grow(self, amount: f32) -> Self {
+        Self {
+            position: Vector3::new(
+                self.position.x - amount,
+                self.position.y - amount,
+                self.position.z - amount,
+            ),
+            size: Vector3::new(
+                self.size.x + amount * 2.0,
+                self.size.y + amount * 2.0,
+                self.size.z + amount * 2.0,
+            ),
+        }
+    }
+
+    /// Returns an equivalent AABB with a non-negative size.
+    ///
+    /// Godot: `AABB.abs`.
+    pub fn abs(self) -> Self {
+        Self {
+            position: Vector3::new(
+                self.position.x + self.size.x.min(0.0),
+                self.position.y + self.size.y.min(0.0),
+                self.position.z + self.size.z.min(0.0),
+            ),
+            size: Vector3::new(self.size.x.abs(), self.size.y.abs(), self.size.z.abs()),
+        }
+    }
+
+    /// Returns the overlapping box of two AABBs, or a zero-size box at the
+    /// origin when they do not overlap.
+    ///
+    /// Godot: `AABB.intersection`.
+    pub fn intersection(self, other: Self) -> Self {
+        if !self.intersects(other) {
+            return Self::new(Vector3::ZERO, Vector3::ZERO);
+        }
+        let a_end = self.get_end();
+        let b_end = other.get_end();
+        let position = Vector3::new(
+            self.position.x.max(other.position.x),
+            self.position.y.max(other.position.y),
+            self.position.z.max(other.position.z),
+        );
+        let end = Vector3::new(
+            a_end.x.min(b_end.x),
+            a_end.y.min(b_end.y),
+            a_end.z.min(b_end.z),
+        );
+        Self {
+            position,
+            size: end - position,
+        }
+    }
+
+    /// Returns `true` if `other` lies entirely within this AABB.
+    ///
+    /// Godot: `AABB.encloses`.
+    pub fn encloses(self, other: Self) -> bool {
+        let a_end = self.get_end();
+        let b_end = other.get_end();
+        other.position.x >= self.position.x
+            && other.position.y >= self.position.y
+            && other.position.z >= self.position.z
+            && b_end.x <= a_end.x
+            && b_end.y <= a_end.y
+            && b_end.z <= a_end.z
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -617,6 +798,28 @@ impl Plane {
             return None;
         }
         Some(a + dir * t)
+    }
+
+    /// Returns `point` projected onto this plane (the closest point on it).
+    ///
+    /// Godot: `Plane.project`.
+    pub fn project(self, point: Vector3) -> Vector3 {
+        point - self.normal * self.distance_to(point)
+    }
+
+    /// Returns the point on the plane closest to the origin
+    /// (`normal * d`).
+    ///
+    /// Godot: `Plane.get_center`.
+    pub fn get_center(self) -> Vector3 {
+        self.normal * self.d
+    }
+
+    /// Returns `true` if `point` lies on the plane within `tolerance`.
+    ///
+    /// Godot: `Plane.has_point`.
+    pub fn has_point(self, point: Vector3, tolerance: f32) -> bool {
+        self.distance_to(point).abs() <= tolerance
     }
 
     /// Returns a copy with a normalized normal vector.
@@ -953,5 +1156,103 @@ mod tests {
         let p = Plane::new(Vector3::new(0.0, 2.0, 0.0), 4.0).normalized();
         assert!(v3_approx_eq(p.normal, Vector3::UP));
         assert!(approx_eq(p.d, 2.0));
+    }
+
+    // -- Basis <-> Quaternion, interpolation, AABB/Plane extras
+    //    (pat-0q2kx.50) -----------------------------------------------------
+
+    /// `to_quaternion` must invert `from_quaternion`. Compared by the rotation
+    /// they apply rather than component-wise, since `q` and `-q` name the same
+    /// rotation.
+    #[test]
+    fn basis_quaternion_round_trips() {
+        let probe = Vector3::new(1.0, 2.0, 3.0);
+        for q in [
+            Quaternion::IDENTITY,
+            Quaternion::from_axis_angle(Vector3::UP, FRAC_PI_2),
+            Quaternion::from_axis_angle(Vector3::new(1.0, 0.0, 0.0), PI),
+            Quaternion::from_axis_angle(Vector3::new(1.0, 1.0, 1.0), FRAC_PI_4),
+        ] {
+            let back = Basis::from_quaternion(q).to_quaternion();
+            assert!(
+                v3_approx_eq(back.xform(probe), q.xform(probe)),
+                "round trip changed the rotation for {q:?}"
+            );
+        }
+    }
+
+    /// A scaled basis reports its rotation without the scale, and rebuilding
+    /// from that rotation plus the scale reproduces the basis.
+    #[test]
+    fn basis_rotation_quaternion_ignores_scale() {
+        let rot = Quaternion::from_axis_angle(Vector3::UP, FRAC_PI_2);
+        let scale = Vector3::new(2.0, 3.0, 4.0);
+        let b = Basis::from_quaternion_scale(rot, scale);
+        assert!(v3_approx_eq(b.get_scale(), scale));
+
+        let probe = Vector3::new(1.0, 0.0, 0.0);
+        assert!(v3_approx_eq(
+            b.get_rotation_quaternion().xform(probe),
+            rot.xform(probe)
+        ));
+    }
+
+    #[test]
+    fn transform3d_interpolate_with_hits_both_ends() {
+        let a = Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(1.0, 2.0, 3.0),
+        };
+        let b = Transform3D {
+            basis: Basis::from_quaternion(Quaternion::from_axis_angle(Vector3::UP, FRAC_PI_2)),
+            origin: Vector3::new(3.0, 2.0, 3.0),
+        };
+        assert!(v3_approx_eq(a.interpolate_with(b, 0.0).origin, a.origin));
+        assert!(v3_approx_eq(a.interpolate_with(b, 1.0).origin, b.origin));
+        // The midpoint sits halfway along the path, and stays a rigid motion.
+        let mid = a.interpolate_with(b, 0.5);
+        assert!(v3_approx_eq(mid.origin, Vector3::new(2.0, 2.0, 3.0)));
+        assert!(v3_approx_eq(mid.basis.get_scale(), Vector3::ONE));
+    }
+
+    #[test]
+    fn aabb_grow_abs_and_region_algebra() {
+        let a = Aabb::new(Vector3::ZERO, Vector3::new(2.0, 2.0, 2.0));
+        let grown = a.grow(1.0);
+        assert!(v3_approx_eq(grown.position, Vector3::new(-1.0, -1.0, -1.0)));
+        assert!(v3_approx_eq(grown.size, Vector3::new(4.0, 4.0, 4.0)));
+        assert!(grown.encloses(a));
+        assert!(!a.encloses(grown));
+        assert!(v3_approx_eq(a.get_end(), Vector3::new(2.0, 2.0, 2.0)));
+
+        let b = Aabb::new(Vector3::new(1.0, 1.0, 1.0), Vector3::new(2.0, 2.0, 2.0));
+        let overlap = a.intersection(b);
+        assert!(v3_approx_eq(overlap.position, Vector3::new(1.0, 1.0, 1.0)));
+        assert!(v3_approx_eq(overlap.size, Vector3::ONE));
+
+        // Disjoint boxes intersect in nothing.
+        let far = Aabb::new(Vector3::new(50.0, 50.0, 50.0), Vector3::ONE);
+        assert!(v3_approx_eq(a.intersection(far).size, Vector3::ZERO));
+
+        // A negative-size box normalizes to the same region.
+        let negative = Aabb::new(Vector3::new(2.0, 2.0, 2.0), Vector3::new(-2.0, -2.0, -2.0));
+        assert!(v3_approx_eq(negative.abs().position, Vector3::ZERO));
+        assert!(v3_approx_eq(
+            negative.abs().size,
+            Vector3::new(2.0, 2.0, 2.0)
+        ));
+    }
+
+    #[test]
+    fn plane_project_and_center() {
+        let p = Plane::new(Vector3::UP, 1.0);
+        // Projection drops the point onto the plane and is idempotent.
+        let projected = p.project(Vector3::new(0.0, 4.0, 0.0));
+        assert!(v3_approx_eq(projected, Vector3::new(0.0, 1.0, 0.0)));
+        assert!(v3_approx_eq(p.project(projected), projected));
+        assert!(approx_eq(p.distance_to(projected), 0.0));
+        assert!(p.has_point(projected, 1e-4));
+        assert!(!p.has_point(Vector3::ZERO, 1e-4));
+        assert!(v3_approx_eq(p.get_center(), Vector3::new(0.0, 1.0, 0.0)));
     }
 }

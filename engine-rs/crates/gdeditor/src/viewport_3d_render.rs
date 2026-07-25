@@ -16,7 +16,8 @@ use gdrender2d::renderer::{Bgra8Image, FrameBuffer, Raster};
 use gdrender3d::SoftwareRenderer3D;
 use gdscene::node::NodeId;
 use gdscene::SceneTree;
-use gdserver3d::light::{Light3D, Light3DId};
+use gdserver3d::instance::GeometryInstanceSettings;
+use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::Material3D;
 use gdserver3d::mesh::Mesh3D;
 use gdserver3d::server::RenderingServer3D;
@@ -78,6 +79,21 @@ pub struct Render3DItem {
     pub kind: Render3DKind,
     /// The mesh's material albedo colour, if any (else a default shade is used).
     pub albedo: Option<Color>,
+    /// The authored `StandardMaterial3D` resolved from the node's
+    /// `__material__*` companions, if it has one.
+    ///
+    /// Carried on the item because `populate_editor_scene_3d` has no
+    /// `SceneTree` — resolution has to happen while the tree is still in scope,
+    /// at construction. `None` keeps the previous flat-albedo behaviour, so a
+    /// mesh without an authored material is unaffected (pat-0q2kx.42).
+    pub material: Option<Material3D>,
+    /// The node's `GeometryInstance3D` settings — `cast_shadow`,
+    /// `visibility_range_*`, `transparency`, `material_overlay`, cull margins
+    /// (pat-nzgdu.76).
+    ///
+    /// Resolved at construction for the same reason as `material`: the render
+    /// pass downstream only receives items, with no `SceneTree` left to read.
+    pub geometry: GeometryInstanceSettings,
 }
 
 impl Viewport3D {
@@ -86,19 +102,51 @@ impl Viewport3D {
     /// nodes, or a primitive marker otherwise. Hidden nodes are skipped (nothing
     /// to draw), and items appear in scene-tree order.
     pub fn build_render_list(&self, tree: &SceneTree) -> Vec<Render3DItem> {
+        // One cache for the whole list: several meshes commonly share a texture,
+        // and without this each would decode the same PNG again.
+        let mut material_textures = gdscene::render_server_3d::MaterialTextureCache::new();
         self.collect_scene_content(tree)
             .into_iter()
             .filter(|r| r.visible)
-            .map(render_item_for)
+            .map(|mut r| {
+                // Fold the mesh sub-resource's authored properties into the marker
+                // before the item leaves the tree behind (pat-0q2kx.43).
+                r.mesh_path = r
+                    .mesh_path
+                    .take()
+                    .map(|path| mesh_marker_with_props(tree, r.node_id, path));
+                // Resolve the authored material HERE, while `tree` is still
+                // available — the render pass downstream only receives items.
+                let nid = gdscene::node::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(
+                    r.node_id,
+                ));
+                let material = gdscene::render_server_3d::material3d_for_node(
+                    tree,
+                    nid,
+                    &mut material_textures,
+                );
+                // Same reason as `material`: read the GeometryInstance3D block
+                // while the tree is still in scope (pat-nzgdu.76).
+                let geometry =
+                    gdscene::render_server_3d::geometry_instance_settings_for_node(tree, nid);
+                render_item_for(r, material, geometry)
+            })
             .collect()
     }
 }
 
 /// Maps a collected spatial node to its draw item.
-fn render_item_for(r: Node3DRenderable) -> Render3DItem {
+fn render_item_for(
+    r: Node3DRenderable,
+    material: Option<Material3D>,
+    geometry: GeometryInstanceSettings,
+) -> Render3DItem {
     let kind = if let Some(shape) = r.shape_path.as_deref() {
         let (shape, half_extents) = collision_shape_for(shape);
-        Render3DKind::Collision { shape, half_extents }
+        Render3DKind::Collision {
+            shape,
+            half_extents,
+        }
     } else if let Some(path) = r.mesh_path {
         Render3DKind::Mesh { path }
     } else {
@@ -111,6 +159,8 @@ fn render_item_for(r: Node3DRenderable) -> Render3DItem {
         global_transform: r.global_transform,
         kind,
         albedo: r.albedo,
+        material,
+        geometry,
     }
 }
 
@@ -134,11 +184,17 @@ fn collision_shape_for(shape: &str) -> (CollisionShapeKind, Vector3) {
         }
         "CapsuleShape3D" => {
             let r = n(0, 0.5);
-            (CollisionShapeKind::Capsule, Vector3::new(r, n(1, 2.0) * 0.5, r))
+            (
+                CollisionShapeKind::Capsule,
+                Vector3::new(r, n(1, 2.0) * 0.5, r),
+            )
         }
         "CylinderShape3D" => {
             let r = n(0, 0.5);
-            (CollisionShapeKind::Cylinder, Vector3::new(r, n(1, 2.0) * 0.5, r))
+            (
+                CollisionShapeKind::Cylinder,
+                Vector3::new(r, n(1, 2.0) * 0.5, r),
+            )
         }
         // BoxShape3D and anything else: dims are the full size, so halve them.
         _ => (
@@ -172,17 +228,230 @@ fn mesh_for_primitive(path: &str) -> Mesh3D {
 }
 
 /// The uncached geometry builder behind [`mesh_for_primitive`].
+///
+/// Accepts `primitive:<Type>` optionally followed by `?k=v&k=v` carrying the mesh
+/// sub-resource's authored properties (pat-0q2kx.43). Those properties travel in
+/// the path string because the path is the only channel from the scene tree to the
+/// render body — [`render_editor_3d_frame_from_inputs`] deliberately reads no tree
+/// — and because [`mesh_for_primitive`]'s cache is path-keyed: without them, two
+/// differently-sized boxes would collide on one cache entry and the second would
+/// silently render at the first one's size.
+///
+/// Geometry comes from the real `gdserver3d` generators, so a `BoxMesh` with
+/// `size = (4, 1, 4)` renders 4 units wide instead of a fixed 0.8 cube. Unspecified
+/// properties fall back to each generator's `Default`, which already matches
+/// Godot's documented defaults.
 fn build_mesh_for_primitive(path: &str) -> Mesh3D {
-    match path.strip_prefix("primitive:").unwrap_or("") {
-        "SphereMesh" => Mesh3D::sphere(0.45, 18),
-        "BoxMesh" | "CubeMesh" => Mesh3D::cube(0.8),
-        "CylinderMesh" => Mesh3D::cylinder(0.4, 0.4, 0.9, 18, 1),
-        "PrismMesh" => Mesh3D::cylinder(0.0, 0.45, 0.9, 18, 1),
-        "PlaneMesh" | "QuadMesh" => Mesh3D::plane(0.9),
-        "CapsuleMesh" => Mesh3D::capsule(0.32, 1.0, 14, 8),
-        "TorusMesh" => Mesh3D::torus(0.22, 0.45, 24, 12),
-        _ => Mesh3D::cube(0.7),
+    use gdserver3d::extra_meshes::PrismMesh;
+    use gdserver3d::primitive_mesh::{BoxMesh, CapsuleMesh, CylinderMesh, PlaneMesh, SphereMesh};
+
+    let (marker, props) = split_mesh_marker(path);
+    // A file-backed mesh (an .obj ext-resource) renders its own geometry.
+    if let Some(mesh) = mesh_from_file(marker) {
+        return mesh;
     }
+
+    let num = |key: &str, default: f32| props.get(key).copied().unwrap_or(default);
+    let count = |key: &str, default: u32| props.get(key).map(|v| *v as u32).unwrap_or(default);
+    let size3 = |default: Vector3| {
+        Vector3::new(
+            num("size.x", default.x),
+            num("size.y", default.y),
+            num("size.z", default.z),
+        )
+    };
+
+    match marker.strip_prefix("primitive:").unwrap_or("") {
+        "SphereMesh" => {
+            let d = SphereMesh::default();
+            SphereMesh {
+                radius: num("radius", d.radius),
+                height: num("height", d.height),
+                radial_segments: count("radial_segments", d.radial_segments),
+                rings: count("rings", d.rings),
+            }
+            .generate()
+        }
+        "BoxMesh" | "CubeMesh" => BoxMesh {
+            size: size3(BoxMesh::default().size),
+        }
+        .generate(),
+        "CylinderMesh" => {
+            let d = CylinderMesh::default();
+            CylinderMesh {
+                top_radius: num("top_radius", d.top_radius),
+                bottom_radius: num("bottom_radius", d.bottom_radius),
+                height: num("height", d.height),
+                radial_segments: count("radial_segments", d.radial_segments),
+                rings: count("rings", d.rings),
+            }
+            .generate()
+        }
+        // A real prism, not the cone the old code stood in for it with.
+        "PrismMesh" => {
+            let d = PrismMesh::default();
+            PrismMesh {
+                size: size3(d.size),
+                left_to_right: num("left_to_right", d.left_to_right),
+            }
+            .generate()
+        }
+        "PlaneMesh" | "QuadMesh" => {
+            let d = PlaneMesh::default();
+            PlaneMesh {
+                size: [num("size.x", d.size[0]), num("size.y", d.size[1])],
+            }
+            .generate()
+        }
+        "CapsuleMesh" => {
+            let d = CapsuleMesh::default();
+            CapsuleMesh {
+                radius: num("radius", d.radius),
+                height: num("height", d.height),
+                radial_segments: count("radial_segments", d.radial_segments),
+                rings: count("rings", d.rings),
+            }
+            .generate()
+        }
+        // No generator for these yet; keep the previous stand-in geometry.
+        "TorusMesh" => Mesh3D::torus(
+            num("inner_radius", 0.22),
+            num("outer_radius", 0.45),
+            count("rings", 24),
+            count("ring_segments", 12),
+        ),
+        // Unknown or unloadable mesh paths fall back to the default box — the same
+        // geometry `primitive:BoxMesh` yields, so "we could not load this" and "a
+        // plain box" are one placeholder rather than two subtly different ones.
+        _ => BoxMesh::default().generate(),
+    }
+}
+
+/// The mesh properties a `.tscn` sub-resource can carry, copied onto the node as
+/// `__mesh__*` companions the way shapes use `__shape__*` (pat-0q2kx.43).
+const MESH_PROP_KEYS: [&str; 10] = [
+    "radius",
+    "height",
+    "radial_segments",
+    "rings",
+    "top_radius",
+    "bottom_radius",
+    "left_to_right",
+    "inner_radius",
+    "outer_radius",
+    "ring_segments",
+];
+
+/// Appends a mesh node's authored sub-resource properties to its marker path as a
+/// `?k=v` query, so the geometry builder and the path-keyed cache both see them.
+///
+/// Values are read from `__mesh__<prop>` companions — the same convention the
+/// `.tscn` instancing path already uses for collision shapes (`__shape__*`). A node
+/// with no companions yields its marker unchanged, so nothing regresses for scenes
+/// that never authored mesh properties.
+fn mesh_marker_with_props(tree: &SceneTree, node_id: u64, path: String) -> String {
+    if !path.starts_with("primitive:") {
+        return path;
+    }
+    let nid = gdscene::node::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(node_id));
+    let Some(node) = tree.get_node(nid) else {
+        return path;
+    };
+
+    let mut query: Vec<String> = Vec::new();
+    // `size` is a Vector3 (or Vector2 for PlaneMesh) and flattens per component.
+    match node.get_property("__mesh__size") {
+        gdvariant::Variant::Vector3(v) => {
+            query.push(format!("size.x={}", v.x));
+            query.push(format!("size.y={}", v.y));
+            query.push(format!("size.z={}", v.z));
+        }
+        gdvariant::Variant::Vector2(v) => {
+            query.push(format!("size.x={}", v.x));
+            query.push(format!("size.y={}", v.y));
+        }
+        _ => {}
+    }
+    for key in MESH_PROP_KEYS {
+        match node.get_property(&format!("__mesh__{key}")) {
+            gdvariant::Variant::Float(f) => query.push(format!("{key}={f}")),
+            gdvariant::Variant::Int(i) => query.push(format!("{key}={i}")),
+            _ => {}
+        }
+    }
+    if query.is_empty() {
+        return path;
+    }
+    format!("{path}?{}", query.join("&"))
+}
+
+/// Splits a mesh marker into its type and a numeric property bag, accepting both
+/// encodings the codebase uses (pat-0q2kx.43).
+///
+/// * `primitive:BoxMesh|4,1,4` — the **positional** form, matching
+///   `packed_scene::encode_shape_marker` / [`collision_shape_for`]. This is what a
+///   `.tscn` load emits, so the order below is a contract with the encoder.
+/// * `primitive:BoxMesh?size.x=4&size.y=1` — the **named** form, produced by
+///   [`mesh_marker_with_props`] from `__mesh__*` companions on the node.
+///
+/// Malformed or non-numeric entries are skipped rather than poisoning the mesh.
+fn split_mesh_marker(path: &str) -> (&str, std::collections::HashMap<String, f32>) {
+    let mut props = std::collections::HashMap::new();
+
+    // Named form first: it cannot be confused with the positional one.
+    if let Some((marker, query)) = path.split_once('?') {
+        for pair in query.split('&') {
+            if let Some((key, value)) = pair.split_once('=') {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    props.insert(key.to_string(), parsed);
+                }
+            }
+        }
+        return (marker, props);
+    }
+
+    let Some((marker, dims)) = path.split_once('|') else {
+        return (path, props);
+    };
+    let nums: Vec<f32> = dims
+        .split(',')
+        .filter_map(|x| x.trim().parse::<f32>().ok())
+        .collect();
+    // Positional order per mesh type — the encoder writes these in this order.
+    let keys: &[&str] = match marker.strip_prefix("primitive:").unwrap_or("") {
+        "BoxMesh" | "CubeMesh" | "PrismMesh" => &["size.x", "size.y", "size.z", "left_to_right"],
+        "SphereMesh" | "CapsuleMesh" => &["radius", "height", "radial_segments", "rings"],
+        "CylinderMesh" => &[
+            "top_radius",
+            "bottom_radius",
+            "height",
+            "radial_segments",
+            "rings",
+        ],
+        "PlaneMesh" | "QuadMesh" => &["size.x", "size.y"],
+        "TorusMesh" => &["inner_radius", "outer_radius", "rings", "ring_segments"],
+        _ => &[],
+    };
+    for (key, value) in keys.iter().zip(nums) {
+        props.insert((*key).to_string(), value);
+    }
+    (marker, props)
+}
+
+/// Loads geometry for a mesh path that names a file rather than a primitive.
+///
+/// `.obj` is parsed with [`Mesh3D::from_obj`]. `res://` resolves against the
+/// current working directory, which is where the editor runs a project from.
+/// Anything unreadable or unparseable returns `None` so the caller keeps its
+/// placeholder — a missing asset should not blank the viewport.
+fn mesh_from_file(path: &str) -> Option<Mesh3D> {
+    let lowered = path.to_ascii_lowercase();
+    if !lowered.ends_with(".obj") {
+        return None;
+    }
+    let on_disk = path.strip_prefix("res://").unwrap_or(path);
+    let source = std::fs::read_to_string(on_disk).ok()?;
+    Mesh3D::from_obj(&source).ok()
 }
 
 /// Chooses the primitive marker for a non-mesh spatial node from its class.
@@ -200,6 +469,23 @@ fn primitive_for_class(class: &str) -> PrimitiveShape {
 /// the properties that drive both surface shading and the sky's sun disc.
 #[derive(Debug, Clone, Copy)]
 pub struct SceneLight3D {
+    /// Which Light3D family this came from — the renderer needs a different light
+    /// type and a different set of parameters for each (pat-0q2kx.41).
+    pub kind: SceneLightKind,
+    /// World-space position of the light. Meaningless for `Directional`, which is
+    /// infinitely far away; load-bearing for omni and spot.
+    pub position: Vector3,
+    /// `omni_range` / `spot_range`: the distance at which the light falls to zero.
+    pub range: f32,
+    /// `omni_attenuation` / `spot_attenuation`: falloff curve exponent.
+    pub attenuation: f32,
+    /// `spot_angle` in degrees (half-angle of the cone).
+    pub spot_angle: f32,
+    /// `spot_angle_attenuation`: falloff across the cone.
+    pub spot_angle_attenuation: f32,
+    /// `shadow_enabled` — the renderer only generates a shadow map for a light
+    /// that asks for one, so this is what makes shadows appear at all.
+    pub shadow_enabled: bool,
     /// World-space direction the light shines (its global −Z), normalized.
     pub direction: Vector3,
     /// `light_color` (sRGB authoring).
@@ -224,10 +510,117 @@ pub struct SceneLight3D {
 /// draws sun discs exactly like the light configured in the scene, not just a
 /// generic sun. Empty when the scene has no directional light (the caller then
 /// falls back to the preview sun).
+/// Which `Light3D` subclass a [`SceneLight3D`] came from (pat-0q2kx.41).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneLightKind {
+    /// `DirectionalLight3D` — infinite, direction only.
+    Directional,
+    /// `OmniLight3D` — a point light with a range.
+    Omni,
+    /// `SpotLight3D` — a cone from a position.
+    Spot,
+}
+
+/// Every light the scene contributes: the directional lights above plus each
+/// `OmniLight3D` and `SpotLight3D` with its own range/attenuation/cone
+/// (pat-0q2kx.41).
+///
+/// Before this, the wired render path collected **only** directional lights, so an
+/// `OmniLight3D` or `SpotLight3D` in the scene emitted nothing and appeared solely
+/// as an editor marker cube — the renderer had supported both all along.
+///
+/// Directional lights stay capped at 4 (Godot's sky sun-disc limit); omni and spot
+/// share a further budget so a pathological scene cannot unbound the light loop.
+fn scene_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
+    const MAX_POSITIONAL_LIGHTS: usize = 8;
+    let mut lights = scene_directional_lights(tree);
+
+    let mut positional = 0usize;
+    for nid in tree.all_nodes_in_tree_order() {
+        if positional >= MAX_POSITIONAL_LIGHTS {
+            break;
+        }
+        let Some(node) = tree.get_node(nid) else {
+            continue;
+        };
+        let kind = if node.is_class("SpotLight3D") {
+            SceneLightKind::Spot
+        } else if node.is_class("OmniLight3D") {
+            SceneLightKind::Omni
+        } else {
+            continue;
+        };
+        if !gdscene::node3d::is_visible_in_tree(tree, nid) {
+            continue;
+        }
+
+        let transform = gdscene::node3d::get_global_transform(tree, nid);
+        let z = transform.basis.z;
+        let dir = Vector3::new(-z.x, -z.y, -z.z);
+        let len = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt();
+        let direction = if len > 1e-6 {
+            Vector3::new(dir.x / len, dir.y / len, dir.z / len)
+        } else {
+            Vector3::new(0.0, -1.0, 0.0)
+        };
+
+        // doc/classes/{OmniLight3D,SpotLight3D}.xml defaults: range 5.0,
+        // attenuation 1.0, spot_angle 45°, spot_angle_attenuation 1.0.
+        let (range, attenuation) = match kind {
+            SceneLightKind::Spot => (
+                gdscene::node3d::get_spot_range(tree, nid) as f32,
+                gdscene::node3d::get_spot_attenuation(tree, nid) as f32,
+            ),
+            _ => (
+                float_prop_3d_render(tree, nid, "omni_range", 5.0),
+                float_prop_3d_render(tree, nid, "omni_attenuation", 1.0),
+            ),
+        };
+
+        lights.push(SceneLight3D {
+            kind,
+            position: transform.origin,
+            range,
+            attenuation,
+            spot_angle: gdscene::node3d::get_spot_angle(tree, nid) as f32,
+            spot_angle_attenuation: gdscene::node3d::get_spot_angle_attenuation(tree, nid) as f32,
+            shadow_enabled: bool_prop_3d_render(tree, nid, "shadow_enabled"),
+            direction,
+            color: gdscene::node3d::get_light_color(tree, nid),
+            energy: gdscene::node3d::get_light_energy(tree, nid) as f32,
+            angular_distance: 0.0,
+            // Only directional lights draw a sky sun disc.
+            sky: false,
+            affects_scene: true,
+        });
+        positional += 1;
+    }
+    lights
+}
+
+/// Reads an `f32` property, defaulting to `default`.
+fn float_prop_3d_render(tree: &SceneTree, nid: gdscene::NodeId, key: &str, default: f32) -> f32 {
+    match tree.get_node(nid).map(|n| n.get_property(key)) {
+        Some(gdvariant::Variant::Float(f)) => f as f32,
+        Some(gdvariant::Variant::Int(i)) => i as f32,
+        _ => default,
+    }
+}
+
+/// Reads a bool property, defaulting to `false`.
+fn bool_prop_3d_render(tree: &SceneTree, nid: gdscene::NodeId, key: &str) -> bool {
+    matches!(
+        tree.get_node(nid).map(|n| n.get_property(key)),
+        Some(gdvariant::Variant::Bool(true))
+    )
+}
+
 fn scene_directional_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
     let mut lights = Vec::new();
     for nid in tree.all_nodes_in_tree_order() {
-        let Some(node) = tree.get_node(nid) else { continue };
+        let Some(node) = tree.get_node(nid) else {
+            continue;
+        };
         if !node.is_class("DirectionalLight3D") {
             continue;
         }
@@ -239,6 +632,15 @@ fn scene_directional_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
         }
         let sky_mode = gdscene::node3d::get_light_sky_mode(tree, nid);
         lights.push(SceneLight3D {
+            kind: SceneLightKind::Directional,
+            // A directional light is infinitely far away, so only its direction
+            // matters; the positional fields stay at their neutral values.
+            position: Vector3::ZERO,
+            range: 0.0,
+            attenuation: 1.0,
+            spot_angle: 0.0,
+            spot_angle_attenuation: 1.0,
+            shadow_enabled: bool_prop_3d_render(tree, nid, "shadow_enabled"),
             direction: Vector3::new(dir.x / len, dir.y / len, dir.z / len),
             color: gdscene::node3d::get_light_color(tree, nid),
             energy: gdscene::node3d::get_light_energy(tree, nid) as f32,
@@ -265,23 +667,83 @@ fn scene_directional_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
 // frame via the software 3D renderer, so 3D mode is no longer cosmetic.
 
 /// Minor grid line color (one line per world unit). Drawn faint; far lines fade.
-const GRID_MINOR_COLOR_3D: Color = Color { r: 0.55, g: 0.58, b: 0.65, a: 1.0 };
+const GRID_MINOR_COLOR_3D: Color = Color {
+    r: 0.55,
+    g: 0.58,
+    b: 0.65,
+    a: 1.0,
+};
 /// Major grid line color (every 10 units) — brighter so the scale reads.
-const GRID_MAJOR_COLOR_3D: Color = Color { r: 0.66, g: 0.69, b: 0.77, a: 1.0 };
+const GRID_MAJOR_COLOR_3D: Color = Color {
+    r: 0.66,
+    g: 0.69,
+    b: 0.77,
+    a: 1.0,
+};
 /// Origin/gizmo axis colors — Godot convention: X = red, Y = green, Z = blue.
-const X_AXIS_COLOR_3D: Color = Color { r: 0.86, g: 0.32, b: 0.34, a: 1.0 };
-const Y_AXIS_COLOR_3D: Color = Color { r: 0.55, g: 0.78, b: 0.30, a: 1.0 };
-const Z_AXIS_COLOR_3D: Color = Color { r: 0.33, g: 0.55, b: 0.88, a: 1.0 };
+const X_AXIS_COLOR_3D: Color = Color {
+    r: 0.86,
+    g: 0.32,
+    b: 0.34,
+    a: 1.0,
+};
+const Y_AXIS_COLOR_3D: Color = Color {
+    r: 0.55,
+    g: 0.78,
+    b: 0.30,
+    a: 1.0,
+};
+const Z_AXIS_COLOR_3D: Color = Color {
+    r: 0.33,
+    g: 0.55,
+    b: 0.88,
+    a: 1.0,
+};
 /// The uniform viewport backdrop behind the 3D scene (Godot's dark editor gray).
-const VIEWPORT_BG_3D: Color = Color { r: 0.13, g: 0.14, b: 0.17, a: 1.0 };
+const VIEWPORT_BG_3D: Color = Color {
+    r: 0.13,
+    g: 0.14,
+    b: 0.17,
+    a: 1.0,
+};
 /// Selection outline color drawn around the picked node (Godot's selection orange).
-const SELECTION_COLOR_3D: Color = Color { r: 1.0, g: 0.62, b: 0.20, a: 1.0 };
-const MESH_COLOR_3D: Color = Color { r: 0.78, g: 0.80, b: 0.85, a: 1.0 };
-const CAMERA_COLOR_3D: Color = Color { r: 0.45, g: 0.75, b: 1.0, a: 1.0 };
-const LIGHT_COLOR_3D: Color = Color { r: 1.0, g: 0.85, b: 0.35, a: 1.0 };
-const BOX_COLOR_3D: Color = Color { r: 0.90, g: 0.62, b: 0.20, a: 1.0 };
+const SELECTION_COLOR_3D: Color = Color {
+    r: 1.0,
+    g: 0.62,
+    b: 0.20,
+    a: 1.0,
+};
+const MESH_COLOR_3D: Color = Color {
+    r: 0.78,
+    g: 0.80,
+    b: 0.85,
+    a: 1.0,
+};
+const CAMERA_COLOR_3D: Color = Color {
+    r: 0.45,
+    g: 0.75,
+    b: 1.0,
+    a: 1.0,
+};
+const LIGHT_COLOR_3D: Color = Color {
+    r: 1.0,
+    g: 0.85,
+    b: 0.35,
+    a: 1.0,
+};
+const BOX_COLOR_3D: Color = Color {
+    r: 0.90,
+    g: 0.62,
+    b: 0.20,
+    a: 1.0,
+};
 /// Collision-shape wireframe colour (Godot's teal collision gizmos).
-const COLLISION_COLOR_3D: Color = Color { r: 0.10, g: 0.75, b: 0.78, a: 1.0 };
+const COLLISION_COLOR_3D: Color = Color {
+    r: 0.10,
+    g: 0.75,
+    b: 0.78,
+    a: 1.0,
+};
 
 fn solid_material_3d(albedo: Color) -> Material3D {
     let mut m = Material3D::default();
@@ -331,7 +793,10 @@ fn project_view(viewport: &Viewport3D, v: Vector3) -> (f32, f32) {
         crate::viewport_3d::Projection::Perspective => {
             let half_fov = (viewport.camera.fov_degrees * 0.5 * std::f32::consts::PI / 180.0).tan();
             let inv_z = if v.z.abs() < 1e-6 { -1e6 } else { -1.0 / v.z };
-            ((v.x * inv_z) / (half_fov * aspect), (v.y * inv_z) / half_fov)
+            (
+                (v.x * inv_z) / (half_fov * aspect),
+                (v.y * inv_z) / half_fov,
+            )
         }
     };
     let px = (ndc_x + 1.0) * 0.5 * viewport.width as f32;
@@ -433,7 +898,18 @@ fn draw_grid_segment(
     }
     let (x0, y0) = project_view(viewport, va);
     let (x1, y1) = project_view(viewport, vb);
-    draw_aa_line_fade(fb, x0, y0, 1.0 / va.z, x1, y1, 1.0 / vb.z, color, base_alpha, fade_dist);
+    draw_aa_line_fade(
+        fb,
+        x0,
+        y0,
+        1.0 / va.z,
+        x1,
+        y1,
+        1.0 / vb.z,
+        color,
+        base_alpha,
+        fade_dist,
+    );
 }
 
 /// Transforms a local point by a [`Transform3D`] (basis * p + origin).
@@ -471,20 +947,45 @@ fn draw_edge(
     let (x0, y0) = project_view(viewport, va);
     let (x1, y1) = project_view(viewport, vb);
     // A huge fade distance makes draw_aa_line_fade effectively solid.
-    draw_aa_line_fade(fb, x0, y0, 1.0 / va.z, x1, y1, 1.0 / vb.z, color, alpha, 1.0e9);
+    draw_aa_line_fade(
+        fb,
+        x0,
+        y0,
+        1.0 / va.z,
+        x1,
+        y1,
+        1.0 / vb.z,
+        color,
+        alpha,
+        1.0e9,
+    );
 }
 
 /// The 12 edges of a cube, as index pairs into its 8 corners (corner `i` has
 /// component `j` set to the high value when bit `j` of `i` is set).
 const BOX_EDGES: [(usize, usize); 12] = [
-    (0, 1), (2, 3), (4, 5), (6, 7), // along X
-    (0, 2), (1, 3), (4, 6), (5, 7), // along Y
-    (0, 4), (1, 5), (2, 6), (3, 7), // along Z
+    (0, 1),
+    (2, 3),
+    (4, 5),
+    (6, 7), // along X
+    (0, 2),
+    (1, 3),
+    (4, 6),
+    (5, 7), // along Y
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7), // along Z
 ];
 
 /// Draws a wireframe box (12 edges) of half-size `h` at `transform`, used as the
 /// selection outline around the picked node — like Godot's selection box.
-fn draw_selection_box(fb: &mut impl Raster, viewport: &Viewport3D, transform: &Transform3D, h: f32) {
+fn draw_selection_box(
+    fb: &mut impl Raster,
+    viewport: &Viewport3D,
+    transform: &Transform3D,
+    h: f32,
+) {
     let view = viewport.camera.view_transform();
     let s = [-h, h];
     let mut c = [Vector3::ZERO; 8];
@@ -539,7 +1040,15 @@ fn draw_camera_gizmo(fb: &mut impl Raster, viewport: &Viewport3D, tf: &Transform
         draw_edge(fb, viewport, &view, apex, *cc, CAMERA_COLOR_3D, 0.95);
     }
     for i in 0..4 {
-        draw_edge(fb, viewport, &view, c[i], c[(i + 1) % 4], CAMERA_COLOR_3D, 0.95);
+        draw_edge(
+            fb,
+            viewport,
+            &view,
+            c[i],
+            c[(i + 1) % 4],
+            CAMERA_COLOR_3D,
+            0.95,
+        );
     }
 }
 
@@ -606,8 +1115,10 @@ fn draw_collision_gizmo(
             let sz = [-hz, hz];
             let mut c = [Vector3::ZERO; 8];
             for (i, slot) in c.iter_mut().enumerate() {
-                *slot =
-                    xform_point(tf, Vector3::new(sx[i & 1], sy[(i >> 1) & 1], sz[(i >> 2) & 1]));
+                *slot = xform_point(
+                    tf,
+                    Vector3::new(sx[i & 1], sy[(i >> 1) & 1], sz[(i >> 2) & 1]),
+                );
             }
             for (a, b) in BOX_EDGES {
                 draw_edge(fb, viewport, &view, c[a], c[b], col, 0.95);
@@ -673,9 +1184,24 @@ fn draw_move_gizmo(fb: &mut impl Raster, viewport: &Viewport3D, center: Vector3,
     let s = pf * 0.45;
     // (offset from center, in-plane edge dir u, in-plane edge dir v, color)
     let planes = [
-        (Vector3::new(pf, pf, 0.0), Vector3::new(s, 0.0, 0.0), Vector3::new(0.0, s, 0.0), Z_AXIS_COLOR_3D),
-        (Vector3::new(pf, 0.0, pf), Vector3::new(s, 0.0, 0.0), Vector3::new(0.0, 0.0, s), Y_AXIS_COLOR_3D),
-        (Vector3::new(0.0, pf, pf), Vector3::new(0.0, s, 0.0), Vector3::new(0.0, 0.0, s), X_AXIS_COLOR_3D),
+        (
+            Vector3::new(pf, pf, 0.0),
+            Vector3::new(s, 0.0, 0.0),
+            Vector3::new(0.0, s, 0.0),
+            Z_AXIS_COLOR_3D,
+        ),
+        (
+            Vector3::new(pf, 0.0, pf),
+            Vector3::new(s, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, s),
+            Y_AXIS_COLOR_3D,
+        ),
+        (
+            Vector3::new(0.0, pf, pf),
+            Vector3::new(0.0, s, 0.0),
+            Vector3::new(0.0, 0.0, s),
+            X_AXIS_COLOR_3D,
+        ),
     ];
     for (off, u, v, color) in planes {
         let c = Vector3::new(center.x + off.x, center.y + off.y, center.z + off.z);
@@ -686,7 +1212,15 @@ fn draw_move_gizmo(fb: &mut impl Raster, viewport: &Viewport3D, center: Vector3,
             Vector3::new(c.x + u.x - v.x, c.y + u.y - v.y, c.z + u.z - v.z),
         ];
         for i in 0..4 {
-            draw_edge(fb, viewport, &view, corners[i], corners[(i + 1) % 4], color, 0.85);
+            draw_edge(
+                fb,
+                viewport,
+                &view,
+                corners[i],
+                corners[(i + 1) % 4],
+                color,
+                0.85,
+            );
         }
     }
 }
@@ -698,9 +1232,15 @@ fn draw_rotate_gizmo(fb: &mut impl Raster, viewport: &Viewport3D, center: Vector
     const SEGMENTS: usize = 48;
     // (color, function mapping an angle to a ring point offset from center)
     let rings: [(Color, fn(f32, f32) -> Vector3); 3] = [
-        (X_AXIS_COLOR_3D, |a, r| Vector3::new(0.0, r * a.cos(), r * a.sin())),
-        (Y_AXIS_COLOR_3D, |a, r| Vector3::new(r * a.cos(), 0.0, r * a.sin())),
-        (Z_AXIS_COLOR_3D, |a, r| Vector3::new(r * a.cos(), r * a.sin(), 0.0)),
+        (X_AXIS_COLOR_3D, |a, r| {
+            Vector3::new(0.0, r * a.cos(), r * a.sin())
+        }),
+        (Y_AXIS_COLOR_3D, |a, r| {
+            Vector3::new(r * a.cos(), 0.0, r * a.sin())
+        }),
+        (Z_AXIS_COLOR_3D, |a, r| {
+            Vector3::new(r * a.cos(), r * a.sin(), 0.0)
+        }),
     ];
     for (color, point) in rings {
         let mut prev: Option<Vector3> = None;
@@ -819,7 +1359,7 @@ pub struct Editor3DRenderInputs {
 pub fn editor_3d_render_inputs(viewport: &Viewport3D, tree: &SceneTree) -> Editor3DRenderInputs {
     Editor3DRenderInputs {
         items: viewport.build_render_list(tree),
-        scene_lights: scene_directional_lights(tree),
+        scene_lights: scene_lights(tree),
     }
 }
 
@@ -844,7 +1384,11 @@ fn populate_editor_scene_3d(
     for item in items {
         // Collision shapes are wireframe-only; record selection and skip the
         // solid mesh instance.
-        if let Render3DKind::Collision { shape, half_extents } = &item.kind {
+        if let Render3DKind::Collision {
+            shape,
+            half_extents,
+        } = &item.kind
+        {
             collision_gizmos.push((item.global_transform, *shape, *half_extents));
             if viewport.selection.is_selected(item.node_id) {
                 selected_tfs.push(item.global_transform);
@@ -856,9 +1400,10 @@ fn populate_editor_scene_3d(
         }
         let (mesh, color) = match &item.kind {
             // Shade the mesh in its material albedo when it has one, else default.
-            Render3DKind::Mesh { path } => {
-                (mesh_for_primitive(path), item.albedo.unwrap_or(MESH_COLOR_3D))
-            }
+            Render3DKind::Mesh { path } => (
+                mesh_for_primitive(path),
+                item.albedo.unwrap_or(MESH_COLOR_3D),
+            ),
             Render3DKind::Collision { .. } => unreachable!("handled above"),
             Render3DKind::Primitive { shape } => {
                 if matches!(shape, PrimitiveShape::Camera | PrimitiveShape::Light) {
@@ -880,11 +1425,27 @@ fn populate_editor_scene_3d(
         }
         let id = renderer.create_instance();
         renderer.set_mesh(id, mesh);
-        renderer.set_material(id, solid_material_3d(color));
+        // The authored material wins; a mesh without one keeps the flat shade.
+        renderer.set_material(
+            id,
+            item.material
+                .clone()
+                .unwrap_or_else(|| solid_material_3d(color)),
+        );
         renderer.set_transform(id, item.global_transform);
         renderer.set_visible(id, true);
+        // GeometryInstance3D (pat-nzgdu.76): cast_shadow=Off must drop this
+        // instance out of the shadow maps, and a mesh past its
+        // visibility_range_end must not be drawn — in the editor viewport too,
+        // not just the runtime adapter.
+        renderer.set_geometry_instance_settings(id, item.geometry.clone());
     }
-    EditorOverlays3D { selected_tfs, primary_tf, node_gizmos, collision_gizmos }
+    EditorOverlays3D {
+        selected_tfs,
+        primary_tf,
+        node_gizmos,
+        collision_gizmos,
+    }
 }
 
 /// Adds the editor's key lighting to `renderer`: every scene
@@ -917,10 +1478,33 @@ fn setup_editor_lighting_3d(
         return;
     }
 
-    // Scene directional lights: add each with its authored properties so the
-    // sky sun disc(s) and surface shading match the light in the scene.
+    // Scene lights: add each with its authored properties so the sky sun disc(s)
+    // and surface shading match the lights in the scene. Omni and spot carry a
+    // position plus range/attenuation (and a cone, for spot) instead of just a
+    // direction (pat-0q2kx.41).
     for (i, sl) in scene_lights.iter().enumerate() {
-        let mut light = Light3D::directional(Light3DId(9_000_001 + i as u64));
+        let id = Light3DId(9_000_001 + i as u64);
+        let mut light = match sl.kind {
+            SceneLightKind::Directional => Light3D::directional(id),
+            // Point is Godot's omni. Spot starts from the same positional light
+            // and switches type, since the library has no spot constructor.
+            SceneLightKind::Omni => Light3D::point(id, sl.position),
+            SceneLightKind::Spot => {
+                let mut l = Light3D::point(id, sl.position);
+                l.light_type = LightType::Spot;
+                l.spot_angle = sl.spot_angle;
+                l.spot_angle_attenuation = sl.spot_angle_attenuation;
+                l
+            }
+        };
+        if sl.kind != SceneLightKind::Directional {
+            light.position = sl.position;
+            light.range = sl.range;
+            light.attenuation = sl.attenuation;
+        }
+        // Without this no shadow map is ever generated, which is why shadows
+        // never appeared in the product however they were authored.
+        light.shadow_enabled = sl.shadow_enabled;
         light.direction = sl.direction;
         light.color = sl.color;
         light.energy = sl.energy.max(0.0);
@@ -983,7 +1567,11 @@ pub(crate) fn editor_render_environment(
 /// colored origin axes, per-node gizmos (camera frustums / light rays), collision
 /// wireframes, selection outlines, and the transform gizmo on the primary
 /// selection. Shared by both editor render paths so the chrome is identical.
-fn draw_editor_overlays_3d(fb: &mut impl Raster, viewport: &Viewport3D, overlays: &EditorOverlays3D) {
+fn draw_editor_overlays_3d(
+    fb: &mut impl Raster,
+    viewport: &Viewport3D,
+    overlays: &EditorOverlays3D,
+) {
     // --- Ground grid + origin axes, projected as crisp anti-aliased lines. ---
     draw_grid_overlay(fb, viewport);
 
@@ -1006,7 +1594,10 @@ fn draw_editor_overlays_3d(fb: &mut impl Raster, viewport: &Viewport3D, overlays
     for tf in &overlays.selected_tfs {
         draw_selection_box(fb, viewport, tf, 0.55);
     }
-    if let Some(tf) = overlays.primary_tf.or_else(|| overlays.selected_tfs.first().copied()) {
+    if let Some(tf) = overlays
+        .primary_tf
+        .or_else(|| overlays.selected_tfs.first().copied())
+    {
         use crate::viewport_3d::GizmoMode3D;
         let len = gizmo_arrow_length(viewport);
         match viewport.selection.gizmo_mode {
@@ -1414,7 +2005,13 @@ mod tests {
     #[test]
     fn primitives_resolve_to_real_geometry_not_box() {
         let cube = mesh_for_primitive("primitive:BoxMesh");
-        for name in ["SphereMesh", "CylinderMesh", "CapsuleMesh", "PrismMesh", "TorusMesh"] {
+        for name in [
+            "SphereMesh",
+            "CylinderMesh",
+            "CapsuleMesh",
+            "PrismMesh",
+            "TorusMesh",
+        ] {
             let m = mesh_for_primitive(&format!("primitive:{name}"));
             assert_ne!(
                 m.vertex_count(),
@@ -1457,7 +2054,10 @@ mod tests {
 
         // A custom-sized box carries its real extents through the marker.
         let mut sized = Node::new("SizedBox", "CollisionShape3D");
-        sized.set_property("shape", gdvariant::Variant::String("shape:BoxShape3D|2,4,6".into()));
+        sized.set_property(
+            "shape",
+            gdvariant::Variant::String("shape:BoxShape3D|2,4,6".into()),
+        );
         let sized_id = tree.add_child(root, sized).unwrap().raw();
 
         let vp = Viewport3D::new(640, 480);
@@ -1473,7 +2073,10 @@ mod tests {
         // The custom box's half-extents are size/2 = (1, 2, 3).
         let sb = find(&items, sized_id).expect("sized box item");
         match &sb.kind {
-            Render3DKind::Collision { shape: CollisionShapeKind::Box, half_extents } => {
+            Render3DKind::Collision {
+                shape: CollisionShapeKind::Box,
+                half_extents,
+            } => {
                 assert!(
                     (half_extents.x - 1.0).abs() < 1e-4
                         && (half_extents.y - 2.0).abs() < 1e-4
@@ -1492,8 +2095,12 @@ mod tests {
         gdobject::class_db::register_3d_classes();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        assert!(scene_directional_lights(&tree).is_empty(), "no light → empty");
-        tree.add_child(root, Node::new("Sun", "DirectionalLight3D")).unwrap();
+        assert!(
+            scene_directional_lights(&tree).is_empty(),
+            "no light → empty"
+        );
+        tree.add_child(root, Node::new("Sun", "DirectionalLight3D"))
+            .unwrap();
         let lights = scene_directional_lights(&tree);
         assert_eq!(lights.len(), 1);
         let dir = lights[0].direction;
@@ -1514,13 +2121,22 @@ mod tests {
         gdobject::class_db::register_3d_classes();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        let id = tree.add_child(root, Node::new("Sun", "DirectionalLight3D")).unwrap();
-        gdscene::node3d::set_light_color(&mut tree, id, gdcore::math::Color::new(1.0, 0.8, 0.5, 1.0));
+        let id = tree
+            .add_child(root, Node::new("Sun", "DirectionalLight3D"))
+            .unwrap();
+        gdscene::node3d::set_light_color(
+            &mut tree,
+            id,
+            gdcore::math::Color::new(1.0, 0.8, 0.5, 1.0),
+        );
         gdscene::node3d::set_light_energy(&mut tree, id, 3.0);
         gdscene::node3d::set_light_angular_distance(&mut tree, id, 2.5);
         let lights = scene_directional_lights(&tree);
         assert_eq!(lights.len(), 1);
-        assert_eq!(lights[0].color, gdcore::math::Color::new(1.0, 0.8, 0.5, 1.0));
+        assert_eq!(
+            lights[0].color,
+            gdcore::math::Color::new(1.0, 0.8, 0.5, 1.0)
+        );
         assert!((lights[0].energy - 3.0).abs() < 1e-6);
         assert!((lights[0].angular_distance - 2.5).abs() < 1e-6);
         // Default sky_mode (LIGHT_AND_SKY) → contributes to the sky.
@@ -1535,7 +2151,9 @@ mod tests {
         gdobject::class_db::register_3d_classes();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        let id = tree.add_child(root, Node::new("Sun", "DirectionalLight3D")).unwrap();
+        let id = tree
+            .add_child(root, Node::new("Sun", "DirectionalLight3D"))
+            .unwrap();
         if let Some(n) = tree.get_node_mut(id) {
             n.set_property("sky_mode", gdvariant::Variant::Int(1)); // LIGHT_ONLY
         }
@@ -1562,7 +2180,8 @@ mod tests {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         for i in 0..6 {
-            tree.add_child(root, Node::new(&format!("Sun{i}"), "DirectionalLight3D")).unwrap();
+            tree.add_child(root, Node::new(&format!("Sun{i}"), "DirectionalLight3D"))
+                .unwrap();
         }
         assert_eq!(scene_directional_lights(&tree).len(), 4);
     }
@@ -1575,7 +2194,10 @@ mod tests {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut n = Node::new("RedBox", "MeshInstance3D");
-        n.set_property("mesh", gdvariant::Variant::String("primitive:BoxMesh".into()));
+        n.set_property(
+            "mesh",
+            gdvariant::Variant::String("primitive:BoxMesh".into()),
+        );
         n.set_property(
             "albedo_color",
             gdvariant::Variant::Color(gdcore::math::Color::new(1.0, 0.0, 0.0, 1.0)),
@@ -1586,7 +2208,10 @@ mod tests {
         let items = vp.build_render_list(&tree);
         let it = find(&items, id).expect("mesh item");
         let a = it.albedo.expect("albedo present on the render item");
-        assert!((a.r - 1.0).abs() < 1e-4 && a.g.abs() < 1e-4 && a.b.abs() < 1e-4, "red: {a:?}");
+        assert!(
+            (a.r - 1.0).abs() < 1e-4 && a.g.abs() < 1e-4 && a.b.abs() < 1e-4,
+            "red: {a:?}"
+        );
     }
 
     /// Acceptance (pat-kka71.2): the 3D viewport builds a render list from the
@@ -1616,7 +2241,11 @@ mod tests {
             .add_child(root, Node::new("Sprite", "Sprite2D"))
             .unwrap();
 
-        node3d::set_position(&mut tree, mesh_id, gdcore::math::Vector3::new(1.0, 2.0, 3.0));
+        node3d::set_position(
+            &mut tree,
+            mesh_id,
+            gdcore::math::Vector3::new(1.0, 2.0, 3.0),
+        );
         node3d::set_mesh_path(&mut tree, mesh_id, "res://crate.obj");
         node3d::set_visible(&mut tree, hidden_id, false);
 
@@ -1630,23 +2259,37 @@ mod tests {
 
         // The mesh node renders its mesh, at its global transform.
         let mesh = find(&items, mesh_id.raw()).expect("mesh item present");
-        assert_eq!(mesh.kind, Render3DKind::Mesh { path: "res://crate.obj".to_string() });
-        assert_eq!(mesh.global_transform.origin, gdcore::math::Vector3::new(1.0, 2.0, 3.0));
+        assert_eq!(
+            mesh.kind,
+            Render3DKind::Mesh {
+                path: "res://crate.obj".to_string()
+            }
+        );
+        assert_eq!(
+            mesh.global_transform.origin,
+            gdcore::math::Vector3::new(1.0, 2.0, 3.0)
+        );
 
         // Camera and light render primitive markers.
         assert_eq!(
             find(&items, cam_id.raw()).unwrap().kind,
-            Render3DKind::Primitive { shape: PrimitiveShape::Camera }
+            Render3DKind::Primitive {
+                shape: PrimitiveShape::Camera
+            }
         );
         assert_eq!(
             find(&items, light_id.raw()).unwrap().kind,
-            Render3DKind::Primitive { shape: PrimitiveShape::Light }
+            Render3DKind::Primitive {
+                shape: PrimitiveShape::Light
+            }
         );
 
         // A plain, mesh-less Node3D renders a generic box marker.
         assert_eq!(
             find(&items, empty_id.raw()).unwrap().kind,
-            Render3DKind::Primitive { shape: PrimitiveShape::Box }
+            Render3DKind::Primitive {
+                shape: PrimitiveShape::Box
+            }
         );
     }
 }

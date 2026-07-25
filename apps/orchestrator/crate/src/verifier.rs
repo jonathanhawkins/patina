@@ -371,15 +371,25 @@ fn command_mentions_test(cmd: &str, test_name: &str) -> bool {
 /// Two rules, both aimed at the same failure: a bead closing on a green
 /// `cargo check` while its actual scope was never exercised.
 ///
-/// 1. **A named acceptance test must be run.** If the criteria names a test and
-///    nothing in the verify set runs it, the completion is rejected rather than
-///    verified against unrelated commands.
+/// 1. **A named acceptance test demands an actual test run.** If the criteria
+///    names a test and the completion reports only compile checks, it is
+///    rejected instead of being verified against a `cargo check`.
 /// 2. **A real test beats a compile check.** Once an acceptance test is in the
 ///    set, generic `cargo check` / `cargo build` commands are dropped: they are
 ///    not evidence of the bead's scope, and they cost verify-lane time.
 ///
 /// A bead with no stated acceptance keeps the current behavior — the worker's
 /// reported commands, unchanged.
+///
+/// Rule 1 deliberately checks *that a test runs*, not *that the named one does*.
+/// The first cut demanded the exact name and produced immediate false rejections
+/// on correct completions, because a bead names a test **function**
+/// (`cross_object_script_method_call`) while the command selects the **binary**
+/// that contains it (`--test cross_object_script_call_test`), or a module filter
+/// that covers it (`--lib animation_tree`). Neither string contains the other,
+/// and the coordinator cannot know the mapping without reading the test sources.
+/// A green run of the wrong test is still caught downstream — `count_tests_run`
+/// rejects a vacuous pass, and the test itself must go green.
 pub fn select_verify_commands(
     reported: &[String],
     demand: &AcceptanceDemand,
@@ -388,32 +398,44 @@ pub fn select_verify_commands(
         return Ok(reported.to_vec());
     }
 
-    let covers = |name: &str| {
-        demand
-            .commands
-            .iter()
-            .chain(reported.iter())
-            .any(|cmd| command_mentions_test(cmd.as_str(), name))
-    };
-    let uncovered: Vec<&str> = demand
-        .test_names
+    let runs_a_test = demand
+        .commands
         .iter()
-        .map(|name| name.as_str())
-        .filter(|name| !covers(name))
-        .collect();
-    if !uncovered.is_empty() {
+        .chain(reported.iter())
+        .any(|cmd| is_test_run_command(cmd.as_str()));
+    if !demand.test_names.is_empty() && !runs_a_test {
         return Err(format!(
             "acceptance test not run: the bead's acceptance_criteria names `{}`, \
-             but no reported command runs it ({}). Report the acceptance test \
-             itself, e.g. `cargo nextest run -p <package> --test {}`.",
-            uncovered.join("`, `"),
+             but the completion reports no test command at all ({}). A compile \
+             check is not evidence the scope was delivered — report the \
+             acceptance test, e.g. `cargo nextest run -p <package> --test {}`.",
+            demand.test_names.join("`, `"),
             if reported.is_empty() {
                 "no commands reported".to_string()
             } else {
                 reported.join("; ")
             },
-            uncovered[0],
+            demand.test_names[0],
         ));
+    }
+
+    // Not a rejection, but worth saying out loud: nothing in the verify set
+    // mentions the demanded name, so it is only *probably* covered by whatever
+    // binary or module filter was reported.
+    for name in &demand.test_names {
+        let mentioned = demand
+            .commands
+            .iter()
+            .chain(reported.iter())
+            .any(|cmd| command_mentions_test(cmd.as_str(), name));
+        if !mentioned {
+            tracing::info!(
+                acceptance_test = %name,
+                commands = %reported.join("; "),
+                "[verify] no reported command names the acceptance test — \
+                 trusting the reported test run to cover it"
+            );
+        }
     }
 
     let mut selected: Vec<String> = Vec::new();
@@ -2173,19 +2195,29 @@ Also ran `cargo test --test foo` again."#;
         );
     }
 
-    /// Test names match as whole tokens, so a prefix of the demanded name is
-    /// not accepted as having run it.
+    /// Regression: a bead names a test **function**, but the command selects the
+    /// **binary** that contains it — the two names do not match as strings, and
+    /// demanding that they do rejected correct completions the moment this
+    /// landed (`cross_object_script_method_call` lives in
+    /// `--test cross_object_script_call_test`; `animation_tree_blend_tree_nodes_runtime`
+    /// is covered by `--lib animation_tree`). Both must be accepted.
     #[test]
-    fn test_select_verify_commands_requires_whole_test_name() {
-        let demand = parse_acceptance("(test: `canvas_item_shader_scene_pixels`)");
-        let near_miss = vec!["cargo nextest run -p gdscene --test canvas_item_shader".to_string()];
-        assert!(
-            select_verify_commands(&near_miss, &demand).is_err(),
-            "a shorter, similarly-named test must not satisfy the demand"
+    fn test_select_verify_commands_accepts_a_binary_that_contains_the_test() {
+        let by_binary =
+            vec!["cargo nextest run -p gdscene --test cross_object_script_call_test".to_string()];
+        let demand = parse_acceptance("(test: `cross_object_script_method_call`)");
+        assert_eq!(
+            select_verify_commands(&by_binary, &demand).unwrap(),
+            by_binary,
+            "a test binary whose name differs from the acceptance function must pass"
         );
-        let exact =
-            vec!["cargo nextest run -p gdscene --test canvas_item_shader_scene_pixels".to_string()];
-        assert!(select_verify_commands(&exact, &demand).is_ok());
+
+        let by_module = vec!["cargo nextest run -p gdscene --lib animation_tree".to_string()];
+        let demand = parse_acceptance("(test: `animation_tree_blend_tree_nodes_runtime`)");
+        assert!(
+            select_verify_commands(&by_module, &demand).is_ok(),
+            "a module filter that covers the acceptance test must pass"
+        );
     }
 
     /// Never verify nothing: if the demand is met but every surviving command

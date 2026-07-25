@@ -231,7 +231,11 @@ fn animation_player_tscn_autoplay_drives_property() {
 fn looping_tscn_animation_does_not_emit_finished() {
     let _guard = BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = unique_project_dir("looping");
-    write_project(&dir, &MAIN_TSCN.replace("loop_mode = 0", "loop_mode = 1"), MAIN_GD);
+    write_project(
+        &dir,
+        &MAIN_TSCN.replace("loop_mode = 0", "loop_mode = 1"),
+        MAIN_GD,
+    );
 
     let mut boot = boot(&dir);
     let main_id = boot
@@ -256,6 +260,73 @@ fn looping_tscn_animation_does_not_emit_finished() {
     assert!(
         tree.get_animation_player(player_node).unwrap().playing,
         "a looping clip is still playing after three loops"
+    );
+}
+
+/// `callback_mode_process` decides which loop phase advances the player:
+/// `PHYSICS` (0) advances on physics ticks, `MANUAL` (2) never advances on its
+/// own. The property was registered in the ClassDB and shown in the inspector
+/// while the runtime advanced every player in the idle phase regardless.
+#[test]
+fn callback_mode_process_selects_the_advance_phase() {
+    let _guard = BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    /// The playhead of the scene's AnimationPlayer.
+    fn playhead(tree: &gdscene::SceneTree) -> f64 {
+        let node = tree
+            .get_node_by_path("/root/Main/AnimationPlayer")
+            .expect("AnimationPlayer instanced");
+        tree.get_animation_player(node)
+            .expect("player attached")
+            .position()
+    }
+
+    // -- PHYSICS (0): advanced by the physics tick, so the clip still plays ----
+    let physics_dir = unique_project_dir("physics_mode");
+    write_project(
+        &physics_dir,
+        &MAIN_TSCN.replace(
+            "autoplay = \"slide\"",
+            "autoplay = \"slide\"\ncallback_mode_process = 0",
+        ),
+        MAIN_GD,
+    );
+    let mut physics_boot = boot(&physics_dir);
+    for _ in 0..5 {
+        physics_boot.main_loop_mut().unwrap().step(0.1);
+    }
+    let physics_x = sprite_x(physics_boot.main_loop().unwrap().tree());
+    assert!(
+        (physics_x - 50.0).abs() < 2.0,
+        "a PHYSICS-mode player must still advance — from the physics tick, at the \
+         same total rate: expected ~50 after 0.5s, got {physics_x}"
+    );
+
+    // -- MANUAL (2): the loop never advances it ------------------------------
+    let manual_dir = unique_project_dir("manual_mode");
+    write_project(
+        &manual_dir,
+        &MAIN_TSCN.replace(
+            "autoplay = \"slide\"",
+            "autoplay = \"slide\"\ncallback_mode_process = 2",
+        ),
+        MAIN_GD,
+    );
+    let mut manual_boot = boot(&manual_dir);
+    for _ in 0..5 {
+        manual_boot.main_loop_mut().unwrap().step(0.1);
+    }
+    let tree = manual_boot.main_loop().unwrap().tree();
+    assert_eq!(
+        playhead(tree),
+        0.0,
+        "a MANUAL-mode player is advanced only by an explicit advance() — the \
+         loop must leave its playhead alone"
+    );
+    assert_eq!(
+        sprite_x(tree),
+        0.0,
+        "with the playhead parked at 0 the sprite stays on the first keyframe"
     );
 }
 

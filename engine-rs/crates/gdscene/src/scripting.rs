@@ -520,32 +520,42 @@ fn variant_callable_method(v: &Variant) -> Option<String> {
 }
 
 /// Godot `Tween.EaseType`: EASE_IN=0, EASE_OUT=1, EASE_IN_OUT=2, EASE_OUT_IN=3.
-/// `OUT_IN` has no Patina counterpart and maps to the nearest, `InOut`.
+///
+/// All four are now real curves (pat-0q2kx.55); `OUT_IN` used to collapse onto
+/// `InOut`, which is a visibly different shape (fast-slow-fast vs
+/// slow-fast-slow).
 fn ease_type_from_i64(v: i64) -> EaseType {
     match v {
         0 => EaseType::In,
         1 => EaseType::Out,
+        3 => EaseType::OutIn,
         _ => EaseType::InOut,
     }
 }
 
 /// Godot `Tween.TransitionType`: LINEAR=0, SINE=1, QUINT=2, QUART=3, QUAD=4,
 /// EXPO=5, ELASTIC=6, CUBIC=7, CIRC=8, BOUNCE=9, BACK=10, SPRING=11.
-/// Patina has no QUINT/QUART/CIRC/SPRING curve, so those fall back to the
-/// closest available shape rather than silently becoming `Linear`.
+///
+/// ⚠️ All twelve now map to their own curve (pat-0q2kx.55). This mapping used to
+/// substitute approximations — QUINT and QUART both became Cubic, CIRC became
+/// Sine, and SPRING became Elastic — so a script asking for `TRANS_SPRING` got a
+/// visibly wrong motion with nothing reporting an error. Do not reintroduce a
+/// "nearest shape" fallback here: a silently different curve is harder to spot
+/// than a missing one.
 fn trans_func_from_i64(v: i64) -> TransFunc {
     match v {
         0 => TransFunc::Linear,
         1 => TransFunc::Sine,
-        2 | 3 => TransFunc::Cubic,
+        2 => TransFunc::Quint,
+        3 => TransFunc::Quart,
         4 => TransFunc::Quad,
         5 => TransFunc::Expo,
         6 => TransFunc::Elastic,
         7 => TransFunc::Cubic,
-        8 => TransFunc::Sine,
+        8 => TransFunc::Circ,
         9 => TransFunc::Bounce,
         10 => TransFunc::Back,
-        11 => TransFunc::Elastic,
+        11 => TransFunc::Spring,
         _ => TransFunc::Linear,
     }
 }
@@ -595,12 +605,10 @@ fn builtin_property_default(class_name: &str, prop: &str) -> Option<Variant> {
         // doc/classes/CharacterBody2D.xml: velocity Vector2(0, 0),
         // up_direction Vector2(0, -1), floor_max_angle 0.785398 (45°).
         ("CharacterBody2D", "velocity") => Some(Variant::Vector2(gdcore::math::Vector2::ZERO)),
-        ("CharacterBody2D", "up_direction") => Some(Variant::Vector2(
-            gdcore::math::Vector2::new(0.0, -1.0),
-        )),
-        ("CharacterBody2D", "floor_max_angle") => {
-            Some(Variant::Float(std::f64::consts::FRAC_PI_4))
+        ("CharacterBody2D", "up_direction") => {
+            Some(Variant::Vector2(gdcore::math::Vector2::new(0.0, -1.0)))
         }
+        ("CharacterBody2D", "floor_max_angle") => Some(Variant::Float(std::f64::consts::FRAC_PI_4)),
         // doc/classes/CharacterBody3D.xml: velocity Vector3(0, 0, 0). The other 3D
         // knobs are left out — no 3D character step reads them yet, and inventing
         // a value the simulation ignores would be worse than reporting nothing.
@@ -611,9 +619,7 @@ fn builtin_property_default(class_name: &str, prop: &str) -> Option<Variant> {
         ("RigidBody3D", "linear_velocity")
         | ("RigidBody3D", "angular_velocity")
         | ("RigidBody3D", "constant_force")
-        | ("RigidBody3D", "constant_torque") => {
-            Some(Variant::Vector3(gdcore::math::Vector3::ZERO))
-        }
+        | ("RigidBody3D", "constant_torque") => Some(Variant::Vector3(gdcore::math::Vector3::ZERO)),
         _ => None,
     }
 }
@@ -1418,6 +1424,52 @@ impl SceneAccess for SceneTreeAccessor {
         }
     }
 
+    fn animation_player_pause(&mut self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self.tree_mut().get_animation_player_mut(nid) {
+            Some(player) => {
+                player.pause();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn animation_player_queue(&mut self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self.tree_mut().get_animation_player_mut(nid) {
+            Some(player) => {
+                player.queue(name);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn animation_player_play_backwards(&mut self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(player) = self.tree_mut().get_animation_player_mut(nid) else {
+            return false;
+        };
+        // An empty name means "the current clip", matching `play()`'s handling.
+        let clip = if name.is_empty() {
+            player.current_animation().map(str::to_owned)
+        } else {
+            Some(name.to_owned())
+        };
+        if let Some(clip) = clip {
+            player.play_backwards(&clip, -1.0);
+        }
+        true
+    }
+
+    fn animation_player_playing_speed(&self, node: u64) -> Option<f64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_animation_player(nid)
+            .map(|p| p.get_playing_speed())
+    }
+
     fn animation_player_seek(&mut self, node: u64, time: f64) -> bool {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         match self.tree_mut().get_animation_player_mut(nid) {
@@ -1444,6 +1496,77 @@ impl SceneAccess for SceneTreeAccessor {
     fn animation_player_position(&self, node: u64) -> Option<f64> {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         self.tree().get_animation_player(nid).map(|p| p.position())
+    }
+
+    // -- SceneTree control surface (pat-0q2kx.47) --------------------------
+    //
+    // Thin routing onto SceneTree's own implementations, which already existed
+    // and were unit-tested; what was missing was any way for a script to reach
+    // them. `EngineResult` collapses to a bool here because GDScript's
+    // `change_scene_to_file` returns an Error code the idiomatic call discards.
+
+    fn change_scene_to_file(&mut self, path: &str) -> bool {
+        self.tree_mut().change_scene_to_file(path).is_ok()
+    }
+
+    fn reload_current_scene(&mut self) -> bool {
+        self.tree_mut().reload_current_scene().is_ok()
+    }
+
+    fn quit(&mut self, exit_code: i64) {
+        self.tree_mut().quit(exit_code as i32);
+    }
+
+    fn set_tree_paused(&mut self, paused: bool) {
+        self.tree_mut().set_paused(paused);
+    }
+
+    fn is_tree_paused(&self) -> bool {
+        self.tree().paused()
+    }
+
+    fn tree_root(&self) -> Option<u64> {
+        Some(self.tree().root_id().raw())
+    }
+
+    fn tree_node_count(&self) -> i64 {
+        self.tree().node_count() as i64
+    }
+
+    fn nodes_in_group(&self, group: &str) -> Vec<u64> {
+        self.tree()
+            .get_nodes_in_group(group)
+            .into_iter()
+            .map(|id| id.raw())
+            .collect()
+    }
+
+    fn first_node_in_group(&self, group: &str) -> Option<u64> {
+        self.tree()
+            .get_first_node_in_group(group)
+            .map(|id| id.raw())
+    }
+
+    fn tree_has_group(&self, group: &str) -> bool {
+        self.tree().has_group(group)
+    }
+
+    fn call_group_flags(&mut self, flags: i64, group: &str, method: &str, args: &[Variant]) {
+        // A negative flag word cannot name any GROUP_CALL_* bit; clamp rather
+        // than wrap it into a mask that would silently mean "reverse + deferred".
+        self.tree_mut()
+            .call_group_flags(flags.max(0) as u32, group, method, args);
+    }
+
+    fn set_group(&mut self, group: &str, property: &str, value: Variant) {
+        self.tree_mut().set_group(group, property, value);
+    }
+
+    fn notify_group(&mut self, group: &str, what: i64) {
+        self.tree_mut().notify_group(
+            group,
+            gdobject::notification::Notification::new(what as i32),
+        );
     }
 
     // -- Tween (pat-0q2kx.4) -----------------------------------------------
@@ -4662,7 +4785,10 @@ func _process(delta):
         // While alive: valid, and resolvable by id.
         assert_eq!(s.get_property("valid_before"), Some(Variant::Bool(true)));
         assert!(
-            matches!(s.get_property("resolved_before"), Some(Variant::ObjectId(_))),
+            matches!(
+                s.get_property("resolved_before"),
+                Some(Variant::ObjectId(_))
+            ),
             "instance_from_id should resolve a live object, got {:?}",
             s.get_property("resolved_before")
         );

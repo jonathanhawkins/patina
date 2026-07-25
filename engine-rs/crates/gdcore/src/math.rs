@@ -63,6 +63,72 @@ impl Neg for Vector2i {
 }
 
 // ---------------------------------------------------------------------------
+// Vector3i
+// ---------------------------------------------------------------------------
+
+/// A 3D vector with `i32` components, matching Godot's `Vector3i`.
+///
+/// The integer counterpart of [`Vector3`], for grid coordinates (`GridMap`
+/// cells, voxel indices) where rounding through `f32` would lose the exact
+/// cell. Added so a `.tscn`'s `Vector3i(...)` literal keeps its integer type
+/// instead of being coerced to a float vector (pat-nzgdu.78).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Vector3i {
+    /// The X component.
+    pub x: i32,
+    /// The Y component.
+    pub y: i32,
+    /// The Z component.
+    pub z: i32,
+}
+
+impl Vector3i {
+    /// The zero vector `(0, 0, 0)`.
+    pub const ZERO: Self = Self { x: 0, y: 0, z: 0 };
+    /// The one vector `(1, 1, 1)`.
+    pub const ONE: Self = Self { x: 1, y: 1, z: 1 };
+    /// The up direction `(0, 1, 0)` — Godot's 3D up, unlike the Y-down 2D
+    /// convention used by [`Vector2i::UP`].
+    pub const UP: Self = Self { x: 0, y: 1, z: 0 };
+    /// The down direction `(0, -1, 0)`.
+    pub const DOWN: Self = Self { x: 0, y: -1, z: 0 };
+    /// The left direction `(-1, 0, 0)`.
+    pub const LEFT: Self = Self { x: -1, y: 0, z: 0 };
+    /// The right direction `(1, 0, 0)`.
+    pub const RIGHT: Self = Self { x: 1, y: 0, z: 0 };
+    /// The forward direction `(0, 0, -1)`.
+    pub const FORWARD: Self = Self { x: 0, y: 0, z: -1 };
+    /// The back direction `(0, 0, 1)`.
+    pub const BACK: Self = Self { x: 0, y: 0, z: 1 };
+
+    /// Creates a new integer vector.
+    pub const fn new(x: i32, y: i32, z: i32) -> Self {
+        Self { x, y, z }
+    }
+}
+
+impl Add for Vector3i {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self::new(self.x + rhs.x, self.y + rhs.y, self.z + rhs.z)
+    }
+}
+
+impl Sub for Vector3i {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Self::new(self.x - rhs.x, self.y - rhs.y, self.z - rhs.z)
+    }
+}
+
+impl Neg for Vector3i {
+    type Output = Self;
+    fn neg(self) -> Self {
+        Self::new(-self.x, -self.y, -self.z)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Vector2
 // ---------------------------------------------------------------------------
 
@@ -377,6 +443,123 @@ impl Rect2 {
             && self.position.y < b_end.y
             && a_end.y > other.position.y
     }
+
+    /// Returns the center point (`position + size / 2`).
+    ///
+    /// Godot: `Rect2.get_center` (`core/math/rect2.h`).
+    pub fn get_center(self) -> Vector2 {
+        self.position + self.size * 0.5
+    }
+
+    /// Returns `true` if the rect has a strictly positive area.
+    ///
+    /// Godot: `Rect2.has_area`.
+    pub fn has_area(self) -> bool {
+        self.size.x > 0.0 && self.size.y > 0.0
+    }
+
+    /// Returns `true` if `other` lies entirely within this rect.
+    ///
+    /// Godot: `Rect2.encloses`.
+    pub fn encloses(self, other: Rect2) -> bool {
+        other.position.x >= self.position.x
+            && other.position.y >= self.position.y
+            && other.end().x <= self.end().x
+            && other.end().y <= self.end().y
+    }
+
+    /// Returns a copy grown by `amount` on all four sides.
+    ///
+    /// Godot: `Rect2.grow` — the position moves out by `amount` and the size
+    /// grows by `amount * 2` on each axis. A negative amount shrinks.
+    pub fn grow(self, amount: f32) -> Self {
+        self.grow_individual(amount, amount, amount, amount)
+    }
+
+    /// Returns a copy grown by a separate amount on each side.
+    ///
+    /// Godot: `Rect2.grow_individual`.
+    pub fn grow_individual(self, left: f32, top: f32, right: f32, bottom: f32) -> Self {
+        Self {
+            position: Vector2::new(self.position.x - left, self.position.y - top),
+            size: Vector2::new(self.size.x + left + right, self.size.y + top + bottom),
+        }
+    }
+
+    /// Returns a copy grown on a single side, identified by the `@GlobalScope`
+    /// `Side` enum (`SIDE_LEFT` 0, `SIDE_TOP` 1, `SIDE_RIGHT` 2,
+    /// `SIDE_BOTTOM` 3). An out-of-range side leaves the rect unchanged, which
+    /// is what Godot's `grow_side` does for a side that matches nothing.
+    ///
+    /// Godot: `Rect2.grow_side`.
+    pub fn grow_side(self, side: i64, amount: f32) -> Self {
+        self.grow_individual(
+            if side == 0 { amount } else { 0.0 },
+            if side == 1 { amount } else { 0.0 },
+            if side == 2 { amount } else { 0.0 },
+            if side == 3 { amount } else { 0.0 },
+        )
+    }
+
+    /// Returns the smallest rect containing both this rect and `other`.
+    ///
+    /// Godot: `Rect2.merge`.
+    pub fn merge(self, other: Rect2) -> Self {
+        let position = Vector2::new(
+            self.position.x.min(other.position.x),
+            self.position.y.min(other.position.y),
+        );
+        let end = Vector2::new(
+            self.end().x.max(other.end().x),
+            self.end().y.max(other.end().y),
+        );
+        Self {
+            position,
+            size: end - position,
+        }
+    }
+
+    /// Returns a copy of this rect expanded to include `point`.
+    ///
+    /// Godot: `Rect2.expand`.
+    pub fn expand(self, point: Vector2) -> Self {
+        self.merge(Rect2::new(point, Vector2::ZERO))
+    }
+
+    /// Returns the overlapping region of two rects, or a zero rect when they do
+    /// not overlap.
+    ///
+    /// Godot: `Rect2.intersection`.
+    pub fn intersection(self, other: Rect2) -> Self {
+        if !self.intersects(other) {
+            return Self::new(Vector2::ZERO, Vector2::ZERO);
+        }
+        let position = Vector2::new(
+            self.position.x.max(other.position.x),
+            self.position.y.max(other.position.y),
+        );
+        let end = Vector2::new(
+            self.end().x.min(other.end().x),
+            self.end().y.min(other.end().y),
+        );
+        Self {
+            position,
+            size: end - position,
+        }
+    }
+
+    /// Returns an equivalent rect with a non-negative size.
+    ///
+    /// Godot: `Rect2.abs`.
+    pub fn abs(self) -> Self {
+        Self {
+            position: Vector2::new(
+                self.position.x + self.size.x.min(0.0),
+                self.position.y + self.size.y.min(0.0),
+            ),
+            size: self.size.abs(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -470,24 +653,135 @@ impl Transform2D {
             origin: io,
         }
     }
+
+    /// Builds a transform from a rotation (radians) and a translation.
+    ///
+    /// Godot: `Transform2D(rotation, position)`
+    /// (`core/math/transform_2d.cpp:97`).
+    pub fn from_rotation_origin(rotation: f32, origin: Vector2) -> Self {
+        let (s, c) = rotation.sin_cos();
+        Self {
+            x: Vector2::new(c, s),
+            y: Vector2::new(-s, c),
+            origin,
+        }
+    }
+
+    /// Builds a transform from rotation, scale, skew and translation.
+    ///
+    /// Godot: `Transform2D(rotation, scale, skew, position)`
+    /// (`core/math/transform_2d.cpp:107`).
+    pub fn from_rotation_scale_skew_origin(
+        rotation: f32,
+        scale: Vector2,
+        skew: f32,
+        origin: Vector2,
+    ) -> Self {
+        Self {
+            x: Vector2::new(rotation.cos() * scale.x, rotation.sin() * scale.x),
+            y: Vector2::new(
+                -(rotation + skew).sin() * scale.y,
+                (rotation + skew).cos() * scale.y,
+            ),
+            origin,
+        }
+    }
+
+    /// Returns the determinant of the 2×2 basis.
+    ///
+    /// Godot: `Transform2D.determinant`.
+    pub fn determinant(self) -> f32 {
+        self.x.x * self.y.y - self.x.y * self.y.x
+    }
+
+    /// Returns the rotation of the basis, in radians.
+    ///
+    /// Godot: `Transform2D.get_rotation` (`atan2(columns[0].y, columns[0].x)`).
+    pub fn get_rotation(self) -> f32 {
+        self.x.y.atan2(self.x.x)
+    }
+
+    /// Returns the scale of the basis. The Y component carries the sign of the
+    /// determinant, so a mirrored transform reports a negative Y scale.
+    ///
+    /// Godot: `Transform2D.get_scale` (`core/math/transform_2d.cpp:115`).
+    pub fn get_scale(self) -> Vector2 {
+        let det_sign = if self.determinant() < 0.0 { -1.0 } else { 1.0 };
+        Vector2::new(self.x.length(), det_sign * self.y.length())
+    }
+
+    /// Returns the skew of the basis, in radians — the deviation of the Y axis
+    /// from perpendicular to the X axis.
+    ///
+    /// Godot: `Transform2D.get_skew` (`core/math/transform_2d.cpp:72`).
+    pub fn get_skew(self) -> f32 {
+        let det_sign = if self.determinant() < 0.0 { -1.0 } else { 1.0 };
+        let dot = self.x.normalized().dot(self.y.normalized() * det_sign);
+        dot.clamp(-1.0, 1.0).acos() - std::f32::consts::FRAC_PI_2
+    }
+
+    /// Returns a copy whose basis vectors are unit-length and perpendicular
+    /// (Gram-Schmidt), leaving the origin untouched.
+    ///
+    /// Godot: `Transform2D.orthonormalized`.
+    pub fn orthonormalized(self) -> Self {
+        let x = self.x.normalized();
+        let y = (self.y - x * x.dot(self.y)).normalized();
+        Self {
+            x,
+            y,
+            origin: self.origin,
+        }
+    }
+
+    /// Interpolates towards `to` by `weight`, decomposing both transforms into
+    /// rotation / scale / skew / origin so the result stays a valid affine
+    /// transform (a component-wise matrix lerp would not).
+    ///
+    /// Godot: `Transform2D.interpolate_with`
+    /// (`core/math/transform_2d.cpp:262`).
+    pub fn interpolate_with(self, to: Transform2D, weight: f32) -> Self {
+        Self::from_rotation_scale_skew_origin(
+            lerp_angle(self.get_rotation(), to.get_rotation(), weight),
+            self.get_scale().lerp(to.get_scale(), weight),
+            lerp_angle(self.get_skew(), to.get_skew(), weight),
+            self.origin.lerp(to.origin, weight),
+        )
+    }
 }
 
+/// Composes two transforms: `a * b` applies `b` first, then `a`, matching
+/// Godot's `Transform2D::operator*` (`core/math/transform_2d.cpp:198`) and the
+/// convention already used by [`Transform3D`](crate::math3d::Transform3D).
 impl Mul for Transform2D {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self {
         Self {
-            x: Vector2::new(
-                self.x.x * rhs.x.x + self.y.x * rhs.x.y,
-                self.x.y * rhs.x.x + self.y.y * rhs.x.y,
-            ),
-            y: Vector2::new(
-                self.x.x * rhs.y.x + self.y.x * rhs.y.y,
-                self.x.y * rhs.y.x + self.y.y * rhs.y.y,
-            ),
+            x: self.basis_xform(rhs.x),
+            y: self.basis_xform(rhs.y),
             origin: self.xform(rhs.origin),
         }
     }
 }
+
+/// Interpolates between two angles along the shortest arc, wrapping across
+/// ±π rather than sweeping the long way round.
+///
+/// Godot: `Math::lerp_angle` (`core/math/math_funcs.h`).
+pub fn lerp_angle(from: f32, to: f32, weight: f32) -> f32 {
+    let tau = std::f32::consts::TAU;
+    let difference = (to - from) % tau;
+    let distance = (2.0 * difference) % tau - difference;
+    from + distance * weight
+}
+
+// NOTE: a second `impl Mul for Transform2D` used to sit here, spelling the same
+// composition out component-by-component. Two impls of one trait for one type is
+// E0119 — it broke every crate that depends on `gdcore`, i.e. the whole
+// workspace. The surviving impl above is that arithmetic expressed through
+// `basis_xform`/`xform`: for each basis column `basis_xform(c)` expands to
+// exactly `(x.x*c.x + y.x*c.y, x.y*c.x + y.y*c.y)`, and the origin term is
+// identical, so nothing changed behaviourally when this copy went away.
 
 // ---------------------------------------------------------------------------
 // Color
@@ -1030,5 +1324,159 @@ mod tests {
         assert_eq!(Vector2i::ONE, Vector2i::new(1, 1));
         assert_eq!(Vector2i::UP, Vector2i::new(0, -1));
         assert_eq!(Vector2i::DOWN, Vector2i::new(0, 1));
+    }
+
+    // -- Rect2 region algebra (pat-0q2kx.50) --------------------------------
+
+    fn v2_approx_eq(a: Vector2, b: Vector2) -> bool {
+        approx_eq(a.x, b.x) && approx_eq(a.y, b.y)
+    }
+
+    /// Looser than [`approx_eq`] for values that survive a decomposition round
+    /// trip (`atan2` of scaled sines, lengths of rotated columns), where f32
+    /// error accumulates past 1e-6.
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn rect2_grow_moves_every_side_out() {
+        let r = Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(10.0, 10.0)).grow(2.0);
+        assert_eq!(r.position, Vector2::new(-2.0, -2.0));
+        assert_eq!(r.size, Vector2::new(14.0, 14.0));
+        // A negative amount shrinks by the same rule.
+        let shrunk = r.grow(-2.0);
+        assert_eq!(shrunk.position, Vector2::new(0.0, 0.0));
+        assert_eq!(shrunk.size, Vector2::new(10.0, 10.0));
+    }
+
+    #[test]
+    fn rect2_grow_side_touches_only_that_side() {
+        let r = Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(4.0, 4.0));
+        // SIDE_LEFT = 0, SIDE_TOP = 1, SIDE_RIGHT = 2, SIDE_BOTTOM = 3.
+        assert_eq!(r.grow_side(0, 1.0).position, Vector2::new(-1.0, 0.0));
+        assert_eq!(r.grow_side(2, 1.0).position, r.position);
+        assert_eq!(r.grow_side(2, 1.0).size, Vector2::new(5.0, 4.0));
+        assert_eq!(r.grow_side(3, 1.0).size, Vector2::new(4.0, 5.0));
+    }
+
+    #[test]
+    fn rect2_merge_intersection_and_encloses() {
+        let a = Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(10.0, 10.0));
+        let b = Rect2::new(Vector2::new(5.0, 5.0), Vector2::new(10.0, 10.0));
+        let merged = a.merge(b);
+        assert_eq!(merged.position, Vector2::new(0.0, 0.0));
+        assert_eq!(merged.size, Vector2::new(15.0, 15.0));
+        assert!(merged.encloses(a) && merged.encloses(b));
+
+        let overlap = a.intersection(b);
+        assert_eq!(overlap.position, Vector2::new(5.0, 5.0));
+        assert_eq!(overlap.size, Vector2::new(5.0, 5.0));
+
+        // Disjoint rects intersect in nothing.
+        let far = Rect2::new(Vector2::new(100.0, 100.0), Vector2::new(1.0, 1.0));
+        assert_eq!(a.intersection(far).size, Vector2::ZERO);
+        assert!(!a.encloses(far));
+    }
+
+    #[test]
+    fn rect2_abs_and_expand() {
+        let negative = Rect2::new(Vector2::new(10.0, 10.0), Vector2::new(-4.0, -4.0)).abs();
+        assert_eq!(negative.position, Vector2::new(6.0, 6.0));
+        assert_eq!(negative.size, Vector2::new(4.0, 4.0));
+
+        let r = Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(2.0, 2.0));
+        let expanded = r.expand(Vector2::new(-3.0, 5.0));
+        assert_eq!(expanded.position, Vector2::new(-3.0, 0.0));
+        assert_eq!(expanded.end(), Vector2::new(2.0, 5.0));
+    }
+
+    #[test]
+    fn rect2_center_and_area_flags() {
+        let r = Rect2::new(Vector2::new(2.0, 4.0), Vector2::new(4.0, 8.0));
+        assert_eq!(r.get_center(), Vector2::new(4.0, 8.0));
+        assert!(r.has_area());
+        assert!(!Rect2::new(Vector2::ZERO, Vector2::ZERO).has_area());
+    }
+
+    // -- Transform2D composition & decomposition (pat-0q2kx.50) -------------
+
+    /// `a * b` must apply `b` first — the whole point of the operator, and what
+    /// `rotated`/`scaled`/`translated` are expressed in terms of.
+    #[test]
+    fn transform2d_mul_applies_right_hand_side_first() {
+        let translate = Transform2D::translated(Vector2::new(10.0, 0.0));
+        let scale = Transform2D::scaled(Vector2::new(2.0, 2.0));
+        let p = Vector2::new(1.0, 0.0);
+
+        assert!(v2_approx_eq(
+            (scale * translate).xform(p),
+            scale.xform(translate.xform(p))
+        ));
+        // Scaling after translating reaches 22; translating after scaling, 12.
+        assert!(v2_approx_eq(
+            (scale * translate).xform(p),
+            Vector2::new(22.0, 0.0)
+        ));
+        assert!(v2_approx_eq(
+            (translate * scale).xform(p),
+            Vector2::new(12.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn transform2d_identity_is_the_multiplicative_unit() {
+        let t = Transform2D::from_rotation_origin(0.7, Vector2::new(3.0, -2.0));
+        let left = Transform2D::IDENTITY * t;
+        let right = t * Transform2D::IDENTITY;
+        for got in [left, right] {
+            assert!(v2_approx_eq(got.x, t.x));
+            assert!(v2_approx_eq(got.y, t.y));
+            assert!(v2_approx_eq(got.origin, t.origin));
+        }
+    }
+
+    #[test]
+    fn transform2d_decomposition_round_trips() {
+        let origin = Vector2::new(4.0, -1.0);
+        let t =
+            Transform2D::from_rotation_scale_skew_origin(0.5, Vector2::new(2.0, 3.0), 0.0, origin);
+        assert!(close(t.get_rotation(), 0.5));
+        assert!(close(t.get_scale().x, 2.0) && close(t.get_scale().y, 3.0));
+        assert!(t.get_skew().abs() < 1e-4);
+        assert_eq!(t.origin, origin);
+        // An unskewed, unscaled basis is already orthonormal.
+        let unit = Transform2D::from_rotation_origin(0.5, origin);
+        let unit_scale = unit.orthonormalized().get_scale();
+        assert!(close(unit_scale.x, 1.0) && close(unit_scale.y, 1.0));
+        assert!(close(t.determinant(), 6.0));
+    }
+
+    #[test]
+    fn transform2d_interpolate_with_hits_both_ends() {
+        let a = Transform2D::from_rotation_origin(0.0, Vector2::new(10.0, 5.0));
+        let b = Transform2D::from_rotation_origin(1.0, Vector2::new(20.0, 5.0));
+        assert!(v2_approx_eq(a.interpolate_with(b, 0.0).origin, a.origin));
+        assert!(v2_approx_eq(a.interpolate_with(b, 1.0).origin, b.origin));
+        assert!(close(a.interpolate_with(b, 1.0).get_rotation(), 1.0));
+        // Halfway is halfway in both position and angle.
+        let mid = a.interpolate_with(b, 0.5);
+        assert!(v2_approx_eq(mid.origin, Vector2::new(15.0, 5.0)));
+        assert!(close(mid.get_rotation(), 0.5));
+    }
+
+    #[test]
+    fn lerp_angle_takes_the_short_way_round() {
+        use std::f32::consts::PI;
+        // From just under +pi to just over -pi: the short arc crosses the wrap.
+        let from = PI - 0.1;
+        let to = -PI + 0.1;
+        let mid = lerp_angle(from, to, 0.5);
+        // The midpoint sits at ±pi, not back at 0.
+        assert!(
+            mid.abs() > PI - 0.05,
+            "expected a wrap-crossing lerp, got {mid}"
+        );
+        assert!(approx_eq(lerp_angle(0.2, 0.8, 0.5), 0.5));
     }
 }

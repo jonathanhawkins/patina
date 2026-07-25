@@ -216,7 +216,11 @@ impl ConfigFile {
                 let value = ini_to_variant(val_str);
                 cfg.set_value(&current_section, key, value);
             } else {
-                return Err(format!("line {}: expected key=value, got '{}'", line_num + 1, line));
+                return Err(format!(
+                    "line {}: expected key=value, got '{}'",
+                    line_num + 1,
+                    line
+                ));
             }
         }
 
@@ -239,7 +243,9 @@ fn variant_to_ini(v: &Variant) -> String {
         }
         Variant::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
         Variant::Vector2(v) => format!("Vector2({}, {})", v.x, v.y),
+        Variant::Vector2i(v) => format!("Vector2i({}, {})", v.x, v.y),
         Variant::Vector3(v) => format!("Vector3({}, {}, {})", v.x, v.y, v.z),
+        Variant::Vector3i(v) => format!("Vector3i({}, {}, {})", v.x, v.y, v.z),
         Variant::Color(c) => format!("Color({}, {}, {}, {})", c.r, c.g, c.b, c.a),
         _ => format!("{v}"),
     }
@@ -273,23 +279,34 @@ fn ini_to_variant(s: &str) -> Variant {
     }
     // Vector2(x, y)
     if let Some(inner) = s.strip_prefix("Vector2(").and_then(|s| s.strip_suffix(')')) {
-        let parts: Vec<f32> = inner.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        let parts: Vec<f32> = inner
+            .split(',')
+            .filter_map(|p| p.trim().parse().ok())
+            .collect();
         if parts.len() == 2 {
             return Variant::Vector2(gdcore::math::Vector2::new(parts[0], parts[1]));
         }
     }
     // Vector3(x, y, z)
     if let Some(inner) = s.strip_prefix("Vector3(").and_then(|s| s.strip_suffix(')')) {
-        let parts: Vec<f32> = inner.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        let parts: Vec<f32> = inner
+            .split(',')
+            .filter_map(|p| p.trim().parse().ok())
+            .collect();
         if parts.len() == 3 {
             return Variant::Vector3(gdcore::math::Vector3::new(parts[0], parts[1], parts[2]));
         }
     }
     // Color(r, g, b, a)
     if let Some(inner) = s.strip_prefix("Color(").and_then(|s| s.strip_suffix(')')) {
-        let parts: Vec<f32> = inner.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        let parts: Vec<f32> = inner
+            .split(',')
+            .filter_map(|p| p.trim().parse().ok())
+            .collect();
         if parts.len() == 4 {
-            return Variant::Color(gdcore::math::Color::new(parts[0], parts[1], parts[2], parts[3]));
+            return Variant::Color(gdcore::math::Color::new(
+                parts[0], parts[1], parts[2], parts[3],
+            ));
         }
     }
     // Fallback: treat as string
@@ -402,9 +419,18 @@ mod tests {
         let text = cfg.save_to_string();
         let loaded = ConfigFile::load_from_string(&text).unwrap();
 
-        assert_eq!(loaded.get_value("display", "width"), Some(&Variant::Int(1920)));
-        assert_eq!(loaded.get_value("display", "fullscreen"), Some(&Variant::Bool(false)));
-        assert_eq!(loaded.get_value("audio", "volume"), Some(&Variant::Float(0.8)));
+        assert_eq!(
+            loaded.get_value("display", "width"),
+            Some(&Variant::Int(1920))
+        );
+        assert_eq!(
+            loaded.get_value("display", "fullscreen"),
+            Some(&Variant::Bool(false))
+        );
+        assert_eq!(
+            loaded.get_value("audio", "volume"),
+            Some(&Variant::Float(0.8))
+        );
         assert_eq!(
             loaded.get_value("player", "name"),
             Some(&Variant::String("Alice".into()))
@@ -423,7 +449,10 @@ width=1280
 height=720
 "#;
         let cfg = ConfigFile::load_from_string(source).unwrap();
-        assert_eq!(cfg.get_value("settings", "width"), Some(&Variant::Int(1280)));
+        assert_eq!(
+            cfg.get_value("settings", "width"),
+            Some(&Variant::Int(1280))
+        );
     }
 
     #[test]
@@ -442,14 +471,26 @@ height=720
 
     #[test]
     fn variant_roundtrip_bool() {
-        assert_eq!(ini_to_variant(&variant_to_ini(&Variant::Bool(true))), Variant::Bool(true));
-        assert_eq!(ini_to_variant(&variant_to_ini(&Variant::Bool(false))), Variant::Bool(false));
+        assert_eq!(
+            ini_to_variant(&variant_to_ini(&Variant::Bool(true))),
+            Variant::Bool(true)
+        );
+        assert_eq!(
+            ini_to_variant(&variant_to_ini(&Variant::Bool(false))),
+            Variant::Bool(false)
+        );
     }
 
     #[test]
     fn variant_roundtrip_int() {
-        assert_eq!(ini_to_variant(&variant_to_ini(&Variant::Int(42))), Variant::Int(42));
-        assert_eq!(ini_to_variant(&variant_to_ini(&Variant::Int(-100))), Variant::Int(-100));
+        assert_eq!(
+            ini_to_variant(&variant_to_ini(&Variant::Int(42))),
+            Variant::Int(42)
+        );
+        assert_eq!(
+            ini_to_variant(&variant_to_ini(&Variant::Int(-100))),
+            Variant::Int(-100)
+        );
     }
 
     #[test]
@@ -510,10 +551,8 @@ height=720
             Ok(())
         })
         .unwrap();
-        let hp = ConfigFile::with_handle_mut(id, |cfg| {
-            Ok(cfg.get_value("player", "hp").cloned())
-        })
-        .unwrap();
+        let hp = ConfigFile::with_handle_mut(id, |cfg| Ok(cfg.get_value("player", "hp").cloned()))
+            .unwrap();
         assert_eq!(hp, Some(Variant::Int(100)));
         ConfigFile::close_handle(id);
         assert!(ConfigFile::with_handle_mut(id, |_| Ok(())).is_err());

@@ -1288,7 +1288,12 @@ mod tests {
         push_cell(&mut bytes, -2, 5, 7, 0, 0, 1); // negative coords exercise i16
 
         let cells = decode_tile_map_data(&bytes);
-        assert_eq!(cells.len(), 3, "three painted cells decoded, got {}", cells.len());
+        assert_eq!(
+            cells.len(),
+            3,
+            "three painted cells decoded, got {}",
+            cells.len()
+        );
 
         let c0 = cells.get(&Vector2i::new(0, 0)).expect("cell (0,0)");
         assert_eq!(c0.source_id, 1);
@@ -1298,7 +1303,9 @@ mod tests {
         let c1 = cells.get(&Vector2i::new(1, 0)).expect("cell (1,0)");
         assert_eq!(c1.atlas_coords, Vector2i::new(4, 0));
 
-        let c2 = cells.get(&Vector2i::new(-2, 5)).expect("negative-coord cell (-2,5)");
+        let c2 = cells
+            .get(&Vector2i::new(-2, 5))
+            .expect("negative-coord cell (-2,5)");
         assert_eq!(c2.source_id, 7);
         assert_eq!(c2.alternative_id, 1);
 

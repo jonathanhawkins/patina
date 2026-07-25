@@ -36,8 +36,12 @@ impl TresSaver {
             .map_err(|e| EngineError::Parse(e.to_string()))?;
         if resource.uid.is_valid() {
             // Godot base-34 encoding; id_to_text already includes the `uid://` prefix.
-            write!(out, " uid=\"{}\"", crate::uid::id_to_text(resource.uid.raw()))
-                .map_err(|e| EngineError::Parse(e.to_string()))?;
+            write!(
+                out,
+                " uid=\"{}\"",
+                crate::uid::id_to_text(resource.uid.raw())
+            )
+            .map_err(|e| EngineError::Parse(e.to_string()))?;
         }
         writeln!(out, " format=3]").map_err(|e| EngineError::Parse(e.to_string()))?;
 
@@ -129,12 +133,14 @@ fn format_variant(v: &Variant) -> String {
             format!("\"{escaped}\"")
         }
         Variant::Vector2(v) => format!("Vector2({}, {})", format_f32(v.x), format_f32(v.y)),
+        Variant::Vector2i(v) => format!("Vector2i({}, {})", v.x, v.y),
         Variant::Vector3(v) => format!(
             "Vector3({}, {}, {})",
             format_f32(v.x),
             format_f32(v.y),
             format_f32(v.z)
         ),
+        Variant::Vector3i(v) => format!("Vector3i({}, {}, {})", v.x, v.y, v.z),
         Variant::Color(c) => format!(
             "Color({}, {}, {}, {})",
             format_f32(c.r),

@@ -138,8 +138,7 @@ pub fn generate_shadow_maps(lights: &[Light3D], instances: &[Instance3D]) -> Vec
     lights
         .iter()
         .filter(|l| {
-            l.shadow_enabled
-                && matches!(l.light_type, LightType::Directional | LightType::Spot)
+            l.shadow_enabled && matches!(l.light_type, LightType::Directional | LightType::Spot)
         })
         .map(|l| match l.light_type {
             LightType::Spot => generate_spot_shadow_map(l, instances),
@@ -206,7 +205,13 @@ fn generate_spot_shadow_map(light: &Light3D, instances: &[Instance3D]) -> Shadow
     }
 }
 
-/// Rasterizes all visible mesh instances into a shadow depth buffer.
+/// Rasterizes all shadow-casting mesh instances into a shadow depth buffer.
+///
+/// ⚠️ Filters on [`Instance3D::casts_shadow`], not `visible` (pat-nzgdu.76):
+/// `cast_shadow = Off` must drop out of the shadow map while still being drawn
+/// in the colour pass, and `ShadowsOnly` is the reverse. This is the single
+/// chokepoint for the directional, spot and cascade shadow maps, so filtering
+/// here covers all three.
 fn rasterize_instances_into_shadow(
     instances: &[Instance3D],
     view_matrix: &[[f32; 4]; 4],
@@ -215,7 +220,7 @@ fn rasterize_instances_into_shadow(
     size: u32,
 ) {
     for inst in instances {
-        if !inst.visible {
+        if !inst.casts_shadow() {
             continue;
         }
         let mesh = match &inst.mesh {
@@ -315,7 +320,10 @@ fn generate_omni_shadow_cubemap(light: &Light3D, instances: &[Instance3D]) -> Sh
 
     for face in CubeFace::ALL {
         for inst in instances {
-            if !inst.visible {
+            // Same cast_shadow filter as the 2D shadow path (pat-nzgdu.76) —
+            // an omni light must not shadow from an instance the directional
+            // path already excluded.
+            if !inst.casts_shadow() {
                 continue;
             }
             let mesh = match &inst.mesh {
@@ -889,7 +897,6 @@ mod tests {
     }
 }
 
-
 /// Directional light cascade split (pat-p0s82.8).
 #[derive(Debug, Clone)]
 pub struct DirectionalCascade {
@@ -964,7 +971,13 @@ pub fn generate_directional_cascades(
             let proj_matrix =
                 orthographic_projection_matrix(-extent, extent, -extent, extent, SHADOW_NEAR, far);
             let mut depth = DepthBuffer::new(size, size);
-            rasterize_instances_into_shadow(instances, &view_matrix, &proj_matrix, &mut depth, size);
+            rasterize_instances_into_shadow(
+                instances,
+                &view_matrix,
+                &proj_matrix,
+                &mut depth,
+                size,
+            );
             DirectionalCascade {
                 near,
                 far,
@@ -1017,7 +1030,9 @@ pub fn sample_cascaded_shadow(cascades: &[DirectionalCascade], world_pos: Vector
     if cascades.is_empty() {
         return 0.0;
     }
-    cascades[cascade_index_for(cascades, world_pos)].map.sample(world_pos)
+    cascades[cascade_index_for(cascades, world_pos)]
+        .map
+        .sample(world_pos)
 }
 
 #[cfg(test)]

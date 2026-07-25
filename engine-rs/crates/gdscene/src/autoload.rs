@@ -156,6 +156,12 @@ pub fn boot_autoloads_from_dir(tree: &mut SceneTree, start_dir: &Path) -> Autolo
     // instantiation order so cross-references resolve and any later main scene
     // sees them live.
     for (_, node_id) in &result.nodes {
+        // `instantiate_one` adds the node **before** attaching its script (and,
+        // for a `.tscn` autoload, before its children exist), so `add_child`
+        // already ran a scriptless enter/ready pass over this subtree. Rewind it
+        // or the node logs ENTER_TREE and READY twice and a scene autoload's
+        // children ready parent-first (pat-0q2kx.46).
+        LifecycleManager::rewind_for_redispatch(tree, *node_id);
         LifecycleManager::enter_tree(tree, *node_id);
     }
     result

@@ -674,9 +674,7 @@ fn apply_ik_modifier(
     }
 
     match solver {
-        IkSolverKind::Ccd => {
-            solve_ccd(tree, skeleton_id, root, tip, target, iterations, influence)
-        }
+        IkSolverKind::Ccd => solve_ccd(tree, skeleton_id, root, tip, target, iterations, influence),
         IkSolverKind::Fabrik => {
             solve_fabrik_chain(tree, skeleton_id, root, tip, target, iterations, influence)
         }
@@ -822,10 +820,8 @@ fn solve_ccd(
             if angle.abs() < IK_EPSILON {
                 continue;
             }
-            let delta = Basis::from_quaternion(Quaternion::from_axis_angle(
-                axis.normalized(),
-                angle,
-            ));
+            let delta =
+                Basis::from_quaternion(Quaternion::from_axis_angle(axis.normalized(), angle));
 
             // `delta` is a rotation in skeleton space, but poses are stored in
             // the bone's parent frame. global(j) = parent_global * rest * pose,

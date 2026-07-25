@@ -5,20 +5,26 @@
 //! implementation, and returns measurable frame data for oracle/golden comparison.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use gdcore::math::Color;
 use gdcore::math::{Rect2, Vector2, Vector2i, Vector3};
 use gdcore::math3d::Transform3D;
 use gdrender3d::{compare_framebuffers_3d, DiffResult3D, FrameBuffer3D, SoftwareRenderer3D};
-use gdserver3d::instance::Instance3DId;
+use gdserver3d::instance::{
+    GeometryInstanceSettings, Instance3DId, ShadowCastingSetting, VisibilityRangeFadeMode,
+};
 use gdserver3d::light::{Light3D, Light3DId, LightType, OmniShadowMode};
-use gdserver3d::material::{Material3D, ShadingMode, StandardMaterial3D, TextureSlot};
+use gdserver3d::material::{
+    Material3D, ShadingMode, StandardMaterial3D, TextureImage, TextureSlot,
+};
 use gdserver3d::mesh::{Mesh3D, PrimitiveType};
 use gdserver3d::reflection_probe::ReflectionProbeId;
 use gdserver3d::server::{FrameData3D, RenderingServer3D};
 use gdserver3d::shader::{Shader3D, ShaderMaterial3D, ShaderType3D};
 use gdserver3d::sprite3d::{Axis3D, BillboardMode3D, Sprite3D};
 use gdserver3d::viewport::Viewport3D;
+use gdvariant::Variant;
 
 use crate::node::NodeId;
 use crate::node3d;
@@ -228,6 +234,10 @@ pub struct RenderServer3DAdapter {
     ///
     /// [`skinned_vertices`]: RenderServer3DAdapter::skinned_vertices
     skinned_vertices: HashMap<NodeId, Vec<Vector3>>,
+    /// Decoded material textures, kept across frames. Materials resolve every
+    /// frame, so without this a textured surface would re-decode its PNG on
+    /// every single frame (pat-0q2kx.42).
+    texture_cache: MaterialTextureCache,
 }
 
 impl RenderServer3DAdapter {
@@ -245,6 +255,7 @@ impl RenderServer3DAdapter {
             frame_counter: 0,
             last_frame: None,
             skinned_vertices: HashMap::new(),
+            texture_cache: MaterialTextureCache::new(),
         }
     }
 
@@ -269,6 +280,16 @@ impl RenderServer3DAdapter {
     /// Light3D properties actually reached the render server's light.
     pub fn lights(&self) -> &[Light3D] {
         self.renderer.lights()
+    }
+
+    /// The render instances the last scene sync produced (pat-nzgdu.76).
+    ///
+    /// Like [`lights`](Self::lights), this exposes what the sync pass actually
+    /// wrote — here, whether a node's `GeometryInstance3D` properties
+    /// (`cast_shadow`, `visibility_range_*`, `transparency`, …) reached the
+    /// instance the renderer draws from.
+    pub fn instances(&self) -> &[gdserver3d::instance::Instance3D] {
+        self.renderer.instances()
     }
 
     /// Returns the last rendered frame buffer, if any.
@@ -540,13 +561,23 @@ impl RenderServer3DAdapter {
                     //   2. surface_material_override/0 (per-surface override)
                     //   3. node "albedo" color property (legacy shorthand)
                     //   4. Material3D::default()
-                    let resolved_mat = Self::resolve_material(tree, nid);
+                    let resolved_mat = self.resolve_material(tree, nid);
                     self.renderer.set_material(inst_id, resolved_mat);
 
                     // Resolve ShaderMaterial3D if attached to this node.
                     if let Some(shader_mat) = Self::resolve_shader_material(tree, nid) {
                         self.renderer.set_shader_material(inst_id, shader_mat);
                     }
+
+                    // GeometryInstance3D property block (pat-nzgdu.76):
+                    // cast_shadow, visibility_range, transparency,
+                    // material_overlay, lod_bias, extra_cull_margin,
+                    // custom_aabb. These are stored on the node and registered
+                    // in ClassDB; this is where they reach the render path.
+                    self.renderer.set_geometry_instance_settings(
+                        inst_id,
+                        geometry_instance_settings_for_node(tree, nid),
+                    );
 
                     if visible {
                         visible_count += 1;
@@ -647,6 +678,10 @@ impl RenderServer3DAdapter {
 
                 // Resolve shared mesh from multimesh_mesh_type or mesh_type.
                 let mesh = Self::resolve_multimesh_mesh(tree, nid);
+                // MultiMeshInstance3D is a GeometryInstance3D too, so its
+                // cast_shadow / visibility_range / transparency apply to every
+                // expanded entry (pat-nzgdu.76).
+                let geometry = geometry_instance_settings_for_node(tree, nid);
 
                 // Get or create the expanded instance list for this node.
                 let existing = self.multimesh_map.node_to_instances.remove(&nid);
@@ -679,6 +714,8 @@ impl RenderServer3DAdapter {
 
                     self.renderer.set_transform(inst_id, composed);
                     self.renderer.set_visible(inst_id, node_visible);
+                    self.renderer
+                        .set_geometry_instance_settings(inst_id, geometry.clone());
 
                     // Per-instance color → material albedo.
                     let color = node3d::get_multimesh_instance_color(tree, nid, i);
@@ -965,28 +1002,45 @@ impl RenderServer3DAdapter {
     /// priority chain:
     ///
     /// 1. `material_override` — overrides all surfaces
-    /// 2. `surface_material_override/0` — per-surface override (surface 0 for
+    /// 2. the authored StandardMaterial3D flattened onto the node at scene load
+    ///    (`__material__*`) — the real sub-resource parameters and textures
+    /// 3. `surface_material_override/0` — per-surface override (surface 0 for
     ///    the single-instance render path)
-    /// 3. StandardMaterial3D properties (`albedo_color`, `metallic`, etc.)
-    /// 4. `albedo` color property — legacy shorthand for a colored material
-    /// 5. `Material3D::default()` — white Lambert
-    fn resolve_material(tree: &SceneTree, nid: NodeId) -> Material3D {
+    /// 4. StandardMaterial3D properties (`albedo_color`, `metallic`, etc.)
+    /// 5. `albedo` color property — legacy shorthand for a colored material
+    /// 6. `Material3D::default()` — white Lambert
+    fn resolve_material(&mut self, tree: &SceneTree, nid: NodeId) -> Material3D {
         // 1. Check material_override (highest priority).
         if let Some(override_path) = node3d::get_material_override(tree, nid) {
             return Self::material_from_path(&override_path);
         }
 
-        // 2. Check per-surface override for surface 0.
+        // 2. The authored StandardMaterial3D, flattened onto the node at scene
+        //    load under `__material__*`. This is the real sub-resource data —
+        //    metallic, roughness, emission, texture references — so it is
+        //    strictly better than the filename colour heuristics
+        //    `material_from_path` falls back to for a path-only reference, and
+        //    better than the flat `albedo_color` shorthand below.
+        //
+        //    `packed_scene` already applied Godot's mesh-level priority when it
+        //    chose which material to flatten (surface_material_override/0, then
+        //    the mesh's own material), so this sits directly under
+        //    `material_override` (pat-0q2kx.42).
+        if let Some(mat) = material3d_for_node(tree, nid, &mut self.texture_cache) {
+            return mat;
+        }
+
+        // 3. Check per-surface override for surface 0.
         if let Some(surface_path) = node3d::get_surface_override_material(tree, nid, 0) {
             return Self::material_from_path(&surface_path);
         }
 
-        // 3. Check StandardMaterial3D properties on the node.
+        // 4. Check StandardMaterial3D properties on the node.
         if let Some(mat) = Self::resolve_standard_material(tree, nid) {
             return mat;
         }
 
-        // 4. Check glTF embedded material properties.
+        // 5. Check glTF embedded material properties.
         if let Some(path) = node3d::get_mesh_path(tree, nid) {
             let lower = path.to_lowercase();
             if lower.ends_with(".glb") || lower.ends_with(".gltf") {
@@ -999,7 +1053,7 @@ impl RenderServer3DAdapter {
             }
         }
 
-        // 5. Check legacy albedo color property.
+        // 6. Check legacy albedo color property.
         if let Some(node) = tree.get_node(nid) {
             if let gdvariant::Variant::Color(c) = node.get_property("albedo") {
                 let mut mat = Material3D::default();
@@ -1605,6 +1659,104 @@ fn evaluate_csg_tree(tree: &SceneTree, root: NodeId) -> Option<Mesh3D> {
 /// same light record as before this bead. `light_temperature` is folded into
 /// the light's colour (Godot tints the light by its blackbody colour) while the
 /// authored Kelvin value is kept on the record.
+/// Reads a numeric node property, accepting either `Float` or `Int`.
+///
+/// ⚠️ A `.tscn` writes `lod_bias = 1` (no decimal point) as an **Int**, so a
+/// `Float`-only match would silently drop whole-number values — the exact
+/// values authors are most likely to type.
+fn float_property(node: &crate::node::Node, name: &str) -> Option<f32> {
+    match node.get_property(name) {
+        Variant::Float(v) => Some(v as f32),
+        Variant::Int(v) => Some(v as f32),
+        _ => None,
+    }
+}
+
+/// Reads Godot's `GeometryInstance3D` property block off a scene node
+/// (pat-nzgdu.76).
+///
+/// Every property is optional: an absent one leaves the Godot default in place,
+/// so a node that sets none of them renders exactly as it did before.
+fn geometry_instance_settings(
+    node: &crate::node::Node,
+    material_overlay: Option<Material3D>,
+) -> GeometryInstanceSettings {
+    let mut g = GeometryInstanceSettings {
+        material_overlay,
+        ..GeometryInstanceSettings::default()
+    };
+
+    // ⚠️ Two spellings in the wild: a `.tscn` stores `cast_shadow` as Godot's
+    // enum ordinal, but Patina's own `node3d::set_cast_shadow` writes a Bool.
+    // Accepting only one would make the setting inert for half the scenes.
+    match node.get_property("cast_shadow") {
+        Variant::Int(v) => g.cast_shadow = ShadowCastingSetting::from_godot_int(v),
+        Variant::Bool(b) => {
+            g.cast_shadow = if b {
+                ShadowCastingSetting::On
+            } else {
+                ShadowCastingSetting::Off
+            }
+        }
+        _ => {}
+    }
+
+    if let Variant::Int(v) = node.get_property("visibility_range_fade_mode") {
+        g.visibility_range_fade_mode = VisibilityRangeFadeMode::from_godot_int(v);
+    }
+    if let Variant::Aabb(aabb) = node.get_property("custom_aabb") {
+        g.custom_aabb = Some(aabb);
+    }
+
+    if let Some(v) = float_property(node, "transparency") {
+        g.transparency = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = float_property(node, "visibility_range_begin") {
+        g.visibility_range_begin = v;
+    }
+    if let Some(v) = float_property(node, "visibility_range_begin_margin") {
+        g.visibility_range_begin_margin = v;
+    }
+    if let Some(v) = float_property(node, "visibility_range_end") {
+        g.visibility_range_end = v;
+    }
+    if let Some(v) = float_property(node, "visibility_range_end_margin") {
+        g.visibility_range_end_margin = v;
+    }
+    if let Some(v) = float_property(node, "lod_bias") {
+        g.lod_bias = v;
+    }
+    if let Some(v) = float_property(node, "extra_cull_margin") {
+        g.extra_cull_margin = v.max(0.0);
+    }
+
+    g
+}
+
+/// Resolves a node's `GeometryInstance3D` settings straight from the scene tree,
+/// overlay material included (pat-nzgdu.76).
+///
+/// Shared with the editor's 3D viewport (`gdeditor::viewport_3d_render`), which
+/// builds its own instance list rather than going through
+/// [`RenderServer3DAdapter`] — both paths must read the same properties the same
+/// way, or `cast_shadow = 0` would work in one viewport and not the other.
+///
+/// Returns the Godot defaults for a node that sets none of these properties, and
+/// for a node id that is not in the tree.
+pub fn geometry_instance_settings_for_node(
+    tree: &SceneTree,
+    nid: NodeId,
+) -> GeometryInstanceSettings {
+    let Some(node) = tree.get_node(nid) else {
+        return GeometryInstanceSettings::default();
+    };
+    let overlay = match node.get_property("material_overlay") {
+        Variant::String(path) => Some(RenderServer3DAdapter::material_from_path(&path)),
+        _ => None,
+    };
+    geometry_instance_settings(node, overlay)
+}
+
 fn sync_light_properties(node: &crate::node::Node, light: &mut Light3D) {
     use gdvariant::Variant;
 
@@ -1768,6 +1920,209 @@ fn extract_index_array(v: &gdvariant::Variant) -> Option<Vec<u32>> {
     } else {
         None
     }
+}
+
+/// Builds a [`StandardMaterial3D`] from a `.tscn` sub-resource property bag.
+///
+/// This is the missing link between a scene file and the renderer. A
+/// `[sub_resource type="StandardMaterial3D"]` block parses into a
+/// `HashMap<String, Variant>` that [`PackedScene::sub_resource_props`] hands
+/// back, and [`StandardMaterial3D::to_material3d`] already converts the result
+/// into the renderer's [`Material3D`] — but nothing turned the property bag into
+/// a `StandardMaterial3D`, so an authored material reached the render path as a
+/// flat albedo colour with metallic/roughness/emission/textures dropped
+/// (pat-0q2kx.42).
+///
+/// Defaults come from `doc/classes/BaseMaterial3D.xml`, which
+/// `StandardMaterial3D` inherits: albedo white, metallic 0, roughness **1**,
+/// emission black and DISABLED, normal map disabled with scale 1.
+///
+/// Godot gates emission and the normal map behind `emission_enabled` /
+/// `normal_enabled`. A `.tscn` that sets `emission` without
+/// `emission_enabled = true` must stay unlit, so honouring the colour alone
+/// would make materials glow that do not glow in Godot.
+pub fn standard_material_from_props(props: &HashMap<String, Variant>) -> StandardMaterial3D {
+    let color = |key: &str, default: Color| match props.get(key) {
+        Some(Variant::Color(c)) => *c,
+        _ => default,
+    };
+    let number = |key: &str, default: f32| match props.get(key) {
+        Some(Variant::Float(f)) => *f as f32,
+        Some(Variant::Int(i)) => *i as f32,
+        _ => default,
+    };
+    let flag = |key: &str| matches!(props.get(key), Some(Variant::Bool(true)));
+    // A texture reference arrives as `ExtResource:<id>` / `SubResource:<id>` or
+    // a bare `res://` path; keep whatever string is there so the texture loader
+    // can resolve it later, but ignore an empty one.
+    let texture = |key: &str| match props.get(key) {
+        Some(Variant::String(s)) if !s.is_empty() => Some(TextureSlot::new(s.clone())),
+        _ => None,
+    };
+
+    let emission_enabled = flag("emission_enabled");
+    let normal_enabled = flag("normal_enabled");
+
+    StandardMaterial3D {
+        albedo_color: color("albedo_color", Color::new(1.0, 1.0, 1.0, 1.0)),
+        albedo_texture: texture("albedo_texture"),
+        metallic: number("metallic", 0.0),
+        metallic_texture: texture("metallic_texture"),
+        roughness: number("roughness", 1.0),
+        roughness_texture: texture("roughness_texture"),
+        normal_enabled,
+        // Godot ignores the normal map entirely unless `normal_enabled` is set.
+        normal_texture: if normal_enabled {
+            texture("normal_texture")
+        } else {
+            None
+        },
+        normal_scale: number("normal_scale", 1.0),
+        emission: if emission_enabled {
+            color("emission", Color::new(0.0, 0.0, 0.0, 1.0))
+        } else {
+            Color::new(0.0, 0.0, 0.0, 1.0)
+        },
+        shading_mode: match props.get("shading_mode") {
+            // BaseMaterial3D.ShadingMode: 0 = UNSHADED, 1 = PER_PIXEL (default),
+            // 2 = PER_VERTEX.
+            Some(Variant::Int(0)) => ShadingMode::Unlit,
+            Some(Variant::Int(2)) => ShadingMode::Lambert,
+            _ => ShadingMode::Phong,
+        },
+        double_sided: matches!(props.get("cull_mode"), Some(Variant::Int(2))),
+    }
+}
+
+/// A `res://`-keyed cache of decoded material textures.
+///
+/// The 3D render path resolves materials every frame, so decoding a PNG per
+/// frame per surface is not viable — and neither is retrying a texture that is
+/// missing or undecodable, which would re-hit the filesystem forever. This
+/// caches BOTH outcomes: a successful decode as `Some`, a failure as `None`, so
+/// each path is attempted exactly once per process (pat-0q2kx.42).
+///
+/// [`gdresource::importers::load_color_texture_linear`] already does the decode
+/// — it honours `.import` sidecars, handles PNG/WebP/`.ctex`, and returns
+/// exactly the `(width, height, pixels)` that [`TextureImage`] wants — so this
+/// only adds path resolution and memoization on top.
+#[derive(Debug, Default)]
+pub struct MaterialTextureCache {
+    entries: HashMap<String, Option<Arc<TextureImage>>>,
+}
+
+impl MaterialTextureCache {
+    /// A cache with no entries.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of paths attempted so far, successful or not. Lets a caller (or a
+    /// test) confirm a repeated lookup did not re-decode.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether nothing has been looked up yet.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Decoded texture for `res_path`, loading it on first request.
+    ///
+    /// Returns `None` for a path that cannot be resolved or decoded — a material
+    /// with a broken texture reference renders with its flat albedo rather than
+    /// failing the frame, which is what Godot does with a missing texture.
+    pub fn get_or_load(&mut self, res_path: &str) -> Option<Arc<TextureImage>> {
+        if let Some(hit) = self.entries.get(res_path) {
+            return hit.clone();
+        }
+        let loaded = Self::load(res_path);
+        self.entries.insert(res_path.to_string(), loaded.clone());
+        loaded
+    }
+
+    fn load(res_path: &str) -> Option<Arc<TextureImage>> {
+        // `res://` needs the project roots that `set_path_roots` installs at
+        // boot; a bare filesystem path is passed through so tests and tools can
+        // load a texture without a project.
+        let resolved = if res_path.starts_with("res://") || res_path.starts_with("user://") {
+            gdcore::resolve_path(res_path).ok()?
+        } else {
+            std::path::PathBuf::from(res_path)
+        };
+        let (width, height, pixels) =
+            gdresource::importers::load_color_texture_linear(&resolved).ok()?;
+        if width == 0 || height == 0 || pixels.len() != (width as usize) * (height as usize) {
+            // A decoded-but-empty texture would sample as garbage; treat it as
+            // absent so the material falls back to its albedo colour.
+            return None;
+        }
+        Some(Arc::new(TextureImage::new(width, height, pixels)))
+    }
+}
+
+/// Recovers a material's property bag from the `__material__*` companions that
+/// [`PackedScene`](crate::packed_scene::PackedScene) flattens onto the node.
+///
+/// By render time the `PackedScene` is gone and only the `SceneTree` remains, so
+/// the scene loader copies the material sub-resource's properties onto the node
+/// under `__material__<key>` (the same trick the physics layer uses for
+/// `__shape__<key>`). This strips the prefix back off, handing
+/// [`standard_material_from_props`] the bag it expects.
+///
+/// `None` when the node carries no material companions — the caller then keeps
+/// whatever flat albedo it already had, so a mesh without an authored material
+/// is unaffected.
+pub fn material_props_from_node(
+    tree: &SceneTree,
+    node_id: NodeId,
+) -> Option<HashMap<String, Variant>> {
+    const PREFIX: &str = "__material__";
+    let node = tree.get_node(node_id)?;
+    let keys: Vec<String> = node
+        .get_property_list()
+        .into_iter()
+        .filter(|k| k.starts_with(PREFIX))
+        .map(String::from)
+        .collect();
+    if keys.is_empty() {
+        return None;
+    }
+    let mut props = HashMap::new();
+    for key in keys {
+        // `__material__class` records the resource type, not a material
+        // parameter; keep it out of the parameter bag.
+        let stripped = &key[PREFIX.len()..];
+        if stripped == "class" {
+            continue;
+        }
+        props.insert(stripped.to_string(), node.get_property(&key));
+    }
+    Some(props)
+}
+
+/// The renderer-ready material for a mesh node, or `None` when it has no
+/// authored material.
+///
+/// The whole `.tscn` -> pixels chain in one call: node companions ->
+/// [`standard_material_from_props`] -> [`StandardMaterial3D::to_material3d`],
+/// with any texture references resolved through `textures`.
+pub fn material3d_for_node(
+    tree: &SceneTree,
+    node_id: NodeId,
+    textures: &mut MaterialTextureCache,
+) -> Option<Material3D> {
+    let props = material_props_from_node(tree, node_id)?;
+    let standard = standard_material_from_props(&props);
+    let mut material = standard.to_material3d();
+    if let Some(slot) = standard.albedo_texture.as_ref() {
+        material.albedo_texture = textures.get_or_load(&slot.path);
+    }
+    if let Some(slot) = standard.normal_texture.as_ref() {
+        material.normal_texture = textures.get_or_load(&slot.path);
+    }
+    Some(material)
 }
 
 #[cfg(test)]
@@ -2635,7 +2990,9 @@ material_override = SubResource("ShaderMaterial_1")
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
-        let cam = tree.add_child(root, Node::new("Camera", "Camera3D")).unwrap();
+        let cam = tree
+            .add_child(root, Node::new("Camera", "Camera3D"))
+            .unwrap();
         node3d::set_position(&mut tree, cam, Vector3::new(0.0, 0.0, 5.0));
         node3d::set_camera_current(&mut tree, cam, true);
 
@@ -2719,7 +3076,10 @@ material_override = SubResource("ShaderMaterial_1")
         // -- temperature tints the light, relative to daylight-neutral 6500K --
         let warm = light_record_from_scene(&[("light_temperature", Variant::Float(3000.0))]);
         let neutral = light_record_from_scene(&[("light_temperature", Variant::Float(6500.0))]);
-        assert_eq!(warm.temperature, 3000.0, "authored Kelvin reaches the record");
+        assert_eq!(
+            warm.temperature, 3000.0,
+            "authored Kelvin reaches the record"
+        );
         assert!(
             warm.color.b < neutral.color.b,
             "3000K must be less blue than 6500K (got {} vs {})",
@@ -2949,6 +3309,281 @@ material_override = SubResource("ShaderMaterial_1")
         assert!(
             px.g > px.r && px.g > px.b,
             "centre pixel should be green-dominant from the sprite modulate, got {px:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod standard_material_props_tests {
+    use super::*;
+
+    fn bag(pairs: &[(&str, Variant)]) -> HashMap<String, Variant> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    /// An empty bag yields Godot's documented defaults — notably roughness 1.0,
+    /// not 0.0. Getting that backwards makes every unspecified material a mirror.
+    #[test]
+    fn empty_bag_uses_godot_defaults() {
+        let m = standard_material_from_props(&bag(&[]));
+        assert_eq!(m.albedo_color, Color::new(1.0, 1.0, 1.0, 1.0));
+        assert_eq!(m.metallic, 0.0);
+        assert_eq!(m.roughness, 1.0, "BaseMaterial3D.roughness defaults to 1.0");
+        assert_eq!(m.emission, Color::new(0.0, 0.0, 0.0, 1.0));
+        assert!(!m.normal_enabled);
+        assert_eq!(m.normal_scale, 1.0);
+        assert!(m.albedo_texture.is_none());
+    }
+
+    /// ⚠️ The bead's own scene: metallic=1, roughness=0.1 with an albedo texture
+    /// must survive into the material instead of collapsing to a flat colour.
+    #[test]
+    fn authored_pbr_params_and_texture_survive() {
+        let m = standard_material_from_props(&bag(&[
+            (
+                "albedo_color",
+                Variant::Color(Color::new(0.2, 0.4, 0.6, 1.0)),
+            ),
+            (
+                "albedo_texture",
+                Variant::String("res://tex/albedo.png".into()),
+            ),
+            ("metallic", Variant::Float(1.0)),
+            ("roughness", Variant::Float(0.1)),
+        ]));
+        assert_eq!(m.albedo_color, Color::new(0.2, 0.4, 0.6, 1.0));
+        assert_eq!(m.metallic, 1.0);
+        assert!((m.roughness - 0.1).abs() < 1e-6);
+        assert_eq!(
+            m.albedo_texture.as_ref().map(|t| t.path.as_str()),
+            Some("res://tex/albedo.png"),
+            "the texture reference must reach the material for the loader to resolve"
+        );
+    }
+
+    /// Godot gates emission behind `emission_enabled`. A colour without the flag
+    /// must NOT glow, or every scene that merely names an emission colour lights up.
+    #[test]
+    fn emission_requires_its_enable_flag() {
+        let colour = Variant::Color(Color::new(1.0, 0.5, 0.0, 1.0));
+        let off = standard_material_from_props(&bag(&[("emission", colour.clone())]));
+        assert_eq!(
+            off.emission,
+            Color::new(0.0, 0.0, 0.0, 1.0),
+            "emission without emission_enabled must stay black"
+        );
+
+        let on = standard_material_from_props(&bag(&[
+            ("emission", colour),
+            ("emission_enabled", Variant::Bool(true)),
+        ]));
+        assert_eq!(on.emission, Color::new(1.0, 0.5, 0.0, 1.0));
+    }
+
+    /// Same gate for the normal map.
+    #[test]
+    fn normal_map_requires_its_enable_flag() {
+        let tex = Variant::String("res://tex/n.png".into());
+        let off = standard_material_from_props(&bag(&[("normal_texture", tex.clone())]));
+        assert!(
+            off.normal_texture.is_none(),
+            "normal map is gated by normal_enabled"
+        );
+
+        let on = standard_material_from_props(&bag(&[
+            ("normal_texture", tex),
+            ("normal_enabled", Variant::Bool(true)),
+        ]));
+        assert!(on.normal_texture.is_some());
+        assert!(on.normal_enabled);
+    }
+
+    /// BaseMaterial3D.ShadingMode: 0 UNSHADED, 1 PER_PIXEL (default), 2 PER_VERTEX.
+    #[test]
+    fn shading_mode_maps_from_the_godot_enum() {
+        let m0 = standard_material_from_props(&bag(&[("shading_mode", Variant::Int(0))]));
+        assert_eq!(m0.shading_mode, ShadingMode::Unlit);
+        let m2 = standard_material_from_props(&bag(&[("shading_mode", Variant::Int(2))]));
+        assert_eq!(m2.shading_mode, ShadingMode::Lambert);
+        // Absent => PER_PIXEL, the documented default.
+        let md = standard_material_from_props(&bag(&[]));
+        assert_eq!(md.shading_mode, ShadingMode::Phong);
+    }
+
+    /// The whole point of the parse: it feeds the renderer's Material3D, which
+    /// already knows how to consume a StandardMaterial3D.
+    #[test]
+    fn parsed_material_converts_for_the_renderer() {
+        let m = standard_material_from_props(&bag(&[
+            ("metallic", Variant::Float(1.0)),
+            ("roughness", Variant::Float(0.25)),
+        ]))
+        .to_material3d();
+        assert_eq!(m.metallic, 1.0);
+        assert!((m.roughness - 0.25).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod material_texture_cache_tests {
+    use super::*;
+
+    /// A real 1x1 red PNG that lives in the repo, so the success path exercises
+    /// an actual decode rather than a hand-built buffer.
+    fn fixture_png() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdresource/fixtures/red1x1.png")
+    }
+
+    #[test]
+    fn decodes_a_real_png_once_and_caches_it() {
+        let path = fixture_png();
+        if !path.exists() {
+            // The fixture moved; skip rather than fail a bead on repo layout.
+            return;
+        }
+        let key = path.to_string_lossy().to_string();
+        let mut cache = MaterialTextureCache::new();
+        assert!(cache.is_empty());
+
+        let first = cache
+            .get_or_load(&key)
+            .expect("the fixture PNG must decode");
+        assert_eq!(first.width, 1);
+        assert_eq!(first.height, 1);
+        assert_eq!(first.pixels.len(), 1);
+
+        // Second lookup is a cache hit: same allocation, no new entry.
+        let second = cache.get_or_load(&key).expect("cached");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a repeat lookup must return the cached Arc, not decode again"
+        );
+        assert_eq!(cache.len(), 1);
+    }
+
+    /// ⚠️ A missing texture must be cached as a MISS. Without this the render
+    /// path retries the filesystem for every surface on every frame.
+    #[test]
+    fn a_missing_texture_is_cached_as_a_miss() {
+        let mut cache = MaterialTextureCache::new();
+        assert!(cache
+            .get_or_load("/nonexistent/definitely-not-here.png")
+            .is_none());
+        assert_eq!(cache.len(), 1, "the failure must occupy a cache slot");
+        assert!(cache
+            .get_or_load("/nonexistent/definitely-not-here.png")
+            .is_none());
+        assert_eq!(cache.len(), 1, "a repeated miss must not add another entry");
+    }
+
+    /// An unresolvable `res://` path (no project roots installed) is a miss, not
+    /// a panic — a broken reference falls back to flat albedo, as in Godot.
+    #[test]
+    fn unresolvable_res_path_is_a_miss() {
+        let mut cache = MaterialTextureCache::new();
+        assert!(cache
+            .get_or_load("res://textures/does_not_exist.png")
+            .is_none());
+    }
+}
+
+#[cfg(test)]
+mod material_node_companion_tests {
+    use super::*;
+    use crate::packed_scene::{add_packed_scene_to_tree, PackedScene};
+
+    /// A mesh whose StandardMaterial3D sets more than albedo — exactly the shape
+    /// that previously arrived at the renderer as a flat colour.
+    const SCENE: &str = r#"[gd_scene load_steps=3 format=3]
+
+[sub_resource type="BoxMesh" id="Mesh_1"]
+
+[sub_resource type="StandardMaterial3D" id="Mat_1"]
+albedo_color = Color(0.2, 0.4, 0.6, 1)
+metallic = 1.0
+roughness = 0.1
+emission_enabled = true
+emission = Color(1, 0.5, 0, 1)
+
+[node name="Root" type="Node3D"]
+
+[node name="Mesh" type="MeshInstance3D" parent="."]
+mesh = SubResource("Mesh_1")
+surface_material_override/0 = SubResource("Mat_1")
+"#;
+
+    /// ⚠️ The data path: a `.tscn` material's full parameter set survives scene
+    /// instancing and is recoverable from the node alone. Before this only
+    /// `albedo_color` was copied, so metallic/roughness/emission were gone by the
+    /// time anything could render them.
+    #[test]
+    fn material_params_survive_scene_instancing() {
+        let scene = PackedScene::from_tscn(SCENE).expect("scene parses");
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scene_root =
+            add_packed_scene_to_tree(&mut tree, root, &scene).expect("scene instances");
+        let mesh = tree
+            .get_node_or_null(scene_root, "Mesh")
+            .expect("Mesh instanced");
+
+        let props = material_props_from_node(&tree, mesh)
+            .expect("the mesh must carry __material__ companions");
+        let m = standard_material_from_props(&props);
+
+        assert_eq!(m.metallic, 1.0, "metallic must survive instancing");
+        assert!((m.roughness - 0.1).abs() < 1e-6, "roughness must survive");
+        assert_eq!(
+            m.emission,
+            Color::new(1.0, 0.5, 0.0, 1.0),
+            "emission must survive, and its enable flag with it"
+        );
+        assert_eq!(m.albedo_color, Color::new(0.2, 0.4, 0.6, 1.0));
+    }
+
+    /// A mesh with no material carries no companions, so the caller keeps its
+    /// existing flat-albedo behaviour rather than getting a default material.
+    #[test]
+    fn a_mesh_without_a_material_has_no_companions() {
+        let scene = PackedScene::from_tscn(
+            "[gd_scene load_steps=2 format=3]\n\n             [sub_resource type=\"BoxMesh\" id=\"Mesh_1\"]\n\n             [node name=\"Root\" type=\"Node3D\"]\n\n             [node name=\"Mesh\" type=\"MeshInstance3D\" parent=\".\"]\n             mesh = SubResource(\"Mesh_1\")\n",
+        )
+        .expect("scene parses");
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scene_root =
+            add_packed_scene_to_tree(&mut tree, root, &scene).expect("scene instances");
+        let mesh = tree
+            .get_node_or_null(scene_root, "Mesh")
+            .expect("Mesh instanced");
+        assert!(material_props_from_node(&tree, mesh).is_none());
+    }
+
+    /// End to end: scene -> node companions -> renderer-ready Material3D.
+    #[test]
+    fn material3d_for_node_resolves_the_full_chain() {
+        let scene = PackedScene::from_tscn(SCENE).expect("scene parses");
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scene_root =
+            add_packed_scene_to_tree(&mut tree, root, &scene).expect("scene instances");
+        let mesh = tree
+            .get_node_or_null(scene_root, "Mesh")
+            .expect("Mesh instanced");
+
+        let mut textures = MaterialTextureCache::new();
+        let m = material3d_for_node(&tree, mesh, &mut textures)
+            .expect("an authored material must resolve");
+        assert_eq!(m.metallic, 1.0);
+        assert!((m.roughness - 0.1).abs() < 1e-6);
+        // No texture was authored, so nothing was attempted.
+        assert!(m.albedo_texture.is_none());
+        assert!(
+            textures.is_empty(),
+            "no texture refs means no load attempts"
         );
     }
 }

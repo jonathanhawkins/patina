@@ -4,7 +4,7 @@
 //! loop modes, and an [`AnimationPlayer`] that advances playback and samples
 //! track values at the current position.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use gdcore::math::{Color, Vector2, Vector3};
 use gdcore::math3d::{Basis, Transform3D};
@@ -526,6 +526,49 @@ pub enum AnimationPlayerSignal {
     },
 }
 
+/// Which loop phase advances a mixer's playback — Godot's
+/// `AnimationMixer.callback_mode_process` (`AnimationMixer::AnimationCallbackModeProcess`).
+///
+/// The node property has always existed in the ClassDB and the editor
+/// inspector, but nothing read it: every player advanced in the idle phase, so
+/// a `PHYSICS` mixer sampled at render rate (jittering against the bodies it
+/// was meant to stay in step with) and a `MANUAL` one animated despite the
+/// project asking to drive it by hand (pat-0q2kx.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnimationCallbackMode {
+    /// Advance during the physics tick (`ANIMATION_CALLBACK_MODE_PROCESS_PHYSICS`,
+    /// `0`), in lockstep with the bodies the animation drives.
+    Physics,
+    /// Advance during the idle/process phase (`..._IDLE`, `1`) — Godot's default.
+    #[default]
+    Idle,
+    /// Never advanced by the loop (`..._MANUAL`, `2`); only an explicit
+    /// `advance()` moves the playhead.
+    Manual,
+}
+
+impl AnimationCallbackMode {
+    /// Maps Godot's `callback_mode_process` integer. Unknown values fall back to
+    /// [`Idle`](Self::Idle), which is also the value used when the property is
+    /// absent from the node.
+    pub fn from_godot_int(v: i64) -> Self {
+        match v {
+            0 => AnimationCallbackMode::Physics,
+            2 => AnimationCallbackMode::Manual,
+            _ => AnimationCallbackMode::Idle,
+        }
+    }
+
+    /// The Godot `callback_mode_process` integer for this mode.
+    pub fn to_godot_int(self) -> i64 {
+        match self {
+            AnimationCallbackMode::Physics => 0,
+            AnimationCallbackMode::Idle => 1,
+            AnimationCallbackMode::Manual => 2,
+        }
+    }
+}
+
 /// Manages playback of named animations, analogous to Godot's `AnimationPlayer`.
 #[derive(Debug, Clone)]
 pub struct AnimationPlayer {
@@ -562,6 +605,20 @@ pub struct AnimationPlayer {
     blend_times: HashMap<(String, String), f64>,
     /// Queued follow-up animations: `anim -> next` (Godot `animation_set_next`).
     next_animations: HashMap<String, String>,
+    /// Per-play speed multiplier from `play(..., custom_speed)`. Multiplies
+    /// [`speed_scale`](Self::speed_scale); reset to 1.0 by `stop`. Negative for
+    /// `play_backwards` (pat-0q2kx.52).
+    custom_speed: f64,
+    /// Clips chained by `queue()`, played in order as each finishes. Distinct
+    /// from `next_animations`, which is a per-clip successor rather than a
+    /// one-shot list, and consumed BEFORE it.
+    queue: VecDeque<String>,
+    /// Active playback section `(start, end)` in seconds (Godot 4.4's
+    /// `play_section`/`set_section`), clamping advance to a sub-range.
+    section: Option<(f64, f64)>,
+    /// Crossfade used when no `(from, to)` pair is registered and `play` was
+    /// given no `custom_blend` (Godot `playback_default_blend_time`).
+    pub default_blend_time: f64,
 }
 
 /// Tracks an in-progress crossfade between two animations.
@@ -609,6 +666,10 @@ impl AnimationPlayer {
             pending_signals: Vec::new(),
             blend_times: HashMap::new(),
             next_animations: HashMap::new(),
+            custom_speed: 1.0,
+            queue: VecDeque::new(),
+            section: None,
+            default_blend_time: 0.0,
         }
     }
 
@@ -617,34 +678,218 @@ impl AnimationPlayer {
         self.animations.insert(anim.name.clone(), anim);
     }
 
-    /// Starts playing the named animation from the beginning.
+    /// Starts playing the named animation, with Godot's default arguments
+    /// (`custom_blend = -1`, `custom_speed = 1.0`, `from_end = false`).
     ///
     /// Emits `animation_changed` (when the current animation differs) and
     /// `animation_started` into the signal queue.
     pub fn play(&mut self, name: &str) {
-        if self.animations.contains_key(name) {
-            let previous = self.current.take();
-            self.current = Some(name.to_owned());
-            self.position = 0.0;
-            self.playing = true;
-            self.ping_pong_forward = true;
-            if let Some(prev) = previous {
-                if prev != name {
-                    self.pending_signals
-                        .push(AnimationPlayerSignal::AnimationChanged {
-                            old: prev,
-                            new: name.to_owned(),
-                        });
-                }
-            }
+        self.play_ex(name, -1.0, 1.0, false);
+    }
+
+    /// Godot's full `play(name, custom_blend, custom_speed, from_end)`
+    /// (pat-0q2kx.52).
+    ///
+    /// - **Same-clip continuation.** Calling `play` on the clip already playing
+    ///   RESUMES it — Godot only rewinds when the clip changes. Restarting
+    ///   unconditionally (the old behaviour) made a per-frame
+    ///   `play("walk")` in `_process` freeze the animation on frame 0.
+    /// - `custom_blend >= 0` crossfades over that many seconds; a negative value
+    ///   falls back to the registered `(from, to)` blend time and then to
+    ///   [`default_blend_time`](Self::default_blend_time).
+    /// - `custom_speed` multiplies [`speed_scale`](Self::speed_scale) for this
+    ///   playback only, and may be negative to run the clip backwards.
+    /// - `from_end` starts the playhead at the clip's end (or the section end)
+    ///   rather than its start, which is what makes backwards playback begin
+    ///   where the clip stops.
+    pub fn play_ex(&mut self, name: &str, custom_blend: f64, custom_speed: f64, from_end: bool) {
+        if !self.animations.contains_key(name) {
+            return;
+        }
+        let already_current = self.current.as_deref() == Some(name);
+        self.custom_speed = custom_speed;
+        self.playing = true;
+
+        if already_current {
+            // Resume in place: no rewind, no crossfade with itself, and no
+            // `animation_changed` — the clip never changed.
             self.pending_signals
                 .push(AnimationPlayerSignal::AnimationStarted(name.to_owned()));
+            return;
+        }
+
+        let previous = self.current.take();
+        // Crossfade from whatever was playing, if a blend time applies.
+        if let Some(ref prev) = previous {
+            let blend = if custom_blend >= 0.0 {
+                custom_blend
+            } else {
+                let registered = self.get_blend_time(prev, name);
+                if registered > 0.0 {
+                    registered
+                } else {
+                    self.default_blend_time
+                }
+            };
+            if blend > 0.0 {
+                self.blend_state = Some(BlendState {
+                    from_animation: prev.clone(),
+                    from_position: self.position,
+                    blend_duration: blend,
+                    blend_elapsed: 0.0,
+                });
+            }
+        }
+
+        self.current = Some(name.to_owned());
+        self.position = if from_end {
+            self.section_end_or_length()
+        } else {
+            self.section_start()
+        };
+        self.ping_pong_forward = !from_end;
+
+        if let Some(prev) = previous {
+            if prev != name {
+                self.pending_signals
+                    .push(AnimationPlayerSignal::AnimationChanged {
+                        old: prev,
+                        new: name.to_owned(),
+                    });
+            }
+        }
+        self.pending_signals
+            .push(AnimationPlayerSignal::AnimationStarted(name.to_owned()));
+    }
+
+    /// Godot's `play_backwards(name, custom_blend)`: plays `name` from its end
+    /// at negative speed, so it runs to the start and finishes there.
+    pub fn play_backwards(&mut self, name: &str, custom_blend: f64) {
+        self.play_ex(name, custom_blend, -1.0, true);
+    }
+
+    /// Godot's `stop()` — halts playback AND resets the playhead, clearing the
+    /// queue and any per-play speed.
+    ///
+    /// This used to be pause semantics (it only cleared `playing`), so a script
+    /// calling `stop()` then `play()` resumed mid-clip instead of restarting,
+    /// and a queued clip survived the stop. Use [`pause`](Self::pause) for the
+    /// old behaviour.
+    pub fn stop(&mut self) {
+        self.playing = false;
+        self.position = self.section_start();
+        self.custom_speed = 1.0;
+        self.ping_pong_forward = true;
+        self.queue.clear();
+        self.blend_state = None;
+    }
+
+    /// Godot's `stop(keep_state = true)`: halts playback but leaves the playhead
+    /// (and the sampled pose) where it is.
+    pub fn stop_keep_state(&mut self) {
+        self.playing = false;
+    }
+
+    /// Godot's `pause()` — halts playback preserving the position, so a
+    /// following `play()` of the same clip resumes from here.
+    pub fn pause(&mut self) {
+        self.playing = false;
+    }
+
+    /// Queues `name` to play once the current animation finishes (Godot
+    /// `AnimationPlayer::queue`). Queued clips are consumed in order and take
+    /// precedence over an `animation_set_next` successor.
+    pub fn queue(&mut self, name: impl Into<String>) {
+        self.queue.push_back(name.into());
+    }
+
+    /// The clips currently queued behind the playing one, in play order.
+    pub fn get_queue(&self) -> Vec<String> {
+        self.queue.iter().cloned().collect()
+    }
+
+    /// Clears the queue without touching the playing animation (Godot
+    /// `clear_queue`).
+    pub fn clear_queue(&mut self) {
+        self.queue.clear();
+    }
+
+    /// The effective playback speed: `speed_scale * custom_speed`, or `0.0` when
+    /// nothing is playing (Godot `get_playing_speed`).
+    pub fn get_playing_speed(&self) -> f64 {
+        if self.playing {
+            self.speed_scale * self.custom_speed
+        } else {
+            0.0
         }
     }
 
-    /// Stops playback.
-    pub fn stop(&mut self) {
-        self.playing = false;
+    /// Restricts playback to `[start, end]` seconds (Godot 4.4 `set_section`).
+    /// A non-positive-width range is ignored rather than freezing the playhead.
+    pub fn set_section(&mut self, start: f64, end: f64) {
+        if end > start {
+            self.section = Some((start.max(0.0), end));
+        }
+    }
+
+    /// Plays `name` restricted to `[start, end]` (Godot `play_section`).
+    pub fn play_section(
+        &mut self,
+        name: &str,
+        start: f64,
+        end: f64,
+        custom_blend: f64,
+        custom_speed: f64,
+        from_end: bool,
+    ) {
+        self.set_section(start, end);
+        self.play_ex(name, custom_blend, custom_speed, from_end);
+    }
+
+    /// Clears any active section, restoring whole-clip playback.
+    pub fn reset_section(&mut self) {
+        self.section = None;
+    }
+
+    /// Whether a section is currently restricting playback.
+    pub fn has_section(&self) -> bool {
+        self.section.is_some()
+    }
+
+    /// The section's start time, or `0.0` when no section is set.
+    pub fn get_section_start_time(&self) -> f64 {
+        self.section.map(|(s, _)| s).unwrap_or(0.0)
+    }
+
+    /// The section's end time, or the current clip's length when unset.
+    pub fn get_section_end_time(&self) -> f64 {
+        self.section
+            .map(|(_, e)| e)
+            .unwrap_or_else(|| self.current_length())
+    }
+
+    /// Length of the currently selected clip (`0.0` when none).
+    fn current_length(&self) -> f64 {
+        self.current
+            .as_ref()
+            .and_then(|n| self.animations.get(n))
+            .map(|a| a.length)
+            .unwrap_or(0.0)
+    }
+
+    /// Lower playback bound: the section start, else the clip start.
+    fn section_start(&self) -> f64 {
+        self.section.map(|(s, _)| s).unwrap_or(0.0)
+    }
+
+    /// Upper playback bound: the section end clamped to the clip, else its length.
+    fn section_end_or_length(&self) -> f64 {
+        let length = self.current_length();
+        match self.section {
+            Some((_, e)) if length > 0.0 => e.min(length),
+            Some((_, e)) => e,
+            None => length,
+        }
     }
 
     /// Emits `animation_finished` for the current animation and, if one is
@@ -656,9 +901,17 @@ impl AnimationPlayer {
         };
         self.pending_signals
             .push(AnimationPlayerSignal::AnimationFinished(name.clone()));
+        // Godot drains `queue()` first: an explicitly queued clip wins over the
+        // clip's registered `animation_set_next` successor (pat-0q2kx.52).
+        while let Some(queued) = self.queue.pop_front() {
+            if self.animations.contains_key(&queued) {
+                // `play` emits `animation_changed` + `animation_started`.
+                self.play(&queued);
+                return;
+            }
+        }
         if let Some(next) = self.next_animations.get(&name).cloned() {
             if self.animations.contains_key(&next) {
-                // `play` emits `animation_changed` + `animation_started`.
                 self.play(&next);
             }
         }
@@ -761,7 +1014,14 @@ impl AnimationPlayer {
         }
 
         let loop_mode = anim.loop_mode;
-        let scaled_delta = delta * self.speed_scale;
+        // `custom_speed` from `play(..., custom_speed)` multiplies the player's
+        // own scale, and carries the sign that makes `play_backwards` run in
+        // reverse (pat-0q2kx.52).
+        let scaled_delta = delta * self.speed_scale * self.custom_speed;
+        // A section restricts the travelled range; without one these are the
+        // clip's own bounds, so the arithmetic below is unchanged.
+        let lower = self.section_start().min(length);
+        let upper = self.section_end_or_length().min(length);
 
         // Advance blend state if crossfading.
         if let Some(ref mut bs) = self.blend_state {
@@ -775,45 +1035,59 @@ impl AnimationPlayer {
         match loop_mode {
             LoopMode::None => {
                 self.position += scaled_delta;
-                if self.position >= length {
-                    self.position = length;
-                    self.playing = false;
-                    self.on_animation_finished();
-                } else if self.position < 0.0 {
-                    self.position = 0.0;
+                // Which bound ends the clip depends on the direction of travel.
+                // Backwards playback lands EXACTLY on `lower` (1.0s of a 1.0s
+                // clip at -1x), so the reverse test has to be inclusive — while
+                // the forward test must not fire for a clip sitting at `lower`
+                // with a zero delta.
+                if scaled_delta >= 0.0 {
+                    if self.position >= upper {
+                        self.position = upper;
+                        self.playing = false;
+                        self.on_animation_finished();
+                    }
+                } else if self.position <= lower {
+                    self.position = lower;
                     self.playing = false;
                     self.on_animation_finished();
                 }
             }
             LoopMode::Linear => {
                 self.position += scaled_delta;
-                if self.position >= length {
-                    self.position %= length;
-                } else if self.position < 0.0 {
-                    self.position = length + (self.position % length);
-                    if self.position >= length {
-                        self.position = 0.0;
+                // Wrap inside the section when one is set; `span` is the clip
+                // length in the common (sectionless) case.
+                let span = upper - lower;
+                if span > 0.0 {
+                    if self.position >= upper {
+                        self.position = lower + (self.position - lower) % span;
+                    } else if self.position < lower {
+                        self.position = upper - (lower - self.position) % span;
+                        if self.position >= upper {
+                            self.position = lower;
+                        }
                     }
                 }
             }
             LoopMode::PingPong => {
+                // Bounces between the section bounds, which are the clip's own
+                // 0..length when no section is set.
                 if self.ping_pong_forward {
                     self.position += scaled_delta;
-                    if self.position >= length {
-                        self.position = 2.0 * length - self.position;
+                    if self.position >= upper {
+                        self.position = 2.0 * upper - self.position;
                         self.ping_pong_forward = false;
-                        if self.position < 0.0 {
-                            self.position = 0.0;
+                        if self.position < lower {
+                            self.position = lower;
                             self.ping_pong_forward = true;
                         }
                     }
                 } else {
                     self.position -= scaled_delta;
-                    if self.position <= 0.0 {
-                        self.position = -self.position;
+                    if self.position <= lower {
+                        self.position = 2.0 * lower - self.position;
                         self.ping_pong_forward = true;
-                        if self.position > length {
-                            self.position = length;
+                        if self.position > upper {
+                            self.position = upper;
                             self.ping_pong_forward = false;
                         }
                     }
@@ -1257,22 +1531,28 @@ pub fn cubic_interpolate_variant(
     t: f32,
 ) -> Option<Variant> {
     match (pre, from, to, post) {
-        (Variant::Float(pr), Variant::Float(fr), Variant::Float(tv), Variant::Float(po)) => {
-            Some(Variant::Float(cubic_interp_f64(*pr, *fr, *tv, *po, t as f64)))
-        }
-        (Variant::Vector2(pr), Variant::Vector2(fr), Variant::Vector2(tv), Variant::Vector2(po)) => {
-            Some(Variant::Vector2(Vector2::new(
-                cubic_interp_f32(pr.x, fr.x, tv.x, po.x, t),
-                cubic_interp_f32(pr.y, fr.y, tv.y, po.y, t),
-            )))
-        }
-        (Variant::Vector3(pr), Variant::Vector3(fr), Variant::Vector3(tv), Variant::Vector3(po)) => {
-            Some(Variant::Vector3(Vector3::new(
-                cubic_interp_f32(pr.x, fr.x, tv.x, po.x, t),
-                cubic_interp_f32(pr.y, fr.y, tv.y, po.y, t),
-                cubic_interp_f32(pr.z, fr.z, tv.z, po.z, t),
-            )))
-        }
+        (Variant::Float(pr), Variant::Float(fr), Variant::Float(tv), Variant::Float(po)) => Some(
+            Variant::Float(cubic_interp_f64(*pr, *fr, *tv, *po, t as f64)),
+        ),
+        (
+            Variant::Vector2(pr),
+            Variant::Vector2(fr),
+            Variant::Vector2(tv),
+            Variant::Vector2(po),
+        ) => Some(Variant::Vector2(Vector2::new(
+            cubic_interp_f32(pr.x, fr.x, tv.x, po.x, t),
+            cubic_interp_f32(pr.y, fr.y, tv.y, po.y, t),
+        ))),
+        (
+            Variant::Vector3(pr),
+            Variant::Vector3(fr),
+            Variant::Vector3(tv),
+            Variant::Vector3(po),
+        ) => Some(Variant::Vector3(Vector3::new(
+            cubic_interp_f32(pr.x, fr.x, tv.x, po.x, t),
+            cubic_interp_f32(pr.y, fr.y, tv.y, po.y, t),
+            cubic_interp_f32(pr.z, fr.z, tv.z, po.z, t),
+        ))),
         (Variant::Color(pr), Variant::Color(fr), Variant::Color(tv), Variant::Color(po)) => {
             Some(Variant::Color(Color::new(
                 cubic_interp_f32(pr.r, fr.r, tv.r, po.r, t),
@@ -2139,8 +2419,14 @@ mod tests {
             Some(Variant::Float(f)) => f,
             o => panic!("expected Float, got {o:?}"),
         };
-        assert!((l - 5.0).abs() < 1e-4, "linear midpoint should be 5.0, got {l}");
-        assert!((c - l).abs() > 1e-2, "cubic ({c}) must differ from linear ({l})");
+        assert!(
+            (l - 5.0).abs() < 1e-4,
+            "linear midpoint should be 5.0, got {l}"
+        );
+        assert!(
+            (c - l).abs() > 1e-2,
+            "cubic ({c}) must differ from linear ({l})"
+        );
         // Catmull-Rom overshoots above the linear midpoint here (≈ 5.625).
         assert!((c - 5.625).abs() < 1e-3, "cubic midpoint ≈ 5.625, got {c}");
     }

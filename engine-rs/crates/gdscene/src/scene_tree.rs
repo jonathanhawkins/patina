@@ -17,7 +17,7 @@ use gdplatform::network::MultiplayerAPI;
 use gdscript_interop::bindings::ScriptInstance;
 use gdvariant::Variant;
 
-use crate::animation::{AnimationPlayer, AnimationPlayerSignal};
+use crate::animation::{AnimationCallbackMode, AnimationPlayer, AnimationPlayerSignal};
 use crate::animation_tree::AnimationTree;
 use crate::lifecycle::LifecycleManager;
 use crate::node::{Node, NodeId};
@@ -125,6 +125,8 @@ pub struct SceneTree {
     nodes: HashMap<NodeId, Node>,
     /// The ID of the root node (always valid).
     root_id: NodeId,
+    /// The root `Window`'s size and content-scale configuration (pat-nzgdu.87).
+    root_window: crate::viewport::RootWindow,
     /// Group index: group name -> set of member NodeIds.
     groups: HashMap<String, HashSet<NodeId>>,
     /// Per-node signal stores. Lazily created when a signal is connected.
@@ -218,8 +220,20 @@ impl std::fmt::Debug for SceneTree {
 
 impl SceneTree {
     /// Creates a new scene tree with an empty root node named `"root"`.
+    ///
+    /// The root is a **`Window`** (pat-nzgdu.87), matching Godot, where
+    /// `SceneTree.root` is a `Window` — itself a `Viewport`. That is what makes
+    /// `Node.get_viewport()` / `get_window()` resolve for every node in the
+    /// tree, and what gives the content-scale ("stretch") pipeline something to
+    /// hang off.
+    ///
+    /// ⚠️ The `Object → Node → Viewport → Window` chain is registered here, not
+    /// left to `register_viewport_classes()`: nothing calls that automatically,
+    /// so without this line `root.is_class("Node")` would answer **false** in
+    /// every test that did not register the viewport classes itself.
     pub fn new() -> Self {
-        let mut root = Node::new("root", "Node");
+        gdobject::class_db::register_root_window_chain();
+        let mut root = Node::new("root", "Window");
         let root_id = root.id();
         // The root node is always inside the tree.
         root.set_inside_tree(true);
@@ -256,7 +270,24 @@ impl SceneTree {
             should_quit: false,
             exit_code: 0,
             input_handled: false,
+            root_window: crate::viewport::RootWindow::default(),
         }
+    }
+
+    /// The root window's size and content-scale ("stretch") configuration
+    /// (pat-nzgdu.87).
+    ///
+    /// Godot stores this on the root `Window` node itself; Patina's nodes are
+    /// untyped property bags, so the tree holds it and the root node stands for
+    /// it in class terms.
+    pub fn root_window(&self) -> &crate::viewport::RootWindow {
+        &self.root_window
+    }
+
+    /// Mutable access to the root window, for the boot path that installs the
+    /// project's `display/window/stretch/*` settings and for window resizes.
+    pub fn root_window_mut(&mut self) -> &mut crate::viewport::RootWindow {
+        &mut self.root_window
     }
 
     // -- multiplayer (pat-u3l8c.75) ----------------------------------------
@@ -1411,26 +1442,32 @@ impl SceneTree {
         // script-method dispatch below honors CONNECT_DEFERRED and Callable
         // bind/unbind (pat-nzgdu.31).
         #[allow(clippy::type_complexity)]
-        let connections: Vec<(gdcore::id::ObjectId, String, bool, bool, Vec<gdvariant::Variant>)> =
-            self.signal_stores
-                .get(&source)
-                .and_then(|store| store.get_signal(signal_name))
-                .map(|signal| {
-                    signal
-                        .connections()
-                        .iter()
-                        .map(|c| {
-                            (
-                                c.target_id,
-                                c.method.clone(),
-                                c.has_callback(),
-                                c.deferred,
-                                c.resolve_args(args),
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+        let connections: Vec<(
+            gdcore::id::ObjectId,
+            String,
+            bool,
+            bool,
+            Vec<gdvariant::Variant>,
+        )> = self
+            .signal_stores
+            .get(&source)
+            .and_then(|store| store.get_signal(signal_name))
+            .map(|signal| {
+                signal
+                    .connections()
+                    .iter()
+                    .map(|c| {
+                        (
+                            c.target_id,
+                            c.method.clone(),
+                            c.has_callback(),
+                            c.deferred,
+                            c.resolve_args(args),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         // Fire callback-based connections and remove one-shot connections.
         let results = self
@@ -1520,7 +1557,11 @@ impl SceneTree {
     ///
     /// Returns an error when `root_id` is unknown, or is the scene tree's root
     /// (which has no parent to duplicate into).
-    pub fn duplicate_node(&mut self, root_id: NodeId, flags: DuplicateFlags) -> EngineResult<NodeId> {
+    pub fn duplicate_node(
+        &mut self,
+        root_id: NodeId,
+        flags: DuplicateFlags,
+    ) -> EngineResult<NodeId> {
         if root_id == self.root_id {
             return Err(EngineError::InvalidOperation(
                 "cannot duplicate the scene tree root".into(),
@@ -1663,6 +1704,22 @@ impl SceneTree {
         Ok(())
     }
 
+    /// The loop phase that advances `node_id`'s animation player, read from the
+    /// node's `callback_mode_process` property.
+    ///
+    /// Absent or non-integer means Godot's default, `IDLE` — the same value the
+    /// ClassDB registers for `AnimationMixer`.
+    pub fn animation_callback_mode(&self, node_id: NodeId) -> AnimationCallbackMode {
+        match self
+            .nodes
+            .get(&node_id)
+            .map(|n| n.get_property("callback_mode_process"))
+        {
+            Some(Variant::Int(v)) => AnimationCallbackMode::from_godot_int(v),
+            _ => AnimationCallbackMode::Idle,
+        }
+    }
+
     /// Returns a reference to a node's animation player, if attached.
     pub fn get_animation_player(&self, node_id: NodeId) -> Option<&AnimationPlayer> {
         self.animation_players.get(&node_id)
@@ -1673,14 +1730,37 @@ impl SceneTree {
         self.animation_players.get_mut(&node_id)
     }
 
-    /// Advances all animation players by `delta` seconds and applies the
-    /// sampled results to their nodes: property tracks set node properties,
-    /// method tracks invoke the owner node's script method as the playhead
-    /// crosses each keyframe, and a configured root-motion track is applied as
-    /// a transform delta rather than an absolute property.
+    /// Advances the **idle-phase** animation players by `delta` seconds — the
+    /// Godot default (`callback_mode_process = IDLE`).
+    ///
+    /// See [`process_animations_in_mode`](Self::process_animations_in_mode) for
+    /// what advancing does; physics-mode players are advanced from the physics
+    /// tick instead, and manual-mode players are never advanced by the loop.
     pub fn process_animations(&mut self, delta: f64) {
+        self.process_animations_in_mode(delta, AnimationCallbackMode::Idle);
+    }
+
+    /// Advances every animation player whose owner node's
+    /// `callback_mode_process` selects `mode`, and applies the sampled results
+    /// to their nodes: property tracks set node properties, method tracks invoke
+    /// the owner node's script method as the playhead crosses each keyframe, and
+    /// a configured root-motion track is applied as a transform delta rather
+    /// than an absolute property.
+    ///
+    /// Godot's `AnimationMixer` picks its phase from `callback_mode_process`
+    /// (`animation_mixer.cpp`): `PHYSICS` advances inside `_physics_process` so
+    /// an animation driving a body stays in lockstep with the solver, `IDLE`
+    /// (the default) advances in `_process`, and `MANUAL` never advances on its
+    /// own. Every player used to advance in the idle phase regardless
+    /// (pat-0q2kx.1).
+    pub fn process_animations_in_mode(&mut self, delta: f64, mode: AnimationCallbackMode) {
         // Collect node_ids to avoid borrowing self twice.
-        let node_ids: Vec<NodeId> = self.animation_players.keys().copied().collect();
+        let node_ids: Vec<NodeId> = self
+            .animation_players
+            .keys()
+            .copied()
+            .filter(|id| self.animation_callback_mode(*id) == mode)
+            .collect();
         for node_id in node_ids {
             // Advance the player and gather everything we need while only the
             // player is borrowed, so we can then mutate nodes and scripts.
@@ -1867,7 +1947,8 @@ impl SceneTree {
                 // A tree whose root_node does not resolve (e.g. the scene root
                 // itself, whose ".." is outside the scene) falls back to the
                 // owner node rather than dropping the frame's pose.
-                self.get_node_or_null(node_id, &root_node).unwrap_or(node_id)
+                self.get_node_or_null(node_id, &root_node)
+                    .unwrap_or(node_id)
             };
 
             for (track_node_path, path, value) in values {
@@ -3503,7 +3584,10 @@ impl SceneTree {
         let root = self.root_id();
         let mut order = vec![root];
         order.extend(self.descendants(root));
-        order.into_iter().filter(|id| members.contains(id)).collect()
+        order
+            .into_iter()
+            .filter(|id| members.contains(id))
+            .collect()
     }
 
     /// Godot `SceneTree.has_group` — whether any node is registered in `group`.
@@ -3718,10 +3802,14 @@ mod tests {
     fn duplicate_node_rejects_tree_root_and_unknown() {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        assert!(tree.duplicate_node(root, DuplicateFlags::default()).is_err());
+        assert!(tree
+            .duplicate_node(root, DuplicateFlags::default())
+            .is_err());
 
         let ghost = NodeId::from_object_id(gdcore::id::ObjectId::from_raw(987_654));
-        assert!(tree.duplicate_node(ghost, DuplicateFlags::default()).is_err());
+        assert!(tree
+            .duplicate_node(ghost, DuplicateFlags::default())
+            .is_err());
     }
 
     // -- pat-nzgdu.137: per-node process toggles gate script callbacks --------
@@ -3806,7 +3894,11 @@ mod tests {
         calls.borrow_mut().clear();
         tree.set_node_process(id, true);
         tree.process_all_scripts_process(0.016);
-        assert_eq!(calls.borrow().as_slice(), ["_process"], "toggle is reversible");
+        assert_eq!(
+            calls.borrow().as_slice(),
+            ["_process"],
+            "toggle is reversible"
+        );
 
         // set_physics_process(false) gates the other side independently.
         calls.borrow_mut().clear();
@@ -3856,7 +3948,11 @@ mod tests {
         tree.process_all_scripts_process(0.016);
 
         assert!(a_calls.borrow().is_empty(), "A is silenced");
-        assert_eq!(b_calls.borrow().as_slice(), ["_process"], "B still processes");
+        assert_eq!(
+            b_calls.borrow().as_slice(),
+            ["_process"],
+            "B still processes"
+        );
     }
 
     /// An unknown node reports not-processing rather than panicking, and
@@ -4567,11 +4663,18 @@ mod tests {
         /// so a tree attached to `Tree` reaches `Sprite` through root_node "..".
         fn tree_with_animation_tree(
             crossfade_clip: f64,
-        ) -> (SceneTree, NodeId, NodeId, crate::animation_tree::AnimationTree) {
+        ) -> (
+            SceneTree,
+            NodeId,
+            NodeId,
+            crate::animation_tree::AnimationTree,
+        ) {
             let mut tree = SceneTree::new();
             let root = tree.root_id();
             let owner = tree.add_child(root, Node::new("Owner", "Node2D")).unwrap();
-            let sprite = tree.add_child(owner, Node::new("Sprite", "Node2D")).unwrap();
+            let sprite = tree
+                .add_child(owner, Node::new("Sprite", "Node2D"))
+                .unwrap();
             let tree_node = tree
                 .add_child(owner, Node::new("Tree", "AnimationTree"))
                 .unwrap();
@@ -4650,7 +4753,8 @@ mod tests {
             tree.attach_animation_tree(tree_node, anim_tree).unwrap();
             assert_eq!(tree.animation_tree_count(), 1);
 
-            tree.change_scene_to_node(Node::new("Next", "Node")).unwrap();
+            tree.change_scene_to_node(Node::new("Next", "Node"))
+                .unwrap();
             assert_eq!(
                 tree.animation_tree_count(),
                 0,

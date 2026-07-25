@@ -564,12 +564,7 @@ pub fn set_camera_limit(tree: &mut SceneTree, node_id: NodeId, side: &str, value
 }
 
 /// Enables/sets position smoothing for a Camera2D node.
-pub fn set_position_smoothing(
-    tree: &mut SceneTree,
-    node_id: NodeId,
-    enabled: bool,
-    speed: f32,
-) {
+pub fn set_position_smoothing(tree: &mut SceneTree, node_id: NodeId, enabled: bool, speed: f32) {
     if let Some(node) = tree.get_node_mut(node_id) {
         node.set_property("position_smoothing_enabled", Variant::Bool(enabled));
         node.set_property("position_smoothing_speed", Variant::Float(speed as f64));
@@ -579,17 +574,15 @@ pub fn set_position_smoothing(
 /// Sets a Camera2D drag margin fraction (`side` = left/right/top/bottom).
 pub fn set_drag_margin(tree: &mut SceneTree, node_id: NodeId, side: &str, fraction: f32) {
     if let Some(node) = tree.get_node_mut(node_id) {
-        node.set_property(&format!("drag_{side}_margin"), Variant::Float(fraction as f64));
+        node.set_property(
+            &format!("drag_{side}_margin"),
+            Variant::Float(fraction as f64),
+        );
     }
 }
 
 /// Enables horizontal/vertical drag margins for a Camera2D node.
-pub fn set_drag_enabled(
-    tree: &mut SceneTree,
-    node_id: NodeId,
-    horizontal: bool,
-    vertical: bool,
-) {
+pub fn set_drag_enabled(tree: &mut SceneTree, node_id: NodeId, horizontal: bool, vertical: bool) {
     if let Some(node) = tree.get_node_mut(node_id) {
         node.set_property("drag_horizontal_enabled", Variant::Bool(horizontal));
         node.set_property("drag_vertical_enabled", Variant::Bool(vertical));
@@ -632,12 +625,7 @@ pub fn camera2d_config_from_node(tree: &SceneTree, node_id: NodeId) -> Camera2DC
         drag_left_margin: get_f32_prop(tree, node_id, "drag_left_margin", d.drag_left_margin),
         drag_right_margin: get_f32_prop(tree, node_id, "drag_right_margin", d.drag_right_margin),
         drag_top_margin: get_f32_prop(tree, node_id, "drag_top_margin", d.drag_top_margin),
-        drag_bottom_margin: get_f32_prop(
-            tree,
-            node_id,
-            "drag_bottom_margin",
-            d.drag_bottom_margin,
-        ),
+        drag_bottom_margin: get_f32_prop(tree, node_id, "drag_bottom_margin", d.drag_bottom_margin),
         zoom: get_zoom(tree, node_id),
     }
 }
@@ -997,12 +985,18 @@ mod tests {
         };
         cfg.zoom = Vector2::ONE;
         let half_view = Vector2::new(400.0, 300.0); // 800x600 viewport, zoom 1
-        // A center near the top-left corner is pushed in so the view fits.
+                                                    // A center near the top-left corner is pushed in so the view fits.
         let clamped = clamp_camera_to_limits(&cfg, Vector2::new(100.0, 100.0), half_view);
-        assert!(approx_vec(clamped, Vector2::new(400.0, 300.0)), "{clamped:?}");
+        assert!(
+            approx_vec(clamped, Vector2::new(400.0, 300.0)),
+            "{clamped:?}"
+        );
         // A center past the bottom-right is pulled back.
         let clamped2 = clamp_camera_to_limits(&cfg, Vector2::new(5000.0, 5000.0), half_view);
-        assert!(approx_vec(clamped2, Vector2::new(600.0, 700.0)), "{clamped2:?}");
+        assert!(
+            approx_vec(clamped2, Vector2::new(600.0, 700.0)),
+            "{clamped2:?}"
+        );
     }
 
     #[test]
@@ -1030,12 +1024,15 @@ mod tests {
             ..Default::default()
         };
         let half_view = Vector2::new(400.0, 300.0); // dead zone = ±80 px
-        // Target within the dead zone: camera does not move.
+                                                    // Target within the dead zone: camera does not move.
         let inside = apply_drag_margins(&cfg, Vector2::ZERO, Vector2::new(50.0, 0.0), half_view);
         assert!(approx_eq(inside.x, 0.0), "inside dead zone: {inside:?}");
         // Target past the right edge: camera moves so target sits on the margin.
         let outside = apply_drag_margins(&cfg, Vector2::ZERO, Vector2::new(200.0, 0.0), half_view);
-        assert!(approx_eq(outside.x, 120.0), "dragged to margin: {outside:?}");
+        assert!(
+            approx_eq(outside.x, 120.0),
+            "dragged to margin: {outside:?}"
+        );
         // Vertical drag disabled -> y tracks the target exactly.
         let v = apply_drag_margins(&cfg, Vector2::ZERO, Vector2::new(0.0, 999.0), half_view);
         assert!(approx_eq(v.y, 999.0), "disabled axis tracks target: {v:?}");

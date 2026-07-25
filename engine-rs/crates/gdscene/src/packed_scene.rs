@@ -362,11 +362,23 @@ impl PackedScene {
                         pending_prop = Some((key.to_string(), value_str.to_string()));
                         continue;
                     }
-                    if let Ok(value) = parse_variant_value(value_str) {
-                        sub_resource_props
-                            .entry(sub_id.clone())
-                            .or_default()
-                            .insert(key.to_string(), value);
+                    // The three other parse sites warn when they drop a value;
+                    // this one discarded silently, so a sub-resource property the
+                    // parser cannot read yet (an int vector, `Vector4`,
+                    // `Projection`) vanished with no trace at all in the logs
+                    // (pat-nzgdu.78).
+                    match parse_variant_value(value_str) {
+                        Ok(value) => {
+                            sub_resource_props
+                                .entry(sub_id.clone())
+                                .or_default()
+                                .insert(key.to_string(), value);
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "skipping unparseable sub-resource value for key '{key}': {value_str}"
+                            );
+                        }
                     }
                 }
             }
@@ -415,6 +427,9 @@ impl PackedScene {
             }
         };
         for tmpl in &mut templates {
+            // Godot's resolve order: a node-level override wins over the mesh's
+            // own material (`material_override` is handled by the ShaderMaterial
+            // pass below).
             let mat_id =
                 sub_ref_id(tmpl.properties.get("surface_material_override/0")).or_else(|| {
                     sub_ref_id(tmpl.properties.get("mesh"))
@@ -428,6 +443,27 @@ impl PackedScene {
                 {
                     tmpl.properties
                         .insert("albedo_color".into(), Variant::Color(*c));
+                }
+
+                // Copy the material sub-resource's FULL property bag onto the
+                // node under `__material__*`, mirroring the `__shape__*` pattern
+                // above. By render time the `PackedScene` — and with it
+                // `sub_resource_props` — is gone; only the `SceneTree` remains,
+                // so anything the renderer needs has to travel on the node.
+                // Without this only `albedo_color` survived and every authored
+                // material rendered as a flat colour with metallic, roughness,
+                // emission and its textures silently dropped (pat-0q2kx.42).
+                //
+                // Copying verbatim keeps this free of per-material knowledge, the
+                // same way the shape pass avoids knowing about `radius` vs `size`.
+                if let Some(mat_props) = sub_resource_props.get(&mat_id) {
+                    let class = sub_resources.get(&mat_id).cloned().unwrap_or_default();
+                    tmpl.properties
+                        .insert("__material__class".into(), Variant::String(class));
+                    for (key, value) in mat_props {
+                        tmpl.properties
+                            .insert(format!("__material__{key}"), value.clone());
+                    }
                 }
             }
         }
@@ -450,7 +486,17 @@ impl PackedScene {
             // Find the ShaderMaterial sub-resource id (override or per-surface).
             let smat_id = sub_ref_id(tmpl.properties.get("material_override"))
                 .or_else(|| sub_ref_id(tmpl.properties.get("surface_material_override/0")))
-                .filter(|id| sub_resources.get(id).map(String::as_str) == Some("ShaderMaterial"));
+                .filter(|id| sub_resources.get(id).map(String::as_str) == Some("ShaderMaterial"))
+                // A CanvasItem carries its ShaderMaterial on the plain `material`
+                // property — Sprite2D, ColorRect, TextureRect and friends have no
+                // 3D override slot, so the two lookups above never found it and
+                // every authored 2D shader was dropped at load (pat-0q2kx.48).
+                // Filtered separately, and last, so 3D resolution is untouched.
+                .or_else(|| {
+                    sub_ref_id(tmpl.properties.get("material")).filter(|id| {
+                        sub_resources.get(id).map(String::as_str) == Some("ShaderMaterial")
+                    })
+                });
             let Some(smat_id) = smat_id else { continue };
             let Some(smat_props) = sub_resource_props.get(&smat_id) else {
                 continue;
@@ -595,12 +641,15 @@ impl PackedScene {
         // property that no loader ever produced, so a .tscn-authored region
         // contributed nothing to the navigation map (pat-0q2kx.26).
         for tmpl in &mut templates {
-            let sub_id = ["navigation_polygon", "navigation_mesh"]
-                .iter()
-                .find_map(|key| match tmpl.properties.get(*key) {
-                    Some(Variant::String(s)) => s.strip_prefix("SubResource:").map(String::from),
-                    _ => None,
-                });
+            let sub_id =
+                ["navigation_polygon", "navigation_mesh"]
+                    .iter()
+                    .find_map(|key| match tmpl.properties.get(*key) {
+                        Some(Variant::String(s)) => {
+                            s.strip_prefix("SubResource:").map(String::from)
+                        }
+                        _ => None,
+                    });
             let Some(sub_id) = sub_id else {
                 continue;
             };

@@ -151,10 +151,7 @@ impl DisplayBackend for HeadlessDisplayBackend {
     }
 
     fn clipboard_get(&self) -> String {
-        self.clipboard
-            .lock()
-            .map(|c| c.clone())
-            .unwrap_or_default()
+        self.clipboard.lock().map(|c| c.clone()).unwrap_or_default()
     }
 
     fn clipboard_set(&self, text: &str) {

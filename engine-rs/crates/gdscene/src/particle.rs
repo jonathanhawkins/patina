@@ -32,7 +32,7 @@
 //! as written, and are tracked separately. Do not describe these nodes as
 //! GPU-accelerated in docs or parity scorecards on the strength of the class name.
 
-use gdcore::math::{Color, Vector2};
+use gdcore::math::{Color, Transform2D, Vector2};
 
 // ---------------------------------------------------------------------------
 // Deterministic random (xorshift32)
@@ -181,6 +181,21 @@ pub struct Particle {
     pub rotation: f32,
     /// Angular velocity in radians/sec.
     pub angular_velocity: f32,
+    /// The emitter's global transform at the instant this particle was spawned
+    /// — the map from this particle's simulation space to global space.
+    ///
+    /// With `local_coords` **false** (Godot's default) a particle is placed in
+    /// global space at spawn and stops caring about the emitter afterwards, so
+    /// moving the emitter must leave the existing cloud behind
+    /// (`doc/classes/GPUParticles2D.xml`, `local_coords`). Keeping the spawn
+    /// transform per particle is what makes that possible while the simulation
+    /// itself stays emitter-relative: see
+    /// [`ParticleSimulator::draw_commands_in_local_space`].
+    ///
+    /// With `local_coords` true it is unused (the emitter's *current* transform
+    /// applies instead), and it stays [`Transform2D::IDENTITY`] for simulators
+    /// driven directly rather than through a scene node.
+    pub spawn_transform: Transform2D,
 }
 
 impl Particle {
@@ -262,7 +277,18 @@ pub struct ParticleEmitter {
     /// Whether the emitter is currently active.
     pub emitting: bool,
     /// If `true`, particles are in the emitter's local space.
+    ///
+    /// Godot defaults this to **false**: particles are spawned into global space
+    /// and no longer follow the emitter. See [`Particle::spawn_transform`].
     pub local_coords: bool,
+    /// The emitter node's global transform for the current frame.
+    ///
+    /// Stamped onto each particle at spawn ([`Particle::spawn_transform`]) so a
+    /// `local_coords = false` cloud can be kept in global space. The scene layer
+    /// refreshes it every frame from the node's transform
+    /// (`MainLoop::process_particles`); a simulator driven directly leaves it at
+    /// [`Transform2D::IDENTITY`], which makes both coordinate modes agree.
+    pub emitter_transform: Transform2D,
     /// Order the simulator emits draw commands in (Godot `draw_order`,
     /// pat-nzgdu.145).
     pub draw_order: ParticleDrawOrder,
@@ -287,6 +313,7 @@ impl Default for ParticleEmitter {
             speed_scale: 1.0,
             emitting: true,
             local_coords: false,
+            emitter_transform: Transform2D::IDENTITY,
             draw_order: ParticleDrawOrder::Index,
             fixed_fps: 0,
         }
@@ -339,6 +366,7 @@ impl ParticleEmitter {
             scale,
             rotation: 0.0,
             angular_velocity,
+            spawn_transform: self.emitter_transform,
         }
     }
 }
@@ -519,6 +547,18 @@ impl ParticleSimulator {
     /// stable, so particles with equal lifetime keep their emission order rather
     /// than shuffling between frames.
     pub fn get_draw_commands(&self) -> Vec<(Vector2, Color, f32)> {
+        self.ordered_particles()
+            .into_iter()
+            .map(|p| (p.position, p.color, p.scale))
+            .collect()
+    }
+
+    /// The live particles in the emitter's [`draw_order`](ParticleEmitter::draw_order).
+    ///
+    /// Shared by [`get_draw_commands`](Self::get_draw_commands) and
+    /// [`draw_commands_in_local_space`](Self::draw_commands_in_local_space) so the
+    /// two never disagree about which particle a command came from.
+    fn ordered_particles(&self) -> Vec<&Particle> {
         let mut particles: Vec<&Particle> = self.active_particles.iter().collect();
         match self.emitter.draw_order {
             ParticleDrawOrder::Index => {}
@@ -539,8 +579,54 @@ impl ParticleSimulator {
             }
         }
         particles
+    }
+
+    /// Returns draw commands expressed in the emitter's **current** local space,
+    /// given the emitter node's current global transform.
+    ///
+    /// This is the seam that implements Godot's `local_coords` (pat-0q2kx.51):
+    ///
+    /// - `local_coords = true` — particles belong to the emitter, so their
+    ///   simulated positions already *are* emitter-local and pass through
+    ///   unchanged. The cloud moves, rotates, and scales with the emitter.
+    /// - `local_coords = false` (Godot's default) — each particle's position is
+    ///   lifted to global space through the transform captured at its spawn
+    ///   ([`Particle::spawn_transform`]) and then expressed back in the emitter's
+    ///   *current* local space. Renderers apply the emitter's current global
+    ///   transform to the returned points, so the round trip cancels: a particle
+    ///   stays where it was born no matter where the emitter goes afterwards.
+    ///
+    /// Returning emitter-local points (rather than global ones) keeps the
+    /// published `_particle_positions` contract that every renderer already
+    /// draws through the emitter's transform.
+    ///
+    /// KNOWN LIMITATION: a global-space particle is *integrated* in its spawn
+    /// frame, so gravity and velocity follow the emitter's rotation/scale at
+    /// spawn rather than world axes. Identical for the overwhelmingly common
+    /// unrotated, unscaled emitter; a rotated one tilts its cloud's gravity.
+    pub fn draw_commands_in_local_space(
+        &self,
+        emitter_global: Transform2D,
+    ) -> Vec<(Vector2, Color, f32)> {
+        if self.emitter.local_coords {
+            return self.get_draw_commands();
+        }
+        // A degenerate emitter basis (zero scale) has no inverse; leaving the
+        // points emitter-local is the pre-existing behaviour rather than NaN.
+        let det = emitter_global.x.x * emitter_global.y.y - emitter_global.x.y * emitter_global.y.x;
+        if det.abs() < 1e-9 {
+            return self.get_draw_commands();
+        }
+        let to_local = emitter_global.affine_inverse();
+        self.ordered_particles()
             .into_iter()
-            .map(|p| (p.position, p.color, p.scale))
+            .map(|p| {
+                (
+                    to_local.xform(p.spawn_transform.xform(p.position)),
+                    p.color,
+                    p.scale,
+                )
+            })
             .collect()
     }
 
@@ -726,6 +812,7 @@ mod tests {
             scale: 1.0,
             rotation: 0.0,
             angular_velocity: 0.0,
+            spawn_transform: Transform2D::IDENTITY,
         };
         assert!(approx_eq(p.age_ratio(), 0.5));
     }
@@ -741,6 +828,7 @@ mod tests {
             scale: 1.0,
             rotation: 0.0,
             angular_velocity: 0.0,
+            spawn_transform: Transform2D::IDENTITY,
         };
         assert!(p.is_dead());
     }
@@ -827,12 +915,24 @@ mod tests {
             ParticleDrawOrder::Lifetime,
             ParticleDrawOrder::ReverseLifetime,
         ] {
-            assert_eq!(ParticleDrawOrder::from_godot_int(order.to_godot_int()), order);
+            assert_eq!(
+                ParticleDrawOrder::from_godot_int(order.to_godot_int()),
+                order
+            );
         }
-        assert_eq!(ParticleDrawOrder::from_godot_int(0), ParticleDrawOrder::Index);
-        assert_eq!(ParticleDrawOrder::from_godot_int(1), ParticleDrawOrder::Lifetime);
+        assert_eq!(
+            ParticleDrawOrder::from_godot_int(0),
+            ParticleDrawOrder::Index
+        );
+        assert_eq!(
+            ParticleDrawOrder::from_godot_int(1),
+            ParticleDrawOrder::Lifetime
+        );
         // Unknown values fall back to Godot's default.
-        assert_eq!(ParticleDrawOrder::from_godot_int(99), ParticleDrawOrder::Index);
+        assert_eq!(
+            ParticleDrawOrder::from_godot_int(99),
+            ParticleDrawOrder::Index
+        );
         assert_eq!(ParticleDrawOrder::default(), ParticleDrawOrder::Index);
     }
 
@@ -850,6 +950,7 @@ mod tests {
             scale: 1.0,
             rotation: 0.0,
             angular_velocity: 0.0,
+            spawn_transform: Transform2D::IDENTITY,
         };
         sim.active_particles = vec![make(0.5, 0.0), make(0.9, 1.0), make(0.1, 2.0)];
 
@@ -905,7 +1006,11 @@ mod tests {
         let mut sim = ParticleSimulator::new(burst(3, 10.0));
         assert_eq!(sim.emitter.fixed_fps, 0);
         sim.step(10.0);
-        assert_eq!(sim.particle_count(), 3, "burst emitted on the variable step");
+        assert_eq!(
+            sim.particle_count(),
+            3,
+            "burst emitted on the variable step"
+        );
     }
 
     #[test]

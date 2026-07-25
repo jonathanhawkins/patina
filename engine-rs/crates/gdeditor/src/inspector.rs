@@ -1216,7 +1216,11 @@ impl PropertyEditor {
             VariantType::StringName => Self::LineEdit,
             VariantType::NodePath => Self::NodePath,
             VariantType::Vector2 => Self::Vector2,
+            // Int vectors reuse the float vector widgets; the value keeps its
+            // integer type, only the editor chrome is shared (pat-nzgdu.78).
+            VariantType::Vector2i => Self::Vector2,
             VariantType::Vector3 => Self::Vector3,
+            VariantType::Vector3i => Self::Vector3,
             VariantType::Rect2 => Self::Rect2,
             VariantType::Transform2D => Self::Transform2D,
             VariantType::Color => Self::ColorPicker,
@@ -1354,20 +1358,21 @@ impl PropertyEditor {
         let base = Self::for_variant_type(base_type);
         match hint {
             PropertyHint::None | PropertyHint::PlaceholderText(_) => base,
-            PropertyHint::Range { min, max, step }
-            | PropertyHint::ExpRange { min, max, step } => match base {
-                Self::SpinBoxInt { .. } => Self::SpinBoxInt {
-                    min: Some(*min),
-                    max: Some(*max),
-                    step: (*step).max(1),
-                },
-                Self::SpinBoxFloat { .. } => Self::SpinBoxFloat {
-                    min: Some(*min as f64),
-                    max: Some(*max as f64),
-                    step: *step as f64,
-                },
-                other => other,
-            },
+            PropertyHint::Range { min, max, step } | PropertyHint::ExpRange { min, max, step } => {
+                match base {
+                    Self::SpinBoxInt { .. } => Self::SpinBoxInt {
+                        min: Some(*min),
+                        max: Some(*max),
+                        step: (*step).max(1),
+                    },
+                    Self::SpinBoxFloat { .. } => Self::SpinBoxFloat {
+                        min: Some(*min as f64),
+                        max: Some(*max as f64),
+                        step: *step as f64,
+                    },
+                    other => other,
+                }
+            }
             PropertyHint::Enum(options) => Self::EnumSelect {
                 options: options.clone(),
             },
@@ -2872,7 +2877,9 @@ mod tests {
         );
 
         // Back re-selects A and enables Forward.
-        let back = toolbar.navigate_back().expect("Back returns the previous entry");
+        let back = toolbar
+            .navigate_back()
+            .expect("Back returns the previous entry");
         assert_eq!(back.node_id, a, "Back re-selects A");
         assert!(
             toolbar.history.can_go_forward(),
@@ -3295,7 +3302,10 @@ mod tests {
         assert!(panel.pin_favorite(&tree, "texture"));
         assert!(panel.is_pinned_favorite(&tree, "texture"));
         let sections = panel.sections(&tree);
-        assert_eq!(sections[0].name, "Favorites", "Favorites section is at the top");
+        assert_eq!(
+            sections[0].name, "Favorites",
+            "Favorites section is at the top"
+        );
         assert!(
             sections[0].entries().iter().any(|e| e.name == "texture"),
             "the pinned property is in the Favorites section"
@@ -3323,10 +3333,7 @@ mod tests {
         // Unpinning removes the Favorites section.
         assert!(panel.unpin_favorite(&tree, "texture"));
         assert!(!panel.is_pinned_favorite(&tree, "texture"));
-        assert!(panel
-            .sections(&tree)
-            .iter()
-            .all(|s| s.name != "Favorites"));
+        assert!(panel.sections(&tree).iter().all(|s| s.name != "Favorites"));
     }
 
     #[test]
@@ -3725,10 +3732,16 @@ mod tests {
         };
         let mut fdrag = NumericDrag::begin(&float_editor, 0.5).unwrap();
         let v = fdrag.drag(2.0 * NumericDrag::PIXELS_PER_STEP);
-        assert!((v - 0.7).abs() < 1e-9, "two 0.1 steps from 0.5 -> 0.7, got {v}");
+        assert!(
+            (v - 0.7).abs() < 1e-9,
+            "two 0.1 steps from 0.5 -> 0.7, got {v}"
+        );
         // Clamps to the float max as well.
         let capped = fdrag.drag(50.0 * NumericDrag::PIXELS_PER_STEP);
-        assert!((capped - 1.0).abs() < 1e-9, "clamped to max 1.0, got {capped}");
+        assert!(
+            (capped - 1.0).abs() < 1e-9,
+            "clamped to max 1.0, got {capped}"
+        );
 
         // Non-numeric editors do not scrub.
         assert!(NumericDrag::begin(&PropertyEditor::CheckBox, 0.0).is_none());
@@ -3829,7 +3842,10 @@ mod tests {
 
         // A no-editor-flagged property (storage but no editor) is hidden.
         let no_editor = PropertyUsage::empty().with(PropertyUsage::STORAGE);
-        assert_eq!(no_editor.inspector_visibility(), InspectorVisibility::Hidden);
+        assert_eq!(
+            no_editor.inspector_visibility(),
+            InspectorVisibility::Hidden
+        );
         assert!(!no_editor.is_editor_visible());
 
         // A storage-only property does not appear in the inspector.
@@ -3954,7 +3970,9 @@ mod tests {
 
         // A plain top-level property is just its name.
         assert_eq!(
-            panel.copy_property_scripting_path("visible", None).as_deref(),
+            panel
+                .copy_property_scripting_path("visible", None)
+                .as_deref(),
             Some("visible")
         );
 
@@ -4360,7 +4378,10 @@ mod tests {
             .copy_resource_slot(&tree)
             .expect("copy reads the inspected slot's resource");
         assert_eq!(copied.path, "res://icon.png");
-        assert!(tb.has_resource_clipboard(), "clipboard holds the copied resource");
+        assert!(
+            tb.has_resource_clipboard(),
+            "clipboard holds the copied resource"
+        );
 
         // Paste into a compatible slot on the other object: the same resource
         // reference is assigned.

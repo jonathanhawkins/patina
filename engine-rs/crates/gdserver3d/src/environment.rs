@@ -704,7 +704,12 @@ impl Environment3D {
                 Variant::Float(self.glow_hdr_luminance_cap as f64),
             ));
         }
-        for (i, (&lvl, &def_lvl)) in self.glow_levels.iter().zip(def.glow_levels.iter()).enumerate() {
+        for (i, (&lvl, &def_lvl)) in self
+            .glow_levels
+            .iter()
+            .zip(def.glow_levels.iter())
+            .enumerate()
+        {
             if (lvl - def_lvl).abs() > f32::EPSILON {
                 props.push((format!("glow_levels/{}", i + 1), Variant::Float(lvl as f64)));
             }
@@ -713,7 +718,10 @@ impl Environment3D {
             props.push(("fog_enabled".into(), Variant::Bool(self.fog_enabled)));
         }
         if self.fog_mode != def.fog_mode {
-            props.push(("fog_mode".into(), Variant::Int(self.fog_mode.to_godot_int())));
+            props.push((
+                "fog_mode".into(),
+                Variant::Int(self.fog_mode.to_godot_int()),
+            ));
         }
         if self.fog_light_color != def.fog_light_color {
             props.push((
@@ -858,8 +866,7 @@ mod tests {
         env.fog_depth_begin = 5.0;
 
         let props = env.to_properties();
-        let restored =
-            Environment3D::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
+        let restored = Environment3D::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
         assert!(restored.fog_enabled);
         assert_eq!(restored.fog_mode, FogMode::Depth);
         assert!((restored.fog_sun_scatter - 0.4).abs() < 1e-6);
@@ -899,12 +906,13 @@ mod tests {
 
         let props = env.to_properties();
         // `glow_levels/1`..`/7` all differ from defaults here.
-        let level_keys = props.iter().filter(|(k, _)| k.starts_with("glow_levels/")).count();
+        let level_keys = props
+            .iter()
+            .filter(|(k, _)| k.starts_with("glow_levels/"))
+            .count();
         assert_eq!(level_keys, 7);
 
-        let restored = Environment3D::from_properties(
-            props.iter().map(|(k, v)| (k.as_str(), v)),
-        );
+        let restored = Environment3D::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
         assert_eq!(restored.glow_enabled, true);
         assert!((restored.glow_intensity - 0.55).abs() < 1e-6);
         assert_eq!(restored.glow_blend_mode, GlowBlendMode::Softlight);

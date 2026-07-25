@@ -555,7 +555,9 @@ impl PhysicsServer3D {
                     id
                 }
                 None => {
-                    let id = self.world.add_area(Area3D::new(AreaId3D(0), position, shape));
+                    let id = self
+                        .world
+                        .add_area(Area3D::new(AreaId3D(0), position, shape));
                     self.node_to_area.insert(nid, id);
                     self.area_to_node.insert(id, nid);
                     id

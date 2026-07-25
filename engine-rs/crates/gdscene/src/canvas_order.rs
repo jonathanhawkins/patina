@@ -80,13 +80,11 @@ pub fn effective_modulate(tree: &SceneTree, node_id: NodeId) -> Color {
 
 /// Global Y of a node (sum of local Y up the parent chain), used for Y-sorting.
 pub fn global_y(tree: &SceneTree, node_id: NodeId) -> f32 {
-    let mut y = 0.0;
-    let mut cursor = Some(node_id);
-    while let Some(id) = cursor {
-        y += crate::node2d::get_position(tree, id).y;
-        cursor = tree.get_node(id).and_then(|n| n.parent());
-    }
-    y
+    // The composed transform, not a sum of local Ys: Godot Y-sorts on the item's
+    // canvas-space origin, so a rotated or scaled ancestor changes a child's
+    // screen Y. Summing `position.y` up the chain ignores both and mis-orders
+    // exactly the scenes where sorting is visible (pat-0q2kx.39).
+    crate::node2d::get_global_position(tree, node_id).y
 }
 
 /// Returns `parent_id`'s children in draw order. When the parent has

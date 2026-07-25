@@ -415,6 +415,10 @@ impl MainLoop {
                 emitter.speed_scale = s;
             }
             emitter.local_coords = matches!(node.get_property("local_coords"), Variant::Bool(true));
+            // The emitter's transform *this* frame, stamped onto every particle
+            // spawned this frame so a `local_coords = false` cloud can stay in
+            // global space once the emitter moves on (pat-0q2kx.51).
+            emitter.emitter_transform = crate::node2d::get_global_transform(&self.tree, id);
             // CPUParticles2D-style process properties drive per-particle motion so
             // emitted particles actually travel across the frame. Godot exposes
             // these on the CPUParticles2D node directly; GPUParticles2D reads them
@@ -484,10 +488,19 @@ impl MainLoop {
         // particles as billboard quads. Positions/colors/scales are stored under
         // internal (`_`-prefixed) keys so they never leak into oracle property
         // dumps or the editor inspector.
+        // Positions are published in the emitter's *current* local space, which
+        // is what every renderer draws through the node's global transform. For
+        // `local_coords = false` (Godot's default) that means undoing the
+        // emitter's current transform on top of each particle's spawn transform,
+        // so already-spawned particles hold their global position while the
+        // emitter moves away from them (pat-0q2kx.51).
         let draws: Vec<(NodeId, Vec<(Vector2, Color, f32)>)> = self
             .particles
             .iter()
-            .map(|(id, sim)| (*id, sim.get_draw_commands()))
+            .map(|(id, sim)| {
+                let global = crate::node2d::get_global_transform(&self.tree, *id);
+                (*id, sim.draw_commands_in_local_space(global))
+            })
             .collect();
         for (id, cmds) in draws {
             if let Some(node) = self.tree.get_node_mut(id) {
@@ -841,10 +854,8 @@ impl MainLoop {
                         node.get_property("__navmesh_vertices__")
                     {
                         for indices in navmesh_polygon_indices(node, verts.len()) {
-                            let poly: Vec<Vector2> = indices
-                                .iter()
-                                .map(|&i| verts[i] + origin)
-                                .collect();
+                            let poly: Vec<Vector2> =
+                                indices.iter().map(|&i| verts[i] + origin).collect();
                             if poly.len() >= 3 {
                                 polys2.push(NavPolygon::new(poly));
                             }
@@ -860,10 +871,8 @@ impl MainLoop {
                         node.get_property("__navmesh_vertices__")
                     {
                         for indices in navmesh_polygon_indices(node, verts.len()) {
-                            let poly: Vec<Vector3> = indices
-                                .iter()
-                                .map(|&i| verts[i] + origin)
-                                .collect();
+                            let poly: Vec<Vector3> =
+                                indices.iter().map(|&i| verts[i] + origin).collect();
                             if poly.len() >= 3 {
                                 polys3.push(NavPolygon3D::new(poly));
                             }
@@ -1524,6 +1533,16 @@ impl MainLoop {
             // the velocity solved for this very tick.
             self.process_navigation_avoidance(physics_dt as f32);
 
+            // Animation players whose `callback_mode_process` is PHYSICS advance
+            // here rather than in the idle phase below, so an animation driving a
+            // body samples once per tick in lockstep with the solver — Godot's
+            // `AnimationMixer::_physics_process` (pat-0q2kx.1). Before the script
+            // phase, so a `_physics_process` handler reads this tick's pose.
+            self.tree.process_animations_in_mode(
+                physics_dt,
+                crate::animation::AnimationCallbackMode::Physics,
+            );
+
             // SceneTree.physics_frame fires before each physics tick's script
             // phase, mirroring Godot's per-tick emission (pat-nzgdu.84).
             let physics_frame_root = self.tree.root_id();
@@ -1542,6 +1561,8 @@ impl MainLoop {
         }
 
         // -- animation / tween phase --
+        // Idle-mode players only; PHYSICS players already advanced in the tick
+        // loop above and MANUAL players are never advanced by the loop.
         self.tree.process_animations(delta_secs);
         // AnimationTree nodes advance in the same phase as the players they pull
         // clips from, after them so a tree's blended pose wins where both write
@@ -1841,7 +1862,11 @@ mod tests {
         let added = Arc::new(AtomicUsize::new(0));
         tree.connect_signal(root, "node_added", recorder(&added, 1));
         let child = tree.add_child(root, Node::new("Child", "Node")).unwrap();
-        assert_eq!(added.load(Ordering::SeqCst), 1, "node_added fires on add_child");
+        assert_eq!(
+            added.load(Ordering::SeqCst),
+            1,
+            "node_added fires on add_child"
+        );
 
         // tree_entered fires on the node as it enters the tree. The child is
         // already in-tree, so re-run the enter phase to observe the emission.
@@ -1856,7 +1881,10 @@ mod tests {
         // node_renamed fires on a SceneTree-level rename.
         let renamed = Arc::new(AtomicUsize::new(0));
         tree.connect_signal(root, "node_renamed", recorder(&renamed, 3));
-        assert!(tree.set_node_name(child, "Renamed"), "rename hits a live node");
+        assert!(
+            tree.set_node_name(child, "Renamed"),
+            "rename hits a live node"
+        );
         assert_eq!(
             renamed.load(Ordering::SeqCst),
             1,

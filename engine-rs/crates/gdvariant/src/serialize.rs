@@ -10,7 +10,7 @@
 
 use crate::dictionary::Dictionary;
 use crate::variant::Variant;
-use gdcore::math::{Color, Rect2, Vector2, Vector3};
+use gdcore::math::{Color, Rect2, Vector2, Vector2i, Vector3, Vector3i};
 use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
 use serde_json::{json, Value};
 
@@ -34,7 +34,9 @@ pub fn to_json(v: &Variant) -> Value {
         Variant::StringName(sn) => json!({ "type": "StringName", "value": sn.as_str() }),
         Variant::NodePath(np) => json!({ "type": "NodePath", "value": np.to_string() }),
         Variant::Vector2(v) => json!({ "type": "Vector2", "value": [v.x, v.y] }),
+        Variant::Vector2i(v) => json!({ "type": "Vector2i", "value": [v.x, v.y] }),
         Variant::Vector3(v) => json!({ "type": "Vector3", "value": [v.x, v.y, v.z] }),
+        Variant::Vector3i(v) => json!({ "type": "Vector3i", "value": [v.x, v.y, v.z] }),
         Variant::Rect2(r) => json!({
             "type": "Rect2",
             "value": {
@@ -208,6 +210,29 @@ pub fn from_json(val: &Value) -> Option<Variant> {
             Some(Variant::Vector2(Vector2::new(
                 arr[0].as_f64()? as f32,
                 arr[1].as_f64()? as f32,
+            )))
+        }
+        // Int vectors decode through `as_i64`, so a value that is not integral
+        // fails the round-trip rather than silently truncating (pat-nzgdu.78).
+        "Vector2i" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() != 2 {
+                return None;
+            }
+            Some(Variant::Vector2i(Vector2i::new(
+                arr[0].as_i64()? as i32,
+                arr[1].as_i64()? as i32,
+            )))
+        }
+        "Vector3i" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() != 3 {
+                return None;
+            }
+            Some(Variant::Vector3i(Vector3i::new(
+                arr[0].as_i64()? as i32,
+                arr[1].as_i64()? as i32,
+                arr[2].as_i64()? as i32,
             )))
         }
         "Vector3" => {
@@ -439,7 +464,10 @@ pub fn from_json(val: &Value) -> Option<Variant> {
             }
             let mut v = Vec::with_capacity(arr.len() / 2);
             for chunk in arr.chunks(2) {
-                v.push(Vector2::new(chunk[0].as_f64()? as f32, chunk[1].as_f64()? as f32));
+                v.push(Vector2::new(
+                    chunk[0].as_f64()? as f32,
+                    chunk[1].as_f64()? as f32,
+                ));
             }
             Some(Variant::PackedVector2Array(v))
         }
@@ -904,7 +932,10 @@ mod tests {
     fn roundtrip_packed_byte_array() {
         let v = Variant::PackedByteArray(vec![0, 1, 255, 128]);
         assert_eq!(roundtrip(v.clone()), v);
-        assert_eq!(roundtrip(Variant::PackedByteArray(vec![])), Variant::PackedByteArray(vec![]));
+        assert_eq!(
+            roundtrip(Variant::PackedByteArray(vec![])),
+            Variant::PackedByteArray(vec![])
+        );
     }
 
     #[test]

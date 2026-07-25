@@ -367,7 +367,12 @@ impl Mesh3D {
     /// `TorusMesh`. `inner_radius` is the hole radius and `outer_radius` the
     /// outer edge; `ring_sides` segments go around the main ring and
     /// `ring_segments` around the tube's circular cross-section.
-    pub fn torus(inner_radius: f32, outer_radius: f32, ring_sides: u32, ring_segments: u32) -> Self {
+    pub fn torus(
+        inner_radius: f32,
+        outer_radius: f32,
+        ring_sides: u32,
+        ring_segments: u32,
+    ) -> Self {
         let center_radius = (outer_radius + inner_radius) * 0.5;
         let tube_radius = (outer_radius - inner_radius) * 0.5;
 
@@ -383,9 +388,16 @@ impl Mesh3D {
                 let v = 2.0 * std::f32::consts::PI * j as f32 / ring_segments as f32;
                 let (sin_v, cos_v) = v.sin_cos();
                 let ring = center_radius + tube_radius * cos_v;
-                vertices.push(Vector3::new(ring * cos_u, tube_radius * sin_v, ring * sin_u));
+                vertices.push(Vector3::new(
+                    ring * cos_u,
+                    tube_radius * sin_v,
+                    ring * sin_u,
+                ));
                 normals.push(Vector3::new(cos_v * cos_u, sin_v, cos_v * sin_u));
-                uvs.push([i as f32 / ring_sides as f32, j as f32 / ring_segments as f32]);
+                uvs.push([
+                    i as f32 / ring_sides as f32,
+                    j as f32 / ring_segments as f32,
+                ]);
             }
         }
 

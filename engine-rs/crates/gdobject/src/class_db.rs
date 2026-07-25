@@ -214,7 +214,8 @@ impl ClassRegistration {
     /// reachable via both `class_get_integer_constant` and
     /// `class_get_enum_constants` (pat-nzgdu.98).
     pub fn enumeration(mut self, info: EnumInfo) -> Self {
-        self.integer_constants.extend(info.constants.iter().cloned());
+        self.integer_constants
+            .extend(info.constants.iter().cloned());
         self.enums.push(info);
         self
     }
@@ -623,7 +624,10 @@ fn object_class() -> ClassRegistration {
             "NOTIFICATION_POSTINITIALIZE",
             NOTIFICATION_POSTINITIALIZE.code() as i64,
         )
-        .constant("NOTIFICATION_PREDELETE", NOTIFICATION_PREDELETE.code() as i64)
+        .constant(
+            "NOTIFICATION_PREDELETE",
+            NOTIFICATION_PREDELETE.code() as i64,
+        )
 }
 
 /// The full `Node` registration — see [`object_class`] (pat-nzgdu.98).
@@ -668,8 +672,14 @@ fn node_class() -> ClassRegistration {
         .signal(SignalInfo::new("child_exiting_tree").arg("node"))
         .signal(SignalInfo::new("child_order_changed"))
         .signal(SignalInfo::new("replacing_by").arg("node"))
-        .constant("NOTIFICATION_ENTER_TREE", NOTIFICATION_ENTER_TREE.code() as i64)
-        .constant("NOTIFICATION_EXIT_TREE", NOTIFICATION_EXIT_TREE.code() as i64)
+        .constant(
+            "NOTIFICATION_ENTER_TREE",
+            NOTIFICATION_ENTER_TREE.code() as i64,
+        )
+        .constant(
+            "NOTIFICATION_EXIT_TREE",
+            NOTIFICATION_EXIT_TREE.code() as i64,
+        )
         .constant("NOTIFICATION_READY", NOTIFICATION_READY.code() as i64)
         .constant("NOTIFICATION_PAUSED", NOTIFICATION_PAUSED.code() as i64)
         .constant("NOTIFICATION_UNPAUSED", NOTIFICATION_UNPAUSED.code() as i64)
@@ -679,7 +689,10 @@ fn node_class() -> ClassRegistration {
             NOTIFICATION_PHYSICS_PROCESS.code() as i64,
         )
         .constant("NOTIFICATION_PARENTED", NOTIFICATION_PARENTED.code() as i64)
-        .constant("NOTIFICATION_UNPARENTED", NOTIFICATION_UNPARENTED.code() as i64)
+        .constant(
+            "NOTIFICATION_UNPARENTED",
+            NOTIFICATION_UNPARENTED.code() as i64,
+        )
         .constant(
             "NOTIFICATION_CHILD_ORDER_CHANGED",
             NOTIFICATION_CHILD_ORDER_CHANGED.code() as i64,
@@ -758,19 +771,33 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("current", Variant::Bool(false))),
     );
 
+    // -- AudioListener3D --
+    //
+    // Overrides where 3D audio is heard from, taking precedence over the current
+    // camera. The 2D counterpart was registered but this one was missing
+    // entirely, so a scene could not even name it (pat-0q2kx.57). Like Camera3D
+    // it is driven by `current`, which `make_current()`/`clear_current()` set and
+    // the audio bridge reads when resolving the listener.
+    register_class(
+        ClassRegistration::new("AudioListener3D")
+            .parent("Node3D")
+            .property(PropertyInfo::new("current", Variant::Bool(false)))
+            .method(MethodInfo::new("make_current", 0))
+            .method(MethodInfo::new("clear_current", 0))
+            .method(MethodInfo::new("is_current", 0)),
+    );
+
     // -- MeshInstance3D (inherits GeometryInstance3D → VisualInstance3D → Node3D;
     //    cast_shadow and the rest of the geometry surface come from the base). --
     register_class(ClassRegistration::new("MeshInstance3D").parent("GeometryInstance3D"));
 
     // -- MultiMeshInstance3D --
-    register_class(
-        ClassRegistration::new("MultiMeshInstance3D").parent("GeometryInstance3D"),
-    );
+    register_class(ClassRegistration::new("MultiMeshInstance3D").parent("GeometryInstance3D"));
 
     // -- Light3D (abstract base for all lights) --
     register_class(
         ClassRegistration::new("Light3D")
-            .parent("Node3D")
+            .parent("VisualInstance3D")
             .abstract_class()
             .property(PropertyInfo::new("light_energy", Variant::Float(1.0)))
             .property(PropertyInfo::new(
@@ -921,10 +948,19 @@ pub fn register_3d_classes() {
                 "target_position",
                 Variant::Vector3(Vector3::new(0.0, -1.0, 0.0)),
             ))
-            .property(PropertyInfo::new("collision_mask", Variant::Int(0xFFFF_FFFF)))
+            .property(PropertyInfo::new(
+                "collision_mask",
+                Variant::Int(0xFFFF_FFFF),
+            ))
             .property(PropertyInfo::new("exclude_parent", Variant::Bool(true)))
-            .property(PropertyInfo::new("collide_with_bodies", Variant::Bool(true)))
-            .property(PropertyInfo::new("collide_with_areas", Variant::Bool(false))),
+            .property(PropertyInfo::new(
+                "collide_with_bodies",
+                Variant::Bool(true),
+            ))
+            .property(PropertyInfo::new(
+                "collide_with_areas",
+                Variant::Bool(false),
+            )),
     );
     register_class(
         ClassRegistration::new("ShapeCast3D")
@@ -934,10 +970,19 @@ pub fn register_3d_classes() {
                 "target_position",
                 Variant::Vector3(Vector3::new(0.0, -1.0, 0.0)),
             ))
-            .property(PropertyInfo::new("collision_mask", Variant::Int(0xFFFF_FFFF)))
+            .property(PropertyInfo::new(
+                "collision_mask",
+                Variant::Int(0xFFFF_FFFF),
+            ))
             .property(PropertyInfo::new("exclude_parent", Variant::Bool(true)))
-            .property(PropertyInfo::new("collide_with_bodies", Variant::Bool(true)))
-            .property(PropertyInfo::new("collide_with_areas", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "collide_with_bodies",
+                Variant::Bool(true),
+            ))
+            .property(PropertyInfo::new(
+                "collide_with_areas",
+                Variant::Bool(false),
+            ))
             .property(PropertyInfo::new("max_results", Variant::Int(32))),
     );
     register_class(
@@ -945,7 +990,10 @@ pub fn register_3d_classes() {
             .parent("Node3D")
             .property(PropertyInfo::new("spring_length", Variant::Float(1.0)))
             .property(PropertyInfo::new("margin", Variant::Float(0.01)))
-            .property(PropertyInfo::new("collision_mask", Variant::Int(0xFFFF_FFFF))),
+            .property(PropertyInfo::new(
+                "collision_mask",
+                Variant::Int(0xFFFF_FFFF),
+            )),
     );
 
     // -- Environment / World --
@@ -989,7 +1037,10 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("navigation_layers", Variant::Int(1)))
             .property(PropertyInfo::new("enter_cost", Variant::Float(0.0)))
             .property(PropertyInfo::new("travel_cost", Variant::Float(1.0)))
-            .property(PropertyInfo::new("use_edge_connections", Variant::Bool(true))),
+            .property(PropertyInfo::new(
+                "use_edge_connections",
+                Variant::Bool(true),
+            )),
     );
     // NavigationAgent3D — scene-tree pathfinding agent (pat-rzs4o).
     register_class(
@@ -1003,12 +1054,12 @@ pub fn register_3d_classes() {
                 "path_desired_distance",
                 Variant::Float(1.0),
             ))
-            .property(PropertyInfo::new(
-                "avoidance_enabled",
-                Variant::Bool(false),
-            ))
+            .property(PropertyInfo::new("avoidance_enabled", Variant::Bool(false)))
             // pat-nzgdu.10 — full NavigationAgent3D property surface (Godot parity).
-            .property(PropertyInfo::new("target_desired_distance", Variant::Float(10.0)))
+            .property(PropertyInfo::new(
+                "target_desired_distance",
+                Variant::Float(10.0),
+            ))
             .property(PropertyInfo::new("path_height_offset", Variant::Float(0.0)))
             .property(PropertyInfo::new("path_max_distance", Variant::Float(5.0)))
             .property(PropertyInfo::new("navigation_layers", Variant::Int(1)))
@@ -1017,17 +1068,38 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("path_metadata_flags", Variant::Int(7)))
             .property(PropertyInfo::new("simplify_path", Variant::Bool(false)))
             .property(PropertyInfo::new("simplify_epsilon", Variant::Float(0.0)))
-            .property(PropertyInfo::new("path_return_max_length", Variant::Float(0.0)))
-            .property(PropertyInfo::new("path_return_max_radius", Variant::Float(0.0)))
-            .property(PropertyInfo::new("path_search_max_polygons", Variant::Int(4096)))
-            .property(PropertyInfo::new("path_search_max_distance", Variant::Float(0.0)))
-            .property(PropertyInfo::new("velocity", Variant::Vector3(Vector3::ZERO)))
+            .property(PropertyInfo::new(
+                "path_return_max_length",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                "path_return_max_radius",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                "path_search_max_polygons",
+                Variant::Int(4096),
+            ))
+            .property(PropertyInfo::new(
+                "path_search_max_distance",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                "velocity",
+                Variant::Vector3(Vector3::ZERO),
+            ))
             .property(PropertyInfo::new("height", Variant::Float(1.0)))
             .property(PropertyInfo::new("radius", Variant::Float(0.5)))
             .property(PropertyInfo::new("neighbor_distance", Variant::Float(50.0)))
             .property(PropertyInfo::new("max_neighbors", Variant::Int(10)))
-            .property(PropertyInfo::new("time_horizon_agents", Variant::Float(1.0)))
-            .property(PropertyInfo::new("time_horizon_obstacles", Variant::Float(0.0)))
+            .property(PropertyInfo::new(
+                "time_horizon_agents",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new(
+                "time_horizon_obstacles",
+                Variant::Float(0.0),
+            ))
             .property(PropertyInfo::new("max_speed", Variant::Float(10.0)))
             .property(PropertyInfo::new("use_3d_avoidance", Variant::Bool(false)))
             .property(PropertyInfo::new("keep_y_velocity", Variant::Bool(true)))
@@ -1040,7 +1112,10 @@ pub fn register_3d_classes() {
                 "debug_path_custom_color",
                 Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
             ))
-            .property(PropertyInfo::new("debug_path_custom_point_size", Variant::Float(4.0))),
+            .property(PropertyInfo::new(
+                "debug_path_custom_point_size",
+                Variant::Float(4.0),
+            )),
     );
     // Vehicle / soft body scene types (physics sim lives in gdphysics2d; pat-n1gh1).
     register_class(
@@ -1072,18 +1147,36 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("use_as_traction", Variant::Bool(false)))
             .property(PropertyInfo::new("use_as_steering", Variant::Bool(false)))
             // How much this wheel's suspension resists chassis roll in a turn.
-            .property(PropertyInfo::new("wheel_roll_influence", Variant::Float(0.1)))
+            .property(PropertyInfo::new(
+                "wheel_roll_influence",
+                Variant::Float(0.1),
+            ))
             .property(PropertyInfo::new("wheel_radius", Variant::Float(0.5)))
             // Distance from the wheel's attachment point to its rest position.
             .property(PropertyInfo::new("wheel_rest_length", Variant::Float(0.15)))
             // Tire grip. Lower slides, higher grips; 10.5 is Godot's default.
-            .property(PropertyInfo::new("wheel_friction_slip", Variant::Float(10.5)))
+            .property(PropertyInfo::new(
+                "wheel_friction_slip",
+                Variant::Float(10.5),
+            ))
             .property(PropertyInfo::new("suspension_travel", Variant::Float(0.2)))
-            .property(PropertyInfo::new("suspension_stiffness", Variant::Float(5.88)))
-            .property(PropertyInfo::new("suspension_max_force", Variant::Float(6000.0)))
+            .property(PropertyInfo::new(
+                "suspension_stiffness",
+                Variant::Float(5.88),
+            ))
+            .property(PropertyInfo::new(
+                "suspension_max_force",
+                Variant::Float(6000.0),
+            ))
             // Godot splits damping in two: resisting compression vs extension.
-            .property(PropertyInfo::new("damping_compression", Variant::Float(0.83)))
-            .property(PropertyInfo::new("damping_relaxation", Variant::Float(0.88))),
+            .property(PropertyInfo::new(
+                "damping_compression",
+                Variant::Float(0.83),
+            ))
+            .property(PropertyInfo::new(
+                "damping_relaxation",
+                Variant::Float(0.88),
+            )),
     );
     register_class(
         ClassRegistration::new("SoftBody3D")
@@ -1091,8 +1184,14 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("simulation_precision", Variant::Int(5)))
             .property(PropertyInfo::new("total_mass", Variant::Float(1.0)))
             .property(PropertyInfo::new("linear_stiffness", Variant::Float(0.5)))
-            .property(PropertyInfo::new("pressure_coefficient", Variant::Float(0.0)))
-            .property(PropertyInfo::new("damping_coefficient", Variant::Float(0.01))),
+            .property(PropertyInfo::new(
+                "pressure_coefficient",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                "damping_coefficient",
+                Variant::Float(0.01),
+            )),
     );
     register_class(ClassRegistration::new("Skeleton3D").parent("Node3D"));
     register_class(ClassRegistration::new("BoneAttachment3D").parent("Node3D"));
@@ -1238,9 +1337,7 @@ pub fn register_3d_classes() {
     // Godot gives the simulator no properties of its own — it is driven entirely
     // by physical_bones_start_simulation()/stop_simulation(), and inherits
     // active/influence from SkeletonModifier3D.
-    register_class(
-        ClassRegistration::new("PhysicalBoneSimulator3D").parent("SkeletonModifier3D"),
-    );
+    register_class(ClassRegistration::new("PhysicalBoneSimulator3D").parent("SkeletonModifier3D"));
 
     // -- Bone constraints (pat-nzgdu.182) ----------------------------------
     //
@@ -1511,13 +1608,20 @@ pub fn register_3d_classes() {
                 "playback_default_blend_time",
                 Variant::Float(0.0),
             ))
-            .property(PropertyInfo::new("playback_auto_capture", Variant::Bool(true)))
+            .property(PropertyInfo::new(
+                "playback_auto_capture",
+                Variant::Bool(true),
+            ))
             .property(PropertyInfo::new(
                 "movie_quit_on_finish",
                 Variant::Bool(false),
             ))
             .signal(SignalInfo::new("current_animation_changed").arg("name"))
-            .signal(SignalInfo::new("animation_changed").arg("old_name").arg("new_name")),
+            .signal(
+                SignalInfo::new("animation_changed")
+                    .arg("old_name")
+                    .arg("new_name"),
+            ),
     );
     register_class(ClassRegistration::new("AnimationTree").parent("AnimationMixer"));
 
@@ -1692,9 +1796,7 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("AnimationNodeStateMachineTransition").parent("Resource"),
     );
-    register_class(
-        ClassRegistration::new("AnimationNodeStateMachinePlayback").parent("Resource"),
-    );
+    register_class(ClassRegistration::new("AnimationNodeStateMachinePlayback").parent("Resource"));
 
     register_class(ClassRegistration::new("GPUParticles3D").parent("GeometryInstance3D"));
 
@@ -1742,10 +1844,10 @@ pub fn register_3d_classes() {
             // A Texture3D sampled for the force direction; Nil until assigned.
             .property(PropertyInfo::new("texture", Variant::Nil)),
     );
-    register_class(ClassRegistration::new("CPUParticles3D").parent("Node3D"));
-    register_class(ClassRegistration::new("Decal").parent("Node3D"));
-    register_class(ClassRegistration::new("ReflectionProbe").parent("Node3D"));
-    register_class(ClassRegistration::new("VoxelGI").parent("Node3D"));
+    register_class(ClassRegistration::new("CPUParticles3D").parent("GeometryInstance3D"));
+    register_class(ClassRegistration::new("Decal").parent("VisualInstance3D"));
+    register_class(ClassRegistration::new("ReflectionProbe").parent("VisualInstance3D"));
+    register_class(ClassRegistration::new("VoxelGI").parent("VisualInstance3D"));
 
     // -- Fog (pat-nzgdu.208) -------------------------------------------------
     //
@@ -1846,7 +1948,7 @@ pub fn register_3d_classes() {
                 .method(MethodInfo::new("get_level_counts", 0)),
         );
     }
-    register_class(ClassRegistration::new("LightmapGI").parent("Node3D"));
+    register_class(ClassRegistration::new("LightmapGI").parent("VisualInstance3D"));
     register_class(
         ClassRegistration::new("VisualInstance3D")
             .parent("Node3D")
@@ -2025,18 +2127,30 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("extra_cull_margin", Variant::Float(0.0)))
             .property(PropertyInfo::new("lod_bias", Variant::Float(1.0)))
             .property(PropertyInfo::new("gi_mode", Variant::Int(1)))
-            .property(PropertyInfo::new("ignore_occlusion_culling", Variant::Bool(false)))
-            .property(PropertyInfo::new("visibility_range_begin", Variant::Float(0.0)))
+            .property(PropertyInfo::new(
+                "ignore_occlusion_culling",
+                Variant::Bool(false),
+            ))
+            .property(PropertyInfo::new(
+                "visibility_range_begin",
+                Variant::Float(0.0),
+            ))
             .property(PropertyInfo::new(
                 "visibility_range_begin_margin",
                 Variant::Float(0.0),
             ))
-            .property(PropertyInfo::new("visibility_range_end", Variant::Float(0.0)))
+            .property(PropertyInfo::new(
+                "visibility_range_end",
+                Variant::Float(0.0),
+            ))
             .property(PropertyInfo::new(
                 "visibility_range_end_margin",
                 Variant::Float(0.0),
             ))
-            .property(PropertyInfo::new("visibility_range_fade_mode", Variant::Int(0)))
+            .property(PropertyInfo::new(
+                "visibility_range_fade_mode",
+                Variant::Int(0),
+            ))
             .property(PropertyInfo::new("custom_aabb", Variant::Nil)),
     );
     register_class(
@@ -2095,7 +2209,10 @@ pub fn register_3d_classes() {
                 Variant::Color(gdcore::math::Color::new(0.6463, 0.6558, 0.6708, 1.0)),
             ))
             .property(PropertyInfo::new("sky_curve", Variant::Float(0.15)))
-            .property(PropertyInfo::new("sky_energy_multiplier", Variant::Float(1.0)))
+            .property(PropertyInfo::new(
+                "sky_energy_multiplier",
+                Variant::Float(1.0),
+            ))
             .property(PropertyInfo::new(
                 "ground_bottom_color",
                 Variant::Color(gdcore::math::Color::new(0.2, 0.169, 0.133, 1.0)),
@@ -2105,7 +2222,10 @@ pub fn register_3d_classes() {
                 Variant::Color(gdcore::math::Color::new(0.6463, 0.6558, 0.6708, 1.0)),
             ))
             .property(PropertyInfo::new("ground_curve", Variant::Float(0.02)))
-            .property(PropertyInfo::new("ground_energy_multiplier", Variant::Float(1.0)))
+            .property(PropertyInfo::new(
+                "ground_energy_multiplier",
+                Variant::Float(1.0),
+            ))
             .property(PropertyInfo::new("sun_angle_max", Variant::Float(30.0)))
             .property(PropertyInfo::new("sun_curve", Variant::Float(0.15)))
             .property(PropertyInfo::new(
@@ -2118,7 +2238,11 @@ pub fn register_3d_classes() {
     // Mesh -> PrimitiveMesh -> <shape> hierarchy so they are creatable and
     // introspectable. CapsuleMesh carries Godot's defaults.
     if !class_exists("Mesh") {
-        register_class(ClassRegistration::new("Mesh").parent("Resource").abstract_class());
+        register_class(
+            ClassRegistration::new("Mesh")
+                .parent("Resource")
+                .abstract_class(),
+        );
     }
 
     // -- Placeholder mesh/material (pat-nzgdu.221) ---------------------------
@@ -2310,11 +2434,16 @@ pub fn register_3d_classes() {
                     .constant("MODE_LINEAR", 0)
                     .constant("MODE_RADIAL", 1)
                     .constant("MODE_TANGENTIAL", 2)
-                    .constant("MODE_MAX", 3)
+                    .constant("MODE_MAX", 3),
             ),
     );
-    register_class(ClassRegistration::new("VisualShaderNodeParticleBoxEmitter").parent("VisualShaderNodeParticleEmitter"));
-    register_class(ClassRegistration::new("VisualShaderNodeParticleConeVelocity").parent("VisualShaderNode"));
+    register_class(
+        ClassRegistration::new("VisualShaderNodeParticleBoxEmitter")
+            .parent("VisualShaderNodeParticleEmitter"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeParticleConeVelocity").parent("VisualShaderNode"),
+    );
     register_class(
         ClassRegistration::new("VisualShaderNodeParticleEmit")
             .parent("VisualShaderNode")
@@ -2325,31 +2454,30 @@ pub fn register_3d_classes() {
                     .constant("EMIT_FLAG_ROT_SCALE", 2)
                     .constant("EMIT_FLAG_VELOCITY", 4)
                     .constant("EMIT_FLAG_COLOR", 8)
-                    .constant("EMIT_FLAG_CUSTOM", 16)
+                    .constant("EMIT_FLAG_CUSTOM", 16),
             ),
     );
     register_class(
         ClassRegistration::new("VisualShaderNodeParticleEmitter")
             .parent("VisualShaderNode")
             .abstract_class()
-            .property(PropertyInfo::new("mode_2d", Variant::Bool(false)))
-            ,
+            .property(PropertyInfo::new("mode_2d", Variant::Bool(false))),
     );
     register_class(
         ClassRegistration::new("VisualShaderNodeParticleMeshEmitter")
             .parent("VisualShaderNodeParticleEmitter")
             .property(PropertyInfo::new("mesh", Variant::Nil))
             .property(PropertyInfo::new("use_all_surfaces", Variant::Bool(false)))
-            .property(PropertyInfo::new("surface_index", Variant::Int(0)))
-            ,
+            .property(PropertyInfo::new("surface_index", Variant::Int(0))),
     );
     register_class(
         ClassRegistration::new("VisualShaderNodeParticleMultiplyByAxisAngle")
             .parent("VisualShaderNode")
-            .property(PropertyInfo::new("degrees_mode", Variant::Bool(false)))
-            ,
+            .property(PropertyInfo::new("degrees_mode", Variant::Bool(false))),
     );
-    register_class(ClassRegistration::new("VisualShaderNodeParticleOutput").parent("VisualShaderNodeOutput"));
+    register_class(
+        ClassRegistration::new("VisualShaderNodeParticleOutput").parent("VisualShaderNodeOutput"),
+    );
     register_class(
         ClassRegistration::new("VisualShaderNodeParticleRandomness")
             .parent("VisualShaderNode")
@@ -2360,11 +2488,17 @@ pub fn register_3d_classes() {
                     .constant("OP_TYPE_VECTOR_2D", 1)
                     .constant("OP_TYPE_VECTOR_3D", 2)
                     .constant("OP_TYPE_VECTOR_4D", 3)
-                    .constant("OP_TYPE_MAX", 4)
+                    .constant("OP_TYPE_MAX", 4),
             ),
     );
-    register_class(ClassRegistration::new("VisualShaderNodeParticleRingEmitter").parent("VisualShaderNodeParticleEmitter"));
-    register_class(ClassRegistration::new("VisualShaderNodeParticleSphereEmitter").parent("VisualShaderNodeParticleEmitter"));
+    register_class(
+        ClassRegistration::new("VisualShaderNodeParticleRingEmitter")
+            .parent("VisualShaderNodeParticleEmitter"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeParticleSphereEmitter")
+            .parent("VisualShaderNodeParticleEmitter"),
+    );
     // Constants: the graph compiler emits these as literals.
     register_class(
         ClassRegistration::new("VisualShaderNodeConstant")
@@ -2431,7 +2565,7 @@ pub fn register_3d_classes() {
                     .constant("OP_TYPE_VECTOR_2D", 0)
                     .constant("OP_TYPE_VECTOR_3D", 1)
                     .constant("OP_TYPE_VECTOR_4D", 2)
-                    .constant("OP_TYPE_MAX", 3)
+                    .constant("OP_TYPE_MAX", 3),
             ),
     );
     register_class(
@@ -2450,7 +2584,7 @@ pub fn register_3d_classes() {
                     .constant("OP_MIN", 7)
                     .constant("OP_ATAN2", 8)
                     .constant("OP_STEP", 9)
-                    .constant("OP_ENUM_SIZE", 10)
+                    .constant("OP_ENUM_SIZE", 10),
             ),
     );
     register_class(
@@ -2471,7 +2605,7 @@ pub fn register_3d_classes() {
                     .constant("OP_BITWISE_XOR", 9)
                     .constant("OP_BITWISE_LEFT_SHIFT", 10)
                     .constant("OP_BITWISE_RIGHT_SHIFT", 11)
-                    .constant("OP_ENUM_SIZE", 12)
+                    .constant("OP_ENUM_SIZE", 12),
             ),
     );
     register_class(
@@ -2489,7 +2623,7 @@ pub fn register_3d_classes() {
                     .constant("OP_BURN", 6)
                     .constant("OP_SOFT_LIGHT", 7)
                     .constant("OP_HARD_LIGHT", 8)
-                    .constant("OP_MAX", 9)
+                    .constant("OP_MAX", 9),
             ),
     );
     register_class(
@@ -2513,7 +2647,7 @@ pub fn register_3d_classes() {
                     .constant("OP_ATAN2", 9)
                     .constant("OP_REFLECT", 10)
                     .constant("OP_STEP", 11)
-                    .constant("OP_ENUM_SIZE", 12)
+                    .constant("OP_ENUM_SIZE", 12),
             ),
     );
     register_class(
@@ -2554,7 +2688,7 @@ pub fn register_3d_classes() {
                     .constant("FUNC_ROUNDEVEN", 29)
                     .constant("FUNC_TRUNC", 30)
                     .constant("FUNC_ONEMINUS", 31)
-                    .constant("FUNC_MAX", 32)
+                    .constant("FUNC_MAX", 32),
             ),
     );
     register_class(
@@ -2567,7 +2701,7 @@ pub fn register_3d_classes() {
                     .constant("FUNC_NEGATE", 1)
                     .constant("FUNC_SIGN", 2)
                     .constant("FUNC_BITWISE_NOT", 3)
-                    .constant("FUNC_MAX", 4)
+                    .constant("FUNC_MAX", 4),
             ),
     );
     register_class(
@@ -2609,7 +2743,7 @@ pub fn register_3d_classes() {
                     .constant("FUNC_TANH", 30)
                     .constant("FUNC_TRUNC", 31)
                     .constant("FUNC_ONEMINUS", 32)
-                    .constant("FUNC_MAX", 33)
+                    .constant("FUNC_MAX", 33),
             ),
     );
     register_class(
@@ -2625,7 +2759,7 @@ pub fn register_3d_classes() {
                     .constant("OP_TYPE_VECTOR_3D_SCALAR", 4)
                     .constant("OP_TYPE_VECTOR_4D", 5)
                     .constant("OP_TYPE_VECTOR_4D_SCALAR", 6)
-                    .constant("OP_TYPE_MAX", 7)
+                    .constant("OP_TYPE_MAX", 7),
             ),
     );
     register_class(
@@ -2638,7 +2772,7 @@ pub fn register_3d_classes() {
                     .constant("OP_TYPE_VECTOR_2D", 1)
                     .constant("OP_TYPE_VECTOR_3D", 2)
                     .constant("OP_TYPE_VECTOR_4D", 3)
-                    .constant("OP_TYPE_MAX", 4)
+                    .constant("OP_TYPE_MAX", 4),
             ),
     );
     register_class(
@@ -2657,7 +2791,7 @@ pub fn register_3d_classes() {
                     .constant("CTYPE_VECTOR_4D", 5)
                     .constant("CTYPE_BOOLEAN", 6)
                     .constant("CTYPE_TRANSFORM", 7)
-                    .constant("CTYPE_MAX", 8)
+                    .constant("CTYPE_MAX", 8),
             )
             .enumeration(
                 EnumInfo::new("Function")
@@ -2667,13 +2801,13 @@ pub fn register_3d_classes() {
                     .constant("FUNC_GREATER_THAN_EQUAL", 3)
                     .constant("FUNC_LESS_THAN", 4)
                     .constant("FUNC_LESS_THAN_EQUAL", 5)
-                    .constant("FUNC_MAX", 6)
+                    .constant("FUNC_MAX", 6),
             )
             .enumeration(
                 EnumInfo::new("Condition")
                     .constant("COND_ALL", 0)
                     .constant("COND_ANY", 1)
-                    .constant("COND_MAX", 2)
+                    .constant("COND_MAX", 2),
             ),
     );
     register_class(ClassRegistration::new("VisualShaderNodeIf").parent("VisualShaderNode"));
@@ -2685,13 +2819,17 @@ pub fn register_3d_classes() {
                 EnumInfo::new("Function")
                     .constant("FUNC_IS_INF", 0)
                     .constant("FUNC_IS_NAN", 1)
-                    .constant("FUNC_MAX", 2)
+                    .constant("FUNC_MAX", 2),
             ),
     );
     register_class(ClassRegistration::new("VisualShaderNodeFresnel").parent("VisualShaderNode"));
     register_class(ClassRegistration::new("VisualShaderNodeDotProduct").parent("VisualShaderNode"));
-    register_class(ClassRegistration::new("VisualShaderNodeDeterminant").parent("VisualShaderNode"));
-    register_class(ClassRegistration::new("VisualShaderNodeOuterProduct").parent("VisualShaderNode"));
+    register_class(
+        ClassRegistration::new("VisualShaderNodeDeterminant").parent("VisualShaderNode"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeOuterProduct").parent("VisualShaderNode"),
+    );
     register_class(
         ClassRegistration::new("VisualShaderNodeDerivativeFunc")
             .parent("VisualShaderNode")
@@ -2704,24 +2842,26 @@ pub fn register_3d_classes() {
                     .constant("OP_TYPE_VECTOR_2D", 1)
                     .constant("OP_TYPE_VECTOR_3D", 2)
                     .constant("OP_TYPE_VECTOR_4D", 3)
-                    .constant("OP_TYPE_MAX", 4)
+                    .constant("OP_TYPE_MAX", 4),
             )
             .enumeration(
                 EnumInfo::new("Function")
                     .constant("FUNC_SUM", 0)
                     .constant("FUNC_X", 1)
                     .constant("FUNC_Y", 2)
-                    .constant("FUNC_MAX", 3)
+                    .constant("FUNC_MAX", 3),
             )
             .enumeration(
                 EnumInfo::new("Precision")
                     .constant("PRECISION_NONE", 0)
                     .constant("PRECISION_COARSE", 1)
                     .constant("PRECISION_FINE", 2)
-                    .constant("PRECISION_MAX", 3)
+                    .constant("PRECISION_MAX", 3),
             ),
     );
-    register_class(ClassRegistration::new("VisualShaderNodeFaceForward").parent("VisualShaderNodeVectorBase"));
+    register_class(
+        ClassRegistration::new("VisualShaderNodeFaceForward").parent("VisualShaderNodeVectorBase"),
+    );
     // Parameters (uniforms) and textures (pat-nzgdu.168).
     //
     // Schemas below are diffed against Godot's `extension_api.json` rather than
@@ -2756,7 +2896,10 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("min", Variant::Float(0.0)))
             .property(PropertyInfo::new("max", Variant::Float(1.0)))
             .property(PropertyInfo::new("step", Variant::Float(0.1)))
-            .property(PropertyInfo::new("default_value_enabled", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "default_value_enabled",
+                Variant::Bool(false),
+            ))
             .property(PropertyInfo::new("default_value", Variant::Float(0.0)))
             .enumeration(
                 EnumInfo::new("Hint")
@@ -2778,7 +2921,10 @@ pub fn register_3d_classes() {
                 "enum_names",
                 Variant::PackedStringArray(Vec::new()),
             ))
-            .property(PropertyInfo::new("default_value_enabled", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "default_value_enabled",
+                Variant::Bool(false),
+            ))
             .property(PropertyInfo::new("default_value", Variant::Int(0)))
             .enumeration(
                 // Note: the int hint has HINT_ENUM, which the float one does not.
@@ -2793,7 +2939,10 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("VisualShaderNodeColorParameter")
             .parent("VisualShaderNodeParameter")
-            .property(PropertyInfo::new("default_value_enabled", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "default_value_enabled",
+                Variant::Bool(false),
+            ))
             .property(PropertyInfo::new(
                 "default_value",
                 Variant::Color(gdcore::math::Color::WHITE),
@@ -3005,9 +3154,7 @@ pub fn register_3d_classes() {
             ))
             .property(PropertyInfo::new("param_type", Variant::Int(0))),
     );
-    register_class(
-        ClassRegistration::new("VisualShaderNodeTexture").parent("VisualShaderNode"),
-    );
+    register_class(ClassRegistration::new("VisualShaderNodeTexture").parent("VisualShaderNode"));
     register_class(
         ClassRegistration::new("VisualShaderNodeExpression")
             .parent("VisualShaderNode")
@@ -3033,7 +3180,10 @@ pub fn register_3d_classes() {
             .parent("Material")
             // Emission (EmissionShape enum: 0 = POINT default).
             .property(PropertyInfo::new("emission_shape", Variant::Int(0)))
-            .property(PropertyInfo::new("emission_sphere_radius", Variant::Float(1.0)))
+            .property(PropertyInfo::new(
+                "emission_sphere_radius",
+                Variant::Float(1.0),
+            ))
             .property(PropertyInfo::new(
                 "emission_box_extents",
                 Variant::Vector3(Vector3::new(1.0, 1.0, 1.0)),
@@ -3050,19 +3200,37 @@ pub fn register_3d_classes() {
                 "gravity",
                 Variant::Vector3(Vector3::new(0.0, -9.8, 0.0)),
             ))
-            .property(PropertyInfo::new("initial_velocity_min", Variant::Float(0.0)))
-            .property(PropertyInfo::new("initial_velocity_max", Variant::Float(0.0)))
-            .property(PropertyInfo::new("angular_velocity_min", Variant::Float(0.0)))
-            .property(PropertyInfo::new("angular_velocity_max", Variant::Float(0.0)))
+            .property(PropertyInfo::new(
+                "initial_velocity_min",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                "initial_velocity_max",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                "angular_velocity_min",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                "angular_velocity_max",
+                Variant::Float(0.0),
+            ))
             .property(PropertyInfo::new("damping_min", Variant::Float(0.0)))
             .property(PropertyInfo::new("damping_max", Variant::Float(0.0)))
             .property(PropertyInfo::new("scale_min", Variant::Float(1.0)))
             .property(PropertyInfo::new("scale_max", Variant::Float(1.0)))
             // Flag / grouping enums (ParticleFlags, SubEmitterMode, CollisionMode).
-            .property(PropertyInfo::new("particle_flag_align_y", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "particle_flag_align_y",
+                Variant::Bool(false),
+            ))
             .property(PropertyInfo::new("sub_emitter_mode", Variant::Int(0)))
             .property(PropertyInfo::new("collision_mode", Variant::Int(0)))
-            .property(PropertyInfo::new("lifetime_randomness", Variant::Float(0.0))),
+            .property(PropertyInfo::new(
+                "lifetime_randomness",
+                Variant::Float(0.0),
+            )),
     );
 }
 
@@ -3230,9 +3398,17 @@ pub fn register_2d_classes() {
         );
     }
     // Overrides where 2D audio is heard from. Godot gives it no properties —
-    // it is driven entirely by `make_current()`/`clear_current()`.
+    // it is driven entirely by `make_current()`/`clear_current()`, which set the
+    // `current` flag the audio bridge resolves the listener from (pat-0q2kx.57).
     if !class_exists("AudioListener2D") {
-        register_class(ClassRegistration::new("AudioListener2D").parent("Node2D"));
+        register_class(
+            ClassRegistration::new("AudioListener2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("current", Variant::Bool(false)))
+                .method(MethodInfo::new("make_current", 0))
+                .method(MethodInfo::new("clear_current", 0))
+                .method(MethodInfo::new("is_current", 0)),
+        );
     }
     if !class_exists("GPUParticles2D") {
         register_class(ClassRegistration::new("GPUParticles2D").parent("Node2D"));
@@ -3365,11 +3541,37 @@ pub fn register_2d_classes() {
     if !class_exists("RemoteTransform2D") {
         register_class(ClassRegistration::new("RemoteTransform2D").parent("Node2D"));
     }
+    // These two 3D nodes are registered from the 2D table, so the bases they
+    // derive from must exist here too — `inheritance_chain` resolves parents BY
+    // NAME at query time and stops dead at the first unregistered link, so
+    // pointing them at a base this entry point never registers would sever
+    // `is_parent_class(Label3D, ..)` for anyone who calls only
+    // `register_2d_classes()` (pat-0q2kx.63).
+    //
+    // Bare bootstraps: `register_3d_classes` registers these two unguarded with
+    // their full property sets, and `register_class` is last-wins, so calling
+    // 2D-then-3D still ends up with the complete definitions.
+    if !class_exists("VisualInstance3D") {
+        register_class(
+            ClassRegistration::new("VisualInstance3D")
+                .parent("Node3D")
+                .abstract_class(),
+        );
+    }
+    if !class_exists("GeometryInstance3D") {
+        register_class(
+            ClassRegistration::new("GeometryInstance3D")
+                .parent("VisualInstance3D")
+                .abstract_class(),
+        );
+    }
     if !class_exists("VisibleOnScreenNotifier3D") {
-        register_class(ClassRegistration::new("VisibleOnScreenNotifier3D").parent("Node3D"));
+        register_class(
+            ClassRegistration::new("VisibleOnScreenNotifier3D").parent("VisualInstance3D"),
+        );
     }
     if !class_exists("Label3D") {
-        register_class(ClassRegistration::new("Label3D").parent("Node3D"));
+        register_class(ClassRegistration::new("Label3D").parent("GeometryInstance3D"));
     }
     if !class_exists("RichTextLabel") {
         register_class(ClassRegistration::new("RichTextLabel").parent("Control"));
@@ -3435,8 +3637,64 @@ pub fn register_2d_classes() {
     if !class_exists("TabContainer") {
         register_class(ClassRegistration::new("TabContainer").parent("Container"));
     }
+    // Godot's GUI intermediates. Patina parented the leaves straight onto
+    // Control/Container and never registered these, so `is_class("BaseButton")`
+    // was false for a Button — which is exactly why `control.rs` carries a
+    // hardcoded BUTTON_CLASSES fallback list (pat-0q2kx.62).
+    //
+    // ⚠️ These MUST be registered in the same entry point as the leaves below.
+    // `inheritance_chain` resolves parents by name at query time and stops at
+    // the first unregistered name, so re-parenting without the base present
+    // would sever Button from Control and Object entirely — worse than the gap
+    // being fixed, and invisible to `cargo check`.
+    if !class_exists("BaseButton") {
+        register_class(
+            ClassRegistration::new("BaseButton")
+                .parent("Control")
+                .abstract_class()
+                .property(PropertyInfo::new("disabled", Variant::Bool(false)))
+                .property(PropertyInfo::new("toggle_mode", Variant::Bool(false)))
+                .property(PropertyInfo::new("button_pressed", Variant::Bool(false)))
+                // ACTION_MODE_BUTTON_RELEASE = 1 is Godot's default: a click
+                // fires on release, not on press.
+                .property(PropertyInfo::new("action_mode", Variant::Int(1)))
+                .property(PropertyInfo::new("button_group", Variant::Nil))
+                .signal(SignalInfo::new("pressed"))
+                .signal(SignalInfo::new("button_down"))
+                .signal(SignalInfo::new("button_up"))
+                .signal(SignalInfo::new("toggled").arg("toggled_on")),
+        );
+    }
+    if !class_exists("Range") {
+        register_class(
+            ClassRegistration::new("Range")
+                .parent("Control")
+                .abstract_class()
+                .property(PropertyInfo::new("min_value", Variant::Float(0.0)))
+                .property(PropertyInfo::new("max_value", Variant::Float(100.0)))
+                .property(PropertyInfo::new("step", Variant::Float(0.01)))
+                .property(PropertyInfo::new("page", Variant::Float(0.0)))
+                .property(PropertyInfo::new("value", Variant::Float(0.0)))
+                .property(PropertyInfo::new("ratio", Variant::Float(0.0)))
+                .property(PropertyInfo::new("exp_edit", Variant::Bool(false)))
+                .property(PropertyInfo::new("rounded", Variant::Bool(false)))
+                .property(PropertyInfo::new("allow_greater", Variant::Bool(false)))
+                .property(PropertyInfo::new("allow_lesser", Variant::Bool(false)))
+                .signal(SignalInfo::new("value_changed").arg("value"))
+                .signal(SignalInfo::new("changed")),
+        );
+    }
+    if !class_exists("BoxContainer") {
+        register_class(
+            ClassRegistration::new("BoxContainer")
+                .parent("Container")
+                .abstract_class()
+                // ALIGNMENT_BEGIN = 0
+                .property(PropertyInfo::new("alignment", Variant::Int(0))),
+        );
+    }
     if !class_exists("ProgressBar") {
-        register_class(ClassRegistration::new("ProgressBar").parent("Control"));
+        register_class(ClassRegistration::new("ProgressBar").parent("Range"));
     }
     if !class_exists("CheckBox") {
         register_class(ClassRegistration::new("CheckBox").parent("Button"));
@@ -3517,16 +3775,48 @@ pub fn register_2d_classes() {
                 .property(PropertyInfo::new("right_disconnects", Variant::Bool(false))),
         );
     }
+    // Every audio effect derives from `AudioEffect`, not straight from
+    // `Resource` (`servers/audio/audio_effect.h`; extension_api has
+    // `AudioEffect <- Resource`). Patina skipped the base entirely, so anything
+    // filtering by "inherits AudioEffect" — the AudioServer's effect-slot type
+    // check, the editor's audio-bus effect picker — matched nothing
+    // (pat-0q2kx.61).
+    //
+    // ⚠️ Registering the base HERE is load-bearing, not tidiness.
+    // `inheritance_chain` resolves parents by name at query time and stops dead
+    // at the first name missing from the map, so re-parenting the three effects
+    // without registering `AudioEffect` in this same entry point would sever
+    // them from `Resource` and `Object` — turning a missing link into a broken
+    // chain, which is strictly worse. `register_2d_classes` is the ONLY
+    // function that registers these three (verified structurally), and it
+    // already bootstraps Object/RefCounted/Resource above.
+    if !class_exists("AudioEffect") {
+        register_class(
+            ClassRegistration::new("AudioEffect")
+                .parent("Resource")
+                .abstract_class(),
+        );
+    }
+    // Godot's `AudioEffectInstance` is the per-playback companion and derives
+    // from RefCounted, NOT from AudioEffect (audio_effect.h) — registering it
+    // under AudioEffect would make the effect picker offer it as an insert.
+    if !class_exists("AudioEffectInstance") {
+        register_class(
+            ClassRegistration::new("AudioEffectInstance")
+                .parent("RefCounted")
+                .abstract_class(),
+        );
+    }
     if !class_exists("AudioEffectAmplify") {
-        register_class(ClassRegistration::new("AudioEffectAmplify").parent("Resource"));
+        register_class(ClassRegistration::new("AudioEffectAmplify").parent("AudioEffect"));
     }
     if !class_exists("AudioEffectReverb") {
-        register_class(ClassRegistration::new("AudioEffectReverb").parent("Resource"));
+        register_class(ClassRegistration::new("AudioEffectReverb").parent("AudioEffect"));
     }
     if !class_exists("AudioEffectEQ") {
-        register_class(ClassRegistration::new("AudioEffectEQ").parent("Resource"));
+        register_class(ClassRegistration::new("AudioEffectEQ").parent("AudioEffect"));
     }
-    
+
     if !class_exists("Light2D") {
         register_class(ClassRegistration::new("Light2D").parent("Node2D"));
     }
@@ -3551,7 +3841,10 @@ pub fn register_2d_classes() {
                 .property(PropertyInfo::new("navigation_layers", Variant::Int(1)))
                 .property(PropertyInfo::new("enter_cost", Variant::Float(0.0)))
                 .property(PropertyInfo::new("travel_cost", Variant::Float(1.0)))
-                .property(PropertyInfo::new("use_edge_connections", Variant::Bool(true))),
+                .property(PropertyInfo::new(
+                    "use_edge_connections",
+                    Variant::Bool(true),
+                )),
         );
     }
     // NavigationAgent2D — scene-tree pathfinding agent (pat-rzs4o).
@@ -3567,23 +3860,38 @@ pub fn register_2d_classes() {
                     "path_desired_distance",
                     Variant::Float(4.0),
                 ))
-                .property(PropertyInfo::new(
-                    "avoidance_enabled",
-                    Variant::Bool(false),
-                ))
+                .property(PropertyInfo::new("avoidance_enabled", Variant::Bool(false)))
                 // pat-nzgdu.10 — full NavigationAgent2D property surface (Godot parity).
-                .property(PropertyInfo::new("target_desired_distance", Variant::Float(10.0)))
-                .property(PropertyInfo::new("path_max_distance", Variant::Float(100.0)))
+                .property(PropertyInfo::new(
+                    "target_desired_distance",
+                    Variant::Float(10.0),
+                ))
+                .property(PropertyInfo::new(
+                    "path_max_distance",
+                    Variant::Float(100.0),
+                ))
                 .property(PropertyInfo::new("navigation_layers", Variant::Int(1)))
                 .property(PropertyInfo::new("pathfinding_algorithm", Variant::Int(0)))
                 .property(PropertyInfo::new("path_postprocessing", Variant::Int(0)))
                 .property(PropertyInfo::new("path_metadata_flags", Variant::Int(7)))
                 .property(PropertyInfo::new("simplify_path", Variant::Bool(false)))
                 .property(PropertyInfo::new("simplify_epsilon", Variant::Float(0.0)))
-                .property(PropertyInfo::new("path_return_max_length", Variant::Float(0.0)))
-                .property(PropertyInfo::new("path_return_max_radius", Variant::Float(0.0)))
-                .property(PropertyInfo::new("path_search_max_polygons", Variant::Int(4096)))
-                .property(PropertyInfo::new("path_search_max_distance", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "path_return_max_length",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "path_return_max_radius",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "path_search_max_polygons",
+                    Variant::Int(4096),
+                ))
+                .property(PropertyInfo::new(
+                    "path_search_max_distance",
+                    Variant::Float(0.0),
+                ))
                 .property(PropertyInfo::new(
                     "velocity",
                     Variant::Vector2(gdcore::math::Vector2::ZERO),
@@ -3596,10 +3904,19 @@ pub fn register_2d_classes() {
                     Variant::Vector2(gdcore::math::Vector2::ZERO),
                 ))
                 .property(PropertyInfo::new("radius", Variant::Float(10.0)))
-                .property(PropertyInfo::new("neighbor_distance", Variant::Float(500.0)))
+                .property(PropertyInfo::new(
+                    "neighbor_distance",
+                    Variant::Float(500.0),
+                ))
                 .property(PropertyInfo::new("max_neighbors", Variant::Int(10)))
-                .property(PropertyInfo::new("time_horizon_agents", Variant::Float(1.0)))
-                .property(PropertyInfo::new("time_horizon_obstacles", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "time_horizon_agents",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new(
+                    "time_horizon_obstacles",
+                    Variant::Float(0.0),
+                ))
                 .property(PropertyInfo::new("max_speed", Variant::Float(100.0)))
                 .property(PropertyInfo::new("avoidance_layers", Variant::Int(1)))
                 .property(PropertyInfo::new("avoidance_mask", Variant::Int(1)))
@@ -3610,8 +3927,14 @@ pub fn register_2d_classes() {
                     "debug_path_custom_color",
                     Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
                 ))
-                .property(PropertyInfo::new("debug_path_custom_point_size", Variant::Float(4.0)))
-                .property(PropertyInfo::new("debug_path_custom_line_width", Variant::Float(-1.0))),
+                .property(PropertyInfo::new(
+                    "debug_path_custom_point_size",
+                    Variant::Float(4.0),
+                ))
+                .property(PropertyInfo::new(
+                    "debug_path_custom_line_width",
+                    Variant::Float(-1.0),
+                )),
         );
     }
 
@@ -3627,7 +3950,7 @@ pub fn register_2d_classes() {
         );
     }
     if !class_exists("Button") {
-        register_class(ClassRegistration::new("Button").parent("Control"));
+        register_class(ClassRegistration::new("Button").parent("BaseButton"));
     }
     if !class_exists("Label") {
         register_class(ClassRegistration::new("Label").parent("Control"));
@@ -3648,10 +3971,10 @@ pub fn register_2d_classes() {
         register_class(ClassRegistration::new("Container").parent("Control"));
     }
     if !class_exists("HBoxContainer") {
-        register_class(ClassRegistration::new("HBoxContainer").parent("Container"));
+        register_class(ClassRegistration::new("HBoxContainer").parent("BoxContainer"));
     }
     if !class_exists("VBoxContainer") {
-        register_class(ClassRegistration::new("VBoxContainer").parent("Container"));
+        register_class(ClassRegistration::new("VBoxContainer").parent("BoxContainer"));
     }
     // Split + SubViewport container family (pat-nzgdu.158).
     if !class_exists("SplitContainer") {
@@ -3767,6 +4090,62 @@ pub fn register_2d_classes() {
 /// * `transparent_bg` = false
 ///
 /// Idempotent — each class is only registered if not already present.
+/// Registers just the `Object → Node → Viewport → Window` chain the SceneTree
+/// root's class depends on (pat-nzgdu.87).
+///
+/// ⚠️ `SceneTree::new()` calls this, and it MUST keep doing so. The root node's
+/// class is `Window`, and `Node::is_class` answers anything other than an exact
+/// match by walking the ClassDB — so without this chain registered,
+/// `root.is_class("Node")` would return **false**. `register_viewport_classes()`
+/// cannot cover it: nothing calls that automatically, only individual tests, so
+/// the overwhelming majority of scene trees would come up with a root that is
+/// not a Node. Registration is idempotent and guarded by `class_exists`, so the
+/// repeated calls cost one map lookup each.
+pub fn register_root_window_chain() {
+    use gdcore::math::Vector2;
+
+    if !class_exists("Object") {
+        register_class(object_class());
+    }
+    if !class_exists("Node") {
+        register_class(node_class());
+    }
+    if !class_exists("Viewport") {
+        register_class(
+            ClassRegistration::new("Viewport")
+                .parent("Node")
+                .abstract_class()
+                .property(PropertyInfo::new("transparent_bg", Variant::Bool(false)))
+                .method(MethodInfo::new("get_texture", 0)),
+        );
+    }
+    if !class_exists("Window") {
+        register_class(
+            ClassRegistration::new("Window")
+                .parent("Viewport")
+                .property(PropertyInfo::new("title", Variant::String(String::new())))
+                .property(PropertyInfo::new(
+                    "size",
+                    Variant::Vector2(Vector2::new(100.0, 100.0)),
+                ))
+                .property(PropertyInfo::new("visible", Variant::Bool(true)))
+                .property(PropertyInfo::new("content_scale_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("content_scale_aspect", Variant::Int(0)))
+                .property(PropertyInfo::new("content_scale_stretch", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "content_scale_factor",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new(
+                    "content_scale_size",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .method(MethodInfo::new("get_window", 0))
+                .method(MethodInfo::new("get_viewport", 0)),
+        );
+    }
+}
+
 pub fn register_viewport_classes() {
     use gdcore::math::Vector2;
 
@@ -3800,6 +4179,43 @@ pub fn register_viewport_classes() {
     }
 
     // SubViewport — default size 512×512, update when visible, clear always.
+    // Window — the OTHER concrete Viewport, and the class of the SceneTree
+    // root (pat-nzgdu.87). Its content_scale_* properties are the stretch
+    // pipeline: they map the project's base resolution onto the real window.
+    // Defaults come from `Window`'s own property defaults, not from the
+    // `display/window/stretch/*` project settings that seed them at boot.
+    if !class_exists("Window") {
+        register_class(
+            ClassRegistration::new("Window")
+                .parent("Viewport")
+                .property(PropertyInfo::new("title", Variant::String(String::new())))
+                .property(PropertyInfo::new(
+                    "size",
+                    Variant::Vector2(Vector2::new(100.0, 100.0)),
+                ))
+                .property(PropertyInfo::new("visible", Variant::Bool(true)))
+                // CONTENT_SCALE_MODE_DISABLED = 0
+                .property(PropertyInfo::new("content_scale_mode", Variant::Int(0)))
+                // ⚠️ CONTENT_SCALE_ASPECT_IGNORE = 0 is the *class* default.
+                // The project setting `display/window/stretch/aspect` defaults
+                // to "keep" instead — do not copy that value here, or a Window
+                // created in code would silently letterbox.
+                .property(PropertyInfo::new("content_scale_aspect", Variant::Int(0)))
+                // CONTENT_SCALE_STRETCH_FRACTIONAL = 0
+                .property(PropertyInfo::new("content_scale_stretch", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "content_scale_factor",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new(
+                    "content_scale_size",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .method(MethodInfo::new("get_window", 0))
+                .method(MethodInfo::new("get_viewport", 0)),
+        );
+    }
+
     // `size` is Vector2i in Godot; Patina stores it as Vector2 until Vector2i
     // lands in Variant (integer components 512.0, 512.0).
     if !class_exists("SubViewport") {
@@ -4315,7 +4731,10 @@ fn register_rendering_device_classes() {
         register_class(
             ClassRegistration::new("RDShaderSource")
                 .parent("RefCounted")
-                .property(PropertyInfo::new("source_vertex", Variant::String(String::new())))
+                .property(PropertyInfo::new(
+                    "source_vertex",
+                    Variant::String(String::new()),
+                ))
                 .property(PropertyInfo::new(
                     "source_fragment",
                     Variant::String(String::new()),
@@ -4909,14 +5328,12 @@ pub fn register_audio_classes() {
     }
     if !class_exists("AudioStreamPlaybackPlaylist") {
         register_class(
-            ClassRegistration::new("AudioStreamPlaybackPlaylist")
-                .parent("AudioStreamPlayback"),
+            ClassRegistration::new("AudioStreamPlaybackPlaylist").parent("AudioStreamPlayback"),
         );
     }
     if !class_exists("AudioStreamPlaybackSynchronized") {
         register_class(
-            ClassRegistration::new("AudioStreamPlaybackSynchronized")
-                .parent("AudioStreamPlayback"),
+            ClassRegistration::new("AudioStreamPlaybackSynchronized").parent("AudioStreamPlayback"),
         );
     }
 
@@ -4954,6 +5371,10 @@ pub fn register_audio_classes() {
                 .property(PropertyInfo::new("bus", Variant::String("Master".into())))
                 .property(PropertyInfo::new("playing", Variant::Bool(false)))
                 .property(PropertyInfo::new("max_distance", Variant::Float(2000.0)))
+                // Falloff exponent and pan width — the audio bridge mirrors both
+                // onto the spatial calculation (pat-0q2kx.57).
+                .property(PropertyInfo::new("attenuation", Variant::Float(1.0)))
+                .property(PropertyInfo::new("panning_strength", Variant::Float(1.0)))
                 .method(MethodInfo::new("play", 1))
                 .method(MethodInfo::new("stop", 0))
                 .method(MethodInfo::new("is_playing", 0)),
@@ -4971,6 +5392,13 @@ pub fn register_audio_classes() {
                 .property(PropertyInfo::new("playing", Variant::Bool(false)))
                 .property(PropertyInfo::new("max_distance", Variant::Float(0.0)))
                 .property(PropertyInfo::new("unit_size", Variant::Float(10.0)))
+                // The rest of Godot's spatial surface, all mirrored per frame by
+                // the audio bridge (pat-0q2kx.57). `attenuation_model` is the
+                // `AudioStreamPlayer3D.AttenuationModel` enum: 0 inverse,
+                // 1 inverse-square, 2 logarithmic, 3 disabled.
+                .property(PropertyInfo::new("attenuation_model", Variant::Int(0)))
+                .property(PropertyInfo::new("max_db", Variant::Float(3.0)))
+                .property(PropertyInfo::new("panning_strength", Variant::Float(1.0)))
                 .method(MethodInfo::new("play", 1))
                 .method(MethodInfo::new("stop", 0))
                 .method(MethodInfo::new("is_playing", 0)),
@@ -5109,7 +5537,10 @@ pub fn register_io_classes() {
                 // A Resource: scripts are saved assets.
                 .parent("Resource")
                 .abstract_class()
-                .property(PropertyInfo::new("source_code", Variant::String(String::new())))
+                .property(PropertyInfo::new(
+                    "source_code",
+                    Variant::String(String::new()),
+                ))
                 .method(MethodInfo::new("can_instantiate", 0))
                 .method(MethodInfo::new("instance_has", 1))
                 .method(MethodInfo::new("has_source_code", 0))
@@ -5127,7 +5558,7 @@ pub fn register_io_classes() {
                 .method(MethodInfo::new("get_property_default_value", 1))
                 .method(MethodInfo::new("is_tool", 0))
                 .method(MethodInfo::new("is_abstract", 0))
-                .method(MethodInfo::new("get_rpc_config", 0))
+                .method(MethodInfo::new("get_rpc_config", 0)),
         );
     }
     // A pure marker base: Godot binds NOTHING on it — no properties, no methods.
@@ -5184,7 +5615,7 @@ pub fn register_io_classes() {
                 .method(MethodInfo::new("_get_constants", 0))
                 .method(MethodInfo::new("_get_members", 0))
                 .method(MethodInfo::new("_is_placeholder_fallback_enabled", 0))
-                .method(MethodInfo::new("_get_rpc_config", 0))
+                .method(MethodInfo::new("_get_rpc_config", 0)),
         );
     }
     if !class_exists("ScriptLanguageExtension") {
@@ -5250,7 +5681,7 @@ pub fn register_io_classes() {
                 .method(MethodInfo::new("_profiling_get_frame_data", 2))
                 .method(MethodInfo::new("_frame", 0))
                 .method(MethodInfo::new("_handles_global_class_type", 1))
-                .method(MethodInfo::new("_get_global_class_name", 1))
+                .method(MethodInfo::new("_get_global_class_name", 1)),
         );
     }
 
@@ -5627,22 +6058,44 @@ fn register_gltf_classes() {
             .property(PropertyInfo::new("count", Variant::Int(0)))
             .property(PropertyInfo::new("accessor_type", Variant::Int(0)))
             .property(PropertyInfo::new("type", Variant::Int(0)))
-            .property(PropertyInfo::new("min", Variant::PackedFloat64Array(Vec::new())))
-            .property(PropertyInfo::new("max", Variant::PackedFloat64Array(Vec::new())))
+            .property(PropertyInfo::new(
+                "min",
+                Variant::PackedFloat64Array(Vec::new()),
+            ))
+            .property(PropertyInfo::new(
+                "max",
+                Variant::PackedFloat64Array(Vec::new()),
+            ))
             .property(PropertyInfo::new("sparse_count", Variant::Int(0)))
-            .property(PropertyInfo::new("sparse_indices_buffer_view", Variant::Int(0)))
-            .property(PropertyInfo::new("sparse_indices_byte_offset", Variant::Int(0)))
-            .property(PropertyInfo::new("sparse_indices_component_type", Variant::Int(0)))
-            .property(PropertyInfo::new("sparse_values_buffer_view", Variant::Int(0)))
-            .property(PropertyInfo::new("sparse_values_byte_offset", Variant::Int(0)))
-            ,
+            .property(PropertyInfo::new(
+                "sparse_indices_buffer_view",
+                Variant::Int(0),
+            ))
+            .property(PropertyInfo::new(
+                "sparse_indices_byte_offset",
+                Variant::Int(0),
+            ))
+            .property(PropertyInfo::new(
+                "sparse_indices_component_type",
+                Variant::Int(0),
+            ))
+            .property(PropertyInfo::new(
+                "sparse_values_buffer_view",
+                Variant::Int(0),
+            ))
+            .property(PropertyInfo::new(
+                "sparse_values_byte_offset",
+                Variant::Int(0),
+            )),
     );
     register_class(
         ClassRegistration::new("GLTFAnimation")
             .parent("Resource")
-            .property(PropertyInfo::new("original_name", Variant::String(String::new())))
-            .property(PropertyInfo::new("loop", Variant::Bool(false)))
-            ,
+            .property(PropertyInfo::new(
+                "original_name",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new("loop", Variant::Bool(false))),
     );
     register_class(
         ClassRegistration::new("GLTFBufferView")
@@ -5652,8 +6105,7 @@ fn register_gltf_classes() {
             .property(PropertyInfo::new("byte_length", Variant::Int(0)))
             .property(PropertyInfo::new("byte_stride", Variant::Int(0)))
             .property(PropertyInfo::new("indices", Variant::Bool(false)))
-            .property(PropertyInfo::new("vertex_attributes", Variant::Bool(false)))
-            ,
+            .property(PropertyInfo::new("vertex_attributes", Variant::Bool(false))),
     );
     register_class(
         ClassRegistration::new("GLTFCamera")
@@ -5662,16 +6114,24 @@ fn register_gltf_classes() {
             .property(PropertyInfo::new("fov", Variant::Float(0.0)))
             .property(PropertyInfo::new("size_mag", Variant::Float(0.0)))
             .property(PropertyInfo::new("depth_far", Variant::Float(0.0)))
-            .property(PropertyInfo::new("depth_near", Variant::Float(0.0)))
-            ,
+            .property(PropertyInfo::new("depth_near", Variant::Float(0.0))),
     );
     register_class(
         ClassRegistration::new("GLTFDocument")
             .parent("Resource")
-            .property(PropertyInfo::new("image_format", Variant::String(String::new())))
+            .property(PropertyInfo::new(
+                "image_format",
+                Variant::String(String::new()),
+            ))
             .property(PropertyInfo::new("lossy_quality", Variant::Float(0.0)))
-            .property(PropertyInfo::new("fallback_image_format", Variant::String(String::new())))
-            .property(PropertyInfo::new("fallback_image_quality", Variant::Float(0.0)))
+            .property(PropertyInfo::new(
+                "fallback_image_format",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new(
+                "fallback_image_quality",
+                Variant::Float(0.0),
+            ))
             .property(PropertyInfo::new("root_node_mode", Variant::Int(0)))
             .property(PropertyInfo::new("visibility_mode", Variant::Int(0)))
             // The document-import API (pat-nzgdu.217). pat-nzgdu.164 registered
@@ -5710,45 +6170,78 @@ fn register_gltf_classes() {
             .method(MethodInfo::new("get_supported_gltf_extensions", 0)),
     );
     register_class(ClassRegistration::new("GLTFDocumentExtension").parent("Resource"));
-    register_class(ClassRegistration::new("GLTFDocumentExtensionConvertImporterMesh").parent("GLTFDocumentExtension"));
+    register_class(
+        ClassRegistration::new("GLTFDocumentExtensionConvertImporterMesh")
+            .parent("GLTFDocumentExtension"),
+    );
     register_class(
         ClassRegistration::new("GLTFLight")
             .parent("Resource")
-            .property(PropertyInfo::new("color", Variant::Color(gdcore::math::Color::WHITE)))
+            .property(PropertyInfo::new(
+                "color",
+                Variant::Color(gdcore::math::Color::WHITE),
+            ))
             .property(PropertyInfo::new("intensity", Variant::Float(0.0)))
-            .property(PropertyInfo::new("light_type", Variant::String(String::new())))
+            .property(PropertyInfo::new(
+                "light_type",
+                Variant::String(String::new()),
+            ))
             .property(PropertyInfo::new("range", Variant::Float(0.0)))
             .property(PropertyInfo::new("inner_cone_angle", Variant::Float(0.0)))
-            .property(PropertyInfo::new("outer_cone_angle", Variant::Float(0.0)))
-            ,
+            .property(PropertyInfo::new("outer_cone_angle", Variant::Float(0.0))),
     );
     register_class(
         ClassRegistration::new("GLTFMesh")
             .parent("Resource")
-            .property(PropertyInfo::new("original_name", Variant::String(String::new())))
+            .property(PropertyInfo::new(
+                "original_name",
+                Variant::String(String::new()),
+            ))
             .property(PropertyInfo::new("mesh", Variant::Nil))
-            .property(PropertyInfo::new("blend_weights", Variant::PackedFloat32Array(Vec::new())))
-            .property(PropertyInfo::new("instance_materials", Variant::Array(Vec::new())))
-            ,
+            .property(PropertyInfo::new(
+                "blend_weights",
+                Variant::PackedFloat32Array(Vec::new()),
+            ))
+            .property(PropertyInfo::new(
+                "instance_materials",
+                Variant::Array(Vec::new()),
+            )),
     );
     register_class(
         ClassRegistration::new("GLTFNode")
             .parent("Resource")
-            .property(PropertyInfo::new("original_name", Variant::String(String::new())))
+            .property(PropertyInfo::new(
+                "original_name",
+                Variant::String(String::new()),
+            ))
             .property(PropertyInfo::new("parent", Variant::Int(0)))
             .property(PropertyInfo::new("height", Variant::Int(0)))
-            .property(PropertyInfo::new("xform", Variant::Transform3D(gdcore::math3d::Transform3D::IDENTITY)))
+            .property(PropertyInfo::new(
+                "xform",
+                Variant::Transform3D(gdcore::math3d::Transform3D::IDENTITY),
+            ))
             .property(PropertyInfo::new("mesh", Variant::Int(0)))
             .property(PropertyInfo::new("camera", Variant::Int(0)))
             .property(PropertyInfo::new("skin", Variant::Int(0)))
             .property(PropertyInfo::new("skeleton", Variant::Int(0)))
-            .property(PropertyInfo::new("position", Variant::Vector3(gdcore::math::Vector3::ZERO)))
-            .property(PropertyInfo::new("rotation", Variant::Quaternion(gdcore::math3d::Quaternion::IDENTITY)))
-            .property(PropertyInfo::new("scale", Variant::Vector3(gdcore::math::Vector3::ZERO)))
-            .property(PropertyInfo::new("children", Variant::PackedInt32Array(Vec::new())))
+            .property(PropertyInfo::new(
+                "position",
+                Variant::Vector3(gdcore::math::Vector3::ZERO),
+            ))
+            .property(PropertyInfo::new(
+                "rotation",
+                Variant::Quaternion(gdcore::math3d::Quaternion::IDENTITY),
+            ))
+            .property(PropertyInfo::new(
+                "scale",
+                Variant::Vector3(gdcore::math::Vector3::ZERO),
+            ))
+            .property(PropertyInfo::new(
+                "children",
+                Variant::PackedInt32Array(Vec::new()),
+            ))
             .property(PropertyInfo::new("light", Variant::Int(0)))
-            .property(PropertyInfo::new("visible", Variant::Bool(false)))
-            ,
+            .property(PropertyInfo::new("visible", Variant::Bool(false))),
     );
     register_class(
         ClassRegistration::new("GLTFObjectModelProperty")
@@ -5757,111 +6250,214 @@ fn register_gltf_classes() {
             .property(PropertyInfo::new("godot_to_gltf_expression", Variant::Nil))
             .property(PropertyInfo::new("node_paths", Variant::Array(Vec::new())))
             .property(PropertyInfo::new("object_model_type", Variant::Int(0)))
-            .property(PropertyInfo::new("json_pointers", Variant::PackedStringArray(Vec::new())))
-            .property(PropertyInfo::new("variant_type", Variant::Int(0)))
-            ,
+            .property(PropertyInfo::new(
+                "json_pointers",
+                Variant::PackedStringArray(Vec::new()),
+            ))
+            .property(PropertyInfo::new("variant_type", Variant::Int(0))),
     );
     register_class(
         ClassRegistration::new("GLTFPhysicsBody")
             .parent("Resource")
-            .property(PropertyInfo::new("body_type", Variant::String(String::new())))
+            .property(PropertyInfo::new(
+                "body_type",
+                Variant::String(String::new()),
+            ))
             .property(PropertyInfo::new("mass", Variant::Float(0.0)))
-            .property(PropertyInfo::new("linear_velocity", Variant::Vector3(gdcore::math::Vector3::ZERO)))
-            .property(PropertyInfo::new("angular_velocity", Variant::Vector3(gdcore::math::Vector3::ZERO)))
-            .property(PropertyInfo::new("center_of_mass", Variant::Vector3(gdcore::math::Vector3::ZERO)))
-            .property(PropertyInfo::new("inertia_diagonal", Variant::Vector3(gdcore::math::Vector3::ZERO)))
-            .property(PropertyInfo::new("inertia_orientation", Variant::Quaternion(gdcore::math3d::Quaternion::IDENTITY)))
-            .property(PropertyInfo::new("inertia_tensor", Variant::Basis(gdcore::math3d::Basis::IDENTITY)))
-            ,
+            .property(PropertyInfo::new(
+                "linear_velocity",
+                Variant::Vector3(gdcore::math::Vector3::ZERO),
+            ))
+            .property(PropertyInfo::new(
+                "angular_velocity",
+                Variant::Vector3(gdcore::math::Vector3::ZERO),
+            ))
+            .property(PropertyInfo::new(
+                "center_of_mass",
+                Variant::Vector3(gdcore::math::Vector3::ZERO),
+            ))
+            .property(PropertyInfo::new(
+                "inertia_diagonal",
+                Variant::Vector3(gdcore::math::Vector3::ZERO),
+            ))
+            .property(PropertyInfo::new(
+                "inertia_orientation",
+                Variant::Quaternion(gdcore::math3d::Quaternion::IDENTITY),
+            ))
+            .property(PropertyInfo::new(
+                "inertia_tensor",
+                Variant::Basis(gdcore::math3d::Basis::IDENTITY),
+            )),
     );
     register_class(
         ClassRegistration::new("GLTFPhysicsShape")
             .parent("Resource")
-            .property(PropertyInfo::new("shape_type", Variant::String(String::new())))
-            .property(PropertyInfo::new("size", Variant::Vector3(gdcore::math::Vector3::ZERO)))
+            .property(PropertyInfo::new(
+                "shape_type",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new(
+                "size",
+                Variant::Vector3(gdcore::math::Vector3::ZERO),
+            ))
             .property(PropertyInfo::new("radius", Variant::Float(0.0)))
             .property(PropertyInfo::new("height", Variant::Float(0.0)))
             .property(PropertyInfo::new("is_trigger", Variant::Bool(false)))
             .property(PropertyInfo::new("mesh_index", Variant::Int(0)))
-            .property(PropertyInfo::new("importer_mesh", Variant::Nil))
-            ,
+            .property(PropertyInfo::new("importer_mesh", Variant::Nil)),
     );
     register_class(
         ClassRegistration::new("GLTFSkeleton")
             .parent("Resource")
-            .property(PropertyInfo::new("joints", Variant::PackedInt32Array(Vec::new())))
-            .property(PropertyInfo::new("roots", Variant::PackedInt32Array(Vec::new())))
-            .property(PropertyInfo::new("unique_names", Variant::Array(Vec::new())))
-            .property(PropertyInfo::new("godot_bone_node", Variant::Dictionary(gdvariant::Dictionary::new())))
-            ,
+            .property(PropertyInfo::new(
+                "joints",
+                Variant::PackedInt32Array(Vec::new()),
+            ))
+            .property(PropertyInfo::new(
+                "roots",
+                Variant::PackedInt32Array(Vec::new()),
+            ))
+            .property(PropertyInfo::new(
+                "unique_names",
+                Variant::Array(Vec::new()),
+            ))
+            .property(PropertyInfo::new(
+                "godot_bone_node",
+                Variant::Dictionary(gdvariant::Dictionary::new()),
+            )),
     );
     register_class(
         ClassRegistration::new("GLTFSkin")
             .parent("Resource")
             .property(PropertyInfo::new("skin_root", Variant::Int(0)))
-            .property(PropertyInfo::new("joints_original", Variant::PackedInt32Array(Vec::new())))
-            .property(PropertyInfo::new("inverse_binds", Variant::Array(Vec::new())))
-            .property(PropertyInfo::new("joints", Variant::PackedInt32Array(Vec::new())))
-            .property(PropertyInfo::new("non_joints", Variant::PackedInt32Array(Vec::new())))
-            .property(PropertyInfo::new("roots", Variant::PackedInt32Array(Vec::new())))
+            .property(PropertyInfo::new(
+                "joints_original",
+                Variant::PackedInt32Array(Vec::new()),
+            ))
+            .property(PropertyInfo::new(
+                "inverse_binds",
+                Variant::Array(Vec::new()),
+            ))
+            .property(PropertyInfo::new(
+                "joints",
+                Variant::PackedInt32Array(Vec::new()),
+            ))
+            .property(PropertyInfo::new(
+                "non_joints",
+                Variant::PackedInt32Array(Vec::new()),
+            ))
+            .property(PropertyInfo::new(
+                "roots",
+                Variant::PackedInt32Array(Vec::new()),
+            ))
             .property(PropertyInfo::new("skeleton", Variant::Int(0)))
-            .property(PropertyInfo::new("joint_i_to_bone_i", Variant::Dictionary(gdvariant::Dictionary::new())))
-            .property(PropertyInfo::new("joint_i_to_name", Variant::Dictionary(gdvariant::Dictionary::new())))
-            .property(PropertyInfo::new("godot_skin", Variant::Nil))
-            ,
+            .property(PropertyInfo::new(
+                "joint_i_to_bone_i",
+                Variant::Dictionary(gdvariant::Dictionary::new()),
+            ))
+            .property(PropertyInfo::new(
+                "joint_i_to_name",
+                Variant::Dictionary(gdvariant::Dictionary::new()),
+            ))
+            .property(PropertyInfo::new("godot_skin", Variant::Nil)),
     );
     register_class(
         ClassRegistration::new("GLTFSpecGloss")
             .parent("Resource")
             .property(PropertyInfo::new("diffuse_img", Variant::Nil))
-            .property(PropertyInfo::new("diffuse_factor", Variant::Color(gdcore::math::Color::WHITE)))
+            .property(PropertyInfo::new(
+                "diffuse_factor",
+                Variant::Color(gdcore::math::Color::WHITE),
+            ))
             .property(PropertyInfo::new("gloss_factor", Variant::Float(0.0)))
-            .property(PropertyInfo::new("specular_factor", Variant::Color(gdcore::math::Color::WHITE)))
-            .property(PropertyInfo::new("spec_gloss_img", Variant::Nil))
-            ,
+            .property(PropertyInfo::new(
+                "specular_factor",
+                Variant::Color(gdcore::math::Color::WHITE),
+            ))
+            .property(PropertyInfo::new("spec_gloss_img", Variant::Nil)),
     );
     register_class(
         ClassRegistration::new("GLTFState")
             .parent("Resource")
-            .property(PropertyInfo::new("json", Variant::Dictionary(gdvariant::Dictionary::new())))
+            .property(PropertyInfo::new(
+                "json",
+                Variant::Dictionary(gdvariant::Dictionary::new()),
+            ))
             .property(PropertyInfo::new("major_version", Variant::Int(0)))
             .property(PropertyInfo::new("minor_version", Variant::Int(0)))
-            .property(PropertyInfo::new("copyright", Variant::String(String::new())))
-            .property(PropertyInfo::new("glb_data", Variant::PackedByteArray(Vec::new())))
-            .property(PropertyInfo::new("use_named_skin_binds", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "copyright",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new(
+                "glb_data",
+                Variant::PackedByteArray(Vec::new()),
+            ))
+            .property(PropertyInfo::new(
+                "use_named_skin_binds",
+                Variant::Bool(false),
+            ))
             .property(PropertyInfo::new("nodes", Variant::Array(Vec::new())))
             .property(PropertyInfo::new("buffers", Variant::Array(Vec::new())))
-            .property(PropertyInfo::new("buffer_views", Variant::Array(Vec::new())))
+            .property(PropertyInfo::new(
+                "buffer_views",
+                Variant::Array(Vec::new()),
+            ))
             .property(PropertyInfo::new("accessors", Variant::Array(Vec::new())))
             .property(PropertyInfo::new("meshes", Variant::Array(Vec::new())))
             .property(PropertyInfo::new("materials", Variant::Array(Vec::new())))
-            .property(PropertyInfo::new("scene_name", Variant::String(String::new())))
-            .property(PropertyInfo::new("base_path", Variant::String(String::new())))
-            .property(PropertyInfo::new("filename", Variant::String(String::new())))
-            .property(PropertyInfo::new("root_nodes", Variant::PackedInt32Array(Vec::new())))
+            .property(PropertyInfo::new(
+                "scene_name",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new(
+                "base_path",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new(
+                "filename",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new(
+                "root_nodes",
+                Variant::PackedInt32Array(Vec::new()),
+            ))
             .property(PropertyInfo::new("textures", Variant::Array(Vec::new())))
-            .property(PropertyInfo::new("texture_samplers", Variant::Array(Vec::new())))
+            .property(PropertyInfo::new(
+                "texture_samplers",
+                Variant::Array(Vec::new()),
+            ))
             .property(PropertyInfo::new("images", Variant::Array(Vec::new())))
             .property(PropertyInfo::new("skins", Variant::Array(Vec::new())))
             .property(PropertyInfo::new("cameras", Variant::Array(Vec::new())))
             .property(PropertyInfo::new("lights", Variant::Array(Vec::new())))
-            .property(PropertyInfo::new("unique_names", Variant::Array(Vec::new())))
-            .property(PropertyInfo::new("unique_animation_names", Variant::Array(Vec::new())))
+            .property(PropertyInfo::new(
+                "unique_names",
+                Variant::Array(Vec::new()),
+            ))
+            .property(PropertyInfo::new(
+                "unique_animation_names",
+                Variant::Array(Vec::new()),
+            ))
             .property(PropertyInfo::new("skeletons", Variant::Array(Vec::new())))
             .property(PropertyInfo::new("create_animations", Variant::Bool(false)))
-            .property(PropertyInfo::new("import_as_skeleton_bones", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "import_as_skeleton_bones",
+                Variant::Bool(false),
+            ))
             .property(PropertyInfo::new("animations", Variant::Array(Vec::new())))
-            .property(PropertyInfo::new("handle_binary_image_mode", Variant::Int(0)))
+            .property(PropertyInfo::new(
+                "handle_binary_image_mode",
+                Variant::Int(0),
+            ))
             .property(PropertyInfo::new("bake_fps", Variant::Float(0.0)))
-            .property(PropertyInfo::new("handle_binary_image", Variant::Int(0)))
-            ,
+            .property(PropertyInfo::new("handle_binary_image", Variant::Int(0))),
     );
     register_class(
         ClassRegistration::new("GLTFTexture")
             .parent("Resource")
             .property(PropertyInfo::new("src_image", Variant::Int(0)))
-            .property(PropertyInfo::new("sampler", Variant::Int(0)))
-            ,
+            .property(PropertyInfo::new("sampler", Variant::Int(0))),
     );
     register_class(
         ClassRegistration::new("GLTFTextureSampler")
@@ -5869,8 +6465,7 @@ fn register_gltf_classes() {
             .property(PropertyInfo::new("mag_filter", Variant::Int(0)))
             .property(PropertyInfo::new("min_filter", Variant::Int(0)))
             .property(PropertyInfo::new("wrap_s", Variant::Int(0)))
-            .property(PropertyInfo::new("wrap_t", Variant::Int(0)))
-            ,
+            .property(PropertyInfo::new("wrap_t", Variant::Int(0))),
     );
 
     // -- FBX (pat-nzgdu.217) -------------------------------------------------
@@ -6310,14 +6905,20 @@ fn register_navigation_resource_classes() {
         register_class(
             ClassRegistration::new("NavigationPolygon")
                 .parent("Resource")
-                .property(PropertyInfo::new("vertices", Variant::PackedVector2Array(Vec::new())))
+                .property(PropertyInfo::new(
+                    "vertices",
+                    Variant::PackedVector2Array(Vec::new()),
+                ))
                 .property(PropertyInfo::new("polygons", Variant::Array(Vec::new())))
                 .property(PropertyInfo::new("outlines", Variant::Array(Vec::new())))
                 .property(PropertyInfo::new("sample_partition_type", Variant::Int(0)))
                 .property(PropertyInfo::new("parsed_geometry_type", Variant::Int(0)))
                 .property(PropertyInfo::new("parsed_collision_mask", Variant::Int(0)))
                 .property(PropertyInfo::new("source_geometry_mode", Variant::Int(0)))
-                .property(PropertyInfo::new("source_geometry_group_name", Variant::String(String::new())))
+                .property(PropertyInfo::new(
+                    "source_geometry_group_name",
+                    Variant::String(String::new()),
+                ))
                 .property(PropertyInfo::new("cell_size", Variant::Float(0.0)))
                 .property(PropertyInfo::new("border_size", Variant::Float(0.0)))
                 .property(PropertyInfo::new("agent_radius", Variant::Float(0.0)))
@@ -6328,26 +6929,29 @@ fn register_navigation_resource_classes() {
                         gdcore::math::Vector2::ZERO,
                     )),
                 ))
-                .property(PropertyInfo::new("baking_rect_offset", Variant::Vector2(gdcore::math::Vector2::ZERO)))
+                .property(PropertyInfo::new(
+                    "baking_rect_offset",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
                 .enumeration(
                     EnumInfo::new("SamplePartitionType")
                         .constant("SAMPLE_PARTITION_CONVEX_PARTITION", 0)
                         .constant("SAMPLE_PARTITION_TRIANGULATE", 1)
-                        .constant("SAMPLE_PARTITION_MAX", 2)
+                        .constant("SAMPLE_PARTITION_MAX", 2),
                 )
                 .enumeration(
                     EnumInfo::new("ParsedGeometryType")
                         .constant("PARSED_GEOMETRY_MESH_INSTANCES", 0)
                         .constant("PARSED_GEOMETRY_STATIC_COLLIDERS", 1)
                         .constant("PARSED_GEOMETRY_BOTH", 2)
-                        .constant("PARSED_GEOMETRY_MAX", 3)
+                        .constant("PARSED_GEOMETRY_MAX", 3),
                 )
                 .enumeration(
                     EnumInfo::new("SourceGeometryMode")
                         .constant("SOURCE_GEOMETRY_ROOT_NODE_CHILDREN", 0)
                         .constant("SOURCE_GEOMETRY_GROUPS_WITH_CHILDREN", 1)
                         .constant("SOURCE_GEOMETRY_GROUPS_EXPLICIT", 2)
-                        .constant("SOURCE_GEOMETRY_MAX", 3)
+                        .constant("SOURCE_GEOMETRY_MAX", 3),
                 ),
         );
     }
@@ -6355,13 +6959,28 @@ fn register_navigation_resource_classes() {
         register_class(
             ClassRegistration::new("NavigationMesh")
                 .parent("Resource")
-                .property(PropertyInfo::new("vertices", Variant::PackedVector3Array(Vec::new())))
+                .property(PropertyInfo::new(
+                    "vertices",
+                    Variant::PackedVector3Array(Vec::new()),
+                ))
                 .property(PropertyInfo::new("polygons", Variant::Array(Vec::new())))
                 .property(PropertyInfo::new("sample_partition_type", Variant::Int(0)))
-                .property(PropertyInfo::new("geometry_parsed_geometry_type", Variant::Int(0)))
-                .property(PropertyInfo::new("geometry_collision_mask", Variant::Int(0)))
-                .property(PropertyInfo::new("geometry_source_geometry_mode", Variant::Int(0)))
-                .property(PropertyInfo::new("geometry_source_group_name", Variant::String(String::new())))
+                .property(PropertyInfo::new(
+                    "geometry_parsed_geometry_type",
+                    Variant::Int(0),
+                ))
+                .property(PropertyInfo::new(
+                    "geometry_collision_mask",
+                    Variant::Int(0),
+                ))
+                .property(PropertyInfo::new(
+                    "geometry_source_geometry_mode",
+                    Variant::Int(0),
+                ))
+                .property(PropertyInfo::new(
+                    "geometry_source_group_name",
+                    Variant::String(String::new()),
+                ))
                 .property(PropertyInfo::new("cell_size", Variant::Float(0.0)))
                 .property(PropertyInfo::new("cell_height", Variant::Float(0.0)))
                 .property(PropertyInfo::new("border_size", Variant::Float(0.0)))
@@ -6373,12 +6992,30 @@ fn register_navigation_resource_classes() {
                 .property(PropertyInfo::new("region_merge_size", Variant::Float(0.0)))
                 .property(PropertyInfo::new("edge_max_length", Variant::Float(0.0)))
                 .property(PropertyInfo::new("edge_max_error", Variant::Float(0.0)))
-                .property(PropertyInfo::new("vertices_per_polygon", Variant::Float(0.0)))
-                .property(PropertyInfo::new("detail_sample_distance", Variant::Float(0.0)))
-                .property(PropertyInfo::new("detail_sample_max_error", Variant::Float(0.0)))
-                .property(PropertyInfo::new("filter_low_hanging_obstacles", Variant::Bool(false)))
-                .property(PropertyInfo::new("filter_ledge_spans", Variant::Bool(false)))
-                .property(PropertyInfo::new("filter_walkable_low_height_spans", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "vertices_per_polygon",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "detail_sample_distance",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "detail_sample_max_error",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "filter_low_hanging_obstacles",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "filter_ledge_spans",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "filter_walkable_low_height_spans",
+                    Variant::Bool(false),
+                ))
                 .property(PropertyInfo::new(
                     "filter_baking_aabb",
                     Variant::Aabb(gdcore::math3d::Aabb::new(
@@ -6386,27 +7023,30 @@ fn register_navigation_resource_classes() {
                         gdcore::math::Vector3::ZERO,
                     )),
                 ))
-                .property(PropertyInfo::new("filter_baking_aabb_offset", Variant::Vector3(gdcore::math::Vector3::ZERO)))
+                .property(PropertyInfo::new(
+                    "filter_baking_aabb_offset",
+                    Variant::Vector3(gdcore::math::Vector3::ZERO),
+                ))
                 .enumeration(
                     EnumInfo::new("SamplePartitionType")
                         .constant("SAMPLE_PARTITION_WATERSHED", 0)
                         .constant("SAMPLE_PARTITION_MONOTONE", 1)
                         .constant("SAMPLE_PARTITION_LAYERS", 2)
-                        .constant("SAMPLE_PARTITION_MAX", 3)
+                        .constant("SAMPLE_PARTITION_MAX", 3),
                 )
                 .enumeration(
                     EnumInfo::new("ParsedGeometryType")
                         .constant("PARSED_GEOMETRY_MESH_INSTANCES", 0)
                         .constant("PARSED_GEOMETRY_STATIC_COLLIDERS", 1)
                         .constant("PARSED_GEOMETRY_BOTH", 2)
-                        .constant("PARSED_GEOMETRY_MAX", 3)
+                        .constant("PARSED_GEOMETRY_MAX", 3),
                 )
                 .enumeration(
                     EnumInfo::new("SourceGeometryMode")
                         .constant("SOURCE_GEOMETRY_ROOT_NODE_CHILDREN", 0)
                         .constant("SOURCE_GEOMETRY_GROUPS_WITH_CHILDREN", 1)
                         .constant("SOURCE_GEOMETRY_GROUPS_EXPLICIT", 2)
-                        .constant("SOURCE_GEOMETRY_MAX", 3)
+                        .constant("SOURCE_GEOMETRY_MAX", 3),
                 ),
         );
     }
@@ -6414,20 +7054,36 @@ fn register_navigation_resource_classes() {
         register_class(
             ClassRegistration::new("NavigationMeshSourceGeometryData2D")
                 .parent("Resource")
-                .property(PropertyInfo::new("traversable_outlines", Variant::Array(Vec::new())))
-                .property(PropertyInfo::new("obstruction_outlines", Variant::Array(Vec::new())))
-                .property(PropertyInfo::new("projected_obstructions", Variant::Array(Vec::new())))
-                ,
+                .property(PropertyInfo::new(
+                    "traversable_outlines",
+                    Variant::Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "obstruction_outlines",
+                    Variant::Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "projected_obstructions",
+                    Variant::Array(Vec::new()),
+                )),
         );
     }
     if !class_exists("NavigationMeshSourceGeometryData3D") {
         register_class(
             ClassRegistration::new("NavigationMeshSourceGeometryData3D")
                 .parent("Resource")
-                .property(PropertyInfo::new("vertices", Variant::PackedVector3Array(Vec::new())))
-                .property(PropertyInfo::new("indices", Variant::PackedInt32Array(Vec::new())))
-                .property(PropertyInfo::new("projected_obstructions", Variant::Array(Vec::new())))
-                ,
+                .property(PropertyInfo::new(
+                    "vertices",
+                    Variant::PackedVector3Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "indices",
+                    Variant::PackedInt32Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "projected_obstructions",
+                    Variant::Array(Vec::new()),
+                )),
         );
     }
 }
@@ -6684,9 +7340,7 @@ pub fn register_editor_classes() {
         "EditorSceneFormatImporterUFBX",
     ] {
         if !class_exists(importer) {
-            register_class(
-                ClassRegistration::new(importer).parent("EditorSceneFormatImporter"),
-            );
+            register_class(ClassRegistration::new(importer).parent("EditorSceneFormatImporter"));
         }
     }
     if !class_exists("EditorScenePostImport") {
@@ -6710,7 +7364,10 @@ pub fn register_editor_classes() {
                 .method(MethodInfo::new("add_import_option_advanced", 3))
                 .method(MethodInfo::new("_get_internal_import_options", 1))
                 .method(MethodInfo::new("_get_internal_option_visibility", 3))
-                .method(MethodInfo::new("_get_internal_option_update_view_required", 2))
+                .method(MethodInfo::new(
+                    "_get_internal_option_update_view_required",
+                    2,
+                ))
                 .method(MethodInfo::new("_internal_process", 4))
                 .method(MethodInfo::new("_get_import_options", 1))
                 .method(MethodInfo::new("_get_option_visibility", 3))
@@ -7261,8 +7918,7 @@ mod tests {
             class_get_integer_constant("Node", "NOTIFICATION_ENTER_TREE"),
             Some(NOTIFICATION_ENTER_TREE.code() as i64),
         );
-        assert!(get_integer_constant_list("Node")
-            .contains(&"NOTIFICATION_READY".to_string()));
+        assert!(get_integer_constant_list("Node").contains(&"NOTIFICATION_READY".to_string()));
 
         // Inherited, and absent constants are None rather than 0.
         assert!(class_get_integer_constant("Node2D", "NOTIFICATION_READY").is_some());
@@ -7369,7 +8025,10 @@ mod tests {
 
         // "Resampled between": the decoders derive Resampled, which derives the
         // base — so they inherit the base's mix() through it.
-        for name in ["AudioStreamPlaybackOggVorbis", "AudioStreamGeneratorPlayback"] {
+        for name in [
+            "AudioStreamPlaybackOggVorbis",
+            "AudioStreamGeneratorPlayback",
+        ] {
             assert!(class_exists(name), "{name}");
             assert!(
                 is_parent_class(name, "AudioStreamPlaybackResampled"),
@@ -7398,12 +8057,18 @@ mod tests {
         }
 
         // The generator's buffer surface is what scripts drive.
-        assert!(class_has_method("AudioStreamGeneratorPlayback", "push_buffer"));
+        assert!(class_has_method(
+            "AudioStreamGeneratorPlayback",
+            "push_buffer"
+        ));
         assert!(class_has_method(
             "AudioStreamGeneratorPlayback",
             "get_frames_available"
         ));
-        assert!(class_has_method("AudioStreamPlaybackPolyphonic", "play_stream"));
+        assert!(class_has_method(
+            "AudioStreamPlaybackPolyphonic",
+            "play_stream"
+        ));
     }
 
     /// pat-nzgdu.146: Godot's web export exposes JavaScriptBridge in ClassDB
@@ -7522,7 +8187,10 @@ mod tests {
             class_get_integer_constant("VisualShader", "TYPE_FRAGMENT"),
             Some(1),
         );
-        assert_eq!(class_get_integer_constant("VisualShader", "TYPE_SKY"), Some(8));
+        assert_eq!(
+            class_get_integer_constant("VisualShader", "TYPE_SKY"),
+            Some(8)
+        );
         assert!(class_has_enum("VisualShaderNode", "PortType"));
         // ⚠️ 4, not 5 (pat-nzgdu.227). This asserted 5 — the old, WRONG value.
         // Godot's PortType is consecutive (SCALAR=0 … MAX=9); the registration
@@ -7632,7 +8300,10 @@ mod tests {
         let methods: Vec<&str> = info.methods.iter().map(|m| m.name.as_str()).collect();
         assert!(methods.contains(&"allocate"), "allocate() exposed");
         assert!(methods.contains(&"get_bounds"), "get_bounds() exposed");
-        assert!(methods.contains(&"get_octree_size"), "get_octree_size() exposed");
+        assert!(
+            methods.contains(&"get_octree_size"),
+            "get_octree_size() exposed"
+        );
     }
 
     /// pat-nzgdu.205: the Mesh → PrimitiveMesh → shape hierarchy is registered
@@ -7827,7 +8498,10 @@ mod tests {
             "HeightMapShape3D",
         ] {
             assert!(class_exists(shape), "{shape} must be registered");
-            assert!(is_parent_class(shape, "Shape3D"), "{shape} derives from Shape3D");
+            assert!(
+                is_parent_class(shape, "Shape3D"),
+                "{shape} derives from Shape3D"
+            );
         }
 
         // Shape3D.margin round-trips through ClassDB with Godot's default 0.04.
@@ -8155,7 +8829,10 @@ mod tests {
             );
         }
         // 3D-only properties.
-        assert!(class_has_property("NavigationAgent3D", "path_height_offset"));
+        assert!(class_has_property(
+            "NavigationAgent3D",
+            "path_height_offset"
+        ));
         assert!(class_has_property("NavigationAgent3D", "height"));
         assert!(class_has_property("NavigationAgent3D", "use_3d_avoidance"));
         assert!(class_has_property("NavigationAgent3D", "keep_y_velocity"));
@@ -8252,7 +8929,10 @@ mod tests {
         register_viewport_classes();
 
         assert!(class_exists("Viewport"), "Viewport base must be in ClassDB");
-        assert!(class_exists("SubViewport"), "SubViewport must be in ClassDB");
+        assert!(
+            class_exists("SubViewport"),
+            "SubViewport must be in ClassDB"
+        );
         assert!(class_exists("Texture2D"), "Texture2D must be in ClassDB");
         assert!(
             class_exists("ViewportTexture"),

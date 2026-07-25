@@ -961,7 +961,10 @@ mod tests {
             seen[p] = true;
             stack.extend(adj[p].iter().copied());
         }
-        assert!(seen.iter().all(|&s| s), "all six triangles are reachable from 0");
+        assert!(
+            seen.iter().all(|&s| s),
+            "all six triangles are reachable from 0"
+        );
     }
 
     #[test]
@@ -1003,7 +1006,10 @@ mod tests {
     #[test]
     fn adjacency_is_empty_for_an_empty_or_single_polygon_mesh() {
         let empty = NavigationMesh3D::new();
-        assert!(empty.compute_adjacency().is_empty(), "no polygons, no lists");
+        assert!(
+            empty.compute_adjacency().is_empty(),
+            "no polygons, no lists"
+        );
 
         let mut src = BakeSourceGeometry3D::new();
         src.add_triangle(

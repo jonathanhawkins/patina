@@ -18,8 +18,9 @@
 //! # Scope
 //!
 //! Encodes every variant this crate's [`Variant`] enum can represent —
-//! including the nine `Packed*Array` types (ordinals 29–37). Types the enum
-//! lacks (`Vector2i`, `Projection`, `RID`, `PackedVector4Array`, …) are reported
+//! including the nine `Packed*Array` types (ordinals 29–37) and the integer
+//! vectors `Vector2i`/`Vector3i` (ordinals 6/10). Types the enum still
+//! lacks (`Rect2i`, `Vector4`, `Projection`, `RID`, `PackedVector4Array`, …) are reported
 //! as [`VariantDecodeError::UnsupportedType`] on decode and — for the two the
 //! enum *does* carry but the wire format can't round-trip (`Callable`,
 //! `Resource`) — as [`VariantEncodeError::Unsupported`] on encode.
@@ -40,7 +41,7 @@ use crate::dictionary::Dictionary;
 use thiserror::Error;
 
 use gdcore::id::ObjectId;
-use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
+use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector2i, Vector3, Vector3i};
 use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
 use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
@@ -86,8 +87,12 @@ const T_INT: u32 = 2;
 const T_FLOAT: u32 = 3;
 const T_STRING: u32 = 4;
 const T_VECTOR2: u32 = 5;
+/// Godot's `Variant::VECTOR2I` — the gap at 6 in this table was always this type.
+const T_VECTOR2I: u32 = 6;
 const T_RECT2: u32 = 7;
 const T_VECTOR3: u32 = 9;
+/// Godot's `Variant::VECTOR3I`.
+const T_VECTOR3I: u32 = 10;
 const T_TRANSFORM2D: u32 = 11;
 const T_PLANE: u32 = 14;
 const T_QUATERNION: u32 = 15;
@@ -275,11 +280,24 @@ fn encode_into(value: &Variant, out: &mut Vec<u8>, depth: u32) -> Result<(), Var
             put_f32(out, v.x);
             put_f32(out, v.y);
         }
+        Variant::Vector2i(v) => {
+            // Godot writes int vectors as plain int32s — no `HEADER_DATA_FLAG_64`
+            // real-width dance, since the components are already integers.
+            put_u32(out, T_VECTOR2I);
+            put_u32(out, v.x as u32);
+            put_u32(out, v.y as u32);
+        }
         Variant::Vector3(v) => {
             put_u32(out, T_VECTOR3);
             put_f32(out, v.x);
             put_f32(out, v.y);
             put_f32(out, v.z);
+        }
+        Variant::Vector3i(v) => {
+            put_u32(out, T_VECTOR3I);
+            put_u32(out, v.x as u32);
+            put_u32(out, v.y as u32);
+            put_u32(out, v.z as u32);
         }
         Variant::Rect2(r) => {
             put_u32(out, T_RECT2);
@@ -670,11 +688,22 @@ fn decode_from(r: &mut Reader, depth: u32) -> Result<Variant, VariantDecodeError
             let y = r.real(flag64)?;
             Ok(Variant::Vector2(Vector2::new(x, y)))
         }
+        T_VECTOR2I => {
+            let x = r.u32()? as i32;
+            let y = r.u32()? as i32;
+            Ok(Variant::Vector2i(Vector2i::new(x, y)))
+        }
         T_VECTOR3 => {
             let x = r.real(flag64)?;
             let y = r.real(flag64)?;
             let z = r.real(flag64)?;
             Ok(Variant::Vector3(Vector3::new(x, y, z)))
+        }
+        T_VECTOR3I => {
+            let x = r.u32()? as i32;
+            let y = r.u32()? as i32;
+            let z = r.u32()? as i32;
+            Ok(Variant::Vector3i(Vector3i::new(x, y, z)))
         }
         T_RECT2 => {
             let px = r.real(flag64)?;
@@ -944,6 +973,10 @@ mod tests {
     #[test]
     fn roundtrip_math_types() {
         roundtrip(Variant::Vector2(Vector2::new(1.0, -2.5)));
+        // pat-nzgdu.78 — int vectors ride the wire as their own types at
+        // Godot's ordinals 6 and 10, not as floats.
+        roundtrip(Variant::Vector2i(Vector2i::new(3, -4)));
+        roundtrip(Variant::Vector3i(Vector3i::new(-1, 0, 7)));
         roundtrip(Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)));
         roundtrip(Variant::Rect2(Rect2::new(
             Vector2::new(1.0, 2.0),
@@ -1368,5 +1401,32 @@ mod tests {
         let (v, used) = decode_variant(&buf).unwrap();
         assert_eq!(v, Variant::Vector2(Vector2::new(1.5, -2.5)));
         assert_eq!(used, buf.len());
+    }
+}
+
+#[cfg(test)]
+mod intvec_wire_tests {
+    use super::*;
+
+    /// The type ordinal on the wire is Godot's own `Variant::Type` value — 6 for
+    /// `VECTOR2I`, 10 for `VECTOR3I`. Pinned because a buffer written by Godot
+    /// (or by an older Patina) is only readable if these never drift
+    /// (pat-nzgdu.78).
+    #[test]
+    fn int_vectors_use_godot_type_ordinals() {
+        let buf = encode_variant(&Variant::Vector2i(Vector2i::new(1, 2))).unwrap();
+        assert_eq!(u32::from_le_bytes(buf[0..4].try_into().unwrap()), 6);
+
+        let buf = encode_variant(&Variant::Vector3i(Vector3i::new(1, 2, 3))).unwrap();
+        assert_eq!(u32::from_le_bytes(buf[0..4].try_into().unwrap()), 10);
+    }
+
+    /// Negative components survive the `as u32` two's-complement round trip.
+    #[test]
+    fn int_vector_negatives_roundtrip() {
+        let v = Variant::Vector3i(Vector3i::new(-2_147_483_648, -1, 2_147_483_647));
+        let bytes = encode_variant(&v).unwrap();
+        let (decoded, _) = decode_variant(&bytes).unwrap();
+        assert_eq!(decoded, v);
     }
 }

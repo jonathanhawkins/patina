@@ -40,6 +40,7 @@ use gdvariant::Variant;
 use gdrender2d::SoftwareRenderer;
 use gdserver2d::canvas::{CanvasItem, CanvasItemId, DrawCommand};
 use gdserver2d::server::{FrameData, RenderingServer2D};
+use gdserver2d::shader::{Shader, ShaderMaterial, ShaderType};
 use gdserver2d::viewport::Viewport;
 
 use crate::node::NodeId;
@@ -114,12 +115,66 @@ fn visit(
         item.transform = node2d::get_global_transform(tree, node_id);
         item.z_index = canvas_order::effective_z_index(tree, node_id);
         item.commands = commands;
+        // A CanvasItem's `material = ShaderMaterial` runs its canvas_item shader
+        // every frame in Godot. The 2D shader stack — compiler, material slot,
+        // and `rasterize_item`'s material branch — was complete and tested, but
+        // this is the only place a scene becomes a render list, and it never set
+        // a material, so no authored 2D shader could ever run (pat-0q2kx.48).
+        if let Some(material) = resolve_canvas_shader_material(tree, node_id) {
+            item.set_material(material);
+        }
         viewport.add_canvas_item(item);
     }
 
     for child in canvas_order::draw_ordered_children(tree, node_id) {
         visit(tree, child, viewport, next_id, texture_size);
     }
+}
+
+/// Resolves the node's `ShaderMaterial` from the flat properties `packed_scene`
+/// leaves behind at load (pat-0q2kx.48).
+///
+/// Mirrors `render_server_3d::resolve_shader_material`: the source is either an
+/// inline `shader_code` (an `[sub_resource type="Shader"]` in the `.tscn`) or a
+/// `.gdshader` named by `shader_path`, and every `shader_parameter/*` property
+/// becomes a uniform override. The `ShaderMaterial` sub-resource itself is gone
+/// by this point — only the `SceneTree` survives — which is why the data travels
+/// on the node.
+///
+/// `None` when the node has no shader, which is the overwhelmingly common case,
+/// so the caller leaves the item's material unset and the plain raster path runs.
+fn resolve_canvas_shader_material(tree: &SceneTree, node_id: NodeId) -> Option<ShaderMaterial> {
+    let node = tree.get_node(node_id)?;
+
+    let source = match node.get_property("shader_code") {
+        Variant::String(code) if !code.is_empty() => code,
+        _ => match node.get_property("shader_path") {
+            Variant::String(path) if !path.is_empty() => {
+                // `res://` resolves relative to the project root, as elsewhere.
+                let fs = path.strip_prefix("res://").unwrap_or(path.as_str());
+                let res = gdresource::importers::load_gdshader(std::path::Path::new(fs)).ok()?;
+                match res.get_property("code") {
+                    Some(Variant::String(code)) if !code.is_empty() => code.clone(),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        },
+    };
+
+    // Always CanvasItem here: this walk only ever builds 2D canvas items, and a
+    // spatial shader reaching a canvas item would be a scene authoring error
+    // rather than something to silently rasterize.
+    let mut material = ShaderMaterial::new();
+    material.shader = Some(Shader::new(ShaderType::CanvasItem, &source));
+    for (key, value) in node.properties() {
+        if let Some(name) = key.strip_prefix("shader_parameter/") {
+            if value != &Variant::Nil {
+                material.set_shader_parameter(name, value.clone());
+            }
+        }
+    }
+    Some(material)
 }
 
 /// Emits the draw commands for a single node based on its class. Returns an

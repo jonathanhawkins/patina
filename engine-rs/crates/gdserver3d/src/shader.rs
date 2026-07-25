@@ -700,7 +700,9 @@ fn generate_wgsl(
         if buffer_uniforms.iter().any(|u| u.name == "color_mix") {
             let has_factor = buffer_uniforms.iter().any(|u| u.name == "color_mix_factor");
             if has_factor {
-                wgsl.push_str("    color = mix(color, custom.color_mix, custom.color_mix_factor);\n");
+                wgsl.push_str(
+                    "    color = mix(color, custom.color_mix, custom.color_mix_factor);\n",
+                );
             } else {
                 wgsl.push_str("    color = mix(color, custom.color_mix, 0.5);\n");
             }
@@ -906,9 +908,9 @@ fn parse_fragment_statement_3d(s: &str) -> Option<FragmentInstruction3D> {
     if let Some(rest) = s.strip_prefix("ALBEDO.rgb") {
         let rest = rest.trim();
         if let Some(val) = rest.strip_prefix("*=") {
-            return Some(FragmentInstruction3D::MultiplyColorRgb(parse_float_expr_3d(
-                val.trim(),
-            )));
+            return Some(FragmentInstruction3D::MultiplyColorRgb(
+                parse_float_expr_3d(val.trim()),
+            ));
         }
         if let Some(val) = rest.strip_prefix('=') {
             return Some(FragmentInstruction3D::SetColorRgb(parse_color_expr_3d(
@@ -921,9 +923,9 @@ fn parse_fragment_statement_3d(s: &str) -> Option<FragmentInstruction3D> {
     if let Some(rest) = s.strip_prefix("ALBEDO") {
         let rest = rest.trim();
         if let Some(val) = rest.strip_prefix("*=") {
-            return Some(FragmentInstruction3D::MultiplyColorRgb(parse_float_expr_3d(
-                val.trim(),
-            )));
+            return Some(FragmentInstruction3D::MultiplyColorRgb(
+                parse_float_expr_3d(val.trim()),
+            ));
         }
         if let Some(val) = rest.strip_prefix('=') {
             return Some(FragmentInstruction3D::SetAlbedo(parse_color_expr_3d(
@@ -956,9 +958,9 @@ fn parse_fragment_statement_3d(s: &str) -> Option<FragmentInstruction3D> {
     if let Some(rest) = s.strip_prefix("COLOR.rgb") {
         let rest = rest.trim();
         if let Some(val) = rest.strip_prefix("*=") {
-            return Some(FragmentInstruction3D::MultiplyColorRgb(parse_float_expr_3d(
-                val.trim(),
-            )));
+            return Some(FragmentInstruction3D::MultiplyColorRgb(
+                parse_float_expr_3d(val.trim()),
+            ));
         }
         if let Some(val) = rest.strip_prefix('=') {
             return Some(FragmentInstruction3D::SetColorRgb(parse_color_expr_3d(
@@ -971,9 +973,9 @@ fn parse_fragment_statement_3d(s: &str) -> Option<FragmentInstruction3D> {
     if let Some(rest) = s.strip_prefix("COLOR") {
         let rest = rest.trim();
         if let Some(val) = rest.strip_prefix("*=") {
-            return Some(FragmentInstruction3D::MultiplyColorRgb(parse_float_expr_3d(
-                val.trim(),
-            )));
+            return Some(FragmentInstruction3D::MultiplyColorRgb(
+                parse_float_expr_3d(val.trim()),
+            ));
         }
         if let Some(val) = rest.strip_prefix('=') {
             return Some(FragmentInstruction3D::SetColor(parse_color_expr_3d(
@@ -1463,7 +1465,10 @@ pub fn fragment_body_to_wgsl_statements(
                 format!("color = {};", color_expr_to_wgsl(e)?)
             }
             FragmentInstruction3D::SetColorRgb(e) | FragmentInstruction3D::SetAlbedo(e) => {
-                format!("color = vec4<f32>(({}).rgb, color.a);", color_expr_to_wgsl(e)?)
+                format!(
+                    "color = vec4<f32>(({}).rgb, color.a);",
+                    color_expr_to_wgsl(e)?
+                )
             }
             FragmentInstruction3D::SetColorAlpha(e) | FragmentInstruction3D::SetAlpha(e) => {
                 format!("color.a = {};", float_expr_to_wgsl(e)?)
@@ -1595,7 +1600,10 @@ mod tests {
             parse_shader_hint("source_color"),
             Some(ShaderHint::SourceColor)
         );
-        assert_eq!(parse_shader_hint("hint_color"), Some(ShaderHint::SourceColor));
+        assert_eq!(
+            parse_shader_hint("hint_color"),
+            Some(ShaderHint::SourceColor)
+        );
         assert_eq!(parse_shader_hint("hint_normal"), Some(ShaderHint::Normal));
         assert_eq!(
             parse_shader_hint("repeat_enable"),
@@ -2297,15 +2305,17 @@ uniform bool enabled = true;
         // A `fragment()` body that writes ALBEDO from UV must transpile to WGSL
         // that reads the interpolated `in.uv` — not a hardcoded uniform override.
         let compiler = ShaderCompiler3D::new();
-        let source =
-            "shader_type spatial;\nvoid fragment() { ALBEDO = vec3(UV.x, UV.y, 1.0); }";
+        let source = "shader_type spatial;\nvoid fragment() { ALBEDO = vec3(UV.x, UV.y, 1.0); }";
         let compiled = compiler.compile(ShaderType3D::Spatial, source);
         let wgsl = compiled
             .wgsl_program
             .as_ref()
             .expect("WGSL should be generated");
 
-        assert!(wgsl.contains("in.uv.x"), "WGSL should reference UV.x:\n{wgsl}");
+        assert!(
+            wgsl.contains("in.uv.x"),
+            "WGSL should reference UV.x:\n{wgsl}"
+        );
         assert!(wgsl.contains("in.uv.y"), "WGSL should reference UV.y");
         assert!(wgsl.contains("fn custom_fragment"));
     }
@@ -2315,7 +2325,10 @@ uniform bool enabled = true;
         let body = parse_fragment_body_3d(
             "shader_type spatial;\nvoid fragment() { ALBEDO = vec3(UV.x, UV.y, 1.0); }",
         );
-        assert!(!body.is_empty(), "UV gradient body should parse to instructions");
+        assert!(
+            !body.is_empty(),
+            "UV gradient body should parse to instructions"
+        );
         let stmts = fragment_body_to_wgsl_statements(&body).expect("UV gradient transpiles");
         assert_eq!(stmts.len(), 1);
         assert!(stmts[0].contains("in.uv.x"));
@@ -2326,12 +2339,12 @@ uniform bool enabled = true;
     #[test]
     fn fragment_body_to_wgsl_statements_arithmetic_and_fns() {
         // sin/fract/arithmetic over UV all transpile to WGSL intrinsics.
-        let body = vec![FragmentInstruction3D::SetAlpha(FloatExpr3D::Fract(Box::new(
-            FloatExpr3D::Mul(
+        let body = vec![FragmentInstruction3D::SetAlpha(FloatExpr3D::Fract(
+            Box::new(FloatExpr3D::Mul(
                 Box::new(FloatExpr3D::UvComponent(UvAxis3D::X)),
                 Box::new(FloatExpr3D::Literal(4.0)),
-            ),
-        )))];
+            )),
+        ))];
         let stmts = fragment_body_to_wgsl_statements(&body).unwrap();
         assert_eq!(stmts[0], "color.a = fract((in.uv.x * 4.0));");
     }
@@ -2468,7 +2481,8 @@ uniform bool enabled = true;
 
     #[test]
     fn parse_albedo_vec3_literal() {
-        let source = "shader_type spatial;\nvoid fragment() {\n    ALBEDO = vec3(1.0, 0.0, 0.0);\n}";
+        let source =
+            "shader_type spatial;\nvoid fragment() {\n    ALBEDO = vec3(1.0, 0.0, 0.0);\n}";
         let body = parse_fragment_body_3d(source);
         assert_eq!(
             body,
@@ -2521,8 +2535,7 @@ uniform bool enabled = true;
 
     #[test]
     fn parse_texture_uv() {
-        let source =
-            "shader_type spatial;\nvoid fragment() {\n    ALBEDO = texture(tex, UV);\n}";
+        let source = "shader_type spatial;\nvoid fragment() {\n    ALBEDO = texture(tex, UV);\n}";
         let body = parse_fragment_body_3d(source);
         assert_eq!(
             body,
@@ -2619,7 +2632,11 @@ uniform bool enabled = true;
             &no_texture,
         );
         assert!(at0.a.abs() < 1e-6, "sin(0) alpha={}", at0.a);
-        assert!((at_half_pi.a - 1.0).abs() < 1e-6, "sin(pi/2) alpha={}", at_half_pi.a);
+        assert!(
+            (at_half_pi.a - 1.0).abs() < 1e-6,
+            "sin(pi/2) alpha={}",
+            at_half_pi.a
+        );
     }
 
     #[test]
@@ -2692,7 +2709,8 @@ uniform bool enabled = true;
     #[test]
     fn compile_populates_fragment_body() {
         let compiler = ShaderCompiler3D::new();
-        let source = "shader_type spatial;\nvoid fragment() {\n    ALBEDO = vec3(1.0, 0.0, 0.0);\n}";
+        let source =
+            "shader_type spatial;\nvoid fragment() {\n    ALBEDO = vec3(1.0, 0.0, 0.0);\n}";
         let compiled = compiler.compile(ShaderType3D::Spatial, source);
         assert_eq!(compiled.fragment_body.len(), 1);
     }

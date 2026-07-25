@@ -746,8 +746,8 @@ mod tests {
                 panorama_path: "res://sky_hdr.exr".to_string(),
                 filter: true,
                 energy_multiplier: 1.5,
-                        texture: None,
-        }),
+                texture: None,
+            }),
             process_mode: SkyProcessMode::Quality,
             radiance_size: 512,
         };
@@ -801,7 +801,11 @@ mod tests {
     // -- resolve_sky_material_textures -----------------------------------------
 
     fn one_pixel(c: Color) -> PanoramaTexture {
-        PanoramaTexture { width: 1, height: 1, pixels: vec![c] }
+        PanoramaTexture {
+            width: 1,
+            height: 1,
+            pixels: vec![c],
+        }
     }
 
     #[test]
@@ -833,14 +837,18 @@ mod tests {
             night_sky_path: "res://stars.png".into(),
             ..Default::default()
         });
-        resolve_sky_material_textures(&mut phys, |_| Some(one_pixel(Color::new(1.0, 1.0, 1.0, 1.0))));
+        resolve_sky_material_textures(&mut phys, |_| {
+            Some(one_pixel(Color::new(1.0, 1.0, 1.0, 1.0)))
+        });
         assert!(matches!(&phys, SkyMaterial::Physical(m) if m.night_sky.is_some()));
 
         let mut pano = SkyMaterial::Panoramic(PanoramicSkyMaterial {
             panorama_path: "res://sky.png".into(),
             ..Default::default()
         });
-        resolve_sky_material_textures(&mut pano, |_| Some(one_pixel(Color::new(0.5, 0.5, 0.5, 1.0))));
+        resolve_sky_material_textures(&mut pano, |_| {
+            Some(one_pixel(Color::new(0.5, 0.5, 0.5, 1.0)))
+        });
         assert!(matches!(&pano, SkyMaterial::Panoramic(m) if m.texture.is_some()));
     }
 
@@ -867,7 +875,9 @@ mod tests {
         resolve_sky_material_textures(&mut sky, |_| {
             panic!("loader must not run when the texture is already populated")
         });
-        assert!(matches!(&sky, SkyMaterial::Procedural(m) if m.sky_cover == Some(existing.clone())));
+        assert!(
+            matches!(&sky, SkyMaterial::Procedural(m) if m.sky_cover == Some(existing.clone()))
+        );
     }
 
     #[test]

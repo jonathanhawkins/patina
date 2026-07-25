@@ -44,12 +44,14 @@ pub use gi::{
     LightmapBakeQuality, LightmapGI, LightmapGIId, LightmapProbeGeneration, VoxelGI, VoxelGIId,
     VoxelGISubdiv,
 };
-pub use instance::{Instance3D, Instance3DId};
+pub use instance::{
+    GeometryInstanceSettings, Instance3D, Instance3DId, ShadowCastingSetting,
+    VisibilityRangeFadeMode, VisibilityRangeState,
+};
 pub use light::{CubeFace, Light3D, Light3DId, LightType, OmniShadowMode, ShadowCubemap};
 pub use material::{Material3D, ShadingMode, StandardMaterial3D, TextureSlot};
 pub use mesh::Surface3D;
 pub use mesh::{Mesh3D, PrimitiveType, SurfaceTool};
-pub use skin::{skin_matrices, skin_mesh, skin_normal, skin_position, Skin, SkinBind};
 pub use multimesh::{MultiMesh3D, TransformFormat};
 pub use navigation::{
     bake_navigation_mesh, BakeSourceGeometry3D, NavPolygon3D, NavigationMesh3D, NavigationRegion3D,
@@ -71,10 +73,10 @@ pub use shader::{
     FragmentContext3D, RenderModeFlags, Shader3D, ShaderCompiler3D, ShaderDiagnostic,
     ShaderMaterial3D, ShaderProcessor3D, ShaderType3D, ShaderUniform3D, UniformType,
 };
+pub use skin::{skin_matrices, skin_mesh, skin_normal, skin_position, Skin, SkinBind};
 pub use sky::{
     PanoramaTexture, PanoramicSkyMaterial, PhysicalSkyMaterial, ProceduralSkyMaterial, Sky,
-    SkyMaterial,
-    SkyProcessMode,
+    SkyMaterial, SkyProcessMode,
 };
 pub use text_mesh::{extrude_contour, triangulate_simple_polygon, TextMesh};
 pub use viewport::Viewport3D;

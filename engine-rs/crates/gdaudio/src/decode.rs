@@ -259,7 +259,6 @@ mod tests {
     }
 }
 
-
 /// Detect MP3 frame sync / ID3.
 pub fn is_mp3(data: &[u8]) -> bool {
     if data.len() >= 3 && &data[0..3] == b"ID3" {

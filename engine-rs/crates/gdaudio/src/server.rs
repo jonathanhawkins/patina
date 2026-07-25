@@ -7,7 +7,7 @@
 use crate::bus::AudioBus;
 use crate::decode::AudioBuffer;
 use crate::mixer::AudioMixer;
-use crate::stream::{AudioStreamPlayback, PlaybackState};
+use crate::stream::{AudioStreamPlayback, LoopMode, PlaybackState};
 
 /// Handle to a playing stream inside the [`AudioServer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -108,7 +108,10 @@ impl AudioServer {
     }
 
     /// Mutable access to a stream's playback controls (volume, bus, seek).
-    pub fn stream_mut(&mut self, id: PlaybackId) -> Option<&mut crate::stream::AudioStreamPlayback> {
+    pub fn stream_mut(
+        &mut self,
+        id: PlaybackId,
+    ) -> Option<&mut crate::stream::AudioStreamPlayback> {
         self.streams
             .iter_mut()
             .find(|(pid, _)| *pid == id)
@@ -214,7 +217,8 @@ impl AudioServer {
 
         let bus_count = self.mixer.bus_count();
         // One accumulation buffer per bus, indexed by bus index.
-        let mut bus_bufs: Vec<Vec<f32>> = (0..bus_count).map(|_| vec![0.0f32; num_samples]).collect();
+        let mut bus_bufs: Vec<Vec<f32>> =
+            (0..bus_count).map(|_| vec![0.0f32; num_samples]).collect();
 
         // 1. Sum each playing stream into its target bus buffer at stream volume.
         for (_id, stream) in &mut self.streams {
@@ -231,8 +235,8 @@ impl AudioServer {
                 .unwrap_or(0);
 
             // User volume (dB) times any spatial linear gain (distance attenuation).
-            let stream_linear = AudioBus::db_to_linear(stream.playback.volume_db())
-                * stream.playback.linear_gain();
+            let stream_linear =
+                AudioBus::db_to_linear(stream.playback.volume_db()) * stream.playback.linear_gain();
 
             let pos_secs = stream.playback.get_playback_position();
             let src_channels = stream.buffer.channels as usize;
@@ -259,8 +263,46 @@ impl AudioServer {
             let (pan_left, pan_right) = stream.playback.pan();
             let buf = &mut bus_bufs[bus_idx];
 
+            // Direction and loop region for the read cursor (pat-0q2kx.58): a
+            // `Backward` loop — and the return leg of a `PingPong` — steps the
+            // cursor DOWN through the sample, and a looping stream wraps inside
+            // its `[loop_begin, loop_end]` window instead of running off the end.
+            //
+            // KNOWN LIMITATION: the direction is fixed for the whole block, so a
+            // ping-pong that reaches its bound mid-block reflects at the next
+            // block boundary rather than exactly on the sample. At typical block
+            // sizes that is well under a millisecond; fixing it means splitting
+            // the block at the reflection point.
+            let direction = stream.playback.read_direction();
+            let looping = stream.playback.loop_mode() != LoopMode::None;
+            let (win_begin_secs, win_end_secs) = stream.playback.loop_window();
+            let win0 = (win_begin_secs * src_rate as f32).max(0.0);
+            let win1 = (win_end_secs * src_rate as f32).min(frame_total as f32);
+
             for frame in 0..frame_count {
-                let src_pos = src_pos_start + frame as f32 * step;
+                let mut src_pos = src_pos_start + frame as f32 * step * direction;
+                if looping && win1 > win0 {
+                    let span = win1 - win0;
+                    // Only wrap once the cursor LEAVES the region. Wrapping
+                    // unconditionally would fold the intro — the `[0, loop_begin)`
+                    // lead-in Godot plays exactly once — into the loop window, so
+                    // a stream with `loop_begin = 50` would jump to frame 50 on
+                    // its very first block instead of playing 0..50 first.
+                    if direction < 0.0 {
+                        if src_pos < win0 {
+                            src_pos = win1 - (win0 - src_pos).rem_euclid(span);
+                        }
+                        // A descending cursor sitting exactly ON `loop_end` must
+                        // read the LAST frame of the region, not the frame at
+                        // `loop_end` itself (which is one past it, and would
+                        // `break` the block as out of range).
+                        if src_pos >= win1 {
+                            src_pos = win1 - 1.0;
+                        }
+                    } else if src_pos >= win1 {
+                        src_pos = win0 + (src_pos - win0).rem_euclid(span);
+                    }
+                }
                 if src_pos < 0.0 {
                     continue;
                 }
@@ -295,14 +337,18 @@ impl AudioServer {
         }
 
         // Any soloed non-master bus makes all other non-master buses inaudible.
-        let any_solo = (1..bus_count)
-            .any(|i| self.mixer.get_bus(i).map(|b| b.is_solo()).unwrap_or(false));
+        let any_solo =
+            (1..bus_count).any(|i| self.mixer.get_bus(i).map(|b| b.is_solo()).unwrap_or(false));
 
         // 2 + 3. Process non-master buses from highest index down, routing each
         // into its send target so the target is processed with the send applied.
         for i in (1..bus_count).rev() {
             // Volume.
-            let vol = self.mixer.get_bus(i).map(|b| b.volume_linear()).unwrap_or(1.0);
+            let vol = self
+                .mixer
+                .get_bus(i)
+                .map(|b| b.volume_linear())
+                .unwrap_or(1.0);
             for s in bus_bufs[i].iter_mut() {
                 *s *= vol;
             }
@@ -325,7 +371,11 @@ impl AudioServer {
             // Resolve the send target (empty send => Master) and level.
             let (target_idx, send_lin) = {
                 let bus = self.mixer.get_bus(i).unwrap();
-                let target_name = if bus.send().is_empty() { "Master" } else { bus.send() };
+                let target_name = if bus.send().is_empty() {
+                    "Master"
+                } else {
+                    bus.send()
+                };
                 (self.mixer.get_bus_by_name(target_name), bus.send_linear())
             };
 
@@ -344,7 +394,11 @@ impl AudioServer {
         }
 
         // 4. Master bus (index 0): volume, effects, then its own mute gate.
-        let master_vol = self.mixer.get_bus(0).map(|b| b.volume_linear()).unwrap_or(1.0);
+        let master_vol = self
+            .mixer
+            .get_bus(0)
+            .map(|b| b.volume_linear())
+            .unwrap_or(1.0);
         for s in bus_bufs[0].iter_mut() {
             *s *= master_vol;
         }
@@ -378,11 +432,7 @@ impl AudioServer {
     /// Apply the effect chain of a named bus to an interleaved buffer.
     ///
     /// Used by tests and by pipelines that mix per-bus then combine.
-    pub fn process_bus_effects(
-        &mut self,
-        bus_name: &str,
-        samples: &mut [f32],
-    ) -> bool {
+    pub fn process_bus_effects(&mut self, bus_name: &str, samples: &mut [f32]) -> bool {
         let Some(idx) = self.mixer.get_bus_by_name(bus_name) else {
             return false;
         };
@@ -481,7 +531,11 @@ bus/2/send = "Master"
         let mut server = AudioServer::new();
         server.mixer_mut().load_bus_layout_str(LAYOUT);
         let sfx_idx = server.mixer().get_bus_by_name("SFX").unwrap();
-        server.mixer_mut().get_bus_mut(sfx_idx).unwrap().set_solo(true);
+        server
+            .mixer_mut()
+            .get_bus_mut(sfx_idx)
+            .unwrap()
+            .set_solo(true);
         server.play_on_bus(make_dc_buffer(1.0, 44100), "Music"); // not soloed
         let out = server.mix(64);
         assert!(
@@ -515,7 +569,8 @@ bus/2/send = "Master"
         let music_idx = server.mixer().get_bus_by_name("Music").unwrap();
         {
             let bus = server.mixer_mut().get_bus_mut(music_idx).unwrap();
-            bus.effects_mut().add(Box::new(AudioEffectAmplify::new(6.0)));
+            bus.effects_mut()
+                .add(Box::new(AudioEffectAmplify::new(6.0)));
             bus.set_bypass(true);
         }
         server.play_on_bus(make_dc_buffer(1.0, 44100), "Music");
@@ -633,7 +688,10 @@ bus/2/send = "Master"
         // Source 30 units to the listener's right (unit_size 10 → atten 0.25).
         let src = AudioStreamPlayer3D::new(Vector3::new(30.0, 0.0, 0.0));
         let res = src.compute_spatial(&AudioListener3D::default());
-        assert!(res.pan_right > res.pan_left, "spatial calc pans right: {res:?}");
+        assert!(
+            res.pan_right > res.pan_left,
+            "spatial calc pans right: {res:?}"
+        );
 
         let mut server = AudioServer::new();
         let id = server.play(make_dc_buffer(1.0, 44100));
@@ -648,7 +706,11 @@ bus/2/send = "Master"
         // ...distance-attenuated well below unity...
         assert!(out[1] < 0.5, "distance-attenuated: {}", out[1]);
         // ...and full-right pan silences the left channel.
-        assert!(out[0].abs() < 1e-4, "left silent on full-right pan: {}", out[0]);
+        assert!(
+            out[0].abs() < 1e-4,
+            "left silent on full-right pan: {}",
+            out[0]
+        );
     }
 
     #[test]
@@ -742,7 +804,11 @@ bus/2/send = "Master"
         assert!(server.mix(1)[0].abs() > 0.5, "Music audible before solo");
 
         // Solo a *different* bus → the non-solo Music bus is silenced.
-        server.mixer_mut().get_bus_mut(voice_idx).unwrap().set_solo(true);
+        server
+            .mixer_mut()
+            .get_bus_mut(voice_idx)
+            .unwrap()
+            .set_solo(true);
         let out = server.mix(1);
         assert!(
             out.iter().all(|&s| s.abs() < 1e-6),
@@ -785,7 +851,10 @@ bus/2/send = "Master"
         server.play_on_bus(make_dc_buffer(0.5, 44100), "Reverb");
         let out = server.mix(1)[0];
         // Reverb keeps a dry component, so the source stays audible on the bus.
-        assert!(out.abs() > 0.1, "reverb on a non-master bus stays audible: {out}");
+        assert!(
+            out.abs() > 0.1,
+            "reverb on a non-master bus stays audible: {out}"
+        );
     }
 
     #[test]
@@ -956,7 +1025,11 @@ bus/2/send = "Master"
         let mut server = AudioServer::new();
         let a_idx = server.mixer_mut().add_bus("A"); // idx 1
         server.mixer_mut().add_bus("B"); // idx 2
-        server.mixer_mut().get_bus_mut(a_idx).unwrap().set_solo(true);
+        server
+            .mixer_mut()
+            .get_bus_mut(a_idx)
+            .unwrap()
+            .set_solo(true);
 
         // Both buses send to Master by default.
         server.play_on_bus(make_dc_buffer(0.5, 44100), "A"); // soloed -> heard

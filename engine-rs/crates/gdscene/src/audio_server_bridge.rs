@@ -15,11 +15,46 @@ use std::path::PathBuf;
 
 use gdaudio::import::AudioStreamLoader;
 use gdaudio::sample::AudioOutputStream;
+use gdaudio::spatial::{
+    AttenuationModel, AudioListener3D, AudioStreamPlayer2D as Spatial2D,
+    AudioStreamPlayer3D as Spatial3D,
+};
 use gdaudio::{mix_and_write, AudioBuffer, AudioServer, AudioStreamPlayer};
+use gdcore::math::{Vector2, Vector3};
 use gdvariant::Variant;
 
 use crate::node::NodeId;
 use crate::scene_tree::SceneTree;
+
+/// Half of Godot's default viewport width (1152), used as the screen half-width
+/// for 2D panning until the host tells us otherwise via
+/// [`set_screen_half_width`](AudioServerBridge::set_screen_half_width). A 2D
+/// source this far to the right of the listener pans fully right.
+const DEFAULT_SCREEN_HALF_WIDTH: f32 = 576.0;
+
+/// Which flavor of audio player a node is — positional players get a per-frame
+/// pan/attenuation pass, plain ones do not (pat-0q2kx.57).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlayerKind {
+    /// `AudioStreamPlayer` — non-positional, mixed at its own volume.
+    NonPositional,
+    /// `AudioStreamPlayer2D` — panned by canvas offset from the 2D listener.
+    Positional2D,
+    /// `AudioStreamPlayer3D` — panned/attenuated against the 3D listener.
+    Positional3D,
+}
+
+impl PlayerKind {
+    /// Classifies a node's class name, or `None` when it is not a player.
+    fn from_class(class_name: &str) -> Option<Self> {
+        match class_name {
+            "AudioStreamPlayer" => Some(Self::NonPositional),
+            "AudioStreamPlayer2D" => Some(Self::Positional2D),
+            "AudioStreamPlayer3D" => Some(Self::Positional3D),
+            _ => None,
+        }
+    }
+}
 
 /// Runtime audio driver owned by the main loop.
 pub struct AudioServerBridge {
@@ -36,6 +71,8 @@ pub struct AudioServerBridge {
     /// The most recent mixed frames (interleaved f32), kept when no
     /// platform output is attached so tests and tools can inspect output.
     last_mix: Vec<f32>,
+    /// Half the viewport width in canvas units, for 2D panning.
+    screen_half_width: f32,
 }
 
 impl AudioServerBridge {
@@ -50,6 +87,19 @@ impl AudioServerBridge {
             base_dir: None,
             frame_accumulator: 0.0,
             last_mix: Vec::new(),
+            screen_half_width: DEFAULT_SCREEN_HALF_WIDTH,
+        }
+    }
+
+    /// Sets the viewport half-width used for `AudioStreamPlayer2D` panning.
+    ///
+    /// Godot pans a 2D source by its horizontal offset from the listener
+    /// measured against the screen, so the host viewport size is part of the
+    /// calculation. Values `<= 0` are ignored rather than collapsing every 2D
+    /// source to center.
+    pub fn set_screen_half_width(&mut self, half_width: f32) {
+        if half_width > 0.0 {
+            self.screen_half_width = half_width;
         }
     }
 
@@ -103,20 +153,33 @@ impl AudioServerBridge {
         }
     }
 
-    /// Syncs `AudioStreamPlayer` nodes and mixes `delta` seconds of audio.
+    /// Syncs audio player nodes and mixes `delta` seconds of audio.
+    ///
+    /// Covers all three player classes. `AudioStreamPlayer2D`/`3D` were skipped
+    /// entirely before pat-0q2kx.57 — the scan matched the base class name
+    /// exactly — so a positional player made no sound at all, however correct
+    /// its properties.
     pub fn process(&mut self, tree: &mut SceneTree, delta: f64) {
-        let player_ids: Vec<NodeId> = tree
+        let players: Vec<(NodeId, PlayerKind)> = tree
             .all_nodes_in_tree_order()
             .into_iter()
-            .filter(|&id| {
-                tree.get_node(id)
-                    .is_some_and(|n| n.class_name() == "AudioStreamPlayer")
+            .filter_map(|id| {
+                let kind = tree
+                    .get_node(id)
+                    .and_then(|n| PlayerKind::from_class(n.class_name()))?;
+                Some((id, kind))
             })
             .collect();
+        let player_ids: Vec<NodeId> = players.iter().map(|(id, _)| *id).collect();
 
         for id in &player_ids {
             self.sync_player_node(tree, *id);
         }
+
+        // Positional players re-derive pan/volume from the live transforms every
+        // frame, exactly as Godot's `_update_panning` does, and must run before
+        // the mix below so this frame's audio carries this frame's position.
+        self.apply_spatial(tree, &players);
 
         // Drop players whose nodes left the tree.
         let live: HashSet<NodeId> = player_ids.iter().copied().collect();
@@ -153,6 +216,159 @@ impl AudioServerBridge {
         for id in &player_ids {
             self.publish_playback_position(tree, *id);
         }
+    }
+
+    /// Recomputes pan and distance attenuation for every positional player and
+    /// pushes the result onto its live voice (pat-0q2kx.57).
+    ///
+    /// Godot recomputes this every frame from the node's *global* transform
+    /// against the active listener (`AudioStreamPlayer3D::_update_panning`), so
+    /// a moving source or a moving listener both take effect immediately. The
+    /// math itself already lived in `gdaudio::spatial` and was tested there;
+    /// what was missing was any call path from the scene tree to it.
+    fn apply_spatial(&mut self, tree: &SceneTree, players: &[(NodeId, PlayerKind)]) {
+        if !players
+            .iter()
+            .any(|(_, kind)| *kind != PlayerKind::NonPositional)
+        {
+            return;
+        }
+        // Resolved once per frame: every source shares one listener.
+        let listener_3d = self.resolve_listener_3d(tree);
+        let listener_2d = self.resolve_listener_2d(tree);
+
+        for (id, kind) in players {
+            let Some(playback_id) = self.players.get(id).and_then(|p| p.playback_id()) else {
+                continue;
+            };
+            let result = match kind {
+                PlayerKind::NonPositional => continue,
+                PlayerKind::Positional3D => {
+                    let source = self.read_spatial_3d(tree, *id);
+                    source.compute_spatial(&listener_3d)
+                }
+                PlayerKind::Positional2D => {
+                    let source = self.read_spatial_2d(tree, *id);
+                    source.compute_spatial_2d(listener_2d, self.screen_half_width)
+                }
+            };
+            if let Some(playback) = self.server.stream_mut(playback_id) {
+                playback.set_linear_gain(result.volume_linear);
+                playback.set_pan(result.pan_left, result.pan_right);
+            }
+        }
+    }
+
+    /// The active 3D listener: an `AudioListener3D` with `current` set wins,
+    /// then the current `Camera3D`, then the world origin.
+    ///
+    /// Godot resolves the listener the same way and in the same order
+    /// (`AudioStreamPlayer3D::_update_panning` asks the viewport for its audio
+    /// listener before falling back to the camera).
+    fn resolve_listener_3d(&self, tree: &SceneTree) -> AudioListener3D {
+        let listener_node = Self::current_node_of_class(tree, "AudioListener3D")
+            .or_else(|| crate::camera3d::current_camera3d(tree));
+        let Some(node_id) = listener_node else {
+            return AudioListener3D::default();
+        };
+        let xform = crate::node3d::get_global_transform(tree, node_id);
+        // Godot's convention: -Z is forward, +X is right.
+        let forward = -xform.basis.z;
+        let right = xform.basis.x;
+        AudioListener3D {
+            position: xform.origin,
+            forward: normalized_or(forward, Vector3::new(0.0, 0.0, -1.0)),
+            right: normalized_or(right, Vector3::new(1.0, 0.0, 0.0)),
+        }
+    }
+
+    /// The active 2D listener position: an `AudioListener2D` with `current`
+    /// set, then a `Camera2D`, then the canvas origin.
+    fn resolve_listener_2d(&self, tree: &SceneTree) -> Vector2 {
+        let listener_node = Self::current_node_of_class(tree, "AudioListener2D")
+            .or_else(|| Self::current_node_of_class(tree, "Camera2D"))
+            .or_else(|| Self::first_node_of_class(tree, "Camera2D"));
+        match listener_node {
+            Some(id) => crate::node2d::get_global_position(tree, id),
+            None => Vector2::ZERO,
+        }
+    }
+
+    /// First node of `class_name` whose `current` property is true — Godot's
+    /// `make_current()`/`clear_current()` write exactly that flag.
+    fn current_node_of_class(tree: &SceneTree, class_name: &str) -> Option<NodeId> {
+        tree.all_nodes_in_tree_order().into_iter().find(|&id| {
+            tree.get_node(id).is_some_and(|n| {
+                n.class_name() == class_name
+                    && matches!(n.get_property("current"), Variant::Bool(true))
+            })
+        })
+    }
+
+    /// First node of `class_name` regardless of `current` — the fallback Godot
+    /// uses when a scene has a camera but nobody called `make_current()`.
+    fn first_node_of_class(tree: &SceneTree, class_name: &str) -> Option<NodeId> {
+        tree.all_nodes_in_tree_order().into_iter().find(|&id| {
+            tree.get_node(id)
+                .is_some_and(|n| n.class_name() == class_name)
+        })
+    }
+
+    /// Mirrors an `AudioStreamPlayer3D` node's spatial properties, using Godot's
+    /// defaults for anything the scene did not set.
+    fn read_spatial_3d(&self, tree: &SceneTree, id: NodeId) -> Spatial3D {
+        let mut source = Spatial3D {
+            position: crate::node3d::get_global_transform(tree, id).origin,
+            ..Default::default()
+        };
+        let Some(node) = tree.get_node(id) else {
+            return source;
+        };
+        if let Some(v) = number_property(node, "volume_db") {
+            source.volume_db = v;
+        }
+        if let Some(v) = number_property(node, "unit_size") {
+            source.unit_size = v;
+        }
+        if let Some(v) = number_property(node, "max_distance") {
+            source.max_distance = v;
+        }
+        if let Some(v) = number_property(node, "max_db") {
+            source.max_db = v;
+        }
+        if let Some(v) = number_property(node, "panning_strength") {
+            source.panning_strength = v;
+        }
+        if let Variant::Int(model) = node.get_property("attenuation_model") {
+            source.attenuation_model = AttenuationModel::from_godot_int(model);
+        }
+        source
+    }
+
+    /// Mirrors an `AudioStreamPlayer2D` node's spatial properties. Godot's 2D
+    /// player spells its falloff exponent `attenuation` (the 3D one uses an
+    /// enum model instead).
+    fn read_spatial_2d(&self, tree: &SceneTree, id: NodeId) -> Spatial2D {
+        let mut source = Spatial2D {
+            position: crate::node2d::get_global_position(tree, id),
+            ..Default::default()
+        };
+        let Some(node) = tree.get_node(id) else {
+            return source;
+        };
+        if let Some(v) = number_property(node, "volume_db") {
+            source.volume_db = v;
+        }
+        if let Some(v) = number_property(node, "max_distance") {
+            source.max_distance = v;
+        }
+        if let Some(v) = number_property(node, "attenuation") {
+            source.attenuation = v;
+        }
+        if let Some(v) = number_property(node, "panning_strength") {
+            source.panning_strength = v;
+        }
+        source
     }
 
     /// Writes the live playback position of `id`'s voice onto its node as
@@ -351,6 +567,28 @@ fn is_unresolved_resource_ref(raw: &str) -> bool {
         || t.starts_with("ExtResource:")
         || t.starts_with("SubResource(")
         || t.starts_with("SubResource:")
+}
+
+/// Reads a numeric node property as `f32`, accepting either Variant number
+/// form. `None` means the scene never set it, so the caller keeps Godot's
+/// default rather than collapsing the value to zero.
+fn number_property(node: &crate::node::Node, key: &str) -> Option<f32> {
+    match node.get_property(key) {
+        Variant::Float(f) => Some(f as f32),
+        Variant::Int(i) => Some(i as f32),
+        _ => None,
+    }
+}
+
+/// Normalizes `v`, falling back to `fallback` for a degenerate (zero-length)
+/// basis column — a listener with a collapsed basis should still hear centered
+/// audio rather than produce NaNs.
+fn normalized_or(v: Vector3, fallback: Vector3) -> Vector3 {
+    if v.length() < 1e-6 {
+        fallback
+    } else {
+        v.normalized()
+    }
 }
 
 impl std::fmt::Debug for AudioServerBridge {

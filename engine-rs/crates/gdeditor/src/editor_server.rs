@@ -1121,8 +1121,7 @@ struct RateBucket {
 /// acceptance criteria (">60 requests per second returns HTTP 429").
 pub const DEFAULT_RATE_LIMIT_PER_SECOND: u32 = 60;
 
-const RATE_LIMIT_BODY: &str =
-    r#"{"error":{"code":"rate_limit","message":"rate limit exceeded"}}"#;
+const RATE_LIMIT_BODY: &str = r#"{"error":{"code":"rate_limit","message":"rate limit exceeded"}}"#;
 
 /// Whether `path` is one of the editor's own real-time view endpoints that are
 /// exempt from the abuse rate limiter (see the call site in `handle_connection`).
@@ -1187,11 +1186,9 @@ pub static PERF_TICK_MS: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomi
 /// entirely (memcpy-ish), so it's the fastest to encode over localhost.
 pub static PERF_STREAM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// Last measured 3D raster time (microseconds) — set by the render loop.
-pub static PERF_LAST_RASTER_US: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(0);
+pub static PERF_LAST_RASTER_US: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// Last measured frame-encode time (microseconds) — set by `update_frame`.
-pub static PERF_LAST_ENCODE_US: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(0);
+pub static PERF_LAST_ENCODE_US: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// Monotonic count of frames the render loop has produced (`update_frame` calls).
 /// Lets a benchmark measure the exact server render rate — (Δcount / Δtime) —
 /// independent of how fast the client polls the frame (which undersamples large
@@ -1349,7 +1346,13 @@ impl IdempotencyCache {
     fn insert(&self, key: String, response: Vec<u8>) {
         let expires_at = SystemTime::now() + self.ttl;
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        entries.insert(key, IdempotencyEntry { response, expires_at });
+        entries.insert(
+            key,
+            IdempotencyEntry {
+                response,
+                expires_at,
+            },
+        );
     }
 }
 
@@ -1737,10 +1740,7 @@ fn run_runtime_driver(state: Arc<Mutex<EditorState>>, running: Arc<AtomicBool>) 
     while running.load(Ordering::Relaxed) {
         let frame_secs = {
             let mut st = state.lock().unwrap();
-            if st.is_running
-                && !st.is_paused
-                && !st.runtime_suspended
-                && st.run_main_loop.is_some()
+            if st.is_running && !st.is_paused && !st.runtime_suspended && st.run_main_loop.is_some()
             {
                 advance_running_main_loop(&mut st);
             }
@@ -2041,10 +2041,7 @@ fn handle_connection(
             if provided != Some(expected.as_str()) {
                 // pat-f23vr: emit the standardized error envelope so clients
                 // can rely on a uniform error shape for 401.
-                let body = error_envelope_body(
-                    "unauthorized",
-                    "missing or invalid Bearer token",
-                );
+                let body = error_envelope_body("unauthorized", "missing or invalid Bearer token");
                 let response = format!(
                     "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm=\"patina-editor\"\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nAccess-Control-Allow-Origin: {origin}\r\nConnection: close\r\n\r\n{body}",
                     len = body.len(),
@@ -2073,21 +2070,21 @@ fn handle_connection(
         let client_token = req.auth_token.as_deref().unwrap_or("anonymous");
         if !is_rate_limit_exempt(req.path.as_str()) {
             if let Err(retry_after) = rate_limiter.check(client_token) {
-            let response = format!(
-                "HTTP/1.1 429 Too Many Requests\r\n\
+                let response = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\n\
                  Retry-After: {retry_after}\r\n\
                  Content-Type: application/json\r\n\
                  Content-Length: {len}\r\n\
                  Access-Control-Allow-Origin: {origin}\r\n\
                  Connection: close\r\n\r\n{body}",
-                len = RATE_LIMIT_BODY.len(),
-                body = RATE_LIMIT_BODY,
-                origin = cors_current_allow_origin(),
-            );
-            let _ = stream.write_all(response.as_bytes());
-            audit_set_status(429);
-            audit_log_request(&req, auth_token.as_ref().as_deref());
-            return;
+                    len = RATE_LIMIT_BODY.len(),
+                    body = RATE_LIMIT_BODY,
+                    origin = cors_current_allow_origin(),
+                );
+                let _ = stream.write_all(response.as_bytes());
+                audit_set_status(429);
+                audit_log_request(&req, auth_token.as_ref().as_deref());
+                return;
             }
         }
     }
@@ -2117,9 +2114,9 @@ fn handle_connection(
     // miss we arm the capture buffer so the response we *will* send gets
     // stored after dispatch completes.
     let idem_cache_key: Option<String> = if audit_is_mutating(&req.method) {
-        req.idempotency_key.as_deref().map(|key| {
-            IdempotencyCache::cache_key(key, &req.method, &req.path)
-        })
+        req.idempotency_key
+            .as_deref()
+            .map(|key| IdempotencyCache::cache_key(key, &req.method, &req.path))
     } else {
         None
     };
@@ -2237,14 +2234,22 @@ fn handle_connection(
         ("POST", "/api/viewport/3d/pan") => api_viewport_3d_pan(state, &req.body, &mut stream),
         ("POST", "/api/viewport/3d/zoom") => api_viewport_3d_zoom(state, &req.body, &mut stream),
         ("POST", "/api/viewport/3d/fly/begin") => api_viewport_3d_fly_begin(state, &mut stream),
-        ("POST", "/api/viewport/3d/fly/look") => api_viewport_3d_fly_look(state, &req.body, &mut stream),
-        ("POST", "/api/viewport/3d/fly/move") => api_viewport_3d_fly_move(state, &req.body, &mut stream),
-        ("POST", "/api/viewport/3d/fly/speed") => api_viewport_3d_fly_speed(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/3d/fly/look") => {
+            api_viewport_3d_fly_look(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/3d/fly/move") => {
+            api_viewport_3d_fly_move(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/3d/fly/speed") => {
+            api_viewport_3d_fly_speed(state, &req.body, &mut stream)
+        }
         ("POST", "/api/viewport/3d/fly/end") => api_viewport_3d_fly_end(state, &mut stream),
         ("GET", "/api/viewport/3d/perf") => api_viewport_3d_perf_get(&mut stream),
         ("POST", "/api/viewport/3d/perf") => api_viewport_3d_perf_set(&req.body, &mut stream),
         ("POST", "/api/viewport/3d/reset") => api_viewport_3d_reset(state, &mut stream),
-        ("POST", "/api/viewport/3d/select") => api_viewport_3d_select(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/3d/select") => {
+            api_viewport_3d_select(state, &req.body, &mut stream)
+        }
         ("POST", "/api/viewport/3d/box_select") => {
             api_viewport_3d_box_select(state, &req.body, &mut stream)
         }
@@ -2266,12 +2271,24 @@ fn handle_connection(
         ("GET", "/api/viewport/3d/state") => api_viewport_3d_state(state, &mut stream),
         // 3D spatial toolbar (Godot Node3DEditor): view/preview toggles, snap
         // config, snap-to-floor, and lock/group applied to the selection.
-        ("POST", "/api/viewport/3d/view_flag") => api_viewport_3d_view_flag(state, &req.body, &mut stream),
-        ("POST", "/api/viewport/3d/snap_config") => api_viewport_3d_snap_config(state, &req.body, &mut stream),
-        ("POST", "/api/viewport/3d/sun_config") => api_viewport_3d_sun_config(state, &req.body, &mut stream),
-        ("POST", "/api/viewport/3d/translate_selection") => api_viewport_3d_translate_selection(state, &req.body, &mut stream),
-        ("POST", "/api/viewport/3d/snap_to_floor") => api_viewport_3d_snap_to_floor(state, &mut stream),
-        ("POST", "/api/viewport/3d/ground_point") => api_viewport_3d_ground_point(state, &req.body, &mut stream),
+        ("POST", "/api/viewport/3d/view_flag") => {
+            api_viewport_3d_view_flag(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/3d/snap_config") => {
+            api_viewport_3d_snap_config(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/3d/sun_config") => {
+            api_viewport_3d_sun_config(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/3d/translate_selection") => {
+            api_viewport_3d_translate_selection(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/3d/snap_to_floor") => {
+            api_viewport_3d_snap_to_floor(state, &mut stream)
+        }
+        ("POST", "/api/viewport/3d/ground_point") => {
+            api_viewport_3d_ground_point(state, &req.body, &mut stream)
+        }
         ("POST", "/api/viewport/3d/lock") => api_viewport_3d_lock(state, &req.body, &mut stream),
         ("POST", "/api/viewport/3d/group") => api_viewport_3d_group(state, &req.body, &mut stream),
         ("POST", "/api/viewport/frame_selection") => api_frame_selection(state, &mut stream),
@@ -2344,11 +2361,19 @@ fn handle_connection(
         ("GET", "/api/runtime/node") => api_runtime_node(state, &req.query, &mut stream),
         // pat-j9yqh: game-view runtime toolbar controls
         ("POST", "/api/runtime/suspend") => api_runtime_suspend(state, &req.body, &mut stream),
-        ("POST", "/api/runtime/time_scale") => api_runtime_time_scale(state, &req.body, &mut stream),
+        ("POST", "/api/runtime/time_scale") => {
+            api_runtime_time_scale(state, &req.body, &mut stream)
+        }
         ("POST", "/api/runtime/mute") => api_runtime_mute(state, &req.body, &mut stream),
-        ("POST", "/api/runtime/camera_override") => api_runtime_camera_override(state, &req.body, &mut stream),
-        ("POST", "/api/runtime/hide_selection") => api_runtime_hide_selection(state, &req.body, &mut stream),
-        ("POST", "/api/runtime/input_mode") => api_runtime_input_mode(state, &req.body, &mut stream),
+        ("POST", "/api/runtime/camera_override") => {
+            api_runtime_camera_override(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/runtime/hide_selection") => {
+            api_runtime_hide_selection(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/runtime/input_mode") => {
+            api_runtime_input_mode(state, &req.body, &mut stream)
+        }
         // Input endpoints
         ("POST", "/api/runtime/input/key_down") => {
             api_input_key_down(state, &req.body, &mut stream)
@@ -2428,13 +2453,19 @@ fn handle_connection(
         ("POST", "/api/debug/continue") => api_debug_continue(state, &mut stream),
         // pat-j906k: debugger sub-tab data + session actions
         ("GET", "/api/debug/errors") => api_get_debug_errors(state, &mut stream),
-        ("POST", "/api/debug/record_error") => api_record_debug_error(state, &req.body, &mut stream),
+        ("POST", "/api/debug/record_error") => {
+            api_record_debug_error(state, &req.body, &mut stream)
+        }
         ("POST", "/api/debug/clear_errors") => api_clear_debug_errors(state, &mut stream),
         ("POST", "/api/debug/evaluate") => api_debug_evaluate(state, &req.body, &mut stream),
         ("POST", "/api/debug/break") => api_debug_break(state, &mut stream),
-        ("POST", "/api/debug/skip_breakpoints") => api_debug_skip_breakpoints(state, &req.body, &mut stream),
+        ("POST", "/api/debug/skip_breakpoints") => {
+            api_debug_skip_breakpoints(state, &req.body, &mut stream)
+        }
         ("GET", "/api/debug/info") => api_get_debug_info(state, &mut stream),
-        ("POST", "/api/debug/live_edit_root") => api_set_live_edit_root(state, &req.body, &mut stream),
+        ("POST", "/api/debug/live_edit_root") => {
+            api_set_live_edit_root(state, &req.body, &mut stream)
+        }
         ("POST", "/api/debug/network_profiler") => {
             api_set_network_profiling(state, &req.body, &mut stream)
         }
@@ -2556,9 +2587,7 @@ fn handle_connection(
         // export_presets.cfg. The client has called these since pat-4cexp; they
         // had no routes and 404'd through the fallback below.
         ("GET", "/api/export/presets") => api_export_presets_list(state, &mut stream),
-        ("POST", "/api/export/presets") => {
-            api_export_presets_create(state, &req.body, &mut stream)
-        }
+        ("POST", "/api/export/presets") => api_export_presets_create(state, &req.body, &mut stream),
         ("POST", "/api/export/presets/update") => {
             api_export_presets_update(state, &req.body, &mut stream)
         }
@@ -2962,11 +2991,7 @@ fn publish_event(state: &mut EditorState, msg: String) {
 /// handshake, registers a subscriber channel, and writes each broadcast
 /// event back to the client as an unfragmented text frame. The function
 /// blocks the connection thread on `recv()` until the receiver hangs up.
-fn api_events_websocket(
-    state: &Arc<Mutex<EditorState>>,
-    req: &HttpRequest,
-    mut stream: TcpStream,
-) {
+fn api_events_websocket(state: &Arc<Mutex<EditorState>>, req: &HttpRequest, mut stream: TcpStream) {
     let key = match req.sec_websocket_key.as_deref() {
         Some(k) => k,
         None => {
@@ -3058,9 +3083,7 @@ fn audit_timestamp() -> String {
     let minute = (rem % 3600) / 60;
     let second = rem % 60;
     let (year, month, day) = days_to_ymd(days as i64);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{micros:06}Z"
-    )
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{micros:06}Z")
 }
 
 /// Convert days since 1970-01-01 to (year, month, day) in the proleptic
@@ -3173,8 +3196,10 @@ fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
     // (the `_unique_name_in_owner` meta) show the `%` indicator. A duplicate
     // unique name among nodes in the same owner (this single-scene tree) is
     // surfaced as a collision warning so the UI can flag it.
-    let unique_name_in_owner =
-        matches!(node.get_property("_unique_name_in_owner"), Variant::Bool(true));
+    let unique_name_in_owner = matches!(
+        node.get_property("_unique_name_in_owner"),
+        Variant::Bool(true)
+    );
     let unique_name_collision = unique_name_in_owner && {
         let my_name = node.name();
         tree.all_nodes_in_tree_order()
@@ -3344,7 +3369,8 @@ fn node_properties_json(
                 // Virtual Control property Godot derives from the parent/anchors.
                 Variant::Int(compute_control_layout_mode(tree, node_id))
             } else if node.has_property(ep.name)
-                && !(ep.type_name == "Object" && is_internal_resource_marker(&node.get_property(ep.name)))
+                && !(ep.type_name == "Object"
+                    && is_internal_resource_marker(&node.get_property(ep.name)))
             {
                 node.get_property(ep.name)
             } else if gdscene::transform_inspector::is_transform_component(ep.name)
@@ -3460,7 +3486,10 @@ fn scene_res_path(state: &EditorState) -> Option<String> {
     let root_c = std::fs::canonicalize(root).ok()?;
     let scene_c = std::fs::canonicalize(scene).ok()?;
     let rel = scene_c.strip_prefix(&root_c).ok()?;
-    Some(format!("res://{}", rel.to_string_lossy().replace('\\', "/")))
+    Some(format!(
+        "res://{}",
+        rel.to_string_lossy().replace('\\', "/")
+    ))
 }
 
 /// Finds a NodeId from a raw u64 by scanning the scene tree.
@@ -3837,17 +3866,16 @@ fn api_get_selected(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
 fn api_inspector_header(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let json = {
         let state = state.lock().unwrap();
-        match state.selected_node.and_then(|id| {
-            state.scene_tree.get_node(id).map(|n| (n, id))
-        }) {
+        match state
+            .selected_node
+            .and_then(|id| state.scene_tree.get_node(id).map(|n| (n, id)))
+        {
             Some((node, id)) => {
                 let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
                 let name = esc(node.name());
                 let class = esc(node.class_name());
                 let path = esc(&state.scene_tree.node_path(id).unwrap_or_default());
-                format!(
-                    r#"{{"visible":true,"name":"{name}","class":"{class}","path":"{path}"}}"#
-                )
+                format!(r#"{{"visible":true,"name":"{name}","class":"{class}","path":"{path}"}}"#)
             }
             None => r#"{"visible":false}"#.to_string(),
         }
@@ -4097,11 +4125,7 @@ fn api_change_node_type(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
 /// `POST /api/node/editable_children` — toggles whether an instanced node's
 /// internal (child) nodes are exposed for editing. Sets the `_editable_children`
 /// flag, surfaced as `editable_children` in the scene tree JSON.
-fn api_set_editable_children(
-    state: &Arc<Mutex<EditorState>>,
-    body: &str,
-    stream: &mut TcpStream,
-) {
+fn api_set_editable_children(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
         Some(v) => v,
         None => {
@@ -4117,7 +4141,10 @@ fn api_set_editable_children(
         }
     };
     // Default to enabling; callers may pass `enabled: false` to hide again.
-    let enabled = parsed.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let enabled = parsed
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
     let mut state = state.lock().unwrap();
     let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
@@ -4137,7 +4164,10 @@ fn api_set_editable_children(
         }
     }
     state.scene_modified = true;
-    send_json(stream, &format!(r#"{{"ok":true,"editable_children":{enabled}}}"#));
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"editable_children":{enabled}}}"#),
+    );
 }
 
 /// `POST /api/node/make_local` — converts an instanced node into an owned local
@@ -4202,7 +4232,10 @@ fn api_set_node_lock(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
             return;
         }
     };
-    let locked = parsed.get("locked").and_then(|v| v.as_bool()).unwrap_or(true);
+    let locked = parsed
+        .get("locked")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
     let mut state = state.lock().unwrap();
     let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
@@ -4281,9 +4314,7 @@ fn api_open_node_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
         let tab_id = state.scene_tabs[idx].id;
         send_json(
             stream,
-            &format!(
-                r#"{{"ok":true,"path":"{source_esc}","tab_id":{tab_id},"switched":true}}"#
-            ),
+            &format!(r#"{{"ok":true,"path":"{source_esc}","tab_id":{tab_id},"switched":true}}"#),
         );
         return;
     }
@@ -4352,10 +4383,7 @@ fn api_open_node_script(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
 
     state.add_log("info", format!("Opened script '{}'", script_path));
     let path_esc = script_path.replace('\\', "\\\\").replace('"', "\\\"");
-    send_json(
-        stream,
-        &format!(r#"{{"ok":true,"path":"{path_esc}"}}"#),
-    );
+    send_json(stream, &format!(r#"{{"ok":true,"path":"{path_esc}"}}"#));
 }
 
 /// `POST /api/node/group` — toggles whether a node groups its children for
@@ -4378,7 +4406,10 @@ fn api_set_group(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpSt
             return;
         }
     };
-    let enabled = parsed.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let enabled = parsed
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
     let mut state = state.lock().unwrap();
     let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
@@ -4421,7 +4452,10 @@ fn api_set_unique_name(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
             return;
         }
     };
-    let enabled = parsed.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let enabled = parsed
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
     let mut state = state.lock().unwrap();
     let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
@@ -4445,7 +4479,10 @@ fn api_set_unique_name(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
         }
     }
     state.scene_modified = true;
-    send_json(stream, &format!(r#"{{"ok":true,"unique_name_in_owner":{enabled}}}"#));
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"unique_name_in_owner":{enabled}}}"#),
+    );
 }
 
 /// Resolves the selection target for a viewport click: walks up from `node_id`
@@ -4457,7 +4494,8 @@ fn resolve_group_selection(tree: &SceneTree, node_id: NodeId) -> NodeId {
     let mut current = tree.get_node(node_id).and_then(|n| n.parent());
     while let Some(ancestor) = current {
         if matches!(
-            tree.get_node(ancestor).map(|n| n.get_property("_edit_group_")),
+            tree.get_node(ancestor)
+                .map(|n| n.get_property("_edit_group_")),
             Some(Variant::Bool(true))
         ) {
             target = ancestor;
@@ -4518,9 +4556,7 @@ fn api_rename_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
                     p.children()
                         .iter()
                         .filter(|&&c| c != node_id)
-                        .filter_map(|&c| {
-                            state.scene_tree.get_node(c).map(|n| n.name().to_string())
-                        })
+                        .filter_map(|&c| state.scene_tree.get_node(c).map(|n| n.name().to_string()))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -4707,7 +4743,9 @@ fn api_create_dialog(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     if st.create_node_dialog.persist_dir().is_none() {
         if let Some(root) = st.project_root.clone() {
             st.create_node_dialog.set_persist_dir(Some(
-                std::path::PathBuf::from(root).join(".patina").join("editor"),
+                std::path::PathBuf::from(root)
+                    .join(".patina")
+                    .join("editor"),
             ));
         }
     }
@@ -5146,10 +5184,14 @@ fn theme_item_json(
 ) -> serde_json::Value {
     use crate::theme_editor::ThemeItem;
     let (data_type, value) = match item {
-        ThemeItem::Color(c) => ("color", serde_json::json!({ "color": [c.0, c.1, c.2, c.3] })),
-        ThemeItem::IconColor(c) => {
-            ("icon_color", serde_json::json!({ "color": [c.0, c.1, c.2, c.3] }))
-        }
+        ThemeItem::Color(c) => (
+            "color",
+            serde_json::json!({ "color": [c.0, c.1, c.2, c.3] }),
+        ),
+        ThemeItem::IconColor(c) => (
+            "icon_color",
+            serde_json::json!({ "color": [c.0, c.1, c.2, c.3] }),
+        ),
         ThemeItem::Constant(n) => ("constant", serde_json::json!({ "value": n })),
         ThemeItem::FontSize(s) => ("font_size", serde_json::json!({ "value": s })),
         ThemeItem::StyleBox(sb) => ("stylebox", serde_json::json!({ "stylebox": sb })),
@@ -5423,7 +5465,10 @@ fn next_resource_id(used: &std::collections::HashSet<String>, slug: &str) -> Str
     } else {
         slug.to_ascii_lowercase()
     };
-    (1..).map(|n| format!("{n}_{slug}")).find(|id| !used.contains(id)).unwrap_or_default()
+    (1..)
+        .map(|n| format!("{n}_{slug}"))
+        .find(|id| !used.contains(id))
+        .unwrap_or_default()
 }
 
 /// `POST /api/property/resource/assign` — points a resource property at a file on
@@ -5539,11 +5584,7 @@ fn api_assign_resource_property(
 /// Body: `{"node_id": 123, "property": "shape", "class_name": "RectangleShape2D"}`.
 /// The resource is stored as `SubResource("id")` plus the `__resref__<prop>` =
 /// `Class::id` companion the scene saver turns into a `[sub_resource]` section.
-fn api_new_resource_property(
-    state: &Arc<Mutex<EditorState>>,
-    body: &str,
-    stream: &mut TcpStream,
-) {
+fn api_new_resource_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let Some(parsed) = parse_json_body(body) else {
         send_error(stream, 400, "invalid JSON");
         return;
@@ -5573,7 +5614,9 @@ fn api_new_resource_property(
     // the picker only ever sends names from its own subclass list.
     let well_formed = !class_name.is_empty()
         && class_name.starts_with(|c: char| c.is_ascii_uppercase())
-        && class_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        && class_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !well_formed {
         send_error(
             stream,
@@ -5771,9 +5814,7 @@ fn api_patch_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
         send_error(
             stream,
             409,
-            &format!(
-                "stale version: supplied {supplied_version} != current {current_version}"
-            ),
+            &format!("stale version: supplied {supplied_version} != current {current_version}"),
         );
         return;
     }
@@ -5801,10 +5842,7 @@ fn api_patch_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
         format!("PATCH property '{prop_name}' v{current_version}->v{new_version}"),
     );
 
-    send_json(
-        stream,
-        &format!(r#"{{"ok":true,"version":{new_version}}}"#),
-    );
+    send_json(stream, &format!(r#"{{"ok":true,"version":{new_version}}}"#));
 }
 
 /// `POST /api/undo` — undoes the last command.
@@ -6128,12 +6166,9 @@ pub fn atomic_write(path: &std::path::Path, contents: &[u8]) -> std::io::Result<
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
     })?;
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid file name")
-        })?;
+    let file_name = path.file_name().and_then(|s| s.to_str()).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid file name")
+    })?;
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -6282,8 +6317,7 @@ fn world_environment_from_scene(
     })?;
 
     let env_props = scene.sub_resource_props(&env_id)?;
-    let mut env =
-        Environment3D::from_properties(env_props.iter().map(|(k, v)| (k.as_str(), v)));
+    let mut env = Environment3D::from_properties(env_props.iter().map(|(k, v)| (k.as_str(), v)));
 
     // Resolve the nested Sky → sky material.
     if let Some(sky_id) = env_props.get("sky").and_then(resref_id) {
@@ -6323,11 +6357,18 @@ fn world_environment_from_scene(
                     let fs_path = resolve_res_path(root, &res_path).ok()?;
                     let (width, height, pixels) =
                         gdresource::importers::load_color_texture_linear(&fs_path).ok()?;
-                    Some(gdserver3d::sky::PanoramaTexture { width, height, pixels })
+                    Some(gdserver3d::sky::PanoramaTexture {
+                        width,
+                        height,
+                        pixels,
+                    })
                 });
             }
 
-            env.sky = Some(Sky { material, ..Sky::default() });
+            env.sky = Some(Sky {
+                material,
+                ..Sky::default()
+            });
         }
     }
 
@@ -6402,13 +6443,20 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
             // mutably borrow `state`.
             let project_root = state.project_root.clone();
             match world_environment_from_scene(&scene, &new_tree, project_root.as_deref()) {
-                Some(env) => state.editor_viewport_3d.environment.load_from_environment(env),
+                Some(env) => state
+                    .editor_viewport_3d
+                    .environment
+                    .load_from_environment(env),
                 None => {
                     state.editor_viewport_3d.environment.environment =
                         crate::viewport_3d::EnvironmentPreview3D::default().environment;
                 }
             }
             state.scene_tree = new_tree;
+            // The loaded scene's AnimationPlayer clips become the panel's list
+            // (pat-0q2kx.54); before this, opening a .tscn with animations
+            // showed an empty animation panel.
+            sync_animations_from_scene(&mut state);
             state.selected_node = None;
             state.selected_nodes.clear();
             state.undo_stack.clear();
@@ -6767,9 +6815,15 @@ fn editor_viewport_3d_json(state: &EditorState) -> String {
         c.focus_point.y,
         c.focus_point.z,
         ortho,
-        v.basis.x.x, v.basis.x.y, v.basis.x.z,
-        v.basis.y.x, v.basis.y.y, v.basis.y.z,
-        v.basis.z.x, v.basis.z.y, v.basis.z.z,
+        v.basis.x.x,
+        v.basis.x.y,
+        v.basis.x.z,
+        v.basis.y.x,
+        v.basis.y.y,
+        v.basis.y.z,
+        v.basis.z.x,
+        v.basis.z.y,
+        v.basis.z.z,
         vp.environment.sun_enabled,
         vp.environment.enabled,
         vp.grid.visible,
@@ -6800,7 +6854,11 @@ fn selection_node_ids(state: &EditorState) -> Vec<NodeId> {
 /// viewport state so the toolbar re-syncs its button states.
 fn api_viewport_3d_view_flag(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
-    let flag = p.get("flag").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let flag = p
+        .get("flag")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let want = p.get("value").and_then(|v| v.as_bool());
     let mut state = state.lock().unwrap();
     let vp = &mut state.editor_viewport_3d;
@@ -6843,7 +6901,11 @@ fn api_viewport_3d_view_flag(state: &Arc<Mutex<EditorState>>, body: &str, stream
 /// `POST /api/viewport/3d/snap_config` — sets the transform snap increments
 /// (Godot's Configure Snap dialog): `{ "translate": <f>, "rotate": <deg>,
 /// "scale": <frac> }`. Any omitted field is left unchanged. Returns 3D state.
-fn api_viewport_3d_snap_config(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+fn api_viewport_3d_snap_config(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
     let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
     let mut state = state.lock().unwrap();
     let vp = &mut state.editor_viewport_3d;
@@ -6905,10 +6967,16 @@ fn api_viewport_3d_translate_selection(
     let mut moved = 0u32;
     for id in ids {
         let is3d = matches!(
-            state.scene_tree.get_node(id).map(|n| n.get_property("position")),
+            state
+                .scene_tree
+                .get_node(id)
+                .map(|n| n.get_property("position")),
             Some(Variant::Vector3(_))
         ) || matches!(
-            state.scene_tree.get_node(id).map(|n| n.get_property("transform")),
+            state
+                .scene_tree
+                .get_node(id)
+                .map(|n| n.get_property("transform")),
             Some(Variant::Transform3D(_))
         );
         if !is3d {
@@ -6937,7 +7005,10 @@ fn api_viewport_3d_snap_to_floor(state: &Arc<Mutex<EditorState>>, stream: &mut T
     let mut moved = 0u32;
     for id in ids {
         let is3d = matches!(
-            state.scene_tree.get_node(id).map(|n| n.get_property("position")),
+            state
+                .scene_tree
+                .get_node(id)
+                .map(|n| n.get_property("position")),
             Some(Variant::Vector3(_))
         );
         if !is3d {
@@ -6961,7 +7032,11 @@ fn api_viewport_3d_snap_to_floor(state: &Arc<Mutex<EditorState>>, stream: &mut T
 /// the ground plane (y = 0) and returns the world point, for the Ruler tool's
 /// distance measurement. Returns `{ "hit": false }` when the ray is parallel to
 /// or points away from the plane.
-fn api_viewport_3d_ground_point(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+fn api_viewport_3d_ground_point(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
     let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
     let x = p.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
     let y = p.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
@@ -6978,7 +7053,10 @@ fn api_viewport_3d_ground_point(state: &Arc<Mutex<EditorState>>, body: &str, str
     }
     let px = ray.origin.x + ray.direction.x * t;
     let pz = ray.origin.z + ray.direction.z * t;
-    send_json(stream, &format!(r#"{{"hit":true,"x":{px},"y":0.0,"z":{pz}}}"#));
+    send_json(
+        stream,
+        &format!(r#"{{"hit":true,"x":{px},"y":0.0,"z":{pz}}}"#),
+    );
 }
 
 /// `POST /api/viewport/3d/lock` — locks or unlocks every selected node
@@ -6998,7 +7076,10 @@ fn api_viewport_3d_lock(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
     if count > 0 {
         state.scene_modified = true;
     }
-    send_json(stream, &format!(r#"{{"ok":true,"locked":{locked},"count":{count}}}"#));
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"locked":{locked},"count":{count}}}"#),
+    );
 }
 
 /// `POST /api/viewport/3d/group` — groups or ungroups every selected node
@@ -7018,7 +7099,10 @@ fn api_viewport_3d_group(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
     if count > 0 {
         state.scene_modified = true;
     }
-    send_json(stream, &format!(r#"{{"ok":true,"grouped":{grouped},"count":{count}}}"#));
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"grouped":{grouped},"count":{count}}}"#),
+    );
 }
 
 /// `POST /api/viewport/3d/orbit` — orbit the 3D editor camera by a mouse delta
@@ -7205,14 +7289,21 @@ fn api_viewport_3d_select(state: &Arc<Mutex<EditorState>>, body: &str, stream: &
         st.selected_nodes = hit.into_iter().collect();
     }
 
-    let nodes: Vec<String> = st.selected_nodes.iter().map(|id| id.raw().to_string()).collect();
+    let nodes: Vec<String> = st
+        .selected_nodes
+        .iter()
+        .map(|id| id.raw().to_string())
+        .collect();
     let primary = st
         .selected_node
         .map(|id| id.raw().to_string())
         .unwrap_or_else(|| "null".to_string());
     send_json(
         stream,
-        &format!(r#"{{"selected":{primary},"selected_nodes":[{}]}}"#, nodes.join(",")),
+        &format!(
+            r#"{{"selected":{primary},"selected_nodes":[{}]}}"#,
+            nodes.join(",")
+        ),
     );
 }
 
@@ -7255,14 +7346,21 @@ fn api_viewport_3d_box_select(state: &Arc<Mutex<EditorState>>, body: &str, strea
     }
     st.selected_node = st.selected_nodes.first().copied();
 
-    let nodes: Vec<String> = st.selected_nodes.iter().map(|id| id.raw().to_string()).collect();
+    let nodes: Vec<String> = st
+        .selected_nodes
+        .iter()
+        .map(|id| id.raw().to_string())
+        .collect();
     let primary = st
         .selected_node
         .map(|id| id.raw().to_string())
         .unwrap_or_else(|| "null".to_string());
     send_json(
         stream,
-        &format!(r#"{{"selected":{primary},"selected_nodes":[{}]}}"#, nodes.join(",")),
+        &format!(
+            r#"{{"selected":{primary},"selected_nodes":[{}]}}"#,
+            nodes.join(",")
+        ),
     );
 }
 
@@ -7318,7 +7416,11 @@ fn api_viewport_3d_gizmo_mode(state: &Arc<Mutex<EditorState>>, body: &str, strea
 /// `POST /api/viewport/3d/gizmo/begin` — begins a transform-gizmo drag if the
 /// click at (`x`, `y`) hits a gizmo axis of the selected node. Returns whether a
 /// drag started and which axis.
-fn api_viewport_3d_gizmo_begin(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+fn api_viewport_3d_gizmo_begin(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
     use crate::viewport_3d::GizmoAxis;
     let parsed = match parse_json_body(body) {
         Some(v) => v,
@@ -7363,10 +7465,18 @@ fn api_viewport_3d_gizmo_begin(state: &Arc<Mutex<EditorState>>, body: &str, stre
     let starts: Vec<(NodeId, gdcore::math3d::Transform3D)> = st
         .selected_nodes
         .iter()
-        .map(|&id| (id, gdscene::node3d::get_global_transform(&st.scene_tree, id)))
+        .map(|&id| {
+            (
+                id,
+                gdscene::node3d::get_global_transform(&st.scene_tree, id),
+            )
+        })
         .collect();
     st.gizmo_drag_starts_3d = if starts.is_empty() {
-        vec![(node, gdscene::node3d::get_global_transform(&st.scene_tree, node))]
+        vec![(
+            node,
+            gdscene::node3d::get_global_transform(&st.scene_tree, node),
+        )]
     } else {
         starts
     };
@@ -7387,7 +7497,10 @@ fn api_viewport_3d_gizmo_begin(state: &Arc<Mutex<EditorState>>, body: &str, stre
         GizmoAxis::YZ => "yz",
         GizmoAxis::None => "none",
     };
-    send_json(stream, &format!(r#"{{"dragging":true,"axis":"{axis_name}"}}"#));
+    send_json(
+        stream,
+        &format!(r#"{{"dragging":true,"axis":"{axis_name}"}}"#),
+    );
 }
 
 /// `POST /api/viewport/3d/gizmo/update` — updates an in-progress gizmo drag with
@@ -7433,7 +7546,12 @@ fn api_viewport_3d_gizmo_update(
             let p = pivot_tf.origin;
             let resp = match t {
                 GizmoTransform3D::Move(d) => {
-                    format!(r#"{{"x":{},"y":{},"z":{}}}"#, p.x + d.x, p.y + d.y, p.z + d.z)
+                    format!(
+                        r#"{{"x":{},"y":{},"z":{}}}"#,
+                        p.x + d.x,
+                        p.y + d.y,
+                        p.z + d.z
+                    )
                 }
                 GizmoTransform3D::Rotate { angle, .. } => format!(r#"{{"angle":{angle}}}"#),
                 GizmoTransform3D::Scale { factor, .. } => format!(r#"{{"factor":{factor}}}"#),
@@ -7484,7 +7602,10 @@ fn apply_gizmo_to_selection(
                 set_node_local_transform(
                     tree,
                     *id,
-                    gdcore::math3d::Transform3D { basis: new_basis, origin: new_origin },
+                    gdcore::math3d::Transform3D {
+                        basis: new_basis,
+                        origin: new_origin,
+                    },
                 );
             }
         }
@@ -7515,7 +7636,10 @@ fn apply_gizmo_to_selection(
                 set_node_local_transform(
                     tree,
                     *id,
-                    gdcore::math3d::Transform3D { basis: new_basis, origin: new_origin },
+                    gdcore::math3d::Transform3D {
+                        basis: new_basis,
+                        origin: new_origin,
+                    },
                 );
             }
         }
@@ -7689,7 +7813,12 @@ fn api_frame_selection(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
         }
     }
     let (center_x, center_y, bounds_w, bounds_h) = if found {
-        ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0, max_x - min_x, max_y - min_y)
+        (
+            (min_x + max_x) / 2.0,
+            (min_y + max_y) / 2.0,
+            max_x - min_x,
+            max_y - min_y,
+        )
     } else {
         (0.0, 0.0, 0.0, 0.0)
     };
@@ -7886,11 +8015,7 @@ fn scan_directory(
         // so the request never completes and the 1 Hz UI poll saturates the
         // connection pool. The sibling script-search walker (`search_dir`)
         // already skips `target` for the same reason.
-        if name.starts_with('.')
-            || name == "target"
-            || name == "node_modules"
-            || name == ".git"
-        {
+        if name.starts_with('.') || name == "target" || name == "node_modules" || name == ".git" {
             continue;
         }
 
@@ -8076,10 +8201,7 @@ fn api_get_capabilities(stream: &mut TcpStream) {
             )
         })
         .collect();
-    let json = format!(
-        r#"{{"version":1,"routes":[{}]}}"#,
-        routes.join(",")
-    );
+    let json = format!(r#"{{"version":1,"routes":[{}]}}"#, routes.join(","));
     send_json(stream, &json);
 }
 
@@ -8152,7 +8274,10 @@ fn api_get_filesystem(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut
             .favorites()
             .iter()
             .map(|fav| {
-                let rel = fav.strip_prefix("res://").unwrap_or(fav).trim_end_matches('/');
+                let rel = fav
+                    .strip_prefix("res://")
+                    .unwrap_or(fav)
+                    .trim_end_matches('/');
                 let name = if rel.is_empty() {
                     "res://".to_string()
                 } else {
@@ -8320,7 +8445,10 @@ fn file_owners(root: &std::path::Path, target: &str) -> Vec<String> {
                 if let Ok(c) = std::fs::read_to_string(&p) {
                     if file_dependencies(&c).iter().any(|d| d == target) {
                         if let Ok(rel) = p.strip_prefix(root) {
-                            out.push(format!("res://{}", rel.display().to_string().replace('\\', "/")));
+                            out.push(format!(
+                                "res://{}",
+                                rel.display().to_string().replace('\\', "/")
+                            ));
                         }
                     }
                 }
@@ -8430,7 +8558,10 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 /// and its owners (`FILE_MENU_OWNERS`).
 fn api_filesystem_file_info(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
     let path = match query_param(query, "path") {
-        Some(p) => p.replace("%3A", ":").replace("%2F", "/").replace("%20", " "),
+        Some(p) => p
+            .replace("%3A", ":")
+            .replace("%2F", "/")
+            .replace("%20", " "),
         None => {
             send_error(stream, 400, "missing path parameter");
             return;
@@ -8450,7 +8581,10 @@ fn api_filesystem_file_info(state: &Arc<Mutex<EditorState>>, query: &str, stream
         None
     };
     let uid = file_uid(&path, content.as_deref());
-    let deps = content.as_deref().map(file_dependencies).unwrap_or_default();
+    let deps = content
+        .as_deref()
+        .map(file_dependencies)
+        .unwrap_or_default();
     let owners = file_owners(&root, &path);
 
     let to_arr = |v: &[String]| -> String {
@@ -8459,7 +8593,11 @@ fn api_filesystem_file_info(state: &Arc<Mutex<EditorState>>, query: &str, stream
             .collect::<Vec<_>>()
             .join(",")
     };
-    let abs_str = abs.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+    let abs_str = abs
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
     send_json(
         stream,
         &format!(
@@ -10169,6 +10307,132 @@ fn variant_to_simple_json(v: &Variant) -> String {
     to_json(v).to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Editor animations <-> the scene's AnimationPlayer (pat-0q2kx.54)
+//
+// `EditorState.animations` used to be a disconnected `HashMap`: the HTTP routes
+// mutated it, nothing read it back into the scene, `scene_saver` never wrote it,
+// and scene load never populated it. So an animation authored in the editor
+// vanished on save/re-open, and pressing play moved nothing in the viewport.
+// These three helpers are the binding.
+// ---------------------------------------------------------------------------
+
+/// The scene's AnimationPlayer node, if it has one.
+///
+/// Godot's animation panel edits the clips of the *selected* player; with one
+/// player in the scene (the common case) that is unambiguous, so the first one
+/// in tree order is used.
+fn scene_animation_player(s: &EditorState) -> Option<NodeId> {
+    s.scene_tree
+        .all_nodes_in_tree_order()
+        .into_iter()
+        .find(|&id| s.scene_tree.get_animation_player(id).is_some())
+}
+
+/// Mirrors the clips of the scene's AnimationPlayer into `state.animations`.
+///
+/// Called after a scene loads, so opening a `.tscn` that carries animations
+/// shows them in the panel instead of an empty list. The scene load path already
+/// rebuilt the players themselves (`attach_scene_animation_players`).
+fn sync_animations_from_scene(s: &mut EditorState) {
+    let Some(player_node) = scene_animation_player(s) else {
+        return;
+    };
+    let Some(player) = s.scene_tree.get_animation_player(player_node) else {
+        return;
+    };
+    let clips: Vec<(String, Animation)> = player
+        .animations
+        .iter()
+        .map(|(name, anim)| (name.clone(), anim.clone()))
+        .collect();
+    for (name, anim) in clips {
+        s.animations.insert(name, anim);
+    }
+}
+
+/// Writes an edited clip back onto the scene's AnimationPlayer so the change
+/// reaches the scene tree — and therefore the saved `.tscn` — rather than living
+/// only in editor state. Returns whether a player took it.
+fn write_animation_through(s: &mut EditorState, name: &str) -> bool {
+    let Some(anim) = s.animations.get(name).cloned() else {
+        return false;
+    };
+    let Some(player_node) = scene_animation_player(s) else {
+        // No AnimationPlayer in the scene: the clip stays editor-only. Saving
+        // cannot persist it, so say so rather than silently dropping it later.
+        s.add_log(
+            "warn",
+            format!("animation '{name}' has no AnimationPlayer in the scene to store it"),
+        );
+        return false;
+    };
+    if let Some(player) = s.scene_tree.get_animation_player_mut(player_node) {
+        player.add_animation(anim);
+        return true;
+    }
+    false
+}
+
+/// Samples the playing clip at `animation_playback.current_time` and writes the
+/// values onto the live scene-tree nodes, which is what makes the editor
+/// viewport preview the motion.
+///
+/// Track paths resolve against the AnimationPlayer's owner the same way the
+/// runtime resolves them, so a track on `Sprite2D:position` moves that sprite.
+fn apply_animation_preview(s: &mut EditorState) {
+    let Some(name) = s.animation_playback.animation_name.clone() else {
+        return;
+    };
+    let Some(anim) = s.animations.get(&name).cloned() else {
+        return;
+    };
+    let time = s.animation_playback.current_time;
+    // Resolve track paths exactly as the runtime does
+    // (`SceneTree::process_animations`): against the player's `root_node`, which
+    // a `.tscn`-loaded player defaults to `".."` — Godot's AnimationMixer
+    // default, the player's PARENT. Hardcoding the parent here would disagree
+    // with playback for any scene that sets `root_node` explicitly, so the
+    // preview would pose different nodes than the game does (pat-0q2kx.54).
+    let base = match scene_animation_player(s) {
+        Some(player_node) => {
+            let root_node = s
+                .scene_tree
+                .get_animation_player(player_node)
+                .map(|p| p.root_node.clone())
+                .unwrap_or_default();
+            if root_node.is_empty() || root_node == "." {
+                player_node
+            } else {
+                s.scene_tree
+                    .get_node_or_null(player_node, &root_node)
+                    .unwrap_or(player_node)
+            }
+        }
+        None => s.scene_tree.root_id(),
+    };
+
+    for (idx, track) in anim.tracks.iter().enumerate() {
+        // `sample_track` addresses tracks by index, not by reference.
+        let Some(value) = anim.sample_track(idx, time) else {
+            continue;
+        };
+        if track.property_path.is_empty() {
+            continue;
+        }
+        let target = if track.node_path.is_empty() {
+            Some(base)
+        } else {
+            s.scene_tree.get_node_or_null(base, &track.node_path)
+        };
+        if let Some(target) = target {
+            if let Some(node) = s.scene_tree.get_node_mut(target) {
+                node.set_property(&track.property_path, value);
+            }
+        }
+    }
+}
+
 /// `GET /api/animations` -- list all animations (names + lengths).
 fn api_get_animations(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let json = {
@@ -10411,6 +10675,9 @@ fn api_add_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     });
     state.redo_stack.clear();
     state.scene_modified = true;
+    // Push the edited clip onto the scene's AnimationPlayer so saving the scene
+    // persists it (pat-0q2kx.54).
+    write_animation_through(&mut state, &anim_name);
 
     send_json(
         stream,
@@ -10610,6 +10877,9 @@ fn api_play_animation(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     state.animation_playback.playing = true;
     state.animation_playback.animation_name = Some(name.clone());
     state.animation_playback.current_time = 0.0;
+    // Sample the clip onto the live scene nodes so the viewport previews the
+    // motion; this used to set flags and touch nothing (pat-0q2kx.54).
+    apply_animation_preview(&mut state);
     state.add_log("info", format!("Playing animation '{}'", name));
     send_json(stream, r#"{"ok":true}"#);
 }
@@ -10755,7 +11025,11 @@ fn api_anim_tree_add_state(state: &Arc<Mutex<EditorState>>, body: &str, stream: 
     let id = state.anim_tree.add_node(name.clone(), kind);
     send_json(
         stream,
-        &format!(r#"{{"ok":true,"id":{},"name":"{}"}}"#, id, json_escape(&name)),
+        &format!(
+            r#"{{"ok":true,"id":{},"name":"{}"}}"#,
+            id,
+            json_escape(&name)
+        ),
     );
 }
 
@@ -10896,6 +11170,8 @@ fn api_seek_animation(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     };
     let mut state = state.lock().unwrap();
     state.animation_playback.current_time = time.max(0.0);
+    // Scrubbing the timeline re-poses the scene (pat-0q2kx.54).
+    apply_animation_preview(&mut state);
     // Apply interpolated values to scene tree nodes when scrubbing.
     if let Some(anim_name) = state.animation_playback.animation_name.clone() {
         if let Some(anim) = state.animations.get(&anim_name) {
@@ -11141,29 +11417,7 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         send_json(stream, r#"{"ok":true,"already_running":true}"#);
         return;
     }
-    let mut cloned = clone_scene_tree(&state.scene_tree);
-
-    // Attach GDScripts to nodes that have a `_script_path` property.
-    let project_root = state.texture_cache.project_root().to_string();
-    attach_scripts_to_tree(&mut cloned, &project_root, &mut state);
-
-    // Instantiate project [autoload] singletons under /root and run THEIR
-    // _ready first, so the scene's scripts can reference /root/<Autoload> in
-    // their own _ready (Godot boot order). pat-nzgdu.3.
-    let autoload_ids = instantiate_play_autoloads(&mut cloned, &project_root);
-    for id in &autoload_ids {
-        cloned.process_script_ready(*id);
-    }
-
-    // Call _ready() on all remaining scripted nodes (autoloads already done).
-    let scripted_ids: Vec<NodeId> = cloned
-        .all_nodes_in_tree_order()
-        .into_iter()
-        .filter(|id| cloned.has_script(*id) && !autoload_ids.contains(id))
-        .collect();
-    for id in &scripted_ids {
-        cloned.process_script_ready(*id);
-    }
+    let cloned = build_play_tree(&mut state);
 
     let mut main_loop = MainLoop::new(cloned);
     main_loop.set_input_map(state.build_engine_input_map());
@@ -11186,7 +11440,67 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     // as api_set_editor_mode does for a user-driven switch.
     state.main_pane.route_to(crate::EditorMode::Game);
     state.add_log("info", "Runtime: play started");
-    send_json(stream, r#"{"ok":true,"running":true,"main_view":"game_view"}"#);
+    send_json(
+        stream,
+        r#"{"ok":true,"running":true,"main_view":"game_view"}"#,
+    );
+}
+
+/// Assembles the tree a Play run executes: the edited scene cloned, its scripts
+/// attached, the project's `[autoload]` singletons instantiated, and the full
+/// Godot lifecycle dispatched over the result.
+///
+/// Split out of [`api_runtime_play`] so the lifecycle contract is testable
+/// without an HTTP round-trip. The editor Play flow is the product loop, so the
+/// callback sequence a script observes here must equal the runner's and Godot's:
+/// `_enter_tree` parent-first, `_ready` child-first, each exactly once
+/// (`upstream/godot/scene/main/node.cpp` `_propagate_enter_tree`/
+/// `_propagate_ready`). It previously called `process_script_ready` per scripted
+/// node in `all_nodes_in_tree_order()` — parent-first, so a parent's `_ready` ran
+/// before its children existed to it — and never dispatched `_enter_tree` at all
+/// (pat-0q2kx.46).
+pub fn build_play_tree(state: &mut EditorState) -> SceneTree {
+    use gdscene::lifecycle::LifecycleManager;
+
+    let mut cloned = clone_scene_tree(&state.scene_tree);
+
+    // Attach GDScripts to nodes that have a `_script_path` property. Done before
+    // any dispatch below, so every script is present for its own `_enter_tree`.
+    let project_root = state.texture_cache.project_root().to_string();
+    attach_scripts_to_tree(&mut cloned, &project_root, state);
+
+    // Instantiate project [autoload] singletons under /root (pat-nzgdu.3). This
+    // also binds their global names, so `Global.score` resolves from any script.
+    let autoload_ids = instantiate_play_autoloads(&mut cloned, &project_root);
+
+    let root_id = cloned.root_id();
+    let subtree_roots: Vec<NodeId> = cloned
+        .get_node(root_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+    // Both the clone and the autoload instantiation build with `add_child` under
+    // a live root, which enters each node as it is inserted — childless and
+    // scriptless. Drop that pass so the dispatch below is the only one the tree
+    // and its scripts observe.
+    for id in &subtree_roots {
+        LifecycleManager::rewind_for_redispatch(&mut cloned, *id);
+    }
+
+    // Godot's boot order: each autoload is added to /root before the main scene,
+    // and `add_child` propagates ENTER_TREE then READY across a whole subtree
+    // before returning — so every autoload is fully `_ready` before the main
+    // scene enters, and can be referenced from its `_ready`. Dispatching one
+    // subtree at a time reproduces that. A single pass from /root would not: the
+    // autoloads are appended *after* the scene here, so the bottom-up READY walk
+    // would ready the main scene first.
+    for id in &autoload_ids {
+        LifecycleManager::enter_tree(&mut cloned, *id);
+    }
+    for id in subtree_roots.iter().filter(|id| !autoload_ids.contains(id)) {
+        LifecycleManager::enter_tree(&mut cloned, *id);
+    }
+
+    cloned
 }
 
 /// Walks all nodes in `tree`, finds those with `_script_path`, resolves
@@ -11229,8 +11543,12 @@ fn attach_scripts_to_tree(tree: &mut SceneTree, project_root: &str, state: &mut 
     }
 }
 
-fn api_runtime_stop(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
-    let mut state = state.lock().unwrap();
+/// Tears down the running instance and restores the editable editor state.
+///
+/// Extracted from [`api_runtime_stop`] so a script calling `get_tree().quit()`
+/// ends the run through exactly the same path as the Stop button, rather than a
+/// near-copy that drifts from it (pat-0q2kx.47).
+fn stop_running_instance(state: &mut EditorState) {
     // pat-niu1j.3: Stop tears down the running instance and restores the
     // editable editor state. Clearing `is_running` also lifts the play-mode
     // edit-lock (pat-niu1j.2): the tree/inspector/viewport mutation routes are
@@ -11257,6 +11575,16 @@ fn api_runtime_stop(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     if let Some(m) = crate::EditorMode::from_str_key(&state.editor_mode) {
         state.main_pane.route_to(m);
     }
+}
+
+fn api_runtime_stop(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    // pat-niu1j.3: Stop tears down the running instance and restores the
+    // editable editor state. Clearing `is_running` also lifts the play-mode
+    // edit-lock (pat-niu1j.2), and dropping `run_main_loop` discards the cloned
+    // runtime tree so the next Play starts from the edited scene afresh — see
+    // `stop_running_instance`, which a script-requested quit shares.
+    stop_running_instance(&mut state);
     let editor_mode = state.editor_mode.clone();
     state.add_log("info", "Runtime: stopped");
     send_json(
@@ -11322,7 +11650,22 @@ fn advance_running_main_loop(state: &mut EditorState) -> u64 {
     }
     // Clear per-frame input after scripts have run.
     state.clear_frame_input();
-    state.runtime_frame_count
+    let frame_count = state.runtime_frame_count;
+    // Godot: `get_tree().quit()` ends the run at the frame boundary — the frame
+    // that asked completes, then the loop stops. In the editor that means Play
+    // tears down exactly as the Stop button does (pat-0q2kx.47). Read before the
+    // teardown, which resets the counter, so the caller still reports the frame
+    // the scene quit on.
+    let quit_requested = state
+        .run_main_loop
+        .as_ref()
+        .map(|ml| ml.tree().should_quit())
+        .unwrap_or(false);
+    if quit_requested {
+        stop_running_instance(state);
+        state.add_log("info", "Runtime: scene called get_tree().quit()");
+    }
+    frame_count
 }
 
 fn api_runtime_step(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
@@ -11442,16 +11785,26 @@ fn api_runtime_node(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut T
 fn api_runtime_suspend(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
     let mut s = state.lock().unwrap();
-    s.runtime_suspended = p.get("suspended").and_then(|v| v.as_bool()).unwrap_or(!s.runtime_suspended);
+    s.runtime_suspended = p
+        .get("suspended")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(!s.runtime_suspended);
     s.is_paused = s.runtime_suspended;
-    send_json(stream, &format!(r#"{{"ok":true,"suspended":{}}}"#, s.runtime_suspended));
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"suspended":{}}}"#, s.runtime_suspended),
+    );
 }
 
 /// `POST /api/runtime/time_scale` — set the game time scale. Body
 /// `{"scale":0.5}`; omit/0 resets to 1.0.
 fn api_runtime_time_scale(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
-    let scale = p.get("scale").and_then(|v| v.as_f64()).filter(|v| *v > 0.0).unwrap_or(1.0);
+    let scale = p
+        .get("scale")
+        .and_then(|v| v.as_f64())
+        .filter(|v| *v > 0.0)
+        .unwrap_or(1.0);
     let mut s = state.lock().unwrap();
     s.runtime_time_scale = scale;
     send_json(stream, &format!(r#"{{"ok":true,"time_scale":{scale:.2}}}"#));
@@ -11461,24 +11814,52 @@ fn api_runtime_time_scale(state: &Arc<Mutex<EditorState>>, body: &str, stream: &
 fn api_runtime_mute(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
     let mut s = state.lock().unwrap();
-    s.runtime_muted = p.get("muted").and_then(|v| v.as_bool()).unwrap_or(!s.runtime_muted);
-    send_json(stream, &format!(r#"{{"ok":true,"muted":{}}}"#, s.runtime_muted));
+    s.runtime_muted = p
+        .get("muted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(!s.runtime_muted);
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"muted":{}}}"#, s.runtime_muted),
+    );
 }
 
 /// `POST /api/runtime/camera_override` — toggle the in-game camera override.
-fn api_runtime_camera_override(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+fn api_runtime_camera_override(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
     let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
     let mut s = state.lock().unwrap();
-    s.runtime_camera_override = p.get("enabled").and_then(|v| v.as_bool()).unwrap_or(!s.runtime_camera_override);
-    send_json(stream, &format!(r#"{{"ok":true,"camera_override":{}}}"#, s.runtime_camera_override));
+    s.runtime_camera_override = p
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(!s.runtime_camera_override);
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"camera_override":{}}}"#,
+            s.runtime_camera_override
+        ),
+    );
 }
 
 /// `POST /api/runtime/hide_selection` — toggle selection visibility in-game.
 fn api_runtime_hide_selection(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
     let mut s = state.lock().unwrap();
-    s.runtime_hide_selection = p.get("hidden").and_then(|v| v.as_bool()).unwrap_or(!s.runtime_hide_selection);
-    send_json(stream, &format!(r#"{{"ok":true,"hide_selection":{}}}"#, s.runtime_hide_selection));
+    s.runtime_hide_selection = p
+        .get("hidden")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(!s.runtime_hide_selection);
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"hide_selection":{}}}"#,
+            s.runtime_hide_selection
+        ),
+    );
 }
 
 /// `POST /api/runtime/input_mode` — set the game-view interaction mode.
@@ -11486,7 +11867,11 @@ fn api_runtime_hide_selection(state: &Arc<Mutex<EditorState>>, body: &str, strea
 fn api_runtime_input_mode(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
     let mode = p.get("mode").and_then(|v| v.as_str()).unwrap_or("input");
-    let mode = if matches!(mode, "input" | "2d" | "3d") { mode } else { "input" };
+    let mode = if matches!(mode, "input" | "2d" | "3d") {
+        mode
+    } else {
+        "input"
+    };
     state.lock().unwrap().runtime_input_mode = mode.to_string();
     send_json(stream, &format!(r#"{{"ok":true,"input_mode":"{mode}"}}"#));
 }
@@ -12031,10 +12416,7 @@ fn api_input_mouse_move(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
     if let Some(ref mut main_loop) = state.run_main_loop {
         main_loop.push_event(gdplatform::InputEvent::MouseMotion {
             position: gdcore::math::Vector2::new(x as f32, y as f32),
-            relative: gdcore::math::Vector2::new(
-                (x - prev.0) as f32,
-                (y - prev.1) as f32,
-            ),
+            relative: gdcore::math::Vector2::new((x - prev.0) as f32, (y - prev.1) as f32),
         });
     }
     send_json(stream, r#"{"ok":true}"#);
@@ -13368,7 +13750,11 @@ fn api_get_debug_errors(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream)
 /// Body: `{"level":"error|warning","message":"..."}`.
 fn api_record_debug_error(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
-    let level = p.get("level").and_then(|v| v.as_str()).unwrap_or("error").to_string();
+    let level = p
+        .get("level")
+        .and_then(|v| v.as_str())
+        .unwrap_or("error")
+        .to_string();
     let message = match p.get("message").and_then(|v| v.as_str()) {
         Some(m) => m.to_string(),
         None => {
@@ -13391,7 +13777,12 @@ fn api_clear_debug_errors(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStrea
 /// arithmetic, else echoes. Body: `{"expression":"..."}`.
 fn api_debug_evaluate(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
-    let expr = p.get("expression").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let expr = p
+        .get("expression")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if expr.is_empty() {
         send_error(stream, 400, "missing expression");
         return;
@@ -13408,8 +13799,14 @@ fn api_debug_evaluate(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     let result = if let Some(v) = lookup(&expr) {
         v
     } else if let Some((a, op, b)) = parse_binop(&expr) {
-        let av: i64 = lookup(&a).and_then(|v| v.parse().ok()).or_else(|| a.parse().ok()).unwrap_or(0);
-        let bv: i64 = lookup(&b).and_then(|v| v.parse().ok()).or_else(|| b.parse().ok()).unwrap_or(0);
+        let av: i64 = lookup(&a)
+            .and_then(|v| v.parse().ok())
+            .or_else(|| a.parse().ok())
+            .unwrap_or(0);
+        let bv: i64 = lookup(&b)
+            .and_then(|v| v.parse().ok())
+            .or_else(|| b.parse().ok())
+            .unwrap_or(0);
         match op {
             '+' => (av + bv).to_string(),
             '-' => (av - bv).to_string(),
@@ -13449,7 +13846,8 @@ fn api_debug_break(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let mut s = state.lock().unwrap();
     s.debug_state = "break".to_string();
     if s.debug_frames.is_empty() {
-        s.debug_frames.push(("_process".to_string(), "res://main.gd".to_string(), 1));
+        s.debug_frames
+            .push(("_process".to_string(), "res://main.gd".to_string(), 1));
     }
     send_json(stream, r#"{"ok":true,"state":"break"}"#);
 }
@@ -13465,7 +13863,10 @@ fn api_debug_skip_breakpoints(state: &Arc<Mutex<EditorState>>, body: &str, strea
         .unwrap_or(!s.debug_skip_breakpoints);
     send_json(
         stream,
-        &format!(r#"{{"ok":true,"skip_breakpoints":{}}}"#, s.debug_skip_breakpoints),
+        &format!(
+            r#"{{"ok":true,"skip_breakpoints":{}}}"#,
+            s.debug_skip_breakpoints
+        ),
     );
 }
 
@@ -13557,9 +13958,18 @@ fn api_clear_network(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
 /// empty or missing path resets to "/root" (the "Clear" behavior).
 fn api_set_live_edit_root(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
-    let path = p.get("path").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let path = p
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let mut s = state.lock().unwrap();
-    s.live_edit_root = if path.is_empty() { "/root".to_string() } else { path };
+    s.live_edit_root = if path.is_empty() {
+        "/root".to_string()
+    } else {
+        path
+    };
     let out = serde_json::json!({ "ok": true, "live_edit_root": s.live_edit_root });
     send_json(stream, &out.to_string());
 }
@@ -13653,11 +14063,20 @@ fn api_get_monitors(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
             }
             // Drawable: anything that paints into the canvas / 3D scene. Markers,
             // cameras and pure logic nodes do not issue draw calls.
-            let drawn = c.ends_with("2D") || c.ends_with("3D") || c.starts_with("Sprite")
-                || c.starts_with("Label") || c.starts_with("Mesh") || c.starts_with("TileMap")
-                || c.starts_with("Polygon") || c.starts_with("Control") || c.contains("Texture");
-            let skip = c == "Camera2D" || c == "Camera3D" || c.starts_with("Navigation")
-                || c.ends_with("Body2D") || c.ends_with("Body3D");
+            let drawn = c.ends_with("2D")
+                || c.ends_with("3D")
+                || c.starts_with("Sprite")
+                || c.starts_with("Label")
+                || c.starts_with("Mesh")
+                || c.starts_with("TileMap")
+                || c.starts_with("Polygon")
+                || c.starts_with("Control")
+                || c.contains("Texture");
+            let skip = c == "Camera2D"
+                || c == "Camera3D"
+                || c.starts_with("Navigation")
+                || c.ends_with("Body2D")
+                || c.ends_with("Body3D");
             if drawn && !skip {
                 drawable += 1;
             }
@@ -13681,15 +14100,31 @@ fn api_get_monitors(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     } else {
         s.frame_times.iter().sum::<f64>() / s.frame_times.len() as f64
     };
-    let fps = if s.delta_time > 0.0 { 1.0 / s.delta_time } else { 0.0 };
+    let fps = if s.delta_time > 0.0 {
+        1.0 / s.delta_time
+    } else {
+        0.0
+    };
     // Physics/navigation step time only accrues while running.
-    let physics_ms = if s.is_running && !s.is_paused { proc_ms * 0.3 } else { 0.0 };
+    let physics_ms = if s.is_running && !s.is_paused {
+        proc_ms * 0.3
+    } else {
+        0.0
+    };
 
     // Draw-call style raster counters scale with the drawn objects.
     let draw_calls = drawable;
     let primitives = drawable * 2; // sprites/quads ≈ 2 triangles each
-    let active_2d = if s.is_running && !s.is_paused { phys2d } else { 0 };
-    let active_3d = if s.is_running && !s.is_paused { phys3d } else { 0 };
+    let active_2d = if s.is_running && !s.is_paused {
+        phys2d
+    } else {
+        0
+    };
+    let active_3d = if s.is_running && !s.is_paused {
+        phys3d
+    } else {
+        0
+    };
     let active_maps = if nav_regions > 0 { 1 } else { 0 };
 
     let json = format!(
@@ -13834,9 +14269,17 @@ fn api_profiler_record(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
                     let name = entry.get("name")?.as_str()?.to_string();
                     let time_ms = entry.get("time_ms")?.as_f64()?;
                     // self_ms defaults to inclusive time (leaf); calls defaults to 1.
-                    let self_ms = entry.get("self_ms").and_then(|v| v.as_f64()).unwrap_or(time_ms);
+                    let self_ms = entry
+                        .get("self_ms")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(time_ms);
                     let calls = entry.get("calls").and_then(|v| v.as_u64()).unwrap_or(1);
-                    Some(ProfilerFuncEntry { name, time_ms, self_ms, calls })
+                    Some(ProfilerFuncEntry {
+                        name,
+                        time_ms,
+                        self_ms,
+                        calls,
+                    })
                 })
                 .collect::<Vec<_>>()
         })
@@ -13846,7 +14289,10 @@ fn api_profiler_record(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
     if s.profiler_frames.len() >= 120 {
         s.profiler_frames.pop_front();
     }
-    let physics_ms = parsed.get("physics_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let physics_ms = parsed
+        .get("physics_ms")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
     s.profiler_frames.push_back(ProfilerFrame {
         frame_number,
         total_ms,
@@ -15195,10 +15641,7 @@ fn api_set_input_map(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
             map.add_action(action.clone());
             if let Some(keys) = p.get("keys").and_then(|v| v.as_array()) {
                 for key in keys.iter().filter_map(|k| k.as_str()) {
-                    map.bind(
-                        &action,
-                        crate::input_map::InputEvent::Key(key.to_string()),
-                    );
+                    map.bind(&action, crate::input_map::InputEvent::Key(key.to_string()));
                 }
             }
         }
@@ -15365,7 +15808,10 @@ fn api_get_import_settings(query: &str, stream: &mut TcpStream) {
     // yields the empty-state.
     use crate::import_settings::ImportResourceType;
     let path = match query_param(query, "path") {
-        Some(p) => p.replace("%3A", ":").replace("%2F", "/").replace("%20", " "),
+        Some(p) => p
+            .replace("%3A", ":")
+            .replace("%2F", "/")
+            .replace("%20", " "),
         None => {
             send_json(stream, r#"{"importable":false}"#);
             return;
@@ -15409,8 +15855,20 @@ fn api_get_import_settings(query: &str, stream: &mut TcpStream) {
         ImportResourceType::Texture => (
             vec!["Default", "2D Pixel", "2D", "3D"],
             vec![
-                opt("compression", "Compress Mode", "enum", s("VRAM Compressed"), &["Lossless", "Lossy", "VRAM Compressed", "Uncompressed"]),
-                opt("filter", "Filter", "enum", s("Linear"), &["Nearest", "Linear", "Nearest (Mipmap)", "Linear (Mipmap)"]),
+                opt(
+                    "compression",
+                    "Compress Mode",
+                    "enum",
+                    s("VRAM Compressed"),
+                    &["Lossless", "Lossy", "VRAM Compressed", "Uncompressed"],
+                ),
+                opt(
+                    "filter",
+                    "Filter",
+                    "enum",
+                    s("Linear"),
+                    &["Nearest", "Linear", "Nearest (Mipmap)", "Linear (Mipmap)"],
+                ),
                 opt("mipmaps", "Mipmaps", "bool", "true".into(), &[]),
                 opt("srgb", "sRGB", "bool", "true".into(), &[]),
                 opt("max_size", "Size Limit", "int", "0".into(), &[]),
@@ -15421,7 +15879,13 @@ fn api_get_import_settings(query: &str, stream: &mut TcpStream) {
         ImportResourceType::Audio => (
             vec!["Default"],
             vec![
-                opt("format", "Format", "enum", s("Original"), &["Original", "Ogg Vorbis", "WAV (PCM)"]),
+                opt(
+                    "format",
+                    "Format",
+                    "enum",
+                    s("Original"),
+                    &["Original", "Ogg Vorbis", "WAV (PCM)"],
+                ),
                 opt("loop", "Loop", "bool", "false".into(), &[]),
                 opt("normalize", "Normalize", "bool", "false".into(), &[]),
             ],
@@ -15429,29 +15893,65 @@ fn api_get_import_settings(query: &str, stream: &mut TcpStream) {
         ImportResourceType::Scene => (
             vec!["Default"],
             vec![
-                opt("import_animations", "Import Animations", "bool", "true".into(), &[]),
+                opt(
+                    "import_animations",
+                    "Import Animations",
+                    "bool",
+                    "true".into(),
+                    &[],
+                ),
                 opt("root_type", "Root Type", "string", s("Node3D"), &[]),
-                opt("apply_root_scale", "Apply Root Scale", "bool", "true".into(), &[]),
+                opt(
+                    "apply_root_scale",
+                    "Apply Root Scale",
+                    "bool",
+                    "true".into(),
+                    &[],
+                ),
             ],
         ),
         ImportResourceType::Mesh => (
             vec!["Default"],
             vec![
                 opt("generate_lods", "Generate LODs", "bool", "true".into(), &[]),
-                opt("create_shadow_mesh", "Create Shadow Mesh", "bool", "true".into(), &[]),
+                opt(
+                    "create_shadow_mesh",
+                    "Create Shadow Mesh",
+                    "bool",
+                    "true".into(),
+                    &[],
+                ),
             ],
         ),
         ImportResourceType::Font => (
             vec!["Default"],
             vec![
-                opt("antialiasing", "Antialiasing", "enum", s("Grayscale"), &["None", "Grayscale", "LCD Subpixel"]),
-                opt("hinting", "Hinting", "enum", s("Light"), &["None", "Light", "Normal"]),
+                opt(
+                    "antialiasing",
+                    "Antialiasing",
+                    "enum",
+                    s("Grayscale"),
+                    &["None", "Grayscale", "LCD Subpixel"],
+                ),
+                opt(
+                    "hinting",
+                    "Hinting",
+                    "enum",
+                    s("Light"),
+                    &["None", "Light", "Normal"],
+                ),
                 opt("msdf", "Multichannel SDF", "bool", "false".into(), &[]),
             ],
         ),
         ImportResourceType::Shader | ImportResourceType::Script => (
             vec!["Default"],
-            vec![opt("keep_compiled", "Keep On Reimport", "bool", "true".into(), &[])],
+            vec![opt(
+                "keep_compiled",
+                "Keep On Reimport",
+                "bool",
+                "true".into(),
+                &[],
+            )],
         ),
     };
     let presets_json = presets
@@ -15986,7 +16486,10 @@ environment = SubResource("env1")
         // The nested sky material resolved to the blue-topped procedural sky.
         match env.sky.as_ref().map(|s| &s.material) {
             Some(gdserver3d::sky::SkyMaterial::Procedural(m)) => {
-                assert!((m.sky_top_color.b - 0.9).abs() < 1e-3, "resolved sky_top blue");
+                assert!(
+                    (m.sky_top_color.b - 0.9).abs() < 1e-3,
+                    "resolved sky_top blue"
+                );
             }
             other => panic!("expected procedural sky, got {other:?}"),
         }
@@ -16056,8 +16559,7 @@ environment = SubResource("env1")
         add_packed_scene_to_tree(&mut tree, root, &scene).expect("instantiate");
 
         let root_str = proj.path().to_str().unwrap();
-        let env =
-            world_environment_from_scene(&scene, &tree, Some(root_str)).expect("world env");
+        let env = world_environment_from_scene(&scene, &tree, Some(root_str)).expect("world env");
         match env.sky.as_ref().map(|s| &s.material) {
             Some(gdserver3d::sky::SkyMaterial::Procedural(m)) => {
                 let tex = m.sky_cover.as_ref().expect("sky_cover decoded from disk");
@@ -16122,7 +16624,10 @@ environment = SubResource("env1")
             "/api/viewport/drag_start",
             "/api/viewport/drag_end",
         ] {
-            assert!(is_rate_limit_exempt(p), "{p} should be exempt from rate limiting");
+            assert!(
+                is_rate_limit_exempt(p),
+                "{p} should be exempt from rate limiting"
+            );
         }
         // NOT exempt: scene/selection/file mutations and other routes stay limited,
         // so the abuse protection still applies where it matters.
@@ -16266,8 +16771,12 @@ environment = SubResource("env1")
 
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        let a = tree.add_child(root, Node::new("A", "MeshInstance3D")).unwrap();
-        let b = tree.add_child(root, Node::new("B", "MeshInstance3D")).unwrap();
+        let a = tree
+            .add_child(root, Node::new("A", "MeshInstance3D"))
+            .unwrap();
+        let b = tree
+            .add_child(root, Node::new("B", "MeshInstance3D"))
+            .unwrap();
         gdscene::node3d::set_position(&mut tree, a, Vector3::new(1.0, 0.0, 0.0));
         gdscene::node3d::set_position(&mut tree, b, Vector3::new(3.0, 0.0, 0.0));
 
@@ -16306,7 +16815,10 @@ environment = SubResource("env1")
             &mut tree,
             &starts,
             starts[0].1.origin,
-            GizmoTransform3D::Rotate { axis: GizmoAxis::Y, angle: std::f32::consts::FRAC_PI_2 },
+            GizmoTransform3D::Rotate {
+                axis: GizmoAxis::Y,
+                angle: std::f32::consts::FRAC_PI_2,
+            },
         );
         let pa = gdscene::node3d::get_global_transform(&tree, a).origin;
         let pb = gdscene::node3d::get_global_transform(&tree, b).origin;
@@ -16318,7 +16830,10 @@ environment = SubResource("env1")
         // B was 2 units from the pivot; rotation preserves that distance but
         // swings it off its starting (+X) position.
         let dist_b = ((pb.x - 1.0).powi(2) + pb.y.powi(2) + pb.z.powi(2)).sqrt();
-        assert!((dist_b - 2.0).abs() < 1e-3, "rotation preserves B's distance from the pivot: {dist_b}");
+        assert!(
+            (dist_b - 2.0).abs() < 1e-3,
+            "rotation preserves B's distance from the pivot: {dist_b}"
+        );
         assert!(
             (pb.x - 3.0).abs() > 0.5 || pb.z.abs() > 0.5,
             "B actually swung off its start position: {pb:?}"
@@ -16532,19 +17047,16 @@ environment = SubResource("env1")
         let main_id = get_main_node_id(port);
 
         // Add a child of a specific requested type to the Main node.
-        let add_body = format!(
-            r#"{{"parent_id":{main_id},"name":"NewChild","class_name":"Sprite2D"}}"#
-        );
+        let add_body =
+            format!(r#"{{"parent_id":{main_id},"name":"NewChild","class_name":"Sprite2D"}}"#);
         let add_resp = http_post(port, "/api/node/add", &add_body);
         assert!(add_resp.contains("200 OK"), "add should succeed");
-        let add_json: serde_json::Value =
-            serde_json::from_str(extract_body(&add_resp)).unwrap();
+        let add_json: serde_json::Value = serde_json::from_str(extract_body(&add_resp)).unwrap();
         let new_id = add_json["id"].as_u64().expect("add returns new node id");
 
         // (1) The child exists under the requested parent with the requested type.
         let scene_resp = http_get(port, "/api/scene");
-        let scene: serde_json::Value =
-            serde_json::from_str(extract_body(&scene_resp)).unwrap();
+        let scene: serde_json::Value = serde_json::from_str(extract_body(&scene_resp)).unwrap();
         let main = &scene["nodes"]["children"][0];
         assert_eq!(
             main["id"].as_u64(),
@@ -16565,8 +17077,7 @@ environment = SubResource("env1")
 
         // (2) The newly created node is focused (selected) in the tree.
         let sel_resp = http_get(port, "/api/selected_nodes");
-        let sel: serde_json::Value =
-            serde_json::from_str(extract_body(&sel_resp)).unwrap();
+        let sel: serde_json::Value = serde_json::from_str(extract_body(&sel_resp)).unwrap();
         let selected: Vec<u64> = sel["selected_nodes"]
             .as_array()
             .expect("selected_nodes array")
@@ -16581,8 +17092,7 @@ environment = SubResource("env1")
 
         // (3) The scene is marked dirty.
         let info_resp = http_get(port, "/api/scene/info");
-        let info: serde_json::Value =
-            serde_json::from_str(extract_body(&info_resp)).unwrap();
+        let info: serde_json::Value = serde_json::from_str(extract_body(&info_resp)).unwrap();
         assert_eq!(
             info["modified"].as_bool(),
             Some(true),
@@ -16626,16 +17136,14 @@ position = Vector2(10, 20)
         );
         let resp = http_post(port, "/api/scene/instance", &body);
         assert!(resp.contains("200 OK"), "instance should succeed: {resp}");
-        let inst_json: serde_json::Value =
-            serde_json::from_str(extract_body(&resp)).unwrap();
+        let inst_json: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
         let root_id = inst_json["id"]
             .as_u64()
             .expect("instance returns instanced root id");
 
         // (1) The instanced root is a child of the selected parent.
         let scene_resp = http_get(port, "/api/scene");
-        let scene: serde_json::Value =
-            serde_json::from_str(extract_body(&scene_resp)).unwrap();
+        let scene: serde_json::Value = serde_json::from_str(extract_body(&scene_resp)).unwrap();
         let main = &scene["nodes"]["children"][0];
         assert_eq!(
             main["id"].as_u64(),
@@ -16669,7 +17177,10 @@ position = Vector2(10, 20)
             .expect("instanced root has children")
             .iter()
             .find(|c| c["name"] == "Sprite");
-        assert!(sprite.is_some(), "instanced subtree is embedded under the root");
+        assert!(
+            sprite.is_some(),
+            "instanced subtree is embedded under the root"
+        );
 
         // Cleanup.
         let _ = std::fs::remove_dir_all(&dir);
@@ -16687,8 +17198,7 @@ position = Vector2(10, 20)
 
         // Helper to add a child and return its new id.
         let add = |parent: u64, name: &str| -> u64 {
-            let body =
-                format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node"}}"#);
+            let body = format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
             v["id"].as_u64().unwrap()
@@ -16709,8 +17219,7 @@ position = Vector2(10, 20)
 
         // Multi-select delete. Include child_id (inside DelParent's subtree)
         // to exercise the ancestor+descendant skip path.
-        let del_body =
-            format!(r#"{{"node_ids":[{parent_id},{child_id},{sibling_id}]}}"#);
+        let del_body = format!(r#"{{"node_ids":[{parent_id},{child_id},{sibling_id}]}}"#);
         let resp = http_post(port, "/api/node/delete", &del_body);
         assert!(resp.contains("200 OK"), "delete should succeed");
         let del: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
@@ -16733,8 +17242,7 @@ position = Vector2(10, 20)
 
         // Selection is cleared after deletion.
         let sel_resp = http_get(port, "/api/selected_nodes");
-        let sel: serde_json::Value =
-            serde_json::from_str(extract_body(&sel_resp)).unwrap();
+        let sel: serde_json::Value = serde_json::from_str(extract_body(&sel_resp)).unwrap();
         assert_eq!(
             sel["selected_nodes"].as_array().map(|a| a.len()),
             Some(0),
@@ -16743,8 +17251,7 @@ position = Vector2(10, 20)
 
         // Scene is marked dirty.
         let info_resp = http_get(port, "/api/scene/info");
-        let info: serde_json::Value =
-            serde_json::from_str(extract_body(&info_resp)).unwrap();
+        let info: serde_json::Value = serde_json::from_str(extract_body(&info_resp)).unwrap();
         assert_eq!(info["modified"].as_bool(), Some(true));
 
         handle.stop();
@@ -16780,10 +17287,13 @@ position = Vector2(10, 20)
         assert!(http_post(port, "/api/property/set", &prop_body).contains("200 OK"));
 
         // Duplicate Orig.
-        let resp = http_post(port, "/api/node/duplicate", &format!(r#"{{"node_id":{orig_id}}}"#));
+        let resp = http_post(
+            port,
+            "/api/node/duplicate",
+            &format!(r#"{{"node_id":{orig_id}}}"#),
+        );
         assert!(resp.contains("200 OK"), "duplicate should succeed");
-        let dup_id = serde_json::from_str::<serde_json::Value>(extract_body(&resp))
-            .unwrap()["id"]
+        let dup_id = serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
             .as_u64()
             .expect("duplicate returns new node id");
 
@@ -16796,13 +17306,20 @@ position = Vector2(10, 20)
 
         // Unique name: the duplicate is "Orig2", original "Orig" remains.
         assert!(names.contains(&"Orig"), "original remains, got {names:?}");
-        assert!(names.contains(&"Orig2"), "duplicate uniquified, got {names:?}");
+        assert!(
+            names.contains(&"Orig2"),
+            "duplicate uniquified, got {names:?}"
+        );
 
         // Next-sibling: Orig2 sits immediately after Orig, before After.
         let i_orig = names.iter().position(|n| *n == "Orig").unwrap();
         let i_dup = names.iter().position(|n| *n == "Orig2").unwrap();
         let i_after = names.iter().position(|n| *n == "After").unwrap();
-        assert_eq!(i_dup, i_orig + 1, "duplicate is the next sibling: {names:?}");
+        assert_eq!(
+            i_dup,
+            i_orig + 1,
+            "duplicate is the next sibling: {names:?}"
+        );
         assert!(i_after > i_dup, "duplicate inserted before later siblings");
 
         // Deep subtree copy: Orig2 has its own "Kid" child of the right class.
@@ -16933,8 +17450,7 @@ position = Vector2(10, 20)
             (arr[0].as_f64().unwrap(), arr[1].as_f64().unwrap())
         };
         let add_child = |port: u16, parent: u64, name: &str| -> u64 {
-            let body =
-                format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node2D"}}"#);
+            let body = format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node2D"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
                 .as_u64()
@@ -17006,9 +17522,7 @@ position = Vector2(10, 20)
         let resp = http_post(
             port,
             "/api/node/reparent",
-            &format!(
-                r#"{{"node_id":{leaf_id},"new_parent_id":{main_id},"keep_transform":true}}"#
-            ),
+            &format!(r#"{{"node_id":{leaf_id},"new_parent_id":{main_id},"keep_transform":true}}"#),
         );
         assert!(resp.contains("200 OK"), "keep_transform reparent: {resp}");
         let (lx, ly) = read_pos(port, leaf_id);
@@ -17523,8 +18037,7 @@ position = Vector2(10, 20)
         let main_id = get_main_node_id(port);
 
         let add = |name: &str| -> u64 {
-            let body =
-                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let body = format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
                 .as_u64()
@@ -17824,8 +18337,7 @@ position = Vector2(10, 20)
         let main_id = get_main_node_id(port);
 
         let add = |name: &str| -> u64 {
-            let body =
-                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let body = format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
                 .as_u64()
@@ -17878,7 +18390,10 @@ position = Vector2(10, 20)
         );
         assert!(resp.contains("200 OK"));
         let ns = names(port);
-        assert!(ns.contains(&"Alpha".to_string()), "original Alpha remains: {ns:?}");
+        assert!(
+            ns.contains(&"Alpha".to_string()),
+            "original Alpha remains: {ns:?}"
+        );
         assert!(
             ns.contains(&"Alpha2".to_string()),
             "collision auto-suffixed to Alpha2: {ns:?}"
@@ -17922,7 +18437,10 @@ position = Vector2(10, 20)
             .iter()
             .filter_map(|c| c["name"].as_str())
             .collect();
-        assert!(names.contains(&"Main"), "original Main remains, got {names:?}");
+        assert!(
+            names.contains(&"Main"),
+            "original Main remains, got {names:?}"
+        );
         assert!(
             names.contains(&"Main2"),
             "duplicate gets a unique name, got {names:?}"
@@ -18142,10 +18660,18 @@ position = Vector2(10, 20)
         // Boundary no-ops: first node up, last node down — order unchanged.
         let first_id = id_of(port, "B"); // index 0
         reorder(port, first_id, "up");
-        assert_eq!(order(port), ["B", "A", "C"], "up at top boundary is a no-op");
+        assert_eq!(
+            order(port),
+            ["B", "A", "C"],
+            "up at top boundary is a no-op"
+        );
         let last_id = id_of(port, "C"); // index 2
         reorder(port, last_id, "down");
-        assert_eq!(order(port), ["B", "A", "C"], "down at bottom boundary is a no-op");
+        assert_eq!(
+            order(port),
+            ["B", "A", "C"],
+            "down at bottom boundary is a no-op"
+        );
 
         handle.stop();
     }
@@ -18186,14 +18712,28 @@ position = Vector2(10, 20)
 
         // Copy Src, then paste under Main. The copy must clone the subtree and,
         // because "Src" already exists under Main, paste uniquifies to "Src2".
-        assert!(http_post(port, "/api/node/copy", &format!(r#"{{"node_id":{src_id}}}"#))
-            .contains("200 OK"));
-        assert!(http_post(port, "/api/node/paste", &format!(r#"{{"parent_id":{main_id}}}"#))
-            .contains("200 OK"));
+        assert!(http_post(
+            port,
+            "/api/node/copy",
+            &format!(r#"{{"node_id":{src_id}}}"#)
+        )
+        .contains("200 OK"));
+        assert!(http_post(
+            port,
+            "/api/node/paste",
+            &format!(r#"{{"parent_id":{main_id}}}"#)
+        )
+        .contains("200 OK"));
 
         let names = main_child_names(port);
-        assert!(names.contains(&"Src".to_string()), "original Src remains (copy): {names:?}");
-        assert!(names.contains(&"Src2".to_string()), "paste uniquified to Src2: {names:?}");
+        assert!(
+            names.contains(&"Src".to_string()),
+            "original Src remains (copy): {names:?}"
+        );
+        assert!(
+            names.contains(&"Src2".to_string()),
+            "paste uniquified to Src2: {names:?}"
+        );
         // The pasted clone carries the subtree (Leaf).
         let sc = scene(port);
         let src2 = sc["nodes"]["children"][0]["children"]
@@ -18202,18 +18742,29 @@ position = Vector2(10, 20)
             .iter()
             .find(|c| c["name"] == "Src2")
             .unwrap();
-        assert_eq!(src2["children"].as_array().unwrap()[0]["name"], "Leaf",
-            "copied subtree includes Leaf");
+        assert_eq!(
+            src2["children"].as_array().unwrap()[0]["name"],
+            "Leaf",
+            "copied subtree includes Leaf"
+        );
 
         // Cut the original Src, then paste under Dest → the original moves.
-        assert!(http_post(port, "/api/node/cut", &format!(r#"{{"node_id":{src_id}}}"#))
-            .contains("200 OK"));
+        assert!(
+            http_post(port, "/api/node/cut", &format!(r#"{{"node_id":{src_id}}}"#))
+                .contains("200 OK")
+        );
         let after_cut = main_child_names(port);
-        assert!(!after_cut.contains(&"Src".to_string()),
-            "cut removed the original Src from Main: {after_cut:?}");
+        assert!(
+            !after_cut.contains(&"Src".to_string()),
+            "cut removed the original Src from Main: {after_cut:?}"
+        );
 
-        assert!(http_post(port, "/api/node/paste", &format!(r#"{{"parent_id":{dest_id}}}"#))
-            .contains("200 OK"));
+        assert!(http_post(
+            port,
+            "/api/node/paste",
+            &format!(r#"{{"parent_id":{dest_id}}}"#)
+        )
+        .contains("200 OK"));
         let sc2 = scene(port);
         let dest = sc2["nodes"]["children"][0]["children"]
             .as_array()
@@ -18227,10 +18778,17 @@ position = Vector2(10, 20)
             .iter()
             .map(|c| c["name"].as_str().unwrap())
             .collect();
-        assert!(dest_children.contains(&"Src"),
-            "cut+paste moved Src under Dest: {dest_children:?}");
+        assert!(
+            dest_children.contains(&"Src"),
+            "cut+paste moved Src under Dest: {dest_children:?}"
+        );
         // And its subtree came along.
-        let moved = dest["children"].as_array().unwrap().iter().find(|c| c["name"] == "Src").unwrap();
+        let moved = dest["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "Src")
+            .unwrap();
         assert_eq!(moved["children"].as_array().unwrap()[0]["name"], "Leaf");
 
         handle.stop();
@@ -18247,8 +18805,7 @@ position = Vector2(10, 20)
 
         // Main > Sub(Node2D) > Leaf, with a custom property on Sub.
         let sub_id = {
-            let body =
-                format!(r#"{{"parent_id":{main_id},"name":"Sub","class_name":"Node2D"}}"#);
+            let body = format!(r#"{{"parent_id":{main_id},"name":"Sub","class_name":"Node2D"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
                 .as_u64()
@@ -18262,7 +18819,9 @@ position = Vector2(10, 20)
         assert!(http_post(
             port,
             "/api/property/set",
-            &format!(r#"{{"node_id":{sub_id},"property":"health","value":{{"type":"Int","value":7}}}}"#),
+            &format!(
+                r#"{{"node_id":{sub_id},"property":"health","value":{{"type":"Int","value":7}}}}"#
+            ),
         )
         .contains("200 OK"));
 
@@ -18314,8 +18873,7 @@ position = Vector2(10, 20)
 
         // A node to carry the signal connection.
         let node_id = {
-            let body =
-                format!(r#"{{"parent_id":{main_id},"name":"Emitter","class_name":"Node"}}"#);
+            let body = format!(r#"{{"parent_id":{main_id},"name":"Emitter","class_name":"Node"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
                 .as_u64()
@@ -18347,7 +18905,10 @@ position = Vector2(10, 20)
             &format!(r#"{{"node_id":{node_id},"signal":"pressed","method":"_on_pressed"}}"#),
         )
         .contains("200 OK"));
-        assert!(has_signals(port), "signal badge appears after connecting a signal");
+        assert!(
+            has_signals(port),
+            "signal badge appears after connecting a signal"
+        );
 
         // Disconnect it → badge clears in real time.
         assert!(http_post(
@@ -18356,7 +18917,10 @@ position = Vector2(10, 20)
             &format!(r#"{{"node_id":{node_id},"signal":"pressed"}}"#),
         )
         .contains("200 OK"));
-        assert!(!has_signals(port), "signal badge clears after disconnecting the signal");
+        assert!(
+            !has_signals(port),
+            "signal badge clears after disconnecting the signal"
+        );
 
         handle.stop();
     }
@@ -18373,8 +18937,7 @@ position = Vector2(10, 20)
 
         // Add a node and mark it as an instance by recording its source scene.
         let node_id = {
-            let body =
-                format!(r#"{{"parent_id":{main_id},"name":"Enemy","class_name":"Node"}}"#);
+            let body = format!(r#"{{"parent_id":{main_id},"name":"Enemy","class_name":"Node"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
                 .as_u64()
@@ -18402,7 +18965,11 @@ position = Vector2(10, 20)
                 .expect("instanced node present")
                 .clone()
         };
-        assert_eq!(inst["is_instance"].as_bool(), Some(true), "instance badge shown");
+        assert_eq!(
+            inst["is_instance"].as_bool(),
+            Some(true),
+            "instance badge shown"
+        );
         assert_eq!(
             inst["instance_path"].as_str(),
             Some(source),
@@ -18415,9 +18982,11 @@ position = Vector2(10, 20)
             "/api/node/open_scene",
             &format!(r#"{{"node_id":{node_id}}}"#),
         );
-        assert!(open_resp.contains("200 OK"), "open_scene should succeed: {open_resp}");
-        let open_body: serde_json::Value =
-            serde_json::from_str(extract_body(&open_resp)).unwrap();
+        assert!(
+            open_resp.contains("200 OK"),
+            "open_scene should succeed: {open_resp}"
+        );
+        let open_body: serde_json::Value = serde_json::from_str(extract_body(&open_resp)).unwrap();
         assert_eq!(
             open_body["path"].as_str(),
             Some(source),
@@ -18438,8 +19007,11 @@ position = Vector2(10, 20)
         assert!(opened, "source scene opened in a tab: {tabs}");
 
         // A non-instanced node has no badge action → 400.
-        let plain_resp =
-            http_post(port, "/api/node/open_scene", &format!(r#"{{"node_id":{main_id}}}"#));
+        let plain_resp = http_post(
+            port,
+            "/api/node/open_scene",
+            &format!(r#"{{"node_id":{main_id}}}"#),
+        );
         assert!(
             plain_resp.contains("400"),
             "open_scene on a non-instanced node is rejected: {plain_resp}"
@@ -18460,8 +19032,7 @@ position = Vector2(10, 20)
 
         // Add a node and attach a script to it (recorded via `_script_path`).
         let node_id = {
-            let body =
-                format!(r#"{{"parent_id":{main_id},"name":"Player","class_name":"Node"}}"#);
+            let body = format!(r#"{{"parent_id":{main_id},"name":"Player","class_name":"Node"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
                 .as_u64()
@@ -18489,7 +19060,11 @@ position = Vector2(10, 20)
                 .expect("scripted node present")
                 .clone()
         };
-        assert_eq!(node["has_script"].as_bool(), Some(true), "script badge shown");
+        assert_eq!(
+            node["has_script"].as_bool(),
+            Some(true),
+            "script badge shown"
+        );
         assert_eq!(
             node["script_path"].as_str(),
             Some(script),
@@ -18502,9 +19077,11 @@ position = Vector2(10, 20)
             "/api/node/open_script",
             &format!(r#"{{"node_id":{node_id}}}"#),
         );
-        assert!(open_resp.contains("200 OK"), "open_script should succeed: {open_resp}");
-        let open_body: serde_json::Value =
-            serde_json::from_str(extract_body(&open_resp)).unwrap();
+        assert!(
+            open_resp.contains("200 OK"),
+            "open_script should succeed: {open_resp}"
+        );
+        let open_body: serde_json::Value = serde_json::from_str(extract_body(&open_resp)).unwrap();
         assert_eq!(
             open_body["path"].as_str(),
             Some(script),
@@ -18512,8 +19089,11 @@ position = Vector2(10, 20)
         );
 
         // A node without a script has no badge action → 400.
-        let plain_resp =
-            http_post(port, "/api/node/open_script", &format!(r#"{{"node_id":{main_id}}}"#));
+        let plain_resp = http_post(
+            port,
+            "/api/node/open_script",
+            &format!(r#"{{"node_id":{main_id}}}"#),
+        );
         assert!(
             plain_resp.contains("400"),
             "open_script on a script-less node is rejected: {plain_resp}"
@@ -18531,8 +19111,7 @@ position = Vector2(10, 20)
         let main_id = get_main_node_id(port);
 
         let add = |parent: u64, name: &str| -> u64 {
-            let body =
-                format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node2D"}}"#);
+            let body = format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node2D"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
                 .as_u64()
@@ -18580,7 +19159,11 @@ position = Vector2(10, 20)
 
         // Baseline: not grouped → clicking the child selects the child itself.
         assert!(!parent_grouped(port), "no group badge before toggling");
-        assert_eq!(click_child(port), child_id, "ungrouped child is directly selectable");
+        assert_eq!(
+            click_child(port),
+            child_id,
+            "ungrouped child is directly selectable"
+        );
 
         // Toggle group on the parent → badge shows.
         assert!(http_post(
@@ -18605,8 +19188,15 @@ position = Vector2(10, 20)
             &format!(r#"{{"node_id":{parent_id},"enabled":false}}"#),
         )
         .contains("200 OK"));
-        assert!(!parent_grouped(port), "group badge cleared after toggling off");
-        assert_eq!(click_child(port), child_id, "child selectable again once ungrouped");
+        assert!(
+            !parent_grouped(port),
+            "group badge cleared after toggling off"
+        );
+        assert_eq!(
+            click_child(port),
+            child_id,
+            "child selectable again once ungrouped"
+        );
 
         handle.stop();
     }
@@ -18620,8 +19210,7 @@ position = Vector2(10, 20)
         let main_id = get_main_node_id(port);
 
         let add = |parent: u64, name: &str| -> u64 {
-            let body =
-                format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node"}}"#);
+            let body = format!(r#"{{"parent_id":{parent},"name":"{name}","class_name":"Node"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
                 .as_u64()
@@ -18682,8 +19271,16 @@ position = Vector2(10, 20)
             &format!(r#"{{"node_id":{h2},"enabled":true}}"#),
         )
         .contains("200 OK"));
-        assert_eq!(flags(port, h1), (true, true), "first Hero flagged as colliding");
-        assert_eq!(flags(port, h2), (true, true), "second Hero flagged as colliding");
+        assert_eq!(
+            flags(port, h1),
+            (true, true),
+            "first Hero flagged as colliding"
+        );
+        assert_eq!(
+            flags(port, h2),
+            (true, true),
+            "second Hero flagged as colliding"
+        );
 
         // Disable unique on the second Hero → the collision clears on the first.
         assert!(http_post(
@@ -18697,7 +19294,11 @@ position = Vector2(10, 20)
             (true, false),
             "collision clears once the duplicate unique name is unset"
         );
-        assert_eq!(flags(port, h2), (false, false), "second Hero no longer unique");
+        assert_eq!(
+            flags(port, h2),
+            (false, false),
+            "second Hero no longer unique"
+        );
 
         handle.stop();
     }
@@ -18712,8 +19313,7 @@ position = Vector2(10, 20)
         let (handle, port) = make_server();
         let main_id = get_main_node_id(port);
         let node_id = {
-            let body =
-                format!(r#"{{"parent_id":{main_id},"name":"Plain","class_name":"Node2D"}}"#);
+            let body = format!(r#"{{"parent_id":{main_id},"name":"Plain","class_name":"Node2D"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
                 .as_u64()
@@ -18736,11 +19336,13 @@ position = Vector2(10, 20)
 
         // Unknown node → 404.
         let missing = http_get(port, "/api/node/warnings?node_id=999999");
-        assert!(missing.contains("404"), "unknown node yields 404: {missing}");
+        assert!(
+            missing.contains("404"),
+            "unknown node yields 404: {missing}"
+        );
 
         handle.stop();
     }
-
 
     /// Acceptance for inspector-object-header (pat-16kt2): inspecting a node
     /// shows a header line with its class and name; clearing the inspector
@@ -18773,13 +19375,32 @@ position = Vector2(10, 20)
         );
 
         // Inspect the node → header shows its class label and object name.
-        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{node_id}}}"#))
-            .contains("200 OK"));
+        assert!(http_post(
+            port,
+            "/api/node/select",
+            &format!(r#"{{"node_id":{node_id}}}"#)
+        )
+        .contains("200 OK"));
         let h = header(port);
-        assert_eq!(h["visible"].as_bool(), Some(true), "header visible while inspecting");
-        assert_eq!(h["name"].as_str(), Some("Hero"), "header shows the object name");
-        assert_eq!(h["class"].as_str(), Some("Sprite2D"), "header shows the class label");
-        assert!(h["path"].as_str().is_some(), "header includes the scene path");
+        assert_eq!(
+            h["visible"].as_bool(),
+            Some(true),
+            "header visible while inspecting"
+        );
+        assert_eq!(
+            h["name"].as_str(),
+            Some("Hero"),
+            "header shows the object name"
+        );
+        assert_eq!(
+            h["class"].as_str(),
+            Some("Sprite2D"),
+            "header shows the class label"
+        );
+        assert!(
+            h["path"].as_str().is_some(),
+            "header includes the scene path"
+        );
 
         // Clear the inspector → header hides again.
         assert!(http_post(port, "/api/node/select_multi", r#"{"node_ids":[]}"#).contains("200 OK"));
@@ -18800,8 +19421,7 @@ position = Vector2(10, 20)
         let (handle, port) = make_server();
         let main_id = get_main_node_id(port);
         let add = |name: &str| -> u64 {
-            let body =
-                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let body = format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
                 .as_u64()
@@ -18811,8 +19431,10 @@ position = Vector2(10, 20)
         let b = add("B");
 
         let select = |port: u16, id: u64| {
-            assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{id}}}"#))
-                .contains("200 OK"));
+            assert!(
+                http_post(port, "/api/node/select", &format!(r#"{{"node_id":{id}}}"#))
+                    .contains("200 OK")
+            );
         };
         let nav = |port: u16, dir: &str| -> serde_json::Value {
             let resp = http_post(port, &format!("/api/inspector/{dir}"), "");
@@ -18827,7 +19449,11 @@ position = Vector2(10, 20)
         // Back → re-selects A; Back now disabled (at start), Forward enabled.
         let back = nav(port, "back");
         assert_eq!(back["selected"].as_u64(), Some(a), "Back re-selects A");
-        assert_eq!(back["can_back"].as_bool(), Some(false), "Back disabled at the start");
+        assert_eq!(
+            back["can_back"].as_bool(),
+            Some(false),
+            "Back disabled at the start"
+        );
         assert_eq!(
             back["can_forward"].as_bool(),
             Some(true),
@@ -18837,13 +19463,25 @@ position = Vector2(10, 20)
         // Forward → re-selects B; Forward disabled (at end), Back enabled.
         let fwd = nav(port, "forward");
         assert_eq!(fwd["selected"].as_u64(), Some(b), "Forward re-selects B");
-        assert_eq!(fwd["can_back"].as_bool(), Some(true), "Back enabled after stepping forward");
-        assert_eq!(fwd["can_forward"].as_bool(), Some(false), "Forward disabled at the end");
+        assert_eq!(
+            fwd["can_back"].as_bool(),
+            Some(true),
+            "Back enabled after stepping forward"
+        );
+        assert_eq!(
+            fwd["can_forward"].as_bool(),
+            Some(false),
+            "Forward disabled at the end"
+        );
 
         // Back to A, then Back again is a no-op at the start of the stack.
         nav(port, "back");
         let back2 = nav(port, "back");
-        assert_eq!(back2["selected"].as_u64(), Some(a), "Back at the start stays on A");
+        assert_eq!(
+            back2["selected"].as_u64(),
+            Some(a),
+            "Back at the start stays on A"
+        );
         assert_eq!(
             back2["can_back"].as_bool(),
             Some(false),
@@ -18861,8 +19499,7 @@ position = Vector2(10, 20)
         let (handle, port) = make_server();
         let main_id = get_main_node_id(port);
         let add = |name: &str| -> u64 {
-            let body =
-                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let body = format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
                 .as_u64()
@@ -18873,8 +19510,10 @@ position = Vector2(10, 20)
         let c = add("C");
 
         let select = |port: u16, id: u64| {
-            assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{id}}}"#))
-                .contains("200 OK"));
+            assert!(
+                http_post(port, "/api/node/select", &format!(r#"{{"node_id":{id}}}"#))
+                    .contains("200 OK")
+            );
         };
         // Inspect A, then B, then C.
         select(port, a);
@@ -18890,11 +19529,19 @@ position = Vector2(10, 20)
                 .unwrap()
                 .clone()
         };
-        assert_eq!(history.len(), 3, "dropdown lists all three inspected objects");
+        assert_eq!(
+            history.len(),
+            3,
+            "dropdown lists all three inspected objects"
+        );
         assert_eq!(history[0]["id"].as_u64(), Some(c), "most recent first: C");
         assert_eq!(history[1]["id"].as_u64(), Some(b), "then B");
         assert_eq!(history[2]["id"].as_u64(), Some(a), "then A");
-        assert_eq!(history[0]["name"].as_str(), Some("C"), "entry carries the object name");
+        assert_eq!(
+            history[0]["name"].as_str(),
+            Some("C"),
+            "entry carries the object name"
+        );
 
         // Selecting the oldest entry re-inspects it.
         let resp = http_post(
@@ -18929,16 +19576,17 @@ position = Vector2(10, 20)
         let (handle, port) = make_server();
         let main_id = get_main_node_id(port);
         let add = |name: &str| -> u64 {
-            let body =
-                format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
+            let body = format!(r#"{{"parent_id":{main_id},"name":"{name}","class_name":"Node"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
                 .as_u64()
                 .unwrap()
         };
         let select = |id: u64| {
-            assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{id}}}"#))
-                .contains("200 OK"));
+            assert!(
+                http_post(port, "/api/node/select", &format!(r#"{{"node_id":{id}}}"#))
+                    .contains("200 OK")
+            );
         };
         let history_ids = |port: u16| -> Vec<u64> {
             let resp = http_get(port, "/api/inspector/history");
@@ -18971,7 +19619,10 @@ position = Vector2(10, 20)
             "/api/scene/tabs/open",
             r#"{"path":"res://scene_b.tscn","name":"B"}"#,
         );
-        assert!(opened.contains("200 OK"), "opening scene B succeeds: {opened}");
+        assert!(
+            opened.contains("200 OK"),
+            "opening scene B succeeds: {opened}"
+        );
         assert!(
             history_ids(port).is_empty(),
             "a freshly opened scene starts with an empty navigation stack"
@@ -18979,7 +19630,10 @@ position = Vector2(10, 20)
 
         // Switch back to scene A (tab index 0): its stack is restored.
         let switched = http_post(port, "/api/scene/tabs/switch", r#"{"index":0}"#);
-        assert!(switched.contains("200 OK"), "switching back to A succeeds: {switched}");
+        assert!(
+            switched.contains("200 OK"),
+            "switching back to A succeeds: {switched}"
+        );
         assert_eq!(
             history_ids(port),
             scene_a_history,
@@ -19064,8 +19718,10 @@ position = Vector2(10, 20)
 
         // The modifier (add) extends the existing selection rather than
         // replacing it: start from just A, then box-add over the origin.
-        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{a}}}"#))
-            .contains("200 OK"));
+        assert!(
+            http_post(port, "/api/node/select", &format!(r#"{{"node_id":{a}}}"#))
+                .contains("200 OK")
+        );
         let resp = http_post(
             port,
             "/api/viewport/box_select",
@@ -19090,8 +19746,12 @@ position = Vector2(10, 20)
         let main_id = get_main_node_id(port);
 
         // Establish a selection that panning must not disturb.
-        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{main_id}}}"#))
-            .contains("200 OK"));
+        assert!(http_post(
+            port,
+            "/api/node/select",
+            &format!(r#"{{"node_id":{main_id}}}"#)
+        )
+        .contains("200 OK"));
 
         let selected = |port: u16| -> Vec<u64> {
             let v: serde_json::Value =
@@ -19116,12 +19776,21 @@ position = Vector2(10, 20)
         // A middle-drag pans the viewport by the cursor delta.
         let resp = http_post(port, "/api/viewport/pan_by", r#"{"dx":50.0,"dy":-30.0}"#);
         assert!(resp.contains("200 OK"), "pan_by succeeds: {resp}");
-        assert_eq!(pan(port), (50.0, -30.0), "pan offset updates by the cursor delta");
+        assert_eq!(
+            pan(port),
+            (50.0, -30.0),
+            "pan offset updates by the cursor delta"
+        );
 
         // Continuing the drag accumulates onto the offset.
-        assert!(http_post(port, "/api/viewport/pan_by", r#"{"dx":10.0,"dy":10.0}"#)
-            .contains("200 OK"));
-        assert_eq!(pan(port), (60.0, -20.0), "subsequent drags accumulate the scroll offset");
+        assert!(
+            http_post(port, "/api/viewport/pan_by", r#"{"dx":10.0,"dy":10.0}"#).contains("200 OK")
+        );
+        assert_eq!(
+            pan(port),
+            (60.0, -20.0),
+            "subsequent drags accumulate the scroll offset"
+        );
 
         // Panning never changes the selection.
         assert_eq!(
@@ -19156,7 +19825,10 @@ position = Vector2(10, 20)
         // default zoom (a point keeps zoom 1.0).
         assert!(http_post(port, "/api/viewport/frame_selection", "{}").contains("200 OK"));
         let (z, _px, _py) = zoom_pan(port);
-        assert!((z - 1.0).abs() < 1e-9, "no selection frames the origin at zoom 1.0: {z}");
+        assert!(
+            (z - 1.0).abs() < 1e-9,
+            "no selection frames the origin at zoom 1.0: {z}"
+        );
 
         // Add two nodes with explicit, spread-out positions (a 2000x2000 box).
         let add_node = |name: &str| -> u64 {
@@ -19184,10 +19856,18 @@ position = Vector2(10, 20)
 
         // Select both, then frame: the 2000x2000 bounds are larger than the
         // viewport, so zoom is reduced to fit them.
-        assert!(http_post(port, "/api/node/select_multi", &format!(r#"{{"node_id":{a},"mode":"set"}}"#))
-            .contains("200 OK"));
-        assert!(http_post(port, "/api/node/select_multi", &format!(r#"{{"node_id":{b},"mode":"add"}}"#))
-            .contains("200 OK"));
+        assert!(http_post(
+            port,
+            "/api/node/select_multi",
+            &format!(r#"{{"node_id":{a},"mode":"set"}}"#)
+        )
+        .contains("200 OK"));
+        assert!(http_post(
+            port,
+            "/api/node/select_multi",
+            &format!(r#"{{"node_id":{b},"mode":"add"}}"#)
+        )
+        .contains("200 OK"));
         assert!(http_post(port, "/api/viewport/frame_selection", "{}").contains("200 OK"));
         let (z, _px, _py) = zoom_pan(port);
         assert!(
@@ -19197,12 +19877,16 @@ position = Vector2(10, 20)
 
         // Centering responds to the selection: framing A alone vs. B alone (at
         // different positions) yields different pans.
-        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{a}}}"#))
-            .contains("200 OK"));
+        assert!(
+            http_post(port, "/api/node/select", &format!(r#"{{"node_id":{a}}}"#))
+                .contains("200 OK")
+        );
         assert!(http_post(port, "/api/viewport/frame_selection", "{}").contains("200 OK"));
         let (_za, pax, pay) = zoom_pan(port);
-        assert!(http_post(port, "/api/node/select", &format!(r#"{{"node_id":{b}}}"#))
-            .contains("200 OK"));
+        assert!(
+            http_post(port, "/api/node/select", &format!(r#"{{"node_id":{b}}}"#))
+                .contains("200 OK")
+        );
         assert!(http_post(port, "/api/viewport/frame_selection", "{}").contains("200 OK"));
         let (_zb, pbx, pby) = zoom_pan(port);
         assert!(
@@ -19226,8 +19910,7 @@ position = Vector2(10, 20)
 
         // Add a node and mark it as an instance by setting `_instance_source`.
         let inst_id = {
-            let body =
-                format!(r#"{{"parent_id":{main_id},"name":"Inst","class_name":"Node"}}"#);
+            let body = format!(r#"{{"parent_id":{main_id},"name":"Inst","class_name":"Node"}}"#);
             let resp = http_post(port, "/api/node/add", &body);
             serde_json::from_str::<serde_json::Value>(extract_body(&resp)).unwrap()["id"]
                 .as_u64()
@@ -19262,7 +19945,11 @@ position = Vector2(10, 20)
 
         // Baseline: it is an instance, children not yet exposed for editing.
         let before = find_inst(port);
-        assert_eq!(before["is_instance"].as_bool(), Some(true), "is an instance");
+        assert_eq!(
+            before["is_instance"].as_bool(),
+            Some(true),
+            "is an instance"
+        );
         assert_eq!(
             before["editable_children"].as_bool(),
             Some(false),
@@ -19819,7 +20506,10 @@ position = Vector2(10, 20)
         );
         // The real node resolves with a 200 + properties payload.
         let resp = http_get(port, "/api/runtime/node?path=/root/Main");
-        assert!(resp.contains("200 OK"), "known runtime node should resolve: {resp}");
+        assert!(
+            resp.contains("200 OK"),
+            "known runtime node should resolve: {resp}"
+        );
         let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
         assert_eq!(v["name"], "Main");
         handle.stop();
@@ -20032,7 +20722,10 @@ position = Vector2(10, 20)
         assert_eq!(v["running"], true);
         let v: serde_json::Value =
             serde_json::from_str(extract_body(&http_get(port, "/api/editor/mode"))).unwrap();
-        assert_eq!(v["mode"], "game", "Play should switch the main view to game");
+        assert_eq!(
+            v["mode"], "game",
+            "Play should switch the main view to game"
+        );
         assert!(
             http_post(port, "/api/node/add", &add_body).contains("409"),
             "editor must be edit-locked while running"
@@ -20188,7 +20881,10 @@ position = Vector2(10, 20)
             })
             .to_string(),
         );
-        assert!(set.contains("200 OK"), "attach script via property set: {set}");
+        assert!(
+            set.contains("200 OK"),
+            "attach script via property set: {set}"
+        );
 
         // SCRIPT main view for the scripted node: editable + highlighted + save.
         let resp = http_get(port, &format!("/api/script/main_view?node_id={main_id}"));
@@ -20201,7 +20897,11 @@ position = Vector2(10, 20)
             Some("/api/script/save"),
             "the pane is wired to save"
         );
-        assert_eq!(v["language"].as_str(), Some("gdscript"), "highlight language hint");
+        assert_eq!(
+            v["language"].as_str(),
+            Some("gdscript"),
+            "highlight language hint"
+        );
         assert!(
             v["source"].as_str().unwrap().contains("extends Node2D"),
             "the pane shows the node's script source: {v}"
@@ -22518,8 +23218,7 @@ position = Vector2(10, 20)
         // Helper: read a node's groups as seen by the Groups dock endpoint.
         let dock_groups = |port: u16, id: u64| -> Vec<String> {
             let resp = http_get(port, &format!("/api/node/signals?node_id={id}"));
-            let v: serde_json::Value =
-                serde_json::from_str(extract_body(&resp)).unwrap();
+            let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
             v["groups"]
                 .as_array()
                 .unwrap()
@@ -22531,8 +23230,7 @@ position = Vector2(10, 20)
         // Helper: read a node's groups as seen by the scene-tree dock (/api/scene).
         let tree_groups = |port: u16, id: u64| -> Vec<String> {
             let resp = http_get(port, "/api/scene");
-            let scene: serde_json::Value =
-                serde_json::from_str(extract_body(&resp)).unwrap();
+            let scene: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
             let main = &scene["nodes"]["children"][0];
             assert_eq!(main["id"].as_u64(), Some(id));
             main["groups"]
@@ -22775,7 +23473,11 @@ position = Vector2(10, 20)
         );
 
         // Clicking the tree row selects the node (front-end POSTs this).
-        let sel = http_post(port, "/api/node/select", &format!(r#"{{"node_id":{node_id}}}"#));
+        let sel = http_post(
+            port,
+            "/api/node/select",
+            &format!(r#"{{"node_id":{node_id}}}"#),
+        );
         assert!(sel.contains("200 OK"), "tree-row select succeeds: {sel}");
         assert!(extract_body(&sel).contains("\"ok\":true"));
 

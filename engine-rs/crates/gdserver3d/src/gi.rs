@@ -366,8 +366,10 @@ impl LightmapGI {
         resolution: u32,
     ) {
         // Pre-compute world AABBs of occluders that carry a shape.
-        let occluder_aabbs: Vec<Aabb> =
-            occluders.iter().filter_map(|o| o.get_world_aabb()).collect();
+        let occluder_aabbs: Vec<Aabb> = occluders
+            .iter()
+            .filter_map(|o| o.get_world_aabb())
+            .collect();
 
         let res = resolution.max(2);
         self.lightmap_samples = Vec::with_capacity((res * res) as usize);
@@ -406,8 +408,12 @@ impl LightmapGI {
                     g += light.color.g * gel.g * scale;
                     b += light.color.b * gel.b * scale;
                 }
-                self.lightmap_samples
-                    .push(Color::new(r * self.energy, g * self.energy, b * self.energy, 1.0));
+                self.lightmap_samples.push(Color::new(
+                    r * self.energy,
+                    g * self.energy,
+                    b * self.energy,
+                    1.0,
+                ));
             }
         }
         self.baked = true;
@@ -583,9 +589,8 @@ mod tests {
     /// x∈[0,10], y∈[4,6] lit from straight above, so the shadow edge falls at
     /// x = 0 and a texel there straddles it.
     fn edge_shadow_occluders() -> Vec<Aabb> {
-        let mut occ = OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(
-            10.0, 2.0, 40.0,
-        )));
+        let mut occ =
+            OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(10.0, 2.0, 40.0)));
         occ.transform.origin = Vector3::new(5.0, 5.0, 0.0);
         occ.get_world_aabb().into_iter().collect()
     }
@@ -690,7 +695,9 @@ mod tests {
 
         let mut tinted = LightmapGI::new(LightmapGIId(2));
         tinted.bake_samples(
-            &[spot(Some(LightProjector::solid(Color::new(1.0, 0.0, 0.0, 1.0))))],
+            &[spot(Some(LightProjector::solid(Color::new(
+                1.0, 0.0, 0.0, 1.0,
+            ))))],
             16,
         );
         let red = tinted.sample_lightmap(Vector3::ZERO);
@@ -894,9 +901,8 @@ mod tests {
         let light = Light3D::directional(Light3DId(1)); // points (0,-1,0)
 
         // Box over x∈[0,10], y∈[4,6], spanning z, casting a downward shadow.
-        let mut occ = OccluderInstance3D::with_occluder(Occluder3D::new_box(
-            Vector3::new(10.0, 2.0, 40.0),
-        ));
+        let mut occ =
+            OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(10.0, 2.0, 40.0)));
         occ.transform.origin = Vector3::new(5.0, 5.0, 0.0);
 
         gi.bake_samples_with_occluders(&[light], &[occ], 16);
@@ -933,9 +939,8 @@ mod tests {
     fn lightmapgi_shade_modulates_albedo_by_lightmap() {
         let mut gi = LightmapGI::new(LightmapGIId(1));
         let light = Light3D::directional(Light3DId(1));
-        let mut occ = OccluderInstance3D::with_occluder(Occluder3D::new_box(
-            Vector3::new(10.0, 2.0, 40.0),
-        ));
+        let mut occ =
+            OccluderInstance3D::with_occluder(Occluder3D::new_box(Vector3::new(10.0, 2.0, 40.0)));
         occ.transform.origin = Vector3::new(5.0, 5.0, 0.0);
         gi.bake_samples_with_occluders(&[light], &[occ], 16);
 

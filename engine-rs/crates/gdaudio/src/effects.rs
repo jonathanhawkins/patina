@@ -361,12 +361,8 @@ impl BiquadCoeffs {
                 -2.0 * cw,
                 1.0 - alpha,
             ),
-            FilterMode::BandPass => {
-                (alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cw, 1.0 - alpha)
-            }
-            FilterMode::Notch => {
-                (1.0, -2.0 * cw, 1.0, 1.0 + alpha, -2.0 * cw, 1.0 - alpha)
-            }
+            FilterMode::BandPass => (alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cw, 1.0 - alpha),
+            FilterMode::Notch => (1.0, -2.0 * cw, 1.0, 1.0 + alpha, -2.0 * cw, 1.0 - alpha),
             FilterMode::Peak => (
                 1.0 + alpha * a,
                 -2.0 * cw,
@@ -785,7 +781,7 @@ mod tests {
         rev.dry = 0.0;
         rev.feedback = 0.6;
         rev.delay_secs = 0.01; // 441 samples at 44.1k
-        // Impulse then silence
+                               // Impulse then silence
         let mut buf = vec![0.0_f32; 2000];
         buf[0] = 1.0;
         rev.process(&mut buf, 44100, 1);
@@ -940,7 +936,10 @@ mod tests {
         let raw = energy(&buf);
         peak.process(&mut buf, sr, 1);
         let boosted = energy(&buf);
-        assert!(boosted > raw * 1.5, "peak +12dB: raw={raw} boosted={boosted}");
+        assert!(
+            boosted > raw * 1.5,
+            "peak +12dB: raw={raw} boosted={boosted}"
+        );
     }
 
     // --- Dynamics (pat-u3l8c.107) ------------------------------------------
@@ -1010,12 +1009,19 @@ mod tests {
         let mut buf: Vec<f32> = vec![2.0, -2.0, 1.5, -1.5, 0.8, -0.8];
         lim.process(&mut buf, 48000, 1);
         for &s in &buf {
-            assert!(s.abs() <= ceiling + 1e-4, "soft limiter ceiling {ceiling}: got {s}");
+            assert!(
+                s.abs() <= ceiling + 1e-4,
+                "soft limiter ceiling {ceiling}: got {s}"
+            );
         }
         // Sub-knee sample preserved.
         let mut small = vec![0.1_f32];
         lim.process(&mut small, 48000, 1);
-        assert!((small[0] - 0.1).abs() < 1e-4, "sub-knee unchanged: {}", small[0]);
+        assert!(
+            (small[0] - 0.1).abs() < 1e-4,
+            "sub-knee unchanged: {}",
+            small[0]
+        );
     }
 
     #[test]

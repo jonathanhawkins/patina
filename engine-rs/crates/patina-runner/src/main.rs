@@ -292,8 +292,27 @@ fn run_main_loop(
                 "tree": dump_tree_json(main_loop.tree()),
             }));
         }
+        // Godot: `SceneTree.quit()` ends the loop at the frame boundary — the
+        // frame that called it finishes, then no further frames run. Before
+        // this, `should_quit` was set and nothing ever read it, so a scene that
+        // quit kept simulating to the requested frame count (pat-0q2kx.47).
+        if main_loop.tree().should_quit() {
+            break;
+        }
     }
     frame_trace
+}
+
+/// Ends the process with the exit code a script requested through
+/// `get_tree().quit(code)` (pat-0q2kx.47).
+///
+/// Called after the run's JSON has been written, so a scene that quits still
+/// produces its output — Godot likewise finishes the frame and flushes before
+/// the process ends. A run that never quit returns normally and exits 0.
+fn exit_if_quit_requested(main_loop: &MainLoop) {
+    if main_loop.tree().should_quit() {
+        process::exit(main_loop.tree().exit_code());
+    }
 }
 
 /// Boots the runner from a `project.godot` (pat-nzgdu.17): parses the project,
@@ -367,6 +386,7 @@ fn run_project_from_godot(arg_path: &Path, args: &Args) {
         "{}",
         serde_json::to_string_pretty(&output).expect("JSON serialization failed")
     );
+    exit_if_quit_requested(&main_loop);
 }
 
 // ---------------------------------------------------------------------------
@@ -497,6 +517,7 @@ fn main() {
         "{}",
         serde_json::to_string_pretty(&output).expect("JSON serialization failed")
     );
+    exit_if_quit_requested(&main_loop);
 }
 
 #[cfg(test)]

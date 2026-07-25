@@ -95,9 +95,7 @@ impl VideoStream {
 
         let frames = body[..needed]
             .chunks_exact(frame_len)
-            .map(|chunk| {
-                Image::create_from_data(width, height, ImageFormat::Rgba8, chunk.to_vec())
-            })
+            .map(|chunk| Image::create_from_data(width, height, ImageFormat::Rgba8, chunk.to_vec()))
             .collect();
         Ok(Self { frames, fps })
     }
@@ -281,15 +279,18 @@ mod tests {
         assert_eq!(first.get_format(), ImageFormat::Rgba8);
         // 2×3 pixels of red.
         assert_eq!(first.get_data(), &RED.repeat(6)[..]);
-        assert_eq!(stream.frame(1).expect("frame 1").get_data(), &GREEN.repeat(6)[..]);
+        assert_eq!(
+            stream.frame(1).expect("frame 1").get_data(),
+            &GREEN.repeat(6)[..]
+        );
         assert!(stream.frame(2).is_none());
     }
 
     #[test]
     fn frame_at_maps_time_to_frame_and_clamps() {
         // 2 fps => each frame shows for 0.5s.
-        let stream = VideoStream::from_fixture_bytes(&fixture(2.0, &[RED, GREEN, BLUE]))
-            .expect("decodes");
+        let stream =
+            VideoStream::from_fixture_bytes(&fixture(2.0, &[RED, GREEN, BLUE])).expect("decodes");
         assert_eq!(stream.frame_at(0.0).unwrap().get_data(), &RED[..]);
         assert_eq!(stream.frame_at(0.49).unwrap().get_data(), &RED[..]);
         assert_eq!(stream.frame_at(0.5).unwrap().get_data(), &GREEN[..]);
@@ -301,8 +302,8 @@ mod tests {
 
     #[test]
     fn playing_a_fixture_walks_frames_to_the_video_texture() {
-        let stream = VideoStream::from_fixture_bytes(&fixture(2.0, &[RED, GREEN, BLUE]))
-            .expect("decodes");
+        let stream =
+            VideoStream::from_fixture_bytes(&fixture(2.0, &[RED, GREEN, BLUE])).expect("decodes");
         let mut player = VideoStreamPlayer::default();
         player.set_stream(stream);
         assert!((player.length_secs - 1.5).abs() < 1e-9);
