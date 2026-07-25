@@ -119,11 +119,13 @@ COLS="${GRID##*x}"
 WORKERS=$((ROWS * COLS))
 
 # Workers run Opus 5 (explicit full model id, not the `opus` alias, so it stays
-# pinned to Opus 5 even as "latest Opus" shifts).
+# pinned to Opus 5 even as "latest Opus" shifts). `--effort high` is the launch
+# BASELINE; the coordinator overrides it per-bead by injecting `/effort <level>`
+# from each bead's `effort:` label (adaptive per-bead effort).
 /Users/bone/dev/games/patina/apps/orchestrator/crate/target/release/patina-orchestrator launch \
   --session "$SESSION" \
   --workers "$WORKERS" \
-  --model "claude --model claude-opus-5 --dangerously-skip-permissions" \
+  --model "claude --model claude-opus-5 --effort high --dangerously-skip-permissions" \
   --project-root /Users/bone/dev/games/patina \
   --with-coordinator \
   --interval 8 \

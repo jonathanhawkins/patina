@@ -43,6 +43,24 @@ If `$ARGUMENTS` contains `--dry-run`, drop the `--apply` flag instead — the an
 
    For legacy V1-style configs that do not use phase chains, fall back to the old behavior: for each gate in the JSON where `passing == true`, use the Edit tool on `prd/V1_EXIT_CRITERIA.md` to replace the exact `- [ ]` checkbox line (from `criteria_line`) with `- [x]`. Only edit lines that currently have `- [ ]`.
 
+3b. **Tag each created bead with an `effort:` label (adaptive per-bead worker effort).** The coordinator injects `/effort <level>` (from this label) into a worker before it starts the bead, so simple beads run cheap and hard beads get full reasoning. Unlabeled beads default to `high` (set by the coordinator), so **you only need to label the beads that deviate** — mark the clearly-simple ones down and the clearly-hard ones up:
+
+```bash
+# For each CREATED bead id, add ONE effort label:
+br update <id> --add-label effort:low     # trivial: wire a getter, expose an enum, add a field, one-line parity
+br update <id> --add-label effort:medium  # standard: implement a node method / small subsystem
+# (omit the label to accept the default `high`)
+br update <id> --add-label effort:xhigh   # hard: solver/parser/codegen, tricky multi-crate semantics, novel algorithm
+```
+
+Rubric (judge from the recommendation's title + cited crate/paths — no deep analysis needed):
+- **low** — title starts with wire/expose/add/register/emit, single crate, no algorithm.
+- **medium** — a normal node method or small wiring task.
+- **high** (default, no label needed) — a substantive feature spanning a few files.
+- **xhigh** — physics/render-pipeline math, a parser/transpiler, GDScript semantics, or anything you'd want maximum reasoning for.
+
+Valid levels only: `low|medium|high|xhigh|max`. A malformed label is ignored by the coordinator (worker keeps its baseline effort), so don't invent other values.
+
 4. **Spot-check one created bead** (cheap sanity verification — the binary already enforces the contract, this just confirms the DB write landed):
 ```bash
 # Pick the first CREATED line from /tmp/planner-apply.log:

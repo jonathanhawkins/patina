@@ -151,6 +151,17 @@ pub struct PromptTask {
     pub pane: u32,
     pub text: String,
     pub pcfg: PromptConfig,
+    /// Adaptive per-bead reasoning effort. When `Some(level)`, the pane is sent
+    /// `/effort <level>` (and, if `clear_context`, a `/clear`) BEFORE the work
+    /// prompt — so each bead runs at the level the planner tagged. `None` = no
+    /// effort management (leaves the session's current effort untouched). Only
+    /// new-assignment tasks set this; re-prompts leave it `None` so a worker
+    /// mid-bead is never cleared.
+    pub effort: Option<String>,
+    /// Reset the worker's context with `/clear` before setting effort + prompting.
+    /// Only honored when `effort` is `Some`. Safe on new assignments (the worker
+    /// is idle between beads); never set on a re-prompt.
+    pub clear_context: bool,
 }
 
 /// Submit multiple prompts in parallel using std::thread::scope.
@@ -181,6 +192,20 @@ pub fn submit_prompts_parallel(tasks: &[PromptTask]) -> Vec<bool> {
                         std::thread::sleep(std::time::Duration::from_millis(i as u64 * 200));
                     }
                     let t = std::time::Instant::now();
+                    // Adaptive per-bead effort: reset context + set effort BEFORE
+                    // the work prompt. Best-effort — a failure here must never
+                    // block the assignment, so we ignore its result and still
+                    // send the work prompt.
+                    if let Some(level) = &task.effort {
+                        inject_effort_prelude(
+                            &task.session,
+                            task.window,
+                            task.pane,
+                            level,
+                            task.clear_context,
+                            &task.pcfg,
+                        );
+                    }
                     let result = prompt_worker_pane(
                         &task.session,
                         task.window,
@@ -243,6 +268,50 @@ fn prompt_text_visible_in_capture(capture: &str) -> bool {
 
 /// Send a prompt to a worker pane: clear input, type text, submit.
 /// Returns Ok(true) if submitted, Ok(false) if prompt remained queued.
+/// Reasoning-effort levels `/effort` accepts. Guards against a malformed
+/// `effort:` label turning into an arbitrary injected slash command.
+const VALID_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// Before an assignment prompt, reset the worker's context (`/clear`, optional)
+/// and set its reasoning effort (`/effort <level>`) so each bead runs at the
+/// planner-tagged level. Effort persists across `/clear` (validated 2026-07-25),
+/// so the order is `/clear` then `/effort`. Best-effort: every tmux error is
+/// swallowed — a hiccup here must never block the work prompt that follows. An
+/// unrecognized level is a safe no-op (the session keeps its launch-baseline
+/// effort) rather than a risky injection.
+fn inject_effort_prelude(
+    session: &str,
+    window: u32,
+    pane: u32,
+    level: &str,
+    clear_context: bool,
+    pcfg: &PromptConfig,
+) {
+    let level = level.trim().to_lowercase();
+    if !VALID_EFFORT_LEVELS.contains(&level.as_str()) {
+        tracing::warn!(pane, level = %level, "adaptive effort: unrecognized level — skipping");
+        return;
+    }
+    let target = format!("{session}:{window}.{pane}");
+    let submit_command = |cmd: &str| {
+        // Clear any half-typed input, type the slash command char-by-char, submit.
+        let _ = send_keys(session, window, pane, &pcfg.clear_line_key);
+        std::thread::sleep(std::time::Duration::from_millis(pcfg.post_clear_delay_ms));
+        let _ = run_tmux(&["send-keys", "-t", &target, "-l", "--", cmd]);
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let _ = run_tmux(&["send-keys", "-t", &target, &pcfg.submit_key]);
+        // Give the slash command time to register before the next injection.
+        std::thread::sleep(std::time::Duration::from_millis(
+            pcfg.prompt_submit_delay_ms.max(400),
+        ));
+    };
+    if clear_context {
+        submit_command("/clear");
+    }
+    submit_command(&format!("/effort {level}"));
+    tracing::info!(pane, level = %level, cleared = clear_context, "adaptive effort applied");
+}
+
 pub fn prompt_worker_pane(
     session: &str,
     window: u32,

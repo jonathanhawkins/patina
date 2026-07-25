@@ -1291,6 +1291,10 @@ impl Coordinator {
                                             &w.worker_name,
                                         ),
                                         pcfg: self.prompt_config(),
+                                        // Re-prompt of a worker already on this bead —
+                                        // never re-level or /clear (would wipe WIP).
+                                        effort: None,
+                                        clear_context: false,
                                     });
                                     self.record_reprompt(&w.worker_name, &bead.id);
                                 }
@@ -1357,6 +1361,10 @@ impl Coordinator {
                         pane: w.pane_index,
                         text: self.build_prompt_text(&bead.id, &bead.title, &w.worker_name),
                         pcfg: self.prompt_config(),
+                        // New assignment: set this bead's effort (and reset the
+                        // worker's context) before the work prompt.
+                        effort: self.assignment_effort(&bead),
+                        clear_context: self.config.adaptive_effort_clear,
                     });
                     self.record_reprompt(&w.worker_name, &bead.id);
                 }
@@ -2096,6 +2104,22 @@ impl Coordinator {
             Ok(()) => tracing::debug!(msg_id = msg_id, "marked message read"),
             Err(e) => tracing::warn!(msg_id = msg_id, error = %e, "failed to mark message read"),
         }
+    }
+
+    /// Adaptive per-bead effort for a NEW-assignment prompt: the bead's
+    /// `effort:` label, else the configured default; `None` when the feature is
+    /// disabled (leaving the worker's launch-baseline effort untouched).
+    /// Re-prompts pass `None` directly so a worker mid-bead is never re-levelled
+    /// or `/clear`ed.
+    fn assignment_effort(&self, bead: &db::BeadInfo) -> Option<String> {
+        if !self.config.adaptive_effort_enabled {
+            return None;
+        }
+        Some(
+            bead.effort
+                .clone()
+                .unwrap_or_else(|| self.config.adaptive_effort_default.clone()),
+        )
     }
 
     fn build_prompt_text(&self, bead_id: &str, bead_title: &str, worker_name: &str) -> String {
@@ -2989,6 +3013,7 @@ mod tests {
             updated_at: None,
             priority,
             crate_labels: crates.iter().map(|s| s.to_string()).collect(),
+            effort: None,
             unblock_impact: 0,
         }
     }
@@ -3565,6 +3590,39 @@ mod tests {
         // No slashes or spaces in filename
         assert!(!filename.contains('/'));
         assert!(!filename.contains(' '));
+    }
+
+    /// Adaptive effort: a bead's `effort:` label wins; unlabeled falls back to
+    /// the configured default; disabled yields None (worker keeps its launch
+    /// baseline).
+    #[test]
+    fn assignment_effort_label_then_default_then_disabled() {
+        let mut cfg = test_config();
+        cfg.adaptive_effort_enabled = true;
+        cfg.adaptive_effort_default = "high".to_string();
+        let coord = test_coordinator_with_config(cfg);
+
+        let mut bead = ready_bead("pat-1", 1, &[]);
+        assert_eq!(
+            coord.assignment_effort(&bead).as_deref(),
+            Some("high"),
+            "unlabeled bead uses the configured default"
+        );
+        bead.effort = Some("low".to_string());
+        assert_eq!(
+            coord.assignment_effort(&bead).as_deref(),
+            Some("low"),
+            "the bead's effort label wins over the default"
+        );
+
+        let mut cfg_off = test_config();
+        cfg_off.adaptive_effort_enabled = false;
+        let coord_off = test_coordinator_with_config(cfg_off);
+        assert_eq!(
+            coord_off.assignment_effort(&bead),
+            None,
+            "disabled → no injection, worker keeps its launch-baseline effort"
+        );
     }
 
     #[test]
@@ -4909,7 +4967,7 @@ mod tests {
         let fn_start = source
             .find("fn submit_prompts_parallel(")
             .expect("function must exist");
-        let fn_body = &source[fn_start..fn_start + 1500];
+        let fn_body = &source[fn_start..fn_start + 2600];
 
         // Must log start with pane list
         assert!(

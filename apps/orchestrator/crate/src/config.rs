@@ -113,6 +113,13 @@ pub struct Config {
     // Agent type: "claude" or "codex"
     pub agent_type: String,
 
+    // Adaptive per-bead worker effort: at each new assignment the coordinator
+    // injects `/effort <level>` (from the bead's `effort:` label, or the
+    // default below) and optionally `/clear` into the worker pane.
+    pub adaptive_effort_enabled: bool,
+    pub adaptive_effort_default: String,
+    pub adaptive_effort_clear: bool,
+
     // Tmux worker detection
     pub min_worker_pane_index: u32,
     pub worker_command: String,
@@ -244,6 +251,10 @@ impl Config {
             }),
 
             // Tmux worker detection
+            adaptive_effort_enabled: env_or("ORCH_ADAPTIVE_EFFORT", true),
+            adaptive_effort_default: env_string("ORCH_ADAPTIVE_EFFORT_DEFAULT")
+                .unwrap_or_else(|| "high".to_string()),
+            adaptive_effort_clear: env_or("ORCH_ADAPTIVE_EFFORT_CLEAR", true),
             min_worker_pane_index: env_or("ORCH_MIN_WORKER_PANE_INDEX", 4),
             worker_command: env_string("ORCH_WORKER_COMMAND")
                 .unwrap_or_else(|| "claude".to_string()),
@@ -511,6 +522,9 @@ pub fn test_config() -> Config {
         browser_verify_enabled: false,
         browser_verify_panes: vec![],
         agent_type: "claude".to_string(),
+        adaptive_effort_enabled: true,
+        adaptive_effort_default: "high".to_string(),
+        adaptive_effort_clear: true,
         min_worker_pane_index: 4,
         worker_command: "claude".to_string(),
         planner_command: "claude".to_string(),

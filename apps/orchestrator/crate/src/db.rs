@@ -52,6 +52,9 @@ pub struct BeadInfo {
     pub priority: i32,
     /// `crate:*` labels on the bead, for collision-aware assignment.
     pub crate_labels: Vec<String>,
+    /// Reasoning-effort level from an `effort:<level>` label (level only, e.g.
+    /// "high"), used for adaptive per-bead worker effort. None when unlabeled.
+    pub effort: Option<String>,
     /// Number of open beads a close of this bead would directly unblock.
     pub unblock_impact: i64,
 }
@@ -217,6 +220,7 @@ pub fn assigned_bead_for_worker(conn: &Connection, worker: &str) -> Result<Optio
                 updated_at: row.get(5)?,
                 priority: row.get(6)?,
                 crate_labels: Vec::new(),
+                effort: None,
                 unblock_impact: 0,
             })
         });
@@ -297,6 +301,8 @@ fn ready_unassigned_sql() -> &'static str {
              coalesce(i.assignee,''), i.updated_at, coalesce(i.priority,999), \
              (SELECT coalesce(group_concat(l.label, char(31)),'') FROM labels l \
               WHERE l.issue_id = i.id AND l.label LIKE 'crate:%') AS crate_labels, \
+             (SELECT l.label FROM labels l \
+              WHERE l.issue_id = i.id AND l.label LIKE 'effort:%' LIMIT 1) AS effort_label, \
              (SELECT count(*) FROM dependencies du JOIN issues di ON di.id = du.issue_id \
               WHERE du.depends_on_id = i.id \
                 AND du.type IN ('blocks','conditional-blocks','waits-for') \
@@ -338,6 +344,7 @@ pub fn ready_unassigned(conn: &Connection, limit: usize) -> Result<Vec<BeadInfo>
             let status_str: String = row.get(3)?;
             let assignee_str: String = row.get(4)?;
             let crate_labels_str: String = row.get(7)?;
+            let effort_label: Option<String> = row.get(8)?;
             Ok(BeadInfo {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -358,7 +365,10 @@ pub fn ready_unassigned(conn: &Connection, limit: usize) -> Result<Vec<BeadInfo>
                         .map(str::to_string)
                         .collect()
                 },
-                unblock_impact: row.get(8)?,
+                effort: effort_label
+                    .and_then(|l| l.strip_prefix("effort:").map(str::to_string))
+                    .filter(|s| !s.is_empty()),
+                unblock_impact: row.get(9)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -928,6 +938,28 @@ mod tests {
         assert_eq!(beads.len(), 2);
         assert_eq!(beads[0].id, "pat-3"); // higher priority
         assert_eq!(beads[1].id, "pat-2");
+    }
+
+    /// An `effort:<level>` label surfaces on BeadInfo.effort as the level only
+    /// (prefix stripped); an unlabeled bead reports None.
+    #[test]
+    fn test_ready_unassigned_reads_effort_label() {
+        let conn = setup_test_db();
+        conn.execute_batch(
+            "INSERT INTO issues (id, title, status, assignee, priority) VALUES
+             ('pat-hi', 'Complex', 'open', '', 1),
+             ('pat-plain', 'Simple', 'open', '', 2);
+             INSERT INTO labels (issue_id, label) VALUES
+             ('pat-hi', 'effort:xhigh'),
+             ('pat-hi', 'crate:gdscene');",
+        )
+        .unwrap();
+
+        let beads = ready_unassigned(&conn, 10).unwrap();
+        let hi = beads.iter().find(|b| b.id == "pat-hi").unwrap();
+        let plain = beads.iter().find(|b| b.id == "pat-plain").unwrap();
+        assert_eq!(hi.effort.as_deref(), Some("xhigh"), "level only, prefix stripped");
+        assert_eq!(plain.effort, None, "unlabeled bead has no effort");
     }
 
     /// Beads with a live blocker (any blocking dep type) are not ready;
