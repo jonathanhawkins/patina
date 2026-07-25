@@ -976,7 +976,21 @@ pub fn register_3d_classes() {
     register_class(ClassRegistration::new("XRCamera3D").parent("Camera3D"));
 
     // -- Additional 3D types --
-    register_class(ClassRegistration::new("NavigationRegion3D").parent("Node3D"));
+    // NavigationRegion3D carries the NavigationMesh the runtime uploads to the
+    // navigation map. Defaults diffed against doc/classes/NavigationRegion3D.xml
+    // — the doc XML is the authoritative source for property defaults
+    // (pat-0q2kx.26). `navigation_mesh` defaults to None, so it is registered as
+    // Nil rather than an invented empty resource.
+    register_class(
+        ClassRegistration::new("NavigationRegion3D")
+            .parent("Node3D")
+            .property(PropertyInfo::new("navigation_mesh", Variant::Nil))
+            .property(PropertyInfo::new("enabled", Variant::Bool(true)))
+            .property(PropertyInfo::new("navigation_layers", Variant::Int(1)))
+            .property(PropertyInfo::new("enter_cost", Variant::Float(0.0)))
+            .property(PropertyInfo::new("travel_cost", Variant::Float(1.0)))
+            .property(PropertyInfo::new("use_edge_connections", Variant::Bool(true))),
+    );
     // NavigationAgent3D — scene-tree pathfinding agent (pat-rzs4o).
     register_class(
         ClassRegistration::new("NavigationAgent3D")
@@ -3526,7 +3540,19 @@ pub fn register_2d_classes() {
         register_class(ClassRegistration::new("LightOccluder2D").parent("Node2D"));
     }
     if !class_exists("NavigationRegion2D") {
-        register_class(ClassRegistration::new("NavigationRegion2D").parent("Node2D"));
+        // Mirrors NavigationRegion3D above; defaults from
+        // doc/classes/NavigationRegion2D.xml (pat-0q2kx.26). The 2D resource slot
+        // is `navigation_polygon`, not `navigation_mesh`.
+        register_class(
+            ClassRegistration::new("NavigationRegion2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("navigation_polygon", Variant::Nil))
+                .property(PropertyInfo::new("enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("navigation_layers", Variant::Int(1)))
+                .property(PropertyInfo::new("enter_cost", Variant::Float(0.0)))
+                .property(PropertyInfo::new("travel_cost", Variant::Float(1.0)))
+                .property(PropertyInfo::new("use_edge_connections", Variant::Bool(true))),
+        );
     }
     // NavigationAgent2D — scene-tree pathfinding agent (pat-rzs4o).
     if !class_exists("NavigationAgent2D") {

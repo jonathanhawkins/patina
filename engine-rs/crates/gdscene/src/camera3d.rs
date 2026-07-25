@@ -655,6 +655,35 @@ pub fn is_current(tree: &SceneTree, node_id: NodeId) -> bool {
         .unwrap_or(false)
 }
 
+/// The `Camera3D` a running scene renders from, or `None` if the scene has no
+/// camera at all (pat-0q2kx.30).
+///
+/// Godot's viewport tracks an active camera: a `Camera3D` claims it by being
+/// `current` (`make_current`, camera_3d.cpp), the last claimant in tree order
+/// wins, and a scene whose cameras never call `make_current` still renders from
+/// the first camera that entered the tree — which is why the fallback matters:
+/// most `.tscn` files carry exactly one `Camera3D` with no explicit `current`.
+pub fn current_camera3d(tree: &SceneTree) -> Option<NodeId> {
+    let mut first = None;
+    let mut claimed = None;
+    for id in tree.all_nodes_in_tree_order() {
+        let is_camera = tree
+            .get_node(id)
+            .map(|n| n.class_name() == "Camera3D")
+            .unwrap_or(false);
+        if !is_camera {
+            continue;
+        }
+        if first.is_none() {
+            first = Some(id);
+        }
+        if is_current(tree, id) {
+            claimed = Some(id);
+        }
+    }
+    claimed.or(first)
+}
+
 // ===========================================================================
 // Projection matrix from scene tree state
 // ===========================================================================

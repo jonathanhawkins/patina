@@ -63,6 +63,18 @@ pub fn boot_project_with_user_root(
     let settings = ProjectSettings::load_godot_project(&project_root.join("project.godot"))
         .map_err(|e| format!("failed to load ProjectSettings: {e}"))?;
 
+    // (1b) Install the DisplayServer backend now that the project's configured
+    // viewport is known. Without this a script calling
+    // `DisplayServer.window_get_size()` got a hardcoded 1920x1080 from inside
+    // the interpreter, unrelated to `display/window/size/viewport_*` and to the
+    // window it was actually running in (pat-0q2kx.38).
+    gdcore::display_backend::install_display_backend(std::sync::Arc::new(
+        gdcore::display_backend::HeadlessDisplayBackend::new(
+            settings.viewport_width(),
+            settings.viewport_height(),
+        ),
+    ));
+
     // (2) Wire res:// / user:// roots so FileAccess (and res:// scene loads) resolve.
     set_path_roots(Some(project_root.clone()), user_dir);
 

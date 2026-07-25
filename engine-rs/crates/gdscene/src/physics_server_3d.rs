@@ -13,10 +13,13 @@
 //! 3. [`sync_from_physics`](PhysicsServer3D::sync_from_physics) — pull
 //!    updated transforms back into the scene tree.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gdcore::math::Vector3;
-use gdphysics3d::body::{BodyId3D, BodyType3D, PhysicsBody3D};
+use gdphysics3d::area3d::{
+    Area3D, AreaId3D, AreaOverlapEvent3D, OverlapEvent3D, OverlapState3D, SpaceOverride,
+};
+use gdphysics3d::body::{BodyId3D, BodyType3D, FreezeMode, PhysicsBody3D};
 use gdphysics3d::shape::Shape3D;
 use gdphysics3d::world::PhysicsWorld3D;
 use gdvariant::Variant;
@@ -56,6 +59,42 @@ fn u32_prop_3d(tree: &SceneTree, id: NodeId, key: &str, default: u32) -> u32 {
             _ => default,
         })
         .unwrap_or(default)
+}
+
+/// Reads a `Vector3` property only if the node actually carries one, so a caller
+/// can tell "authored (or last published) value" from "never set".
+fn vec3_opt_prop_3d(tree: &SceneTree, id: NodeId, key: &str) -> Option<Vector3> {
+    match tree.get_node(id).map(|n| n.get_property(key)) {
+        Some(Variant::Vector3(v)) => Some(v),
+        _ => None,
+    }
+}
+
+/// Reads a `Vector3` property from a 3D node, defaulting to `default`.
+fn vec3_prop_3d(tree: &SceneTree, id: NodeId, key: &str, default: Vector3) -> Vector3 {
+    tree.get_node(id)
+        .map(|n| match n.get_property(key) {
+            Variant::Vector3(v) => v,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
+/// Maps a Godot `Area3D.SpaceOverride` enum integer to [`SpaceOverride`].
+///
+/// **Not** a cast: Godot's order is DISABLED/COMBINE/COMBINE_REPLACE/REPLACE/
+/// REPLACE_COMBINE (0-4, `Area3D.xml` + `godot_extension_api.json`), while
+/// [`SpaceOverride`]'s own discriminants put `Replace` at 2 and `CombineReplace`
+/// at 3 — so `value as SpaceOverride` would silently turn an authored REPLACE
+/// into COMBINE_REPLACE. The 2D server maps explicitly for the same reason.
+fn space_override_from_int_3d(value: u32) -> SpaceOverride {
+    match value {
+        1 => SpaceOverride::Combine,
+        2 => SpaceOverride::CombineReplace,
+        3 => SpaceOverride::Replace,
+        4 => SpaceOverride::ReplaceCombine,
+        _ => SpaceOverride::Disabled,
+    }
 }
 
 /// Reads a truthy property that Godot may expose as a bool or as an enum int
@@ -165,6 +204,19 @@ pub(crate) fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Sh
 pub struct PhysicsServer3D {
     world: PhysicsWorld3D,
     node_to_body: HashMap<NodeId, BodyId3D>,
+    /// `Area3D` nodes registered into the world, both directions (pat-0q2kx.35).
+    node_to_area: HashMap<NodeId, AreaId3D>,
+    area_to_node: HashMap<AreaId3D, NodeId>,
+    /// Enter/exit events recorded by the last [`step`](Self::step), drained when
+    /// they are turned into signals.
+    last_overlap_events: Vec<OverlapEvent3D>,
+    last_area_overlap_events: Vec<AreaOverlapEvent3D>,
+    /// Body pairs in contact after the last step, so the next step can report
+    /// which pairs are new and which are gone (pat-0q2kx.37). Each pair is stored
+    /// with the lower id first, so one entry represents the pair once.
+    previous_contacts: HashSet<(BodyId3D, BodyId3D)>,
+    /// `(a, b, entered)` for this step, drained when turned into signals.
+    last_contact_events: Vec<(BodyId3D, BodyId3D, bool)>,
     gravity: Vector3,
 }
 
@@ -174,6 +226,12 @@ impl PhysicsServer3D {
         Self {
             world: PhysicsWorld3D::new(),
             node_to_body: HashMap::new(),
+            node_to_area: HashMap::new(),
+            area_to_node: HashMap::new(),
+            last_overlap_events: Vec::new(),
+            last_area_overlap_events: Vec::new(),
+            previous_contacts: HashSet::new(),
+            last_contact_events: Vec::new(),
             gravity: Vector3::new(0.0, -9.8, 0.0),
         }
     }
@@ -183,6 +241,12 @@ impl PhysicsServer3D {
         Self {
             world: PhysicsWorld3D::new(),
             node_to_body: HashMap::new(),
+            node_to_area: HashMap::new(),
+            area_to_node: HashMap::new(),
+            last_overlap_events: Vec::new(),
+            last_area_overlap_events: Vec::new(),
+            previous_contacts: HashSet::new(),
+            last_contact_events: Vec::new(),
             gravity,
         }
     }
@@ -277,7 +341,22 @@ impl PhysicsServer3D {
 
                         let actual_id = self.world.add_body(body);
                         self.node_to_body.insert(nid, actual_id);
-                    } else if body_type != BodyType3D::Rigid {
+                    }
+
+                    // Rigid bodies used to get nothing after registration, so every
+                    // scripted force, velocity write and flag was a silent no-op
+                    // (pat-0q2kx.37).
+                    //
+                    // This runs on the **registration tick too**, which is not
+                    // optional: `sync_from_physics` publishes the body's own
+                    // `sleeping` / velocities onto the node at the end of that same
+                    // tick, so a flag the scene authored (`sleeping = true`) would
+                    // otherwise be overwritten by the fresh body's default before it
+                    // was ever adopted — the body fell for one tick and stayed awake
+                    // forever after.
+                    if body_type == BodyType3D::Rigid {
+                        self.sync_rigid_body(tree, nid);
+                    } else {
                         // Static/kinematic bodies are driven by the scene tree:
                         // push their current node transform into the world so a
                         // moving platform (animated StaticBody/CharacterBody)
@@ -311,18 +390,404 @@ impl PhysicsServer3D {
                 self.world.remove_body(body_id);
             }
         }
+
+        self.sync_areas(tree, &all_nodes);
     }
 
-    /// Steps the 3D physics simulation by `dt` seconds.
+    /// Pushes a registered `RigidBody3D` node's authored state into its world
+    /// body, then drains the forces its script accumulated (pat-0q2kx.37).
+    ///
+    /// Ordering is load-bearing in two places:
+    /// * flags first, forces second — applying an impulse wakes the body
+    ///   (`PhysicsBody3D::apply_impulse`), so draining after writing
+    ///   `sleeping` is what lets an impulse wake a body the script put to sleep,
+    ///   rather than the flag silently undoing the impulse;
+    /// * `linear_velocity` / `angular_velocity` are read back unconditionally,
+    ///   which is safe only because [`sync_from_physics`](Self::sync_from_physics)
+    ///   publishes the simulated values to the same properties — so an untouched
+    ///   node hands back what physics just produced, while a script write in
+    ///   between wins. Same contract as the 2D server.
+    fn sync_rigid_body(&mut self, tree: &SceneTree, nid: NodeId) {
+        let Some(&body_id) = self.node_to_body.get(&nid) else {
+            return;
+        };
+
+        // All tree reads first: the world borrow below is mutable.
+        let node_lin = vec3_opt_prop_3d(tree, nid, "linear_velocity");
+        let node_ang = vec3_opt_prop_3d(tree, nid, "angular_velocity");
+        let constant_force = vec3_prop_3d(tree, nid, "constant_force", Vector3::ZERO);
+        let constant_torque = vec3_prop_3d(tree, nid, "constant_torque", Vector3::ZERO);
+        let pending_impulse = vec3_prop_3d(tree, nid, "_pending_impulse", Vector3::ZERO);
+        let pending_force = vec3_prop_3d(tree, nid, "_pending_force", Vector3::ZERO);
+        let pending_torque = vec3_prop_3d(tree, nid, "_pending_torque", Vector3::ZERO);
+        let pending_torque_impulse =
+            vec3_prop_3d(tree, nid, "_pending_torque_impulse", Vector3::ZERO);
+        // doc/classes/RigidBody3D.xml defaults.
+        let gravity_scale = float_prop_3d(tree, nid, "gravity_scale", 1.0) as f32;
+        let linear_damp = float_prop_3d(tree, nid, "linear_damp", 0.0) as f32;
+        let angular_damp = float_prop_3d(tree, nid, "angular_damp", 0.0) as f32;
+        let lock_rotation = truthy_prop_3d(tree, nid, "lock_rotation", false);
+        let can_sleep = truthy_prop_3d(tree, nid, "can_sleep", true);
+        let sleeping = truthy_prop_3d(tree, nid, "sleeping", false);
+        let contact_monitor = truthy_prop_3d(tree, nid, "contact_monitor", false);
+        let max_contacts_reported = u32_prop_3d(tree, nid, "max_contacts_reported", 0) as usize;
+        // Godot splits this across a bool and a mode int (FREEZE_MODE_STATIC = 0,
+        // FREEZE_MODE_KINEMATIC = 1); the library folds both into one enum whose
+        // `None` variant has no Godot counterpart, so map rather than cast.
+        let freeze_mode = if truthy_prop_3d(tree, nid, "freeze", false) {
+            match u32_prop_3d(tree, nid, "freeze_mode", 0) {
+                1 => FreezeMode::Kinematic,
+                _ => FreezeMode::Static,
+            }
+        } else {
+            FreezeMode::None
+        };
+
+        let Some(body) = self.world.get_body_mut(body_id) else {
+            return;
+        };
+        if let Some(v) = node_lin {
+            body.linear_velocity = v;
+        }
+        if let Some(v) = node_ang {
+            body.angular_velocity = v;
+        }
+        body.constant_force = constant_force;
+        body.constant_torque = constant_torque;
+        body.gravity_scale = gravity_scale;
+        body.linear_damp = linear_damp;
+        body.angular_damp = angular_damp;
+        body.lock_rotation = lock_rotation;
+        body.can_sleep = can_sleep;
+        body.sleeping = sleeping;
+        body.freeze_mode = freeze_mode;
+        body.contact_monitor = contact_monitor;
+        body.max_contacts_reported = max_contacts_reported;
+
+        if pending_impulse.length_squared() > 0.0 {
+            body.apply_central_impulse(pending_impulse);
+        }
+        if pending_torque_impulse.length_squared() > 0.0 {
+            body.apply_torque_impulse(pending_torque_impulse);
+        }
+        if pending_force.length_squared() > 0.0 {
+            body.apply_central_force(pending_force);
+        }
+        if pending_torque.length_squared() > 0.0 {
+            body.apply_torque(pending_torque);
+        }
+    }
+
+    /// Zeroes the one-shot `_pending_*` force properties on every registered
+    /// rigid body, after [`sync_rigid_body`](Self::sync_rigid_body) has drained
+    /// them into the world.
+    ///
+    /// Separate pass because draining reads an immutable tree; Godot's
+    /// `apply_impulse` is a one-frame event, so a script that stops applying
+    /// force stops being pushed.
+    fn clear_pending_forces(&self, tree: &mut SceneTree) {
+        for (&nid, &body_id) in &self.node_to_body {
+            let is_rigid = self
+                .world
+                .get_body(body_id)
+                .map(|b| b.body_type == BodyType3D::Rigid)
+                .unwrap_or(false);
+            if !is_rigid {
+                continue;
+            }
+            if let Some(node) = tree.get_node_mut(nid) {
+                for key in [
+                    "_pending_impulse",
+                    "_pending_force",
+                    "_pending_torque",
+                    "_pending_torque_impulse",
+                ] {
+                    if !matches!(node.get_property(key), Variant::Nil) {
+                        node.set_property(key, Variant::Vector3(Vector3::ZERO));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Registers `Area3D` nodes into the world and refreshes the per-tick state
+    /// of the ones already registered (pat-0q2kx.35).
+    ///
+    /// Mirrors the 2D server's Area2D handling: an area's shape comes from its
+    /// `CollisionShape3D` child, its transform and authored properties are read
+    /// back every tick so a moved or retuned area takes effect, and areas whose
+    /// nodes left the tree are freed.
+    fn sync_areas(&mut self, tree: &SceneTree, all_nodes: &[NodeId]) {
+        let mut current_area_nodes: HashMap<NodeId, ()> = HashMap::new();
+
+        for &nid in all_nodes {
+            let is_area = tree
+                .get_node(nid)
+                .map(|n| n.class_name() == "Area3D")
+                .unwrap_or(false);
+            if !is_area {
+                continue;
+            }
+            current_area_nodes.insert(nid, ());
+
+            // World-space, like bodies: an Area3D under an offset parent must
+            // monitor the region it actually occupies.
+            let position = node3d::get_global_transform(tree, nid).origin;
+            let shape = tree
+                .get_node(nid)
+                .map(|n| n.children().to_vec())
+                .unwrap_or_default()
+                .iter()
+                .find_map(|&child_id| shape_from_node_3d(tree, child_id))
+                .unwrap_or(Shape3D::Sphere { radius: 0.5 });
+
+            // `.copied()` ends the map borrow before the arms touch `self` again —
+            // the `None` arm inserts into the same map.
+            let existing = self.node_to_area.get(&nid).copied();
+            let area_id = match existing {
+                Some(id) => {
+                    // Re-seed the shape too: a CollisionShape3D child resized or
+                    // added after the first tick would otherwise be ignored.
+                    if let Some(area) = self.world.get_area_mut(id) {
+                        area.position = position;
+                        area.shape = shape;
+                    }
+                    id
+                }
+                None => {
+                    let id = self.world.add_area(Area3D::new(AreaId3D(0), position, shape));
+                    self.node_to_area.insert(nid, id);
+                    self.area_to_node.insert(id, nid);
+                    id
+                }
+            };
+
+            // Authored properties, defaults from doc/classes/Area3D.xml.
+            if let Some(area) = self.world.get_area_mut(area_id) {
+                area.collision_layer = u32_prop_3d(tree, nid, "collision_layer", 1);
+                area.collision_mask = u32_prop_3d(tree, nid, "collision_mask", 1);
+                area.monitoring = truthy_prop_3d(tree, nid, "monitoring", true);
+                area.monitorable = truthy_prop_3d(tree, nid, "monitorable", true);
+                // Godot types `priority` as int; the library stores it as f32.
+                area.priority = float_prop_3d(tree, nid, "priority", 0.0) as f32;
+                area.gravity_space_override =
+                    space_override_from_int_3d(u32_prop_3d(tree, nid, "gravity_space_override", 0));
+                area.gravity = float_prop_3d(tree, nid, "gravity", 9.8) as f32;
+                area.gravity_direction =
+                    vec3_prop_3d(tree, nid, "gravity_direction", Vector3::new(0.0, -1.0, 0.0));
+                area.gravity_point = truthy_prop_3d(tree, nid, "gravity_point", false);
+                area.linear_damp = float_prop_3d(tree, nid, "linear_damp", 0.1) as f32;
+                area.angular_damp = float_prop_3d(tree, nid, "angular_damp", 0.1) as f32;
+            }
+        }
+
+        let stale: Vec<NodeId> = self
+            .node_to_area
+            .keys()
+            .filter(|nid| !current_area_nodes.contains_key(nid))
+            .copied()
+            .collect();
+        for nid in stale {
+            if let Some(area_id) = self.node_to_area.remove(&nid) {
+                self.area_to_node.remove(&area_id);
+                self.world.remove_area(area_id);
+            }
+        }
+    }
+
+    /// Steps the 3D physics simulation by `dt` seconds, then records this step's
+    /// area enter/exit events for [`process_overlap_signals`](Self::process_overlap_signals).
     pub fn step(&mut self, dt: f32) {
         self.world.step(dt);
+        self.detect_body_contacts();
+        if self.world.area_count() > 0 {
+            let (body_events, area_events) = self.world.detect_overlaps();
+            self.last_overlap_events = body_events;
+            self.last_area_overlap_events = area_events;
+        }
     }
 
-    /// Syncs updated physics transforms back into the scene tree.
+    /// Diffs this step's contact pairs against the previous step's to produce
+    /// `body_entered` / `body_exited` events (pat-0q2kx.37).
+    ///
+    /// The world records contacts on the bodies themselves during the step, and
+    /// `PhysicsBody3D::add_contact` already honours Godot's gating — a body only
+    /// collects contacts when its own `contact_monitor` is set and it is under its
+    /// `max_contacts_reported` budget — so reading them back needs no extra
+    /// filtering. A body with monitoring off contributes nothing, which is also
+    /// why the pair is recorded from whichever side saw it.
+    fn detect_body_contacts(&mut self) {
+        let mut current: HashSet<(BodyId3D, BodyId3D)> = HashSet::new();
+        for body in self.world.bodies() {
+            for other in body.get_colliding_bodies() {
+                // Order the pair so the same contact is one entry regardless of
+                // which body reported it.
+                let pair = if body.id <= other {
+                    (body.id, other)
+                } else {
+                    (other, body.id)
+                };
+                current.insert(pair);
+            }
+        }
+
+        for &pair in current.difference(&self.previous_contacts) {
+            self.last_contact_events.push((pair.0, pair.1, true));
+        }
+        for &pair in self.previous_contacts.difference(&current) {
+            self.last_contact_events.push((pair.0, pair.1, false));
+        }
+        self.previous_contacts = current;
+    }
+
+    /// Emits `body_entered` / `body_exited` on `RigidBody3D` nodes whose
+    /// `contact_monitor` is on, passing the other body's node `ObjectId`.
+    ///
+    /// Both directions are evaluated because either body in a pair may be the
+    /// monitoring one, and Godot gates on `contact_monitor` **and** a non-zero
+    /// `max_contacts_reported` — mirroring the 2D server. Draining, for the same
+    /// reason as the area signals.
+    pub fn process_body_contact_signals(&mut self, tree: &mut SceneTree) {
+        for (a, b, entered) in std::mem::take(&mut self.last_contact_events) {
+            let signal = if entered {
+                "body_entered"
+            } else {
+                "body_exited"
+            };
+            for (self_body, other_body) in [(a, b), (b, a)] {
+                let Some(self_node) = self.node_for_body(self_body) else {
+                    continue;
+                };
+                let Some(other_node) = self.node_for_body(other_body) else {
+                    continue;
+                };
+                if !truthy_prop_3d(tree, self_node, "contact_monitor", false) {
+                    continue;
+                }
+                if u32_prop_3d(tree, self_node, "max_contacts_reported", 0) == 0 {
+                    continue;
+                }
+                tree.emit_signal(
+                    self_node,
+                    signal,
+                    &[Variant::ObjectId(other_node.object_id())],
+                );
+            }
+        }
+    }
+
+    /// Number of registered `Area3D` nodes.
+    pub fn area_count(&self) -> usize {
+        self.node_to_area.len()
+    }
+
+    /// The world area registered for an `Area3D` node, if any.
+    pub fn area_for_node(&self, node_id: NodeId) -> Option<AreaId3D> {
+        self.node_to_area.get(&node_id).copied()
+    }
+
+    /// The nodes of the bodies currently overlapping an `Area3D` node, in the
+    /// world's body order — Godot's `Area3D.get_overlapping_bodies()`.
+    ///
+    /// A one-shot query against the current world state, so it answers correctly
+    /// on the same tick a body enters (unlike the enter/exit events, which are
+    /// differences between ticks).
+    pub fn overlapping_body_nodes(&self, area_node: NodeId) -> Vec<NodeId> {
+        let Some(area_id) = self.node_to_area.get(&area_node).copied() else {
+            return Vec::new();
+        };
+        let Some(area) = self.world.get_area(area_id) else {
+            return Vec::new();
+        };
+        area.get_overlapping_bodies(self.world.bodies())
+            .into_iter()
+            .filter_map(|body_id| self.node_for_body(body_id))
+            .collect()
+    }
+
+    /// Emits `body_entered` / `body_exited` on the monitoring `Area3D` node with
+    /// the other node's `ObjectId`, for the events recorded by the last
+    /// [`step`](Self::step) (pat-0q2kx.35).
+    ///
+    /// Draining, unlike the 2D twin: the frame flow calls this from
+    /// [`sync_from_physics`](Self::sync_from_physics), so clearing the events is
+    /// what keeps an additional explicit call from double-firing the signals.
+    pub fn process_overlap_signals(&mut self, tree: &mut SceneTree) {
+        for event in std::mem::take(&mut self.last_overlap_events) {
+            let Some(&area_node) = self.area_to_node.get(&event.area_id) else {
+                continue;
+            };
+            let Some(body_node) = self.node_for_body(event.body_id) else {
+                continue;
+            };
+            let signal = match event.state {
+                OverlapState3D::Entered => "body_entered",
+                OverlapState3D::Exited => "body_exited",
+            };
+            tree.emit_signal(
+                area_node,
+                signal,
+                &[Variant::ObjectId(body_node.object_id())],
+            );
+        }
+    }
+
+    /// Emits `area_entered` / `area_exited` on the monitoring `Area3D` node with
+    /// the *other* area's `ObjectId`. Directional, so a mutually overlapping pair
+    /// emits on both nodes, matching Godot.
+    pub fn process_area_overlap_signals(&mut self, tree: &mut SceneTree) {
+        for event in std::mem::take(&mut self.last_area_overlap_events) {
+            let Some(&area_node) = self.area_to_node.get(&event.area_id) else {
+                continue;
+            };
+            let Some(&other_node) = self.area_to_node.get(&event.other_area_id) else {
+                continue;
+            };
+            let signal = match event.state {
+                OverlapState3D::Entered => "area_entered",
+                OverlapState3D::Exited => "area_exited",
+            };
+            tree.emit_signal(
+                area_node,
+                signal,
+                &[Variant::ObjectId(other_node.object_id())],
+            );
+        }
+    }
+
+    /// Publishes each `Area3D` node's current overlap set onto the node as
+    /// `_overlapping_bodies`, which is what the script-facing
+    /// `get_overlapping_bodies()` / `has_overlapping_bodies()` read.
+    ///
+    /// Same bridge shape as RayCast2D's `_hit_normal`: the script phase has no
+    /// handle on the physics server, so the physics phase leaves the answer on
+    /// the node (pat-0q2kx.35).
+    pub fn publish_overlapping_bodies(&self, tree: &mut SceneTree) {
+        for &area_node in self.node_to_area.keys() {
+            let bodies: Vec<Variant> = self
+                .overlapping_body_nodes(area_node)
+                .into_iter()
+                .map(|nid| Variant::ObjectId(nid.object_id()))
+                .collect();
+            if let Some(node) = tree.get_node_mut(area_node) {
+                node.set_property("_overlapping_bodies", Variant::Array(bodies));
+            }
+        }
+    }
+
+    /// Syncs updated physics transforms back into the scene tree, then flushes
+    /// this step's `Area3D` overlap results.
     ///
     /// Only rigid bodies have their positions updated (static/kinematic
     /// bodies are driven by the scene tree, not by physics).
-    pub fn sync_from_physics(&self, tree: &mut SceneTree) {
+    ///
+    /// The area work rides along here (pat-0q2kx.35) because this is the last 3D
+    /// physics call the frame loop makes with a `&mut SceneTree` in hand, so
+    /// `body_entered` reaches a connected script on the same tick it happened.
+    /// The three steps are public individually, and signal emission drains its
+    /// events, so a frame loop that later calls them explicitly stays correct
+    /// rather than firing everything twice.
+    pub fn sync_from_physics(&mut self, tree: &mut SceneTree) {
         for (&nid, &body_id) in &self.node_to_body {
             if let Some(body) = self.world.get_body(body_id) {
                 if body.body_type == BodyType3D::Rigid {
@@ -332,6 +797,31 @@ impl PhysicsServer3D {
                     node3d::set_rotation(tree, nid, body.rotation.to_euler());
                 }
             }
+        }
+        // Publish the simulated rigid-body state so a script can read it, and so
+        // the next tick's `sync_rigid_body` hands back what physics produced
+        // unless a script overwrote it in between (pat-0q2kx.37).
+        for (&nid, &body_id) in &self.node_to_body {
+            let Some(body) = self.world.get_body(body_id) else {
+                continue;
+            };
+            if body.body_type != BodyType3D::Rigid {
+                continue;
+            }
+            let (lin, ang, sleeping) = (body.linear_velocity, body.angular_velocity, body.sleeping);
+            if let Some(node) = tree.get_node_mut(nid) {
+                node.set_property("linear_velocity", Variant::Vector3(lin));
+                node.set_property("angular_velocity", Variant::Vector3(ang));
+                node.set_property("sleeping", Variant::Bool(sleeping));
+            }
+        }
+        self.clear_pending_forces(tree);
+        self.process_body_contact_signals(tree);
+
+        if !self.node_to_area.is_empty() {
+            self.process_overlap_signals(tree);
+            self.process_area_overlap_signals(tree);
+            self.publish_overlapping_bodies(tree);
         }
     }
 }

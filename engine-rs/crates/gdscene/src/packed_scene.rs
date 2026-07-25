@@ -551,13 +551,71 @@ impl PackedScene {
             let resolved = match tmpl.properties.get("shape") {
                 Some(Variant::String(s)) => s.strip_prefix("SubResource:").and_then(|id| {
                     let ty = sub_resources.get(id)?;
-                    Some(encode_shape_marker(ty, sub_resource_props.get(id)))
+                    Some((
+                        id.to_string(),
+                        ty.clone(),
+                        encode_shape_marker(ty, sub_resource_props.get(id)),
+                    ))
                 }),
                 _ => None,
             };
-            if let Some(p) = resolved {
+            if let Some((shape_id, shape_class, p)) = resolved {
                 tmpl.properties
                     .insert("__viewport_shape__".into(), Variant::String(p));
+                // The physics layer needs the shape's real geometry, not a gizmo
+                // string: copy the sub-resource's class and its typed properties
+                // onto the node under `__shape__*`, so
+                // `physics_server::shape_from_node` can build a body shape with the
+                // authored dimensions instead of falling back to a default circle
+                // (pat-0q2kx.28). Copying every property verbatim keeps this free
+                // of per-shape knowledge — `radius`, `size`, `a`/`b`, `points`,
+                // `segments` all come along.
+                tmpl.properties
+                    .insert("__shape__class".into(), Variant::String(shape_class));
+                if let Some(shape_props) = sub_resource_props.get(&shape_id) {
+                    for (key, value) in shape_props {
+                        tmpl.properties
+                            .insert(format!("__shape__{key}"), value.clone());
+                    }
+                }
+            }
+        }
+
+        // Resolve `navigation_polygon` / `navigation_mesh` = SubResource("id") on
+        // NavigationRegion2D/3D to the resource's real geometry, stored under
+        // companion properties so the declared property keeps its
+        // `SubResource:<id>` value (round-trip + inspector) — same shape as the
+        // `mesh` / `shape` resolution above.
+        //
+        // Godot's NavigationPolygon/NavigationMesh carry `vertices` **plus a
+        // `polygons` array of index arrays** — several polygons per region, which
+        // is what makes a region traversable across its interior
+        // (navigation_region_2d.cpp `region_set_navigation_polygon`). Before this,
+        // `MainLoop::process_navigation` read an invented `navmesh_vertices`
+        // property that no loader ever produced, so a .tscn-authored region
+        // contributed nothing to the navigation map (pat-0q2kx.26).
+        for tmpl in &mut templates {
+            let sub_id = ["navigation_polygon", "navigation_mesh"]
+                .iter()
+                .find_map(|key| match tmpl.properties.get(*key) {
+                    Some(Variant::String(s)) => s.strip_prefix("SubResource:").map(String::from),
+                    _ => None,
+                });
+            let Some(sub_id) = sub_id else {
+                continue;
+            };
+            let Some(props) = sub_resource_props.get(&sub_id) else {
+                continue;
+            };
+            // `vertices` is a PackedVector2Array (2D) or PackedVector3Array (3D);
+            // the region's class decides how it is read back.
+            if let Some(vertices) = props.get("vertices") {
+                tmpl.properties
+                    .insert("__navmesh_vertices__".into(), vertices.clone());
+            }
+            if let Some(polygons) = props.get("polygons") {
+                tmpl.properties
+                    .insert("__navmesh_polygons__".into(), polygons.clone());
             }
         }
 

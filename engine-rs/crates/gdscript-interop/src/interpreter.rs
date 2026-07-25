@@ -10054,7 +10054,81 @@ thread_local! {
 /// script calls resolve without UndefinedFunction; the real web surface
 /// (devicePixelRatio, Fullscreen API, `navigator.clipboard`, SpeechSynthesis) is
 /// wired in gdplatform under wasm32. Screen metrics use headless defaults.
+/// Answers a `DisplayServer.*` call from the installed backend.
+///
+/// Returns `None` for methods the backend seam does not cover, so the caller
+/// falls through to its own headless handling — that keeps this list additive
+/// and means an unrecognised method still reaches the `UndefinedFunction` arm
+/// instead of silently becoming `Nil`.
+fn call_displayserver_via_backend(
+    backend: &dyn gdcore::display_backend::DisplayBackend,
+    method: &str,
+    args: &[Variant],
+) -> Option<Result<Variant, RuntimeError>> {
+    let size_variant = |(w, h): (i64, i64)| {
+        Variant::Vector2(gdcore::math::Vector2::new(w as f32, h as f32))
+    };
+    match method {
+        "window_get_size" | "window_get_size_with_decorations" => {
+            Some(Ok(size_variant(backend.window_size())))
+        }
+        "screen_get_size" => Some(Ok(size_variant(backend.screen_size()))),
+        "screen_get_dpi" => Some(Ok(Variant::Int(backend.screen_dpi()))),
+        "screen_get_scale" | "screen_get_max_scale" => {
+            Some(Ok(Variant::Float(backend.screen_scale())))
+        }
+        "get_screen_count" => Some(Ok(Variant::Int(backend.screen_count()))),
+        "clipboard_set" => match args.first() {
+            Some(Variant::String(s)) => {
+                backend.clipboard_set(s);
+                Some(Ok(Variant::Nil))
+            }
+            // Preserve the existing type error rather than swallowing it.
+            _ => Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                "DisplayServer.clipboard_set() takes a string".into(),
+            )))),
+        },
+        "clipboard_get" => Some(Ok(Variant::String(backend.clipboard_get()))),
+        "clipboard_has" => Some(Ok(Variant::Bool(backend.clipboard_has()))),
+        "tts_speak" => {
+            if let Some(Variant::String(s)) = args.first() {
+                backend.tts_speak(s);
+            }
+            Some(Ok(Variant::Nil))
+        }
+        "tts_stop" => {
+            backend.tts_stop();
+            Some(Ok(Variant::Nil))
+        }
+        "tts_is_speaking" => Some(Ok(Variant::Bool(backend.tts_is_speaking()))),
+        "tts_get_voices" => Some(Ok(Variant::Array(
+            backend.tts_voices().into_iter().map(Variant::String).collect(),
+        ))),
+        "tts_get_voices_for_language" => {
+            Some(Ok(Variant::PackedStringArray(backend.tts_voices())))
+        }
+        "has_feature" => {
+            let feature = match args.first() {
+                Some(Variant::Int(i)) => *i,
+                _ => return Some(Ok(Variant::Bool(false))),
+            };
+            Some(Ok(Variant::Bool(backend.has_feature(feature))))
+        }
+        _ => None,
+    }
+}
+
 fn call_displayserver_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    // Route through the installed platform backend when there is one, so a
+    // script sees the real window/clipboard/TTS of the process it runs in
+    // rather than interpreter-local constants (pat-0q2kx.38). With no backend
+    // installed every arm below falls through to the previous headless answers,
+    // so nothing that worked before changes.
+    if let Some(backend) = gdcore::display_backend::display_backend() {
+        if let Some(result) = call_displayserver_via_backend(backend.as_ref(), method, args) {
+            return result;
+        }
+    }
     match method {
         // -- Screen / window metrics (headless defaults) -------------------
         "screen_get_dpi" => Ok(Variant::Int(96)),

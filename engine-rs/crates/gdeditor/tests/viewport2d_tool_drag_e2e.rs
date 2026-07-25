@@ -17,6 +17,7 @@
 
 use gdcore::math::Vector2;
 use gdeditor::editor_server::{EditorServerHandle, EditorState};
+use gdeditor::editor_ui::EDITOR_HTML;
 use gdscene::node::Node;
 use gdscene::SceneTree;
 use gdvariant::Variant;
@@ -101,28 +102,49 @@ fn node_json(port: u16, id: u64) -> serde_json::Value {
     json_of(&http_get(port, &format!("/api/node/{id}")))
 }
 
-/// Reads a numeric property, tolerating either a bare number or a `{x,y}` pair
-/// (`rotation` is scalar, `scale` is a vector).
-fn prop_f64(port: u16, id: u64, prop: &str) -> f64 {
+/// The inner value of one inspector property.
+///
+/// ⚠️ `/api/node/<id>` returns `properties` as an **array of entries**, not a map
+/// keyed by name — each entry is
+/// `{name, type, type_name, value: {type, value}, hint, hint_string, is_default}`
+/// (`property_entry`, editor_server.rs:3276). So a property is found by scanning
+/// for `name`, and the payload is one level deeper, under `value.value`.
+fn prop_value(port: u16, id: u64, prop: &str) -> serde_json::Value {
     let n = node_json(port, id);
-    let v = &n["properties"][prop];
-    v.as_f64()
-        .or_else(|| v["x"].as_f64())
-        .unwrap_or_else(|| panic!("node {id} has no numeric '{prop}': {n}"))
+    let props: &Vec<serde_json::Value> = match n["properties"].as_array() {
+        Some(a) => a,
+        None => panic!("node {id} has no properties array"),
+    };
+    for entry in props {
+        if entry["name"].as_str() == Some(prop) {
+            return entry["value"]["value"].clone();
+        }
+    }
+    panic!("node {id} has no property '{prop}'");
 }
 
+/// A scalar property (`rotation` — radians, despite the inspector's
+/// `radians_as_degrees` display hint).
+fn prop_f64(port: u16, id: u64, prop: &str) -> f64 {
+    let v = prop_value(port, id, prop);
+    match v.as_f64() {
+        Some(f) => f,
+        None => panic!("node {id} '{prop}' is not a number: {v}"),
+    }
+}
+
+/// A `Vector2` property, serialised as `{"type":"Vector2","value":[x,y]}`.
 fn prop_xy(port: u16, id: u64, prop: &str) -> (f64, f64) {
-    let n = node_json(port, id);
-    let v = &n["properties"][prop];
-    let arr = v.as_array();
-    let (x, y) = match arr {
-        Some(a) if a.len() >= 2 => (a[0].as_f64(), a[1].as_f64()),
-        _ => (v["x"].as_f64(), v["y"].as_f64()),
+    let v = prop_value(port, id, prop);
+    let comps: Vec<f64> = match v.as_array() {
+        Some(a) => a.iter().filter_map(|c| c.as_f64()).collect(),
+        None => panic!("node {id} '{prop}' is not a Vector2 array: {v}"),
     };
-    (
-        x.unwrap_or_else(|| panic!("node {id} '{prop}' has no x: {n}")),
-        y.unwrap_or_else(|| panic!("node {id} '{prop}' has no y: {n}")),
-    )
+    assert!(
+        comps.len() >= 2,
+        "node {id} '{prop}' needs 2 numeric components, got {v}"
+    );
+    (comps[0], comps[1])
 }
 
 /// Alpha and Beta sit 100 units either side of the origin so the viewport
@@ -259,12 +281,19 @@ fn viewport2d_tool_drag_e2e() {
         "both nodes must move by the same delta: Alpha {a0:?}->{a1:?}, Beta {b0:?}->{b1:?}"
     );
 
-    // ── 5. The served client actually calls these routes ──────────────────
+    // ── 5. The client actually calls these routes ─────────────────────────
     //
     // The half that was missing: the endpoints all worked before this bead, but
     // no client code path reached them. Asserting on EDITOR_HTML is what makes
     // this a wiring test rather than another server-side unit test.
-    let html = http_get(port, "/");
+    //
+    // ⚠️ Assert on the CONSTANT, not on `GET /`. `EDITOR_HTML` is ~741 KB, and
+    // reading that back over the socket truncates against the read timeout — the
+    // fetched body silently lost the script block, so this assertion failed
+    // while the wiring was present. The other wired-panel tests in this crate
+    // (editor_theme_resource_editor_wired_test, editor_vcs_panel_wired_test)
+    // check the constant for the same reason.
+    let html = EDITOR_HTML;
     for route in [
         "/api/viewport/rotate_node",
         "/api/viewport/scale_node",
@@ -278,7 +307,8 @@ fn viewport2d_tool_drag_e2e() {
     }
     // …and that it branches on the tool rather than always moving.
     assert!(
-        html.contains("currentToolMode === 'rotate'") && html.contains("currentToolMode === 'scale'"),
+        html.contains("currentToolMode === 'rotate'")
+            && html.contains("currentToolMode === 'scale'"),
         "the 2D pointer handler must branch on currentToolMode"
     );
     // Not vacuous: the original move route is still there for select mode.

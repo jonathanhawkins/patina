@@ -151,6 +151,18 @@ pub struct SceneTree {
     /// Snapshot of input state for the current frame, used by scripts
     /// that call `Input.is_action_pressed()` etc.
     input_snapshot: Option<crate::scripting::InputSnapshot>,
+    /// `Input` mutations issued by scripts this frame — `action_press`,
+    /// `set_mouse_mode`, `warp_mouse`, joypad rumble. The tree cannot apply them
+    /// itself (the engine `InputState` belongs to the frame owner, `MainLoop`),
+    /// so they are queued here and drained once per frame (pat-0q2kx.24).
+    pending_input_commands: Vec<crate::scripting::InputCommand>,
+    /// Last-known engine mouse mode, mirrored so a script's `Input.get_mouse_mode`
+    /// can answer without reaching the `InputState` it cannot see. Refreshed each
+    /// frame by the owner and updated eagerly when a script sets it, so a
+    /// set-then-get in one frame is consistent.
+    input_mouse_mode: i64,
+    /// Last-known connected joypad ids, mirrored for `Input.get_connected_joypads`.
+    input_connected_joypads: Vec<i64>,
     /// The packed scene that was used to load the current scene (if any).
     /// Stored for `reload_current_scene()`.
     current_packed_scene: Option<crate::packed_scene::PackedScene>,
@@ -227,6 +239,9 @@ impl SceneTree {
             tweens: HashMap::new(),
             scripts: HashMap::new(),
             input_snapshot: None,
+            pending_input_commands: Vec::new(),
+            input_mouse_mode: 0,
+            input_connected_joypads: Vec::new(),
             current_packed_scene: None,
             current_scene_id: None,
             pending_deletions: Vec::new(),
@@ -505,6 +520,68 @@ impl SceneTree {
     /// Returns a reference to the current input snapshot, if any.
     pub fn input_snapshot(&self) -> Option<&crate::scripting::InputSnapshot> {
         self.input_snapshot.as_ref()
+    }
+
+    // -- script-issued Input mutations (pat-0q2kx.24) ------------------------
+
+    /// Queues an `Input` mutation a script asked for, to be applied to the engine
+    /// `InputState` by the frame owner. In Godot these calls mutate live engine
+    /// state (core/input/input.cpp); the tree cannot, so it records intent.
+    pub fn queue_input_command(&mut self, command: crate::scripting::InputCommand) {
+        self.pending_input_commands.push(command);
+    }
+
+    /// Takes the queued `Input` mutations, leaving the queue empty. Called once
+    /// per frame by [`crate::MainLoop::step`] after the script phase.
+    pub fn drain_input_commands(&mut self) -> Vec<crate::scripting::InputCommand> {
+        std::mem::take(&mut self.pending_input_commands)
+    }
+
+    /// Number of `Input` mutations queued but not yet applied.
+    pub fn pending_input_command_count(&self) -> usize {
+        self.pending_input_commands.len()
+    }
+
+    /// Mirrored engine mouse mode, as Godot's `Input.get_mouse_mode` reports it.
+    pub fn input_mouse_mode(&self) -> i64 {
+        self.input_mouse_mode
+    }
+
+    /// Updates the mirrored mouse mode. Called by the frame owner after applying
+    /// commands, and eagerly by a script's `set_mouse_mode` so a set-then-get in
+    /// the same frame is consistent.
+    pub fn set_input_mouse_mode_mirror(&mut self, mode: i64) {
+        self.input_mouse_mode = mode;
+    }
+
+    /// Mirrored connected joypad ids, for `Input.get_connected_joypads`.
+    pub fn input_connected_joypads(&self) -> &[i64] {
+        &self.input_connected_joypads
+    }
+
+    /// Updates the mirrored joypad list from the engine `InputState`.
+    pub fn set_input_connected_joypads_mirror(&mut self, devices: Vec<i64>) {
+        self.input_connected_joypads = devices;
+    }
+
+    /// Applies a script's `Input.action_press` to the *current* frame's snapshot,
+    /// so a later script in the same frame observes it — Godot's `action_press`
+    /// is visible to `is_action_pressed` immediately (pat-0q2kx.24).
+    pub fn inject_action_press(&mut self, action: &str) {
+        if let Some(snapshot) = self.input_snapshot.as_mut() {
+            snapshot.inject_action_press(action);
+        } else {
+            let mut snapshot = crate::scripting::InputSnapshot::default();
+            snapshot.inject_action_press(action);
+            self.input_snapshot = Some(snapshot);
+        }
+    }
+
+    /// The `action_release` counterpart of [`inject_action_press`](Self::inject_action_press).
+    pub fn inject_action_release(&mut self, action: &str) {
+        if let Some(snapshot) = self.input_snapshot.as_mut() {
+            snapshot.inject_action_release(action);
+        }
     }
 
     /// Returns a reference to the event trace.

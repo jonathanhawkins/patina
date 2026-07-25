@@ -15,55 +15,154 @@ use crate::scene_tree::SceneTree;
 // Node3D properties
 // ===========================================================================
 
-/// Sets the `"position"` property on a 3D node.
+// ---------------------------------------------------------------------------
+// Canonical local-transform state (pat-0q2kx.29)
+// ---------------------------------------------------------------------------
+//
+// Godot's Node3D keeps ONE local transform; `position` / `rotation` / `scale` /
+// `transform` are views over it with dirty-flag conversion, so reading any of
+// them after writing another always reflects the write (scene/3d/node_3d.cpp).
+//
+// Patina used to store two competing representations: the `.tscn` parser wrote
+// `transform`, the setters wrote separate keys, and `get_local_transform`
+// preferred `transform` when present. The consequence was silent and severe —
+// on any node loaded with a `transform =` line, a script writing `position`
+// changed nothing that rendering or physics could see.
+//
+// These helpers make every write land on the canonical `transform` while
+// keeping the component views in sync, so both directions stay coherent.
+
+/// Splits a possibly-scaled basis into its rotation (Euler) and scale parts.
+///
+/// `Basis::to_euler` assumes an orthonormal basis — handing it a scaled one
+/// yields garbage angles — so the columns are normalised first. A zero-length
+/// column (degenerate scale) is left as-is rather than dividing by zero.
+fn decompose_basis(basis: Basis) -> (Vector3, Vector3) {
+    let scale = basis.get_scale();
+    let norm = |v: Vector3, s: f32| {
+        if s.abs() > 1e-6 {
+            Vector3::new(v.x / s, v.y / s, v.z / s)
+        } else {
+            v
+        }
+    };
+    let rotation = Basis {
+        x: norm(basis.x, scale.x),
+        y: norm(basis.y, scale.y),
+        z: norm(basis.z, scale.z),
+    };
+    (rotation.to_euler(), scale)
+}
+
+/// Rebuilds a basis from Euler angles and per-axis scale (Godot's R * S order).
+fn compose_basis(euler: Vector3, scale: Vector3) -> Basis {
+    let b = Basis::from_euler(euler);
+    Basis {
+        x: b.x * scale.x,
+        y: b.y * scale.y,
+        z: b.z * scale.z,
+    }
+}
+
+/// The node's canonical local transform: the explicit `transform` when present,
+/// otherwise composed from the component keys.
+fn local_transform_of(node: &crate::node::Node) -> Transform3D {
+    if let Variant::Transform3D(t) = node.get_property("transform") {
+        return t;
+    }
+    let pos = match node.get_property("position") {
+        Variant::Vector3(v) => v,
+        _ => Vector3::ZERO,
+    };
+    let rot = match node.get_property("rotation") {
+        Variant::Vector3(v) => v,
+        _ => Vector3::ZERO,
+    };
+    let scl = match node.get_property("scale") {
+        Variant::Vector3(v) => v,
+        _ => Vector3::ONE,
+    };
+    Transform3D {
+        basis: compose_basis(rot, scl),
+        origin: pos,
+    }
+}
+
+/// Stores `t` as the canonical `transform` and refreshes the component views so
+/// `position` / `rotation` / `scale` agree with it. Writing all four is what
+/// keeps reads coherent regardless of which representation a caller consults.
+fn store_local_transform(node: &mut crate::node::Node, t: Transform3D) {
+    let (euler, scale) = decompose_basis(t.basis);
+    node.set_property("transform", Variant::Transform3D(t));
+    node.set_property("position", Variant::Vector3(t.origin));
+    node.set_property("rotation", Variant::Vector3(euler));
+    node.set_property("scale", Variant::Vector3(scale));
+}
+
+/// Sets the node's local position, preserving its rotation and scale.
 pub fn set_position(tree: &mut SceneTree, node_id: NodeId, pos: Vector3) {
     if let Some(node) = tree.get_node_mut(node_id) {
-        node.set_property("position", Variant::Vector3(pos));
+        let mut t = local_transform_of(node);
+        t.origin = pos;
+        store_local_transform(node, t);
     }
 }
 
-/// Reads the `"position"` property, defaulting to [`Vector3::ZERO`].
+/// Reads the node's local position, defaulting to [`Vector3::ZERO`].
+///
+/// Prefers the `position` view (always in sync after any setter) and falls back
+/// to the canonical `transform`, so a `.tscn`-loaded node that only carries
+/// `transform =` still reports its real origin.
 pub fn get_position(tree: &SceneTree, node_id: NodeId) -> Vector3 {
-    tree.get_node(node_id)
-        .map(|n| match n.get_property("position") {
-            Variant::Vector3(v) => v,
-            _ => Vector3::ZERO,
-        })
-        .unwrap_or(Vector3::ZERO)
+    let Some(node) = tree.get_node(node_id) else {
+        return Vector3::ZERO;
+    };
+    match node.get_property("position") {
+        Variant::Vector3(v) => v,
+        _ => local_transform_of(node).origin,
+    }
 }
 
-/// Sets the `"rotation"` property (Euler angles in radians, YXZ convention).
+/// Sets the node's local rotation (Euler radians), preserving position and scale.
 pub fn set_rotation(tree: &mut SceneTree, node_id: NodeId, euler: Vector3) {
     if let Some(node) = tree.get_node_mut(node_id) {
-        node.set_property("rotation", Variant::Vector3(euler));
+        let mut t = local_transform_of(node);
+        let (_, scale) = decompose_basis(t.basis);
+        t.basis = compose_basis(euler, scale);
+        store_local_transform(node, t);
     }
 }
 
-/// Reads the `"rotation"` property as Euler angles, defaulting to [`Vector3::ZERO`].
+/// Reads the node's local rotation as Euler angles, defaulting to [`Vector3::ZERO`].
 pub fn get_rotation(tree: &SceneTree, node_id: NodeId) -> Vector3 {
-    tree.get_node(node_id)
-        .map(|n| match n.get_property("rotation") {
-            Variant::Vector3(v) => v,
-            _ => Vector3::ZERO,
-        })
-        .unwrap_or(Vector3::ZERO)
+    let Some(node) = tree.get_node(node_id) else {
+        return Vector3::ZERO;
+    };
+    match node.get_property("rotation") {
+        Variant::Vector3(v) => v,
+        _ => decompose_basis(local_transform_of(node).basis).0,
+    }
 }
 
-/// Sets the `"scale"` property on a 3D node.
+/// Sets the node's local scale, preserving position and rotation.
 pub fn set_scale(tree: &mut SceneTree, node_id: NodeId, scale: Vector3) {
     if let Some(node) = tree.get_node_mut(node_id) {
-        node.set_property("scale", Variant::Vector3(scale));
+        let mut t = local_transform_of(node);
+        let (euler, _) = decompose_basis(t.basis);
+        t.basis = compose_basis(euler, scale);
+        store_local_transform(node, t);
     }
 }
 
-/// Reads the `"scale"` property, defaulting to [`Vector3::ONE`].
+/// Reads the node's local scale, defaulting to [`Vector3::ONE`].
 pub fn get_scale(tree: &SceneTree, node_id: NodeId) -> Vector3 {
-    tree.get_node(node_id)
-        .map(|n| match n.get_property("scale") {
-            Variant::Vector3(v) => v,
-            _ => Vector3::ONE,
-        })
-        .unwrap_or(Vector3::ONE)
+    let Some(node) = tree.get_node(node_id) else {
+        return Vector3::ONE;
+    };
+    match node.get_property("scale") {
+        Variant::Vector3(v) => v,
+        _ => decompose_basis(local_transform_of(node).basis).1,
+    }
 }
 
 /// Returns the local [`Transform3D`] for a node.
@@ -73,26 +172,16 @@ pub fn get_scale(tree: &SceneTree, node_id: NodeId) -> Vector3 {
 /// Otherwise the transform is composed from separate `position`, `rotation`,
 /// and `scale` properties (composition order matches Godot: T * R * S).
 pub fn get_local_transform(tree: &SceneTree, node_id: NodeId) -> Transform3D {
-    // Check for an explicit Transform3D property first (set by .tscn parser).
-    if let Some(node) = tree.get_node(node_id) {
-        if let Variant::Transform3D(t) = node.get_property("transform") {
-            return t;
-        }
-    }
-
-    let pos = get_position(tree, node_id);
-    let rot = get_rotation(tree, node_id);
-    let scl = get_scale(tree, node_id);
-
-    let basis = Basis::from_euler(rot);
-    Transform3D {
-        basis: Basis {
-            x: basis.x * scl.x,
-            y: basis.y * scl.y,
-            z: basis.z * scl.z,
-        },
-        origin: pos,
-    }
+    // Single source of truth for both the "explicit transform wins" rule and the
+    // T * R * S composition — see `local_transform_of`. Keeping a second copy of
+    // the composition here is how the two representations drifted apart in the
+    // first place (pat-0q2kx.29).
+    tree.get_node(node_id)
+        .map(local_transform_of)
+        .unwrap_or(Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::ZERO,
+        })
 }
 
 /// Computes the global transform by walking the parent chain and multiplying

@@ -238,6 +238,54 @@ impl ScriptInstance for GDScriptNodeInstance {
 
 use std::collections::HashSet;
 
+/// An `Input` mutation a script asked for, queued on the [`crate::SceneTree`] and
+/// applied to the engine `InputState` by the frame owner (pat-0q2kx.24).
+///
+/// Godot's `Input` methods mutate live engine state directly
+/// (upstream/godot/core/input/input.cpp). A running script here reaches only the
+/// tree, never the `InputState` that `MainLoop` owns, so intent is recorded and
+/// drained once per frame instead of being silently dropped.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputCommand {
+    /// `Input.set_mouse_mode(mode)` — Godot `MOUSE_MODE_*` as an int.
+    SetMouseMode(i64),
+    /// `Input.warp_mouse(position)`.
+    WarpMouse {
+        /// Target x in window coordinates.
+        x: f32,
+        /// Target y in window coordinates.
+        y: f32,
+    },
+    /// `Input.action_press(action, strength)`.
+    ActionPress {
+        /// Action name.
+        action: String,
+        /// Press strength, 0..1.
+        strength: f32,
+    },
+    /// `Input.action_release(action)`.
+    ActionRelease {
+        /// Action name.
+        action: String,
+    },
+    /// `Input.start_joy_vibration(device, weak, strong, duration)`.
+    StartJoyVibration {
+        /// Joypad device id.
+        device: i64,
+        /// Weak motor amplitude.
+        weak: f32,
+        /// Strong motor amplitude.
+        strong: f32,
+        /// Duration in seconds (0 = until stopped).
+        duration: f32,
+    },
+    /// `Input.stop_joy_vibration(device)`.
+    StopJoyVibration {
+        /// Joypad device id.
+        device: i64,
+    },
+}
+
 /// A snapshot of input state at a single frame, passed to scripts via
 /// [`SceneTreeAccessor`] so they can query `Input.is_action_pressed()` etc.
 #[derive(Debug, Clone, Default)]
@@ -288,6 +336,44 @@ impl InputSnapshot {
     /// Returns `true` if the raw key is held.
     pub fn is_key_pressed(&self, key: &str) -> bool {
         self.pressed_keys.contains(key)
+    }
+
+    /// The reserved key name representing a script-injected action press.
+    ///
+    /// Godot's `Input.action_press` sets action state directly, with no physical
+    /// key involved. This snapshot resolves actions through `input_map`, so an
+    /// injected press is modelled as a synthetic binding whose name no real device
+    /// can produce (pat-0q2kx.24).
+    fn injected_action_key(action: &str) -> String {
+        format!("__script_action__{action}")
+    }
+
+    /// Marks `action` pressed as if a script had called `Input.action_press`, so
+    /// `is_action_pressed` and `is_action_just_pressed` report it for the rest of
+    /// this frame — Godot makes the state visible immediately.
+    pub fn inject_action_press(&mut self, action: &str) {
+        let key = Self::injected_action_key(action);
+        let keys = self.input_map.entry(action.to_string()).or_default();
+        if !keys.iter().any(|k| k == &key) {
+            keys.push(key.clone());
+        }
+        self.just_released_keys.remove(&key);
+        self.just_pressed_keys.insert(key.clone());
+        self.pressed_keys.insert(key);
+    }
+
+    /// The `Input.action_release` counterpart of
+    /// [`inject_action_press`](Self::inject_action_press).
+    pub fn inject_action_release(&mut self, action: &str) {
+        let key = Self::injected_action_key(action);
+        // The binding stays so `is_action_just_released` can resolve it.
+        let keys = self.input_map.entry(action.to_string()).or_default();
+        if !keys.iter().any(|k| k == &key) {
+            keys.push(key.clone());
+        }
+        self.pressed_keys.remove(&key);
+        self.just_pressed_keys.remove(&key);
+        self.just_released_keys.insert(key);
     }
 
     /// Returns the current mouse position.
@@ -464,6 +550,74 @@ fn trans_func_from_i64(v: i64) -> TransFunc {
     }
 }
 
+/// Reads a `Vector3` argument, or `None` when the argument is absent or is a
+/// different type — which is how the 3D force arms decline a 2D call.
+fn vec3_arg(args: &[Variant], index: usize) -> Option<gdcore::math::Vector3> {
+    match args.get(index) {
+        Some(Variant::Vector3(v)) => Some(*v),
+        _ => None,
+    }
+}
+
+/// Adds `delta` to a node's `Vector3` property, treating an absent value as zero
+/// — the accumulate step of the `_pending_*` force bridge (pat-0q2kx.37).
+fn accumulate_vec3_prop(
+    tree: &mut SceneTree,
+    nid: NodeId,
+    key: &str,
+    delta: gdcore::math::Vector3,
+) {
+    let current = match tree.get_node(nid).map(|n| n.get_property(key)) {
+        Some(Variant::Vector3(v)) => v,
+        _ => gdcore::math::Vector3::ZERO,
+    };
+    if let Some(node) = tree.get_node_mut(nid) {
+        node.set_property(key, Variant::Vector3(current + delta));
+    }
+}
+
+/// The built-in properties Godot guarantees exist on a class, with their
+/// documented defaults — reported when the node itself was never given one
+/// (pat-0q2kx.33).
+///
+/// A static table rather than a ClassDB lookup: ClassDB is only populated by an
+/// explicit `register_*_classes()` call, so a ClassDB-derived fallback silently
+/// vanishes in exactly the contexts that need it most (bare tests, partially
+/// registered servers) — the same reasoning that keeps the transform routing in
+/// [`SceneAccess::set_node_property`] off ClassDB.
+///
+/// Deliberately narrow: the `CharacterBody*` runtime state whose absence breaks a
+/// verbatim Godot script, and only values that agree with what
+/// [`crate::physics_server::PhysicsServer::process_character_movement`] assumes
+/// for the same key, so the script and the simulation cannot disagree.
+fn builtin_property_default(class_name: &str, prop: &str) -> Option<Variant> {
+    match (class_name, prop) {
+        // doc/classes/CharacterBody2D.xml: velocity Vector2(0, 0),
+        // up_direction Vector2(0, -1), floor_max_angle 0.785398 (45°).
+        ("CharacterBody2D", "velocity") => Some(Variant::Vector2(gdcore::math::Vector2::ZERO)),
+        ("CharacterBody2D", "up_direction") => Some(Variant::Vector2(
+            gdcore::math::Vector2::new(0.0, -1.0),
+        )),
+        ("CharacterBody2D", "floor_max_angle") => {
+            Some(Variant::Float(std::f64::consts::FRAC_PI_4))
+        }
+        // doc/classes/CharacterBody3D.xml: velocity Vector3(0, 0, 0). The other 3D
+        // knobs are left out — no 3D character step reads them yet, and inventing
+        // a value the simulation ignores would be worse than reporting nothing.
+        ("CharacterBody3D", "velocity") => Some(Variant::Vector3(gdcore::math::Vector3::ZERO)),
+        // doc/classes/RigidBody3D.xml: all four are Vector3(0, 0, 0). Without
+        // these, `linear_velocity.y += lift * delta` on a body the scene never
+        // gave a velocity dies exactly as CharacterBody2D's did (pat-0q2kx.37).
+        ("RigidBody3D", "linear_velocity")
+        | ("RigidBody3D", "angular_velocity")
+        | ("RigidBody3D", "constant_force")
+        | ("RigidBody3D", "constant_torque") => {
+            Some(Variant::Vector3(gdcore::math::Vector3::ZERO))
+        }
+        _ => None,
+    }
+}
+
 impl SceneAccess for SceneTreeAccessor {
     fn get_node(&self, from: u64, path: &str) -> Option<u64> {
         let from_id = NodeId::from_object_id(ObjectId::from_raw(from));
@@ -536,7 +690,18 @@ impl SceneAccess for SceneTreeAccessor {
         }
         // Then try node property
         if let Some(n) = self.tree().get_node(nid) {
-            return n.get_property(prop);
+            let value = n.get_property(prop);
+            if !value.is_nil() {
+                return value;
+            }
+            // A Godot class property exists with its default even when nothing
+            // ever assigned it; `Node` stores only what was set, so an unset
+            // built-in read back `Nil`. That killed the most ordinary script in
+            // Godot: `velocity.y += gravity * delta` on a fresh CharacterBody2D
+            // found `Nil`, so the interpreter's "is this a node property?" gate
+            // said no and the read-modify-write died with "cannot assign member
+            // 'y' on Nil" mid-frame — the body never fell (pat-0q2kx.33).
+            return builtin_property_default(n.class_name(), prop).unwrap_or(Variant::Nil);
         }
         Variant::Nil
     }
@@ -570,6 +735,35 @@ impl SceneAccess for SceneTreeAccessor {
                 }
                 return;
             }
+        }
+        // Route a Node3D transform component through the canonical
+        // local-transform setters so a script write is visible to rendering and
+        // physics (pat-0q2kx.29). A plain `set_property` here writes only the
+        // component key, and `get_local_transform` prefers an explicit
+        // `transform` — so on any node loaded from a `.tscn` with a
+        // `transform =` line, `self.position = ...` silently changed nothing.
+        //
+        // Checked before the script-property path because these are engine
+        // properties of the node, not script variables.
+        // The `Vector3` payload is itself the 2D/3D discriminator: a Node2D
+        // writes `position` as a `Vector2`, so it falls through untouched. That
+        // avoids consulting ClassDB here, which is not guaranteed to be
+        // populated in every runtime/test context and would silently disable
+        // this routing when it isn't.
+        match (prop, &value) {
+            ("position", Variant::Vector3(v)) => {
+                crate::node3d::set_position(self.tree_mut(), nid, *v);
+                return;
+            }
+            ("rotation", Variant::Vector3(v)) => {
+                crate::node3d::set_rotation(self.tree_mut(), nid, *v);
+                return;
+            }
+            ("scale", Variant::Vector3(v)) => {
+                crate::node3d::set_scale(self.tree_mut(), nid, *v);
+                return;
+            }
+            _ => {}
         }
         // Try script property first
         if let Some(script) = self.tree_mut().get_script_mut(nid) {
@@ -626,6 +820,15 @@ impl SceneAccess for SceneTreeAccessor {
                 .map(|n| matches!(n.get_property(key), Variant::Bool(true)))
                 .unwrap_or(false)
         };
+        // Godot's Vector2 getters return `Vector2.ZERO`, never null, so a script
+        // can chain `.length()` on the result before the first physics tick has
+        // published anything (pat-0q2kx.33).
+        let vec2_prop = |tree: &SceneTree, key: &str| -> gdcore::math::Vector2 {
+            match tree.get_node(nid).map(|n| n.get_property(key)) {
+                Some(Variant::Vector2(v)) => v,
+                _ => gdcore::math::Vector2::ZERO,
+            }
+        };
 
         match method {
             // -- CharacterBody2D motion --------------------------------------
@@ -657,12 +860,97 @@ impl SceneAccess for SceneTreeAccessor {
             "is_on_floor_only" => Some(Variant::Bool(bool_prop(self.tree(), "is_on_floor"))),
             "is_on_wall_only" => Some(Variant::Bool(bool_prop(self.tree(), "is_on_wall"))),
             "is_on_ceiling_only" => Some(Variant::Bool(bool_prop(self.tree(), "is_on_ceiling"))),
-            "get_real_velocity" => Some(
-                self.tree()
-                    .get_node(nid)
-                    .map(|n| n.get_property("velocity"))
-                    .unwrap_or(Variant::Nil),
-            ),
+            // Godot's `get_real_velocity()` is the motion actually achieved last
+            // move, which differs from `velocity` when sliding cancelled part of
+            // it. Patina publishes the post-slide velocity, which is that value
+            // for every case except the first tick after a collision; reporting it
+            // beats returning null and killing `get_real_velocity().length()`.
+            "get_real_velocity" => Some(Variant::Vector2(vec2_prop(self.tree(), "velocity"))),
+            // Written by `process_character_movement` from the platform the body
+            // is standing on; ZERO until then.
+            "get_platform_velocity" => Some(Variant::Vector2(vec2_prop(
+                self.tree(),
+                "platform_velocity",
+            ))),
+
+            // -- RigidBody3D force / impulse script API (pat-0q2kx.37) --------
+            //
+            // A body holds no handle on the PhysicsServer, so these accumulate
+            // onto `_pending_*` node properties that
+            // `PhysicsServer3D::sync_to_physics` drains into the world body every
+            // physics tick — the Vector3 twin of the 2D `_pending_*` bridge.
+            //
+            // The interpreter has its own arms for the `$Body.apply_*()` form,
+            // but they coerce every argument through `vec2_arg`, so a `Vector3`
+            // arrived as ZERO and every 3D force call was a silent no-op. These
+            // are reached by the bare / `self.` call form and discriminate on the
+            // argument's own type: a non-Vector3 call declines, leaving the 2D
+            // path exactly as it was.
+            "apply_central_impulse"
+            | "apply_impulse"
+            | "apply_central_force"
+            | "apply_force"
+            | "apply_torque"
+            | "apply_torque_impulse"
+            | "add_constant_central_force"
+            | "add_constant_force"
+            | "add_constant_torque" => {
+                let value = vec3_arg(args, 0)?;
+                // `linear_key` empty means the argument *is* a torque.
+                let (linear_key, torque_key): (&str, &str) = match method {
+                    "apply_central_impulse" | "apply_impulse" => {
+                        ("_pending_impulse", "_pending_torque_impulse")
+                    }
+                    "apply_central_force" | "apply_force" => ("_pending_force", "_pending_torque"),
+                    "apply_torque" => ("", "_pending_torque"),
+                    "apply_torque_impulse" => ("", "_pending_torque_impulse"),
+                    // Godot's add_constant_* accumulate onto the real
+                    // `constant_force` / `constant_torque` properties, which the
+                    // server re-reads each tick rather than draining.
+                    "add_constant_central_force" | "add_constant_force" => {
+                        ("constant_force", "constant_torque")
+                    }
+                    _ => ("", "constant_torque"),
+                };
+                if linear_key.is_empty() {
+                    accumulate_vec3_prop(self.tree_mut(), nid, torque_key, value);
+                } else {
+                    accumulate_vec3_prop(self.tree_mut(), nid, linear_key, value);
+                    // A positioned force/impulse also induces torque about the
+                    // centre of mass: τ = r × F (Godot takes `position` in global
+                    // space relative to the body's centre of mass).
+                    if let Some(offset) = vec3_arg(args, 1) {
+                        accumulate_vec3_prop(self.tree_mut(), nid, torque_key, offset.cross(value));
+                    }
+                }
+                Some(Variant::Nil)
+            }
+
+            // -- Area3D / Area2D overlap queries (pat-0q2kx.35) ---------------
+            //
+            // The physics phase leaves the current overlap set on the node as
+            // `_overlapping_bodies` (see
+            // `PhysicsServer3D::publish_overlapping_bodies`) because the script
+            // phase holds no handle on the physics server — the same bridge
+            // RayCast2D uses for `_hit_normal`. Godot returns an Array of nodes,
+            // empty (never null) when nothing overlaps.
+            "get_overlapping_bodies" => Some(match self.tree().get_node(nid) {
+                Some(n) => match n.get_property("_overlapping_bodies") {
+                    Variant::Array(items) => Variant::Array(items),
+                    _ => Variant::Array(Vec::new()),
+                },
+                None => Variant::Array(Vec::new()),
+            }),
+            "has_overlapping_bodies" => {
+                let count = match self.tree().get_node(nid) {
+                    Some(n) => match n.get_property("_overlapping_bodies") {
+                        Variant::Array(items) => items.len(),
+                        _ => 0,
+                    },
+                    None => 0,
+                };
+                Some(Variant::Bool(count > 0))
+            }
 
             // -- Node groups --------------------------------------------------
             "add_to_group" => {
@@ -922,6 +1210,68 @@ impl SceneAccess for SceneTreeAccessor {
             .as_ref()
             .map(|i| i.is_action_just_pressed(action))
             .unwrap_or(false)
+    }
+
+    // -- Input singleton mutators (pat-0q2kx.24) ----------------------------
+    //
+    // Godot's `Input` mutators change live engine state
+    // (upstream/godot/core/input/input.cpp). The engine `InputState` belongs to
+    // `MainLoop`, which a running script cannot reach, so each call is queued on
+    // the tree and applied after the script phase. Reads stay answerable within
+    // the frame: mouse mode and joypads come from the tree's mirrors, and an
+    // injected action press lands on the frame snapshot so a later script in the
+    // same frame observes it — matching Godot, where `action_press` is visible to
+    // `is_action_pressed` immediately.
+
+    fn set_mouse_mode(&mut self, mode: i64) {
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::SetMouseMode(mode));
+        tree.set_input_mouse_mode_mirror(mode);
+    }
+
+    fn get_mouse_mode(&self) -> i64 {
+        self.tree().input_mouse_mode()
+    }
+
+    fn warp_mouse(&mut self, x: f32, y: f32) {
+        self.tree_mut()
+            .queue_input_command(InputCommand::WarpMouse { x, y });
+    }
+
+    fn action_press(&mut self, action: &str, strength: f32) {
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::ActionPress {
+            action: action.to_string(),
+            strength,
+        });
+        tree.inject_action_press(action);
+    }
+
+    fn action_release(&mut self, action: &str) {
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::ActionRelease {
+            action: action.to_string(),
+        });
+        tree.inject_action_release(action);
+    }
+
+    fn get_connected_joypads(&self) -> Vec<i64> {
+        self.tree().input_connected_joypads().to_vec()
+    }
+
+    fn start_joy_vibration(&mut self, device: i64, weak: f32, strong: f32, duration: f32) {
+        self.tree_mut()
+            .queue_input_command(InputCommand::StartJoyVibration {
+                device,
+                weak,
+                strong,
+                duration,
+            });
+    }
+
+    fn stop_joy_vibration(&mut self, device: i64) {
+        self.tree_mut()
+            .queue_input_command(InputCommand::StopJoyVibration { device });
     }
 
     fn is_input_action_just_released(&self, action: &str) -> bool {

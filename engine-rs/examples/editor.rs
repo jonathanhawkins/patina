@@ -237,11 +237,47 @@ fn main() {
                 if gdeditor::scene_renderer::scene_is_3d(running_tree) {
                     // Snapshot the tree-dependent inputs under the lock; GPU-render
                     // off it (same lock-hold reduction as the editor path).
-                    let mut vp = state.editor_viewport_3d.clone();
-                    vp.width = rw.max(1);
-                    vp.height = rh.max(1);
-                    let inputs =
-                        gdeditor::viewport_3d_render::editor_3d_render_inputs(&vp, running_tree);
+                    //
+                    // Game view (pat-0q2kx.30): the running scene is framed by its own
+                    // current Camera3D, not the editor's orbit camera, and shows none
+                    // of the editor furniture (grid, origin lines, the orange
+                    // camera/light marker cubes). `runtime_camera_override` is the
+                    // deliberate escape hatch — with it on we fall back to the editor
+                    // camera so a designer can fly around a running game. A 3D scene
+                    // with no Camera3D at all also falls back, which beats a black
+                    // frame.
+                    let game_camera = gdeditor::viewport_3d_render::game_camera_for_play(
+                        running_tree,
+                        state.runtime_camera_override,
+                    );
+                    let mut vp = match game_camera {
+                        Some(camera) => gdeditor::viewport_3d_render::viewport_for_scene_camera(
+                            running_tree,
+                            camera,
+                            rw.max(1),
+                            rh.max(1),
+                        ),
+                        None => {
+                            let mut vp = state.editor_viewport_3d.clone();
+                            vp.width = rw.max(1);
+                            vp.height = rh.max(1);
+                            vp
+                        }
+                    };
+                    let inputs = match game_camera {
+                        Some(camera) => {
+                            vp.grid.visible = false;
+                            vp.show_origin = false;
+                            gdeditor::viewport_3d_render::game_3d_render_inputs(
+                                running_tree,
+                                camera,
+                                &vp,
+                            )
+                        }
+                        None => {
+                            gdeditor::viewport_3d_render::editor_3d_render_inputs(&vp, running_tree)
+                        }
+                    };
                     RenderJob::Gpu { vp, inputs }
                 } else {
                     // 2D running scene: rasterize the real CanvasItem pixels the
@@ -265,6 +301,29 @@ fn main() {
                             root,
                             gdcore::math::Vector2::new(rw as f32, rh as f32),
                         ));
+                    }
+                    // Camera2D scroll (pat-0q2kx.27): an enabled Camera2D sets the
+                    // canvas transform every frame in Godot, centring content on
+                    // the camera and magnifying by its zoom. Folded onto the items
+                    // so the rasterizer stays camera-agnostic. `None` for the
+                    // previous centre snaps to the target, which is correct while
+                    // position smoothing is off (Godot's default); carrying the
+                    // centre across frames is what smoothing needs and is noted as
+                    // follow-up.
+                    if let Some(view) = gdeditor::viewport_2d_render::camera2d_view_transform(
+                        state
+                            .run_main_loop
+                            .as_ref()
+                            .map(|ml| ml.tree())
+                            .unwrap_or(&state.scene_tree),
+                        gdcore::math::Vector2::new(rw as f32, rh as f32),
+                        None,
+                        // `dt` only matters once a previous centre is carried
+                        // across frames (position smoothing); with `None` above the
+                        // camera snaps to its target, so this is inert today.
+                        1.0 / 60.0,
+                    ) {
+                        gdeditor::viewport_2d_render::apply_camera2d_view(&mut items, view);
                     }
                     let fb = gdeditor::viewport_2d_render::rasterize_render_list(
                         &items,

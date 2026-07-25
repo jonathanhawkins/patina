@@ -1032,6 +1032,14 @@ pub struct NavigationAgent2D {
     pub path_index: usize,
     /// Distance at which a waypoint is considered reached.
     pub path_desired_distance: f32,
+    /// Distance at which the **target** is considered reached
+    /// (Godot `NavigationAgent2D.target_desired_distance`, default 10.0).
+    ///
+    /// Godot uses a separate threshold for arrival than for advancing
+    /// waypoints; Patina previously reused `path_desired_distance` for both, so
+    /// an agent tuned with a wide waypoint tolerance declared itself finished
+    /// far from the goal (pat-0q2kx.25).
+    pub target_desired_distance: f32,
     /// Whether avoidance is enabled for this agent.
     pub avoidance_enabled: bool,
     /// Avoidance radius of this agent (Godot `NavigationAgent2D.radius`, default 10.0).
@@ -1077,6 +1085,7 @@ impl NavigationAgent2D {
             path: Vec::new(),
             path_index: 0,
             path_desired_distance: 4.0,
+            target_desired_distance: 10.0,
             avoidance_enabled: false,
             radius: 10.0,
             max_speed: 100.0,
@@ -1322,6 +1331,14 @@ pub struct NavigationAgent3D {
     pub path_index: usize,
     /// Distance at which a waypoint is considered reached.
     pub path_desired_distance: f32,
+    /// Distance at which the **target** is considered reached
+    /// (Godot `NavigationAgent2D.target_desired_distance`, default 10.0).
+    ///
+    /// Godot uses a separate threshold for arrival than for advancing
+    /// waypoints; Patina previously reused `path_desired_distance` for both, so
+    /// an agent tuned with a wide waypoint tolerance declared itself finished
+    /// far from the goal (pat-0q2kx.25).
+    pub target_desired_distance: f32,
     /// Whether avoidance is enabled for this agent.
     pub avoidance_enabled: bool,
     /// Avoidance radius of this agent (Godot `NavigationAgent3D.radius`, default 0.5).
@@ -1341,6 +1358,7 @@ impl NavigationAgent3D {
             path: Vec::new(),
             path_index: 0,
             path_desired_distance: 1.0,
+            target_desired_distance: 1.0,
             avoidance_enabled: false,
             radius: 0.5,
             max_speed: 10.0,

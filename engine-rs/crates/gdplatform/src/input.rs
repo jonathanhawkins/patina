@@ -967,6 +967,17 @@ impl InputState {
         self.mouse_mode
     }
 
+    /// Moves the cursor to `position`, mirroring Godot's `Input.warp_mouse`
+    /// (upstream/godot/core/input/input.cpp). Until this existed, the position
+    /// could only change through a `MouseMotion` event, so a script's
+    /// `Input.warp_mouse` had nowhere to land (pat-0q2kx.24).
+    ///
+    /// This updates the engine's notion of where the cursor is; moving the real OS
+    /// cursor is the platform backend's job.
+    pub fn warp_mouse(&mut self, position: Vector2) {
+        self.mouse_position = position;
+    }
+
     // -- Programmatic actions (Input.action_press / action_release) ---------
 
     /// Presses `action` programmatically with the given strength, mirroring

@@ -291,6 +291,45 @@ fn prop_f32(v: Variant) -> Option<f32> {
     }
 }
 
+/// Godot's `NavigationRegion2D/3D.enabled` — a disabled region contributes
+/// nothing to the navigation map. Absent means enabled, matching Godot's
+/// default of `true` (pat-0q2kx.26).
+fn region_enabled(node: &crate::node::Node) -> bool {
+    match node.get_property("enabled") {
+        Variant::Bool(b) => b,
+        _ => true,
+    }
+}
+
+/// A navigation region's polygons, as index lists into its vertex array.
+///
+/// Godot stores `polygons` as an array of `PackedInt32Array` index lists, so one
+/// region is several polygons — that is what lets a path cross a concave or
+/// multi-part region instead of cutting straight through it.
+///
+/// A resource carrying vertices but no `polygons` entry is treated as a single
+/// polygon over all of them, which is what a hand-authored one-face mesh looks
+/// like. Out-of-range indices are dropped rather than panicking: a malformed
+/// `.tscn` should cost that polygon, not the frame.
+fn navmesh_polygon_indices(node: &crate::node::Node, vert_count: usize) -> Vec<Vec<usize>> {
+    match node.get_property("__navmesh_polygons__") {
+        Variant::Array(entries) => entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Variant::PackedInt32Array(ids) => Some(
+                    ids.iter()
+                        .filter_map(|&i| usize::try_from(i).ok())
+                        .filter(|&i| i < vert_count)
+                        .collect::<Vec<usize>>(),
+                ),
+                _ => None,
+            })
+            .collect(),
+        _ if vert_count >= 3 => vec![(0..vert_count).collect()],
+        _ => Vec::new(),
+    }
+}
+
 impl MainLoop {
     /// Creates a new `MainLoop` that owns the given [`SceneTree`].
     pub fn new(tree: SceneTree) -> Self {
@@ -760,13 +799,16 @@ impl MainLoop {
     /// paths each frame (pat-u3l8c.5).
     ///
     /// A local `NavigationServer2D`/`NavigationServer3D` is (re)built from every
-    /// `NavigationRegion2D`/`NavigationRegion3D` node — each contributes one
-    /// convex navmesh polygon via a `navmesh_vertices` packed-array property,
-    /// merged into a single connected mesh. For each agent node the path is
+    /// enabled `NavigationRegion2D`/`NavigationRegion3D` node — each contributes
+    /// the polygons of its `NavigationPolygon`/`NavigationMesh` resource, which
+    /// `PackedScene` resolves off the `.tscn` onto `__navmesh_vertices__` /
+    /// `__navmesh_polygons__` (pat-0q2kx.26). A region is a *set* of indexed
+    /// polygons, not one convex blob, so concave and multi-part regions route
+    /// correctly. For each agent node the path is
     /// (re)computed only when its `target_position` property changes, then the
     /// agent is integrated toward its next waypoint (default max_speed) and the
     /// resulting `next_path_position` is published onto the node. Agents stop
-    /// once within `path_desired_distance` of the target so they rest cleanly.
+    /// once within `target_desired_distance` of the target so they rest cleanly.
     /// Closes the audit gap where navigation.rs was never called from the loop.
     pub fn process_navigation(&mut self, dt: f32) {
         use gdcore::math::{Vector2, Vector3};
@@ -782,17 +824,49 @@ impl MainLoop {
                 continue;
             };
             match node.class_name() {
+                // A region contributes the polygons of its NavigationPolygon /
+                // NavigationMesh resource, resolved from the .tscn by
+                // `PackedScene` onto `__navmesh_vertices__` / `__navmesh_polygons__`
+                // (pat-0q2kx.26). Godot uploads these on ENTER_TREE via
+                // `region_set_navigation_polygon`, and a region is a *set* of
+                // indexed polygons — reading one flat vertex array as a single
+                // convex blob (what this did before) cannot represent an L-shape
+                // or any concave region, and made cross-region paths impossible.
                 "NavigationRegion2D" => {
-                    if let Variant::PackedVector2Array(v) = node.get_property("navmesh_vertices") {
-                        if v.len() >= 3 {
-                            polys2.push(NavPolygon::new(v));
+                    if !region_enabled(node) {
+                        continue;
+                    }
+                    let origin = crate::node2d::get_position(&self.tree, id);
+                    if let Variant::PackedVector2Array(verts) =
+                        node.get_property("__navmesh_vertices__")
+                    {
+                        for indices in navmesh_polygon_indices(node, verts.len()) {
+                            let poly: Vec<Vector2> = indices
+                                .iter()
+                                .map(|&i| verts[i] + origin)
+                                .collect();
+                            if poly.len() >= 3 {
+                                polys2.push(NavPolygon::new(poly));
+                            }
                         }
                     }
                 }
                 "NavigationRegion3D" => {
-                    if let Variant::PackedVector3Array(v) = node.get_property("navmesh_vertices") {
-                        if v.len() >= 3 {
-                            polys3.push(NavPolygon3D::new(v));
+                    if !region_enabled(node) {
+                        continue;
+                    }
+                    let origin = crate::node3d::get_position(&self.tree, id);
+                    if let Variant::PackedVector3Array(verts) =
+                        node.get_property("__navmesh_vertices__")
+                    {
+                        for indices in navmesh_polygon_indices(node, verts.len()) {
+                            let poly: Vec<Vector3> = indices
+                                .iter()
+                                .map(|&i| verts[i] + origin)
+                                .collect();
+                            if poly.len() >= 3 {
+                                polys3.push(NavPolygon3D::new(poly));
+                            }
                         }
                     }
                 }
@@ -871,7 +945,7 @@ impl MainLoop {
                 agent.set_target_position(*target, *current, &server2);
             }
             let arrived = agent.is_navigation_finished()
-                || (agent.target_position - *current).length() <= agent.path_desired_distance;
+                || (agent.target_position - *current).length() <= agent.target_desired_distance;
             let new_pos = if arrived {
                 *current
             } else {
@@ -879,9 +953,9 @@ impl MainLoop {
             };
             let next = agent.get_next_path_position(new_pos);
             // Fire `navigation_finished`/`target_reached` exactly once, the frame
-            // the agent first reaches within `path_desired_distance` of the goal.
+            // the agent first reaches within `target_desired_distance` of the goal.
             let arrived_now = agent.is_navigation_finished()
-                || (agent.target_position - new_pos).length() <= agent.path_desired_distance;
+                || (agent.target_position - new_pos).length() <= agent.target_desired_distance;
             if arrived_now && !agent.finished_emitted {
                 agent.finished_emitted = true;
                 finished2.push(*id);
@@ -911,7 +985,7 @@ impl MainLoop {
                 agent.set_target_position(*target, *current, &server3);
             }
             let arrived = agent.is_navigation_finished()
-                || (agent.target_position - *current).length() <= agent.path_desired_distance;
+                || (agent.target_position - *current).length() <= agent.target_desired_distance;
             let new_pos = if arrived {
                 *current
             } else {
@@ -919,7 +993,7 @@ impl MainLoop {
             };
             let next = agent.get_next_path_position(new_pos);
             let arrived_now = agent.is_navigation_finished()
-                || (agent.target_position - new_pos).length() <= agent.path_desired_distance;
+                || (agent.target_position - new_pos).length() <= agent.target_desired_distance;
             if arrived_now && !agent.finished_emitted {
                 agent.finished_emitted = true;
                 finished3.push(*id);
@@ -1031,64 +1105,26 @@ impl MainLoop {
     /// `target_position` (Godot default `(0, 50)`); it must run after the
     /// physics phase so the world reflects this frame's body positions.
     pub fn process_raycasts(&mut self) {
-        use gdcore::math::Vector2;
-
-        struct RayJob {
-            id: NodeId,
-            origin: Vector2,
-            dir: Vector2,
-            max_dist: f32,
-        }
-        let mut jobs: Vec<RayJob> = Vec::new();
+        // Collect ids first (immutable tree read), then update (needs &mut
+        // tree) — the same shape as `process_queries_3d`.
+        //
+        // The per-node work lives in `raycast2d::force_raycast_update` so the
+        // scripted `force_raycast_update()` and this per-frame pass run the
+        // identical query. This loop previously inlined a cast from the node's
+        // LOCAL position along the raw `target_position`, using the unfiltered
+        // `world.raycast`, publishing property names the script bridge does not
+        // read (pat-0q2kx.32).
+        let mut raycasts: Vec<NodeId> = Vec::new();
         for id in self.tree.all_nodes_in_tree_order() {
             let Some(node) = self.tree.get_node(id) else {
                 continue;
             };
-            if node.class_name() != "RayCast2D" {
-                continue;
+            if node.class_name() == "RayCast2D" {
+                raycasts.push(id);
             }
-            // Godot's RayCast2D defaults `enabled` to true.
-            if matches!(node.get_property("enabled"), Variant::Bool(false)) {
-                continue;
-            }
-            let target = match node.get_property("target_position") {
-                Variant::Vector2(v) => v,
-                _ => Vector2::new(0.0, 50.0),
-            };
-            let len = (target.x * target.x + target.y * target.y).sqrt();
-            if len < 1e-6 {
-                continue;
-            }
-            let origin = crate::node2d::get_position(&self.tree, id);
-            jobs.push(RayJob {
-                id,
-                origin,
-                dir: Vector2::new(target.x / len, target.y / len),
-                max_dist: len,
-            });
         }
-
-        let mut updates: Vec<(NodeId, bool, Option<NodeId>)> = Vec::new();
-        for job in &jobs {
-            let hit = self
-                .physics_server
-                .world()
-                .raycast(job.origin, job.dir, job.max_dist);
-            let collider = hit
-                .as_ref()
-                .and_then(|h| self.physics_server.node_for_body(h.body_id));
-            updates.push((job.id, hit.is_some(), collider));
-        }
-
-        for (id, colliding, collider) in updates {
-            if let Some(node) = self.tree.get_node_mut(id) {
-                node.set_property("is_colliding", Variant::Bool(colliding));
-                let collider_val = match collider {
-                    Some(cid) => Variant::Int(cid.raw() as i64),
-                    None => Variant::Nil,
-                };
-                node.set_property("collider", collider_val);
-            }
+        for id in raycasts {
+            crate::raycast2d::force_raycast_update(&mut self.tree, &self.physics_server, id);
         }
     }
 
@@ -1288,6 +1324,77 @@ impl MainLoop {
         self.input_state.set_input_map(map);
     }
 
+    /// Applies the `Input` mutations scripts queued this frame to the engine
+    /// [`InputState`], then refreshes the tree's read mirrors (pat-0q2kx.24).
+    ///
+    /// Godot's `Input` mutators act on live engine state; here the script phase
+    /// records intent on the tree and this drains it, so `action_press` is real
+    /// engine state from the next frame on — while remaining visible to later
+    /// scripts *this* frame through the injected snapshot.
+    fn apply_script_input_commands(&mut self) {
+        use crate::scripting::InputCommand;
+        use gdplatform::input::MouseMode;
+
+        for command in self.tree.drain_input_commands() {
+            match command {
+                InputCommand::SetMouseMode(mode) => {
+                    let mode = match mode {
+                        1 => MouseMode::Hidden,
+                        2 => MouseMode::Captured,
+                        3 => MouseMode::Confined,
+                        4 => MouseMode::ConfinedHidden,
+                        // Godot treats any other value as VISIBLE.
+                        _ => MouseMode::Visible,
+                    };
+                    self.input_state.set_mouse_mode(mode);
+                }
+                InputCommand::WarpMouse { x, y } => {
+                    self.input_state
+                        .warp_mouse(gdcore::math::Vector2::new(x, y));
+                }
+                InputCommand::ActionPress { action, strength } => {
+                    self.input_state.action_press(&action, strength);
+                }
+                InputCommand::ActionRelease { action } => {
+                    self.input_state.action_release(&action);
+                }
+                InputCommand::StartJoyVibration {
+                    device,
+                    weak,
+                    strong,
+                    duration,
+                } => {
+                    if device >= 0 {
+                        self.input_state
+                            .start_joy_vibration(device as u32, weak, strong, duration);
+                    }
+                }
+                InputCommand::StopJoyVibration { device } => {
+                    if device >= 0 {
+                        self.input_state.stop_joy_vibration(device as u32);
+                    }
+                }
+            }
+        }
+
+        // Mirror engine truth back for the next frame's reads.
+        let mode = match self.input_state.mouse_mode() {
+            MouseMode::Visible => 0,
+            MouseMode::Hidden => 1,
+            MouseMode::Captured => 2,
+            MouseMode::Confined => 3,
+            MouseMode::ConfinedHidden => 4,
+        };
+        self.tree.set_input_mouse_mode_mirror(mode);
+        let joypads: Vec<i64> = self
+            .input_state
+            .connected_joypads()
+            .into_iter()
+            .map(|d| d as i64)
+            .collect();
+        self.tree.set_input_connected_joypads_mirror(joypads);
+    }
+
     /// Returns a reference to the engine-owned [`InputState`].
     pub fn input_state(&self) -> &InputState {
         &self.input_state
@@ -1399,6 +1506,17 @@ impl MainLoop {
             self.physics_server_3d.step(physics_dt as f32);
             self.physics_server_3d.sync_from_physics(&mut self.tree);
 
+            // Drive CharacterBody3D nodes, mirroring the 2D character pass
+            // above. Runs AFTER step/sync so the sweep tests against this
+            // tick's body positions. Nothing called the (already complete)
+            // 3D move_and_slide before this, so a CharacterBody3D in a scene
+            // never moved and `is_on_floor()` was always false (pat-0q2kx.36).
+            crate::character3d::process_character_movement(
+                &mut self.tree,
+                &self.physics_server_3d,
+                physics_dt as f32,
+            );
+
             // -- navigation avoidance phase (pat-nzgdu.116) --
             // ORCA runs per physics tick, like Godot's NavigationServer: agents
             // with a desired velocity get a safe one back via velocity_computed.
@@ -1489,6 +1607,14 @@ impl MainLoop {
         // awaits so `await get_tree().create_timer(t).timeout` resumes at
         // runtime instead of hanging forever.
         self.tree.process_script_coroutines(delta_secs as f32);
+
+        // -- Input singleton mutations (pat-0q2kx.24) --
+        // Scripts cannot reach the engine `InputState` (this loop owns it), so
+        // `Input.action_press`, `set_mouse_mode`, `warp_mouse` and joypad rumble
+        // are queued on the tree during the script phase and applied here, in
+        // issue order. The tree's mirrors are then refreshed so a script's
+        // `get_mouse_mode`/`get_connected_joypads` reads engine truth next frame.
+        self.apply_script_input_commands();
 
         // -- collision detection phase --
         // Run after scripts so collision properties are set before next frame's _process.

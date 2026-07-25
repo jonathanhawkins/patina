@@ -32,6 +32,20 @@ impl CollisionResult {
     };
 }
 
+/// Whether a shape has no spatial extent at all and therefore cannot produce a
+/// contact. Used to keep degenerate geometry out of the SAT path, where a
+/// zero-length separating axis yields NaN rather than "no collision".
+fn is_degenerate(shape: &Shape2D) -> bool {
+    const EPS: f32 = 1e-6;
+    match shape {
+        Shape2D::Rectangle { half_extents } => {
+            half_extents.x.abs() < EPS && half_extents.y.abs() < EPS
+        }
+        Shape2D::Circle { radius } => radius.abs() < EPS,
+        _ => false,
+    }
+}
+
 /// Tests for collision between two shapes, each positioned by a transform.
 ///
 /// The transforms carry the full basis (rotation and scale), so collisions are
@@ -50,6 +64,21 @@ pub fn test_collision(
     shape_b: &Shape2D,
     transform_b: &Transform2D,
 ) -> Option<CollisionResult> {
+    // A body whose colliders are all `disabled` is represented as a zero-extent
+    // rectangle — the "collides with nothing" sentinel, chosen so a disabled
+    // shape cannot be silently replaced by a default-sized stand-in
+    // (pat-0q2kx.28). Its four vertices are COINCIDENT rather than absent, so it
+    // is not caught by the `verts.is_empty()` guards below: the polygon path
+    // then normalises a zero-length axis and every contact value becomes NaN,
+    // which propagates straight into the character controller's position
+    // (pat-0q2kx.34 — a walker next to a disabled barrier ended up at x=NaN).
+    //
+    // Returning `None` is exactly this function's documented contract for a
+    // degenerate shape, and every caller already treats `None` as "no contact".
+    if is_degenerate(shape_a) || is_degenerate(shape_b) {
+        return None;
+    }
+
     // Fast path: circle vs circle is rotation-invariant, so keep the exact,
     // well-tested closed form (including the coincident-centers case).
     if let (Shape2D::Circle { radius: ra }, Shape2D::Circle { radius: rb }) = (shape_a, shape_b) {
@@ -1262,5 +1291,67 @@ mod tests {
         );
         // Linear response is unchanged: inelastic stop along the normal.
         assert!(approx_eq(a.linear_velocity.x, 0.0));
+    }
+
+    // ---- pat-0q2kx.34: degenerate shapes must not yield NaN ---------------
+
+    /// A body whose colliders are all `disabled` is stored as a zero-extent
+    /// rectangle. Its four vertices are coincident rather than absent, so it
+    /// slipped past the `verts.is_empty()` guards, went down the SAT path, and
+    /// normalised a zero-length axis — every contact value came back NaN and
+    /// the character controller wrote a NaN position into the scene tree.
+    #[test]
+    fn degenerate_rectangle_reports_no_contact_instead_of_nan() {
+        let degenerate = Shape2D::Rectangle {
+            half_extents: Vector2::ZERO,
+        };
+        let walker = Shape2D::Circle { radius: 4.0 };
+        let at_origin = Transform2D::IDENTITY;
+        let mut overlapping = Transform2D::IDENTITY;
+        overlapping.origin = Vector2::new(1.0, 0.0);
+
+        // Overlapping in the sense that the circle contains the degenerate
+        // rect's single point — the worst case for the SAT path.
+        assert!(
+            test_collision(&walker, &overlapping, &degenerate, &at_origin).is_none(),
+            "a zero-extent rectangle must report no contact (None), never a NaN result"
+        );
+        assert!(
+            test_collision(&degenerate, &at_origin, &walker, &overlapping).is_none(),
+            "the degenerate check must be symmetric in argument order"
+        );
+    }
+
+    /// The same guard for a zero-radius circle, the other shape that can carry
+    /// no extent.
+    #[test]
+    fn degenerate_circle_reports_no_contact() {
+        let point = Shape2D::Circle { radius: 0.0 };
+        let box_shape = Shape2D::Rectangle {
+            half_extents: Vector2::new(10.0, 10.0),
+        };
+        assert!(
+            test_collision(&point, &Transform2D::IDENTITY, &box_shape, &Transform2D::IDENTITY)
+                .is_none(),
+            "a zero-radius circle has no extent and cannot produce a contact"
+        );
+    }
+
+    /// Guard rail: a normal-sized rectangle must still collide, so the
+    /// degenerate check cannot be over-broad.
+    #[test]
+    fn non_degenerate_rectangle_still_collides() {
+        let a = Shape2D::Rectangle {
+            half_extents: Vector2::new(5.0, 5.0),
+        };
+        let b = Shape2D::Circle { radius: 4.0 };
+        let mut near = Transform2D::IDENTITY;
+        near.origin = Vector2::new(6.0, 0.0);
+        let result = test_collision(&a, &Transform2D::IDENTITY, &b, &near)
+            .expect("real shapes must still reach the narrow phase");
+        assert!(
+            result.colliding,
+            "a 5px box and a 4px circle 6px apart overlap by 3px"
+        );
     }
 }

@@ -375,6 +375,11 @@ fn parse_ext_resource_id(s: &str) -> Option<String> {
 fn is_internal_prop(key: &str) -> bool {
     key.starts_with("__resref__")
         || key.starts_with("__viewport_")
+        // `__shape__*` caches a collision shape sub-resource's class and typed
+        // geometry for the physics layer (pat-0q2kx.28). The node's own `shape`
+        // property still carries the `SubResource` reference that round-trips;
+        // emitting the cache would invent properties Godot has never heard of.
+        || key.starts_with("__shape__")
         // `__extres__<prop>` caches the path an `ExtResource("id")` property
         // resolves to (pat-0q2kx.6). The property itself still carries the raw
         // reference, which is what round-trips; emitting the cache would invent

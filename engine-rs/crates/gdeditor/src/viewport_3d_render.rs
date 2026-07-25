@@ -1018,26 +1018,37 @@ fn draw_editor_overlays_3d(fb: &mut impl Raster, viewport: &Viewport3D, overlays
     }
 }
 
-/// Renders the editor 3D viewport — its camera, the scene's spatial nodes, and a
-/// projected ground grid — to a pixel [`FrameBuffer`] using the **software** 3D
-/// rasterizer. Spatial nodes are drawn as solid geometry colored by kind; the
-/// ground grid, colored origin axes, node gizmos, and selection chrome are then
-/// drawn over the frame as crisp anti-aliased projected lines, the way Godot
-/// draws them.
-///
-/// This is the reference path (and the fallback for the GPU path); the
-/// GPU-accelerated twin is [`render_editor_3d_frame_gpu`].
 /// pat-nzgdu.173: renders the scene from a scene `Camera3D`'s viewpoint — the
 /// frame behind the camera-preview inset and cinematic mode. The preview
 /// viewport's camera is pinned to the node's global transform (via the camera's
 /// `override_transform`), with fov/projection read off the node, so the frame is
 /// what that `Camera3D` sees — distinct from the editor's orbit camera.
+///
+/// This is the *editor's* preview: unlike [`render_game_3d_frame`] it keeps the
+/// editor furniture (grid, gizmos), because the inset previews the shot inside the
+/// editor rather than standing in for the game view.
 pub fn render_camera3d_preview(
     tree: &SceneTree,
     camera_node: NodeId,
     width: u32,
     height: u32,
 ) -> FrameBuffer {
+    let viewport = viewport_for_scene_camera(tree, camera_node, width, height);
+    render_editor_3d_frame(&viewport, tree)
+}
+
+/// A [`Viewport3D`] that sees exactly what a scene `Camera3D` sees: its camera is
+/// pinned to the node's global transform via `override_transform`, bypassing the
+/// orbit derivation, with projection/fov/size read off the node.
+///
+/// Shared by the camera-preview inset (pat-nzgdu.173) and the Play/game view
+/// (pat-0q2kx.30) so both agree on what "through that camera" means.
+pub fn viewport_for_scene_camera(
+    tree: &SceneTree,
+    camera_node: NodeId,
+    width: u32,
+    height: u32,
+) -> Viewport3D {
     let mut viewport = Viewport3D::new(width.max(1), height.max(1));
     viewport.camera.override_transform =
         Some(gdscene::node3d::get_global_transform(tree, camera_node));
@@ -1057,9 +1068,130 @@ pub fn render_camera3d_preview(
             viewport.camera.ortho_size = size as f32;
         }
     }
-    render_editor_3d_frame(&viewport, tree)
+    viewport
 }
 
+/// `true` for a render item that exists only to make an invisible node visible in
+/// the *editor*: the orange camera/light marker cubes and the collision-shape
+/// wireframes.
+///
+/// A running game shows none of them (pat-0q2kx.30) — Godot's game viewport draws
+/// the scene, not the editor's affordances, and collision shapes appear only behind
+/// the "Visible Collision Shapes" debug toggle, which is off by default. Mesh items
+/// and the generic `Node3D` box markers are kept: those stand in for scene content.
+fn is_editor_only_marker(item: &Render3DItem) -> bool {
+    matches!(
+        item.kind,
+        Render3DKind::Primitive {
+            shape: PrimitiveShape::Camera | PrimitiveShape::Light,
+        } | Render3DKind::Collision { .. }
+    )
+}
+
+/// Drops the editor-only items from a render-input snapshot, so a game frame shows
+/// the scene without the camera/light marker cubes (pat-0q2kx.30).
+///
+/// Exposed for the GPU Play path, which builds its own inputs and cannot go through
+/// [`render_game_3d_frame`].
+pub fn strip_editor_only_items(inputs: &mut Editor3DRenderInputs) {
+    inputs.items.retain(|item| !is_editor_only_marker(item));
+}
+
+/// The render layers a spatial node is drawn on — `VisualInstance3D.layers`,
+/// default `1` (Godot doc `VisualInstance3D.xml`).
+fn visual_layers(tree: &SceneTree, node_id: NodeId) -> i64 {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("layers") {
+            gdvariant::Variant::Int(i) => i,
+            _ => 1,
+        })
+        .unwrap_or(1)
+}
+
+/// The camera's `cull_mask` applied to the render list: a node is drawn only when
+/// its layers intersect the mask (`Camera3D.cull_mask`, default all 20 layers).
+fn strip_cull_masked_items(
+    tree: &SceneTree,
+    camera_node: NodeId,
+    inputs: &mut Editor3DRenderInputs,
+) {
+    let mask = gdscene::camera3d::get_cull_mask(tree, camera_node);
+    // The render items carry raw ids, so collect the excluded ids from one tree
+    // walk rather than looking each item's node back up.
+    let culled: std::collections::HashSet<u64> = tree
+        .all_nodes_in_tree_order()
+        .into_iter()
+        .filter(|id| visual_layers(tree, *id) & mask == 0)
+        .map(|id| id.raw())
+        .collect();
+    if culled.is_empty() {
+        return;
+    }
+    inputs.items.retain(|item| !culled.contains(&item.node_id));
+}
+
+/// Builds the render inputs a *running game* draws from: the editor's list minus
+/// the editor-only markers, minus everything the camera's `cull_mask` excludes
+/// (pat-0q2kx.30).
+///
+/// `viewport` should come from [`viewport_for_scene_camera`] so the list is culled
+/// against the camera the game actually renders from.
+pub fn game_3d_render_inputs(
+    tree: &SceneTree,
+    camera_node: NodeId,
+    viewport: &Viewport3D,
+) -> Editor3DRenderInputs {
+    let mut inputs = editor_3d_render_inputs(viewport, tree);
+    strip_editor_only_items(&mut inputs);
+    strip_cull_masked_items(tree, camera_node, &mut inputs);
+    inputs
+}
+
+/// The `Camera3D` the Play view renders from, honouring the editor's runtime
+/// camera override.
+///
+/// With the override on, the editor deliberately keeps its own orbit camera while
+/// the game runs (Godot's "Camera Override" button), so this returns `None` and the
+/// caller uses the editor viewport.
+pub fn game_camera_for_play(tree: &SceneTree, camera_override: bool) -> Option<NodeId> {
+    if camera_override {
+        return None;
+    }
+    gdscene::camera3d::current_camera3d(tree)
+}
+
+/// Renders the running scene the way the *game* sees it: from the scene's current
+/// `Camera3D`, with no editor furniture (pat-0q2kx.30).
+///
+/// Returns `None` when the scene has no `Camera3D`, so the caller can fall back to
+/// the editor viewport rather than show a black frame — the same thing Godot does
+/// when a scene has no camera.
+///
+/// Four differences from [`render_editor_3d_frame`], all of them the point of the
+/// bead: the view comes from the scene camera rather than the editor's orbit
+/// camera; the grid and origin axes are off; the camera/light marker cubes are
+/// filtered out of the render list; and the camera's `cull_mask` is applied.
+pub fn render_game_3d_frame(tree: &SceneTree, width: u32, height: u32) -> Option<FrameBuffer> {
+    let camera = gdscene::camera3d::current_camera3d(tree)?;
+    let mut viewport = viewport_for_scene_camera(tree, camera, width, height);
+    // Editor furniture off. `Viewport3D::new` starts with an empty selection, so
+    // no selection outline can leak in either.
+    viewport.grid.visible = false;
+    viewport.show_origin = false;
+
+    let inputs = game_3d_render_inputs(tree, camera, &viewport);
+    Some(render_editor_3d_frame_from_inputs(&viewport, &inputs))
+}
+
+/// Renders the editor 3D viewport — its camera, the scene's spatial nodes, and a
+/// projected ground grid — to a pixel [`FrameBuffer`] using the **software** 3D
+/// rasterizer. Spatial nodes are drawn as solid geometry colored by kind; the
+/// ground grid, colored origin axes, node gizmos, and selection chrome are then
+/// drawn over the frame as crisp anti-aliased projected lines, the way Godot
+/// draws them.
+///
+/// This is the reference path (and the fallback for the GPU path); the
+/// GPU-accelerated twin is [`render_editor_3d_frame_gpu`].
 pub fn render_editor_3d_frame(viewport: &Viewport3D, tree: &SceneTree) -> FrameBuffer {
     let inputs = editor_3d_render_inputs(viewport, tree);
     render_editor_3d_frame_from_inputs(viewport, &inputs)

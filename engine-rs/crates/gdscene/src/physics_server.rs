@@ -121,38 +121,129 @@ fn vec2array_prop(tree: &SceneTree, id: NodeId, key: &str) -> Vec<Vector2> {
         .unwrap_or_default()
 }
 
-/// Extracts a collision shape from a `CollisionShape2D` node's properties.
+/// Builds a shape from a `CollisionPolygon2D`'s inline `polygon` outline.
+///
+/// Godot's `build_mode` decides how the outline becomes collision geometry
+/// (`scene/2d/physics/collision_polygon_2d.cpp`): `BUILD_SOLIDS` (0, the
+/// default) makes a solid convex body, `BUILD_SEGMENTS` (1) makes a hollow
+/// outline of segments. Treating a Segments polygon as solid would let bodies
+/// rest on the inside of what the author drew as a thin wall.
+fn polygon_shape_from_node(tree: &SceneTree, node_id: NodeId) -> Option<Shape2D> {
+    let points = vec2array_prop(tree, node_id, "polygon");
+    if points.len() < 3 {
+        // Godot contributes no collision for a degenerate polygon, and a
+        // default stand-in shape here would be worse than none.
+        return None;
+    }
+
+    let build_mode = match tree.get_node(node_id).map(|n| n.get_property("build_mode")) {
+        Some(Variant::Int(i)) => i,
+        _ => 0,
+    };
+
+    if build_mode == 1 {
+        // Expand the outline into the consecutive point PAIRS that
+        // `ConcavePolygon2D` stores, closing the loop back to the first point.
+        let mut segments: Vec<Vector2> = Vec::with_capacity(points.len() * 2);
+        for i in 0..points.len() {
+            segments.push(points[i]);
+            segments.push(points[(i + 1) % points.len()]);
+        }
+        Some(Shape2D::concave_polygon(&segments))
+    } else {
+        Some(Shape2D::convex_polygon(&points))
+    }
+}
+
+/// Extracts a collision shape from a `CollisionShape2D` or `CollisionPolygon2D`
+/// node's properties.
 fn shape_from_node(tree: &SceneTree, node_id: NodeId) -> Option<Shape2D> {
     let node = tree.get_node(node_id)?;
+    // A CollisionPolygon2D carries its geometry inline as a `polygon`
+    // PackedVector2Array rather than referencing a Shape2D sub-resource, so it
+    // never had a path through the sub-resource logic below. Rejecting it here
+    // meant a body whose only collider was a polygon silently fell back to the
+    // default 16px circle — the authored ramp/terrain shape simply did not
+    // exist to the solver (pat-0q2kx.34).
+    if node.class_name() == "CollisionPolygon2D" {
+        return polygon_shape_from_node(tree, node_id);
+    }
     if node.class_name() != "CollisionShape2D" {
         return None;
     }
 
-    // Check the "shape" property for a shape type string, or try shape-specific properties.
-    match node.get_property("shape") {
-        Variant::String(s) => match s.as_str() {
+    // A real `.tscn` writes `shape = SubResource("id")`, which the parser leaves as
+    // `"SubResource:<id>"`; the geometry lives on the sub-resource and is copied
+    // onto this node under `__shape__*` at instancing (packed_scene.rs). Hand-built
+    // nodes instead put the class name in `shape` with the dimensions directly on
+    // the node. Both are accepted: resolve the class, then read each dimension from
+    // the namespaced key if present, else the bare one (pat-0q2kx.28).
+    let shape_prop = node.get_property("shape");
+    let resolved_class: Option<String> = match &shape_prop {
+        Variant::String(s) if s.starts_with("SubResource:") => {
+            match node.get_property("__shape__class") {
+                Variant::String(class) => Some(class),
+                // An unresolved reference has no geometry — better no shape than a
+                // default-sized one silently standing in for the authored size.
+                _ => None,
+            }
+        }
+        Variant::String(s) => Some(s.clone()),
+        _ => None,
+    };
+
+    // Dimension readers that prefer the sub-resource's copied value.
+    let has = |key: &str| !matches!(node.get_property(key), Variant::Nil);
+    let num = |key: &str, default: f64| -> f32 {
+        let ns = format!("__shape__{key}");
+        if has(&ns) {
+            float_prop(tree, node_id, &ns, default) as f32
+        } else {
+            float_prop(tree, node_id, key, default) as f32
+        }
+    };
+    let v2 = |key: &str, default: Vector2| -> Vector2 {
+        let ns = format!("__shape__{key}");
+        if has(&ns) {
+            vec2_prop(tree, node_id, &ns, default)
+        } else {
+            vec2_prop(tree, node_id, key, default)
+        }
+    };
+    let v2s = |key: &str| -> Vec<Vector2> {
+        let ns = format!("__shape__{key}");
+        let namespaced = vec2array_prop(tree, node_id, &ns);
+        if namespaced.is_empty() {
+            vec2array_prop(tree, node_id, key)
+        } else {
+            namespaced
+        }
+    };
+
+    match resolved_class.as_deref() {
+        Some(class) => match class {
             "CircleShape2D" => {
-                let radius = float_prop(tree, node_id, "radius", 10.0) as f32;
+                let radius = num("radius", 10.0);
                 Some(Shape2D::Circle { radius })
             }
             "RectangleShape2D" => {
-                let size = vec2_prop(tree, node_id, "size", Vector2::new(20.0, 20.0));
+                let size = v2("size", Vector2::new(20.0, 20.0));
                 Some(Shape2D::Rectangle {
                     half_extents: Vector2::new(size.x / 2.0, size.y / 2.0),
                 })
             }
             "CapsuleShape2D" => {
-                let radius = float_prop(tree, node_id, "radius", 10.0) as f32;
-                let height = float_prop(tree, node_id, "height", 20.0) as f32;
+                let radius = num("radius", 10.0);
+                let height = num("height", 20.0);
                 Some(Shape2D::Capsule { radius, height })
             }
             "SegmentShape2D" => {
-                let a = vec2_prop(tree, node_id, "a", Vector2::ZERO);
-                let b = vec2_prop(tree, node_id, "b", Vector2::new(0.0, 10.0));
+                let a = v2("a", Vector2::ZERO);
+                let b = v2("b", Vector2::new(0.0, 10.0));
                 Some(Shape2D::Segment { a, b })
             }
             "ConvexPolygonShape2D" => {
-                let points = vec2array_prop(tree, node_id, "points");
+                let points = v2s("points");
                 if points.is_empty() {
                     None
                 } else {
@@ -162,7 +253,7 @@ fn shape_from_node(tree: &SceneTree, node_id: NodeId) -> Option<Shape2D> {
             "ConcavePolygonShape2D" => {
                 // Godot stores concave collision as a flat "segments" array of
                 // point pairs.
-                let segments = vec2array_prop(tree, node_id, "segments");
+                let segments = v2s("segments");
                 if segments.is_empty() {
                     None
                 } else {
@@ -170,17 +261,17 @@ fn shape_from_node(tree: &SceneTree, node_id: NodeId) -> Option<Shape2D> {
                 }
             }
             "WorldBoundaryShape2D" => {
-                let normal = vec2_prop(tree, node_id, "normal", Vector2::new(0.0, -1.0));
-                let distance = float_prop(tree, node_id, "distance", 0.0) as f32;
+                let normal = v2("normal", Vector2::new(0.0, -1.0));
+                let distance = num("distance", 0.0);
                 Some(Shape2D::world_boundary(normal, distance))
             }
             "SeparationRayShape2D" => {
-                let length = float_prop(tree, node_id, "length", 20.0) as f32;
+                let length = num("length", 20.0);
                 Some(Shape2D::SeparationRay { length })
             }
             _ => None,
         },
-        _ => {
+        None => {
             // Fallback: check for "radius" (circle) or "size" (rect) properties directly.
             let radius_prop = node.get_property("radius");
             let size_prop = node.get_property("size");
@@ -195,13 +286,75 @@ fn shape_from_node(tree: &SceneTree, node_id: NodeId) -> Option<Shape2D> {
     }
 }
 
-/// Finds the first `CollisionShape2D` child of a node and returns its shape.
+/// Finds the first *enabled* `CollisionShape2D` child of a node and returns its
+/// shape.
+///
+/// Godot skips a shape whose `disabled` is true when it builds the body's shape
+/// list (collision_shape_2d.cpp), so a disabled shape must contribute no collision
+/// at all rather than a default-sized stand-in (pat-0q2kx.28).
 fn find_collision_shape(tree: &SceneTree, parent_id: NodeId) -> Option<Shape2D> {
     let children = tree.get_node(parent_id)?.children().to_vec();
     for child_id in children {
+        if bool_prop(tree, child_id, "disabled", false) {
+            continue;
+        }
         if let Some(shape) = shape_from_node(tree, child_id) {
             return Some(shape);
         }
+    }
+    None
+}
+
+/// Whether `parent_id` has any `CollisionShape2D` child at all, enabled or not.
+///
+/// Distinguishes "this body's shapes are all disabled" (no collision, per Godot)
+/// from "this body was built without shape children", which the older
+/// test-convention scenes rely on and which keeps the legacy default shape
+/// (pat-0q2kx.28).
+fn has_collision_shape_child(tree: &SceneTree, parent_id: NodeId) -> bool {
+    tree.get_node(parent_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default()
+        .into_iter()
+        .any(|child| {
+            tree.get_node(child)
+                .map(|n| {
+                    // CollisionPolygon2D counts too — otherwise a body whose
+                    // only collider is a disabled polygon looks like a body
+                    // authored with no shapes at all, and gets the legacy
+                    // default circle instead of no collision (pat-0q2kx.34).
+                    matches!(
+                        n.class_name(),
+                        "CollisionShape2D" | "CollisionPolygon2D"
+                    )
+                })
+                .unwrap_or(false)
+        })
+}
+
+/// One-way collision settings from a body's first enabled `CollisionShape2D`
+/// child, as `(enabled, margin)`.
+///
+/// Godot puts `one_way_collision` on the *shape* node, while the solver needs it on
+/// the body, so it is lifted here (collision_shape_2d.cpp). The direction is the
+/// shape's local "up" — Godot blocks motion coming from the side the shape faces,
+/// which for an unrotated platform is straight up.
+fn one_way_collision_for(tree: &SceneTree, parent_id: NodeId) -> Option<(bool, f32)> {
+    let children = tree.get_node(parent_id)?.children().to_vec();
+    for child_id in children {
+        if bool_prop(tree, child_id, "disabled", false) {
+            continue;
+        }
+        let is_shape = tree
+            .get_node(child_id)
+            .map(|n| n.class_name() == "CollisionShape2D")
+            .unwrap_or(false);
+        if !is_shape {
+            continue;
+        }
+        let enabled = bool_prop(tree, child_id, "one_way_collision", false);
+        let margin = float_prop(tree, child_id, "one_way_collision_margin", 1.0) as f32;
+        return Some((enabled, margin));
     }
     None
 }
@@ -431,10 +584,30 @@ impl PhysicsServer {
                 if self.node_to_body.contains_key(&node_id) {
                     continue;
                 }
-                let pos = vec2_prop(tree, node_id, "position", Vector2::ZERO);
-                let base_shape =
-                    find_collision_shape(tree, node_id).unwrap_or(Shape2D::Circle { radius: 16.0 });
-                let node_scale = vec2_prop(tree, node_id, "scale", Vector2::new(1.0, 1.0));
+                // Godot's physics server always sees a CollisionObject2D's
+                // GLOBAL transform (collision_object_2d.cpp). Reading the LOCAL
+                // `position` here made a body under an offset parent register at
+                // the wrong world spot — a RigidBody2D under `Node2D
+                // position=(500,300)` fell from the origin (pat-0q2kx.31).
+                let pos = crate::node2d::get_global_position(tree, node_id);
+                let base_shape = find_collision_shape(tree, node_id).unwrap_or_else(|| {
+                    if has_collision_shape_child(tree, node_id) {
+                        // Shape children exist but none is usable — every one is
+                        // `disabled`, or the sub-resource did not resolve. Godot
+                        // leaves such a body with no shapes, so a degenerate rect
+                        // collides with nothing; the legacy default circle would
+                        // silently stand in for the authored geometry
+                        // (pat-0q2kx.28).
+                        Shape2D::Rectangle {
+                            half_extents: Vector2::ZERO,
+                        }
+                    } else {
+                        Shape2D::Circle { radius: 16.0 }
+                    }
+                });
+                // Accumulated scale, not just the body's own: a collider under a
+                // scaled parent must collide at the size it visually occupies.
+                let node_scale = crate::node2d::get_global_scale(tree, node_id);
                 let shape = scale_shape(base_shape, node_scale);
 
                 let mass = float_prop(tree, node_id, "mass", 1.0) as f32;
@@ -444,12 +617,19 @@ impl PhysicsServer {
                 body.bounce = float_prop(tree, node_id, "bounce", 0.0) as f32;
                 body.friction = float_prop(tree, node_id, "friction", 0.5) as f32;
                 body.linear_velocity = vec2_prop(tree, node_id, "linear_velocity", Vector2::ZERO);
-                body.rotation = float_prop(tree, node_id, "rotation", 0.0) as f32;
+                body.rotation = crate::node2d::get_global_rotation(tree, node_id);
                 body.angular_velocity = float_prop(tree, node_id, "angular_velocity", 0.0) as f32;
                 // Godot RigidBody2D gravity/damping properties.
                 body.gravity_scale = float_prop(tree, node_id, "gravity_scale", 1.0) as f32;
                 body.linear_damp = float_prop(tree, node_id, "linear_damp", 0.0) as f32;
                 body.angular_damp = float_prop(tree, node_id, "angular_damp", 0.0) as f32;
+                // One-way collision lives on the shape node in Godot but is solved
+                // per body here, so lift it (pat-0q2kx.28). The default direction
+                // (0,-1) already means "blocks from above", which is what an
+                // unrotated one-way platform does.
+                if let Some((one_way, _margin)) = one_way_collision_for(tree, node_id) {
+                    body.one_way_collision = one_way;
+                }
 
                 let body_id = self.world.add_body(body);
                 self.node_to_body.insert(node_id, body_id);
@@ -458,7 +638,11 @@ impl PhysicsServer {
 
             // Register areas (Area2D).
             if class == "Area2D" && !self.node_to_area.contains_key(&node_id) {
-                let pos = vec2_prop(tree, node_id, "position", Vector2::ZERO);
+                // Global, like bodies — an Area2D under an offset parent was
+                // monitoring the wrong region of the world (pat-0q2kx.31).
+                // `gravity_point_center` below stays `pos + <node-relative
+                // offset>`, which is now correctly world-space.
+                let pos = crate::node2d::get_global_position(tree, node_id);
                 let shape =
                     find_collision_shape(tree, node_id).unwrap_or(Shape2D::Circle { radius: 16.0 });
 
@@ -505,8 +689,10 @@ impl PhysicsServer {
             // Snapshot the node's transform, script-set velocity, and any
             // accumulated force/impulse bridge properties before mutably
             // borrowing the world body (all immutable tree reads).
-            let scene_pos = vec2_prop(tree, node_id, "position", Vector2::ZERO);
-            let scene_rot = float_prop(tree, node_id, "rotation", 0.0) as f32;
+            // Global, not local — same reason as registration: the server
+            // works in world space (pat-0q2kx.31).
+            let scene_pos = crate::node2d::get_global_position(tree, node_id);
+            let scene_rot = crate::node2d::get_global_rotation(tree, node_id);
             let node_lin = tree
                 .get_node(node_id)
                 .map(|n| n.get_property("linear_velocity"));
@@ -617,7 +803,8 @@ impl PhysicsServer {
         // Sync Area2D positions and monitoring flag from the scene tree.
         for (&node_id, &area_id) in &self.node_to_area {
             if let Some(area) = self.area_store.get_area_mut(area_id) {
-                area.position = vec2_prop(tree, node_id, "position", Vector2::ZERO);
+                // Areas had the identical local-as-world bug as bodies.
+                area.position = crate::node2d::get_global_position(tree, node_id);
                 area.monitoring = bool_prop(tree, node_id, "monitoring", true);
             }
         }
@@ -681,9 +868,15 @@ impl PhysicsServer {
                 if body.body_type == BodyType::Static {
                     continue;
                 }
+                // The body's transform is world-space; the node's `position` /
+                // `rotation` properties are PARENT-relative. Writing the world
+                // value straight into the local property re-applied the parent
+                // offset on the next `sync_to_physics`, so a body under an
+                // offset parent accelerated away by that offset every frame
+                // (pat-0q2kx.31). Velocities stay global, as in Godot.
+                crate::node2d::set_global_position(tree, node_id, body.position);
+                crate::node2d::set_global_rotation(tree, node_id, body.rotation);
                 if let Some(node) = tree.get_node_mut(node_id) {
-                    node.set_property("position", Variant::Vector2(body.position));
-                    node.set_property("rotation", Variant::Float(body.rotation as f64));
                     node.set_property("linear_velocity", Variant::Vector2(body.linear_velocity));
                     node.set_property(
                         "angular_velocity",
@@ -946,9 +1139,11 @@ impl PhysicsServer {
                 phys_body.position = new_position;
             }
 
-            // Sync to scene tree
+            // Sync to scene tree. `new_position` is world-space (the character
+            // was seeded from `body.position`), so it has to be de-parented
+            // before landing in the local `position` property (pat-0q2kx.31).
+            crate::node2d::set_global_position(tree, node_id, new_position);
             if let Some(node) = tree.get_node_mut(node_id) {
-                node.set_property("position", Variant::Vector2(new_position));
                 node.set_property("velocity", Variant::Vector2(result_velocity));
                 node.set_property("platform_velocity", Variant::Vector2(result_platform_vel));
                 node.set_property("is_on_floor", Variant::Bool(on_floor));
@@ -2144,6 +2339,385 @@ mod tests {
             exited.load(Ordering::SeqCst),
             1,
             "area_exited should fire once when the areas separate"
+        );
+    }
+
+    // ---- pat-0q2kx.34: CollisionPolygon2D is real collision geometry ------
+    //
+    // `shape_from_node` rejected every class except CollisionShape2D, so a
+    // CollisionPolygon2D — which carries its outline inline as `polygon`
+    // rather than referencing a Shape2D sub-resource — resolved to nothing and
+    // the body fell back to the default 16px circle. A hand-drawn ramp or
+    // terrain collider silently became a small ball, with no error.
+
+    /// A right-triangle ramp spanning x ∈ [-50,50], y ∈ [-25,25].
+    fn ramp_points() -> Vec<Variant> {
+        vec![
+            Variant::Vector2(Vector2::new(-50.0, 25.0)),
+            Variant::Vector2(Vector2::new(50.0, 25.0)),
+            Variant::Vector2(Vector2::new(50.0, -25.0)),
+        ]
+    }
+
+    fn body_with_polygon(build_mode: Option<i64>, disabled: bool) -> (SceneTree, NodeId) {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let body = Node::new("Ramp", "StaticBody2D");
+        let body_id = tree.add_child(root, body).unwrap();
+
+        let mut poly = Node::new("Poly", "CollisionPolygon2D");
+        poly.set_property("polygon", Variant::Array(ramp_points()));
+        if let Some(bm) = build_mode {
+            poly.set_property("build_mode", Variant::Int(bm));
+        }
+        if disabled {
+            poly.set_property("disabled", Variant::Bool(true));
+        }
+        tree.add_child(body_id, poly).unwrap();
+        (tree, body_id)
+    }
+
+    /// ⚠️ The core gap: the authored outline becomes the body's real shape
+    /// instead of the 16px-circle fallback.
+    #[test]
+    fn collision_polygon2d_builds_the_authored_shape() {
+        let (tree, body_id) = body_with_polygon(None, false);
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+
+        let body_id = server.body_for_node(body_id).expect("body registered");
+        let body = server.world().get_body(body_id).expect("body exists");
+        match body.shape {
+            Shape2D::ConvexPolygon { count, .. } => {
+                assert_eq!(
+                    count, 3,
+                    "the 3-point ramp outline must reach the solver intact"
+                );
+            }
+            Shape2D::Circle { radius } => panic!(
+                "the polygon fell back to the default circle (radius {radius}) — \
+                 CollisionPolygon2D was skipped entirely"
+            ),
+            other => panic!("expected a convex polygon, got {other:?}"),
+        }
+    }
+
+    /// `build_mode = BUILD_SEGMENTS` (1) makes a hollow outline, not a solid.
+    /// Treating it as solid would let bodies rest inside a thin wall.
+    #[test]
+    fn collision_polygon2d_segments_build_mode_is_hollow() {
+        let (tree, body_id) = body_with_polygon(Some(1), false);
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+
+        let body_id = server.body_for_node(body_id).unwrap();
+        let body = server.world().get_body(body_id).unwrap();
+        match body.shape {
+            // Three outline points close into three segments = six endpoints.
+            Shape2D::ConcavePolygon { count, .. } => assert_eq!(
+                count, 6,
+                "a closed 3-point outline must expand to 3 segments (6 endpoints)"
+            ),
+            other => panic!("BUILD_SEGMENTS must not produce a solid shape, got {other:?}"),
+        }
+    }
+
+    /// A disabled polygon contributes nothing — and must NOT silently fall back
+    /// to the default circle, which is what "no shape children" would give.
+    #[test]
+    fn collision_polygon2d_disabled_contributes_no_collision() {
+        let (tree, body_id) = body_with_polygon(None, true);
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+
+        let body_id = server.body_for_node(body_id).unwrap();
+        let body = server.world().get_body(body_id).unwrap();
+        match body.shape {
+            Shape2D::Rectangle { half_extents } => assert_eq!(
+                half_extents,
+                Vector2::ZERO,
+                "a disabled-only body gets the degenerate no-collision shape"
+            ),
+            Shape2D::Circle { radius } => panic!(
+                "a disabled polygon must not become a {radius}px default circle"
+            ),
+            other => panic!("expected the degenerate shape, got {other:?}"),
+        }
+    }
+
+    /// A degenerate outline (fewer than 3 points) yields no shape rather than a
+    /// stand-in.
+    #[test]
+    fn collision_polygon2d_degenerate_outline_is_ignored() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let body = Node::new("Ramp", "StaticBody2D");
+        let body_id = tree.add_child(root, body).unwrap();
+        let mut poly = Node::new("Poly", "CollisionPolygon2D");
+        poly.set_property(
+            "polygon",
+            Variant::Array(vec![Variant::Vector2(Vector2::ZERO)]),
+        );
+        tree.add_child(body_id, poly).unwrap();
+
+        assert!(
+            shape_from_node(&tree, tree.get_node(body_id).unwrap().children()[0]).is_none(),
+            "a 1-point polygon must resolve to no shape"
+        );
+    }
+
+    // ---- pat-0q2kx.31: the server works in world space -------------------
+    //
+    // Godot's physics server is fed a CollisionObject2D's GLOBAL transform
+    // (`upstream/godot/scene/2d/physics/collision_object_2d.cpp` —
+    // `NOTIFICATION_TRANSFORM_CHANGED` pushes `get_global_transform()`).
+    // Patina read the node's LOCAL `position`/`rotation`/`scale` properties, so
+    // every body under a non-identity parent registered at the wrong world
+    // spot. Nothing errored: a level built the normal Godot way — everything
+    // parented under one offset `Node2D` — simply collided somewhere else, and
+    // because the write-back put world coordinates straight into the local
+    // property, the error compounded each frame.
+    //
+    // Every scene below needs a parent with a non-identity transform: with an
+    // identity parent, local and global coincide and the bug is invisible.
+
+    /// The bead's scene: a floor and a ball parented under a `Node2D` offset by
+    /// (500, 300), authored as the Godot editor writes it.
+    const NESTED_PARENT_SCENE: &str = r#"[gd_scene load_steps=3 format=3]
+
+[sub_resource type="RectangleShape2D" id="Rect_floor"]
+size = Vector2(200, 20)
+
+[sub_resource type="CircleShape2D" id="Circle_ball"]
+radius = 10.0
+
+[node name="Root" type="Node2D"]
+
+[node name="Level" type="Node2D" parent="."]
+position = Vector2(500, 300)
+
+[node name="Floor" type="StaticBody2D" parent="Level"]
+position = Vector2(0, 100)
+
+[node name="FloorShape" type="CollisionShape2D" parent="Level/Floor"]
+shape = SubResource("Rect_floor")
+
+[node name="Ball" type="RigidBody2D" parent="Level"]
+position = Vector2(0, 0)
+
+[node name="BallShape" type="CollisionShape2D" parent="Level/Ball"]
+shape = SubResource("Circle_ball")
+"#;
+
+    /// **The acceptance test.**
+    #[test]
+    fn physics2d_nested_parent_transforms_respected() {
+        let scene =
+            crate::packed_scene::PackedScene::from_tscn(NESTED_PARENT_SCENE).expect("scene parses");
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let scene_root = crate::packed_scene::add_packed_scene_to_tree(&mut tree, root, &scene)
+            .expect("scene instances");
+        let level = tree
+            .get_node_or_null(scene_root, "Level")
+            .expect("Level node");
+        let ball = tree.get_node_or_null(level, "Ball").expect("Ball node");
+        let floor = tree.get_node_or_null(level, "Floor").expect("Floor node");
+
+        let mut server = PhysicsServer::new();
+        // Pinned rather than inherited, so the fall distance below is arithmetic
+        // rather than a hostage to the world's default.
+        server.set_gravity(Vector2::new(0.0, 980.0));
+        server.register_bodies(&tree);
+
+        // ⚠️ Registration alone already exposed the bug: the ball authored at
+        // local (0,0) is at world (500,300), and the floor at local (0,100) is
+        // at world (500,400). Before the fix both registered at their local
+        // coordinates — the ball at the origin, 583px from where it was drawn.
+        let ball_body = server.body_for_node(ball).expect("ball registered");
+        let floor_body = server.body_for_node(floor).expect("floor registered");
+        let ball_start = server.world().get_body(ball_body).unwrap().position;
+        let floor_at = server.world().get_body(floor_body).unwrap().position;
+        assert!(
+            (ball_start.x - 500.0).abs() < 0.01 && (ball_start.y - 300.0).abs() < 0.01,
+            "the ball must register at its authored WORLD position (500,300), got {ball_start:?}"
+        );
+        assert!(
+            (floor_at.x - 500.0).abs() < 0.01 && (floor_at.y - 400.0).abs() < 0.01,
+            "the floor must register at its authored WORLD position (500,400), got {floor_at:?}"
+        );
+
+        // One second of simulation. Free-fall from y=300 to the floor's top
+        // surface (y=390) minus the ball's 10px radius is 80px, reached in
+        // ~0.40s, so 60 ticks land it and leave it resting.
+        for _ in 0..60 {
+            server.sync_to_physics(&mut tree);
+            server.step_physics(1.0 / 60.0);
+            server.sync_from_physics(&mut tree);
+        }
+
+        let resting = server.world().get_body(ball_body).unwrap().position;
+
+        // It collided with the floor at the authored world location: stopped on
+        // top of it rather than falling past. With local-space registration the
+        // ball collided with the floor near the origin and rested at y≈80.
+        assert!(
+            resting.y > 360.0 && resting.y < 400.0,
+            "the ball must come to rest on the floor's world surface (y≈380), got {resting:?}"
+        );
+        assert!(
+            (resting.x - 500.0).abs() < 2.0,
+            "the ball must not drift horizontally, got {resting:?}"
+        );
+
+        // ⚠️ The round-trip assertion: the node's GLOBAL position — parent
+        // offset composed with the local property physics wrote back — equals
+        // the body's position. This is what fails if `sync_from_physics` dumps
+        // world coordinates into the local property: the parent offset then
+        // gets added a second time, and the two drift apart by (500,300) on the
+        // very first frame.
+        let ball_global = crate::node2d::get_global_position(&tree, ball);
+        assert!(
+            (ball_global.x - resting.x).abs() < 0.01 && (ball_global.y - resting.y).abs() < 0.01,
+            "node global position {ball_global:?} must equal the physics body position {resting:?}"
+        );
+
+        // …and the property physics wrote is genuinely PARENT-RELATIVE, not a
+        // world coordinate that happens to compose correctly.
+        let ball_local = vec2_prop(&tree, ball, "position", Vector2::ZERO);
+        assert!(
+            ball_local.x.abs() < 2.0 && (ball_local.y - (resting.y - 300.0)).abs() < 0.01,
+            "the stored `position` must stay local (≈(0,{:.0})), got {ball_local:?}",
+            resting.y - 300.0
+        );
+    }
+
+    /// The bead's second case: a `CharacterBody2D` under a ROTATED parent has to
+    /// collide against world geometry, which needs the parent's rotation — not
+    /// just its offset — on both the read and the write-back.
+    #[test]
+    fn nested_parent_character_body_collides_in_world_space() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        // Parent offset AND rotated a quarter turn.
+        let mut level = Node::new("Level", "Node2D");
+        level.set_property("position", Variant::Vector2(Vector2::new(500.0, 300.0)));
+        level.set_property("rotation", Variant::Float(std::f64::consts::FRAC_PI_2));
+        let level_id = tree.add_child(root, level).unwrap();
+
+        // Player at the parent's origin ⇒ world (500,300). Velocity is global in
+        // Godot, so it drives the player toward +X in world space regardless of
+        // how the parent is turned.
+        let mut player = Node::new("Player", "CharacterBody2D");
+        player.set_property("position", Variant::Vector2(Vector2::ZERO));
+        player.set_property("velocity", Variant::Vector2(Vector2::new(600.0, 0.0)));
+        let player_id = tree.add_child(level_id, player).unwrap();
+        let mut ps = Node::new("Shape", "CollisionShape2D");
+        ps.set_property("radius", Variant::Float(10.0));
+        tree.add_child(player_id, ps).unwrap();
+
+        // Wall authored in world space under the UNROTATED root: x ∈ [550,570].
+        let mut wall = Node::new("Wall", "StaticBody2D");
+        wall.set_property("position", Variant::Vector2(Vector2::new(560.0, 300.0)));
+        let wall_id = tree.add_child(root, wall).unwrap();
+        let mut ws = Node::new("Shape", "CollisionShape2D");
+        ws.set_property("size", Variant::Vector2(Vector2::new(20.0, 400.0)));
+        tree.add_child(wall_id, ws).unwrap();
+
+        let mut server = PhysicsServer::new();
+        server.set_gravity(Vector2::ZERO);
+        server.register_bodies(&tree);
+
+        let player_body = server.body_for_node(player_id).expect("player registered");
+        let start = server.world().get_body(player_body).unwrap().position;
+        assert!(
+            (start.x - 500.0).abs() < 0.01 && (start.y - 300.0).abs() < 0.01,
+            "the player must register at world (500,300), got {start:?}"
+        );
+
+        // 10px per tick; the wall is 60px away, so 20 ticks is far more than
+        // enough to reach it and stay stopped.
+        for _ in 0..20 {
+            server.process_character_movement(1.0 / 60.0, &mut tree);
+        }
+
+        let world = crate::node2d::get_global_position(&tree, player_id);
+        assert!(
+            world.x < 550.0,
+            "the player must not enter the wall at world x=550, got {world:?}"
+        );
+        assert!(
+            world.x > 520.0,
+            "the player must have moved toward the wall, got {world:?}"
+        );
+        assert!(
+            (world.y - 300.0).abs() < 2.0,
+            "the player must not drift off its world row, got {world:?}"
+        );
+
+        // ⚠️ The rotation-specific assertion. World +X maps onto the rotated
+        // parent's local ∓Y, so the stored local `position` must be almost
+        // entirely on its y axis. If the write-back ignored the parent (storing
+        // world coordinates) or de-parented with the offset only (giving local
+        // ≈(40,0)), local.x lands near 540 or 40 — never near 0.
+        let local = vec2_prop(&tree, player_id, "position", Vector2::ZERO);
+        assert!(
+            local.x.abs() < 2.0,
+            "under a 90°-rotated parent, world +X motion must show up on the \
+             local y axis; got local {local:?}"
+        );
+        assert!(
+            (local.y.abs() - (world.x - 500.0)).abs() < 2.0,
+            "the local offset magnitude must match the world one ({:.1}), got {local:?}",
+            world.x - 500.0
+        );
+
+        // The wall actually stopped it, rather than the player merely running
+        // out of somewhere to be.
+        let vel = vec2_prop(&tree, player_id, "velocity", Vector2::ZERO);
+        assert!(
+            vel.x.abs() < 1.0,
+            "X velocity should be zeroed by the wall, got {vel:?}"
+        );
+    }
+
+    /// Areas had the identical bug, and it is just as silent: a trigger volume
+    /// under an offset parent monitored a region of the world nothing ever
+    /// entered, so `body_entered` simply never fired.
+    #[test]
+    fn nested_parent_area_monitors_world_region() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mut level = Node::new("Level", "Node2D");
+        level.set_property("position", Variant::Vector2(Vector2::new(500.0, 300.0)));
+        let level_id = tree.add_child(root, level).unwrap();
+
+        // Trigger at the parent's origin ⇒ world (500,300).
+        let mut area = Node::new("Trigger", "Area2D");
+        area.set_property("position", Variant::Vector2(Vector2::ZERO));
+        tree.add_child(level_id, area).unwrap();
+
+        // Body authored directly in world space under the root, standing exactly
+        // where the trigger is drawn. The two are 583px apart in local
+        // coordinates, so this overlap exists only in world space.
+        let mut body = Node::new("Walker", "RigidBody2D");
+        body.set_property("position", Variant::Vector2(Vector2::new(500.0, 300.0)));
+        tree.add_child(root, body).unwrap();
+
+        let mut server = PhysicsServer::new();
+        server.set_gravity(Vector2::ZERO);
+        server.register_bodies(&tree);
+        assert_eq!(server.area_count(), 1, "the Area2D must register");
+
+        server.step_physics(1.0 / 60.0);
+
+        assert!(
+            !server.last_overlap_events().is_empty(),
+            "the body standing on the trigger's authored world position must \
+             overlap it; with local-space registration the area sat at the \
+             origin and nothing ever entered it"
         );
     }
 }

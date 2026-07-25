@@ -1,11 +1,13 @@
 //! 3D physics world state and simulation stepping.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use gdcore::math::Vector3;
 use gdcore::math3d::{Aabb, Quaternion};
 
-use crate::area3d::{Area3D, AreaId3D, AreaStore3D, SpaceOverride};
+use crate::area3d::{
+    Area3D, AreaId3D, AreaOverlapEvent3D, AreaStore3D, OverlapEvent3D, SpaceOverride,
+};
 use crate::body::BodyType3D;
 use crate::body::{BodyId3D, ContactPoint3D, PhysicsBody3D};
 use crate::collision;
@@ -153,6 +155,28 @@ impl PhysicsWorld3D {
     /// Returns the number of areas in the world.
     pub fn area_count(&self) -> usize {
         self.area_store.area_count()
+    }
+
+    /// Runs the area store's overlap detection against the world's current
+    /// bodies, returning this step's `(body enter/exit, area enter/exit)` events.
+    ///
+    /// The area store is private to the world, so this is how a scene-level
+    /// server reaches enter/exit detection to turn into `body_entered` /
+    /// `area_entered` signals (pat-0q2kx.35). Call it after [`step`](Self::step);
+    /// events are relative to the previous call, so calling it twice per step
+    /// reports the second pair of frames as "no change".
+    pub fn detect_overlaps(&mut self) -> (Vec<OverlapEvent3D>, Vec<AreaOverlapEvent3D>) {
+        // `detect_body_overlaps` wants a map and only reads its values; the
+        // bodies live in a `BTreeMap`, so clone into the expected shape — the
+        // same per-step clone the 2D server does.
+        let body_map: HashMap<BodyId3D, PhysicsBody3D> = self
+            .bodies
+            .iter()
+            .map(|(&id, body)| (id, body.clone()))
+            .collect();
+        let body_events = self.area_store.detect_body_overlaps(&body_map);
+        let area_events = self.area_store.detect_area_overlaps();
+        (body_events, area_events)
     }
 
     /// Register a soft body for simulation.

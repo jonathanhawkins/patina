@@ -15,6 +15,7 @@ pub mod gdextension_host;
 pub mod dashboard;
 pub mod debug_protocol;
 pub mod debugger;
+pub mod display_backend;
 pub mod diagnostics;
 pub mod error;
 pub mod file_access;

@@ -115,6 +115,50 @@ pub fn set_global_position(tree: &mut SceneTree, node_id: NodeId, pos: Vector2) 
     set_position(tree, node_id, local_pos);
 }
 
+/// The node's global position — the origin of its global transform.
+pub fn get_global_position(tree: &SceneTree, node_id: NodeId) -> Vector2 {
+    get_global_transform(tree, node_id).xform(Vector2::ZERO)
+}
+
+/// The node's global rotation in radians.
+///
+/// In 2D this is the sum of the local rotations along the parent chain, which
+/// avoids decomposing the global matrix — `Transform2D` exposes no rotation
+/// extractor, and pulling one out of a matrix that also carries scale is where
+/// sign and shear errors creep in (pat-0q2kx.31).
+pub fn get_global_rotation(tree: &SceneTree, node_id: NodeId) -> f32 {
+    let mut rotation = 0.0;
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        rotation += get_rotation(tree, id);
+        current = tree.get_node(id).and_then(|n| n.parent());
+    }
+    rotation
+}
+
+/// The node's global scale — the component-wise product along the parent chain.
+pub fn get_global_scale(tree: &SceneTree, node_id: NodeId) -> Vector2 {
+    let mut scale = Vector2::new(1.0, 1.0);
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        let s = get_scale(tree, id);
+        scale = Vector2::new(scale.x * s.x, scale.y * s.y);
+        current = tree.get_node(id).and_then(|n| n.parent());
+    }
+    scale
+}
+
+/// Sets the node's local rotation such that its global rotation equals
+/// `radians`, by subtracting the parent chain's accumulated rotation.
+pub fn set_global_rotation(tree: &mut SceneTree, node_id: NodeId, radians: f32) {
+    let parent_rotation = tree
+        .get_node(node_id)
+        .and_then(|n| n.parent())
+        .map(|pid| get_global_rotation(tree, pid))
+        .unwrap_or(0.0);
+    set_rotation(tree, node_id, radians - parent_rotation);
+}
+
 // ===========================================================================
 // CanvasItem properties
 // ===========================================================================

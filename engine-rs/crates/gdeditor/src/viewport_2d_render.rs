@@ -471,6 +471,105 @@ pub fn build_control_render_items(
 /// plain 2D nodes of the same canvas layer (Godot scenes put UI on top).
 pub const CONTROL_Z_BASE: i64 = 1 << 20;
 
+/// The `Camera2D` driving the runtime canvas, or `None` if the scene enables none
+/// (pat-0q2kx.27).
+///
+/// Godot's Viewport tracks a *current* camera: a node claims it through `enabled`
+/// (Godot 4) or the legacy `current` property, and when several claim it the last
+/// one in tree order wins (upstream/godot/scene/2d/camera_2d.cpp).
+pub fn current_camera2d(tree: &SceneTree) -> Option<gdscene::NodeId> {
+    let mut subtree = Vec::new();
+    tree.collect_subtree_top_down(tree.root_id(), &mut subtree);
+    let mut found = None;
+    for id in subtree {
+        let Some(node) = tree.get_node(id) else {
+            continue;
+        };
+        if node.class_name() != "Camera2D" {
+            continue;
+        }
+        let claims = match node.get_property("enabled") {
+            Variant::Bool(b) => b,
+            // Godot 3 named it `current`; scenes in the wild still carry it.
+            _ => matches!(node.get_property("current"), Variant::Bool(true)),
+        };
+        if claims {
+            found = Some(id);
+        }
+    }
+    found
+}
+
+/// The canvas transform an enabled `Camera2D` imposes on the runtime frame —
+/// world space to screen pixels (pat-0q2kx.27).
+///
+/// Godot's `Camera2D::_update_scroll` writes this to the viewport once per frame
+/// rather than per node, so a camera centred on `C` with zoom `Z` places world
+/// point `P` at `(P - C) * Z + viewport/2`: content centres on the camera and zoom
+/// magnifies about that centre. Limits, drag margins and position smoothing all
+/// come from [`node2d::compute_camera2d_position`], which already implements them
+/// and until now had no runtime caller.
+///
+/// `previous_center` is last frame's camera centre, which smoothing and drag
+/// margins integrate from — pass `None` to snap straight to the target, which is
+/// also the correct result when smoothing is disabled (Godot's default).
+pub fn camera2d_view_transform(
+    tree: &SceneTree,
+    viewport_size: Vector2,
+    previous_center: Option<Vector2>,
+    dt: f32,
+) -> Option<Transform2D> {
+    let camera = current_camera2d(tree)?;
+    let config = node2d::camera2d_config_from_node(tree, camera);
+    // The camera's own global position plus its `offset`, as Godot's target.
+    let target = node2d::get_global_transform(tree, camera).origin + node2d::get_camera_offset(tree, camera);
+    let current = previous_center.unwrap_or(target);
+    let center = node2d::compute_camera2d_position(&config, current, target, viewport_size, dt);
+
+    let half = Vector2::new(viewport_size.x * 0.5, viewport_size.y * 0.5);
+    // Applied right-to-left: recentre on the camera, scale by zoom, then move to
+    // the middle of the viewport (`A * B` applies B first).
+    Some(
+        Transform2D::translated(half)
+            * Transform2D::scaled(config.zoom)
+            * Transform2D::translated(-center),
+    )
+}
+
+/// Pre-multiplies a camera view transform onto every render item.
+///
+/// Godot applies the canvas transform once, at the viewport, rather than per node;
+/// folding it into each item's global transform is the equivalent for a flat
+/// render list, and it means the existing rasterizer needs no camera awareness —
+/// it already draws rects and textures *through* the item transform, so zoom
+/// scales sizes as well as positions.
+pub fn apply_camera2d_view(items: &mut [Render2DItem], view: Transform2D) {
+    for item in items.iter_mut() {
+        item.global_transform = view * item.global_transform;
+    }
+}
+
+/// The camera centre [`camera2d_view_transform`] resolved, for a caller that keeps
+/// per-frame smoothing state. `None` when no camera is enabled.
+pub fn camera2d_center(
+    tree: &SceneTree,
+    viewport_size: Vector2,
+    previous_center: Option<Vector2>,
+    dt: f32,
+) -> Option<Vector2> {
+    let camera = current_camera2d(tree)?;
+    let config = node2d::camera2d_config_from_node(tree, camera);
+    let target = node2d::get_global_transform(tree, camera).origin + node2d::get_camera_offset(tree, camera);
+    let current = previous_center.unwrap_or(target);
+    Some(node2d::compute_camera2d_position(
+        &config,
+        current,
+        target,
+        viewport_size,
+        dt,
+    ))
+}
+
 /// Rasterizes an ordered runtime render list into a fresh [`FrameBuffer`],
 /// drawing the real CanvasItem pixels a running 2D game would show: textured
 /// sprites, filled color rects, label text, filled polygons, and polylines,

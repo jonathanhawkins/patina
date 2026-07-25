@@ -731,36 +731,172 @@ fn raycast_shape(
     max_distance: f32,
     body: &PhysicsBody2D,
 ) -> Option<RaycastHit> {
-    match body.shape {
+    // Godot intersects the ray in the SHAPE's own space, so a rotated body
+    // collides as it is drawn. This previously passed `body.position` as the
+    // shape centre and ignored `body.rotation` entirely: a rotated rectangle
+    // was ray-tested as though it were still axis-aligned, which silently
+    // reported hits on faces that had turned away (pat-0q2kx.32).
+    //
+    // `body_transform` is rigid — rotation plus translation, no scale — so the
+    // hit distance survives the round trip unchanged and a unit direction stays
+    // unit-length.
+    let xform = body_transform(body.position, body.rotation);
+    let inv = xform.affine_inverse();
+    let hit = raycast_shape_local(
+        inv.xform(origin),
+        inv.basis_xform(dir),
+        max_distance,
+        &body.shape,
+        body.id,
+    )?;
+
+    Some(RaycastHit {
+        body_id: hit.body_id,
+        point: xform.xform(hit.point),
+        normal: xform.basis_xform(hit.normal),
+        distance: hit.distance,
+    })
+}
+
+/// Ray-shape intersection with the shape at the origin, unrotated.
+fn raycast_shape_local(
+    origin: Vector2,
+    dir: Vector2,
+    max_distance: f32,
+    shape: &Shape2D,
+    body_id: BodyId,
+) -> Option<RaycastHit> {
+    match *shape {
         Shape2D::Circle { radius } => {
-            ray_circle(origin, dir, max_distance, body.position, radius, body.id)
+            ray_circle(origin, dir, max_distance, Vector2::ZERO, radius, body_id)
         }
         Shape2D::Rectangle { half_extents } => ray_aabb(
             origin,
             dir,
             max_distance,
-            body.position,
+            Vector2::ZERO,
             half_extents,
-            body.id,
+            body_id,
         ),
-        Shape2D::Capsule {
-            radius,
-            height,
-        } => ray_capsule(
+        Shape2D::Capsule { radius, height } => ray_capsule(
             origin,
             dir,
             max_distance,
-            body.position,
+            Vector2::ZERO,
             radius,
             height,
-            body.id,
+            body_id,
         ),
-        Shape2D::Segment { a, b } => {
-            // Segment as thin capsule between endpoints (relative to body origin).
-            ray_segment(origin, dir, max_distance, body.position + a, body.position + b, body.id)
+        Shape2D::Segment { a, b } => ray_edges(origin, dir, max_distance, &[(a, b)], body_id),
+        // A convex hull is its closed boundary: the nearest edge crossing is the
+        // entry point. Winding order is irrelevant because `ray_edges` orients
+        // each normal against the ray.
+        Shape2D::ConvexPolygon { points, count } => {
+            let n = count as usize;
+            if n < 2 {
+                return None;
+            }
+            let edges: Vec<(Vector2, Vector2)> =
+                (0..n).map(|i| (points[i], points[(i + 1) % n])).collect();
+            ray_edges(origin, dir, max_distance, &edges, body_id)
         }
-        _ => None,
+        // Godot's ConcavePolygonShape2D is a segment soup: consecutive PAIRS,
+        // not a closed loop, so the edges must not wrap around.
+        Shape2D::ConcavePolygon { points, count } => {
+            let n = count as usize;
+            let edges: Vec<(Vector2, Vector2)> = (0..n / 2)
+                .map(|i| (points[i * 2], points[i * 2 + 1]))
+                .collect();
+            if edges.is_empty() {
+                return None;
+            }
+            ray_edges(origin, dir, max_distance, &edges, body_id)
+        }
+        Shape2D::WorldBoundary { normal, distance } => {
+            ray_world_boundary(origin, dir, max_distance, normal, distance, body_id)
+        }
+        // A separation ray is a segment from the origin along local +Y.
+        Shape2D::SeparationRay { length } => ray_edges(
+            origin,
+            dir,
+            max_distance,
+            &[(Vector2::ZERO, Vector2::new(0.0, length))],
+            body_id,
+        ),
     }
+}
+
+/// Nearest intersection of a ray with a set of line segments.
+///
+/// Shared by every polyline-ish shape (segment, convex hull boundary, concave
+/// soup, separation ray). Each returned normal is flipped to face the incoming
+/// ray, so callers need not care about winding order.
+fn ray_edges(
+    origin: Vector2,
+    dir: Vector2,
+    max_distance: f32,
+    edges: &[(Vector2, Vector2)],
+    body_id: BodyId,
+) -> Option<RaycastHit> {
+    let mut best: Option<RaycastHit> = None;
+    for &(a, b) in edges {
+        let e = b - a;
+        let denom = dir.cross(e);
+        if denom.abs() < 1e-9 {
+            // Parallel (or a degenerate edge): no single crossing point.
+            continue;
+        }
+        let rel = a - origin;
+        let t = rel.cross(e) / denom;
+        let u = rel.cross(dir) / denom;
+        if t < 0.0 || t > max_distance || !(0.0..=1.0).contains(&u) {
+            continue;
+        }
+        if best.as_ref().map_or(false, |c| t >= c.distance) {
+            continue;
+        }
+        let mut normal = Vector2::new(e.y, -e.x).normalized();
+        if normal.dot(dir) > 0.0 {
+            normal = -normal;
+        }
+        best = Some(RaycastHit {
+            body_id,
+            point: origin + dir * t,
+            normal,
+            distance: t,
+        });
+    }
+    best
+}
+
+/// Ray vs an infinite half-plane (`WorldBoundaryShape2D`).
+///
+/// The solid region is the side the normal points AWAY from, so only a ray
+/// travelling toward that side crosses the surface. A ray leaving the solid
+/// side is already inside the shape — that is `hit_from_inside`'s business,
+/// handled by the caller's `contains_point` test.
+fn ray_world_boundary(
+    origin: Vector2,
+    dir: Vector2,
+    max_distance: f32,
+    normal: Vector2,
+    distance: f32,
+    body_id: BodyId,
+) -> Option<RaycastHit> {
+    let denom = dir.dot(normal);
+    if denom >= -1e-9 {
+        return None;
+    }
+    let t = (distance - origin.dot(normal)) / denom;
+    if t < 0.0 || t > max_distance {
+        return None;
+    }
+    Some(RaycastHit {
+        body_id,
+        point: origin + dir * t,
+        normal,
+        distance: t,
+    })
 }
 
 /// Ray vs vertical capsule (Godot CapsuleShape2D: height along Y, hemispheres).
@@ -793,39 +929,6 @@ fn ray_capsule(
         }
     }
     best
-}
-
-/// Ray vs line segment (closest intersection within max_dist).
-fn ray_segment(
-    origin: Vector2,
-    dir: Vector2,
-    max_dist: f32,
-    a: Vector2,
-    b: Vector2,
-    body_id: BodyId,
-) -> Option<RaycastHit> {
-    // 2D segment-ray intersection
-    let r = dir;
-    let s = b - a;
-    let det = r.x * s.y - r.y * s.x;
-    if det.abs() < 1e-8 {
-        return None;
-    }
-    let qp = a - origin;
-    let t = (qp.x * s.y - qp.y * s.x) / det;
-    let u = (qp.x * r.y - qp.y * r.x) / det;
-    if t < 0.0 || t > max_dist || u < 0.0 || u > 1.0 {
-        return None;
-    }
-    let point = origin + r * t;
-    let normal = Vector2::new(-(b.y - a.y), b.x - a.x);
-    let nlen = normal.length().max(1e-8);
-    Some(RaycastHit {
-        body_id,
-        point,
-        normal: Vector2::new(normal.x / nlen, normal.y / nlen),
-        distance: t,
-    })
 }
 
 /// Ray vs circle intersection.
