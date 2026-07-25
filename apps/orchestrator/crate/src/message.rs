@@ -16,6 +16,13 @@ pub struct ParsedCompletion {
     pub files_ok: bool,
     pub tests_ok: bool,
     pub structured: bool,
+    /// The worker delivered part of the bead's scope and asked to keep it open
+    /// (pat-k5o8f). Verification still runs — what changes is the outcome of a
+    /// pass: the bead returns to `open` with a scope comment instead of closing.
+    pub partial: bool,
+    /// What the worker says is still undelivered. Written to a `br` comment so
+    /// it outlives the mail message.
+    pub remaining_scope: String,
 }
 
 #[derive(Debug)]
@@ -28,6 +35,10 @@ pub struct StructuredPayload {
     pub bead_id: String,
     pub files_changed: Vec<String>,
     pub tests_run: Vec<String>,
+    /// `"partial": true` or `"status": "partial"` in the payload (pat-k5o8f).
+    pub partial: bool,
+    /// `"remaining_scope"` — string or array.
+    pub remaining_scope: Vec<String>,
 }
 
 // ---------- regex singletons ----------
@@ -145,13 +156,67 @@ pub fn parse_structured_payload(body: &str, fallback_bead_id: &str) -> Option<St
         let files_changed = json_string_or_array(&payload, "files_changed");
         let tests_run = json_string_or_array(&payload, "test_commands");
 
+        // Either spelling counts: an explicit `partial` boolean, or a `status`
+        // that says so. Workers reach for both (pat-k5o8f).
+        let partial = payload
+            .get("partial")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            || payload
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| {
+                    let s = s.trim().to_ascii_lowercase();
+                    s == "partial" || s == "keep-open" || s == "keep_open"
+                })
+                .unwrap_or(false);
+        let remaining_scope = json_string_or_array(&payload, "remaining_scope");
+
         return Some(StructuredPayload {
             bead_id,
             files_changed,
             tests_run,
+            partial,
+            remaining_scope,
         });
     }
     None
+}
+
+/// Whether the body carries an explicit request to keep the bead open.
+///
+/// Only imperative phrasings count. Workers have been writing these in prose
+/// for months and watching the bead auto-close anyway (pat-k5o8f); a bare word
+/// like "partial" is deliberately NOT enough, since it shows up in ordinary
+/// notes ("partial implementation of the parser") where no such request is
+/// meant.
+pub fn body_requests_keep_open(body: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        // `r#""#` because the pattern itself contains a quote (an optional one
+        // before `partial`, for `"status": "partial"` in a JSON-ish body).
+        Regex::new(
+            r#"(?i)(keep[- ]?open\b|keep\s+(?:this\s+)?bead\s+open|(?:do\s+not|don't|dont)\s+close|partial\s*[:=]\s*true|\bpartial\s+completion\b|status\s*[:=]\s*"?partial)"#,
+        )
+        .unwrap()
+    });
+    re.is_match(body)
+}
+
+/// The scope a worker says is still undelivered, from prose.
+fn prose_remaining_scope(body: &str) -> String {
+    for label in [
+        "Remaining scope",
+        "Remaining",
+        "Not delivered",
+        "Still open",
+    ] {
+        let section = extract_section(body, label);
+        if is_meaningful(&section) {
+            return section;
+        }
+    }
+    String::new()
 }
 
 /// Filter inbox to completion messages, parse, and deduplicate.
@@ -190,17 +255,32 @@ pub fn parse_completions(inbox: &[InboxMessage]) -> CompletionSet {
 
         let body = msg.body_text();
 
-        let (files_changed, tests_run, structured) =
+        let (files_changed, tests_run, structured, mut partial, mut remaining_scope) =
             if let Some(sp) = parse_structured_payload(body, &bead_id) {
                 if !sp.bead_id.is_empty() {
                     bead_id = sp.bead_id;
                 }
-                (sp.files_changed.join("\n"), sp.tests_run.join("\n"), true)
+                (
+                    sp.files_changed.join("\n"),
+                    sp.tests_run.join("\n"),
+                    true,
+                    sp.partial,
+                    sp.remaining_scope.join("\n"),
+                )
             } else {
                 let fc = extract_section(body, "Files changed");
                 let tr = extract_section(body, "Tests run");
-                (fc, tr, false)
+                (fc, tr, false, false, String::new())
             };
+
+        // A payload without the flag can still carry the request in prose, and
+        // the remaining scope is usually only ever written there (pat-k5o8f).
+        if !partial {
+            partial = body_requests_keep_open(body);
+        }
+        if remaining_scope.trim().is_empty() {
+            remaining_scope = prose_remaining_scope(body);
+        }
 
         raw.push(ParsedCompletion {
             msg_id: msg.id,
@@ -213,6 +293,8 @@ pub fn parse_completions(inbox: &[InboxMessage]) -> CompletionSet {
             files_changed,
             tests_run,
             structured,
+            partial,
+            remaining_scope,
         });
     }
 
@@ -416,6 +498,97 @@ mod tests {
         let sp4 = parse_structured_payload(body4, "pat-x").unwrap();
         assert_eq!(sp4.files_changed, vec!["single.rs"]);
         assert_eq!(sp4.tests_run, vec!["cargo test"]);
+    }
+
+    // -- Partial / keep-open completions (pat-k5o8f) ------------------------
+
+    fn completion_with_body(body: &str) -> ParsedCompletion {
+        let msgs = vec![make_msg(|m| {
+            m.id = Some(1);
+            m.topic = Some("bead-complete".into());
+            m.subject = Some("[pat-abc] complete".into());
+            m.sender_name = Some("Worker1".into());
+            m.body_md = Some(body.into());
+        })];
+        let mut result = parse_completions(&msgs);
+        assert_eq!(result.completions.len(), 1, "expected one completion");
+        result.completions.remove(0)
+    }
+
+    /// The flag a worker sets in the structured payload, plus the scope note
+    /// that has to survive the close that no longer happens.
+    #[test]
+    fn test_status_partial_marks_completion_partial() {
+        let c = completion_with_body(
+            r#"```json
+{"bead_id": "pat-abc", "status": "partial",
+ "files_changed": ["src/lib.rs"], "test_commands": ["cargo test --test a"],
+ "remaining_scope": ["ViewportTexture still unwired", "Parallax not started"]}
+```"#,
+        );
+        assert!(
+            c.partial,
+            "status: partial must mark the completion partial"
+        );
+        assert!(c.remaining_scope.contains("ViewportTexture still unwired"));
+        assert!(c.remaining_scope.contains("Parallax not started"));
+        // The delivered scope is still parsed normally — it still gets verified.
+        assert!(c.files_ok && c.tests_ok);
+    }
+
+    /// The other spelling workers reach for.
+    #[test]
+    fn test_partial_true_marks_completion_partial() {
+        let c = completion_with_body(
+            r#"```json
+{"bead_id": "pat-abc", "partial": true, "status": "complete",
+ "files_changed": ["src/lib.rs"], "test_commands": ["cargo test"]}
+```"#,
+        );
+        assert!(c.partial, "an explicit partial:true must win over status");
+    }
+
+    /// The regression guard: an ordinary completion must still close.
+    #[test]
+    fn test_ordinary_completion_is_not_partial() {
+        let c = completion_with_body(
+            r#"```json
+{"bead_id": "pat-abc", "status": "complete",
+ "files_changed": ["src/lib.rs"], "test_commands": ["cargo test"]}
+```"#,
+        );
+        assert!(
+            !c.partial,
+            "a normal completion must not be treated as partial"
+        );
+        assert!(c.remaining_scope.is_empty());
+    }
+
+    /// Workers have been writing this in prose for months while the bead
+    /// auto-closed anyway — honor it, and pick up the scope they listed.
+    #[test]
+    fn test_prose_keep_open_request_marks_partial() {
+        let c = completion_with_body(
+            "Files changed: src/canvas_group.rs\n\
+             Tests run: cargo test --test canvas_group\n\
+             Please keep this bead OPEN — only 1 of 4 features landed.\n\
+             Remaining: BackBufferCopy, ViewportTexture, Parallax\n",
+        );
+        assert!(c.partial, "an explicit keep-open request must be honored");
+        assert!(c.remaining_scope.contains("BackBufferCopy"));
+    }
+
+    /// ...but the bare word in ordinary notes is not a request.
+    #[test]
+    fn test_incidental_partial_wording_is_not_a_request() {
+        assert!(!body_requests_keep_open(
+            "Delivered a partial implementation of the parser; all tests pass."
+        ));
+        assert!(body_requests_keep_open("partial=true"));
+        assert!(body_requests_keep_open(
+            "Please do not close this bead yet."
+        ));
+        assert!(body_requests_keep_open("keep-open"));
     }
 
     #[test]

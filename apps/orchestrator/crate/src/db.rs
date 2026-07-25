@@ -198,15 +198,18 @@ pub fn active_assignment_count(conn: &Connection, worker: &str) -> Result<usize>
 pub fn assigned_bead_for_worker(conn: &Connection, worker: &str) -> Result<Option<BeadInfo>> {
     with_retry(|| {
         let mut stmt = conn.prepare_cached(
-            "SELECT id, coalesce(title,''), coalesce(description,''), status, \
-             coalesce(assignee,''), updated_at, coalesce(priority,999) \
-             FROM issues \
-             WHERE status IN ('open','in_progress') AND assignee = ?1 \
-             ORDER BY priority, created_at LIMIT 1",
+            "SELECT i.id, coalesce(i.title,''), coalesce(i.description,''), i.status, \
+             coalesce(i.assignee,''), i.updated_at, coalesce(i.priority,999), \
+             (SELECT l.label FROM labels l \
+              WHERE l.issue_id = i.id AND l.label LIKE 'effort:%' LIMIT 1) AS effort_label \
+             FROM issues i \
+             WHERE i.status IN ('open','in_progress') AND i.assignee = ?1 \
+             ORDER BY i.priority, i.created_at LIMIT 1",
         )?;
         let result = stmt.query_row([worker], |row| {
             let status_str: String = row.get(3)?;
             let assignee_str: String = row.get(4)?;
+            let effort_label: Option<String> = row.get(7)?;
             Ok(BeadInfo {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -220,7 +223,9 @@ pub fn assigned_bead_for_worker(conn: &Connection, worker: &str) -> Result<Optio
                 updated_at: row.get(5)?,
                 priority: row.get(6)?,
                 crate_labels: Vec::new(),
-                effort: None,
+                effort: effort_label
+                    .and_then(|l| l.strip_prefix("effort:").map(str::to_string))
+                    .filter(|s| !s.is_empty()),
                 unblock_impact: 0,
             })
         });
@@ -614,6 +619,34 @@ pub fn bead_description(conn: &Connection, bead_id: &str) -> Result<Option<Strin
             Err(e) => Err(e),
         }
     })
+}
+
+/// The structured `acceptance_criteria` field of one bead (pat-mpqun).
+///
+/// Separate from the description: `br` stores the acceptance sentence in its
+/// own column, and port-audit beads put the test's name there and nowhere else.
+/// A verify set that only ever saw the description could not tell that a bead
+/// demanded a specific named test.
+///
+/// Returns `None` — never an error — when the column is absent or the read
+/// fails. This runs on the completion path, and a schema difference in some
+/// older `beads.db` must degrade to "no stated acceptance" (i.e. today's
+/// behavior), not wedge completion processing.
+pub fn bead_acceptance_criteria(conn: &Connection, bead_id: &str) -> Option<String> {
+    let read = with_retry(|| {
+        let mut stmt = conn.prepare_cached(
+            "SELECT coalesce(acceptance_criteria,'') FROM issues WHERE id = ?1 LIMIT 1",
+        )?;
+        stmt.query_row([bead_id], |row| row.get::<_, String>(0))
+    });
+    match read {
+        Ok(text) if !text.trim().is_empty() => Some(text),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::debug!(bead = %bead_id, error = %e, "acceptance_criteria unreadable");
+            None
+        }
+    }
 }
 
 /// `crate:*` labels attached to one bead — used to scope the stale-recovery

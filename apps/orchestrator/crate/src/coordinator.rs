@@ -40,6 +40,13 @@ struct VerifyResult {
     /// True when this verification originated from stale-PROG recovery
     /// (no worker to reassign; just close on pass, reopen on fail).
     is_stale_recovery: bool,
+    /// The worker delivered part of the scope and asked to keep the bead open
+    /// (pat-k5o8f). A pass then records the scope and reopens instead of
+    /// closing. Declared after `is_stale_recovery` on purpose — a test windows
+    /// the first 500 chars of this struct looking for that field.
+    partial: bool,
+    /// What the worker says is still undelivered, for the durable comment.
+    remaining_scope: String,
 }
 
 #[derive(Debug)]
@@ -54,6 +61,10 @@ struct VerifyRequest {
     is_stale_recovery: bool,
     /// When this request entered the queue — used to report queue-wait latency.
     enqueued_at: Instant,
+    /// Carried through to [`VerifyResult::partial`] (pat-k5o8f).
+    partial: bool,
+    /// Carried through to [`VerifyResult::remaining_scope`].
+    remaining_scope: String,
 }
 
 /// Outcome bundle from one verification run, feeding both circuit breakers
@@ -87,6 +98,10 @@ pub struct Coordinator {
     orphan_strikes: Mutex<HashMap<String, u32>>,
     /// Cache of resolved worker identities by pane id, with resolution time (D2).
     identity_cache: Mutex<HashMap<String, (String, Instant)>>,
+    /// Last bead each worker had its `/effort` set for. Lets the prompt path
+    /// tell a genuinely-new bead (inject `/clear` + `/effort`) from a re-nudge
+    /// of the bead the worker is already on (inject nothing — never wipe WIP).
+    last_effort_bead: Mutex<HashMap<String, String>>,
     /// Last time a bead was reclaimed from each worker (D4 reclaim hysteresis).
     last_reclaim: Mutex<HashMap<String, Instant>>,
     /// Last time a bead close succeeded via any path (close-stall detection).
@@ -140,6 +155,7 @@ impl Coordinator {
             verify_request_tx,
             orphan_strikes: Mutex::new(HashMap::new()),
             identity_cache: Mutex::new(HashMap::new()),
+            last_effort_bead: Mutex::new(HashMap::new()),
             last_reclaim: Mutex::new(HashMap::new()),
             last_close: Mutex::new(None),
             started_at: Instant::now(),
@@ -347,6 +363,25 @@ impl Coordinator {
                             );
                         }
                     }
+                } else if vr.partial {
+                    // The delivered scope verified, but the worker said the
+                    // bead is not finished. Closing here is what silently
+                    // marked real gaps done (pat-k5o8f) — instead record the
+                    // remaining scope on the bead and return it to the queue.
+                    match self.handle_partial_completion(&vr) {
+                        Ok(()) => {
+                            self.ack_or_mark_read(vr.msg_id);
+                            processed += 1;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                bead = %vr.bead_id,
+                                error = %e,
+                                "ERROR: partial completion could not be recorded — \
+                                 leaving the message unacked to retry next cycle"
+                            );
+                        }
+                    }
                 } else {
                     // Normal completion — close bead and reassign worker
                     match self.reassign(&vr.bead_id, &vr.worker, vr.msg_id) {
@@ -477,6 +512,76 @@ impl Coordinator {
         (processed, rejected, prompt_tasks)
     }
 
+    /// Record a verified-but-incomplete completion and put the bead back in the
+    /// queue instead of closing it (pat-k5o8f).
+    ///
+    /// The comment is written *before* the reopen, and its failure aborts the
+    /// whole operation: a bead that returns to the queue without its scope note
+    /// has lost the very information this path exists to preserve, and would be
+    /// picked up by the next worker as if nothing had been done. Better to
+    /// leave the completion unacked and retry than to reopen blind.
+    fn handle_partial_completion(&self, vr: &VerifyResult) -> Result<()> {
+        let comment = partial_scope_comment(
+            &vr.worker,
+            &vr.files_changed,
+            &vr.tests_run,
+            &vr.remaining_scope,
+        );
+        if self.dry_run {
+            tracing::info!(
+                bead = %vr.bead_id,
+                "[dry-run] would record partial scope and reopen"
+            );
+            return Ok(());
+        }
+        br::comment_add(&vr.bead_id, &comment)?;
+        br::reopen(&vr.bead_id)?;
+        tracing::info!(
+            bead = %vr.bead_id,
+            worker = %vr.worker,
+            "PARTIAL verified — scope recorded, bead returned to open"
+        );
+        let _ = self.send_partial_message(&vr.worker, &vr.bead_id, &vr.remaining_scope);
+        Ok(())
+    }
+
+    /// Tell the worker their partial was accepted and the bead stayed open, so
+    /// they don't re-report it (or assume the keep-open request was ignored
+    /// again).
+    fn send_partial_message(&self, worker: &str, bead_id: &str, remaining: &str) -> Result<()> {
+        if worker.is_empty() {
+            return Ok(());
+        }
+        let coordinator = self.coordinator_name()?;
+        let project_key = self.config.project_root.to_string_lossy().to_string();
+        let body = format!(
+            "## [{bead_id}] Partial accepted\n\n\
+             Your delivered scope verified. The bead was **not** closed — it is back \
+             in the ready queue with your remaining scope recorded as a `br` comment, \
+             so it survives for whoever picks it up next.\n\n\
+             Remaining scope on record:\n{}\n\n\
+             No action needed from you on this bead.\n",
+            if remaining.trim().is_empty() {
+                "(none stated — consider listing it next time so the split is actionable)"
+            } else {
+                remaining
+            }
+        );
+        let msg = OutgoingMessage {
+            project_key,
+            sender_name: coordinator,
+            to: vec![worker.to_string()],
+            subject: format!("[{bead_id}] Partial accepted — bead left open"),
+            body_md: body,
+            importance: "normal".to_string(),
+            ack_required: false,
+            topic: "bead-partial".to_string(),
+            thread_id: bead_id.to_string(),
+        };
+
+        self.mail.send_message_best_effort(&msg)
+    }
+
     /// Dispatch background verification for a stale PROG bead.
     /// Instead of blindly reopening, check if the acceptance tests pass.
     /// If they pass → close as done. If they fail → reopen for a new worker.
@@ -486,12 +591,19 @@ impl Coordinator {
         let (mut commands, crate_labels) = match self.open_db() {
             Ok(db) => {
                 let desc = db::bead_description(&db, bead_id).ok().flatten();
+                // The structured field first: port-audit beads state their
+                // acceptance there, not on an `Acceptance:` line (pat-mpqun).
+                let criteria = db::bead_acceptance_criteria(&db, bead_id);
                 let labels = db::bead_crate_labels(&db, bead_id).unwrap_or_default();
                 drop(db);
-                let cmds = match desc {
-                    Some(d) => verifier::extract_acceptance_commands(&d),
-                    None => vec![],
-                };
+                let mut cmds = Vec::new();
+                for text in [criteria.as_deref(), desc.as_deref()].into_iter().flatten() {
+                    for cmd in verifier::extract_acceptance_commands(text) {
+                        if !cmds.contains(&cmd) {
+                            cmds.push(cmd);
+                        }
+                    }
+                }
                 (cmds, labels)
             }
             Err(_) => (vec![], vec![]),
@@ -520,6 +632,9 @@ impl Coordinator {
             commands,
             is_stale_recovery: true,
             enqueued_at: Instant::now(),
+            // Stale recovery has no worker and therefore no keep-open request.
+            partial: false,
+            remaining_scope: String::new(),
         });
     }
 
@@ -901,19 +1016,52 @@ impl Coordinator {
                     }
                 }
 
-                let mut commands = verifier::extract_test_commands(&completion.tests_run);
+                let reported = verifier::extract_test_commands(&completion.tests_run);
 
-                // Also gather acceptance commands from bead description
-                let description = {
+                // What the BEAD demands, from its structured acceptance_criteria
+                // and its description (pat-mpqun). Read before the reported
+                // commands are trusted: a bead that names a test is not proven
+                // by a green `cargo check` somewhere else.
+                let (description, criteria) = {
                     let db = self.open_db()?;
                     let desc = db::bead_description(&db, &completion.bead_id)?;
+                    let criteria = db::bead_acceptance_criteria(&db, &completion.bead_id);
                     drop(db);
-                    desc
+                    (desc, criteria)
                 };
-                if let Some(desc) = &description {
-                    let acceptance_cmds = verifier::extract_acceptance_commands(desc);
-                    commands.extend(acceptance_cmds);
+                let mut demand = verifier::AcceptanceDemand::default();
+                for text in [criteria.as_deref(), description.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    let parsed = verifier::parse_acceptance(text);
+                    for cmd in parsed.commands {
+                        if !demand.commands.contains(&cmd) {
+                            demand.commands.push(cmd);
+                        }
+                    }
+                    for name in parsed.test_names {
+                        if !demand.test_names.contains(&name) {
+                            demand.test_names.push(name);
+                        }
+                    }
                 }
+
+                // An unmet acceptance demand collapses into the same rejection
+                // path as "no commands at all" — with a reason that names the
+                // test the worker still has to run.
+                let (commands, unmet_acceptance) =
+                    match verifier::select_verify_commands(&reported, &demand) {
+                        Ok(cmds) => (cmds, None),
+                        Err(why) => {
+                            tracing::info!(
+                                bead = %completion.bead_id,
+                                reason = %why,
+                                "REJECT: acceptance test not covered by reported commands"
+                            );
+                            (Vec::new(), Some(why))
+                        }
+                    };
 
                 if commands.is_empty() {
                     tracing::info!(
@@ -934,10 +1082,12 @@ impl Coordinator {
                             &completion.tests_run
                         },
                     );
+                    let reason = unmet_acceptance
+                        .unwrap_or_else(|| "missing concrete completion evidence".to_string());
                     let _ = self.send_reopen_message(
                         &completion.worker,
                         &completion.bead_id,
-                        "missing concrete completion evidence",
+                        &reason,
                         &details,
                     );
                     self.ack_or_mark_read(completion.msg_id);
@@ -955,6 +1105,8 @@ impl Coordinator {
                     commands,
                     is_stale_recovery: false,
                     enqueued_at: Instant::now(),
+                    partial: completion.partial,
+                    remaining_scope: completion.remaining_scope.clone(),
                 });
 
                 // Do NOT ack here — ack only after drain_verify_results successfully
@@ -1281,6 +1433,11 @@ impl Coordinator {
                                     &format!("{} | {}", w.worker_name, bead.id),
                                 );
                                 if prompt_workers {
+                                    // Inject effort only on the FIRST prompt of a
+                                    // newly-assigned bead (finish→next); a genuine
+                                    // re-nudge of the same bead injects nothing.
+                                    let (effort, clear_context) =
+                                        self.effort_for_prompt(&w.worker_name, bead);
                                     prompt_tasks.push(tmux::PromptTask {
                                         session: session.to_string(),
                                         window,
@@ -1291,10 +1448,8 @@ impl Coordinator {
                                             &w.worker_name,
                                         ),
                                         pcfg: self.prompt_config(),
-                                        // Re-prompt of a worker already on this bead —
-                                        // never re-level or /clear (would wipe WIP).
-                                        effort: None,
-                                        clear_context: false,
+                                        effort,
+                                        clear_context,
                                     });
                                     self.record_reprompt(&w.worker_name, &bead.id);
                                 }
@@ -1355,16 +1510,17 @@ impl Coordinator {
                         bead = %bead.id,
                         "Queuing prompt for parallel submission"
                     );
+                    // Fresh idle-fill assignment: set this bead's effort and reset
+                    // the worker's context before the work prompt.
+                    let (effort, clear_context) = self.effort_for_prompt(&w.worker_name, &bead);
                     prompt_tasks.push(tmux::PromptTask {
                         session: session.to_string(),
                         window,
                         pane: w.pane_index,
                         text: self.build_prompt_text(&bead.id, &bead.title, &w.worker_name),
                         pcfg: self.prompt_config(),
-                        // New assignment: set this bead's effort (and reset the
-                        // worker's context) before the work prompt.
-                        effort: self.assignment_effort(&bead),
-                        clear_context: self.config.adaptive_effort_clear,
+                        effort,
+                        clear_context,
                     });
                     self.record_reprompt(&w.worker_name, &bead.id);
                 }
@@ -2122,6 +2278,26 @@ impl Coordinator {
         )
     }
 
+    /// Effort + `/clear` decision for prompting `worker` about `bead`. Injects
+    /// only when this is a NEW bead for the worker (fresh assignment or the
+    /// finish→next transition) — a re-nudge of the bead the worker is already
+    /// on returns `(None, false)` so its in-progress context is never cleared.
+    /// Records the bead as the worker's current effort target. `(None, false)`
+    /// when adaptive effort is disabled.
+    fn effort_for_prompt(&self, worker: &str, bead: &db::BeadInfo) -> (Option<String>, bool) {
+        if !self.config.adaptive_effort_enabled {
+            return (None, false);
+        }
+        {
+            let mut map = self.last_effort_bead.lock().unwrap();
+            if map.get(worker).map(String::as_str) == Some(bead.id.as_str()) {
+                return (None, false); // re-nudge of the same bead — inject nothing
+            }
+            map.insert(worker.to_string(), bead.id.clone());
+        }
+        (self.assignment_effort(bead), self.config.adaptive_effort_clear)
+    }
+
     fn build_prompt_text(&self, bead_id: &str, bead_title: &str, worker_name: &str) -> String {
         // Single-line: newlines cause Claude Code to submit prematurely via tmux send-keys -l.
         // The worker skill name varies by agent type (flywheel-worker for Claude, patina-fly-worker for Codex).
@@ -2470,6 +2646,51 @@ fn order_batch_by_crate(batch: &mut [VerifyRequest]) {
 /// workspace *check* (no codegen/link) when the bead is unlabeled. Never a
 /// full `cargo build --workspace` — compiling and linking every crate
 /// (wgpu/metal included) per stale bead is what starved the verify lane.
+/// The comment left on a bead whose completion was partial (pat-k5o8f).
+///
+/// This is the whole point of the partial path: mail messages get acked and
+/// scroll away, so a "these three features are still missing" note written only
+/// in mail dies with it. A `br` comment is attached to the issue and outlives
+/// every close, reopen and reassignment, which is why workers had already
+/// started writing scope notes there by hand.
+fn partial_scope_comment(
+    worker: &str,
+    files_changed: &str,
+    tests_run: &str,
+    remaining_scope: &str,
+) -> String {
+    let section = |label: &str, body: &str, empty: &str| -> String {
+        let body = body.trim();
+        if body.is_empty() {
+            format!("{label}\n{empty}\n")
+        } else {
+            format!("{label}\n{body}\n")
+        }
+    };
+    format!(
+        "## Partial completion — bead intentionally left open\n\n\
+         Reported by {} and verified: the delivered scope passed its tests, but the \
+         worker flagged the bead as incomplete, so it was returned to the queue \
+         instead of closed.\n\n{}\n{}\n{}",
+        if worker.trim().is_empty() {
+            "an unnamed worker"
+        } else {
+            worker.trim()
+        },
+        section(
+            "### Remaining scope",
+            remaining_scope,
+            "(not stated — the next worker should re-derive it from the bead description)",
+        ),
+        section(
+            "### Delivered (files changed)",
+            files_changed,
+            "(none reported)",
+        ),
+        section("### Verified by", tests_run, "(none reported)"),
+    )
+}
+
 fn stale_fallback_commands(crate_labels: &[String]) -> Vec<String> {
     let pkgs: Vec<&str> = crate_labels
         .iter()
@@ -2661,6 +2882,8 @@ fn process_one_verification(
         passed,
         reject_reason,
         is_stale_recovery: request.is_stale_recovery,
+        partial: request.partial,
+        remaining_scope: request.remaining_scope,
     });
 
     VerifyRunSummary {
@@ -2992,6 +3215,7 @@ mod tests {
             verify_request_tx,
             orphan_strikes: Mutex::new(HashMap::new()),
             identity_cache: Mutex::new(HashMap::new()),
+            last_effort_bead: Mutex::new(HashMap::new()),
             last_reclaim: Mutex::new(HashMap::new()),
             last_close: Mutex::new(None),
             started_at: Instant::now(),
@@ -3173,6 +3397,8 @@ mod tests {
             commands: vec![cmd.to_string()],
             is_stale_recovery: false,
             enqueued_at: Instant::now(),
+            partial: false,
+            remaining_scope: String::new(),
         }
     }
 
@@ -3315,6 +3541,8 @@ mod tests {
                     commands: vec!["sleep 30".to_string()],
                     is_stale_recovery: false,
                     enqueued_at: Instant::now(),
+                    partial: false,
+                    remaining_scope: String::new(),
                 })
                 .unwrap();
         }
@@ -5230,6 +5458,8 @@ mod tests {
             passed: true,
             reject_reason: None,
             is_stale_recovery: false,
+            partial: false,
+            remaining_scope: String::new(),
         })
         .unwrap();
 
@@ -5262,6 +5492,97 @@ mod tests {
         let s = source.find("struct VerifyResult").unwrap();
         let body = &source[s..s + 500];
         assert!(body.contains("is_stale_recovery"));
+    }
+
+    // -- Partial completions (pat-k5o8f) ------------------------------------
+
+    /// The scope comment is the durable artifact of a partial: everything the
+    /// next worker needs has to be in it, because the mail message will be
+    /// acked and gone.
+    #[test]
+    fn test_partial_scope_comment_carries_the_remaining_scope() {
+        let comment = partial_scope_comment(
+            "IndigoBridge",
+            "engine-rs/crates/gdscene/src/canvas_group.rs",
+            "cargo nextest run -p gdscene --test canvas_group",
+            "BackBufferCopy/SCREEN_TEXTURE, ViewportTexture, Parallax",
+        );
+        assert!(
+            comment.contains("left open"),
+            "the comment must say the bead was deliberately not closed: {comment}"
+        );
+        assert!(comment.contains("IndigoBridge"));
+        assert!(comment.contains("BackBufferCopy/SCREEN_TEXTURE"));
+        assert!(comment.contains("ViewportTexture"));
+        assert!(comment.contains("Parallax"));
+        assert!(comment.contains("canvas_group.rs"), "delivered files");
+        assert!(comment.contains("cargo nextest run"), "verify command");
+    }
+
+    /// A worker who flags partial without listing what is left still gets a
+    /// usable comment — silence must not read as "nothing remains".
+    #[test]
+    fn test_partial_scope_comment_survives_a_missing_scope() {
+        let comment = partial_scope_comment("W", "src/a.rs", "cargo test", "");
+        assert!(comment.contains("Remaining scope"));
+        assert!(
+            comment.contains("not stated"),
+            "an empty scope must be called out, not silently omitted: {comment}"
+        );
+    }
+
+    /// A passing partial must never reach the close/reassign path, and the
+    /// scope comment must be written before the bead is reopened — a reopen
+    /// without the note loses the gap information entirely.
+    #[test]
+    fn test_partial_completion_leaves_bead_open_with_a_comment() {
+        let source = include_str!("coordinator.rs");
+
+        let drain = source
+            .find("pub fn drain_verify_results(")
+            .expect("drain_verify_results must exist");
+        let drain_body = &source[drain..drain + 4000];
+        assert!(
+            drain_body.contains("} else if vr.partial {"),
+            "the pass branch must route partial completions away from close"
+        );
+        assert!(
+            drain_body.contains("handle_partial_completion(&vr)"),
+            "partial completions must be handled, not closed"
+        );
+
+        let handler = source
+            .find("fn handle_partial_completion(")
+            .expect("handle_partial_completion must exist");
+        let handler_body = &source[handler..handler + 1400];
+        let comment_at = handler_body
+            .find("br::comment_add(")
+            .expect("the partial handler must record a br comment");
+        let reopen_at = handler_body
+            .find("br::reopen(")
+            .expect("the partial handler must return the bead to open");
+        assert!(
+            comment_at < reopen_at,
+            "the scope comment must be written before the reopen"
+        );
+        assert!(
+            !handler_body.contains("close_bead"),
+            "the partial handler must never close the bead"
+        );
+    }
+
+    /// The flag has to survive the trip through the verify lane, or the drain
+    /// branch above can never fire.
+    #[test]
+    fn test_verify_result_carries_partial_fields() {
+        let source = include_str!("coordinator.rs");
+        let s = source.find("struct VerifyResult").unwrap();
+        let body = &source[s..s + 1200];
+        assert!(body.contains("partial: bool"));
+        assert!(body.contains("remaining_scope: String"));
+        let r = source.find("struct VerifyRequest").unwrap();
+        let req = &source[r..r + 900];
+        assert!(req.contains("partial: bool"), "request must carry the flag");
     }
 
     #[test]
@@ -5314,6 +5635,8 @@ mod tests {
                 passed: true,
                 reject_reason: None,
                 is_stale_recovery: true,
+                partial: false,
+                remaining_scope: String::new(),
             })
             .unwrap();
         let rx = coord.verify_rx.lock().unwrap();

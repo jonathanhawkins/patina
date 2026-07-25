@@ -293,6 +293,150 @@ pub fn extract_acceptance_commands(description: &str) -> Vec<String> {
     found
 }
 
+/// A bead's acceptance criteria, reduced to what a completion must actually run.
+///
+/// Beads state their acceptance two ways. Older ones put a whole command on an
+/// `Acceptance:` line; port-audit ones end their `acceptance_criteria` field
+/// with the test's *name* — `(test: \`scene_tree_script_bridge\`)` — and leave
+/// the command to the worker. Both are demands on the verify set, so both are
+/// captured here (pat-mpqun).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AcceptanceDemand {
+    /// Runnable commands quoted in the criteria or description.
+    pub commands: Vec<String>,
+    /// Test names called out without a command, from the `(test: \`name\`)` form.
+    pub test_names: Vec<String>,
+}
+
+impl AcceptanceDemand {
+    /// True when the bead states no acceptance command or test name, so the
+    /// completion's own reported commands are all there is to go on.
+    pub fn is_empty(&self) -> bool {
+        self.commands.is_empty() && self.test_names.is_empty()
+    }
+}
+
+/// Parse a bead's `acceptance_criteria` (and/or description) into the commands
+/// and test names its completion must be verified against.
+pub fn parse_acceptance(text: &str) -> AcceptanceDemand {
+    // `Acceptance:` lines first — they are the explicit form and should lead.
+    let mut commands = extract_acceptance_commands(text);
+    for cmd in extract_test_commands(text) {
+        if !commands.contains(&cmd) {
+            commands.push(cmd);
+        }
+    }
+
+    static TEST_NAME: OnceLock<Regex> = OnceLock::new();
+    let test_name = TEST_NAME.get_or_init(|| {
+        Regex::new(r"(?i)\(tests?:\s*`?([A-Za-z0-9_][A-Za-z0-9_:]*)`?\s*\)").unwrap()
+    });
+    let mut test_names = Vec::new();
+    for cap in test_name.captures_iter(text) {
+        let name = cap[1].to_string();
+        if !test_names.contains(&name) {
+            test_names.push(name);
+        }
+    }
+
+    AcceptanceDemand {
+        commands,
+        test_names,
+    }
+}
+
+/// Whether `cmd` runs the test called `test_name`.
+///
+/// Matched as a whole token so `--test scene_tree` does not satisfy a demand
+/// for `scene_tree_script_bridge` (or the reverse).
+fn command_mentions_test(cmd: &str, test_name: &str) -> bool {
+    if test_name.is_empty() {
+        return false;
+    }
+    let haystack = cmd.to_lowercase();
+    let needle = test_name.to_lowercase();
+    let bytes = haystack.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    haystack.match_indices(&needle).any(|(start, m)| {
+        let end = start + m.len();
+        let before_ok = start == 0 || !ident(bytes[start - 1]);
+        let after_ok = end >= bytes.len() || !ident(bytes[end]);
+        before_ok && after_ok
+    })
+}
+
+/// Choose the commands a completion is verified against, given what the worker
+/// reported and what the bead's acceptance criteria demands (pat-mpqun).
+///
+/// Two rules, both aimed at the same failure: a bead closing on a green
+/// `cargo check` while its actual scope was never exercised.
+///
+/// 1. **A named acceptance test must be run.** If the criteria names a test and
+///    nothing in the verify set runs it, the completion is rejected rather than
+///    verified against unrelated commands.
+/// 2. **A real test beats a compile check.** Once an acceptance test is in the
+///    set, generic `cargo check` / `cargo build` commands are dropped: they are
+///    not evidence of the bead's scope, and they cost verify-lane time.
+///
+/// A bead with no stated acceptance keeps the current behavior — the worker's
+/// reported commands, unchanged.
+pub fn select_verify_commands(
+    reported: &[String],
+    demand: &AcceptanceDemand,
+) -> std::result::Result<Vec<String>, String> {
+    if demand.is_empty() {
+        return Ok(reported.to_vec());
+    }
+
+    let covers = |name: &str| {
+        demand
+            .commands
+            .iter()
+            .chain(reported.iter())
+            .any(|cmd| command_mentions_test(cmd.as_str(), name))
+    };
+    let uncovered: Vec<&str> = demand
+        .test_names
+        .iter()
+        .map(|name| name.as_str())
+        .filter(|name| !covers(name))
+        .collect();
+    if !uncovered.is_empty() {
+        return Err(format!(
+            "acceptance test not run: the bead's acceptance_criteria names `{}`, \
+             but no reported command runs it ({}). Report the acceptance test \
+             itself, e.g. `cargo nextest run -p <package> --test {}`.",
+            uncovered.join("`, `"),
+            if reported.is_empty() {
+                "no commands reported".to_string()
+            } else {
+                reported.join("; ")
+            },
+            uncovered[0],
+        ));
+    }
+
+    let mut selected: Vec<String> = Vec::new();
+    for cmd in demand.commands.iter().chain(reported.iter()) {
+        if !selected.contains(cmd) {
+            selected.push(cmd.clone());
+        }
+    }
+
+    // Prefer the real tests. Only drop the compile checks when something
+    // test-shaped survives — verifying nothing is worse than verifying a check.
+    let tests_only: Vec<String> = selected
+        .iter()
+        .filter(|cmd| is_test_run_command(cmd.as_str()))
+        .cloned()
+        .collect();
+    if tests_only.is_empty() {
+        Ok(selected)
+    } else {
+        Ok(tests_only)
+    }
+}
+
 /// Determine the working directory for a command based on its prefix.
 pub fn command_workdir(project_root: &Path, command: &str) -> PathBuf {
     let lower = command.trim().to_lowercase();
@@ -1939,6 +2083,122 @@ Also ran `cargo test --test foo` again."#;
                 "cargo test --test v1_acceptance_gate_test -- --ignored test_render_fix",
                 "cargo test --test smoke_test",
             ]
+        );
+    }
+
+    // -- Acceptance-driven command selection (pat-mpqun) --------------------
+
+    /// The port-audit shape: the criteria names a test and nothing else.
+    #[test]
+    fn test_parse_acceptance_picks_up_named_test() {
+        let criteria = "A scene script can construct Transform2D and apply it \
+                        via `*` end-to-end (test: `variant_affine_types_runtime`)";
+        let demand = parse_acceptance(criteria);
+        assert_eq!(demand.test_names, vec!["variant_affine_types_runtime"]);
+        assert!(demand.commands.is_empty(), "no command was stated");
+        assert!(!demand.is_empty(), "a named test is still a demand");
+    }
+
+    /// The older shape: a whole command on an `Acceptance:` line.
+    #[test]
+    fn test_parse_acceptance_picks_up_command() {
+        let demand = parse_acceptance("Acceptance: cargo test --test smoke_test\n");
+        assert_eq!(demand.commands, vec!["cargo test --test smoke_test"]);
+        assert!(demand.test_names.is_empty());
+    }
+
+    /// A bead with no stated acceptance keeps today's behavior: the worker's
+    /// reported commands, unchanged and unfiltered.
+    #[test]
+    fn test_select_verify_commands_without_acceptance_is_unchanged() {
+        let reported = vec![
+            "cargo check -p gdscene".to_string(),
+            "cargo test --test foo".to_string(),
+        ];
+        let demand = parse_acceptance("Just a description with no acceptance.");
+        assert!(demand.is_empty());
+        assert_eq!(
+            select_verify_commands(&reported, &demand).unwrap(),
+            reported,
+            "with nothing demanded, the reported set passes through verbatim"
+        );
+    }
+
+    /// The bug this exists for: a bead names a test, the worker reports only a
+    /// compile check, and the bead closes green with its scope undelivered.
+    #[test]
+    fn test_select_verify_commands_rejects_missing_acceptance_test() {
+        let demand = parse_acceptance("Prove it: ... (test: `scene_tree_script_bridge`)");
+        let reported = vec!["cargo check -p gdscene".to_string()];
+        let err = select_verify_commands(&reported, &demand)
+            .expect_err("a compile check is not proof of the named test");
+        assert!(
+            err.contains("scene_tree_script_bridge"),
+            "the rejection must name the test still owed: {err}"
+        );
+    }
+
+    /// A completion that DOES run the named test verifies via that command —
+    /// and the generic compile check alongside it is dropped.
+    #[test]
+    fn test_select_verify_commands_prefers_the_acceptance_test() {
+        let demand = parse_acceptance("Prove it: ... (test: `scene_tree_script_bridge`)");
+        let reported = vec![
+            "cargo check -p gdscene".to_string(),
+            "cargo nextest run -p gdscene --test scene_tree_script_bridge".to_string(),
+        ];
+        assert_eq!(
+            select_verify_commands(&reported, &demand).unwrap(),
+            vec!["cargo nextest run -p gdscene --test scene_tree_script_bridge"],
+            "the named test supersedes the compile check"
+        );
+    }
+
+    /// An `Acceptance:` command leads the verify set even when the worker
+    /// reported something else, and compile-only commands still drop out.
+    #[test]
+    fn test_select_verify_commands_runs_the_stated_command_first() {
+        let demand = parse_acceptance("Acceptance: cargo test --test gate_test\n");
+        let reported = vec![
+            "cargo build -p gdcore".to_string(),
+            "cargo test --test worker_choice".to_string(),
+        ];
+        assert_eq!(
+            select_verify_commands(&reported, &demand).unwrap(),
+            vec![
+                "cargo test --test gate_test",
+                "cargo test --test worker_choice"
+            ],
+            "the bead's own command leads; the build check is not evidence"
+        );
+    }
+
+    /// Test names match as whole tokens, so a prefix of the demanded name is
+    /// not accepted as having run it.
+    #[test]
+    fn test_select_verify_commands_requires_whole_test_name() {
+        let demand = parse_acceptance("(test: `canvas_item_shader_scene_pixels`)");
+        let near_miss = vec!["cargo nextest run -p gdscene --test canvas_item_shader".to_string()];
+        assert!(
+            select_verify_commands(&near_miss, &demand).is_err(),
+            "a shorter, similarly-named test must not satisfy the demand"
+        );
+        let exact =
+            vec!["cargo nextest run -p gdscene --test canvas_item_shader_scene_pixels".to_string()];
+        assert!(select_verify_commands(&exact, &demand).is_ok());
+    }
+
+    /// Never verify nothing: if the demand is met but every surviving command
+    /// is a compile check, keep them rather than emptying the set.
+    #[test]
+    fn test_select_verify_commands_keeps_checks_when_no_test_survives() {
+        let demand = AcceptanceDemand {
+            commands: vec!["cargo check -p patina-engine".to_string()],
+            test_names: vec![],
+        };
+        assert_eq!(
+            select_verify_commands(&[], &demand).unwrap(),
+            vec!["cargo check -p patina-engine"]
         );
     }
 
