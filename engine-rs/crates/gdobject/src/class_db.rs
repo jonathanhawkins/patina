@@ -14,30 +14,65 @@ use gdvariant::Variant;
 use crate::object::{GenericObject, GodotObject};
 
 /// Metadata for a single registered property.
+/// `PROPERTY_USAGE_NONE` — the property is neither stored nor shown.
+pub const PROPERTY_USAGE_NONE: i32 = 0;
+/// `PROPERTY_USAGE_STORAGE` — serialized into scenes/resources.
+pub const PROPERTY_USAGE_STORAGE: i32 = 2;
+/// `PROPERTY_USAGE_EDITOR` — shown in the inspector.
+pub const PROPERTY_USAGE_EDITOR: i32 = 4;
+/// `PROPERTY_USAGE_DEFAULT` — Godot's default for an exposed property:
+/// `STORAGE | EDITOR` (`core/object/object.h`).
+pub const PROPERTY_USAGE_DEFAULT: i32 = PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR;
+
 #[derive(Debug, Clone)]
 pub struct PropertyInfo {
     /// The property name (e.g., `"position"`).
     pub name: String,
     /// The default value for this property.
+    ///
+    /// Doubles as the property's TYPE: Godot's `get_property_list()` dict
+    /// reports `type` as a Variant type id, and the default already carries it,
+    /// so the two can never disagree (pat-0q2kx.64).
     pub default_value: Variant,
     /// Optional property hint value (matches Godot's PropertyHint enum).
     /// 0 means no hint (default).
     pub hint: i32,
+    /// Hint detail — an enum's comma-separated names, a resource type, a numeric
+    /// range (Godot `PropertyInfo::hint_string`). Empty when unhinted.
+    pub hint_string: String,
+    /// Storage/editor visibility flags (Godot `PropertyInfo::usage`). Defaults
+    /// to [`PROPERTY_USAGE_DEFAULT`]; a save system reads this to decide what to
+    /// persist.
+    pub usage: i32,
 }
 
 impl PropertyInfo {
-    /// Creates a new property info entry with no hint.
+    /// Creates a new property info entry with no hint and Godot's default usage.
     pub fn new(name: impl Into<String>, default_value: Variant) -> Self {
         Self {
             name: name.into(),
             default_value,
             hint: 0,
+            hint_string: String::new(),
+            usage: PROPERTY_USAGE_DEFAULT,
         }
     }
 
     /// Sets the property hint value (builder pattern).
     pub fn with_hint(mut self, hint: i32) -> Self {
         self.hint = hint;
+        self
+    }
+
+    /// Sets the hint detail string (builder pattern).
+    pub fn with_hint_string(mut self, hint_string: impl Into<String>) -> Self {
+        self.hint_string = hint_string.into();
+        self
+    }
+
+    /// Sets the usage flags (builder pattern).
+    pub fn with_usage(mut self, usage: i32) -> Self {
+        self.usage = usage;
         self
     }
 }
@@ -409,6 +444,31 @@ pub fn get_property_list(class_name: &str) -> Vec<PropertyInfo> {
         }
     }
     props
+}
+
+/// Whether `property` on `class_name` has a class default to revert to
+/// (Godot `Object::property_can_revert`).
+///
+/// True exactly when the ClassDB knows the property — a script-only variable
+/// with no registered default has nothing to revert TO, which is what Godot
+/// reports too.
+pub fn property_can_revert(class_name: &str, property: &str) -> bool {
+    get_property_list(class_name)
+        .iter()
+        .any(|p| p.name == property)
+}
+
+/// The class default for `property` (Godot `Object::property_get_revert`).
+///
+/// The LAST match in the merged list wins, so a derived class that re-declares a
+/// base property reverts to the DERIVED default — the same override order
+/// `get_property_list` builds (base first, derived last).
+pub fn property_get_revert(class_name: &str, property: &str) -> Option<Variant> {
+    get_property_list(class_name)
+        .into_iter()
+        .filter(|p| p.name == property)
+        .next_back()
+        .map(|p| p.default_value)
 }
 
 /// Returns all methods for a class, including inherited methods.

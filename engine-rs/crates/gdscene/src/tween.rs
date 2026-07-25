@@ -522,6 +522,12 @@ pub struct Tween {
     /// Playback speed multiplier applied to every `advance` (Godot
     /// `set_speed_scale`). Defaults to 1.0.
     pub speed_scale: f64,
+    /// Default `parallel` flag applied to every tweener added from now on
+    /// (Godot `Tween.set_parallel`). Distinct from `Tween.parallel()`, which
+    /// affects only the NEXT tweener — Godot has both, and a builder that only
+    /// models the one-shot form cannot express "everything after this runs
+    /// together" (pat-0q2kx.4).
+    pub default_parallel: bool,
     /// When paused, `advance` is a no-op (Godot `pause`).
     paused: bool,
     /// When killed, the tween is permanently inert (Godot `kill`).
@@ -539,6 +545,7 @@ impl Tween {
             loops: 1,
             loops_total: 1,
             speed_scale: 1.0,
+            default_parallel: false,
             paused: false,
             killed: false,
             finished_pending: false,

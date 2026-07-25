@@ -360,6 +360,30 @@ pub(crate) fn construct(name: &str, args: &[Variant]) -> Result<Variant, Runtime
 
 /// The shortest-arc rotation taking `from` onto `to`
 /// (Godot's `Quaternion(Vector3 arc_from, Vector3 arc_to)`).
+/// Godot's `Math::is_equal_approx`: a RELATIVE tolerance that scales with the
+/// magnitude, with an absolute floor so values near zero still compare equal.
+/// A fixed epsilon would call two large transforms unequal over rounding that
+/// does not matter, and two tiny ones equal when they differ meaningfully.
+fn approx(a: f32, b: f32) -> bool {
+    if a == b {
+        return true;
+    }
+    let tolerance = (1e-6_f32 * a.abs()).max(1e-6);
+    (a - b).abs() < tolerance
+}
+
+fn vec2_equal_approx(a: Vector2, b: Vector2) -> bool {
+    approx(a.x, b.x) && approx(a.y, b.y)
+}
+
+fn vec3_equal_approx(a: Vector3, b: Vector3) -> bool {
+    approx(a.x, b.x) && approx(a.y, b.y) && approx(a.z, b.z)
+}
+
+fn basis_equal_approx(a: Basis, b: Basis) -> bool {
+    vec3_equal_approx(a.x, b.x) && vec3_equal_approx(a.y, b.y) && vec3_equal_approx(a.z, b.z)
+}
+
 fn quaternion_from_arc(from: Vector3, to: Vector3) -> Quaternion {
     let c = from.cross(to);
     let d = from.dot(to);
@@ -690,6 +714,17 @@ fn transform2d_method(
         "interpolate_with" => Ok(Variant::Transform2D(
             t.interpolate_with(arg_transform2d(args, 0, &ctx)?, arg_num(args, 1, &ctx)?),
         )),
+        // Godot compares every component with `Math::is_equal_approx`, i.e. a
+        // RELATIVE epsilon — a plain `==` on floats would report two transforms
+        // that differ only by accumulated rounding as unequal (pat-0q2kx.66).
+        "is_equal_approx" => {
+            let o = arg_transform2d(args, 0, &ctx)?;
+            Ok(Variant::Bool(
+                vec2_equal_approx(t.x, o.x)
+                    && vec2_equal_approx(t.y, o.y)
+                    && vec2_equal_approx(t.origin, o.origin),
+            ))
+        }
         _ => Err(undefined_method("Transform2D", method)),
     }
 }
@@ -756,6 +791,12 @@ fn transform3d_method(
         "interpolate_with" => Ok(Variant::Transform3D(
             t.interpolate_with(arg_transform3d(args, 0, &ctx)?, arg_num(args, 1, &ctx)?),
         )),
+        "is_equal_approx" => {
+            let o = arg_transform3d(args, 0, &ctx)?;
+            Ok(Variant::Bool(
+                basis_equal_approx(t.basis, o.basis) && vec3_equal_approx(t.origin, o.origin),
+            ))
+        }
         _ => Err(undefined_method("Transform3D", method)),
     }
 }
@@ -798,6 +839,10 @@ fn basis_method(b: Basis, method: &str, args: &[Variant]) -> Result<Variant, Run
                 b.get_scale().lerp(to.get_scale(), weight),
             )))
         }
+        "is_equal_approx" => Ok(Variant::Bool(basis_equal_approx(
+            b,
+            arg_basis(args, 0, &ctx)?,
+        ))),
         _ => Err(undefined_method("Basis", method)),
     }
 }
@@ -839,6 +884,12 @@ fn quaternion_method(
             let d = q.dot(arg_quat(args, 0, &ctx)?);
             Ok(Variant::Float(
                 (2.0 * d * d - 1.0).clamp(-1.0, 1.0).acos() as f64
+            ))
+        }
+        "is_equal_approx" => {
+            let o = arg_quat(args, 0, &ctx)?;
+            Ok(Variant::Bool(
+                approx(q.x, o.x) && approx(q.y, o.y) && approx(q.z, o.z) && approx(q.w, o.w),
             ))
         }
         _ => Err(undefined_method("Quaternion", method)),

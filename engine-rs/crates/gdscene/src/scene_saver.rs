@@ -10,6 +10,7 @@ use std::fmt::Write as FmtWrite;
 use gdvariant::Variant;
 
 use crate::node::NodeId;
+use crate::packed_scene::{CONNECT_DEFERRED, CONNECT_ONE_SHOT};
 use crate::scene_tree::SceneTree;
 
 // ---------------------------------------------------------------------------
@@ -872,6 +873,12 @@ fn write_connections(
         from_path: String,
         to_path: String,
         method: String,
+        /// Godot `ConnectFlags` bitfield rebuilt from the live connection, so a
+        /// loaded-then-saved scene keeps the behavior it was authored with
+        /// (pat-0q2kx.65). Omitted from the output when zero, as Godot does.
+        flags: u32,
+        binds: Vec<Variant>,
+        unbinds: usize,
     }
 
     let mut conn_infos: Vec<ConnInfo> = Vec::new();
@@ -905,21 +912,44 @@ fn write_connections(
                     .cloned()
                     .unwrap_or_else(|| ".".to_string());
 
+                let mut flags = 0u32;
+                if conn.deferred {
+                    flags |= CONNECT_DEFERRED;
+                }
+                if conn.one_shot {
+                    flags |= CONNECT_ONE_SHOT;
+                }
                 conn_infos.push(ConnInfo {
                     signal_name: sig_name.to_string(),
                     from_path: from_path.clone(),
                     to_path,
                     method: conn.method.clone(),
+                    flags,
+                    binds: conn.binds.clone(),
+                    unbinds: conn.unbinds,
                 });
             }
         }
     }
 
     for info in &conn_infos {
+        // Godot writes flags/binds/unbinds only when they carry information, so
+        // an ordinary connection round-trips byte-identical.
+        let mut extra = String::new();
+        if info.flags != 0 {
+            extra.push_str(&format!(" flags={}", info.flags));
+        }
+        if !info.binds.is_empty() {
+            let items: Vec<String> = info.binds.iter().map(format_variant_value).collect();
+            extra.push_str(&format!(" binds=[{}]", items.join(", ")));
+        }
+        if info.unbinds != 0 {
+            extra.push_str(&format!(" unbinds={}", info.unbinds));
+        }
         writeln!(
             out,
-            "\n[connection signal=\"{}\" from=\"{}\" to=\"{}\" method=\"{}\"]",
-            info.signal_name, info.from_path, info.to_path, info.method,
+            "\n[connection signal=\"{}\" from=\"{}\" to=\"{}\" method=\"{}\"{}]",
+            info.signal_name, info.from_path, info.to_path, info.method, extra,
         )
         .unwrap();
     }

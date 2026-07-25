@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+use gdscript_interop::bindings::ScriptInstance;
 use gdvariant::Variant;
 use patina_runner::bootstrap::{BootConfig, EngineBootstrap};
 

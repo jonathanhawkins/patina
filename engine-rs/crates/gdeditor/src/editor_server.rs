@@ -2096,7 +2096,18 @@ fn handle_connection(
     // GETs, and all `/api/runtime/*` control routes stay available. Checked
     // before the idempotency block so no capture buffer is armed for a request
     // we are about to reject.
-    if route_is_edit_locked(&req.method, &req.path) && state.lock().unwrap().is_running {
+    // Godot's inspector edits the RUNNING game during play (live edit), so a
+    // `/api/property/set` carrying `{"runtime": true}` is aimed at the running
+    // clone, not the edit tree, and must not be locked out (pat-0q2kx.72).
+    let runtime_targeted = req.method == "POST"
+        && req.path == "/api/property/set"
+        && parse_json_body(&req.body)
+            .and_then(|v| v.get("runtime").and_then(|r| r.as_bool()))
+            .unwrap_or(false);
+    if !runtime_targeted
+        && route_is_edit_locked(&req.method, &req.path)
+        && state.lock().unwrap().is_running
+    {
         send_error_coded(
             &mut stream,
             409,
@@ -2359,6 +2370,9 @@ fn handle_connection(
         ("GET", "/api/runtime/movie") => api_runtime_movie(state, &mut stream),
         // pat-nzgdu.23: live node inspection of the running scene (remote tree).
         ("GET", "/api/runtime/node") => api_runtime_node(state, &req.query, &mut stream),
+        // Godot's Scene dock switches to a "Remote" tree during play; this is
+        // the source it reads (pat-0q2kx.72).
+        ("GET", "/api/runtime/scene") => api_runtime_scene(state, &mut stream),
         // pat-j9yqh: game-view runtime toolbar controls
         ("POST", "/api/runtime/suspend") => api_runtime_suspend(state, &req.body, &mut stream),
         ("POST", "/api/runtime/time_scale") => {
@@ -2512,6 +2526,9 @@ fn handle_connection(
         ("POST", "/api/output/clear") => api_clear_output(state, &mut stream),
         ("GET", "/api/output") => api_get_output(state, &mut stream),
         // pat-kj4: Project settings
+        // pat-0q2kx.73: Project Settings ▸ Autoload
+        ("GET", "/api/autoloads") => api_get_autoloads(state, &mut stream),
+        ("POST", "/api/autoloads") => api_post_autoloads(state, &req.body, &mut stream),
         ("GET", "/api/project_settings") => api_get_project_settings(state, &mut stream),
         ("POST", "/api/project_settings") => {
             api_set_project_settings(state, &req.body, &mut stream)
@@ -2538,7 +2555,7 @@ fn handle_connection(
         ("GET", "/api/input_map") => api_get_input_map(state, &mut stream),
         ("POST", "/api/input_map") => api_set_input_map(state, &req.body, &mut stream),
         // pat-flr: Filesystem operations
-        ("POST", "/api/filesystem/rename") => api_filesystem_rename(&req.body, &mut stream),
+        ("POST", "/api/filesystem/rename") => api_filesystem_rename(state, &req.body, &mut stream),
         ("POST", "/api/filesystem/delete") => api_filesystem_delete(&req.body, &mut stream),
         ("POST", "/api/filesystem/mkdir") => api_filesystem_mkdir(&req.body, &mut stream),
         // pat-k6600: favorite/unfavorite a directory, persisted under Favorites
@@ -3493,6 +3510,23 @@ fn scene_res_path(state: &EditorState) -> Option<String> {
 }
 
 /// Finds a NodeId from a raw u64 by scanning the scene tree.
+/// The absolute `/root/...` path of `node_id`.
+///
+/// Needed to address the SAME node in a DIFFERENT tree: the play clone mints
+/// fresh ids, so an id is only meaningful within the tree that produced it,
+/// while the path is stable across the clone (pat-0q2kx.72).
+fn absolute_node_path(tree: &SceneTree, node_id: NodeId) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut cursor = Some(node_id);
+    while let Some(id) = cursor {
+        let Some(node) = tree.get_node(id) else { break };
+        parts.push(node.name().to_string());
+        cursor = node.parent();
+    }
+    parts.reverse();
+    format!("/{}", parts.join("/"))
+}
+
 fn find_node_by_raw_id(tree: &SceneTree, raw: u64) -> Option<NodeId> {
     // Walk from root to find the node with this raw id.
     let mut stack = vec![tree.root_id()];
@@ -5711,6 +5745,61 @@ fn api_set_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     };
 
     let mut state = state.lock().unwrap();
+
+    // Live edit (pat-0q2kx.72): `{"runtime": true}` targets the RUNNING clone in
+    // `run_main_loop`, which is a different tree from `state.scene_tree`. The
+    // change lands on the next frame the game draws and — deliberately — does
+    // NOT dirty the edit scene, matching Godot, where live-editing a running
+    // game does not modify the saved scene.
+    if parsed
+        .get("runtime")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        if !state.is_running {
+            send_error(stream, 400, "not running");
+            return;
+        }
+        // ⚠️ Address the node by PATH, not by id. Play runs on a CLONE of the
+        // scene, and cloning mints fresh `ObjectId`s — an id from the edit tree
+        // matches nothing in the running one. Godot's live-edit protocol is
+        // path-based for exactly this reason (scene/debugger live edit).
+        //
+        // An explicit `path` wins, which is what lets the inspector address a
+        // node the script SPAWNED at runtime — it has no edit-tree twin, so no
+        // id could be translated for it.
+        let target_path = match parsed.get("path").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => {
+                let Some(edit_id) = find_node_by_raw_id(&state.scene_tree, node_raw) else {
+                    send_error(stream, 404, "node not found in the edit scene");
+                    return;
+                };
+                absolute_node_path(&state.scene_tree, edit_id)
+            }
+        };
+        let Some(main_loop) = state.run_main_loop.as_mut() else {
+            send_error(stream, 400, "not running");
+            return;
+        };
+        let tree = main_loop.tree_mut();
+        let Some(node_id) = tree.get_node_by_path(&target_path) else {
+            send_error(
+                stream,
+                404,
+                &format!("node not found in the running scene: {target_path}"),
+            );
+            return;
+        };
+        let Some(node) = tree.get_node_mut(node_id) else {
+            send_error(stream, 404, "node not found in the running scene");
+            return;
+        };
+        node.set_property(&property, new_value);
+        send_json(stream, r#"{"ok":true,"runtime":true}"#);
+        return;
+    }
+
     let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
         Some(id) => id,
         None => {
@@ -11744,6 +11833,35 @@ fn api_runtime_status(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
 ///
 /// Returns 400 when no scene is playing and 404 when the path resolves to no
 /// node in the running tree.
+/// `GET /api/runtime/scene` — the RUNNING clone's tree, for the Scene dock's
+/// Remote tab (pat-0q2kx.72).
+///
+/// `/api/scene` keeps serving the EDIT tree: play runs on a clone stored in
+/// `run_main_loop`, so nodes a script spawns in `_ready` exist only here. Before
+/// this route the dock had no way to see them — it showed the pre-play tree and
+/// the running game was invisible.
+fn api_runtime_scene(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let json = {
+        let state = state.lock().unwrap();
+        if !state.is_running {
+            send_error(stream, 400, "not running");
+            return;
+        }
+        let main_loop = match state.run_main_loop.as_ref() {
+            Some(ml) => ml,
+            None => {
+                send_error(stream, 400, "not running");
+                return;
+            }
+        };
+        let tree = main_loop.tree();
+        let root_id = tree.root_id();
+        let tree_json = node_to_json_tree(tree, root_id);
+        format!(r#"{{"ok":true,"remote":true,"tree":{tree_json}}}"#)
+    };
+    send_json(stream, &json);
+}
+
 fn api_runtime_node(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
     let path = match query_param(query, "path") {
         Some(p) => url_decode(p),
@@ -15167,6 +15285,121 @@ fn api_get_output(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
 // ---------------------------------------------------------------------------
 
 /// `GET /api/project_settings` — returns project settings organized by category (pat-c4zlm).
+// -- Project Settings ▸ Autoload (pat-0q2kx.73) -----------------------------
+//
+// Godot's Autoload tab adds script/scene singletons and persists them to
+// `project.godot`'s `[autoload]` section. Patina's play path already consumed
+// that section (`instantiate_play_autoloads`) and `autoload_manager.rs` already
+// had the list logic — but nothing connected them, so the section could only be
+// edited by hand.
+
+/// Reads `project.godot` and its `[autoload]` section. Returns the manager plus
+/// the file's current text, so a write can splice without losing other sections.
+fn load_autoloads(root: &std::path::Path) -> (crate::autoload_manager::AutoloadManager, String) {
+    let path = root.join("project.godot");
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    (
+        crate::autoload_manager::AutoloadManager::from_project_godot_section(&text),
+        text,
+    )
+}
+
+/// Writes `mgr` back into `project.godot`, preserving every other section.
+fn save_autoloads(
+    root: &std::path::Path,
+    mgr: &crate::autoload_manager::AutoloadManager,
+    original: &str,
+) -> std::io::Result<()> {
+    std::fs::write(
+        root.join("project.godot"),
+        mgr.splice_into_project_godot(original),
+    )
+}
+
+/// Serializes the autoload list the way the settings dialog consumes it.
+fn autoloads_json(mgr: &crate::autoload_manager::AutoloadManager) -> String {
+    let rows: Vec<serde_json::Value> = mgr
+        .names()
+        .iter()
+        .filter_map(|n| mgr.get(n))
+        .map(|a| serde_json::json!({ "name": a.name, "path": a.path, "enabled": a.enabled }))
+        .collect();
+    serde_json::json!({ "ok": true, "autoloads": rows }).to_string()
+}
+
+/// `GET /api/autoloads` — the project's autoloads, in load order.
+fn api_get_autoloads(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let root = fs_project_root(state);
+    let (mgr, _) = load_autoloads(&root);
+    send_json(stream, &autoloads_json(&mgr));
+}
+
+/// `POST /api/autoloads` — `{"action":"add|remove|toggle|move_up|move_down",
+/// "name":"Game","path":"res://game.gd","enabled":true}`.
+///
+/// Every action rewrites `project.godot`, so the next play picks the change up
+/// without an editor restart.
+fn api_post_autoloads(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let action = p.get("action").and_then(|v| v.as_str()).unwrap_or("add");
+    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if name.is_empty() {
+        send_error(stream, 400, "missing name");
+        return;
+    }
+
+    let root = fs_project_root(state);
+    let (mut mgr, original) = load_autoloads(&root);
+
+    let ok = match action {
+        "add" => {
+            let path = p.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if path.is_empty() {
+                send_error(stream, 400, "missing path");
+                return;
+            }
+            mgr.add(name, path)
+        }
+        "remove" => mgr.remove(name),
+        "toggle" => {
+            let enabled = p
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                // Absent means "flip it", which is what a checkbox click sends.
+                .unwrap_or_else(|| !mgr.get(name).map(|a| a.enabled).unwrap_or(false));
+            mgr.set_enabled(name, enabled)
+        }
+        "move_up" => mgr.move_up(name),
+        "move_down" => mgr.move_down(name),
+        other => {
+            send_error(stream, 400, &format!("unknown action '{other}'"));
+            return;
+        }
+    };
+    if !ok {
+        // A duplicate add or an unknown name — a 409 rather than a silent no-op,
+        // so the dialog can say why nothing happened.
+        send_error(
+            stream,
+            409,
+            &format!("'{action}' did not apply to '{name}'"),
+        );
+        return;
+    }
+
+    if let Err(e) = save_autoloads(&root, &mgr, &original) {
+        send_error(stream, 500, &format!("failed to write project.godot: {e}"));
+        return;
+    }
+    send_json(stream, &autoloads_json(&mgr));
+}
+
 fn api_get_project_settings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let json = {
         let s = state.lock().unwrap();
@@ -15656,7 +15889,42 @@ fn api_set_input_map(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
 // ---------------------------------------------------------------------------
 
 /// `POST /api/filesystem/rename` — renames a file or directory.
-fn api_filesystem_rename(body: &str, stream: &mut TcpStream) {
+/// Rewrites every `[ext_resource path="<old>"]` reference to `<new>` across the
+/// project, returning the `res://` paths actually changed (pat-0q2kx.70).
+///
+/// This is the half of Godot's `FileSystemDock::_try_move_item` that keeps
+/// scenes working across a rename: without it the file moves and every scene
+/// pointing at it silently loses its texture/script/mesh.
+///
+/// The match is on the **quoted** path (`"res://a.png"`), which is how the text
+/// format writes it. Matching the bare substring would also rewrite
+/// `res://a.png.import` and any longer path that merely starts with the old one.
+fn remap_ext_resource_paths(root: &std::path::Path, old_res: &str, new_res: &str) -> Vec<String> {
+    let mut updated = Vec::new();
+    if old_res == new_res {
+        return updated;
+    }
+    let needle = format!("\"{old_res}\"");
+    let replacement = format!("\"{new_res}\"");
+    for owner in file_owners(root, old_res) {
+        let Ok(abs) = resolve_res_path(root, &owner) else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(&abs) else {
+            continue;
+        };
+        if !content.contains(&needle) {
+            continue;
+        }
+        let rewritten = content.replace(&needle, &replacement);
+        if std::fs::write(&abs, rewritten).is_ok() {
+            updated.push(owner);
+        }
+    }
+    updated
+}
+
+fn api_filesystem_rename(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = match parse_json_body(body) {
         Some(v) => v,
         None => {
@@ -15698,9 +15966,47 @@ fn api_filesystem_rename(body: &str, stream: &mut TcpStream) {
     }
     let cwd = std::env::current_dir().unwrap_or_default();
     let new_path = resolved.parent().unwrap_or(&cwd).join(&new_name);
-    match std::fs::rename(&resolved, &new_path) {
-        Ok(_) => send_json(stream, r#"{"ok":true}"#),
-        Err(e) => send_error(stream, 500, &format!("rename failed: {e}")),
+    if let Err(e) = std::fs::rename(&resolved, &new_path) {
+        send_error(stream, 500, &format!("rename failed: {e}"));
+        return;
+    }
+
+    // Godot rewrites every dependent scene/resource as part of the move, so a
+    // rename never breaks the scenes that reference the file (pat-0q2kx.70).
+    // The reverse-dependency scan already existed for the file-info endpoint;
+    // it just had no caller here.
+    //
+    // Both `res://` forms come from the request rather than from the filesystem:
+    // the old file no longer exists to canonicalize, and the caller's path is
+    // exactly the string the scenes were written with.
+    let root = fs_project_root(state);
+    let old_res = normalize_res_path(&old_path);
+    let new_res = {
+        let rel = old_res.trim_start_matches("res://");
+        match rel.rsplit_once('/') {
+            Some((dir, _)) => format!("res://{dir}/{new_name}"),
+            None => format!("res://{new_name}"),
+        }
+    };
+    let updated = remap_ext_resource_paths(&root, &old_res, &new_res);
+
+    let list = updated
+        .iter()
+        .map(|s| format!(r#""{}""#, s.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(",");
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"updated_files":[{list}]}}"#),
+    );
+}
+
+/// Ensures a caller-supplied path carries the `res://` prefix.
+fn normalize_res_path(path: &str) -> String {
+    if path.starts_with("res://") {
+        path.to_string()
+    } else {
+        format!("res://{}", path.trim_start_matches('/'))
     }
 }
 

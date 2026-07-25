@@ -6461,6 +6461,176 @@ impl Interpreter {
                             )))
                         }
                     }
+                    // -- Object introspection (pat-0q2kx.64) --------------
+                    //
+                    // Godot's save systems, serializers and plugin code walk
+                    // `get_property_list()` expecting Array[Dictionary] with
+                    // name/class_name/type/hint/hint_string/usage
+                    // (`core/object/object.cpp`). Patina exposed none of it, so a
+                    // script could not enumerate — let alone revert — a property.
+                    "get_property_list" => {
+                        let class = self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.get_class(id))
+                            .unwrap_or_default();
+                        let props = gdobject::class_db::get_property_list(&class)
+                            .into_iter()
+                            .map(|p| {
+                                let mut d = gdvariant::Dictionary::new();
+                                d.insert("name", Variant::String(p.name));
+                                // Godot fills `class_name` only for object-typed
+                                // properties; the hint string carries the class
+                                // there, so mirroring it keeps the dict honest
+                                // rather than inventing a name for every entry.
+                                d.insert("class_name", Variant::String(p.hint_string.clone()));
+                                d.insert(
+                                    "type",
+                                    Variant::Int(crate::global_constants::variant_type_code(
+                                        &p.default_value,
+                                    )),
+                                );
+                                d.insert("hint", Variant::Int(p.hint as i64));
+                                d.insert("hint_string", Variant::String(p.hint_string));
+                                d.insert("usage", Variant::Int(p.usage as i64));
+                                Variant::Dictionary(d)
+                            })
+                            .collect();
+                        Ok(Variant::Array(props))
+                    }
+                    "get_method_list" => {
+                        let class = self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.get_class(id))
+                            .unwrap_or_default();
+                        let methods = gdobject::class_db::get_method_list(&class)
+                            .into_iter()
+                            .map(|m| {
+                                let mut d = gdvariant::Dictionary::new();
+                                d.insert("name", Variant::String(m.name));
+                                d.insert("args", Variant::Int(m.argument_count as i64));
+                                Variant::Dictionary(d)
+                            })
+                            .collect();
+                        Ok(Variant::Array(methods))
+                    }
+                    "get_signal_list" => {
+                        let class = self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.get_class(id))
+                            .unwrap_or_default();
+                        let signals = gdobject::class_db::get_signal_list(&class)
+                            .into_iter()
+                            .map(|sig| {
+                                let mut d = gdvariant::Dictionary::new();
+                                d.insert("name", Variant::String(sig.name));
+                                let args = sig
+                                    .arguments
+                                    .into_iter()
+                                    .map(Variant::String)
+                                    .collect::<Vec<_>>();
+                                d.insert("args", Variant::Array(args));
+                                Variant::Dictionary(d)
+                            })
+                            .collect();
+                        Ok(Variant::Array(signals))
+                    }
+                    "property_can_revert" => {
+                        let class = self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.get_class(id))
+                            .unwrap_or_default();
+                        let name = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.as_str().to_string(),
+                            _ => String::new(),
+                        };
+                        Ok(Variant::Bool(gdobject::class_db::property_can_revert(
+                            &class, &name,
+                        )))
+                    }
+                    "get_signal_connection_list" => {
+                        let signal_name = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.as_str().to_string(),
+                            _ => String::new(),
+                        };
+                        let conns = self
+                            .scene_access
+                            .as_ref()
+                            .map(|a| a.signal_connection_list(id, &signal_name))
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|(target, method, one_shot)| {
+                                let mut d = Dictionary::new();
+                                d.insert("signal", Variant::String(signal_name.clone()));
+                                d.insert("callable", Variant::String(method));
+                                d.insert("target", Variant::Int(target as i64));
+                                // Godot reports the connect flags; ONE_SHOT is 1.
+                                d.insert("flags", Variant::Int(i64::from(one_shot)));
+                                Variant::Dictionary(d)
+                            })
+                            .collect();
+                        Ok(Variant::Array(conns))
+                    }
+                    "get_incoming_connections" => {
+                        let conns = self
+                            .scene_access
+                            .as_ref()
+                            .map(|a| a.incoming_connections(id))
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|(source, signal_name, method)| {
+                                let mut d = Dictionary::new();
+                                d.insert("source", Variant::Int(source as i64));
+                                d.insert("signal", Variant::String(signal_name));
+                                d.insert("callable", Variant::String(method));
+                                Variant::Dictionary(d)
+                            })
+                            .collect();
+                        Ok(Variant::Array(conns))
+                    }
+                    "has_connections" => {
+                        // Godot's `has_connections(signal)` asks about ONE signal;
+                        // with no argument this answers "any signal at all", which
+                        // is what the tree-wide check is useful for.
+                        let per_signal = match args.first() {
+                            Some(Variant::String(s)) => Some(s.clone()),
+                            Some(Variant::StringName(s)) => Some(s.as_str().to_string()),
+                            _ => None,
+                        };
+                        let connected = match (self.scene_access.as_ref(), per_signal) {
+                            (Some(access), Some(name)) => {
+                                !access.signal_connection_list(id, &name).is_empty()
+                            }
+                            (Some(access), None) => access.has_any_connections(id),
+                            (None, _) => false,
+                        };
+                        Ok(Variant::Bool(connected))
+                    }
+                    "notify_property_list_changed" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            access.notify_property_list_changed(id);
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "property_get_revert" => {
+                        let class = self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.get_class(id))
+                            .unwrap_or_default();
+                        let name = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.as_str().to_string(),
+                            _ => String::new(),
+                        };
+                        Ok(gdobject::class_db::property_get_revert(&class, &name)
+                            .unwrap_or(Variant::Nil))
+                    }
                     "get_instance_id" => {
                         // Godot `Object.get_instance_id()`: the object's unique
                         // id, usable with `instance_from_id` / `weakref`.
@@ -7098,6 +7268,95 @@ impl Interpreter {
                     inner: Box::new((**callable_ref).clone()),
                     bound_args: args.to_vec(),
                 }))),
+                // Godot's `bindv(array)` is `bind` with the arguments supplied as
+                // one array rather than varargs (pat-0q2kx.67).
+                "bindv" => {
+                    let bound_args = match args.first() {
+                        Some(Variant::Array(a)) => a.clone(),
+                        _ => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "bindv() takes an Array".into(),
+                            )))
+                        }
+                    };
+                    Ok(Variant::Callable(Box::new(CallableRef::Bound {
+                        inner: Box::new((**callable_ref).clone()),
+                        bound_args,
+                    })))
+                }
+                // The object a standard callable targets. `target_id == 0` is the
+                // "calling object" sentinel `Callable(self, "m")` produces, so it
+                // resolves against the current node rather than reporting 0.
+                "get_object" | "get_object_id" => {
+                    let target = match callable_ref.inner_callable() {
+                        CallableRef::Method { target_id, .. } => {
+                            if *target_id == 0 {
+                                self.current_node_id.unwrap_or(0)
+                            } else {
+                                *target_id
+                            }
+                        }
+                        _ => 0,
+                    };
+                    if method == "get_object_id" {
+                        Ok(Variant::Int(target as i64))
+                    } else {
+                        Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(target)))
+                    }
+                }
+                // Bound arguments accumulate across nested `bind` calls, so the
+                // whole chain is walked rather than just the outermost layer.
+                "get_bound_arguments" => Ok(Variant::Array(collect_bound_args(callable_ref))),
+                "get_bound_arguments_count" => {
+                    Ok(Variant::Int(collect_bound_args(callable_ref).len() as i64))
+                }
+                "get_unbound_arguments_count" => {
+                    Ok(Variant::Int(count_unbound_args(callable_ref) as i64))
+                }
+                "is_null" => {
+                    let null = match callable_ref.inner_callable() {
+                        CallableRef::Method { target_id, method } => {
+                            *target_id == 0 && method.is_empty()
+                        }
+                        _ => false,
+                    };
+                    Ok(Variant::Bool(null))
+                }
+                // Godot: a lambda is "custom", an object+method pair is
+                // "standard". Bind/unbind wrappers report their inner kind.
+                "is_custom" => Ok(Variant::Bool(matches!(
+                    callable_ref.inner_callable(),
+                    CallableRef::Lambda { .. }
+                ))),
+                "is_standard" => Ok(Variant::Bool(matches!(
+                    callable_ref.inner_callable(),
+                    CallableRef::Method { .. }
+                ))),
+                "get_argument_count" => {
+                    let count = match callable_ref.inner_callable() {
+                        CallableRef::Lambda { params, .. } => params.len() as i64,
+                        // A method's arity lives in the ClassDB, not the
+                        // callable; reporting 0 rather than guessing.
+                        CallableRef::Method { .. } => 0,
+                        _ => 0,
+                    };
+                    Ok(Variant::Int(count))
+                }
+                "hash" => {
+                    let target = match callable_ref.inner_callable() {
+                        CallableRef::Method { target_id, method } => {
+                            format!("{target_id}::{method}")
+                        }
+                        CallableRef::Lambda { params, .. } => format!("lambda/{}", params.len()),
+                        _ => String::from("callable"),
+                    };
+                    Ok(Variant::Int(str_hash(&target)))
+                }
+                // Present so a script calling them gets Godot's shape of error
+                // rather than "has no method"; the multiplayer lane wires them.
+                "rpc" | "rpc_id" => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "Callable.{method}() requires multiplayer, which is not configured"
+                )))),
                 // Callable.unbind(n): returns a new Callable that drops the last
                 // `n` call-site arguments before delegating to this callable.
                 "unbind" => {
@@ -7436,6 +7695,172 @@ impl Interpreter {
                     obj.variant_type()
                 )))),
             },
+            // -- the shared ordering/searching/editing surface (pat-0q2kx.68) --
+            //
+            // Every packed array carries these in Godot. The element-type rules
+            // live in `gdvariant`, so each arm is just index/argument handling.
+            "sort" => {
+                let mut updated = obj.clone();
+                updated.packed_sort();
+                self.write_place(object_expr, updated)?;
+                Ok(Variant::Nil)
+            }
+            "bsearch" => {
+                Self::require_args_range("bsearch", args, 1, 2)?;
+                // Godot's second argument defaults to `true` (insert before).
+                let before = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
+                let idx = obj.packed_bsearch(&args[0], before).unwrap_or(0);
+                Ok(Variant::Int(idx as i64))
+            }
+            "find" => {
+                Self::require_args_range("find", args, 1, 2)?;
+                let from = args.get(1).map(|v| to_int(v)).transpose()?.unwrap_or(0);
+                let from = from.max(0) as usize;
+                Ok(Variant::Int(obj.packed_find(&args[0], from).unwrap_or(-1)))
+            }
+            "rfind" => {
+                Self::require_args_range("rfind", args, 1, 2)?;
+                let to = match args.get(1) {
+                    Some(v) => {
+                        let i = to_int(v)?;
+                        if i < 0 {
+                            None
+                        } else {
+                            Some(i as usize)
+                        }
+                    }
+                    None => None,
+                };
+                Ok(Variant::Int(obj.packed_rfind(&args[0], to).unwrap_or(-1)))
+            }
+            "count" => {
+                Self::require_args("count", args, 1)?;
+                Ok(Variant::Int(obj.packed_count(&args[0]).unwrap_or(0) as i64))
+            }
+            "reverse" => {
+                let mut updated = obj.clone();
+                updated.packed_reverse();
+                self.write_place(object_expr, updated)?;
+                Ok(Variant::Nil)
+            }
+            "fill" => {
+                Self::require_args("fill", args, 1)?;
+                let mut updated = obj.clone();
+                if !updated.packed_fill(&args[0]) {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "cannot fill {} with {}",
+                        obj.variant_type(),
+                        args[0].variant_type()
+                    ))));
+                }
+                self.write_place(object_expr, updated)?;
+                Ok(Variant::Nil)
+            }
+            "insert" => {
+                Self::require_args("insert", args, 2)?;
+                let at = to_int(&args[0])?.max(0) as usize;
+                let mut updated = obj.clone();
+                if !updated.packed_insert(at, &args[1]) {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "cannot insert {} into {}",
+                        args[1].variant_type(),
+                        obj.variant_type()
+                    ))));
+                }
+                self.write_place(object_expr, updated)?;
+                Ok(Variant::Nil)
+            }
+            "remove_at" => {
+                Self::require_args("remove_at", args, 1)?;
+                let at = to_int(&args[0])?;
+                let mut updated = obj.clone();
+                if at >= 0 {
+                    updated.packed_remove_at(at as usize);
+                }
+                self.write_place(object_expr, updated)?;
+                Ok(Variant::Nil)
+            }
+            "append_array" => {
+                Self::require_args("append_array", args, 1)?;
+                let mut updated = obj.clone();
+                if !updated.packed_append_array(&args[0]) {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "cannot append {} to {}",
+                        args[0].variant_type(),
+                        obj.variant_type()
+                    ))));
+                }
+                self.write_place(object_expr, updated)?;
+                Ok(Variant::Nil)
+            }
+            // Typed reinterpretations of the byte image.
+            "to_int32_array" | "to_int64_array" | "to_float32_array" | "to_float64_array" => {
+                let kind = method.trim_start_matches("to_").trim_end_matches("_array");
+                obj.packed_to_typed_array(kind).ok_or_else(|| {
+                    RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "{} has no method '{method}'",
+                        obj.variant_type()
+                    )))
+                })
+            }
+            // -- PackedByteArray codecs (pat-0q2kx.68) ----------------------
+            //
+            // `decode_double(0)` / `encode_double(0, PI)` and friends: the
+            // save-game and networking workhorses. Byte-array only, so a
+            // non-byte receiver falls through to the error below.
+            m if m.starts_with("decode_") && matches!(obj, Variant::PackedByteArray(_)) => {
+                Self::require_args(m, args, 1)?;
+                let offset = to_int(&args[0])?.max(0) as usize;
+                let kind = m.trim_start_matches("decode_");
+                if kind == "var" {
+                    let Variant::PackedByteArray(bytes) = obj else {
+                        unreachable!("guarded by the match arm")
+                    };
+                    // Godot returns null for a buffer that does not hold a
+                    // variant, rather than raising.
+                    return Ok(bytes
+                        .get(offset..)
+                        .and_then(|b| gdvariant::binary::decode_variant(b).ok())
+                        .map(|(v, _)| v)
+                        .unwrap_or(Variant::Nil));
+                }
+                obj.packed_byte_decode(offset, kind).ok_or_else(|| {
+                    RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "PackedByteArray has no method '{m}' (or the read ran past the end)"
+                    )))
+                })
+            }
+            m if m.starts_with("encode_") && matches!(obj, Variant::PackedByteArray(_)) => {
+                Self::require_args(m, args, 2)?;
+                let offset = to_int(&args[0])?.max(0) as usize;
+                let kind = m.trim_start_matches("encode_");
+                let mut updated = obj.clone();
+                let ok = if kind == "var" {
+                    match gdvariant::binary::encode_variant(&args[1]) {
+                        Ok(encoded) => {
+                            let Variant::PackedByteArray(bytes) = &mut updated else {
+                                unreachable!("guarded by the match arm")
+                            };
+                            let end = offset + encoded.len();
+                            if bytes.len() < end {
+                                bytes.resize(end, 0);
+                            }
+                            bytes[offset..end].copy_from_slice(&encoded);
+                            true
+                        }
+                        Err(_) => false,
+                    }
+                } else {
+                    updated.packed_byte_encode(offset, kind, &args[1])
+                };
+                if !ok {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "PackedByteArray has no method '{m}'"
+                    ))));
+                }
+                self.write_place(object_expr, updated)?;
+                Ok(Variant::Nil)
+            }
             other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "{} has no method '{}'",
                 obj.variant_type(),
@@ -8465,6 +8890,32 @@ fn str_similarity(a: &str, b: &str) -> f64 {
 }
 
 /// djb2 string hash matching Godot's `String.hash`.
+/// Every argument bound onto a callable, outermost `bind` last — Godot appends
+/// each `bind` after the previous ones (pat-0q2kx.67).
+fn collect_bound_args(callable: &CallableRef) -> Vec<Variant> {
+    match callable {
+        CallableRef::Bound { inner, bound_args } => {
+            let mut acc = collect_bound_args(inner);
+            acc.extend(bound_args.iter().cloned());
+            acc
+        }
+        CallableRef::Unbound { inner, .. } => collect_bound_args(inner),
+        _ => Vec::new(),
+    }
+}
+
+/// Total trailing arguments dropped by nested `unbind` layers.
+fn count_unbound_args(callable: &CallableRef) -> usize {
+    match callable {
+        CallableRef::Unbound {
+            inner,
+            unbind_count,
+        } => unbind_count + count_unbound_args(inner),
+        CallableRef::Bound { inner, .. } => count_unbound_args(inner),
+        _ => 0,
+    }
+}
+
 fn str_hash(s: &str) -> i64 {
     let mut h: u32 = 5381;
     for c in s.chars() {
@@ -9223,6 +9674,11 @@ fn gd_escape_string(s: &str) -> String {
 /// Godot-text serialization of a [`Variant`] (`var_to_str`). Round-trips with
 /// [`gd_string_to_variant`] for the supported set; any other variant falls back
 /// to its `Display` form.
+/// Comma-joins `Display`-able packed-array elements for constructor text.
+fn join_gd<T: std::fmt::Display>(items: impl Iterator<Item = T>) -> String {
+    items.map(|i| i.to_string()).collect::<Vec<_>>().join(", ")
+}
+
 fn variant_to_gd_string(v: &Variant) -> String {
     match v {
         Variant::Nil => "null".to_string(),
@@ -9265,6 +9721,95 @@ fn variant_to_gd_string(v: &Variant) -> String {
                 format!("{{ {} }}", items.join(", "))
             }
         }
+        // Constructor text for the remaining types (pat-0q2kx.69). `var_to_str`
+        // is NOT `print`: it must emit something `str_to_var` can read back, so
+        // these carry their type name and arguments rather than Godot's display
+        // shapes (`(1, 2)`, `[X: …]`).
+        Variant::Vector2i(v) => format!("Vector2i({}, {})", v.x, v.y),
+        Variant::Vector3i(v) => format!("Vector3i({}, {}, {})", v.x, v.y, v.z),
+        Variant::Rect2(r) => format!(
+            "Rect2({}, {}, {}, {})",
+            format_gd_float(r.position.x as f64),
+            format_gd_float(r.position.y as f64),
+            format_gd_float(r.size.x as f64),
+            format_gd_float(r.size.y as f64)
+        ),
+        Variant::Transform2D(t) => format!(
+            "Transform2D({}, {}, {}, {}, {}, {})",
+            format_gd_float(t.x.x as f64),
+            format_gd_float(t.x.y as f64),
+            format_gd_float(t.y.x as f64),
+            format_gd_float(t.y.y as f64),
+            format_gd_float(t.origin.x as f64),
+            format_gd_float(t.origin.y as f64)
+        ),
+        Variant::Basis(b) => format!(
+            "Basis({}, {}, {}, {}, {}, {}, {}, {}, {})",
+            format_gd_float(b.x.x as f64),
+            format_gd_float(b.x.y as f64),
+            format_gd_float(b.x.z as f64),
+            format_gd_float(b.y.x as f64),
+            format_gd_float(b.y.y as f64),
+            format_gd_float(b.y.z as f64),
+            format_gd_float(b.z.x as f64),
+            format_gd_float(b.z.y as f64),
+            format_gd_float(b.z.z as f64)
+        ),
+        Variant::Quaternion(q) => format!(
+            "Quaternion({}, {}, {}, {})",
+            format_gd_float(q.x as f64),
+            format_gd_float(q.y as f64),
+            format_gd_float(q.z as f64),
+            format_gd_float(q.w as f64)
+        ),
+        Variant::Aabb(a) => format!(
+            "AABB({}, {}, {}, {}, {}, {})",
+            format_gd_float(a.position.x as f64),
+            format_gd_float(a.position.y as f64),
+            format_gd_float(a.position.z as f64),
+            format_gd_float(a.size.x as f64),
+            format_gd_float(a.size.y as f64),
+            format_gd_float(a.size.z as f64)
+        ),
+        Variant::Plane(pl) => format!(
+            "Plane({}, {}, {}, {})",
+            format_gd_float(pl.normal.x as f64),
+            format_gd_float(pl.normal.y as f64),
+            format_gd_float(pl.normal.z as f64),
+            format_gd_float(pl.d as f64)
+        ),
+        Variant::StringName(sn) => format!("&\"{}\"", gd_escape_string(sn.as_str())),
+        Variant::NodePath(np) => format!("NodePath(\"{np}\")"),
+        Variant::PackedInt32Array(items) => {
+            format!("PackedInt32Array({})", join_gd(items.iter()))
+        }
+        Variant::PackedInt64Array(items) => {
+            format!("PackedInt64Array({})", join_gd(items.iter()))
+        }
+        Variant::PackedFloat32Array(items) => format!(
+            "PackedFloat32Array({})",
+            items
+                .iter()
+                .map(|f| format_gd_float(*f as f64))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Variant::PackedFloat64Array(items) => format!(
+            "PackedFloat64Array({})",
+            items
+                .iter()
+                .map(|f| format_gd_float(*f))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Variant::PackedStringArray(items) => format!(
+            "PackedStringArray({})",
+            items
+                .iter()
+                .map(|s| format!("\"{}\"", gd_escape_string(s)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         other => format!("{other}"),
     }
 }
@@ -9485,7 +10030,16 @@ fn gd_string_to_variant(s: &str) -> Variant {
         chars: s.chars().collect(),
         pos: 0,
     };
-    p.parse_value().unwrap_or(Variant::Nil)
+    // Fall back to `gdresource`'s `.tscn`/`.tres` literal parser, which already
+    // reads every constructor form `var_to_str` emits — Quaternion, Plane, AABB,
+    // Basis, Transform2D/3D, StringName, typed and packed arrays (pat-0q2kx.69).
+    // Reusing it keeps the two directions in step instead of maintaining a
+    // second grammar that drifts. `gdscript-interop` already depends on
+    // `gdresource`, so no crate move was needed.
+    match p.parse_value() {
+        Some(v) => v,
+        None => gdresource::loader::parse_variant_value(s.trim()).unwrap_or(Variant::Nil),
+    }
 }
 
 /// Deterministic (within a run) hash of a [`Variant`] for the `hash` builtin.

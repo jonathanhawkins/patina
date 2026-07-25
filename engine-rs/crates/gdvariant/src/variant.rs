@@ -638,6 +638,359 @@ impl Variant {
         };
         Some(Variant::PackedByteArray(bytes))
     }
+
+    // -- the shared method surface (pat-0q2kx.68) ---------------------------
+    //
+    // Godot gives every packed array the same 23-method surface. These are the
+    // ordering/searching/editing half of it; the interpreter dispatches to them
+    // by name. Each returns `false`/`None` for a non-packed receiver so the
+    // caller can keep its own "no such method" error.
+
+    /// Sorts in place (Godot `Packed*Array.sort`).
+    ///
+    /// Vectors and colors sort lexicographically by component, matching Godot's
+    /// `operator<` on those types. Floats order with `partial_cmp`, treating an
+    /// incomparable pair (NaN) as equal rather than panicking — `sort_by` would
+    /// otherwise be free to misbehave on an inconsistent comparator.
+    pub fn packed_sort(&mut self) -> bool {
+        fn sort_floats<T: PartialOrd + Copy>(v: &mut [T]) {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        match self {
+            Self::PackedByteArray(v) => v.sort_unstable(),
+            Self::PackedInt32Array(v) => v.sort_unstable(),
+            Self::PackedInt64Array(v) => v.sort_unstable(),
+            Self::PackedFloat32Array(v) => sort_floats(v),
+            Self::PackedFloat64Array(v) => sort_floats(v),
+            Self::PackedStringArray(v) => v.sort(),
+            Self::PackedVector2Array(v) => v.sort_by(|a, b| cmp_f32_pair(a.x, a.y, b.x, b.y)),
+            Self::PackedVector3Array(v) => {
+                v.sort_by(|a, b| cmp_f32_pair(a.x, a.y, b.x, b.y).then(f32_cmp(a.z, b.z)))
+            }
+            Self::PackedColorArray(v) => v.sort_by(|a, b| {
+                cmp_f32_pair(a.r, a.g, b.r, b.g)
+                    .then(f32_cmp(a.b, b.b))
+                    .then(f32_cmp(a.a, b.a))
+            }),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Godot `Packed*Array.bsearch` — the index where `value` belongs in a
+    /// sorted array. With `before` (Godot's default) the result is the first
+    /// such index, otherwise the last. Returns `len` when `value` sorts past the
+    /// end, exactly as Godot does.
+    ///
+    /// Only meaningful on a sorted array; Godot says the same.
+    pub fn packed_bsearch(&self, value: &Variant, before: bool) -> Option<usize> {
+        let len = self.packed_len()?;
+        // Partition on the comparison the sort above uses, so bsearch and sort
+        // agree by construction rather than by two hand-written orderings.
+        let mut lo = 0usize;
+        let mut hi = len;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let elem = self.packed_get(mid)?;
+            let ord = compare_packed_elements(&elem, value);
+            let go_right = if before {
+                ord == std::cmp::Ordering::Less
+            } else {
+                ord != std::cmp::Ordering::Greater
+            };
+            if go_right {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Some(lo)
+    }
+
+    /// Godot `Packed*Array.find` — first index at or after `from` holding
+    /// `value`, or `-1`. `None` only when this is not a packed array.
+    pub fn packed_find(&self, value: &Variant, from: usize) -> Option<i64> {
+        let len = self.packed_len()?;
+        for i in from..len {
+            if packed_elements_equal(&self.packed_get(i)?, value) {
+                return Some(i as i64);
+            }
+        }
+        Some(-1)
+    }
+
+    /// Godot `Packed*Array.rfind` — last index at or before `to` holding
+    /// `value`, or `-1`.
+    pub fn packed_rfind(&self, value: &Variant, to: Option<usize>) -> Option<i64> {
+        let len = self.packed_len()?;
+        let start = to
+            .unwrap_or(len.saturating_sub(1))
+            .min(len.saturating_sub(1));
+        if len == 0 {
+            return Some(-1);
+        }
+        for i in (0..=start).rev() {
+            if packed_elements_equal(&self.packed_get(i)?, value) {
+                return Some(i as i64);
+            }
+        }
+        Some(-1)
+    }
+
+    /// Godot `Packed*Array.count` — how many elements equal `value`.
+    pub fn packed_count(&self, value: &Variant) -> Option<usize> {
+        let len = self.packed_len()?;
+        let mut n = 0;
+        for i in 0..len {
+            if packed_elements_equal(&self.packed_get(i)?, value) {
+                n += 1;
+            }
+        }
+        Some(n)
+    }
+
+    /// Godot `Packed*Array.has` — whether any element equals `value`.
+    pub fn packed_has(&self, value: &Variant) -> Option<bool> {
+        Some(self.packed_find(value, 0)? >= 0)
+    }
+
+    /// Godot `Packed*Array.reverse` — reverses in place.
+    pub fn packed_reverse(&mut self) -> bool {
+        match self {
+            Self::PackedByteArray(v) => v.reverse(),
+            Self::PackedInt32Array(v) => v.reverse(),
+            Self::PackedInt64Array(v) => v.reverse(),
+            Self::PackedFloat32Array(v) => v.reverse(),
+            Self::PackedFloat64Array(v) => v.reverse(),
+            Self::PackedStringArray(v) => v.reverse(),
+            Self::PackedVector2Array(v) => v.reverse(),
+            Self::PackedVector3Array(v) => v.reverse(),
+            Self::PackedColorArray(v) => v.reverse(),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Godot `Packed*Array.fill` — overwrites every element with `value`.
+    pub fn packed_fill(&mut self, value: &Variant) -> bool {
+        let Some(len) = self.packed_len() else {
+            return false;
+        };
+        for i in 0..len {
+            if !self.packed_set(i, value) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Godot `Packed*Array.insert` — inserts before `index` (clamped to the
+    /// end, as Godot does for an index past the tail).
+    pub fn packed_insert(&mut self, index: usize, value: &Variant) -> bool {
+        let Some(len) = self.packed_len() else {
+            return false;
+        };
+        let at = index.min(len);
+        // Push then rotate: `packed_push` already owns the per-type coercion
+        // rules, so there is one place that decides what a value means for each
+        // element type.
+        if !self.packed_push(value) {
+            return false;
+        }
+        match self {
+            Self::PackedByteArray(v) => v[at..].rotate_right(1),
+            Self::PackedInt32Array(v) => v[at..].rotate_right(1),
+            Self::PackedInt64Array(v) => v[at..].rotate_right(1),
+            Self::PackedFloat32Array(v) => v[at..].rotate_right(1),
+            Self::PackedFloat64Array(v) => v[at..].rotate_right(1),
+            Self::PackedStringArray(v) => v[at..].rotate_right(1),
+            Self::PackedVector2Array(v) => v[at..].rotate_right(1),
+            Self::PackedVector3Array(v) => v[at..].rotate_right(1),
+            Self::PackedColorArray(v) => v[at..].rotate_right(1),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Godot `Packed*Array.remove_at` — removes the element at `index`.
+    /// `false` when the index is out of range.
+    pub fn packed_remove_at(&mut self, index: usize) -> bool {
+        let Some(len) = self.packed_len() else {
+            return false;
+        };
+        if index >= len {
+            return false;
+        }
+        match self {
+            Self::PackedByteArray(v) => drop(v.remove(index)),
+            Self::PackedInt32Array(v) => drop(v.remove(index)),
+            Self::PackedInt64Array(v) => drop(v.remove(index)),
+            Self::PackedFloat32Array(v) => drop(v.remove(index)),
+            Self::PackedFloat64Array(v) => drop(v.remove(index)),
+            Self::PackedStringArray(v) => drop(v.remove(index)),
+            Self::PackedVector2Array(v) => drop(v.remove(index)),
+            Self::PackedVector3Array(v) => drop(v.remove(index)),
+            Self::PackedColorArray(v) => drop(v.remove(index)),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Godot `Packed*Array.append_array` — appends every element of `other`,
+    /// coerced to this array's element type.
+    pub fn packed_append_array(&mut self, other: &Variant) -> bool {
+        let Some(items) = other.packed_to_array() else {
+            return false;
+        };
+        for item in items {
+            if !self.packed_push(&item) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // -- PackedByteArray codecs (pat-0q2kx.68) ------------------------------
+
+    /// Godot `PackedByteArray.decode_*` — reads one little-endian value at
+    /// `offset`. `kind` is the method's suffix (`"u8"`, `"s32"`, `"double"`, …).
+    ///
+    /// `None` when this is not a byte array, the kind is unknown, or the read
+    /// would run past the end — Godot returns 0 for a short buffer, but the
+    /// caller is better placed to decide that than this function is.
+    pub fn packed_byte_decode(&self, offset: usize, kind: &str) -> Option<Variant> {
+        let Self::PackedByteArray(bytes) = self else {
+            return None;
+        };
+        let take = |n: usize| -> Option<&[u8]> { bytes.get(offset..offset + n) };
+        Some(match kind {
+            "u8" => Variant::Int(i64::from(*bytes.get(offset)?)),
+            "s8" => Variant::Int(i64::from(*bytes.get(offset)? as i8)),
+            "u16" => Variant::Int(i64::from(u16::from_le_bytes(take(2)?.try_into().ok()?))),
+            "s16" => Variant::Int(i64::from(i16::from_le_bytes(take(2)?.try_into().ok()?))),
+            "u32" => Variant::Int(i64::from(u32::from_le_bytes(take(4)?.try_into().ok()?))),
+            "s32" => Variant::Int(i64::from(i32::from_le_bytes(take(4)?.try_into().ok()?))),
+            // Godot's decode_u64 hands back a 64-bit pattern in an int; the
+            // reinterpretation is Godot's, not a loss introduced here.
+            "u64" => Variant::Int(u64::from_le_bytes(take(8)?.try_into().ok()?) as i64),
+            "s64" => Variant::Int(i64::from_le_bytes(take(8)?.try_into().ok()?)),
+            "float" => Variant::Float(f64::from(f32::from_le_bytes(take(4)?.try_into().ok()?))),
+            "double" => Variant::Float(f64::from_le_bytes(take(8)?.try_into().ok()?)),
+            _ => return None,
+        })
+    }
+
+    /// Godot `PackedByteArray.encode_*` — writes one little-endian value at
+    /// `offset`, growing the array when the write runs past the end (Godot
+    /// requires the caller to `resize` first; growing is the forgiving choice
+    /// and never truncates existing data).
+    pub fn packed_byte_encode(&mut self, offset: usize, kind: &str, value: &Variant) -> bool {
+        let encoded: Vec<u8> = match kind {
+            "u8" => vec![value.to_int() as u8],
+            "s8" => vec![value.to_int() as i8 as u8],
+            "u16" => (value.to_int() as u16).to_le_bytes().to_vec(),
+            "s16" => (value.to_int() as i16).to_le_bytes().to_vec(),
+            "u32" => (value.to_int() as u32).to_le_bytes().to_vec(),
+            "s32" => (value.to_int() as i32).to_le_bytes().to_vec(),
+            "u64" => (value.to_int() as u64).to_le_bytes().to_vec(),
+            "s64" => value.to_int().to_le_bytes().to_vec(),
+            "float" => (value.to_float() as f32).to_le_bytes().to_vec(),
+            "double" => value.to_float().to_le_bytes().to_vec(),
+            _ => return false,
+        };
+        let Self::PackedByteArray(bytes) = self else {
+            return false;
+        };
+        let end = offset + encoded.len();
+        if bytes.len() < end {
+            bytes.resize(end, 0);
+        }
+        bytes[offset..end].copy_from_slice(&encoded);
+        true
+    }
+
+    /// Godot `Packed*Array.to_int32_array()` and friends — reinterprets this
+    /// array's byte image as `kind`'s element type.
+    ///
+    /// `kind` is the converter's suffix: `"int32"`, `"int64"`, `"float32"`,
+    /// `"float64"`. Trailing bytes that do not fill a whole element are
+    /// dropped, as Godot does.
+    pub fn packed_to_typed_array(&self, kind: &str) -> Option<Variant> {
+        let Variant::PackedByteArray(bytes) = self.packed_to_byte_array()? else {
+            return None;
+        };
+        Some(match kind {
+            "int32" => Variant::PackedInt32Array(
+                bytes
+                    .chunks_exact(4)
+                    .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+                    .collect(),
+            ),
+            "int64" => Variant::PackedInt64Array(
+                bytes
+                    .chunks_exact(8)
+                    .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+                    .collect(),
+            ),
+            "float32" => Variant::PackedFloat32Array(
+                bytes
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                    .collect(),
+            ),
+            "float64" => Variant::PackedFloat64Array(
+                bytes
+                    .chunks_exact(8)
+                    .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                    .collect(),
+            ),
+            _ => return None,
+        })
+    }
+}
+
+/// Total order over two `f32`s, with NaN treated as equal to everything so a
+/// comparator built from this stays consistent.
+fn f32_cmp(a: f32, b: f32) -> std::cmp::Ordering {
+    a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Lexicographic order over a leading pair of components.
+fn cmp_f32_pair(ax: f32, ay: f32, bx: f32, by: f32) -> std::cmp::Ordering {
+    f32_cmp(ax, bx).then(f32_cmp(ay, by))
+}
+
+/// Orders two packed elements the way [`Variant::packed_sort`] does, so
+/// `bsearch` agrees with `sort`.
+fn compare_packed_elements(a: &Variant, b: &Variant) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Variant::String(x), Variant::String(y)) => x.cmp(y),
+        (Variant::Vector2(x), Variant::Vector2(y)) => cmp_f32_pair(x.x, x.y, y.x, y.y),
+        (Variant::Vector3(x), Variant::Vector3(y)) => {
+            cmp_f32_pair(x.x, x.y, y.x, y.y).then(f32_cmp(x.z, y.z))
+        }
+        (Variant::Color(x), Variant::Color(y)) => cmp_f32_pair(x.r, x.g, y.r, y.g)
+            .then(f32_cmp(x.b, y.b))
+            .then(f32_cmp(x.a, y.a)),
+        // Numbers compare numerically across int/float, so a float probe against
+        // an int array behaves.
+        _ => a
+            .to_float()
+            .partial_cmp(&b.to_float())
+            .unwrap_or(Ordering::Equal),
+    }
+}
+
+/// Equality for `find`/`rfind`/`count`/`has`, numeric-aware for the same reason.
+fn packed_elements_equal(a: &Variant, b: &Variant) -> bool {
+    match (a, b) {
+        (Variant::String(x), Variant::String(y)) => x == y,
+        (Variant::Vector2(_), Variant::Vector2(_))
+        | (Variant::Vector3(_), Variant::Vector3(_))
+        | (Variant::Color(_), Variant::Color(_)) => a == b,
+        _ => a.to_float() == b.to_float(),
+    }
 }
 
 /// Overwrites `v[index]`, returning `false` if `index` is out of range.
@@ -773,6 +1126,40 @@ impl PartialOrd for Variant {
     }
 }
 
+/// Comma-joins nested variants for container printing. Godot prints a
+/// container's ELEMENTS, and a nested string keeps its quotes inside a
+/// container while printing bare on its own (`print("hi")` → `hi`,
+/// `print(["hi"])` → `["hi"]`).
+fn join_variants(items: &[Variant]) -> String {
+    items
+        .iter()
+        .map(display_element)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// An element inside a container: strings are quoted, everything else prints as
+/// itself.
+fn display_element(v: &Variant) -> String {
+    match v {
+        Variant::String(s) => format!("\"{s}\""),
+        other => other.to_string(),
+    }
+}
+
+/// A dictionary key, quoted the same way an element is.
+fn display_key(k: &Variant) -> String {
+    display_element(k)
+}
+
+fn join_display<T: fmt::Display>(items: &[T]) -> String {
+    items
+        .iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl fmt::Display for Variant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -787,40 +1174,100 @@ impl fmt::Display for Variant {
             Self::Vector2i(v) => write!(f, "({}, {})", v.x, v.y),
             Self::Vector3(v) => write!(f, "({}, {}, {})", v.x, v.y, v.z),
             Self::Vector3i(v) => write!(f, "({}, {}, {})", v.x, v.y, v.z),
+            // Godot's `operator String` shapes (core/variant/variant.cpp): a
+            // Rect2 is `[P: …, S: …]`, a matrix type labels its columns, and a
+            // container prints its ELEMENTS. The old `[Array; len=2]` /
+            // `<Transform2D>` placeholders meant every `print()` of a container
+            // or transform diverged from Godot (pat-0q2kx.69).
             Self::Rect2(r) => write!(
                 f,
-                "[({}, {}), ({}, {})]",
+                "[P: ({}, {}), S: ({}, {})]",
                 r.position.x, r.position.y, r.size.x, r.size.y
             ),
-            Self::Transform2D(_) => write!(f, "<Transform2D>"),
-            Self::Color(c) => write!(f, "Color({}, {}, {}, {})", c.r, c.g, c.b, c.a),
-            Self::Basis(_) => write!(f, "<Basis>"),
-            Self::Transform3D(_) => write!(f, "<Transform3D>"),
-            Self::Quaternion(q) => write!(f, "Quaternion({}, {}, {}, {})", q.x, q.y, q.z, q.w),
+            Self::Transform2D(t) => write!(
+                f,
+                "[X: ({}, {}), Y: ({}, {}), O: ({}, {})]",
+                t.x.x, t.x.y, t.y.x, t.y.y, t.origin.x, t.origin.y
+            ),
+            Self::Color(c) => write!(f, "({}, {}, {}, {})", c.r, c.g, c.b, c.a),
+            Self::Basis(b) => write!(
+                f,
+                "[X: ({}, {}, {}), Y: ({}, {}, {}), Z: ({}, {}, {})]",
+                b.x.x, b.x.y, b.x.z, b.y.x, b.y.y, b.y.z, b.z.x, b.z.y, b.z.z
+            ),
+            Self::Transform3D(t) => write!(
+                f,
+                "[X: ({}, {}, {}), Y: ({}, {}, {}), Z: ({}, {}, {}), O: ({}, {}, {})]",
+                t.basis.x.x,
+                t.basis.x.y,
+                t.basis.x.z,
+                t.basis.y.x,
+                t.basis.y.y,
+                t.basis.y.z,
+                t.basis.z.x,
+                t.basis.z.y,
+                t.basis.z.z,
+                t.origin.x,
+                t.origin.y,
+                t.origin.z
+            ),
+            Self::Quaternion(q) => write!(f, "({}, {}, {}, {})", q.x, q.y, q.z, q.w),
             Self::Aabb(a) => write!(
                 f,
-                "AABB(({}, {}, {}), ({}, {}, {}))",
+                "[P: ({}, {}, {}), S: ({}, {}, {})]",
                 a.position.x, a.position.y, a.position.z, a.size.x, a.size.y, a.size.z
             ),
             Self::Plane(p) => write!(
                 f,
-                "Plane(({}, {}, {}), {})",
+                "[N: ({}, {}, {}), D: {}]",
                 p.normal.x, p.normal.y, p.normal.z, p.d
             ),
             Self::ObjectId(id) => write!(f, "<Object#{id}>"),
-            Self::Array(a) => write!(f, "[Array; len={}]", a.len()),
-            Self::Dictionary(d) => write!(f, "{{Dict; len={}}}", d.len()),
+            Self::Array(a) => write!(f, "[{}]", join_variants(a)),
+            // Godot pads a dictionary's braces: `{ "k": v }`.
+            Self::Dictionary(d) => {
+                if d.is_empty() {
+                    return write!(f, "{{  }}");
+                }
+                let body = d
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", display_key(k), v))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "{{ {body} }}")
+            }
             Self::Callable(c) => write!(f, "{c:?}"),
             Self::Resource(r) => write!(f, "<Resource:{} @ {}>", r.class_name, r.path),
-            Self::PackedByteArray(v) => write!(f, "[PackedByteArray; len={}]", v.len()),
-            Self::PackedInt32Array(v) => write!(f, "[PackedInt32Array; len={}]", v.len()),
-            Self::PackedInt64Array(v) => write!(f, "[PackedInt64Array; len={}]", v.len()),
-            Self::PackedFloat32Array(v) => write!(f, "[PackedFloat32Array; len={}]", v.len()),
-            Self::PackedFloat64Array(v) => write!(f, "[PackedFloat64Array; len={}]", v.len()),
-            Self::PackedStringArray(v) => write!(f, "[PackedStringArray; len={}]", v.len()),
-            Self::PackedVector2Array(v) => write!(f, "[PackedVector2Array; len={}]", v.len()),
-            Self::PackedVector3Array(v) => write!(f, "[PackedVector3Array; len={}]", v.len()),
-            Self::PackedColorArray(v) => write!(f, "[PackedColorArray; len={}]", v.len()),
+            Self::PackedByteArray(v) => write!(f, "[{}]", join_display(v)),
+            Self::PackedInt32Array(v) => write!(f, "[{}]", join_display(v)),
+            Self::PackedInt64Array(v) => write!(f, "[{}]", join_display(v)),
+            Self::PackedFloat32Array(v) => write!(f, "[{}]", join_display(v)),
+            Self::PackedFloat64Array(v) => write!(f, "[{}]", join_display(v)),
+            Self::PackedStringArray(v) => write!(f, "[{}]", v.join(", ")),
+            Self::PackedVector2Array(v) => write!(
+                f,
+                "[{}]",
+                v.iter()
+                    .map(|e| format!("({}, {})", e.x, e.y))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::PackedVector3Array(v) => write!(
+                f,
+                "[{}]",
+                v.iter()
+                    .map(|e| format!("({}, {}, {})", e.x, e.y, e.z))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::PackedColorArray(v) => write!(
+                f,
+                "[{}]",
+                v.iter()
+                    .map(|e| format!("({}, {}, {}, {})", e.r, e.g, e.b, e.a))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Self::Signal { object_id, name } => {
                 write!(f, "Signal(<Object#{object_id}>, \"{name}\")")
             }
@@ -992,19 +1439,22 @@ mod tests {
     #[test]
     fn display_rect2() {
         let r = gdcore::math::Rect2::new(Vector2::new(1.0, 2.0), Vector2::new(3.0, 4.0));
-        assert_eq!(format!("{}", Variant::Rect2(r)), "[(1, 2), (3, 4)]");
+        assert_eq!(format!("{}", Variant::Rect2(r)), "[P: (1, 2), S: (3, 4)]");
     }
 
     #[test]
     fn display_transform2d() {
         let t = gdcore::math::Transform2D::IDENTITY;
-        assert_eq!(format!("{}", Variant::Transform2D(t)), "<Transform2D>");
+        assert_eq!(
+            format!("{}", Variant::Transform2D(t)),
+            "[X: (1, 0), Y: (0, 1), O: (0, 0)]"
+        );
     }
 
     #[test]
     fn display_color() {
         let c = gdcore::math::Color::new(1.0, 0.5, 0.0, 1.0);
-        assert_eq!(format!("{}", Variant::Color(c)), "Color(1, 0.5, 0, 1)");
+        assert_eq!(format!("{}", Variant::Color(c)), "(1, 0.5, 0, 1)");
     }
 
     #[test]
@@ -1016,7 +1466,7 @@ mod tests {
     #[test]
     fn display_array() {
         let a = Variant::Array(vec![Variant::Int(1), Variant::Int(2)]);
-        assert_eq!(format!("{a}"), "[Array; len=2]");
+        assert_eq!(format!("{a}"), "[1, 2]");
     }
 
     #[test]
@@ -1024,7 +1474,7 @@ mod tests {
         let mut d = Dictionary::new();
         d.insert("key".to_string(), Variant::Int(1));
         let v = Variant::Dictionary(d);
-        assert_eq!(format!("{v}"), "{Dict; len=1}");
+        assert_eq!(format!("{v}"), "{ \"key\": 1 }");
     }
 
     // -- Clone correctness --------------------------------------------------

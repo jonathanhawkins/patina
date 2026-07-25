@@ -103,6 +103,7 @@ var found_child = false
 var enemy_has_ready = false
 var enemy_has_bogus = true
 var group_count = 0
+var emit_result = -1
 func _process(delta):
     var e = get_node(\"Enemy\")
     e.add_to_group(\"enemies\")
@@ -111,6 +112,7 @@ func _process(delta):
     self.enemy_has_ready = e.has_method(\"has_method\")
     self.enemy_has_bogus = e.has_method(\"definitely_not_a_method_xyz\")
     self.group_count = e.get_nodes_in_group(\"enemies\").size()
+    self.emit_result = e.emit_signal(\"tree_entered\")
 ";
     tree.attach_script(
         main,
@@ -124,6 +126,15 @@ func _process(delta):
         script_var(&ml, main, "in_group_after"),
         Some(Variant::Bool(true)),
         "add_to_group then is_in_group must round-trip on another node"
+    );
+    // `emit_signal` on ANOTHER node: the self form was a script builtin, but the
+    // cross-node form reached neither the ObjectId path nor the native table, so
+    // `$Enemy.emit_signal(..)` failed while `$Enemy.has_signal(..)` answered.
+    // Godot returns an Error code, and OK is 0.
+    assert_eq!(
+        script_var(&ml, main, "emit_result"),
+        Some(Variant::Int(0)),
+        "emit_signal must dispatch on another node and report OK"
     );
     assert_eq!(
         script_var(&ml, main, "found_child"),

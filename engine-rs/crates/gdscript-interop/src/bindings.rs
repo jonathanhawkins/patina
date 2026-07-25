@@ -437,6 +437,37 @@ pub trait SceneAccess {
         None
     }
 
+    // -- Object introspection over the signal graph (pat-0q2kx.64) ----------
+    //
+    // Godot's `get_signal_connection_list` / `get_incoming_connections` /
+    // `has_connections` let a script (or a plugin, or a save system) walk the
+    // live connection graph. The interpreter cannot see the tree's signal
+    // stores, so the host answers.
+
+    /// Outgoing connections on `node`'s `signal_name`, as
+    /// `(target_object_id, method, one_shot)`.
+    fn signal_connection_list(&self, _node: u64, _signal_name: &str) -> Vec<(u64, String, bool)> {
+        Vec::new()
+    }
+
+    /// Connections anywhere in the tree whose TARGET is `node`, as
+    /// `(source_object_id, signal_name, method)` — Godot's
+    /// `get_incoming_connections`.
+    fn incoming_connections(&self, _node: u64) -> Vec<(u64, String, String)> {
+        Vec::new()
+    }
+
+    /// Whether `node` has any outgoing connection on any of its signals.
+    fn has_any_connections(&self, _node: u64) -> bool {
+        false
+    }
+
+    /// Emits `property_list_changed` on `node` (Godot
+    /// `notify_property_list_changed`). Returns `false` if `node` is unknown.
+    fn notify_property_list_changed(&mut self, _node: u64) -> bool {
+        false
+    }
+
     /// Whether the AnimationPlayer attached to `node` is playing, or `None`
     /// when `node` has no attached player.
     fn animation_player_is_playing(&self, _node: u64) -> Option<bool> {

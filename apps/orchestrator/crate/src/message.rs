@@ -591,11 +591,40 @@ mod tests {
         assert!(!body_requests_keep_open(
             "Delivered a partial implementation of the parser; all tests pass."
         ));
-        assert!(body_requests_keep_open("partial=true"));
         assert!(body_requests_keep_open(
             "Please do not close this bead yet."
         ));
         assert!(body_requests_keep_open("keep-open"));
+        assert!(body_requests_keep_open("Please keep this bead open."));
+    }
+
+    /// Regression: **describing** the flag must not **set** it. Prose detection
+    /// covers English imperatives only; the machine spellings belong to the JSON
+    /// payload, which is parsed separately. Matching them in prose fired on any
+    /// message that explained the feature — including a completion whose notes
+    /// said an earlier message had set it — and looped that bead through the
+    /// verifier every ~9 seconds (2026-07-25).
+    #[test]
+    fn test_describing_the_flag_does_not_set_it() {
+        for prose in [
+            "My previous completion set `partial: true`, which routed it badly.",
+            "The payload spelling is partial=true or \"status\": \"partial\".",
+            "This was a partial completion and the scope note explains the rest.",
+            "Do not close the file handle before the writer flushes.",
+        ] {
+            assert!(
+                !body_requests_keep_open(prose),
+                "explaining the feature must not trigger it: {prose:?}"
+            );
+        }
+        // The structured flag is still honored — it is just read from the JSON.
+        let c = completion_with_body(
+            r#"```json
+{"bead_id": "pat-abc", "status": "partial",
+ "files_changed": ["src/lib.rs"], "test_commands": ["cargo test"]}
+```"#,
+        );
+        assert!(c.partial, "the payload flag remains authoritative");
     }
 
     #[test]

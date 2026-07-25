@@ -40,10 +40,17 @@ pub struct SceneConnection {
     /// The method name to call on the target node.
     pub method_name: String,
     /// Optional connection flags (defaults to 0).
+    ///
+    /// Godot's `Object.ConnectFlags` bitfield as written by the text format:
+    /// `CONNECT_DEFERRED` 1, `CONNECT_PERSIST` 2, `CONNECT_ONE_SHOT` 4,
+    /// `CONNECT_REFERENCE_COUNTED` 8.
     pub flags: u32,
-    /// Extra bound arguments delivered to the callback ahead of the signal's
-    /// own arguments (Godot `binds=[...]` on the connection). Empty when absent.
+    /// Extra bound arguments delivered to the callback after the signal's own
+    /// arguments (Godot `binds=[...]` on the connection). Empty when absent.
     pub binds: Vec<Variant>,
+    /// How many trailing signal arguments the callback drops (Godot
+    /// `unbinds=N`). Zero when absent.
+    pub unbinds: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +233,15 @@ impl PackedScene {
                                     _ => None,
                                 })
                                 .unwrap_or_default();
+                            // `unbinds=N` — trailing signal args the callback
+                            // drops. Written by Godot's text format next to
+                            // `binds=`, and previously not parsed at all, so a
+                            // scene authored with it silently delivered the
+                            // extra arguments (pat-0q2kx.65).
+                            let unbinds = attrs
+                                .get("unbinds")
+                                .and_then(|v| v.parse::<usize>().ok())
+                                .unwrap_or(0);
                             connections.push(SceneConnection {
                                 signal_name: signal,
                                 from_path: from,
@@ -233,6 +249,7 @@ impl PackedScene {
                                 method_name: method,
                                 flags,
                                 binds,
+                                unbinds,
                             });
                         }
                         _ => {
@@ -1403,6 +1420,13 @@ fn auto_assign_current_camera(tree: &mut crate::scene_tree::SceneTree, root_id: 
     }
 }
 
+/// Godot `Object.ConnectFlags::CONNECT_DEFERRED` — the callback runs at the
+/// next idle flush rather than inside `emit_signal`.
+pub const CONNECT_DEFERRED: u32 = 1;
+/// Godot `Object.ConnectFlags::CONNECT_ONE_SHOT` — the connection disconnects
+/// itself after firing once.
+pub const CONNECT_ONE_SHOT: u32 = 4;
+
 /// Wires signal connections from a packed scene into the scene tree.
 ///
 /// After a packed scene has been instanced and added to the tree via
@@ -1412,6 +1436,10 @@ fn auto_assign_current_camera(tree: &mut crate::scene_tree::SceneTree, root_id: 
 ///
 /// - `"."` in `from_path` or `to_path` refers to the scene root.
 /// - Non-existent paths produce a warning but do not cause an error.
+/// - The connection's authored `flags`, `binds` and `unbinds` are applied, so a
+///   deferred connection defers and a one-shot connection fires once
+///   (pat-0q2kx.65). `CONNECT_PERSIST` (2) and `CONNECT_REFERENCE_COUNTED` (8)
+///   are parsed but do not affect dispatch, matching the rest of the engine.
 pub fn wire_connections(
     tree: &mut crate::scene_tree::SceneTree,
     root_id: NodeId,
@@ -1436,7 +1464,19 @@ pub fn wire_connections(
             (Some(from), Some(to)) => {
                 // Look up the target node's ObjectId for the Connection.
                 let to_object_id = to.object_id();
-                let connection = Connection::new(to_object_id, &conn.method_name);
+                // The authored flags/binds/unbinds were parsed but thrown away
+                // here, so a `flags=1` connection fired immediately instead of
+                // at the deferred flush, a `flags=4` one fired on every emit,
+                // and bound arguments never reached the callback (pat-0q2kx.65).
+                let mut connection = Connection::new(to_object_id, &conn.method_name)
+                    .with_binds(conn.binds.clone())
+                    .with_unbinds(conn.unbinds);
+                if conn.flags & CONNECT_DEFERRED != 0 {
+                    connection = connection.as_deferred();
+                }
+                if conn.flags & CONNECT_ONE_SHOT != 0 {
+                    connection = connection.as_one_shot();
+                }
                 tree.connect_signal(from, &conn.signal_name, connection);
             }
             (None, _) => {

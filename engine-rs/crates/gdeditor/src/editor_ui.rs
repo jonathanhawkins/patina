@@ -3168,6 +3168,8 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         <div class="pset-cat active" data-cat="application" style="padding:6px 12px;cursor:pointer;font-size:11px;">Application</div>
         <!-- pat-db37w: Input Map tab (Godot Project Settings > Input Map) -->
         <div class="pset-cat" data-cat="input" style="padding:6px 12px;cursor:pointer;font-size:11px;">Input Map</div>
+        <!-- pat-0q2kx.73: Autoload tab (Godot Project Settings > Autoload) -->
+        <div class="pset-cat" data-cat="autoload" style="padding:6px 12px;cursor:pointer;font-size:11px;">Autoload</div>
         <div class="pset-cat" data-cat="display" style="padding:6px 12px;cursor:pointer;font-size:11px;">Display</div>
         <div class="pset-cat" data-cat="physics" style="padding:6px 12px;cursor:pointer;font-size:11px;">Physics</div>
         <div class="pset-cat" data-cat="audio" style="padding:6px 12px;cursor:pointer;font-size:11px;">Audio</div>
@@ -3188,6 +3190,16 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
           <div class="input-map-add" style="display:flex;gap:4px;margin-top:8px;">
             <input type="text" id="pset-input-new-action" placeholder="New action name..." style="flex:1;font-size:11px;">
             <button id="pset-input-add" style="font-size:11px;padding:2px 8px;">Add Action</button>
+          </div>
+        </div>
+        <!-- pat-0q2kx.73: Autoload — name + path rows, enable toggle, reorder,
+             delete. Persisted to project.godot [autoload] via /api/autoloads. -->
+        <div class="pset-section" data-cat="autoload" style="display:none;">
+          <div id="pset-autoloads"></div>
+          <div class="autoload-add" style="display:flex;gap:4px;margin-top:8px;">
+            <input type="text" id="pset-autoload-new-name" placeholder="Name (e.g. Game)" style="flex:1;font-size:11px;">
+            <input type="text" id="pset-autoload-new-path" placeholder="res://game.gd" style="flex:2;font-size:11px;">
+            <button id="pset-autoload-add" style="font-size:11px;padding:2px 8px;">Add</button>
           </div>
         </div>
         <!-- Display -->
@@ -3864,7 +3876,44 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     }
   }
 
+  // Labels the Scene dock "Remote" while it mirrors the running game, so the
+  // user can tell a live tree from the edit one (pat-0q2kx.72).
+  function setSceneDockRemoteLabel(remote) {
+    var el = document.getElementById('scene-dock-title');
+    if (el) el.textContent = remote ? 'Scene (Remote)' : 'Scene';
+  }
+
+  // On stop with Movie Maker on, pull the recorded frames and offer them as a
+  // download. The route existed with no caller, so a recording was unreachable.
+  async function downloadMovieFrames() {
+    var movie = await api('GET', '/api/runtime/movie');
+    if (!movie || !movie.frames || !movie.frames.length) return;
+    var blob = new Blob([JSON.stringify(movie)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'patina-movie-' + movie.frames.length + '-frames.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   async function fetchScene() {
+    // Godot's Scene dock switches to a Remote tree during play: the running
+    // game is a CLONE, so nodes a script spawns in _ready exist only there and
+    // are invisible in the edit tree (pat-0q2kx.72).
+    if (typeof runtimeRunning !== 'undefined' && runtimeRunning) {
+      var remote = await api('GET', '/api/runtime/scene');
+      if (remote && remote.tree) {
+        sceneData = { nodes: remote.tree };
+        setSceneDockRemoteLabel(true);
+        if (expandedNodes.size === 0) expandedNodes.add(remote.tree.id);
+        refreshTree();
+        return;
+      }
+    }
+    setSceneDockRemoteLabel(false);
     var data = await api('GET', '/api/scene');
     if (data) {
       sceneData = data;
@@ -4968,18 +5017,134 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     menu.style.top = (r.bottom + 2) + 'px';
     setTimeout(function() { document.addEventListener('click', closeResMenu, { once: true }); }, 0);
   }
-  // Enum dropdown options for known Int enum properties.
+  // pat-0q2kx.71: the inspector renders editors from the server's PropertyHint
+  // metadata, the way Godot's editor_properties.cpp does, instead of matching on
+  // property NAMES. The payload has always carried `hint`/`hint_string`; the
+  // renderer just ignored them, so every enum outside the hand-written map below
+  // degraded to a raw number box.
+  //
+  // Godot's PropertyHint values (core/object/object.h).
+  var HINT_RANGE = 1, HINT_ENUM = 2, HINT_ENUM_SUGGESTION = 3, HINT_FLAGS = 6;
+  // LAYERS_2D_RENDER(7) … LAYERS_AVOIDANCE(13): all render as a 32-bit grid.
+  var HINT_LAYERS_MIN = 7, HINT_LAYERS_MAX = 13;
+
+  // Enum dropdowns for the two Int enums the schema carries NO hint for. Every
+  // other entry this map used to hold is now driven by `hint`, so listing it
+  // here would just be a second source of truth that silently goes stale.
   var ENUM_OPTIONS = {
-    disable_mode: [['0', 'Remove'], ['1', 'Make Static'], ['2', 'Keep Active']],
-    process_mode: [['0', 'Inherit'], ['1', 'Pausable'], ['2', 'When Paused'], ['3', 'Always'], ['4', 'Disabled']],
-    blend_mode: [['0', 'Mix'], ['1', 'Add'], ['2', 'Subtract'], ['3', 'Multiply'], ['4', 'Premultiplied Alpha']],
-    texture_filter: [['0', 'Inherit'], ['1', 'Nearest'], ['2', 'Linear'], ['3', 'Nearest Mipmap'], ['4', 'Linear Mipmap']],
-    texture_repeat: [['0', 'Inherit'], ['1', 'Disabled'], ['2', 'Enabled'], ['3', 'Mirror']],
-    physics_interpolation_mode: [['0', 'Inherit'], ['1', 'On'], ['2', 'Off']],
-    auto_translate_mode: [['0', 'Inherit'], ['1', 'Always'], ['2', 'Disabled']],
-    process_thread_group: [['0', 'Inherit'], ['1', 'Main Thread'], ['2', 'Sub Thread']],
-    clip_children: [['0', 'Disabled'], ['1', 'Clip Only'], ['2', 'Clip and Draw']]
+    blend_mode: [['0', 'Mix'], ['1', 'Add'], ['2', 'Subtract'], ['3', 'Multiply'], ['4', 'Premultiplied Alpha']]
   };
+
+  // "Inherit,Nearest,Linear" -> [[0,'Inherit'],…]; "Fill:1,Expand:2" -> [[1,'Fill'],…].
+  // Godot allows either form; an explicit `:value` wins, otherwise the index is
+  // the value (object.h `PROPERTY_HINT_ENUM`).
+  function parseEnumHint(hintString) {
+    var out = [];
+    if (!hintString) return out;
+    var parts = String(hintString).split(',');
+    for (var i = 0; i < parts.length; i++) {
+      var raw = parts[i];
+      if (raw === '') continue;
+      var colon = raw.lastIndexOf(':');
+      if (colon > 0) {
+        var explicit = parseInt(raw.slice(colon + 1), 10);
+        if (!isNaN(explicit)) {
+          out.push([explicit, raw.slice(0, colon)]);
+          continue;
+        }
+      }
+      out.push([out.length, raw]);
+    }
+    return out;
+  }
+
+  // "0,16,0.01,or_greater,exp,suffix:m" -> {min,max,step,orGreater,…,suffix}.
+  function parseRangeHint(hintString) {
+    var r = { min: null, max: null, step: null, orGreater: false, orLess: false, exp: false, degrees: false, suffix: '' };
+    if (!hintString) return r;
+    var parts = String(hintString).split(',');
+    var nums = 0;
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i];
+      if (p === 'or_greater') { r.orGreater = true; continue; }
+      if (p === 'or_less') { r.orLess = true; continue; }
+      if (p === 'exp') { r.exp = true; continue; }
+      if (p === 'degrees') { r.degrees = true; continue; }
+      if (p.indexOf('suffix:') === 0) { r.suffix = p.slice(7); continue; }
+      var n = parseFloat(p);
+      if (isNaN(n)) continue;
+      if (nums === 0) r.min = n; else if (nums === 1) r.max = n; else if (nums === 2) r.step = n;
+      nums++;
+    }
+    return r;
+  }
+
+  function hintIsLayers(hint) {
+    return hint >= HINT_LAYERS_MIN && hint <= HINT_LAYERS_MAX;
+  }
+
+  // Dropdown built from the hint's own labels/values.
+  function makeEnumEditor(nodeId, prop, options) {
+    var sel = document.createElement('select');
+    var current = String(prop.value && prop.value.value);
+    for (var i = 0; i < options.length; i++) {
+      var opt = document.createElement('option');
+      opt.value = String(options[i][0]);
+      opt.textContent = options[i][1];
+      if (current === opt.value) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', function() {
+      setProperty(nodeId, prop.name, { type: 'Int', value: parseInt(sel.value, 10) || 0 });
+    });
+    return sel;
+  }
+
+  // Numeric input clamped to the hint's range. `or_greater`/`or_less` mean the
+  // bound is a soft one in Godot, so the clamp is dropped on that side.
+  function makeRangeEditor(nodeId, prop, range, isInt) {
+    var input = document.createElement('input');
+    input.type = 'number';
+    if (range.step != null) input.step = String(range.step);
+    else input.step = isInt ? '1' : '0.1';
+    if (range.min != null && !range.orLess) input.min = String(range.min);
+    if (range.max != null && !range.orGreater) input.max = String(range.max);
+    var v = prop.value && prop.value.value;
+    input.value = v != null ? v : 0;
+    input.addEventListener('change', function() {
+      var n = isInt ? parseInt(input.value, 10) : parseFloat(input.value);
+      if (isNaN(n)) n = 0;
+      if (range.min != null && !range.orLess && n < range.min) n = range.min;
+      if (range.max != null && !range.orGreater && n > range.max) n = range.max;
+      input.value = n;
+      setProperty(nodeId, prop.name, { type: isInt ? 'Int' : 'Float', value: n });
+    });
+    return input;
+  }
+
+  // Checkbox set over the hint's named bits (Godot PROPERTY_HINT_FLAGS).
+  function makeFlagsEditor(nodeId, prop, options) {
+    var wrap = document.createElement('div');
+    wrap.className = 'flags-editor';
+    wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;flex:1;min-width:0;';
+    var value = parseInt(prop.value && prop.value.value, 10) || 0;
+    options.forEach(function(o) {
+      var bit = o[0];
+      var lab = document.createElement('label');
+      lab.style.cssText = 'display:flex;align-items:center;gap:3px;font-size:10px;color:var(--text-dim);';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = (value & bit) !== 0;
+      cb.addEventListener('change', function() {
+        if (cb.checked) value |= bit; else value &= ~bit;
+        setProperty(nodeId, prop.name, { type: 'Int', value: value });
+      });
+      lab.appendChild(cb);
+      lab.appendChild(document.createTextNode(o[1]));
+      wrap.appendChild(lab);
+    });
+    return wrap;
+  }
   // Godot-style bit-flag grid (collision Layer/Mask): 20 numbered toggle cells.
   function makeBitFlagGrid(nodeId, prop) {
     // Godot layout: grouped 4x2 blocks (1-4/5-8, 9-12/…), an expand chevron for
@@ -5086,9 +5251,22 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         val.appendChild(input);
       }
     } else if (type === 'Int') {
-      if (prop.name === 'collision_layer' || prop.name === 'collision_mask') {
+      // pat-0q2kx.71: hint-driven editors come first — whenever the server
+      // states what a property IS, that beats guessing from its name.
+      var iHint = prop.hint | 0;
+      var iHintStr = prop.hint_string || '';
+      var iEnum = (iHint === HINT_ENUM || iHint === HINT_ENUM_SUGGESTION) ? parseEnumHint(iHintStr) : [];
+      var iFlags = iHint === HINT_FLAGS ? parseEnumHint(iHintStr) : [];
+      if (hintIsLayers(iHint) || prop.name === 'collision_layer' || prop.name === 'collision_mask') {
         row.classList.add('insp-row-flags');
         val.appendChild(makeBitFlagGrid(nodeId, prop));
+      } else if (iEnum.length) {
+        val.appendChild(makeEnumEditor(nodeId, prop, iEnum));
+      } else if (iFlags.length) {
+        row.classList.add('insp-row-flags');
+        val.appendChild(makeFlagsEditor(nodeId, prop, iFlags));
+      } else if (iHint === HINT_RANGE && iHintStr) {
+        val.appendChild(makeRangeEditor(nodeId, prop, parseRangeHint(iHintStr), true));
       } else if (ENUM_OPTIONS[prop.name]) {
         var esel = document.createElement('select');
         ENUM_OPTIONS[prop.name].forEach(function(o) {
@@ -5137,15 +5315,27 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         val.appendChild(input);
       }
     } else if (type === 'Float') {
-      var input = document.createElement('input');
-      input.type = 'number'; input.step = '0.1';
-      input.value = v != null ? v : 0;
-      input.addEventListener('change', function() {
-        setProperty(nodeId, prop.name, { type: 'Float', value: parseFloat(input.value) || 0 });
-      });
-      val.appendChild(input);
-      if (PROP_UNITS[prop.name]) {
-        var fu = document.createElement('span'); fu.className = 'insp-unit'; fu.textContent = PROP_UNITS[prop.name]; val.appendChild(fu);
+      // pat-0q2kx.71: a range-hinted float gets the hint's min/max/step and is
+      // clamped on commit; everything else keeps the plain box.
+      var fHint = prop.hint | 0;
+      var fRange = (fHint === HINT_RANGE && prop.hint_string) ? parseRangeHint(prop.hint_string) : null;
+      if (fRange) {
+        val.appendChild(makeRangeEditor(nodeId, prop, fRange, false));
+      } else {
+        var input = document.createElement('input');
+        input.type = 'number'; input.step = '0.1';
+        input.value = v != null ? v : 0;
+        input.addEventListener('change', function() {
+          setProperty(nodeId, prop.name, { type: 'Float', value: parseFloat(input.value) || 0 });
+        });
+        val.appendChild(input);
+      }
+      // The hint's own suffix (`suffix:m`) wins over the hand-written unit map.
+      var unit = (fRange && fRange.suffix) ? fRange.suffix
+        : (fRange && fRange.degrees) ? '°'
+        : PROP_UNITS[prop.name];
+      if (unit) {
+        var fu = document.createElement('span'); fu.className = 'insp-unit'; fu.textContent = unit; val.appendChild(fu);
       }
     } else if (type === 'Bool') {
       var boolDiv = document.createElement('div');
@@ -5466,7 +5656,14 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   }
 
   async function setProperty(nodeId, property, value) {
-    await api('POST', '/api/property/set', { node_id: nodeId, property: property, value: value });
+    // During play the inspector live-edits the RUNNING clone; without this flag
+    // the route is edit-locked and the change is rejected (pat-0q2kx.72).
+    await api('POST', '/api/property/set', {
+      node_id: nodeId,
+      property: property,
+      value: value,
+      runtime: (typeof runtimeRunning !== 'undefined' && runtimeRunning) ? true : false,
+    });
   }
 
   // ---- Viewport ----
@@ -9705,8 +9902,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       if (r && r.ok) { runtimePaused = r.paused; logMessage('info', runtimePaused ? 'Paused (F7)' : 'Resumed (F7)'); updatePlayButtonStates(); showPlayingOverlay(true); }
     });
     document.getElementById('btn-stop').addEventListener('click', async function() {
+      // Fetch the recording BEFORE stopping: the frames live on the runtime
+      // state that stop tears down (pat-0q2kx.72).
+      if (movieMakerEnabled) await downloadMovieFrames();
       var r = await api('POST', '/api/runtime/stop');
-      if (r && r.ok) { runtimeRunning = false; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Stopped (F8)'); restoreViewAfterStop(); updatePlayButtonStates(); showPlayingOverlay(false); updateRuntimeStatusBar(); setRuntimeEditingDisabled(false); stopRuntimePolling(); stopGameInput(); }
+      if (r && r.ok) { runtimeRunning = false; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Stopped (F8)'); restoreViewAfterStop(); updatePlayButtonStates(); showPlayingOverlay(false); updateRuntimeStatusBar(); setRuntimeEditingDisabled(false); stopRuntimePolling(); stopGameInput(); fetchScene(); }
     });
     document.getElementById('btn-play-current').addEventListener('click', async function() {
       if (runtimeRunning) return;
@@ -12529,6 +12729,89 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         tab.classList.add('active');
         psetShowCategory(psetActiveCat);
         if (psetActiveCat === 'input') renderInputMap(); // pat-db37w
+        if (psetActiveCat === 'autoload') renderAutoloads(); // pat-0q2kx.73
+      });
+    });
+
+    // pat-0q2kx.73: Autoload rows — name, path, enable checkbox, reorder, delete.
+    // Every mutation posts to /api/autoloads, which rewrites project.godot, so
+    // the next play instantiates the singleton without an editor restart.
+    function renderAutoloads() {
+      var host = document.getElementById('pset-autoloads');
+      if (!host) return;
+      api('GET', '/api/autoloads').then(function(data) {
+        host.innerHTML = '';
+        var rows = (data && data.autoloads) || [];
+        if (!rows.length) {
+          var empty = document.createElement('div');
+          empty.style.cssText = 'color:var(--text-dim);font-size:11px;padding:6px 0;';
+          empty.textContent = 'No autoloads. Add one below.';
+          host.appendChild(empty);
+          return;
+        }
+        rows.forEach(function(a, idx) {
+          var row = document.createElement('div');
+          row.className = 'settings-row';
+          row.style.cssText = 'display:flex;align-items:center;gap:6px;';
+
+          var cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.checked = !!a.enabled;
+          cb.title = 'Enable as a global singleton';
+          cb.addEventListener('change', function() {
+            api('POST', '/api/autoloads', { action: 'toggle', name: a.name, enabled: cb.checked })
+              .then(renderAutoloads);
+          });
+          row.appendChild(cb);
+
+          var nm = document.createElement('span');
+          nm.className = 'settings-label';
+          nm.textContent = a.name;
+          nm.style.cssText = 'min-width:90px;';
+          row.appendChild(nm);
+
+          var pth = document.createElement('span');
+          pth.style.cssText = 'flex:1;font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;';
+          pth.textContent = a.path;
+          pth.title = a.path;
+          row.appendChild(pth);
+
+          [['▲', 'move_up', idx === 0], ['▼', 'move_down', idx === rows.length - 1]]
+            .forEach(function(spec) {
+              var b = document.createElement('button');
+              b.textContent = spec[0];
+              b.style.cssText = 'font-size:10px;padding:1px 5px;';
+              b.disabled = spec[2];
+              b.addEventListener('click', function() {
+                api('POST', '/api/autoloads', { action: spec[1], name: a.name }).then(renderAutoloads);
+              });
+              row.appendChild(b);
+            });
+
+          var del = document.createElement('button');
+          del.textContent = '✕';
+          del.title = 'Remove autoload';
+          del.style.cssText = 'font-size:10px;padding:1px 5px;';
+          del.addEventListener('click', function() {
+            api('POST', '/api/autoloads', { action: 'remove', name: a.name }).then(renderAutoloads);
+          });
+          row.appendChild(del);
+
+          host.appendChild(row);
+        });
+      });
+    }
+
+    var addAutoloadBtn = document.getElementById('pset-autoload-add');
+    if (addAutoloadBtn) addAutoloadBtn.addEventListener('click', function() {
+      var nameEl = document.getElementById('pset-autoload-new-name');
+      var pathEl = document.getElementById('pset-autoload-new-path');
+      var name = (nameEl.value || '').trim();
+      var path = (pathEl.value || '').trim();
+      if (!name || !path) return;
+      api('POST', '/api/autoloads', { action: 'add', name: name, path: path }).then(function() {
+        nameEl.value = ''; pathEl.value = '';
+        renderAutoloads();
       });
     });
 

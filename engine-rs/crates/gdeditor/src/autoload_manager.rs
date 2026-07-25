@@ -187,6 +187,56 @@ impl AutoloadManager {
         out
     }
 
+    /// Splices this manager's `[autoload]` section into a whole `project.godot`,
+    /// leaving every other section untouched (pat-0q2kx.73).
+    ///
+    /// This is the piece that lets the editor persist an edit: the round-trip
+    /// helpers above only produce/consume the section itself, and rewriting the
+    /// file by hand at each call site is how a settings writer starts dropping
+    /// other people's keys.
+    ///
+    /// An existing `[autoload]` section is replaced in place, preserving its
+    /// position in the file; otherwise the section is appended. An empty
+    /// manager removes the section entirely rather than leaving a stub, which is
+    /// what Godot's own writer does.
+    pub fn splice_into_project_godot(&self, project_godot: &str) -> String {
+        let mut out = String::new();
+        let mut in_autoload = false;
+        let mut wrote_section = false;
+        let section = self.to_project_godot_section();
+
+        for line in project_godot.lines() {
+            let trimmed = line.trim();
+            let is_header = trimmed.starts_with('[') && trimmed.ends_with(']');
+            if is_header {
+                if trimmed == "[autoload]" {
+                    // Drop the old section body; emit the new one in its place.
+                    in_autoload = true;
+                    if !self.is_empty() {
+                        out.push_str(&section);
+                        out.push('\n');
+                    }
+                    wrote_section = true;
+                    continue;
+                }
+                in_autoload = false;
+            }
+            if in_autoload {
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+
+        if !wrote_section && !self.is_empty() {
+            if !out.is_empty() && !out.ends_with("\n\n") {
+                out.push('\n');
+            }
+            out.push_str(&section);
+        }
+        out
+    }
+
     /// Parses the `[autoload]` section out of `project.godot` text.
     ///
     /// Reads only that section (other sections are skipped), preserves the file's
@@ -362,8 +412,91 @@ ui_accept={\"deadzone\": 0.5}
     /// A project with no `[autoload]` section yields an empty manager, not an error.
     #[test]
     fn project_file_without_autoload_section_is_empty() {
-        let mgr = AutoloadManager::from_project_godot_section("[application]\n\nconfig/name=\"X\"\n");
+        let mgr =
+            AutoloadManager::from_project_godot_section("[application]\n\nconfig/name=\"X\"\n");
         assert!(mgr.is_empty());
         assert_eq!(mgr.to_project_godot_section(), "[autoload]\n\n");
+    }
+
+    // -- whole-file splice (pat-0q2kx.73) -----------------------------------
+
+    /// Replacing the section must leave every other section byte-identical —
+    /// a settings writer that drops other people's keys is worse than no writer.
+    #[test]
+    fn splice_replaces_only_the_autoload_section() {
+        let original = "[application]\n\nconfig/name=\"Demo\"\nrun/main_scene=\"res://m.tscn\"\n\n\
+             [autoload]\n\nOld=\"*res://old.gd\"\n\n\
+             [input]\n\nui_accept={\"deadzone\":0.5}\n";
+        let mut mgr = AutoloadManager::new();
+        mgr.add("Game", "res://game.gd");
+
+        let out = mgr.splice_into_project_godot(original);
+
+        assert!(
+            out.contains(r#"Game="*res://game.gd""#),
+            "new entry written:\n{out}"
+        );
+        assert!(!out.contains("Old="), "the old entry is gone:\n{out}");
+        assert!(
+            out.contains(r#"config/name="Demo""#),
+            "application kept:\n{out}"
+        );
+        assert!(out.contains("run/main_scene="), "main scene kept:\n{out}");
+        assert!(out.contains("ui_accept="), "the input section kept:\n{out}");
+        // The section keeps its position rather than migrating to the end.
+        let autoload_at = out.find("[autoload]").expect("section present");
+        let input_at = out.find("[input]").expect("input present");
+        assert!(autoload_at < input_at, "section order preserved:\n{out}");
+    }
+
+    /// A project that never had the section gets one appended.
+    #[test]
+    fn splice_appends_when_no_section_exists() {
+        let mut mgr = AutoloadManager::new();
+        mgr.add("Game", "res://game.gd");
+        let out = mgr.splice_into_project_godot("[application]\n\nconfig/name=\"Demo\"\n");
+        assert!(out.contains("[autoload]"), "section added:\n{out}");
+        assert!(out.contains(r#"Game="*res://game.gd""#));
+        assert!(
+            out.contains(r#"config/name="Demo""#),
+            "existing keys survive:\n{out}"
+        );
+    }
+
+    /// Removing the last autoload removes the section rather than leaving a stub.
+    #[test]
+    fn splice_drops_the_section_when_empty() {
+        let original =
+            "[application]\n\nconfig/name=\"Demo\"\n\n[autoload]\n\nGame=\"*res://game.gd\"\n";
+        let out = AutoloadManager::new().splice_into_project_godot(original);
+        assert!(!out.contains("[autoload]"), "empty section removed:\n{out}");
+        assert!(
+            out.contains(r#"config/name="Demo""#),
+            "other sections survive:\n{out}"
+        );
+    }
+
+    /// A disabled autoload round-trips without the `*` marker.
+    #[test]
+    fn splice_round_trips_the_enabled_marker() {
+        let mut mgr = AutoloadManager::new();
+        mgr.add("On", "res://on.gd");
+        mgr.add("Off", "res://off.gd");
+        mgr.set_enabled("Off", false);
+
+        let out = mgr.splice_into_project_godot("[application]\n\nconfig/name=\"D\"\n");
+        assert!(
+            out.contains(r#"On="*res://on.gd""#),
+            "enabled keeps the star:\n{out}"
+        );
+        assert!(
+            out.contains(r#"Off="res://off.gd""#),
+            "disabled has no star:\n{out}"
+        );
+
+        let back = AutoloadManager::from_project_godot_section(&out);
+        assert_eq!(back.names(), vec!["On", "Off"], "order survives the trip");
+        assert!(back.get("On").unwrap().enabled);
+        assert!(!back.get("Off").unwrap().enabled);
     }
 }

@@ -442,8 +442,14 @@ impl SceneTreeAccessor {
     // -- Tween step plumbing (pat-0q2kx.4) ----------------------------------
 
     /// Appends a step to the tween, returning `None` if it no longer exists.
-    fn push_tween_step(&mut self, tid: TweenId, step: TweenStep) -> Option<()> {
+    fn push_tween_step(&mut self, tid: TweenId, mut step: TweenStep) -> Option<()> {
         let tween = self.tree_mut().get_tween_mut(tid)?;
+        // `set_parallel(true)` makes every SUBSEQUENT tweener run alongside the
+        // previous one, so the default is stamped onto each step as it is added
+        // (Godot `Tween.set_parallel`, distinct from the one-shot `parallel()`).
+        if tween.default_parallel {
+            step.parallel = true;
+        }
         tween.steps.push(step);
         // Chaining a tweener onto a tween that already ran dry restarts it, so
         // `create_tween()` followed by tweeners in the same frame animates even
@@ -1016,6 +1022,21 @@ impl SceneAccess for SceneTreeAccessor {
                     .unwrap_or(false);
                 Some(Variant::Bool(declared || on_class))
             }
+            // `other.emit_signal("died", 5)` — emitting on ANOTHER node.
+            //
+            // The self form is a script builtin (`try_builtin`), but nothing
+            // dispatched the cross-node form: it is not on the ObjectId method
+            // path and was not in this native table, so `$Enemy.emit_signal(..)`
+            // failed even though `$Enemy.has_signal(..)` answered (pat-0q2kx.16,
+            // whose implement list names `emit_signal via SceneTree`).
+            "emit_signal" => {
+                let name = arg_str(0)?;
+                // Godot passes everything after the signal name as arguments.
+                let signal_args: Vec<Variant> = args.iter().skip(1).cloned().collect();
+                self.tree_mut().emit_signal(nid, &name, &signal_args);
+                // Godot returns an Error code; OK is 0.
+                Some(Variant::Int(0))
+            }
 
             _ => None,
         }
@@ -1470,6 +1491,70 @@ impl SceneAccess for SceneTreeAccessor {
             .map(|p| p.get_playing_speed())
     }
 
+    // -- Object introspection over the signal graph (pat-0q2kx.64) ----------
+
+    fn signal_connection_list(&self, node: u64, signal_name: &str) -> Vec<(u64, String, bool)> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(store) = self.tree().signal_store(nid) else {
+            return Vec::new();
+        };
+        let Some(signal) = store.get_signal(signal_name) else {
+            return Vec::new();
+        };
+        signal
+            .connections()
+            .iter()
+            .map(|c| (c.target_id.raw(), c.method.clone(), c.one_shot))
+            .collect()
+    }
+
+    fn incoming_connections(&self, node: u64) -> Vec<(u64, String, String)> {
+        // Godot answers this from a per-object back-reference list; this tree
+        // keeps connections only on the SOURCE, so the whole graph is scanned.
+        // Linear in nodes×signals — fine for an introspection call a script
+        // makes rarely, and it cannot go stale the way a cached back-list can.
+        let target_raw = node;
+        let mut out = Vec::new();
+        for id in self.tree().all_nodes_in_tree_order() {
+            let Some(store) = self.tree().signal_store(id) else {
+                continue;
+            };
+            for signal_name in store.signal_names() {
+                let Some(signal) = store.get_signal(signal_name) else {
+                    continue;
+                };
+                for conn in signal.connections() {
+                    if conn.target_id.raw() == target_raw {
+                        out.push((id.raw(), signal_name.to_string(), conn.method.clone()));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn has_any_connections(&self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(store) = self.tree().signal_store(nid) else {
+            return false;
+        };
+        store.signal_names().into_iter().any(|name| {
+            store
+                .get_signal(name)
+                .is_some_and(|s| s.connection_count() > 0)
+        })
+    }
+
+    fn notify_property_list_changed(&mut self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        if self.tree().get_node(nid).is_none() {
+            return false;
+        }
+        self.tree_mut()
+            .emit_signal(nid, "property_list_changed", &[]);
+        true
+    }
+
     fn animation_player_seek(&mut self, node: u64, time: f64) -> bool {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         match self.tree_mut().get_animation_player_mut(nid) {
@@ -1685,6 +1770,15 @@ impl SceneAccess for SceneTreeAccessor {
             }
             "chain" => {
                 self.with_last_step(tid, |s| s.parallel = false)?;
+                Some(handle)
+            }
+            // Godot's `set_parallel(enabled = true)`: a MODE, not a one-shot.
+            // Every tweener added afterwards runs alongside the previous one
+            // until it is turned off — `parallel()` above only affects the next.
+            "set_parallel" => {
+                let enabled = !matches!(args.first(), Some(Variant::Bool(false)));
+                let tween = self.tree_mut().get_tween_mut(tid)?;
+                tween.default_parallel = enabled;
                 Some(handle)
             }
 
