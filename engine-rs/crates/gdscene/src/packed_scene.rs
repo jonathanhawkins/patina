@@ -485,6 +485,83 @@ impl PackedScene {
             }
         }
 
+        // Unflatten a `SpriteFrames` sub-resource back into the `__sf_*`
+        // companion keys the runtime and the editor panel read (pat-0q2kx.74).
+        //
+        // Godot stores the resource as `animations = [{frames, loop, name,
+        // speed}]` with each frame an `{duration, texture}` dictionary. By the
+        // time anything animates, the `PackedScene` — and with it
+        // `sub_resource_props` — is gone, so the frame list has to travel on the
+        // node, mirroring the `__material__*` and `__shape__*` passes above.
+        //
+        // Anything that does not match the expected shape is skipped rather than
+        // guessed at, so a hand-written or future-Godot variation degrades to
+        // "no frames" instead of a wrong frame count.
+        for tmpl in &mut templates {
+            let Some(sf_id) = sub_ref_id(tmpl.properties.get("sprite_frames")) else {
+                continue;
+            };
+            if sub_resources.get(&sf_id).map(String::as_str) != Some("SpriteFrames") {
+                continue;
+            }
+            let Some(Variant::Array(anims)) = sub_resource_props
+                .get(&sf_id)
+                .and_then(|p| p.get("animations"))
+            else {
+                continue;
+            };
+
+            let mut names: Vec<String> = Vec::new();
+            for entry in anims {
+                let Variant::Dictionary(dict) = entry else {
+                    continue;
+                };
+                // The name is a StringName (`&"run"`) in Godot's output, but a
+                // plain String is accepted too — both spell the same thing.
+                let name = match dict.get("name") {
+                    Some(Variant::StringName(sn)) => sn.as_str().to_string(),
+                    Some(Variant::String(s)) => s.clone(),
+                    _ => continue,
+                };
+                let speed = match dict.get("speed") {
+                    Some(Variant::Float(f)) => *f,
+                    Some(Variant::Int(i)) => *i as f64,
+                    _ => 5.0,
+                };
+                let loops = !matches!(dict.get("loop"), Some(Variant::Bool(false)));
+                let mut frames: Vec<String> = Vec::new();
+                if let Some(Variant::Array(list)) = dict.get("frames") {
+                    for f in list {
+                        let Variant::Dictionary(fd) = f else { continue };
+                        // The texture is an `ExtResource:<id>` reference; resolve
+                        // it to the path the renderer can actually load.
+                        let Some(Variant::String(reference)) = fd.get("texture") else {
+                            continue;
+                        };
+                        let Some(ext_id) = reference.strip_prefix("ExtResource:") else {
+                            continue;
+                        };
+                        if let Some(entry) = ext_resources.get(ext_id) {
+                            frames.push(entry.path.clone());
+                        }
+                    }
+                }
+                tmpl.properties
+                    .insert(format!("__sf_{name}_speed"), Variant::Float(speed));
+                tmpl.properties
+                    .insert(format!("__sf_{name}_loop"), Variant::Bool(loops));
+                tmpl.properties.insert(
+                    format!("__sf_{name}_frames"),
+                    Variant::PackedStringArray(frames),
+                );
+                names.push(name);
+            }
+            if !names.is_empty() {
+                tmpl.properties
+                    .insert("__sf_anims__".into(), Variant::PackedStringArray(names));
+            }
+        }
+
         // Resolve a ShaderMaterial referenced by `material_override` or
         // `surface_material_override/0` into flat node properties the 3D render
         // server understands (`shader_code` / `shader_path`, `shader_type`, and

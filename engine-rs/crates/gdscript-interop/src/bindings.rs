@@ -154,6 +154,15 @@ pub trait ScriptInstance {
     /// signal that has never been connected has no entry in the node's
     /// `SignalStore`, so the store alone reports a false negative in exactly
     /// the connect-before-emit case (pat-0q2kx.9). Default: none.
+    /// The script's `@rpc`-annotated methods as `(name, annotation_args)`.
+    ///
+    /// Defaults to empty so non-GDScript script instances need no change; the
+    /// host registers whatever comes back with its MultiplayerAPI
+    /// (pat-0q2kx.79).
+    fn rpc_methods(&self) -> Vec<(String, Vec<String>)> {
+        Vec::new()
+    }
+
     fn list_signals(&self) -> Vec<String> {
         Vec::new()
     }
@@ -291,6 +300,28 @@ pub trait SceneAccess {
 
     /// Mark a node for deferred deletion (removed at end of frame).
     fn queue_free(&mut self, _node_id: u64) {}
+
+    /// Sends `method` to every peer via the tree's MultiplayerAPI (Godot
+    /// `Node.rpc`), returning the engine's error text on failure.
+    ///
+    /// Defaults to an error rather than a silent no-op: a script calling `rpc()`
+    /// with no multiplayer configured should hear about it, exactly as Godot
+    /// reports an unregistered RPC (pat-0q2kx.79).
+    fn node_rpc(&mut self, _node: u64, _method: &str, _args: &[Variant]) -> Result<(), String> {
+        Err("no multiplayer available".to_string())
+    }
+
+    /// [`node_rpc`](Self::node_rpc) addressed to a single peer (Godot
+    /// `Node.rpc_id`).
+    fn node_rpc_id(
+        &mut self,
+        _node: u64,
+        _peer: i64,
+        _method: &str,
+        _args: &[Variant],
+    ) -> Result<(), String> {
+        Err("no multiplayer available".to_string())
+    }
 
     /// Return `true` if the object with the given raw id is a live node in the
     /// scene tree (Godot `is_instance_valid`). A freed / never-existed object

@@ -417,6 +417,128 @@ fn write_animation_player_props(out: &mut String, anims: &AnimationTables, nid: 
     }
 }
 
+/// The `SpriteFrames` sub-resources rebuilt from a node's `__sf_*` companions.
+struct SpriteFramesTables {
+    /// Rendered `[sub_resource type="SpriteFrames"]` sections, ready to append.
+    text: String,
+    /// `node id -> sub-resource id`, for `sprite_frames = SubResource("...")`.
+    nodes: HashMap<NodeId, String>,
+    /// The frame textures as `[ext_resource]` rows, merged into the header.
+    ext: Vec<(String, String, String)>,
+}
+
+impl SpriteFramesTables {
+    fn resource_count(&self) -> usize {
+        self.nodes.len()
+    }
+}
+
+/// Serializes every AnimatedSprite2D's frame library in the saved subtree.
+///
+/// Godot writes the resource as one `[sub_resource type="SpriteFrames"]` whose
+/// `animations` array holds `{frames, loop, name, speed}` dictionaries, each
+/// frame a `{duration, texture}` pointing at an `[ext_resource]`
+/// (`scene/resources/sprite_frames.cpp` `_set_animations`). The editor authors
+/// this into the FLAT property bag as `__sf_*` keys (`editor_server.rs`); this
+/// folds them back into Godot's shape, so frames authored in the panel survive a
+/// save as a real SpriteFrames rather than as invented `__sf_` properties.
+///
+/// Sub-resource and texture ids are derived from the node, animation and path
+/// names, so re-saving an unchanged scene produces an unchanged file.
+fn collect_spriteframes_tables(tree: &SceneTree, node_ids: &[NodeId]) -> SpriteFramesTables {
+    let mut text = String::new();
+    let mut nodes: HashMap<NodeId, String> = HashMap::new();
+    let mut ext: BTreeMap<String, (String, String)> = BTreeMap::new();
+
+    for &nid in node_ids {
+        let Some(node) = tree.get_node(nid) else {
+            continue;
+        };
+        let Variant::PackedStringArray(anim_names) = node.get_property("__sf_anims__") else {
+            continue;
+        };
+        if anim_names.is_empty() {
+            continue;
+        }
+        let stem = sanitize_resource_id(node.name());
+        let sub_id = format!("SpriteFrames_{stem}");
+
+        let mut anim_blocks: Vec<String> = Vec::new();
+        // Authoring order, NOT sorted: the animation list is a user-ordered list
+        // in Godot's panel and reordering it on save would churn the file.
+        for anim in &anim_names {
+            let speed = match node.get_property(&format!("__sf_{anim}_speed")) {
+                Variant::Float(f) => f,
+                Variant::Int(i) => i as f64,
+                _ => 5.0,
+            };
+            // Only an explicit `false` turns looping off; Godot defaults to true.
+            let loops = !matches!(
+                node.get_property(&format!("__sf_{anim}_loop")),
+                Variant::Bool(false)
+            );
+            let frames = match node.get_property(&format!("__sf_{anim}_frames")) {
+                Variant::PackedStringArray(f) => f,
+                _ => Vec::new(),
+            };
+
+            let mut frame_blocks: Vec<String> = Vec::new();
+            for path in &frames {
+                let tex_id = format!("Texture_{}", sanitize_resource_id(path));
+                ext.entry(tex_id.clone())
+                    .or_insert_with(|| (ext_resource_type_for(path), path.clone()));
+                frame_blocks.push(format!(
+                    "{{\n\"duration\": 1.0,\n\"texture\": ExtResource(\"{tex_id}\")\n}}"
+                ));
+            }
+            anim_blocks.push(format!(
+                "{{\n\"frames\": [{}],\n\"loop\": {loops},\n\"name\": &\"{anim}\",\n\"speed\": {}\n}}",
+                frame_blocks.join(", "),
+                format_float(speed)
+            ));
+        }
+
+        writeln!(text, "\n[sub_resource type=\"SpriteFrames\" id=\"{sub_id}\"]").unwrap();
+        writeln!(text, "animations = [{}]", anim_blocks.join(", ")).unwrap();
+        nodes.insert(nid, sub_id);
+    }
+
+    SpriteFramesTables {
+        text,
+        nodes,
+        ext: ext
+            .into_iter()
+            .map(|(id, (res_type, path))| (id, res_type, path))
+            .collect(),
+    }
+}
+
+/// Properties regenerated from a node's attached player or frame library, which
+/// the node writer must therefore NOT also emit from its own parsed copies.
+///
+/// ⚠️ `sprite_frames` is the subtle one: a node loaded from a scene keeps the
+/// raw `SubResource("...")` string in its bag, so writing both that and the
+/// regenerated reference would emit the property twice.
+fn skip_keys_for(
+    anims: &AnimationTables,
+    sframes: &SpriteFramesTables,
+    nid: NodeId,
+) -> Vec<&'static str> {
+    let mut keys: Vec<&'static str> = anims.skip_keys(nid).to_vec();
+    if sframes.nodes.contains_key(&nid) {
+        keys.push("sprite_frames");
+    }
+    keys
+}
+
+/// Writes the `sprite_frames = SubResource("...")` reference for a node whose
+/// frames were regenerated above.
+fn write_spriteframes_props(out: &mut String, sf: &SpriteFramesTables, nid: NodeId) {
+    if let Some(sub_id) = sf.nodes.get(&nid) {
+        writeln!(out, "sprite_frames = SubResource(\"{sub_id}\")").unwrap();
+    }
+}
+
 /// Godot's `Animation.LoopMode` integer.
 fn loop_mode_to_int(mode: crate::animation::LoopMode) -> i64 {
     match mode {
@@ -520,21 +642,39 @@ impl TscnSaver {
         // writes them (pat-0q2kx.54). Before this, animations authored in the
         // editor existed only in memory: saving a scene dropped them silently.
         let anims = collect_animation_tables(tree, &node_ids);
+        // Every AnimatedSprite2D's authored frames become a `SpriteFrames`
+        // sub-resource plus `[ext_resource]` rows for its textures, matching
+        // Godot's shape (pat-0q2kx.74). Without this the editor's `__sf_*`
+        // companion keys would be written verbatim as properties Godot has
+        // never heard of.
+        let sframes = collect_spriteframes_tables(tree, &node_ids);
 
         let mut out = String::new();
         // Header. Godot emits `load_steps` = (ext + sub resources) + 1 whenever
         // any resources exist; a resource-free scene keeps the bare header.
-        let resource_count = tables.ext.len() + tables.sub.len() + anims.resource_count();
+        let resource_count = tables.ext.len()
+            + tables.sub.len()
+            + anims.resource_count()
+            + sframes.resource_count()
+            + sframes.ext.len();
         if resource_count > 0 {
             writeln!(out, "[gd_scene load_steps={} format=3]", resource_count + 1).unwrap();
         } else {
             writeln!(out, "[gd_scene format=3]").unwrap();
         }
 
-        // External resource table.
-        if !tables.ext.is_empty() {
+        // External resource table. Frame textures join the rows the node
+        // properties contributed; `or_insert` semantics upstream mean an id
+        // already present is not duplicated here either.
+        let mut ext_rows: Vec<&(String, String, String)> = tables.ext.iter().collect();
+        for row in &sframes.ext {
+            if !ext_rows.iter().any(|(id, _, _)| id == &row.0) {
+                ext_rows.push(row);
+            }
+        }
+        if !ext_rows.is_empty() {
             out.push('\n');
-            for (id, res_type, path) in &tables.ext {
+            for (id, res_type, path) in &ext_rows {
                 writeln!(
                     out,
                     "[ext_resource type=\"{res_type}\" path=\"{path}\" id=\"{id}\"]"
@@ -543,13 +683,20 @@ impl TscnSaver {
             }
         }
         // Inline sub-resource sections.
+        let sub_bodies = collect_sub_resource_bodies(tree, &node_ids);
         for (id, class) in &tables.sub {
             writeln!(out, "\n[sub_resource type=\"{class}\" id=\"{id}\"]").unwrap();
+            if let Some(props) = sub_bodies.get(id) {
+                for (key, value) in props {
+                    writeln!(out, "{key} = {}", format_variant_value(value)).unwrap();
+                }
+            }
         }
 
         // Animation + AnimationLibrary sub-resources, written before the node
         // sections so the players' `libraries` references resolve on re-load.
         out.push_str(&anims.text);
+        out.push_str(&sframes.text);
 
         // Build a map from NodeId -> relative path within the subtree.
         let mut id_to_path: HashMap<NodeId, String> = HashMap::new();
@@ -563,8 +710,9 @@ impl TscnSaver {
 
             if nid == root_id {
                 // Root node — no parent attribute.
-                write_node_section(&mut out, node, None, anims.skip_keys(nid));
+                write_node_section(&mut out, node, None, &skip_keys_for(&anims, &sframes, nid));
                 write_animation_player_props(&mut out, &anims, nid);
+                write_spriteframes_props(&mut out, &sframes, nid);
             } else {
                 // Compute parent path.
                 let parent_id = match node.parent() {
@@ -581,8 +729,14 @@ impl TscnSaver {
                 };
                 id_to_path.insert(nid, node_path);
 
-                write_node_section(&mut out, node, Some(&parent_path), anims.skip_keys(nid));
+                write_node_section(
+                    &mut out,
+                    node,
+                    Some(&parent_path),
+                    &skip_keys_for(&anims, &sframes, nid),
+                );
                 write_animation_player_props(&mut out, &anims, nid);
+                write_spriteframes_props(&mut out, &sframes, nid);
             }
         }
 
@@ -609,6 +763,71 @@ struct ResourceTables {
     sub: Vec<(String, String)>,
 }
 
+/// The node-companion prefix that caches a sub-resource's properties, by the
+/// property that references it.
+///
+/// The loader copies an inline sub-resource's whole property bag onto the node
+/// under a namespaced prefix so the runtime can reach it after the `PackedScene`
+/// is gone (`packed_scene.rs`). That cache is also the only surviving record of
+/// the sub-resource's contents at save time.
+fn companion_prefix_for(property: &str) -> Option<&'static str> {
+    match property {
+        "shape" => Some("__shape__"),
+        "curve" => Some("__curve__"),
+        "material" | "material_override" | "surface_material_override/0" => Some("__material__"),
+        _ => None,
+    }
+}
+
+/// Rebuilds each inline sub-resource's body from the node companions caching it.
+///
+/// ⚠️ Before this, `[sub_resource type="X" id="Y"]` was written as a bare header
+/// with NO properties, so a RectangleShape2D's `size` — or any authored shape
+/// geometry — was silently dropped on every save (pat-0q2kx.77). The header
+/// alone looks right in a diff, which is why it survived so long.
+///
+/// `class` is skipped: it is the cache's own bookkeeping and is already the
+/// section's `type=`.
+fn collect_sub_resource_bodies(
+    tree: &SceneTree,
+    node_ids: &[NodeId],
+) -> BTreeMap<String, Vec<(String, Variant)>> {
+    let mut bodies: BTreeMap<String, Vec<(String, Variant)>> = BTreeMap::new();
+    for &nid in node_ids {
+        let Some(node) = tree.get_node(nid) else {
+            continue;
+        };
+        for (k, v) in node.properties() {
+            let Some(property) = k.strip_prefix("__resref__") else {
+                continue;
+            };
+            let Variant::String(meta) = v else { continue };
+            let Some((_class, id)) = meta.rsplit_once("::") else {
+                continue;
+            };
+            let Some(prefix) = companion_prefix_for(property) else {
+                continue;
+            };
+            let mut props: Vec<(String, Variant)> = node
+                .properties()
+                .filter_map(|(ck, cv)| {
+                    let key = ck.strip_prefix(prefix)?;
+                    if key == "class" {
+                        return None;
+                    }
+                    Some((key.to_string(), cv.clone()))
+                })
+                .collect();
+            // Deterministic order, so re-saving an unchanged scene is a no-op.
+            props.sort_by(|a, b| a.0.cmp(&b.0));
+            if !props.is_empty() {
+                bodies.insert(id.to_string(), props);
+            }
+        }
+    }
+    bodies
+}
+
 /// Extracts the id from an `ExtResource("id")` reference string.
 fn parse_ext_resource_id(s: &str) -> Option<String> {
     let inner = s.strip_prefix("ExtResource(")?.strip_suffix(')')?.trim();
@@ -631,6 +850,11 @@ fn is_internal_prop(key: &str) -> bool {
         // reference, which is what round-trips; emitting the cache would invent
         // a property Godot has never heard of.
         || key.starts_with("__extres__")
+        // `__sf_*` holds the AnimatedSprite2D frame library the editor authors
+        // into the flat property bag (pat-0q2kx.74). It is regenerated above as
+        // a real `SpriteFrames` sub-resource, so emitting the raw keys too would
+        // both duplicate the data and invent properties Godot cannot parse.
+        || key.starts_with("__sf_")
         || key == "_instance"
         || key == "_instance_path"
         || key == "_script_path"

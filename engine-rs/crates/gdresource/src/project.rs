@@ -115,6 +115,87 @@ impl GodotProjectFile {
         Ok(GodotProjectFile { sections })
     }
 
+    /// Sets a value in a section, creating the section if needed.
+    pub fn set(&mut self, section: &str, key: &str, value: &str) {
+        self.sections
+            .entry(section.to_string())
+            .or_default()
+            .insert(key.to_string(), value.to_string());
+    }
+
+    /// Renders the file back to `project.godot` text.
+    ///
+    /// Godot writes the unnamed leading section (`config_version`, etc.) with no
+    /// header, then one `[section]` block each. Sections and keys are emitted in
+    /// sorted order so that rewriting an unchanged file is a no-op rather than a
+    /// reshuffle — a `HashMap`'s iteration order would churn the file on every
+    /// save and make diffs meaningless.
+    ///
+    /// ⚠️ This is a re-render, not an edit-in-place: comments and blank-line
+    /// layout in the original file are NOT preserved, because the parsed form
+    /// never captured them.
+    pub fn to_text(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+
+        // The leading section has an empty name and no header line.
+        if let Some(root) = self.sections.get("") {
+            let mut keys: Vec<&String> = root.keys().collect();
+            keys.sort();
+            for k in keys {
+                let _ = writeln!(out, "{k}={}", root[k]);
+            }
+        }
+
+        let mut names: Vec<&String> = self.sections.keys().filter(|n| !n.is_empty()).collect();
+        names.sort();
+        for name in names {
+            let _ = writeln!(out, "\n[{name}]\n");
+            let section = &self.sections[name];
+            let mut keys: Vec<&String> = section.keys().collect();
+            keys.sort();
+            for k in keys {
+                let _ = writeln!(out, "{k}={}", section[k]);
+            }
+        }
+        out
+    }
+
+    /// The `res://addons/*/plugin.cfg` paths listed in `[editor_plugins] enabled`.
+    ///
+    /// Godot stores them as `PackedStringArray("res://addons/a/plugin.cfg", ...)`
+    /// (`editor/editor_plugin_settings.cpp`). An absent or unparseable entry
+    /// yields an empty list, which is the same as "no plugins enabled".
+    pub fn enabled_editor_plugins(&self) -> Vec<String> {
+        let Some(raw) = self.get("editor_plugins", "enabled") else {
+            return Vec::new();
+        };
+        let inner = raw
+            .trim()
+            .strip_prefix("PackedStringArray(")
+            .and_then(|r| r.strip_suffix(')'))
+            .unwrap_or_else(|| raw.trim().trim_start_matches('[').trim_end_matches(']'));
+        inner
+            .split(',')
+            .map(|p| p.trim().trim_matches('"').to_string())
+            .filter(|p| !p.is_empty())
+            .collect()
+    }
+
+    /// Replaces `[editor_plugins] enabled` with `paths`.
+    ///
+    /// An empty list writes an empty `PackedStringArray()` rather than removing
+    /// the key, matching what Godot leaves behind after disabling the last
+    /// plugin.
+    pub fn set_enabled_editor_plugins(&mut self, paths: &[String]) {
+        let quoted: Vec<String> = paths.iter().map(|p| format!("\"{p}\"")).collect();
+        self.set(
+            "editor_plugins",
+            "enabled",
+            &format!("PackedStringArray({})", quoted.join(", ")),
+        );
+    }
+
     /// Gets a value from a specific section.
     pub fn get(&self, section: &str, key: &str) -> Option<&str> {
         self.sections

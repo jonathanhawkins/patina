@@ -1568,6 +1568,9 @@ impl MainLoop {
         // clips from, after them so a tree's blended pose wins where both write
         // the same property (pat-0q2kx.2).
         self.tree.process_animation_trees(delta_secs);
+        // AnimatedSprite2D advances its own frame counter in the idle phase,
+        // independent of any AnimationPlayer (pat-0q2kx.74).
+        self.tree.process_animated_sprites(delta_secs);
         self.tree.process_tweens(delta_secs);
 
         // -- skeleton phase (pat-0q2kx.3) --

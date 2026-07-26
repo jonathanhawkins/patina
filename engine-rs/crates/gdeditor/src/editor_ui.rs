@@ -600,6 +600,15 @@ select.renderer-indicator option { color: var(--text); background: var(--panel);
   order: 1; display: flex; align-items: center; gap: 2px; padding: 0 4px;
   border-top: 1px solid var(--border); flex-shrink: 0; height: 30px;
 }
+/* pat-0q2kx.75: tiles-editor tool row. The pressed tool is the one a pointer
+   gesture will run, so it has to read as pressed. */
+.tile-tool {
+  font-size: 12px; line-height: 1; padding: 3px 5px; cursor: pointer;
+  background: var(--panel-bg, #2b2b2b); color: var(--text, #ddd);
+  border: 1px solid var(--border, #111); border-radius: 3px;
+}
+.tile-tool:hover { background: var(--hover, #3a3a3a); }
+.tile-tool.active { background: var(--accent, #5c9ded); color: #fff; border-color: var(--accent, #5c9ded); }
 .bottom-tab {
   padding: 4px 12px; font-size: 12px; cursor: pointer; color: var(--text-dim);
   border: none; background: transparent; border-radius: 3px; font: inherit;
@@ -2334,6 +2343,10 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         <div id="viewport-placeholder"><div class="loading-spinner"></div><div>Loading viewport...</div></div>
         <canvas id="viewport-overlay-canvas" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5;"></canvas>
         <div id="box-select-overlay"></div>
+        <!-- pat-0q2kx.77: sub-editor handles. Godot draws draggable handles on a
+             selected CollisionShape2D and one per point on a Path2D/Polygon2D/
+             Line2D; these are absolutely positioned over the viewport img. -->
+        <div id="shape-handle-overlay" style="position:absolute;left:0;top:0;pointer-events:none;"></div>
         <div id="snap-indicator">Snap: 8px</div>
         <!-- pat-nzgdu.34: TileMap paint palette (Godot tiles editor TileSet atlas
              panel + paint tool, editor/plugins/tiles/). Shown only when a
@@ -2343,6 +2356,23 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
             <span style="font-weight:bold;">TileSet</span>
             <button id="tilemap-paint-toggle" title="Toggle tile paint mode: when on, clicking the 2D viewport paints the active tile." style="font-size:10px;">Paint: off</button>
+          </div>
+          <!-- pat-0q2kx.75: Godot's tiles-editor tool row
+               (tile_map_layer_editor.cpp). The active tool decides what a
+               pointer gesture posts; every tool commits one undo entry. -->
+          <div id="tilemap-tools" style="display:flex;flex-wrap:wrap;gap:2px;margin-bottom:5px;">
+            <button class="tile-tool" data-tool="paint" title="Paint (drag to paint a stroke)">&#9998;</button>
+            <button class="tile-tool" data-tool="erase" title="Eraser (or right-drag with any tool)">&#9003;</button>
+            <button class="tile-tool" data-tool="bucket" title="Bucket Fill (flood the contiguous like tiles)">&#9832;</button>
+            <button class="tile-tool" data-tool="rect" title="Rectangle (drag a filled rectangle)">&#9645;</button>
+            <button class="tile-tool" data-tool="line" title="Line (drag a straight run of cells)">&#9585;</button>
+            <button class="tile-tool" data-tool="picker" title="Picker (adopt the tile under the cursor)">&#128167;</button>
+          </div>
+          <div style="display:flex;gap:3px;align-items:center;margin-bottom:5px;">
+            <button id="tilemap-flip-h" title="Flip the placed tile horizontally (Godot alternative-tile flag)">Flip H</button>
+            <button id="tilemap-flip-v" title="Flip the placed tile vertically">Flip V</button>
+            <button id="tilemap-rotate" title="Rotate the placed tile 90&#176;">Rot</button>
+            <span id="tilemap-alt-label" style="opacity:0.7;">alt 0</span>
           </div>
           <div id="tilemap-palette-tiles" style="display:flex;flex-wrap:wrap;gap:3px;"></div>
         </div>
@@ -2530,6 +2560,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         <button class="bottom-tab" data-tab="audio">Audio</button>
         <button class="bottom-tab" data-tab="animation">Animation</button>
         <button class="bottom-tab" data-tab="scene-info">Scene Info</button>
+        <!-- pat-0q2kx.74: Godot's SpriteFrames panel appears only while an
+             AnimatedSprite2D is selected (sprite_frames_editor_plugin.cpp). -->
+        <button class="bottom-tab" data-tab="spriteframes" id="spriteframes-tab-btn" style="display:none">SpriteFrames</button>
         <button class="bottom-tab" data-tab="script" id="script-tab-btn">Script</button>
         <!-- pat-bc0tv: Shader Editor bottom-panel tab (Godot shader_editor_plugin.cpp
              adds "Shader Editor" to the bottom panel). -->
@@ -2543,6 +2576,25 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         </div>
       </div>
       <div id="bottom-panel-content">
+        <div class="bottom-content-tab" data-tab="spriteframes">
+          <div style="display:flex; gap:10px; align-items:flex-start">
+            <div style="min-width:170px">
+              <div style="display:flex; gap:4px; margin-bottom:4px">
+                <input id="sf-new-anim" placeholder="animation name" style="flex:1"/>
+                <button id="sf-add-anim">+</button>
+              </div>
+              <div id="sf-anim-list"></div>
+            </div>
+            <div style="flex:1">
+              <div style="display:flex; gap:6px; align-items:center; margin-bottom:4px">
+                <label>Speed <input id="sf-speed" type="number" min="0" step="1" style="width:64px"/></label>
+                <label><input id="sf-loop" type="checkbox"/> Loop</label>
+                <button id="sf-add-frame">Add Frame</button>
+              </div>
+              <div id="sf-frame-strip" style="display:flex; gap:4px; flex-wrap:wrap"></div>
+            </div>
+          </div>
+        </div>
         <div class="bottom-content-tab active" data-tab="output">
           <!-- Output panel (Godot EditorLog parity, editor_log.cpp:505-617):
                left = log + "Filter Messages" box; right = Clear/Copy, Collapse/
@@ -4235,6 +4287,123 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   }
 
   // ---- Selection ----
+  // -- SpriteFrames panel (pat-0q2kx.74) ------------------------------------
+  //
+  // Godot shows this panel only while an AnimatedSprite2D is selected, and it
+  // edits the node's SpriteFrames resource. Patina stores that resource as flat
+  // companion keys on the node, so the panel talks to /api/spriteframes rather
+  // than to the generic inspector.
+  var sfCurrentAnim = null;
+
+  async function refreshSpriteFrames() {
+    if (!selectedNodeId) return;
+    var data = await api('GET', '/api/spriteframes?node_id=' + selectedNodeId);
+    if (!data || !data.animations) return;
+    var list = document.getElementById('sf-anim-list');
+    var strip = document.getElementById('sf-frame-strip');
+    if (!list || !strip) return;
+    list.innerHTML = '';
+    if (sfCurrentAnim === null && data.animations.length) sfCurrentAnim = data.animations[0].name;
+    data.animations.forEach(function(a) {
+      var row = document.createElement('div');
+      row.textContent = a.name + '  (' + a.frames.length + ')';
+      row.style.cursor = 'pointer';
+      if (a.name === sfCurrentAnim) row.style.fontWeight = 'bold';
+      row.addEventListener('click', function() { sfCurrentAnim = a.name; refreshSpriteFrames(); });
+      list.appendChild(row);
+    });
+    var current = data.animations.filter(function(a) { return a.name === sfCurrentAnim; })[0];
+    strip.innerHTML = '';
+    if (!current) return;
+    var speedEl = document.getElementById('sf-speed');
+    var loopEl = document.getElementById('sf-loop');
+    if (speedEl) speedEl.value = current.speed;
+    if (loopEl) loopEl.checked = !!current.loop;
+    current.frames.forEach(function(tex, i) {
+      var cell = document.createElement('div');
+      cell.style.cssText = 'border:1px solid var(--border); padding:2px; text-align:center';
+      var img = document.createElement('img');
+      // Thumbnails come from the existing preview route.
+      img.src = '/api/preview/file?path=' + encodeURIComponent(tex);
+      img.style.cssText = 'width:48px; height:48px; object-fit:contain; display:block';
+      cell.appendChild(img);
+      var del = document.createElement('button');
+      del.textContent = 'x';
+      del.title = 'Remove frame ' + i;
+      del.addEventListener('click', async function() {
+        await api('POST', '/api/spriteframes/frame/remove', { node_id: selectedNodeId, name: sfCurrentAnim, index: i });
+        refreshSpriteFrames();
+      });
+      cell.appendChild(del);
+      strip.appendChild(cell);
+    });
+  }
+
+  // Godot only surfaces the panel for the class that owns the resource.
+  function updateSpriteFramesTabVisibility(cls) {
+    var btn = document.getElementById('spriteframes-tab-btn');
+    if (!btn) return;
+    var show = cls === 'AnimatedSprite2D';
+    btn.style.display = show ? '' : 'none';
+    if (show) refreshSpriteFrames(); else sfCurrentAnim = null;
+  }
+
+  function wireSpriteFramesPanel() {
+    var add = document.getElementById('sf-add-anim');
+    if (add) add.addEventListener('click', async function() {
+      var input = document.getElementById('sf-new-anim');
+      var name = input && input.value.trim();
+      if (!name) return;
+      await api('POST', '/api/spriteframes/anim/add', { node_id: selectedNodeId, name: name });
+      sfCurrentAnim = name;
+      if (input) input.value = '';
+      refreshSpriteFrames();
+    });
+    var addFrame = document.getElementById('sf-add-frame');
+    if (addFrame) addFrame.addEventListener('click', async function() {
+      var tex = prompt('Texture path (res://...)');
+      if (!tex) return;
+      await api('POST', '/api/spriteframes/frame/add', { node_id: selectedNodeId, name: sfCurrentAnim, texture: tex });
+      refreshSpriteFrames();
+    });
+    ['sf-speed', 'sf-loop'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('change', async function() {
+        var speedEl = document.getElementById('sf-speed');
+        var loopEl = document.getElementById('sf-loop');
+        await api('POST', '/api/spriteframes/anim/set', {
+          node_id: selectedNodeId,
+          name: sfCurrentAnim,
+          speed: speedEl ? parseFloat(speedEl.value) : 5.0,
+          loop: loopEl ? loopEl.checked : true,
+        });
+        refreshSpriteFrames();
+      });
+    });
+    // Drag a texture from the FileSystem dock onto the strip.
+    var strip = document.getElementById('sf-frame-strip');
+    if (strip) {
+      strip.addEventListener('dragover', function(e) { e.preventDefault(); });
+      strip.addEventListener('drop', async function(e) {
+        e.preventDefault();
+        var raw = e.dataTransfer && e.dataTransfer.getData('text/plain');
+        if (!raw || !sfCurrentAnim) return;
+        // The FileSystem dock ships `{type, path, name}` as JSON, not a bare path.
+        var path = null;
+        try {
+          var payload = JSON.parse(raw);
+          // ⚠️ Only a texture belongs in a frame strip; a dragged .gd or .tscn
+          // would otherwise be stored as a frame and fail to load at runtime.
+          if (payload && payload.type === 'texture') path = payload.path;
+        } catch (err) { path = raw; }
+        if (!path) return;
+        await api('POST', '/api/spriteframes/frame/add', { node_id: selectedNodeId, name: sfCurrentAnim, texture: path });
+        refreshSpriteFrames();
+      });
+    }
+  }
+
   async function selectNode(id) {
     selectedNodeId = id;
     if (!inspectorHistoryNavigating) {
@@ -4289,6 +4458,8 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       if (typeof updateMiscButtons === 'function') updateMiscButtons();
       buildTilePalette(); // pat-nzgdu.34: hide TileSet palette when nothing is selected
       updateCameraPreviewInset(); // pat-nzgdu.173: hide the Camera3D preview inset
+      updateSpriteFramesTabVisibility(''); // pat-0q2kx.74
+      refreshSubEditorHandles(); // pat-0q2kx.77: clear handles with the selection
       return;
     }
     var data = await api('GET', '/api/selected');
@@ -4296,6 +4467,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       selectedNodeData = data;
       buildTilePalette(); // pat-nzgdu.34: refresh TileSet palette for the new selection
       updateCameraPreviewInset(); // pat-nzgdu.173: show/refresh the Camera3D preview inset
+      // pat-0q2kx.74: the SpriteFrames panel is bound to the selected node.
+      updateSpriteFramesTabVisibility(data.class || data.class_name || '');
+      refreshSubEditorHandles(); // pat-0q2kx.77
       renderInspector(data);
       document.getElementById('status-selected').textContent = data.name || 'None';
       document.getElementById('status-path').textContent = data.path || '\u2014';
@@ -5681,6 +5855,118 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   var panStartPanX = 0;
   var panStartPanY = 0;
 
+  // -- 2D sub-editors: shape handles + curve/polygon points (pat-0q2kx.77) ---
+  //
+  // The server owns the geometry; the client only draws handles where the server
+  // says they are and posts the drag back. `/api/viewport/shape_resize` and the
+  // point routes had ZERO callers before this.
+  var shapeHandles = [];   // [{handle, x, y}] in node-local pixels
+  var curvePoints = [];    // [[x, y], ...] in node-local pixels
+  var handleDrag = null;   // {kind:'shape'|'point', handle, index}
+
+  // Node-local -> viewport-image pixels. The 2D editor viewport is unscaled and
+  // origin-aligned, so a node's own position is the only offset.
+  // Whether the selection is a class with an editable point list. Mirrors the
+  // server's `point_property_for`, which is the authority.
+  function isPointEditableSelected() {
+    var cls = (selectedNodeData && (selectedNodeData.class || selectedNodeData.class_name)) || '';
+    return cls === 'Path2D' || cls === 'Polygon2D' || cls === 'Line2D';
+  }
+
+  function nodeOrigin() {
+    var pos = selectedNodeData && selectedNodeData.properties && selectedNodeData.properties.position;
+    if (pos && pos.value && pos.value.length === 2) return { x: pos.value[0], y: pos.value[1] };
+    return { x: 0, y: 0 };
+  }
+
+  async function refreshSubEditorHandles() {
+    var host = document.getElementById('shape-handle-overlay');
+    if (!host) return;
+    host.innerHTML = '';
+    shapeHandles = [];
+    curvePoints = [];
+    if (selectedNodeId === null || selectedNodeId === undefined || editorMode === '3d') return;
+
+    var shapes = await api('GET', '/api/viewport/shape_handles?node_id=' + selectedNodeId);
+    if (shapes && shapes.editable) shapeHandles = shapes.handles || [];
+    var points = await api('GET', '/api/viewport/points?node_id=' + selectedNodeId);
+    if (points && points.editable) curvePoints = points.points || [];
+
+    var origin = nodeOrigin();
+    var rect = viewportImg ? viewportImg.getBoundingClientRect() : null;
+    var scaleX = rect && viewportImg.naturalWidth ? rect.width / viewportImg.naturalWidth : 1;
+    var scaleY = rect && viewportImg.naturalHeight ? rect.height / viewportImg.naturalHeight : 1;
+
+    function place(px, py, color, title) {
+      var dot = document.createElement('div');
+      dot.className = 'sub-edit-handle';
+      dot.title = title;
+      dot.style.cssText = 'position:absolute;width:9px;height:9px;margin:-5px 0 0 -5px;border:1px solid #000;'
+        + 'border-radius:2px;pointer-events:auto;cursor:pointer;background:' + color
+        + ';left:' + ((origin.x + px) * scaleX) + 'px;top:' + ((origin.y + py) * scaleY) + 'px;';
+      return dot;
+    }
+
+    shapeHandles.forEach(function(h, i) {
+      var dot = place(h.x, h.y, '#ffb020', 'Drag to resize (' + h.handle + ')');
+      dot.addEventListener('mousedown', function(ev) {
+        ev.stopPropagation(); ev.preventDefault();
+        handleDrag = { kind: 'shape', handle: h.handle, index: i };
+      });
+      host.appendChild(dot);
+    });
+    curvePoints.forEach(function(p, i) {
+      var dot = place(p[0], p[1], '#5cd6a0', 'Point ' + i + ' (drag to move, right-click to delete)');
+      dot.addEventListener('mousedown', function(ev) {
+        ev.stopPropagation(); ev.preventDefault();
+        if (ev.button === 2) { removeCurvePoint(i); return; }
+        handleDrag = { kind: 'point', index: i };
+      });
+      host.appendChild(dot);
+    });
+  }
+
+  async function removeCurvePoint(index) {
+    await api('POST', '/api/path2d/point/remove', { node_id: selectedNodeId, index: index });
+    refreshViewport();
+    refreshSubEditorHandles();
+  }
+
+  // Alt+click on empty viewport space appends a point to the selected curve.
+  async function addCurvePointAtEvent(e) {
+    var c = viewportCoords(e);
+    var origin = nodeOrigin();
+    await api('POST', '/api/path2d/point/add', { node_id: selectedNodeId, x: c.x - origin.x, y: c.y - origin.y });
+    refreshViewport();
+    refreshSubEditorHandles();
+  }
+
+  async function subEditorDragMove(e) {
+    if (!handleDrag) return;
+    var c = viewportCoords(e);
+    var origin = nodeOrigin();
+    var lx = c.x - origin.x, ly = c.y - origin.y;
+    if (handleDrag.kind === 'point') {
+      await api('POST', '/api/path2d/point/move', { node_id: selectedNodeId, index: handleDrag.index, x: lx, y: ly });
+    } else if (handleDrag.handle === 'radius') {
+      // A radius handle sits on +X, so its distance from the origin IS the value.
+      await api('POST', '/api/viewport/shape_resize', { node_id: selectedNodeId, handle: 'radius', value: Math.round(Math.sqrt(lx * lx + ly * ly)) });
+    } else if (handleDrag.handle === 'height') {
+      await api('POST', '/api/viewport/shape_resize', { node_id: selectedNodeId, handle: 'height', value: Math.round(Math.abs(ly) * 2) });
+    } else {
+      // Rectangle: the handle drives full size, and Godot's handles are at the
+      // half-extent, so the dragged distance is doubled.
+      await api('POST', '/api/viewport/shape_resize', { node_id: selectedNodeId, handle: 'extents', value: [Math.round(Math.abs(lx) * 2), Math.round(Math.abs(ly) * 2)] });
+    }
+    refreshViewport();
+  }
+
+  function subEditorDragEnd() {
+    if (!handleDrag) return;
+    handleDrag = null;
+    refreshSubEditorHandles();
+  }
+
   function viewportCoords(e) {
     var rect = viewportImg.getBoundingClientRect();
     var scaleX = viewportImg.naturalWidth / rect.width;
@@ -6086,16 +6372,138 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     }
   }
 
+  // pat-0q2kx.75: the active tool decides what a pointer gesture posts. Godot's
+  // tiles editor keeps paint/erase/bucket/rect/line/picker in one toolbar and
+  // commits each gesture as a single undo action
+  // (tile_map_layer_editor.cpp).
+  var tileTool = 'paint';
+  // Godot encodes flip/rotate as the alternative-tile id's low bits
+  // (TileSetAtlasSource::TRANSFORM_FLIP_H / FLIP_V / TRANSPOSE).
+  var TILE_FLIP_H = 1, TILE_FLIP_V = 2, TILE_TRANSPOSE = 4;
+  var tileAlternative = 0;
+  // Where a drag started, so rect/line know their other corner.
+  var tileDragAnchor = null;
+  // Cells already painted during this drag, so a stroke does not re-post the
+  // same cell every mousemove.
+  var tileStrokeSeen = null;
+
+  function updateTileToolButtons() {
+    var btns = document.querySelectorAll('.tile-tool');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle('active', btns[i].getAttribute('data-tool') === tileTool);
+    }
+    var lbl = document.getElementById('tilemap-alt-label');
+    if (lbl) lbl.textContent = 'alt ' + tileAlternative;
+  }
+
+  // The grid cell under a viewport event.
+  function tileCellAtEvent(e) {
+    var c = viewportCoords(e);
+    var cs = tilesetCellSize > 0 ? tilesetCellSize : 16;
+    return { x: Math.floor(c.x / cs), y: Math.floor(c.y / cs) };
+  }
+
   // Paint the active tile at the cell under a 2D viewport click, then refresh
   // the rendered viewport so the change is visible.
   async function paintTileAtEvent(e) {
     if (!isTileMapNodeSelected()) return;
-    var c = viewportCoords(e);
-    var cs = tilesetCellSize > 0 ? tilesetCellSize : 16;
-    var cx = Math.floor(c.x / cs);
-    var cy = Math.floor(c.y / cs);
-    await api('POST', '/api/tilemap/paint', { node_id: selectedNodeId, x: cx, y: cy, tile_id: activeTileId });
+    var cell = tileCellAtEvent(e);
+    await api('POST', '/api/tilemap/paint', { node_id: selectedNodeId, x: cell.x, y: cell.y, tile_id: activeTileId, alternative: tileAlternative });
     refreshViewport();
+  }
+
+  async function eraseTileAtEvent(e) {
+    if (!isTileMapNodeSelected()) return;
+    var cell = tileCellAtEvent(e);
+    await api('POST', '/api/tilemap/erase', { node_id: selectedNodeId, x: cell.x, y: cell.y });
+    refreshViewport();
+  }
+
+  // Adopt the tile under the cursor as the active one, like Godot's picker.
+  async function pickTileAtEvent(e) {
+    if (!isTileMapNodeSelected()) return;
+    var cell = tileCellAtEvent(e);
+    var data = await api('GET', '/api/tilemap/data?node_id=' + selectedNodeId);
+    if (!data || !data.cells || !data.width) return;
+    if (cell.x < 0 || cell.y < 0 || cell.x >= data.width || cell.y >= data.height) return;
+    var id = data.cells[cell.y * data.width + cell.x];
+    // Tile 0 is "empty" and is not a palette entry, so picking it is a no-op
+    // rather than selecting a tile that cannot be painted.
+    if (id) { activeTileId = id; buildTilePalette(); }
+  }
+
+  // -- gesture entry points ---------------------------------------------------
+  //
+  // ⚠️ Right button erases regardless of tool, matching Godot; that is why the
+  // handlers take the button into account instead of keying only off tileTool.
+  async function tileToolDown(e) {
+    if (!isTileMapNodeSelected()) return;
+    var cell = tileCellAtEvent(e);
+    tileDragAnchor = cell;
+    tileStrokeSeen = {};
+    if (e.button === 2 || tileTool === 'erase') { tileStrokeSeen[cell.x + ',' + cell.y] = 1; await eraseTileAtEvent(e); return; }
+    if (tileTool === 'picker') { await pickTileAtEvent(e); return; }
+    if (tileTool === 'bucket') {
+      await api('POST', '/api/tilemap/fill', { node_id: selectedNodeId, mode: 'bucket', x: cell.x, y: cell.y, tile_id: activeTileId });
+      refreshViewport();
+      return;
+    }
+    // rect/line commit on release; paint starts a stroke immediately.
+    if (tileTool === 'paint') { tileStrokeSeen[cell.x + ',' + cell.y] = 1; await paintTileAtEvent(e); }
+  }
+
+  // Drag painting: each newly-entered cell is painted once (Godot paints
+  // continuously while the button is held).
+  async function tileToolMove(e) {
+    if (!tileDragAnchor || !tileStrokeSeen) return;
+    if (tileTool !== 'paint' && tileTool !== 'erase' && e.button !== 2) return;
+    var cell = tileCellAtEvent(e);
+    var key = cell.x + ',' + cell.y;
+    if (tileStrokeSeen[key]) return;
+    tileStrokeSeen[key] = 1;
+    if (tileTool === 'erase') await eraseTileAtEvent(e); else await paintTileAtEvent(e);
+  }
+
+  async function tileToolUp(e) {
+    if (!tileDragAnchor) return;
+    var anchor = tileDragAnchor;
+    tileDragAnchor = null;
+    tileStrokeSeen = null;
+    if (!isTileMapNodeSelected()) return;
+    var cell = tileCellAtEvent(e);
+    if (tileTool === 'rect') {
+      // The rect route is atomic server-side, so the whole drag is ONE undo
+      // entry rather than one per cell.
+      await api('POST', '/api/tilemap/fill', { node_id: selectedNodeId, x1: anchor.x, y1: anchor.y, x2: cell.x, y2: cell.y, tile_id: activeTileId });
+      refreshViewport();
+    } else if (tileTool === 'line') {
+      await api('POST', '/api/tilemap/line', { node_id: selectedNodeId, x1: anchor.x, y1: anchor.y, x2: cell.x, y2: cell.y, tile_id: activeTileId });
+      refreshViewport();
+    }
+  }
+
+  function wireTileTools() {
+    var btns = document.querySelectorAll('.tile-tool');
+    for (var i = 0; i < btns.length; i++) {
+      (function(b) {
+        b.addEventListener('click', function() {
+          tileTool = b.getAttribute('data-tool');
+          // Choosing a tool implies wanting to use it.
+          tilePaintActive = true;
+          updateTilePaintToggle();
+          updateTileToolButtons();
+        });
+      })(btns[i]);
+    }
+    var fh = document.getElementById('tilemap-flip-h');
+    if (fh) fh.addEventListener('click', function() { tileAlternative ^= TILE_FLIP_H; updateTileToolButtons(); });
+    var fv = document.getElementById('tilemap-flip-v');
+    if (fv) fv.addEventListener('click', function() { tileAlternative ^= TILE_FLIP_V; updateTileToolButtons(); });
+    var rot = document.getElementById('tilemap-rotate');
+    // Godot's 90-degree rotation is transpose + horizontal flip, not a flag of
+    // its own.
+    if (rot) rot.addEventListener('click', function() { tileAlternative ^= (TILE_TRANSPOSE | TILE_FLIP_H); updateTileToolButtons(); });
+    updateTileToolButtons();
   }
 
   function setupViewport() {
@@ -6107,12 +6515,15 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var toolDragPrev = null;
     var tilePaintToggleBtn = document.getElementById('tilemap-paint-toggle');
     if (tilePaintToggleBtn) tilePaintToggleBtn.addEventListener('click', function() { tilePaintActive = !tilePaintActive; updateTilePaintToggle(); });
+    wireTileTools(); // pat-0q2kx.75
     viewportImg = document.createElement('img');
     viewportImg.id = 'viewport-img';
     viewportImg.style.display = 'none';
     viewportImg.draggable = false;
     // In 3D mode, suppress the native context menu so right-drag can orbit.
-    viewportImg.addEventListener('contextmenu', function(e) { if (editorMode === '3d') e.preventDefault(); });
+    // pat-0q2kx.75: also suppress it while tile painting, so the right button
+    // can erase without the browser menu swallowing the drag.
+    viewportImg.addEventListener('contextmenu', function(e) { if (editorMode === '3d' || (tilePaintActive && isTileMapNodeSelected())) e.preventDefault(); });
     viewportImg.addEventListener('mousedown', function(e) {
       e.preventDefault();
       if (editorMode === '3d') {
@@ -6122,9 +6533,13 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         else begin3DLeft(e);
         return;
       }
-      // pat-nzgdu.34: in tile paint mode with a TileMapLayer selected, a left
-      // click paints the active tile instead of selecting/dragging.
-      if (tilePaintActive && e.button === 0 && isTileMapNodeSelected()) { paintTileAtEvent(e); return; }
+      // pat-nzgdu.34 / pat-0q2kx.75: in tile paint mode with a TileMapLayer
+      // selected, a pointer gesture drives the active tile tool instead of
+      // selecting/dragging. Right button erases, as in Godot.
+      if (tilePaintActive && (e.button === 0 || e.button === 2) && isTileMapNodeSelected()) { tileToolDown(e); return; }
+      // pat-0q2kx.77: Alt+click appends a point to the selected curve/polygon,
+      // mirroring Godot's "add point" modifier in the Path2D editor.
+      if (e.altKey && e.button === 0 && curvePoints.length >= 0 && isPointEditableSelected()) { addCurvePointAtEvent(e); return; }
       var c = viewportCoords(e);
       dragStartX = e.clientX; dragStartY = e.clientY;
       isDragging = false;
@@ -6152,6 +6567,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     });
     document.addEventListener('mousemove', function(e) {
       if (editorMode === '3d') { update3DNav(e); return; }
+      // pat-0q2kx.75: a held tile stroke consumes the move before selection
+      // logic sees it, so dragging paints rather than box-selecting.
+      if (tileDragAnchor) { tileToolMove(e); return; }
+      // pat-0q2kx.77: same for a shape/point handle drag.
+      if (handleDrag) { subEditorDragMove(e); return; }
       if (isBoxSelecting && boxSelectStart) {
         var x = Math.min(boxSelectStart.x, e.clientX);
         var y = Math.min(boxSelectStart.y, e.clientY);
@@ -6217,6 +6637,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     });
     document.addEventListener('mouseup', function(e) {
       if (editorMode === '3d') { end3DNav(e); return; }
+      // Rect and line commit here, on release, as one server-side action.
+      if (tileDragAnchor) { tileToolUp(e); return; }
+      if (handleDrag) { subEditorDragEnd(); return; }
       if (isBoxSelecting && boxSelectStart) {
         isBoxSelecting = false;
         if (boxSelectOverlay) boxSelectOverlay.style.display = 'none';
@@ -14477,6 +14900,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   setupModeButtons();
   setupSceneTabClose();
   setupCommandPalette();
+  wireSpriteFramesPanel(); // pat-0q2kx.74
   logMessage('info', 'Editor ready');
   fetchScene();
   fetchSelected();

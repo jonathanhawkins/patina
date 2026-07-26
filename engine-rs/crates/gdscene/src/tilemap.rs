@@ -294,6 +294,31 @@ pub fn decode_tile_map_data(bytes: &[u8]) -> HashMap<Vector2i, TileData> {
     cells
 }
 
+/// Encodes cells into Godot's `tile_map_data` PackedByteArray.
+///
+/// The exact inverse of [`decode_tile_map_data`]: a little-endian `u16` format
+/// header (0) followed by 12-byte `[i16 x][i16 y][u16 source_id][u16 atlas_x]
+/// [u16 atlas_y][u16 alternative]` records. Records are emitted in sorted cell
+/// order so that re-saving an unchanged layer produces an unchanged file rather
+/// than reshuffling with `HashMap` iteration order.
+pub fn encode_tile_map_data(cells: &HashMap<Vector2i, TileData>) -> Vec<u8> {
+    let mut keys: Vec<&Vector2i> = cells.keys().collect();
+    keys.sort_by_key(|c| (c.y, c.x));
+
+    let mut out = Vec::with_capacity(2 + keys.len() * 12);
+    out.extend_from_slice(&0u16.to_le_bytes());
+    for key in keys {
+        let data = &cells[key];
+        out.extend_from_slice(&(key.x as i16).to_le_bytes());
+        out.extend_from_slice(&(key.y as i16).to_le_bytes());
+        out.extend_from_slice(&(data.source_id as u16).to_le_bytes());
+        out.extend_from_slice(&(data.atlas_coords.x as u16).to_le_bytes());
+        out.extend_from_slice(&(data.atlas_coords.y as u16).to_le_bytes());
+        out.extend_from_slice(&(data.alternative_id as u16).to_le_bytes());
+    }
+    out
+}
+
 impl TileMapLayer {
     /// Builds a layer named `name` whose cells are decoded from a Godot
     /// `tile_map_data` PackedByteArray (see [`decode_tile_map_data`]). This is
@@ -304,6 +329,25 @@ impl TileMapLayer {
         layer.cells = decode_tile_map_data(bytes);
         layer
     }
+}
+
+/// The `(width, height)` a dense grid needs to hold every cell in `bytes`.
+///
+/// Negative coordinates are ignored — the editor's `TileGrid` is anchored at
+/// (0, 0) and has no room for them — so a layer painted into negative space
+/// round-trips only its non-negative quadrant.
+pub fn tile_map_data_extent(bytes: &[u8]) -> (usize, usize) {
+    let mut w = 0i32;
+    let mut h = 0i32;
+    for cell in decode_tile_map_data(bytes).keys() {
+        if cell.x >= 0 {
+            w = w.max(cell.x + 1);
+        }
+        if cell.y >= 0 {
+            h = h.max(cell.y + 1);
+        }
+    }
+    (w as usize, h as usize)
 }
 
 /// Converts a grid cell coordinate to local pixel position (center of cell).
@@ -479,6 +523,44 @@ impl TileGrid {
         self.height = nh;
         self.cells = nc;
     }
+    /// Encodes the grid as Godot's `tile_map_data` PackedByteArray.
+    ///
+    /// The editor's dense grid and Godot's sparse cell map are different models,
+    /// so the bridge is explicit: a non-zero grid value is one cell whose
+    /// `source_id` IS that tile id, at atlas (0, 0) with alternative 0; a zero
+    /// is "no cell" and is simply absent. Empty cells are omitted rather than
+    /// written as source 0, because Godot treats a present record as a placed
+    /// tile — writing them would resurrect every erased cell on reload.
+    ///
+    /// This is what makes painted tiles survive a save: the bytes land on the
+    /// node's `tile_map_data` property, which the `.tscn` writer already knows
+    /// how to emit (pat-0q2kx.75).
+    pub fn to_tile_map_data(&self) -> Vec<u8> {
+        let mut cells: HashMap<Vector2i, TileData> = HashMap::new();
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let t = self.cells[y * self.width + x];
+                if t != 0 {
+                    cells.insert(Vector2i::new(x as i32, y as i32), TileData::new(t));
+                }
+            }
+        }
+        encode_tile_map_data(&cells)
+    }
+
+    /// Rebuilds a `width` x `height` grid from Godot `tile_map_data` bytes.
+    ///
+    /// Cells outside the requested extent are dropped rather than growing the
+    /// grid, so a caller that knows the layer's authored size gets that size
+    /// back. Use [`tile_map_data_extent`] to derive a size from the data itself.
+    pub fn from_tile_map_data(bytes: &[u8], width: usize, height: usize) -> Self {
+        let mut grid = Self::new(width, height);
+        for (cell, data) in decode_tile_map_data(bytes) {
+            grid.set(cell.x, cell.y, data.source_id);
+        }
+        grid
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({ "width": self.width, "height": self.height, "cells": self.cells })
     }

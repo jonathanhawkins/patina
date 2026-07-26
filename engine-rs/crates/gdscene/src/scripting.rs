@@ -72,9 +72,55 @@ impl GDScriptNodeInstance {
     pub fn has_method(&self, name: &str) -> bool {
         self.instance.class_def.methods.contains_key(name)
     }
+
+    /// The `@rpc`-annotated methods, as `(method_name, annotation_args)`.
+    ///
+    /// The parser has always recorded these; `FuncDef` used to discard them, so
+    /// nothing downstream could see them (pat-0q2kx.79). Returned as raw
+    /// argument strings because the RPC config type lives in `gdplatform`, which
+    /// the interpreter crate does not depend on.
+    fn rpc_methods_impl(&self) -> Vec<(String, Vec<String>)> {
+        let mut out: Vec<(String, Vec<String>)> = self
+            .instance
+            .class_def
+            .methods
+            .iter()
+            .filter_map(|(name, def)| {
+                def.rpc_annotation()
+                    .map(|args| (name.clone(), args.to_vec()))
+            })
+            .collect();
+        // Deterministic order: a HashMap walk would register in a different
+        // order each run, which matters the moment two methods disagree.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Whether the script carries `@tool`, i.e. it is meant to run in the
+    /// editor as well as at runtime (pat-0q2kx.76).
+    ///
+    /// The parser already records the annotation; nothing outside the
+    /// interpreter could read it, so the editor had no way to tell a tool
+    /// script from an ordinary one.
+    pub fn is_tool(&self) -> bool {
+        self.instance.class_def.is_tool
+    }
+
+    /// Drains anything the script printed since the last call.
+    ///
+    /// `print` accumulates into the interpreter's output buffer; draining it is
+    /// how a host surfaces script output — the editor routes it to the Output
+    /// panel, so a `@tool` script's prints are visible where a user expects.
+    pub fn take_output(&mut self) -> Vec<String> {
+        self.interpreter.take_output()
+    }
 }
 
 impl ScriptInstance for GDScriptNodeInstance {
+    fn rpc_methods(&self) -> Vec<(String, Vec<String>)> {
+        self.rpc_methods_impl()
+    }
+
     fn call_method(&mut self, name: &str, args: &[Variant]) -> Result<Variant, ScriptError> {
         self.interpreter
             .call_instance_method(&mut self.instance, name, args)
@@ -431,6 +477,14 @@ impl SceneTreeAccessor {
         // Callers of `new`/`with_input` (both `unsafe`) guarantee the pointer is valid
         // and that no mutable alias exists while this shared reference is live.
         unsafe { &*self.tree }
+    }
+
+    /// The absolute-path hash used to address `nid` over the network, or `None`
+    /// when the node is not in the tree.
+    fn rpc_hash_for(&self, nid: NodeId) -> Option<u64> {
+        self.tree()
+            .node_path(nid)
+            .map(|p| crate::scene_tree::rpc_path_hash(&p))
     }
 
     fn tree_mut(&mut self) -> &mut SceneTree {
@@ -1360,6 +1414,60 @@ impl SceneAccess for SceneTreeAccessor {
     fn queue_free(&mut self, node_id: u64) {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node_id));
         self.tree_mut().queue_free(nid);
+    }
+
+    /// Godot `Node.rpc`: send through the tree's MultiplayerAPI, addressed by
+    /// the node's absolute path hash — the same hash `poll_multiplayer` resolves
+    /// inbound packets with, so a call lands on the matching node on the peer.
+    /// Godot `Node.rpc`: send through the tree's MultiplayerAPI, addressed by
+    /// the node's absolute path hash — the same hash `poll_multiplayer` resolves
+    /// inbound packets with, so a call lands on the matching node on the peer.
+    fn node_rpc(&mut self, node: u64, method: &str, args: &[Variant]) -> Result<(), String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(hash) = self.rpc_hash_for(nid) else {
+            return Err(format!("rpc(): node {node} is not in the tree"));
+        };
+        let sent = self
+            .tree_mut()
+            .get_multiplayer_mut()
+            .rpc(hash, method, args.to_vec())
+            .map_err(|e| format!("{e:?}"));
+        // ⚠️ `call_local` runs the method on the SENDER too, and Godot does it
+        // whether or not the packet went anywhere — a peerless send is not a
+        // reason to skip local execution.
+        //
+        // Queued rather than called inline: `rpc()` is invoked FROM inside the
+        // node's own running script, and a running script is checked out of
+        // `SceneTree.scripts`, so a re-entrant `call_script_method` would find
+        // no script and silently do nothing. The deferred queue runs it once the
+        // current method has returned and the script is back in the arena.
+        if self.tree().rpc_is_call_local(method) {
+            self.tree_mut().call_deferred(nid, method, args);
+        }
+        sent
+    }
+
+    /// [`node_rpc`](Self::node_rpc) addressed to a single peer.
+    fn node_rpc_id(
+        &mut self,
+        node: u64,
+        peer: i64,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<(), String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(hash) = self.rpc_hash_for(nid) else {
+            return Err(format!("rpc_id(): node {node} is not in the tree"));
+        };
+        let sent = self
+            .tree_mut()
+            .get_multiplayer_mut()
+            .rpc_id(hash, peer, method, args.to_vec())
+            .map_err(|e| format!("{e:?}"));
+        if self.tree().rpc_is_call_local(method) {
+            self.tree_mut().call_deferred(nid, method, args);
+        }
+        sent
     }
 
     fn is_object_alive(&self, id: u64) -> bool {

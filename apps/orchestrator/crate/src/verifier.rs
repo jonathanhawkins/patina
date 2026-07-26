@@ -319,13 +319,17 @@ impl AcceptanceDemand {
 /// Parse a bead's `acceptance_criteria` (and/or description) into the commands
 /// and test names its completion must be verified against.
 pub fn parse_acceptance(text: &str) -> AcceptanceDemand {
-    // `Acceptance:` lines first — they are the explicit form and should lead.
-    let mut commands = extract_acceptance_commands(text);
-    for cmd in extract_test_commands(text) {
-        if !commands.contains(&cmd) {
-            commands.push(cmd);
-        }
-    }
+    // ONLY `Acceptance:` lines. This deliberately does **not** sweep the whole
+    // description with `extract_test_commands`: a bead body is prose written by
+    // an audit tool, and the commands quoted in it are documentation, not a
+    // script. Harvesting them put a malformed `cargo nextest --test <name>`
+    // (no `run` subcommand) at the head of a verify set on 2026-07-25, where it
+    // exited 2 and failed the bead before the worker's own correct command ever
+    // ran. What executes must be what somebody meant to execute.
+    let commands = extract_acceptance_commands(text)
+        .into_iter()
+        .filter(|cmd| is_runnable_command(cmd))
+        .collect();
 
     static TEST_NAME: OnceLock<Regex> = OnceLock::new();
     let test_name = TEST_NAME.get_or_init(|| {
@@ -343,6 +347,25 @@ pub fn parse_acceptance(text: &str) -> AcceptanceDemand {
         commands,
         test_names,
     }
+}
+
+/// Whether a command quoted in a bead body is actually invocable.
+///
+/// A bead's `Acceptance:` line is written by hand and is not validated anywhere,
+/// so it can carry a typo that cargo rejects at argument-parse time (exit 2)
+/// before any test runs. Since these commands are *prepended* to the verify set,
+/// one typo fails a bead whose code is fine — so an obviously-broken one is
+/// dropped rather than executed.
+///
+/// Deliberately narrow: this catches the shapes cargo cannot parse at all, not
+/// commands that merely might fail.
+fn is_runnable_command(cmd: &str) -> bool {
+    let lower = cmd.to_lowercase();
+    // `cargo nextest` needs its subcommand — `cargo nextest --test x` is exit 2.
+    if lower.contains("nextest") && !lower.contains("nextest run") {
+        return false;
+    }
+    true
 }
 
 /// Whether `cmd` runs the test called `test_name`.
@@ -2127,6 +2150,42 @@ Also ran `cargo test --test foo` again."#;
         let demand = parse_acceptance("Acceptance: cargo test --test smoke_test\n");
         assert_eq!(demand.commands, vec!["cargo test --test smoke_test"]);
         assert!(demand.test_names.is_empty());
+    }
+
+    /// Regression: a command merely *mentioned* in the description is
+    /// documentation, not something to execute. Harvesting prose put a malformed
+    /// `cargo nextest --test <name>` (no `run`) at the head of a verify set on
+    /// 2026-07-25; cargo exited 2 at argument-parse time and failed a bead whose
+    /// code was fine, before the worker's own correct command ever ran.
+    #[test]
+    fn test_parse_acceptance_ignores_commands_quoted_in_prose() {
+        let body = "Patina's shape_from_node returns None, so the authored shape \
+                    is lost. Verify with `cargo nextest --test collision_wiring` \
+                    once fixed. (test: `collision_wiring`)";
+        let demand = parse_acceptance(body);
+        assert!(
+            demand.commands.is_empty(),
+            "a command in prose must not become an executed command: {:?}",
+            demand.commands
+        );
+        // The named test is still picked up — the demand survives, only the
+        // unvetted command is dropped.
+        assert_eq!(demand.test_names, vec!["collision_wiring"]);
+    }
+
+    /// ...and even on a real `Acceptance:` line, a shape cargo cannot parse is
+    /// dropped rather than run, since these commands lead the verify set.
+    #[test]
+    fn test_parse_acceptance_drops_an_uninvocable_command() {
+        // `cargo nextest` without its `run` subcommand is exit 2, always.
+        let demand = parse_acceptance("Acceptance: cargo nextest --test smoke_test\n");
+        assert!(
+            demand.commands.is_empty(),
+            "an uninvocable command must not be executed: {:?}",
+            demand.commands
+        );
+        let ok = parse_acceptance("Acceptance: cargo nextest run --test smoke_test\n");
+        assert_eq!(ok.commands, vec!["cargo nextest run --test smoke_test"]);
     }
 
     /// A bead with no stated acceptance keeps today's behavior: the worker's

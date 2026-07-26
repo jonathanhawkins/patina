@@ -1212,6 +1212,16 @@ impl EditorCommand {
                 }
                 Ok(())
             }
+            // A compound edit forwards to its parts, so a line or bucket fill
+            // built from many `TileMapPaint`s applies as one action and takes
+            // one Ctrl-Z (pat-0q2kx.75). Without this arm a `Group` fell into
+            // the catch-all below and silently did nothing to the grid.
+            EditorCommand::Group { commands, .. } => {
+                for cmd in commands.iter_mut() {
+                    cmd.execute_tilemap(store)?;
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -1251,6 +1261,15 @@ impl EditorCommand {
                     g.width = *old_width;
                     g.height = *old_height;
                     g.cells = old_cells.clone();
+                }
+                Ok(())
+            }
+            // Reverse order, mirroring `undo` — two paints on the same cell in
+            // one group must be undone newest-first or the older one's saved
+            // value wins and the cell ends up wrong.
+            EditorCommand::Group { commands, .. } => {
+                for cmd in commands.iter().rev() {
+                    cmd.undo_tilemap(store)?;
                 }
                 Ok(())
             }

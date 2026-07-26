@@ -293,6 +293,21 @@ fn render_kind_for(tree: &SceneTree, id: gdscene::NodeId, class: &str) -> Render
                 color: read_color(tree, id, "default_color"),
             };
         }
+        // pat-0q2kx.77: a Path2D's curve is a Curve2D sub-resource, flattened
+        // onto the node as `__curve__points` the same way a collision shape is
+        // flattened to `__shape__*`. Godot draws the curve as a polyline in the
+        // editor; with points it renders as one, and without them it falls
+        // through to the marker below rather than drawing an empty line.
+        "Path2D" => {
+            let points = read_points(tree, id, "__curve__points");
+            if !points.is_empty() {
+                return Render2DKind::Line {
+                    points,
+                    width: read_f32(tree, id, "__curve__width", 2.0),
+                    color: Color::new(1.0, 0.8, 0.2, 1.0),
+                };
+            }
+        }
         "ColorRect" => {
             return Render2DKind::ColorRect {
                 size: control::get_size(tree, id),
@@ -391,6 +406,11 @@ fn read_color(tree: &SceneTree, id: gdscene::NodeId, key: &str) -> Color {
 /// dropping any non-`Vector2` entries and defaulting to empty when absent.
 fn read_points(tree: &SceneTree, id: gdscene::NodeId, key: &str) -> Vec<Vector2> {
     match tree.get_node(id).map(|n| n.get_property(key)) {
+        // ⚠️ A `.tscn` writes `polygon = PackedVector2Array(...)` and the loader
+        // parses it to the packed variant, NOT a generic Array — so only
+        // hand-built nodes ever matched the arm below and every authored
+        // Polygon2D/Line2D rendered empty (pat-0q2kx.77).
+        Some(Variant::PackedVector2Array(items)) => items,
         Some(Variant::Array(items)) => items
             .into_iter()
             .filter_map(|v| match v {

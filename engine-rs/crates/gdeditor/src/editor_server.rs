@@ -33,6 +33,10 @@ use crate::EditorCommand;
 
 use gdcore::math::Vector2;
 use gdscene::scripting::{GDScriptNodeInstance, InputSnapshot};
+// pat-0q2kx.76: `call_method` is a `ScriptInstance` trait method, so the trait
+// has to be in scope to invoke it on a concrete instance.
+use gdresource::project::GodotProjectFile;
+use gdscript_interop::bindings::ScriptInstance;
 
 /// Animation playback state for the editor.
 #[derive(Debug, Clone)]
@@ -425,6 +429,13 @@ pub struct EditorState {
     /// Input action map: action name -> list of key names.
     pub input_map: HashMap<String, Vec<String>>,
     pub tile_grid_store: gdscene::tilemap::TileGridStore,
+    /// Per-cell alternative-tile ids (Godot's flip/rotate transform bits).
+    ///
+    /// `TileGrid` is a flat `Vec<i32>` of tile ids with nowhere to put them, so
+    /// they ride alongside and are folded back in when the grid is encoded to
+    /// `tile_map_data` (pat-0q2kx.75). Without this the toolbar's Flip/Rot
+    /// buttons would post a value the server dropped on the floor.
+    pub tile_alternatives: HashMap<NodeId, HashMap<(i32, i32), i32>>,
     /// Currently active editor mode: "2d", "3d", or "script".
     pub editor_mode: String,
     /// The editor mode that was active before Play switched to the game view.
@@ -484,6 +495,10 @@ pub struct EditorState {
     pub net_profiler_autostart: bool,
     /// Registered editor plugins.
     pub plugins: Vec<PluginEntry>,
+    /// Running EditorPlugin instances, keyed by addon folder (pat-0q2kx.76).
+    pub active_plugins: HashMap<String, GDScriptNodeInstance>,
+    /// `@tool` scripts executing against the EDIT tree, keyed by their node.
+    pub tool_scripts: HashMap<NodeId, GDScriptNodeInstance>,
     /// Editor keybindings for the settings dialog.
     pub keybindings: Vec<EditorKeyBinding>,
     /// Current viewport tool mode (select, move, rotate, scale).
@@ -631,10 +646,26 @@ impl ViewportMode {
 /// A registered editor plugin entry.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PluginEntry {
-    /// Plugin display name.
+    /// Plugin display name (`plugin.cfg` `name=`, or the folder as a fallback).
     pub name: String,
     /// Whether the plugin is currently enabled.
     pub enabled: bool,
+    /// The `addons/<folder>` directory this plugin lives in.
+    #[serde(default)]
+    pub folder: String,
+    /// `res://addons/<folder>/plugin.cfg` — the identity Godot persists in
+    /// `project.godot [editor_plugins] enabled`.
+    #[serde(default)]
+    pub cfg_path: String,
+    /// The EditorPlugin script, relative to the addon folder.
+    #[serde(default)]
+    pub script: String,
+    /// `plugin.cfg` `description=`.
+    #[serde(default)]
+    pub description: String,
+    /// `plugin.cfg` `version=`.
+    #[serde(default)]
+    pub version: String,
 }
 
 /// An editor keybinding entry for the settings dialog.
@@ -841,6 +872,7 @@ impl EditorState {
             mouse_buttons: HashSet::new(),
             input_map: Self::default_input_map(),
             tile_grid_store: gdscene::tilemap::TileGridStore::new_with_defaults(),
+            tile_alternatives: HashMap::new(),
             editor_mode: "2d".to_string(),
             pre_play_editor_mode: None,
             main_pane: crate::main_screen::MainPane::new(),
@@ -863,6 +895,8 @@ impl EditorState {
             debug_locals: Vec::new(),
             debug_globals: Vec::new(),
             plugins: Vec::new(),
+            active_plugins: HashMap::new(),
+            tool_scripts: HashMap::new(),
             keybindings: EditorKeyBinding::defaults(),
             viewport_mode: ViewportMode::Select,
             output_entries: VecDeque::new(),
@@ -1743,6 +1777,14 @@ fn run_runtime_driver(state: Arc<Mutex<EditorState>>, running: Arc<AtomicBool>) 
             if st.is_running && !st.is_paused && !st.runtime_suspended && st.run_main_loop.is_some()
             {
                 advance_running_main_loop(&mut st);
+            } else if !st.tool_scripts.is_empty() {
+                // pat-0q2kx.76: with no game running, this is the EDITOR's idle
+                // frame — where Godot ticks `@tool` `_process` so a tool script
+                // can drive something in the edit viewport. Skipped while
+                // playing, because then the clone's own `_process` is running
+                // and the edit tree should sit still.
+                let delta = st.delta_time;
+                process_tool_scripts(&mut st, delta);
             }
             st.delta_time
         }; // lock dropped here — never held across the sleep below.
@@ -2325,6 +2367,18 @@ fn handle_connection(
         ("POST", "/api/settings") => api_set_settings(state, &req.body, &mut stream),
         ("GET", "/api/plugins") => api_get_plugins(state, &mut stream),
         ("POST", "/api/plugins/toggle") => api_toggle_plugin(state, &req.body, &mut stream),
+        // pat-0q2kx.77: Path2D / Polygon2D / Line2D point editing. One route set
+        // serves all three; `point_property_for` picks the backing property.
+        ("POST", "/api/path2d/point/add") => api_point_add(state, &req.body, &mut stream),
+        ("POST", "/api/path2d/point/move") => api_point_move(state, &req.body, &mut stream),
+        ("POST", "/api/path2d/point/remove") => api_point_remove(state, &req.body, &mut stream),
+        ("POST", "/api/polygon2d/vertex/add") => api_point_add(state, &req.body, &mut stream),
+        ("POST", "/api/polygon2d/vertex/move") => api_point_move(state, &req.body, &mut stream),
+        ("POST", "/api/polygon2d/vertex/remove") => api_point_remove(state, &req.body, &mut stream),
+        ("GET", "/api/viewport/points") => api_get_points(state, &req.query, &mut stream),
+        ("GET", "/api/viewport/shape_handles") => {
+            api_shape_handles(state, &req.query, &mut stream)
+        }
         ("GET", "/api/keybindings") => api_get_keybindings(state, &mut stream),
         ("POST", "/api/keybindings") => api_set_keybinding(state, &req.body, &mut stream),
         ("POST", "/api/viewport/box_select") => api_box_select(state, &req.body, &mut stream),
@@ -2373,6 +2427,23 @@ fn handle_connection(
         // Godot's Scene dock switches to a "Remote" tree during play; this is
         // the source it reads (pat-0q2kx.72).
         ("GET", "/api/runtime/scene") => api_runtime_scene(state, &mut stream),
+        // SpriteFrames authoring for AnimatedSprite2D (pat-0q2kx.74).
+        ("GET", "/api/spriteframes") => api_spriteframes_get(state, &req.query, &mut stream),
+        ("POST", "/api/spriteframes/anim/add") => {
+            api_spriteframes_anim_add(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/spriteframes/anim/remove") => {
+            api_spriteframes_anim_remove(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/spriteframes/anim/set") => {
+            api_spriteframes_anim_set(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/spriteframes/frame/add") => {
+            api_spriteframes_frame_add(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/spriteframes/frame/remove") => {
+            api_spriteframes_frame_remove(state, &req.body, &mut stream)
+        }
         // pat-j9yqh: game-view runtime toolbar controls
         ("POST", "/api/runtime/suspend") => api_runtime_suspend(state, &req.body, &mut stream),
         ("POST", "/api/runtime/time_scale") => {
@@ -2410,6 +2481,7 @@ fn handle_connection(
         ("POST", "/api/tilemap/paint") => api_tilemap_paint(state, &req.body, &mut stream),
         ("POST", "/api/tilemap/erase") => api_tilemap_erase(state, &req.body, &mut stream),
         ("POST", "/api/tilemap/fill") => api_tilemap_fill(state, &req.body, &mut stream),
+        ("POST", "/api/tilemap/line") => api_tilemap_line(state, &req.body, &mut stream),
         ("GET", "/api/tilemap/data") => api_tilemap_data(state, &req.query, &mut stream),
         ("POST", "/api/tilemap/resize") => api_tilemap_resize(state, &req.body, &mut stream),
         ("GET", "/api/tilemap/tileset") => api_tilemap_tileset(state, &mut stream),
@@ -3510,6 +3582,367 @@ fn scene_res_path(state: &EditorState) -> Option<String> {
 }
 
 /// Finds a NodeId from a raw u64 by scanning the scene tree.
+// ---------------------------------------------------------------------------
+// SpriteFrames authoring (pat-0q2kx.74)
+//
+// Godot's SpriteFrames panel edits a resource hanging off the AnimatedSprite2D.
+// Patina's node property bag is FLAT, so the resource is stored as companion
+// keys on the node — `__sf_anims__` plus `__sf_<anim>_{speed,loop,frames}`.
+// That is the same flattening the scene file already uses for sub-resources, so
+// authored frames persist through `TscnSaver` with no new serializer.
+// ---------------------------------------------------------------------------
+
+/// Key holding the animation-name list.
+const SF_ANIMS: &str = "__sf_anims__";
+
+fn sf_key(anim: &str, field: &str) -> String {
+    format!("__sf_{anim}_{field}")
+}
+
+/// The animation names declared on `node`.
+fn sf_anim_names(tree: &SceneTree, node_id: NodeId) -> Vec<String> {
+    match tree.get_node(node_id).map(|n| n.get_property(SF_ANIMS)) {
+        Some(Variant::PackedStringArray(v)) => v,
+        _ => Vec::new(),
+    }
+}
+
+/// The frame texture paths of one animation.
+fn sf_frames(tree: &SceneTree, node_id: NodeId, anim: &str) -> Vec<String> {
+    match tree
+        .get_node(node_id)
+        .map(|n| n.get_property(&sf_key(anim, "frames")))
+    {
+        Some(Variant::PackedStringArray(v)) => v,
+        _ => Vec::new(),
+    }
+}
+
+/// Applies property writes to `node_id` as ONE undoable command.
+///
+/// Godot's SpriteFrames panel wraps every edit in a single UndoRedo action
+/// (`sprite_frames_editor_plugin.cpp` create_action/commit_action), so adding a
+/// frame is one Ctrl-Z — not one per touched key. Writing the property bag
+/// directly, as the first cut did, left these edits invisible to undo entirely.
+fn sf_apply(
+    state: &mut EditorState,
+    node_id: NodeId,
+    label: &str,
+    writes: Vec<(String, Variant)>,
+) -> bool {
+    let commands: Vec<EditorCommand> = writes
+        .into_iter()
+        .map(|(property, new_value)| EditorCommand::SetProperty {
+            node_id,
+            property,
+            new_value,
+            // Populated by `execute`, which returns the displaced Variant.
+            old_value: Variant::Nil,
+        })
+        .collect();
+    let mut cmd = if commands.len() == 1 {
+        commands.into_iter().next().expect("len checked")
+    } else {
+        EditorCommand::Group {
+            label: label.to_string(),
+            commands,
+        }
+    };
+    if cmd.execute(&mut state.scene_tree).is_err() {
+        return false;
+    }
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    true
+}
+
+/// `GET /api/spriteframes?node_id=N` — the node's animations, each with its
+/// speed, loop flag and ordered frame list.
+fn api_spriteframes_get(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let Some(raw) = query_param(query, "node_id").and_then(|v| v.parse::<u64>().ok()) else {
+        send_error(stream, 400, "missing node_id");
+        return;
+    };
+    let json = {
+        let state = state.lock().unwrap();
+        let Some(node_id) = find_node_by_raw_id(&state.scene_tree, raw) else {
+            send_error(stream, 404, "node not found");
+            return;
+        };
+        let mut entries: Vec<String> = Vec::new();
+        for name in sf_anim_names(&state.scene_tree, node_id) {
+            let node = state.scene_tree.get_node(node_id);
+            let speed = match node.map(|n| n.get_property(&sf_key(&name, "speed"))) {
+                Some(Variant::Float(f)) => f,
+                _ => 5.0,
+            };
+            let loops = !matches!(
+                node.map(|n| n.get_property(&sf_key(&name, "loop"))),
+                Some(Variant::Bool(false))
+            );
+            let frames = sf_frames(&state.scene_tree, node_id, &name);
+            let frames_json = frames
+                .iter()
+                .map(|f| format!("\"{}\"", json_escape(f)))
+                .collect::<Vec<_>>()
+                .join(",");
+            entries.push(format!(
+                r#"{{"name":"{}","speed":{},"loop":{},"frames":[{}]}}"#,
+                json_escape(&name),
+                speed,
+                loops,
+                frames_json
+            ));
+        }
+        format!(r#"{{"ok":true,"animations":[{}]}}"#, entries.join(","))
+    };
+    send_json(stream, &json);
+}
+
+/// Shared preamble: parse the body, resolve the node, return both.
+fn sf_target(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) -> Option<(serde_json::Value, u64)> {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return None;
+        }
+    };
+    let Some(raw) = parsed.get("node_id").and_then(|v| v.as_u64()) else {
+        send_error(stream, 400, "missing node_id");
+        return None;
+    };
+    Some((parsed, raw))
+}
+
+/// `POST /api/spriteframes/anim/add` — declares a new animation.
+fn api_spriteframes_anim_add(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some((parsed, raw)) = sf_target(state, body, stream) else {
+        return;
+    };
+    let name = parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if name.is_empty() {
+        send_error(stream, 400, "missing name");
+        return;
+    }
+    let mut state = state.lock().unwrap();
+    let Some(node_id) = find_node_by_raw_id(&state.scene_tree, raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    let mut names = sf_anim_names(&state.scene_tree, node_id);
+    if names.iter().any(|n| n == &name) {
+        send_error(stream, 409, "animation already exists");
+        return;
+    }
+    names.push(name.clone());
+    let ok = sf_apply(
+        &mut state,
+        node_id,
+        "Add Animation",
+        vec![
+            (SF_ANIMS.to_string(), Variant::PackedStringArray(names)),
+            // Godot's defaults for a fresh animation.
+            (sf_key(&name, "speed"), Variant::Float(5.0)),
+            (sf_key(&name, "loop"), Variant::Bool(true)),
+            (
+                sf_key(&name, "frames"),
+                Variant::PackedStringArray(Vec::new()),
+            ),
+        ],
+    );
+    if !ok {
+        send_error(stream, 500, "failed to add animation");
+        return;
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/spriteframes/anim/remove` — drops an animation and its frames.
+fn api_spriteframes_anim_remove(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let Some((parsed, raw)) = sf_target(state, body, stream) else {
+        return;
+    };
+    let name = parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut state = state.lock().unwrap();
+    let Some(node_id) = find_node_by_raw_id(&state.scene_tree, raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    let mut names = sf_anim_names(&state.scene_tree, node_id);
+    let before = names.len();
+    names.retain(|n| n != &name);
+    if names.len() == before {
+        send_error(stream, 404, "animation not found");
+        return;
+    }
+    let ok = sf_apply(
+        &mut state,
+        node_id,
+        "Remove Animation",
+        vec![
+            (SF_ANIMS.to_string(), Variant::PackedStringArray(names)),
+            // The per-animation keys are set to Nil rather than removed: the
+            // property bag has no delete, and an animation absent from the name
+            // list is invisible to every reader. Undo restores both.
+            (sf_key(&name, "frames"), Variant::Nil),
+        ],
+    );
+    if !ok {
+        send_error(stream, 500, "failed to remove animation");
+        return;
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/spriteframes/anim/set` — speed / loop / autoplay.
+fn api_spriteframes_anim_set(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some((parsed, raw)) = sf_target(state, body, stream) else {
+        return;
+    };
+    let name = parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut state = state.lock().unwrap();
+    let Some(node_id) = find_node_by_raw_id(&state.scene_tree, raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    if !sf_anim_names(&state.scene_tree, node_id)
+        .iter()
+        .any(|n| n == &name)
+    {
+        send_error(stream, 404, "animation not found");
+        return;
+    }
+    let mut writes: Vec<(String, Variant)> = Vec::new();
+    if let Some(speed) = parsed.get("speed").and_then(|v| v.as_f64()) {
+        writes.push((sf_key(&name, "speed"), Variant::Float(speed)));
+    }
+    if let Some(loops) = parsed.get("loop").and_then(|v| v.as_bool()) {
+        writes.push((sf_key(&name, "loop"), Variant::Bool(loops)));
+    }
+    // `autoplay` is a property of the NODE in Godot, not of one animation.
+    if let Some(auto) = parsed.get("autoplay").and_then(|v| v.as_str()) {
+        writes.push(("autoplay".to_string(), Variant::String(auto.to_string())));
+    }
+    if !writes.is_empty() && !sf_apply(&mut state, node_id, "Set Animation", writes) {
+        send_error(stream, 500, "failed to set animation");
+        return;
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/spriteframes/frame/add` — appends a texture frame.
+fn api_spriteframes_frame_add(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some((parsed, raw)) = sf_target(state, body, stream) else {
+        return;
+    };
+    let name = parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let texture = parsed
+        .get("texture")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if texture.is_empty() {
+        send_error(stream, 400, "missing texture");
+        return;
+    }
+    let mut state = state.lock().unwrap();
+    let Some(node_id) = find_node_by_raw_id(&state.scene_tree, raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    if !sf_anim_names(&state.scene_tree, node_id)
+        .iter()
+        .any(|n| n == &name)
+    {
+        send_error(stream, 404, "animation not found");
+        return;
+    }
+    let mut frames = sf_frames(&state.scene_tree, node_id, &name);
+    frames.push(texture);
+    let count = frames.len();
+    if !sf_apply(
+        &mut state,
+        node_id,
+        "Add Frame",
+        vec![(
+            sf_key(&name, "frames"),
+            Variant::PackedStringArray(frames),
+        )],
+    ) {
+        send_error(stream, 500, "failed to add frame");
+        return;
+    }
+    send_json(stream, &format!(r#"{{"ok":true,"frame_count":{count}}}"#));
+}
+
+/// `POST /api/spriteframes/frame/remove` — drops the frame at `index`.
+fn api_spriteframes_frame_remove(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let Some((parsed, raw)) = sf_target(state, body, stream) else {
+        return;
+    };
+    let name = parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let mut state = state.lock().unwrap();
+    let Some(node_id) = find_node_by_raw_id(&state.scene_tree, raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    let mut frames = sf_frames(&state.scene_tree, node_id, &name);
+    if index >= frames.len() {
+        send_error(stream, 404, "frame index out of range");
+        return;
+    }
+    frames.remove(index);
+    let count = frames.len();
+    if !sf_apply(
+        &mut state,
+        node_id,
+        "Remove Frame",
+        vec![(
+            sf_key(&name, "frames"),
+            Variant::PackedStringArray(frames),
+        )],
+    ) {
+        send_error(stream, 500, "failed to remove frame");
+        return;
+    }
+    send_json(stream, &format!(r#"{{"ok":true,"frame_count":{count}}}"#));
+}
+
 /// The absolute `/root/...` path of `node_id`.
 ///
 /// Needed to address the SAME node in a DIFFERENT tree: the play clone mints
@@ -5934,6 +6367,21 @@ fn api_patch_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
     send_json(stream, &format!(r#"{{"ok":true,"version":{new_version}}}"#));
 }
 
+/// The tile-layer node a command touches, if any.
+///
+/// Undo/redo has to write the grid back to `tile_map_data` as well, or the saved
+/// scene keeps the state from before the Ctrl-Z while the editor shows the state
+/// after it.
+fn tilemap_node_of(cmd: &EditorCommand) -> Option<NodeId> {
+    match cmd {
+        EditorCommand::TileMapPaint { node_id, .. }
+        | EditorCommand::TileMapFill { node_id, .. }
+        | EditorCommand::TileMapResize { node_id, .. } => Some(*node_id),
+        EditorCommand::Group { commands, .. } => commands.iter().find_map(tilemap_node_of),
+        _ => None,
+    }
+}
+
 /// `POST /api/undo` — undoes the last command.
 fn api_undo(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let mut state = state.lock().unwrap();
@@ -5953,6 +6401,9 @@ fn api_undo(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     }
 
     let _ = cmd.undo_tilemap(&mut state.tile_grid_store);
+    if let Some(nid) = tilemap_node_of(&cmd) {
+        writeback_tile_grid(&mut state, nid);
+    }
     state.redo_stack.push(cmd);
     // Undo may have removed nodes (e.g. undoing an add/duplicate); drop any
     // selected ids that no longer exist so the selection can't dangle.
@@ -5983,6 +6434,9 @@ fn api_redo(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     }
 
     let _ = cmd.execute_tilemap(&mut state.tile_grid_store);
+    if let Some(nid) = tilemap_node_of(&cmd) {
+        writeback_tile_grid(&mut state, nid);
+    }
     state.undo_stack.push(cmd);
     // Redo may also remove nodes (e.g. redoing a delete); keep selection sane.
     state.prune_selection();
@@ -6546,6 +7000,13 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
             // (pat-0q2kx.54); before this, opening a .tscn with animations
             // showed an empty animation panel.
             sync_animations_from_scene(&mut state);
+            // The loaded scene's tile layers become paintable grids
+            // (pat-0q2kx.75); before this the store was never populated from a
+            // scene, so every paint into an opened .tscn was silently dropped.
+            sync_tile_grids_from_scene(&mut state);
+            // pat-0q2kx.76: `@tool` scripts in the opened scene run in edit
+            // mode, exactly as Godot does.
+            sync_tool_scripts_from_scene(&mut state);
             state.selected_node = None;
             state.selected_nodes.clear();
             state.undo_stack.clear();
@@ -9125,6 +9586,10 @@ fn api_open_project(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         // per-project settings dir.
         s.create_node_dialog
             .set_persist_dir(Some(dir.join(".patina").join("editor")));
+        // pat-0q2kx.76: fill the plugin list from addons/*/plugin.cfg and start
+        // whatever `project.godot` says is already enabled, so an enabled addon
+        // survives a server restart.
+        sync_plugins_from_project(&mut s);
     }
     send_json(
         stream,
@@ -12316,6 +12781,267 @@ fn pixel_to_world_pos(state: &EditorState, pixel_x: f32, pixel_y: f32) -> Vector
 ///
 /// Body: `{"node_id": 123, "handle": "radius", "value": 50.0}`
 ///    or `{"node_id": 123, "handle": "extents", "value": [30, 20]}`
+// ---------------------------------------------------------------------------
+// Path2D / Polygon2D / Line2D point editing (pat-0q2kx.77)
+//
+// Godot gives each of these a point editor in the 2D viewport: add, move and
+// delete vertices, with every edit a single undo action
+// (`editor/scene/2d/path_2d_editor_plugin.cpp`,
+// `editor/scene/2d/abstract_polygon_2d_editor.cpp`). Patina had none of it, on
+// either side of the wire.
+//
+// A Path2D's points live on its Curve2D SUB-RESOURCE, flattened onto the node as
+// `__curve__points` exactly as a collision shape is flattened to `__shape__*`.
+// Polygon2D and Line2D hold theirs directly, on `polygon` and `points`.
+// ---------------------------------------------------------------------------
+
+/// The property holding `node`'s editable point list, by class.
+///
+/// Returns `None` for a class with no point editor, so the routes 400 instead of
+/// inventing a property on an unrelated node.
+fn point_property_for(class_name: &str) -> Option<&'static str> {
+    match class_name {
+        "Path2D" => Some("__curve__points"),
+        "Polygon2D" => Some("polygon"),
+        "Line2D" => Some("points"),
+        _ => None,
+    }
+}
+
+/// Reads a point list, accepting both the packed and generic spellings.
+///
+/// A `.tscn` yields `PackedVector2Array`; a hand-built node may hold a generic
+/// `Array` of `Vector2`. Both are real inputs, so both are read.
+fn read_point_list(tree: &SceneTree, node_id: NodeId, property: &str) -> Vec<Vector2> {
+    match tree.get_node(node_id).map(|n| n.get_property(property)) {
+        Some(Variant::PackedVector2Array(v)) => v,
+        Some(Variant::Array(items)) => items
+            .into_iter()
+            .filter_map(|v| match v {
+                Variant::Vector2(p) => Some(p),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Resolves the node and its point property, answering the request on failure.
+fn point_target(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) -> Option<(serde_json::Value, NodeId, &'static str)> {
+    let parsed = parse_json_body(body)?;
+    let raw = parsed.get("node_id").and_then(|v| v.as_u64())?;
+    let s = state.lock().unwrap();
+    let node_id = find_node_by_raw_id(&s.scene_tree, raw)?;
+    let class = s.scene_tree.get_node(node_id)?.class_name().to_string();
+    let property = point_property_for(&class)?;
+    drop(s);
+    let _ = stream;
+    Some((parsed, node_id, property))
+}
+
+/// Applies a new point list as one undoable command and answers with the count.
+fn commit_point_list(
+    state: &Arc<Mutex<EditorState>>,
+    node_id: NodeId,
+    property: &str,
+    points: Vec<Vector2>,
+    stream: &mut TcpStream,
+) {
+    let count = points.len();
+    let mut s = state.lock().unwrap();
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property: property.to_string(),
+        new_value: Variant::PackedVector2Array(points),
+        old_value: Variant::Nil,
+    };
+    if let Err(e) = cmd.execute(&mut s.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    s.undo_stack.push(cmd);
+    s.redo_stack.clear();
+    s.scene_modified = true;
+    send_json(stream, &format!(r#"{{"ok":true,"count":{count}}}"#));
+}
+
+/// `POST /api/path2d/point/add` — appends (or inserts at `index`) a point.
+///
+/// Shared by Polygon2D and Line2D: the gesture and the undo shape are identical
+/// and only the backing property differs, which `point_property_for` resolves.
+fn api_point_add(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some((parsed, node_id, property)) = point_target(state, body, stream) else {
+        send_error(stream, 400, "node has no editable point list");
+        return;
+    };
+    let x = parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let y = parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let mut points = {
+        let s = state.lock().unwrap();
+        read_point_list(&s.scene_tree, node_id, property)
+    };
+    // An out-of-range index appends rather than failing, matching Godot's
+    // "add at end" default when no insertion point is given.
+    let index = parsed
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .map(|i| i as usize)
+        .filter(|i| *i <= points.len())
+        .unwrap_or(points.len());
+    points.insert(index, Vector2::new(x, y));
+    commit_point_list(state, node_id, property, points, stream);
+}
+
+/// `POST /api/path2d/point/move` — moves the point at `index`.
+fn api_point_move(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some((parsed, node_id, property)) = point_target(state, body, stream) else {
+        send_error(stream, 400, "node has no editable point list");
+        return;
+    };
+    let index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let x = parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let y = parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let mut points = {
+        let s = state.lock().unwrap();
+        read_point_list(&s.scene_tree, node_id, property)
+    };
+    if index >= points.len() {
+        send_error(stream, 404, "point index out of range");
+        return;
+    }
+    points[index] = Vector2::new(x, y);
+    commit_point_list(state, node_id, property, points, stream);
+}
+
+/// `POST /api/path2d/point/remove` — deletes the point at `index`.
+fn api_point_remove(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some((parsed, node_id, property)) = point_target(state, body, stream) else {
+        send_error(stream, 400, "node has no editable point list");
+        return;
+    };
+    let index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let mut points = {
+        let s = state.lock().unwrap();
+        read_point_list(&s.scene_tree, node_id, property)
+    };
+    if index >= points.len() {
+        send_error(stream, 404, "point index out of range");
+        return;
+    }
+    points.remove(index);
+    commit_point_list(state, node_id, property, points, stream);
+}
+
+/// `GET /api/viewport/points?node_id=N` — the node's editable points, so the
+/// client can draw a handle on each without guessing at the property name.
+fn api_get_points(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let Some(raw) = query_param(query, "node_id").and_then(|v| v.parse::<u64>().ok()) else {
+        send_error(stream, 400, "missing node_id");
+        return;
+    };
+    let s = state.lock().unwrap();
+    let Some(node_id) = find_node_by_raw_id(&s.scene_tree, raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    let class = s
+        .scene_tree
+        .get_node(node_id)
+        .map(|n| n.class_name().to_string())
+        .unwrap_or_default();
+    let Some(property) = point_property_for(&class) else {
+        send_json(stream, r#"{"ok":true,"editable":false,"points":[]}"#);
+        return;
+    };
+    let points = read_point_list(&s.scene_tree, node_id, property);
+    let list: Vec<String> = points
+        .iter()
+        .map(|p| format!("[{},{}]", p.x, p.y))
+        .collect();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"editable":true,"class":"{class}","property":"{property}","points":[{}]}}"#,
+            list.join(",")
+        ),
+    );
+}
+
+/// `GET /api/viewport/shape_handles?node_id=N` — the draggable handles for a
+/// selected CollisionShape2D, so the client can draw them where Godot does.
+///
+/// Godot places one handle per resizable dimension of the shape class
+/// (`collision_shape_2d_editor_plugin.cpp`); the handle NAME is what
+/// `/api/viewport/shape_resize` takes back.
+fn api_shape_handles(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let Some(raw) = query_param(query, "node_id").and_then(|v| v.parse::<u64>().ok()) else {
+        send_error(stream, 400, "missing node_id");
+        return;
+    };
+    let s = state.lock().unwrap();
+    let Some(node_id) = find_node_by_raw_id(&s.scene_tree, raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    let Some(node) = s.scene_tree.get_node(node_id) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    if node.class_name() != "CollisionShape2D" {
+        send_json(stream, r#"{"ok":true,"editable":false,"handles":[]}"#);
+        return;
+    }
+    // The shape class comes from the flattened companion for a loaded scene, or
+    // straight off `shape` for a hand-built node.
+    let shape_class = match node.get_property("__shape__class") {
+        Variant::String(c) => c,
+        _ => match node.get_property("shape") {
+            Variant::String(c) if !c.starts_with("SubResource:") => c,
+            _ => String::new(),
+        },
+    };
+    let num = |key: &str, default: f32| -> f32 {
+        match node.get_property(&format!("__shape__{key}")) {
+            Variant::Float(f) => f as f32,
+            Variant::Int(i) => i as f32,
+            _ => default,
+        }
+    };
+    let size = match node.get_property("__shape__size") {
+        Variant::Vector2(v) => v,
+        _ => Vector2::new(20.0, 20.0),
+    };
+
+    // Each handle is (name, local offset from the node's origin).
+    let handles: Vec<(&str, Vector2)> = match shape_class.as_str() {
+        "CircleShape2D" => vec![("radius", Vector2::new(num("radius", 10.0), 0.0))],
+        "RectangleShape2D" => vec![
+            ("extents", Vector2::new(size.x / 2.0, 0.0)),
+            ("extents", Vector2::new(0.0, size.y / 2.0)),
+        ],
+        "CapsuleShape2D" => vec![
+            ("radius", Vector2::new(num("radius", 10.0), 0.0)),
+            ("height", Vector2::new(0.0, num("height", 20.0) / 2.0)),
+        ],
+        _ => Vec::new(),
+    };
+    let list: Vec<String> = handles
+        .iter()
+        .map(|(name, p)| format!(r#"{{"handle":"{name}","x":{},"y":{}}}"#, p.x, p.y))
+        .collect();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"editable":true,"shape":"{shape_class}","handles":[{}]}}"#,
+            list.join(",")
+        ),
+    );
+}
+
 fn api_shape_resize(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
         Some(v) => v,
@@ -12360,7 +13086,11 @@ fn api_shape_resize(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
                     return;
                 }
             };
-            ("shape_radius".to_string(), Variant::Float(val))
+            // ⚠️ `__shape__radius`, not `shape_radius`: the flattened companion
+            // is what `physics_server::shape_from_node` reads and what the
+            // `.tscn` sub-resource body is written from. The old made-up name
+            // was read by nothing at all (pat-0q2kx.77).
+            ("__shape__radius".to_string(), Variant::Float(val))
         }
         "extents" => {
             let arr = match parsed.get("value").and_then(|v| v.as_array()) {
@@ -12376,8 +13106,10 @@ fn api_shape_resize(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
             }
             let x = arr[0].as_f64().unwrap_or(0.0) as f32;
             let y = arr[1].as_f64().unwrap_or(0.0) as f32;
+            // Godot 4's RectangleShape2D property is `size`, not `extents`
+            // (`extents` was the Godot 3 spelling and is half the size).
             (
-                "shape_extents".to_string(),
+                "__shape__size".to_string(),
                 Variant::Vector2(Vector2::new(x, y)),
             )
         }
@@ -12389,7 +13121,7 @@ fn api_shape_resize(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
                     return;
                 }
             };
-            ("shape_height".to_string(), Variant::Float(val))
+            ("__shape__height".to_string(), Variant::Float(val))
         }
         _ => {
             send_error(stream, 400, &format!("unknown handle type: {handle}"));
@@ -12671,6 +13403,226 @@ fn api_input_state(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     send_json(stream, &json);
 }
 
+// ---------------------------------------------------------------------------
+// TileMap paint toolset (pat-0q2kx.75)
+//
+// Godot's tiles editor offers paint, line, rect, bucket, picker and eraser
+// tools, every operation a single undo step, and stores the result on the
+// layer's `tile_map_data` property so it survives a save. Patina had the paint
+// and rect ops as routes with no client, no line or bucket at all, and a grid
+// store that was never populated from — nor written back to — the scene.
+// ---------------------------------------------------------------------------
+
+/// Whether a node is one of the tile-layer classes the tools apply to.
+fn is_tilemap_class(class_name: &str) -> bool {
+    class_name == "TileMapLayer" || class_name == "TileMap"
+}
+
+/// Populates `tile_grid_store` from every tile layer in the current scene.
+///
+/// Called on scene load, mirroring `sync_animations_from_scene`. Before this the
+/// store was never filled from a scene, so every paint into a freshly-opened
+/// `.tscn` hit `get_mut(nid) == None` and was silently discarded.
+fn sync_tile_grids_from_scene(state: &mut EditorState) {
+    let mut ids = Vec::new();
+    state
+        .scene_tree
+        .collect_subtree_top_down(state.scene_tree.root_id(), &mut ids);
+    for nid in ids {
+        let Some(node) = state.scene_tree.get_node(nid) else {
+            continue;
+        };
+        if !is_tilemap_class(node.class_name()) {
+            continue;
+        }
+        let Variant::PackedByteArray(bytes) = node.get_property("tile_map_data") else {
+            continue;
+        };
+        let (w, h) = gdscene::tilemap::tile_map_data_extent(&bytes);
+        // An empty layer still gets a canvas so the first paint lands somewhere.
+        let (w, h) = (w.max(TILE_GRID_MIN), h.max(TILE_GRID_MIN));
+        state.tile_grid_store.insert(
+            nid,
+            gdscene::tilemap::TileGrid::from_tile_map_data(&bytes, w, h),
+        );
+    }
+}
+
+/// The canvas a fresh or newly-grown grid is given, in cells.
+const TILE_GRID_MIN: usize = 32;
+
+/// Ensures `nid` has a grid large enough to hold cell `(x, y)`.
+///
+/// ⚠️ Growth happens BEFORE the command runs and is deliberately not undone:
+/// enlarging only adds empty cells, so undoing the paint still restores the
+/// cell to 0 and the layer looks exactly as it did. Godot's TileMapLayer has no
+/// bounds at all; this grid does, and silently dropping a paint outside them
+/// would be worse than a canvas that only ever grows.
+fn ensure_tile_grid(state: &mut EditorState, nid: NodeId, x: i32, y: i32) {
+    let need_w = if x >= 0 { x as usize + 1 } else { 0 };
+    let need_h = if y >= 0 { y as usize + 1 } else { 0 };
+    match state.tile_grid_store.get_mut(nid) {
+        Some(g) => {
+            if need_w > g.width || need_h > g.height {
+                g.resize(g.width.max(need_w), g.height.max(need_h));
+            }
+        }
+        None => {
+            let g = gdscene::tilemap::TileGrid::new(
+                need_w.max(TILE_GRID_MIN),
+                need_h.max(TILE_GRID_MIN),
+            );
+            state.tile_grid_store.insert(nid, g);
+        }
+    }
+}
+
+/// Writes the node's grid back onto its `tile_map_data` property.
+///
+/// This is what makes painting persist: the property is Godot's own
+/// PackedByteArray format, which the existing `.tscn` writer already emits and
+/// the loader already parses — so no new serializer is involved. Called after
+/// every mutation, including undo/redo, so the property never drifts from the
+/// grid the editor is showing.
+fn writeback_tile_grid(state: &mut EditorState, nid: NodeId) {
+    let Some(grid) = state.tile_grid_store.get(nid) else {
+        return;
+    };
+    // Rebuild Godot's sparse cell map from the dense grid, re-attaching each
+    // cell's transform bits. A cell whose tile has since been erased drops its
+    // alternative with it, because the record is not emitted at all.
+    let alts = state.tile_alternatives.get(&nid);
+    let mut cells: std::collections::HashMap<gdcore::math::Vector2i, gdscene::tilemap::TileData> =
+        std::collections::HashMap::new();
+    for y in 0..grid.height {
+        for x in 0..grid.width {
+            let t = grid.cells[y * grid.width + x];
+            if t == 0 {
+                continue;
+            }
+            let (cx, cy) = (x as i32, y as i32);
+            let mut data = gdscene::tilemap::TileData::new(t);
+            if let Some(a) = alts.and_then(|m| m.get(&(cx, cy))) {
+                data.alternative_id = *a;
+            }
+            cells.insert(gdcore::math::Vector2i::new(cx, cy), data);
+        }
+    }
+    let bytes = gdscene::tilemap::encode_tile_map_data(&cells);
+    if let Some(node) = state.scene_tree.get_node_mut(nid) {
+        node.set_property("tile_map_data", Variant::PackedByteArray(bytes));
+    }
+}
+
+/// Records (or clears) the transform bits a paint placed on a cell.
+fn set_tile_alternative(state: &mut EditorState, nid: NodeId, x: i32, y: i32, alternative: i32) {
+    let per_node = state.tile_alternatives.entry(nid).or_default();
+    if alternative == 0 {
+        // Not stored as 0: an absent entry and a zero entry mean the same thing,
+        // and letting the map grow one entry per painted cell would be waste.
+        per_node.remove(&(x, y));
+    } else {
+        per_node.insert((x, y), alternative);
+    }
+}
+
+/// Cells on the Bresenham line between two grid coordinates, endpoints included.
+///
+/// Godot's line tool paints a connected run of cells rather than a mathematical
+/// segment, which is what Bresenham gives (`tile_map_layer_editor.cpp`).
+fn tile_line_cells(x1: i32, y1: i32, x2: i32, y2: i32) -> Vec<(i32, i32)> {
+    let mut cells = Vec::new();
+    let (dx, dy) = ((x2 - x1).abs(), -(y2 - y1).abs());
+    let (sx, sy) = (if x1 < x2 { 1 } else { -1 }, if y1 < y2 { 1 } else { -1 });
+    let (mut x, mut y) = (x1, y1);
+    let mut err = dx + dy;
+    loop {
+        cells.push((x, y));
+        if x == x2 && y == y2 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+    cells
+}
+
+/// The 4-connected run of cells sharing `(x, y)`'s current tile.
+///
+/// ⚠️ Returns empty when the target tile already equals `tile_id`; without that
+/// guard the flood would still enqueue every neighbour and walk the whole grid
+/// to paint nothing.
+fn tile_bucket_cells(grid: &gdscene::tilemap::TileGrid, x: i32, y: i32, tile_id: i32) -> Vec<(i32, i32)> {
+    let Some(target) = grid.get(x, y) else {
+        return Vec::new();
+    };
+    if target == tile_id {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![(x, y)];
+    seen.insert((x, y));
+    while let Some((cx, cy)) = stack.pop() {
+        if grid.get(cx, cy) != Some(target) {
+            continue;
+        }
+        out.push((cx, cy));
+        for (nx, ny) in [(cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)] {
+            if grid.get(nx, ny) == Some(target) && seen.insert((nx, ny)) {
+                stack.push((nx, ny));
+            }
+        }
+    }
+    out
+}
+
+/// Applies a multi-cell tile edit as ONE undo entry.
+///
+/// Godot commits line/bucket/rect drags as a single UndoRedo action; a batch of
+/// individual paint posts would instead need one Ctrl-Z per cell.
+fn apply_tile_cells(
+    state: &mut EditorState,
+    nid: NodeId,
+    label: &str,
+    cells: &[(i32, i32)],
+    tile_id: i32,
+) -> usize {
+    for &(x, y) in cells {
+        ensure_tile_grid(state, nid, x, y);
+        // These tools place plain tiles; a cell they cover must shed whatever
+        // transform a previous paint left on it.
+        set_tile_alternative(state, nid, x, y, 0);
+    }
+    let commands: Vec<EditorCommand> = cells
+        .iter()
+        .map(|&(x, y)| EditorCommand::TileMapPaint {
+            node_id: nid,
+            x,
+            y,
+            tile_id,
+            old_tile_id: 0,
+        })
+        .collect();
+    let mut cmd = EditorCommand::Group {
+        label: label.to_string(),
+        commands,
+    };
+    let _ = cmd.execute_tilemap(&mut state.tile_grid_store);
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    writeback_tile_grid(state, nid);
+    cells.len()
+}
+
 fn api_tilemap_paint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = match parse_json_body(body) {
         Some(v) => v,
@@ -12689,6 +13641,8 @@ fn api_tilemap_paint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     let x = p.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
     let y = p.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
     let tid = p.get("tile_id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    // Godot's flip/rotate live in the alternative-tile id's low bits.
+    let alt = p.get("alternative").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
     let mut s = state.lock().unwrap();
     let nid = match find_node_by_raw_id(&s.scene_tree, nr) {
         Some(id) => id,
@@ -12697,6 +13651,8 @@ fn api_tilemap_paint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
             return;
         }
     };
+    ensure_tile_grid(&mut s, nid, x, y);
+    set_tile_alternative(&mut s, nid, x, y, alt);
     let mut cmd = EditorCommand::TileMapPaint {
         node_id: nid,
         x,
@@ -12708,6 +13664,7 @@ fn api_tilemap_paint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     s.undo_stack.push(cmd);
     s.redo_stack.clear();
     s.scene_modified = true;
+    writeback_tile_grid(&mut s, nid);
     send_json(stream, r#"{"ok":true}"#);
 }
 
@@ -12736,10 +13693,16 @@ fn api_tilemap_erase(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
             return;
         }
     };
+    ensure_tile_grid(&mut s, nid, x, y);
+    // An erased cell must not keep the flip/rotate of whatever used to be there,
+    // or repainting it would silently inherit the old transform.
+    set_tile_alternative(&mut s, nid, x, y, 0);
     let mut cmd = EditorCommand::TileMapPaint {
         node_id: nid,
         x,
         y,
+        // Erasing IS painting tile 0 — the grid's "no tile" value, which
+        // `to_tile_map_data` then omits from the saved bytes entirely.
         tile_id: 0,
         old_tile_id: 0,
     };
@@ -12747,6 +13710,7 @@ fn api_tilemap_erase(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     s.undo_stack.push(cmd);
     s.redo_stack.clear();
     s.scene_modified = true;
+    writeback_tile_grid(&mut s, nid);
     send_json(stream, r#"{"ok":true}"#);
 }
 
@@ -12770,6 +13734,7 @@ fn api_tilemap_fill(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     let x2 = p.get("x2").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
     let y2 = p.get("y2").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
     let tid = p.get("tile_id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let bucket = p.get("mode").and_then(|v| v.as_str()) == Some("bucket");
     let mut s = state.lock().unwrap();
     let nid = match find_node_by_raw_id(&s.scene_tree, nr) {
         Some(id) => id,
@@ -12778,6 +13743,24 @@ fn api_tilemap_fill(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
             return;
         }
     };
+
+    // Godot's bucket tool floods the contiguous run of like tiles under the
+    // cursor; the rectangle form below is the rect-drag tool. Both live on this
+    // route because they are the same user gesture ("fill this with that").
+    if bucket {
+        let bx = p.get("x").and_then(|v| v.as_i64()).unwrap_or(x1 as i64) as i32;
+        let by = p.get("y").and_then(|v| v.as_i64()).unwrap_or(y1 as i64) as i32;
+        ensure_tile_grid(&mut s, nid, bx, by);
+        let cells = match s.tile_grid_store.get(nid) {
+            Some(g) => tile_bucket_cells(g, bx, by, tid),
+            None => Vec::new(),
+        };
+        let painted = apply_tile_cells(&mut s, nid, "Bucket Fill", &cells, tid);
+        send_json(stream, &format!(r#"{{"ok":true,"cells":{painted}}}"#));
+        return;
+    }
+
+    ensure_tile_grid(&mut s, nid, x1.max(x2), y1.max(y2));
     let mut cmd = EditorCommand::TileMapFill {
         node_id: nid,
         x1,
@@ -12791,7 +13774,34 @@ fn api_tilemap_fill(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     s.undo_stack.push(cmd);
     s.redo_stack.clear();
     s.scene_modified = true;
+    writeback_tile_grid(&mut s, nid);
     send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/tilemap/line` — paints the Bresenham line between two cells as a
+/// single undo entry (Godot's line tool).
+fn api_tilemap_line(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some(p) = parse_json_body(body) else {
+        send_error(stream, 400, "bad json");
+        return;
+    };
+    let Some(nr) = p.get("node_id").and_then(|v| v.as_u64()) else {
+        send_error(stream, 400, "missing node_id");
+        return;
+    };
+    let x1 = p.get("x1").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let y1 = p.get("y1").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let x2 = p.get("x2").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let y2 = p.get("y2").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let tid = p.get("tile_id").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let mut s = state.lock().unwrap();
+    let Some(nid) = find_node_by_raw_id(&s.scene_tree, nr) else {
+        send_error(stream, 404, "not found");
+        return;
+    };
+    let cells = tile_line_cells(x1, y1, x2, y2);
+    let painted = apply_tile_cells(&mut s, nid, "Paint Line", &cells, tid);
+    send_json(stream, &format!(r#"{{"ok":true,"cells":{painted}}}"#));
 }
 
 fn api_tilemap_data(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
@@ -12997,6 +14007,267 @@ fn api_viewport_scale_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: 
     }
 }
 
+// ---------------------------------------------------------------------------
+// @tool scripts + addon EditorPlugins (pat-0q2kx.76)
+//
+// In Godot a `@tool` script executes in the EDITOR as well as at runtime, and
+// enabling an addon instantiates the EditorPlugin named by its `plugin.cfg`,
+// with the enabled list persisted to `project.godot [editor_plugins]`.
+//
+// Patina had neither: `api_toggle_plugin` flipped a bool on a list that was
+// initialised empty and never populated from disk, so the toggle could not even
+// find a plugin to flip, and no `@tool` code ran in edit mode at all.
+// ---------------------------------------------------------------------------
+
+/// Reads `project.godot`, applies `edit`, and writes it back.
+///
+/// Returns false when the project has no readable `project.godot` — callers
+/// treat that as "nothing to persist to" rather than an error, so an editor
+/// session with no project open still toggles in memory.
+fn update_project_file(project_root: &str, edit: impl FnOnce(&mut GodotProjectFile)) -> bool {
+    let path = std::path::Path::new(project_root).join("project.godot");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(mut pf) = GodotProjectFile::parse(&text) else {
+        return false;
+    };
+    edit(&mut pf);
+    std::fs::write(&path, pf.to_text()).is_ok()
+}
+
+/// The `[editor_plugins] enabled` list, or empty when there is no project file.
+fn enabled_plugin_paths(project_root: &str) -> Vec<String> {
+    let path = std::path::Path::new(project_root).join("project.godot");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| GodotProjectFile::parse(&t).ok())
+        .map(|pf| pf.enabled_editor_plugins())
+        .unwrap_or_default()
+}
+
+/// Scans `addons/*/plugin.cfg` and builds the plugin list.
+///
+/// ⚠️ This is the step that was missing entirely: `state.plugins` started as
+/// `Vec::new()` and nothing ever filled it, so `POST /api/plugins/toggle`
+/// always answered 404 no matter what the project contained.
+fn discover_plugins(project_root: &str) -> Vec<PluginEntry> {
+    let enabled = enabled_plugin_paths(project_root);
+    let addons = std::path::Path::new(project_root).join("addons");
+    let Ok(entries) = std::fs::read_dir(&addons) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PluginEntry> = Vec::new();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let cfg = dir.join("plugin.cfg");
+        if !cfg.is_file() {
+            continue;
+        }
+        let Some(folder) = dir.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
+        // plugin.cfg is the same INI dialect as project.godot, so it reuses the
+        // same parser rather than growing a second one.
+        let text = std::fs::read_to_string(&cfg).unwrap_or_default();
+        let pf = GodotProjectFile::parse(&text).unwrap_or(GodotProjectFile {
+            sections: HashMap::new(),
+        });
+        let unquote = |v: Option<&str>| v.unwrap_or("").trim().trim_matches('"').to_string();
+        let name = {
+            let n = unquote(pf.get("plugin", "name"));
+            if n.is_empty() {
+                folder.to_string()
+            } else {
+                n
+            }
+        };
+        let res_cfg = format!("res://addons/{folder}/plugin.cfg");
+        found.push(PluginEntry {
+            enabled: enabled.iter().any(|p| p == &res_cfg),
+            name,
+            folder: folder.to_string(),
+            cfg_path: res_cfg,
+            script: unquote(pf.get("plugin", "script")),
+            description: unquote(pf.get("plugin", "description")),
+            version: unquote(pf.get("plugin", "version")),
+        });
+    }
+    // Stable order so the settings list does not reshuffle between requests.
+    found.sort_by(|a, b| a.folder.cmp(&b.folder));
+    found
+}
+
+/// Instantiates an enabled plugin's EditorPlugin script and starts it.
+///
+/// Godot calls `_enter_tree` then `_enable_plugin` when a plugin is switched on
+/// (`editor/plugins/editor_plugin.cpp`). Whatever the script prints is routed to
+/// the Output panel, which is how a user sees that their addon actually ran.
+fn start_editor_plugin(state: &mut EditorState, folder: &str, script: &str) {
+    let Some(root) = state.project_root.clone() else {
+        return;
+    };
+    if script.is_empty() {
+        state.add_log(
+            "warn",
+            format!("Plugin '{folder}' has no script= in plugin.cfg; nothing to run"),
+        );
+        return;
+    }
+    // `script=` is relative to the addon folder (Godot's convention).
+    let path = std::path::Path::new(&root)
+        .join("addons")
+        .join(folder)
+        .join(script.trim_start_matches("res://"));
+    let source = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            state.add_log(
+                "error",
+                format!("Plugin '{folder}': cannot read {}: {e}", path.display()),
+            );
+            return;
+        }
+    };
+    // The plugin is not a scene node, so it gets the edit tree's root as its
+    // host id — enough for `get_node`-free plugin code, which is what an
+    // EditorPlugin's _enter_tree normally is.
+    let host = state.scene_tree.root_id();
+    let mut instance = match GDScriptNodeInstance::from_source(&source, host) {
+        Ok(i) => i,
+        Err(e) => {
+            state.add_log("error", format!("Plugin '{folder}' parse error: {e}"));
+            return;
+        }
+    };
+    for method in ["_enter_tree", "_enable_plugin"] {
+        if instance.has_method(method) {
+            if let Err(e) = instance.call_method(method, &[]) {
+                state.add_log("error", format!("Plugin '{folder}' {method} failed: {e:?}"));
+            }
+        }
+    }
+    for line in instance.take_output() {
+        state.add_log("info", line);
+    }
+    state.add_log("info", format!("Plugin enabled: {folder}"));
+    state.active_plugins.insert(folder.to_string(), instance);
+}
+
+/// Mirrors Godot's `_disable_plugin` / `_exit_tree` on switch-off.
+fn stop_editor_plugin(state: &mut EditorState, folder: &str) {
+    let Some(mut instance) = state.active_plugins.remove(folder) else {
+        return;
+    };
+    for method in ["_disable_plugin", "_exit_tree"] {
+        if instance.has_method(method) {
+            let _ = instance.call_method(method, &[]);
+        }
+    }
+    for line in instance.take_output() {
+        state.add_log("info", line);
+    }
+    state.add_log("info", format!("Plugin disabled: {folder}"));
+}
+
+/// Refreshes the plugin list from disk and starts everything already enabled.
+///
+/// Called when a project is opened, so an enabled plugin survives a server
+/// restart — the bead's persistence clause is only observable through this.
+fn sync_plugins_from_project(state: &mut EditorState) {
+    let Some(root) = state.project_root.clone() else {
+        return;
+    };
+    state.plugins = discover_plugins(&root);
+    let to_start: Vec<(String, String)> = state
+        .plugins
+        .iter()
+        .filter(|p| p.enabled)
+        .map(|p| (p.folder.clone(), p.script.clone()))
+        .collect();
+    for (folder, script) in to_start {
+        start_editor_plugin(state, &folder, &script);
+    }
+}
+
+/// Instantiates the `@tool` scripts in the current EDIT tree and runs `_ready`.
+///
+/// Godot runs a `@tool` script in the editor exactly as it would at runtime; a
+/// script WITHOUT the annotation stays inert while editing, which is why this
+/// filters on `is_tool()` rather than attaching everything.
+fn sync_tool_scripts_from_scene(state: &mut EditorState) {
+    // Dropping the previous scene's instances is what stops a closed scene's
+    // tool script from continuing to tick against a tree it no longer belongs
+    // to.
+    state.tool_scripts.clear();
+    let Some(root) = state.project_root.clone() else {
+        return;
+    };
+
+    let mut candidates: Vec<(NodeId, String)> = Vec::new();
+    for node_id in state.scene_tree.all_nodes_in_tree_order() {
+        if let Some(node) = state.scene_tree.get_node(node_id) {
+            if let Variant::String(res_path) = node.get_property("_script_path") {
+                candidates.push((node_id, res_path));
+            }
+        }
+    }
+
+    for (node_id, res_path) in candidates {
+        let relative = res_path.strip_prefix("res://").unwrap_or(&res_path);
+        let path = std::path::Path::new(&root).join(relative);
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut instance = match GDScriptNodeInstance::from_source(&source, node_id) {
+            Ok(i) => i,
+            Err(e) => {
+                state.add_log("error", format!("@tool parse error in {res_path}: {e}"));
+                continue;
+            }
+        };
+        if !instance.is_tool() {
+            continue;
+        }
+        if instance.has_method("_ready") {
+            if let Err(e) = instance.call_method("_ready", &[]) {
+                state.add_log("error", format!("@tool {res_path} _ready failed: {e:?}"));
+            }
+        }
+        for line in instance.take_output() {
+            state.add_log("info", line);
+        }
+        state.tool_scripts.insert(node_id, instance);
+    }
+}
+
+/// Ticks every running `@tool` script's `_process` against the edit tree.
+///
+/// Godot drives tool scripts from the editor's idle frame, which is what lets an
+/// `@tool` `_process` animate something in the edit viewport.
+pub fn process_tool_scripts(state: &mut EditorState, delta: f64) {
+    let ids: Vec<NodeId> = state.tool_scripts.keys().copied().collect();
+    let mut output: Vec<String> = Vec::new();
+    for id in ids {
+        let Some(instance) = state.tool_scripts.get_mut(&id) else {
+            continue;
+        };
+        if !instance.has_method("_process") {
+            continue;
+        }
+        let err = instance
+            .call_method("_process", &[Variant::Float(delta)])
+            .err();
+        output.extend(instance.take_output());
+        if let Some(e) = err {
+            output.push(format!("@tool _process failed: {e:?}"));
+        }
+    }
+    for line in output {
+        state.add_log("info", line);
+    }
+}
+
 /// `GET /api/plugins` — returns the list of registered editor plugins.
 fn api_get_plugins(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let s = state.lock().unwrap();
@@ -13073,12 +14344,43 @@ fn api_toggle_plugin(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
         }
     };
     let mut s = state.lock().unwrap();
-    if let Some(plugin) = s.plugins.iter_mut().find(|pl| pl.name == name) {
-        plugin.enabled = enabled;
-        send_json(stream, r#"{"ok":true}"#);
-    } else {
+    // Accept the display name, the folder, or the cfg path: the settings UI
+    // shows the name, while `project.godot` and Godot's own API speak in cfg
+    // paths.
+    let found = s
+        .plugins
+        .iter_mut()
+        .find(|pl| pl.name == name || pl.folder == name || pl.cfg_path == name);
+    let Some(plugin) = found else {
         send_error(stream, 404, "plugin not found");
+        return;
+    };
+    plugin.enabled = enabled;
+    let folder = plugin.folder.clone();
+    let script = plugin.script.clone();
+
+    // Persist the whole enabled set, not just this entry: `[editor_plugins]
+    // enabled` is one array, so it has to be rewritten as a unit.
+    let paths: Vec<String> = s
+        .plugins
+        .iter()
+        .filter(|p| p.enabled)
+        .map(|p| p.cfg_path.clone())
+        .collect();
+    let mut persisted = false;
+    if let Some(root) = s.project_root.clone() {
+        persisted = update_project_file(&root, |pf| pf.set_enabled_editor_plugins(&paths));
     }
+
+    if enabled {
+        start_editor_plugin(&mut s, &folder, &script);
+    } else {
+        stop_editor_plugin(&mut s, &folder);
+    }
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"enabled":{enabled},"persisted":{persisted}}}"#),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -21989,8 +23291,8 @@ position = Vector2(10, 20)
         let node_resp = http_get(port, &format!("/api/node/{}", shape_id));
         let body = extract_body(&node_resp);
         assert!(
-            body.contains("shape_radius"),
-            "should have shape_radius property"
+            body.contains("__shape__radius"),
+            "should have the flattened __shape__radius property"
         );
 
         handle.stop();
@@ -22019,8 +23321,8 @@ position = Vector2(10, 20)
         let node_resp = http_get(port, &format!("/api/node/{}", shape_id));
         let body = extract_body(&node_resp);
         assert!(
-            body.contains("shape_extents"),
-            "should have shape_extents property"
+            body.contains("__shape__size"),
+            "should have the flattened __shape__size property"
         );
 
         handle.stop();
@@ -22053,16 +23355,16 @@ position = Vector2(10, 20)
         // The property should be reverted (Nil = not present in response or null).
         let node_resp = http_get(port, &format!("/api/node/{}", shape_id));
         let body = extract_body(&node_resp);
-        // After undo, shape_radius should not be set (reverted to Nil).
-        // The property list should either not contain shape_radius or show it as null.
+        // After undo, __shape__radius should not be set (reverted to Nil).
+        // The property list should either omit it or show it as null.
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
         let props = v["properties"].as_array().unwrap();
         let has_radius = props
             .iter()
-            .any(|p| p["name"] == "shape_radius" && p["value"]["type"] != "Nil");
+            .any(|p| p["name"] == "__shape__radius" && p["value"]["type"] != "Nil");
         assert!(
             !has_radius,
-            "after undo, shape_radius should be reverted to Nil"
+            "after undo, __shape__radius should be reverted to Nil"
         );
 
         handle.stop();

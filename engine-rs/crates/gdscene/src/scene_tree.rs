@@ -13,12 +13,13 @@ use gdobject::notification::{
 };
 use gdobject::signal::SignalStore;
 use gdobject::weak_ref;
-use gdplatform::network::MultiplayerAPI;
+use gdplatform::network::{MultiplayerAPI, RPCConfig, RPCMode, TransferMode};
 use gdscript_interop::bindings::ScriptInstance;
 use gdvariant::Variant;
 
 use crate::animation::{AnimationCallbackMode, AnimationPlayer, AnimationPlayerSignal};
 use crate::animation_tree::AnimationTree;
+use crate::sprite_frames::{AnimatedSpritePlayback, SpriteFrames};
 use crate::lifecycle::LifecycleManager;
 use crate::node::{Node, NodeId};
 use crate::trace::{EventTrace, TraceEvent, TraceEventType};
@@ -191,6 +192,9 @@ pub struct SceneTree {
     /// per frame via [`poll_multiplayer`](Self::poll_multiplayer); inbound RPCs
     /// are dispatched to their target node's script.
     multiplayer: MultiplayerAPI,
+    /// Method names declared `@rpc(..., "call_local", ...)`, which Godot also
+    /// executes on the sending peer (pat-0q2kx.79).
+    rpc_call_local: std::collections::HashSet<String>,
     /// A scene queued by [`change_scene_to_file`](Self::change_scene_to_file),
     /// applied at the next [`process_deferred_scene_change`] — Godot defers the
     /// swap to the frame boundary so the calling script's own scene is not
@@ -266,6 +270,7 @@ impl SceneTree {
             trace_frame: 0,
             paused: false,
             multiplayer: MultiplayerAPI::new(),
+            rpc_call_local: std::collections::HashSet::new(),
             pending_scene: None,
             should_quit: false,
             exit_code: 0,
@@ -319,6 +324,57 @@ impl SceneTree {
                 self.call_script_with_access(node_id, &rpc.method_name, &rpc.args);
             }
         }
+    }
+
+    /// Registers a script's `@rpc` methods with the tree's MultiplayerAPI.
+    ///
+    /// Godot configures `Node::rpc_config` from the annotation at script load
+    /// (`gdscript_parser.cpp`); until this existed, `MultiplayerAPI::rpc` could
+    /// only fail with `UnregisteredRPC` because nothing ever registered anything
+    /// (pat-0q2kx.79).
+    ///
+    /// Argument order follows `@rpc("any_peer", "call_local", "reliable", 0)`,
+    /// but Godot accepts them in ANY order and omits what it does not need, so
+    /// each argument is classified by value rather than by position.
+    pub fn register_script_rpcs(&mut self, methods: &[(String, Vec<String>)]) {
+        for (name, args) in methods {
+            let mut config = RPCConfig {
+                // Godot's defaults for a bare `@rpc`.
+                mode: RPCMode::Authority,
+                transfer_mode: TransferMode::Unreliable,
+                channel: 0,
+            };
+            for arg in args {
+                match arg.as_str() {
+                    "any_peer" => config.mode = RPCMode::Any,
+                    "authority" => config.mode = RPCMode::Authority,
+                    "reliable" => config.transfer_mode = TransferMode::Reliable,
+                    "unreliable" => config.transfer_mode = TransferMode::Unreliable,
+                    // Patina's transport spells Godot's `unreliable_ordered`
+                    // as `Ordered`.
+                    "unreliable_ordered" => config.transfer_mode = TransferMode::Ordered,
+                    // `call_local` / `call_remote` are about local execution, not
+                    // transport, and are tracked separately below.
+                    "call_local" | "call_remote" => {}
+                    other => {
+                        // The channel is the only numeric argument.
+                        if let Ok(ch) = other.parse::<u8>() {
+                            config.channel = ch;
+                        }
+                    }
+                }
+            }
+            if args.iter().any(|a| a == "call_local") {
+                self.rpc_call_local.insert(name.clone());
+            }
+            self.multiplayer.register_rpc(name.clone(), config);
+        }
+    }
+
+    /// Whether `method` was declared `@rpc(..., "call_local", ...)`, i.e. Godot
+    /// also runs it on the caller.
+    pub fn rpc_is_call_local(&self, method: &str) -> bool {
+        self.rpc_call_local.contains(method)
     }
 
     /// Resolves an inbound RPC `node_path` hash to a live node by matching the
@@ -1498,6 +1554,24 @@ impl SceneTree {
         if self.scripts.contains_key(&source) {
             self.notify_script_await(source, signal_name, args);
         }
+        // …and every OTHER script, because a cross-node `await other.sig` parks
+        // in the AWAITING script's interpreter, which the emitter's own host
+        // knows nothing about. Object-bound awaits still only wake for their own
+        // source, so this is a broadcast of the offer, not of the resume
+        // (pat-0q2kx.81).
+        //
+        // ⚠️ Deliberately outside the `contains_key(&source)` guard above: a
+        // scriptless node emitting a signal (a native/engine emit) must still be
+        // able to wake somebody else's `await`.
+        let others: Vec<NodeId> = self
+            .scripts
+            .keys()
+            .copied()
+            .filter(|id| *id != source)
+            .collect();
+        for id in others {
+            self.notify_script_await_from(id, source, signal_name, args);
+        }
 
         results
     }
@@ -1885,6 +1959,89 @@ impl SceneTree {
         }
     }
 
+    /// Advances every `AnimatedSprite2D`'s frame by `delta` seconds.
+    ///
+    /// Godot's `AnimatedSprite2D::_process_animation` walks the node's
+    /// `SpriteFrames` at the animation's FPS, wrapping when it loops and
+    /// emitting `animation_finished` once when it does not
+    /// (`scene/2d/animated_sprite_2d.cpp`). Patina had the state machine
+    /// ([`AnimatedSpritePlayback`]) but nothing ever called it — an
+    /// `AnimatedSprite2D` sat on frame 0 forever no matter how long the game
+    /// ran (pat-0q2kx.74).
+    ///
+    /// Playback state lives in the node's own property bag (`frame`, `playing`,
+    /// `speed_scale` are Godot's; `__sf_time` accumulates sub-frame time) so a
+    /// node added mid-run needs no registration step, and the frame index a
+    /// script reads back is the one the renderer draws.
+    pub fn process_animated_sprites(&mut self, delta: f64) {
+        let node_ids: Vec<NodeId> = self.nodes.keys().copied().collect();
+        for node_id in node_ids {
+            let Some(node) = self.nodes.get(&node_id) else {
+                continue;
+            };
+            if node.class_name() != "AnimatedSprite2D" {
+                continue;
+            }
+            // `playing` defaults to FALSE, matching Godot: a sprite only
+            // animates once `play()` — or `autoplay` — has started it. Autoplay
+            // fires once, on the first frame the node is processed, and is
+            // recorded so stopping a non-looping clip is not undone next frame.
+            let mut autostart: Option<String> = None;
+            if !matches!(node.get_property("playing"), Variant::Bool(true)) {
+                let auto = match node.get_property("autoplay") {
+                    Variant::String(s) if !s.is_empty() => s,
+                    _ => continue,
+                };
+                if matches!(node.get_property("__sf_autoplayed"), Variant::Bool(true)) {
+                    continue;
+                }
+                autostart = Some(auto);
+            }
+            let Some(frames) = sprite_frames_from_node(node) else {
+                continue;
+            };
+            let anim = match autostart.clone() {
+                Some(a) => a,
+                None => match node.get_property("animation") {
+                    Variant::String(s) if !s.is_empty() => s,
+                    // Godot's default animation name.
+                    _ => "default".to_string(),
+                },
+            };
+            let mut playback = AnimatedSpritePlayback::new(&anim);
+            playback.frame = match node.get_property("frame") {
+                Variant::Int(i) if i >= 0 => i as usize,
+                _ => 0,
+            };
+            playback.time = match node.get_property("__sf_time") {
+                Variant::Float(f) => f as f32,
+                _ => 0.0,
+            };
+            playback.speed_scale = match node.get_property("speed_scale") {
+                Variant::Float(f) => f as f32,
+                Variant::Int(i) => i as f32,
+                _ => 1.0,
+            };
+
+            let finished = playback.advance(delta as f32, &frames);
+
+            if let Some(node) = self.nodes.get_mut(&node_id) {
+                if let Some(a) = autostart {
+                    node.set_property("animation", Variant::String(a));
+                    node.set_property("__sf_autoplayed", Variant::Bool(true));
+                }
+                node.set_property("frame", Variant::Int(playback.frame as i64));
+                node.set_property("__sf_time", Variant::Float(playback.time as f64));
+                // A non-looping animation stops on its last frame; Godot leaves
+                // `playing` false so a later `play()` is what restarts it.
+                node.set_property("playing", Variant::Bool(playback.playing));
+            }
+            if finished {
+                self.emit_signal(node_id, "animation_finished", &[]);
+            }
+        }
+    }
+
     // -- animation tree management ------------------------------------------
 
     /// Attaches an [`AnimationTree`] to a node (Godot's `AnimationTree` node),
@@ -2124,6 +2281,14 @@ impl SceneTree {
                 script.set_property(&name, value);
             }
         }
+        // Godot configures a node's RPCs from the script's `@rpc` annotations at
+        // load time. Doing it here covers every attach site — the runner's boot
+        // and main paths and the editor's Play path all funnel through this
+        // function (pat-0q2kx.79).
+        let rpcs = script.rpc_methods();
+        if !rpcs.is_empty() {
+            self.register_script_rpcs(&rpcs);
+        }
         self.scripts.insert(node_id, script);
     }
 
@@ -2200,7 +2365,12 @@ impl SceneTree {
     /// [`SceneTreeAccessor`], calls the named method, then re-inserts the
     /// script. This allows the running script to call back into the tree
     /// (e.g. `get_node`, `emit_signal`) without violating borrow rules.
-    fn call_script_with_access(&mut self, node_id: NodeId, method: &str, args: &[Variant]) {
+    pub(crate) fn call_script_with_access(
+        &mut self,
+        node_id: NodeId,
+        method: &str,
+        args: &[Variant],
+    ) {
         let _ = self.call_script_method(node_id, method, args);
     }
 
@@ -2315,6 +2485,26 @@ impl SceneTree {
     /// dance: the script is removed while it runs so a resumed body can call
     /// back into the tree via `SceneTreeAccessor` without aliasing `self`.
     fn notify_script_await(&mut self, node_id: NodeId, signal_name: &str, args: &[Variant]) {
+        // The emitter is its own source in the single-node case.
+        self.notify_script_await_from(node_id, node_id, signal_name, args);
+    }
+
+    /// [`notify_script_await`] where the parked coroutine and the EMITTER are
+    /// different nodes.
+    ///
+    /// ⚠️ A coroutine parked at `await other.sig` lives in the AWAITING script's
+    /// own interpreter — each `GDScriptNodeInstance` owns its `CoroutineHost` —
+    /// so it is not reachable from the emitter's script at all. `source` is
+    /// carried separately so the host's `(name, object_id)` match still rejects
+    /// a same-named signal from a different object (pat-0q2kx.81).
+    fn notify_script_await_from(
+        &mut self,
+        script_node: NodeId,
+        source: NodeId,
+        signal_name: &str,
+        args: &[Variant],
+    ) {
+        let node_id = script_node;
         if let Some(mut script) = self.scripts.remove(&node_id) {
             let snapshot_clone = self.input_snapshot.clone();
             // SAFETY: identical invariant to `call_script_with_access` — the
@@ -2334,7 +2524,7 @@ impl SceneTree {
             // `node_id` is also the emitter here: `emit_signal` passes its own
             // `source` as the node to notify. Carrying it lets an object-bound
             // `await` reject another node's same-named signal (pat-0q2kx.9).
-            script.notify_await_signal_from(node_id.raw(), signal_name, args);
+            script.notify_await_signal_from(source.raw(), signal_name, args);
             script.clear_scene_access();
 
             // Sync any variables a resumed coroutine wrote back to node
@@ -3249,6 +3439,43 @@ impl Default for SceneTree {
 /// Root motion moves the owner node itself (matching Godot, where the mixer's
 /// parent/character consumes the delta) rather than driving an absolute value,
 /// so successive frames accumulate movement.
+/// Rebuilds a node's [`SpriteFrames`] from the flat `__sf_*` companion keys the
+/// SpriteFrames editor authors (`editor_server.rs`, pat-0q2kx.74).
+///
+/// Patina's property bag is flat, so the resource is stored as `__sf_anims__`
+/// plus `__sf_<anim>_{speed,loop,frames}` rather than as a nested object. Only
+/// the frame COUNT matters to playback — which texture each frame draws is the
+/// renderer's business.
+///
+/// Returns `None` when the node declares no animations, so the caller can skip
+/// it without allocating.
+fn sprite_frames_from_node(node: &Node) -> Option<SpriteFrames> {
+    let names = match node.get_property("__sf_anims__") {
+        Variant::PackedStringArray(v) if !v.is_empty() => v,
+        _ => return None,
+    };
+    let mut frames = SpriteFrames::new();
+    for name in &names {
+        let count = match node.get_property(&format!("__sf_{name}_frames")) {
+            Variant::PackedStringArray(f) => f.len(),
+            _ => 0,
+        };
+        let speed = match node.get_property(&format!("__sf_{name}_speed")) {
+            Variant::Float(f) => f as f32,
+            Variant::Int(i) => i as f32,
+            // Godot's SpriteFrames default FPS.
+            _ => 5.0,
+        };
+        // Only an explicit `false` turns looping off.
+        let loops = !matches!(
+            node.get_property(&format!("__sf_{name}_loop")),
+            Variant::Bool(false)
+        );
+        frames.add_animation(name, count, speed, loops);
+    }
+    Some(frames)
+}
+
 fn apply_root_motion_delta(node: &mut Node, delta: &crate::animation::RootMotionDelta) {
     if delta.position != gdcore::math::Vector3::ZERO {
         let cur = match node.get_property("position") {

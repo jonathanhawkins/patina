@@ -238,6 +238,48 @@ impl MultiplayerAPI {
         peer.send_packet(target_id, packet)
     }
 
+    /// The registered config for `method`, if any.
+    ///
+    /// Lets a host confirm what a script's `@rpc` annotation actually
+    /// configured, rather than inferring it from a successful send
+    /// (pat-0q2kx.79).
+    pub fn get_rpc_config(&self, method: &str) -> Option<&RPCConfig> {
+        self.rpc_configs.get(method)
+    }
+
+    /// Initiate an RPC on `node_path` addressed to ONE peer (Godot
+    /// `Node.rpc_id`).
+    ///
+    /// Identical to [`rpc`](Self::rpc) except the target is given rather than
+    /// resolved from the node's authority, which is the whole point of the
+    /// `_id` form: replying to a specific caller (pat-0q2kx.79).
+    pub fn rpc_id(
+        &mut self,
+        node_path: u64,
+        peer: i64,
+        method: &str,
+        args: Vec<Variant>,
+    ) -> Result<()> {
+        let config = self
+            .rpc_configs
+            .get(method)
+            .ok_or_else(|| NetworkError::UnregisteredRPC(method.to_string()))?
+            .clone();
+
+        let peer_handle = self.peer.as_mut().ok_or(NetworkError::NoPeer)?;
+        let sender_id = peer_handle.get_unique_id();
+        let data = encode_rpc_packet(node_path, method, &args);
+
+        let packet = Packet {
+            sender: sender_id,
+            channel: config.channel,
+            data,
+            transfer_mode: config.transfer_mode,
+        };
+
+        peer_handle.send_packet(PeerId(peer as u32), packet)
+    }
+
     /// Poll the transport and decode inbound RPC / leave non-RPC packets to caller.
     ///
     /// Returns non-RPC packets (spawn/sync/etc.) for higher layers. Decoded

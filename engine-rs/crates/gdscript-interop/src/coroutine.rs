@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use gdvariant::{Dictionary, Variant};
 
-use crate::parser::Stmt;
+use crate::parser::{Expr, Stmt};
 
 /// What a suspended coroutine is waiting for.
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +42,16 @@ pub enum AwaitTarget {
     Frames {
         /// Frames remaining.
         remaining: u32,
+    },
+    /// Wait for another coroutine to finish, then take its return value.
+    ///
+    /// This is `var v = await helper()` where `helper` itself awaits: Godot
+    /// parks the caller on the callee's `GDScriptFunctionState` and delivers its
+    /// return value on completion. Without it the call returned `Nil`
+    /// immediately and the caller ran on regardless (pat-0q2kx.78).
+    Coroutine {
+        /// The awaited coroutine's id.
+        id: u64,
     },
 }
 
@@ -151,6 +161,47 @@ impl AwaitTarget {
     }
 }
 
+/// One enclosing construct a suspended function still has to finish.
+///
+/// Godot's VM resumes at the exact instruction, so a `for` that awaits mid-body
+/// carries on iterating (`gdscript_vm.cpp` `GDScriptFunctionState`). A tree-walk
+/// interpreter has no instruction pointer, so the equivalent is an explicit
+/// stack of "what is left to do" frames, captured as the suspension unwinds and
+/// replayed innermost-first on resume.
+///
+/// ⚠️ Without this, `While`/`For` propagated `Suspend` outward exactly like
+/// `Return`: `for e in list: spawn(e); await timer` spawned ONE enemy and
+/// silently abandoned the rest, with every top-level-await test still green
+/// (pat-0q2kx.78).
+#[derive(Debug, Clone)]
+pub enum ResumeFrame {
+    /// Statements left in a plain block (an `if` body, a loop body, a function
+    /// body) after the one that suspended.
+    Block {
+        /// The not-yet-executed statements, in order.
+        remaining: Vec<Stmt>,
+    },
+    /// A `for` that suspended inside its body: finish the current iteration
+    /// (via the `Block` frame pushed beneath this one), then iterate the items
+    /// that were never reached.
+    For {
+        /// The loop variable to rebind per item.
+        var: String,
+        /// The loop body, re-executed per remaining item.
+        body: Vec<Stmt>,
+        /// Items after the one being processed when the suspension happened.
+        pending_items: Vec<Variant>,
+    },
+    /// A `while` that suspended inside its body: after the current iteration
+    /// finishes, re-test the condition and keep looping.
+    While {
+        /// The loop condition, re-evaluated each iteration.
+        condition: Expr,
+        /// The loop body.
+        body: Vec<Stmt>,
+    },
+}
+
 /// Identity for a suspended coroutine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CoroutineId(pub u64);
@@ -160,8 +211,14 @@ pub struct CoroutineId(pub u64);
 pub struct SuspendedCoroutine {
     /// Unique id.
     pub id: CoroutineId,
-    /// Statements still to execute after resume.
+    /// Statements still to execute after resume, from the OUTERMOST block (the
+    /// function body). Inner constructs are carried by [`frames`](Self::frames).
     pub remaining: Vec<Stmt>,
+    /// The enclosing constructs still to finish, innermost first.
+    ///
+    /// Empty for a top-level `await`, which is why the old flat `remaining`
+    /// looked sufficient for so long (pat-0q2kx.78).
+    pub frames: Vec<ResumeFrame>,
     /// Local scope snapshot (parameter + local bindings as name→value).
     pub locals: HashMap<String, Variant>,
     /// Instance property snapshot (for class methods). Empty for free funcs.
@@ -310,6 +367,27 @@ impl CoroutineHost {
         self.suspended = still;
     }
 
+    /// Wakes anything awaiting coroutine `id`, delivering its return `value`.
+    ///
+    /// Called when a coroutine's body finally runs to completion, which may be
+    /// many resumes after the caller parked on it.
+    pub fn notify_coroutine_done(&mut self, id: CoroutineId, value: Variant) {
+        let mut i = 0;
+        while i < self.suspended.len() {
+            let hit = matches!(
+                self.suspended[i].wait,
+                AwaitTarget::Coroutine { id: waited } if waited == id.0
+            );
+            if hit {
+                let mut co = self.suspended.remove(i);
+                co.resume_value = value.clone();
+                self.ready.push(co);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     /// Pop all ready coroutines (caller will execute them).
     pub fn take_ready(&mut self) -> Vec<SuspendedCoroutine> {
         std::mem::take(&mut self.ready)
@@ -335,6 +413,7 @@ mod tests {
     fn poll_moves_timer_to_ready() {
         let mut host = CoroutineHost::new();
         host.suspend(SuspendedCoroutine {
+                frames: Vec::new(),
             id: CoroutineId(0),
             remaining: vec![],
             locals: HashMap::new(),
@@ -358,6 +437,7 @@ mod tests {
     fn signal_notify_resumes() {
         let mut host = CoroutineHost::new();
         host.suspend(SuspendedCoroutine {
+                frames: Vec::new(),
             id: CoroutineId(0),
             remaining: vec![],
             locals: HashMap::new(),
@@ -388,6 +468,7 @@ mod tests {
     fn object_bound_signal_await_ignores_other_emitters() {
         fn park(host: &mut CoroutineHost, name: &str, object_id: Option<u64>) {
             host.suspend(SuspendedCoroutine {
+                frames: Vec::new(),
                 id: CoroutineId(0),
                 remaining: vec![],
                 locals: HashMap::new(),
@@ -449,6 +530,7 @@ mod tests {
         let mut host = CoroutineHost::new();
         for secs in [0.1_f32, 0.3, 0.2] {
             host.suspend(SuspendedCoroutine {
+                frames: Vec::new(),
                 id: CoroutineId(0),
                 remaining: vec![],
                 locals: HashMap::new(),

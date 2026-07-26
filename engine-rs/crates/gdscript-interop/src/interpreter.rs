@@ -370,6 +370,15 @@ pub struct Interpreter {
     environment: Environment,
     function_registry: HashMap<String, FuncDef>,
     output: Vec<String>,
+    /// Continuation frames captured while a suspension unwinds, innermost
+    /// first. Drained by `park_coroutine` into the parked frame (pat-0q2kx.78).
+    pending_continuation: Vec<crate::coroutine::ResumeFrame>,
+    /// Set when the most recent call parked a coroutine instead of returning.
+    ///
+    /// A suspending callee returns `Nil` like any other, so this is the only
+    /// signal the caller has that it should await rather than carry on
+    /// (pat-0q2kx.78).
+    last_call_suspended: Option<crate::coroutine::CoroutineId>,
     call_depth: usize,
     /// The current class instance when executing inside a class method.
     self_instance: Option<ClassInstance>,
@@ -429,6 +438,13 @@ impl Clone for Interpreter {
             current_node_id: self.current_node_id,
             coroutine_host: crate::coroutine::CoroutineHost::new(),
             pending_await_bind: None,
+            // Both are strictly in-flight suspension bookkeeping, valid only
+            // between a Suspend unwinding and the matching `park_coroutine`.
+            // A clone starts with a fresh (empty) CoroutineHost above, so
+            // carrying half-captured frames into it would describe a suspension
+            // the clone has no record of (pat-0q2kx.78).
+            pending_continuation: Vec::new(),
+            last_call_suspended: None,
         }
     }
 }
@@ -444,17 +460,48 @@ pub struct FuncDef {
     pub body: Vec<Stmt>,
     /// Whether this is a static function.
     pub is_static: bool,
+    /// Annotations declared on the function, e.g. `@rpc("any_peer", ...)`.
+    ///
+    /// ⚠️ The parser has always attached these to `Stmt::FuncDef`, but `FuncDef`
+    /// dropped them on the floor when the `ClassDef` was built — which made
+    /// registering a script's RPCs structurally impossible, not merely unwired
+    /// (pat-0q2kx.79).
+    pub annotations: Vec<Annotation>,
 }
 
 impl FuncDef {
     /// Constructs a `FuncDef` from parsed [`FuncParam`]s.
     pub fn from_params(params: &[FuncParam], body: &[Stmt], is_static: bool) -> Self {
+        Self::from_params_annotated(params, body, is_static, &[])
+    }
+
+    /// [`from_params`](Self::from_params) that also keeps the function's
+    /// annotations.
+    pub fn from_params_annotated(
+        params: &[FuncParam],
+        body: &[Stmt],
+        is_static: bool,
+        annotations: &[Annotation],
+    ) -> Self {
         Self {
             params: params.iter().map(|p| p.name.clone()).collect(),
             defaults: params.iter().map(|p| p.default.clone()).collect(),
             body: body.to_vec(),
             is_static,
+            annotations: annotations.to_vec(),
         }
+    }
+
+    /// The `@rpc(...)` arguments if this function is an RPC, else `None`.
+    ///
+    /// A bare `@rpc` yields an empty argument list, which is Godot's
+    /// `authority`/`call_remote`/`unreliable`/channel-0 default — distinct from
+    /// "not an RPC at all", hence `Option<Vec<_>>` rather than `Vec<_>`.
+    pub fn rpc_annotation(&self) -> Option<&[String]> {
+        self.annotations
+            .iter()
+            .find(|a| a.name == "rpc")
+            .map(|a| a.args.as_slice())
     }
 
     /// Returns the minimum number of required arguments (those without defaults).
@@ -579,12 +626,25 @@ pub struct ClassInstance {
 }
 
 impl Interpreter {
+    /// Drains everything `print()` has emitted since the last call.
+    ///
+    /// The buffer itself is private, and `InterpreterResult::output` only
+    /// carries what a single top-level run produced — a host that keeps ONE
+    /// interpreter alive across many `call_instance_method` invocations (the
+    /// editor running a `@tool` script, pat-0q2kx.76) has no other way to reach
+    /// the lines those calls printed.
+    pub fn take_output(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.output)
+    }
+
     /// Creates a new interpreter with an empty environment.
     pub fn new() -> Self {
         Self {
             environment: Environment::new(),
             function_registry: HashMap::new(),
             output: Vec::new(),
+            pending_continuation: Vec::new(),
+            last_call_suspended: None,
             call_depth: 0,
             self_instance: None,
             class_registry: HashMap::new(),
@@ -754,8 +814,19 @@ impl Interpreter {
                         match cf {
                             ControlFlow::Break => break,
                             ControlFlow::Continue => continue,
-                            ControlFlow::Return(_) | ControlFlow::Suspend(_) => {
-                                return Ok(Some(cf))
+                            ControlFlow::Return(_) => return Ok(Some(cf)),
+                            // A suspension owes the REST OF THE LOOP, not just
+                            // the rest of this iteration: record the loop itself
+                            // so resume re-tests the condition and carries on
+                            // (pat-0q2kx.78).
+                            ControlFlow::Suspend(_) => {
+                                self.pending_continuation.push(
+                                    crate::coroutine::ResumeFrame::While {
+                                        condition: condition.clone(),
+                                        body: body.clone(),
+                                    },
+                                );
+                                return Ok(Some(cf));
                             }
                         }
                     }
@@ -781,14 +852,25 @@ impl Interpreter {
                         ))));
                     }
                 };
-                for item in &items {
+                for (idx, item) in items.iter().enumerate() {
                     self.environment.define(var.clone(), item.clone());
                     if let Some(cf) = self.exec_block(body)? {
                         match cf {
                             ControlFlow::Break => break,
                             ControlFlow::Continue => continue,
-                            ControlFlow::Return(_) | ControlFlow::Suspend(_) => {
-                                return Ok(Some(cf))
+                            ControlFlow::Return(_) => return Ok(Some(cf)),
+                            // The items after this one were never reached; carry
+                            // them so resume finishes the iteration. This is the
+                            // "spawns ONE enemy" bug (pat-0q2kx.78).
+                            ControlFlow::Suspend(_) => {
+                                self.pending_continuation.push(
+                                    crate::coroutine::ResumeFrame::For {
+                                        var: var.clone(),
+                                        body: body.clone(),
+                                        pending_items: items[idx + 1..].to_vec(),
+                                    },
+                                );
+                                return Ok(Some(cf));
                             }
                         }
                     }
@@ -809,10 +891,13 @@ impl Interpreter {
                 params,
                 body,
                 is_static,
+                annotations,
                 ..
             } => {
-                self.function_registry
-                    .insert(name.clone(), FuncDef::from_params(params, body, *is_static));
+                self.function_registry.insert(
+                    name.clone(),
+                    FuncDef::from_params_annotated(params, body, *is_static, annotations),
+                );
                 Ok(None)
             }
 
@@ -857,7 +942,19 @@ impl Interpreter {
             }
 
             Stmt::Await { expr, bind } => {
+                // Clear first: only a suspension raised by THIS expression
+                // should chain, not a stale one from an earlier call.
+                self.last_call_suspended = None;
                 let awaited = self.eval_expr(expr)?;
+                // `await helper()` where helper itself awaited: the call already
+                // parked a coroutine and handed back `Nil`, so park this frame on
+                // the callee and take its return value on completion.
+                if let Some(id) = self.last_call_suspended.take() {
+                    self.pending_await_bind = bind.clone();
+                    return Ok(Some(ControlFlow::Suspend(
+                        crate::coroutine::AwaitTarget::Coroutine { id: id.0 },
+                    )));
+                }
                 if let Some(target) = crate::coroutine::AwaitTarget::from_variant(&awaited) {
                     // Real suspension — record the optional binding target so the
                     // parked frame binds the resumed value on resume, then bubble
@@ -887,9 +984,19 @@ impl Interpreter {
     fn exec_block(&mut self, stmts: &[Stmt]) -> Result<Option<ControlFlow>, RuntimeError> {
         self.environment.push_scope();
         let mut result = None;
-        for stmt in stmts {
+        for (i, stmt) in stmts.iter().enumerate() {
             if let Some(cf) = self.exec_stmt(stmt)? {
-                // Return and Suspend both leave the block early.
+                // ⚠️ Return and Suspend both leave the block early, but they are
+                // not the same: a Return discards the rest, while a Suspend owes
+                // it. Record what is left so `resume_one` can finish this block
+                // rather than abandoning it (pat-0q2kx.78).
+                if matches!(cf, ControlFlow::Suspend(_)) {
+                    let remaining = stmts[i + 1..].to_vec();
+                    if !remaining.is_empty() {
+                        self.pending_continuation
+                            .push(crate::coroutine::ResumeFrame::Block { remaining });
+                    }
+                }
                 result = Some(cf);
                 break;
             }
@@ -935,10 +1042,15 @@ impl Interpreter {
         // Take the `var v = await ...` binding target recorded by the suspending
         // await statement so the resumed frame binds the value (pat-nzgdu.6).
         let bind_target = self.pending_await_bind.take();
-        self.coroutine_host
+        // Frames were pushed innermost-first as the suspension unwound, which is
+        // exactly the order resume needs to replay them.
+        let frames = std::mem::take(&mut self.pending_continuation);
+        let id = self
+            .coroutine_host
             .suspend(crate::coroutine::SuspendedCoroutine {
                 id: crate::coroutine::CoroutineId(0),
                 remaining,
+                frames,
                 locals,
                 instance_props,
                 function_name: function_name.to_string(),
@@ -948,6 +1060,9 @@ impl Interpreter {
                 resume_value: Variant::Nil,
                 prior_output: self.output.clone(),
             });
+        // Remember it so an awaiting CALLER can park on this coroutine rather
+        // than treating the callee's `Nil` as a finished result.
+        self.last_call_suspended = Some(id);
     }
 
     /// Advance timer-based awaits by `delta` seconds, then resume any ready
@@ -1117,6 +1232,38 @@ impl Interpreter {
                 .define(name.clone(), co.resume_value.clone());
         }
 
+        // Finish the enclosing constructs first, innermost outward: the block
+        // the await sat in, then the loop that block belonged to, and so on,
+        // before the function body's own remaining statements (pat-0q2kx.78).
+        //
+        // ⚠️ A frame that suspends again owes everything OUTSIDE it too, so the
+        // not-yet-replayed frames are appended to whatever the new suspension
+        // pushed. Dropping them would lose an outer loop on the second await.
+        for fi in 0..co.frames.len() {
+            match self.run_resume_frame(&co.frames[fi])? {
+                Some(ControlFlow::Return(v)) => {
+                    let value = v.unwrap_or(Variant::Nil);
+                    self.environment.pop_scope();
+                    // Anything awaiting THIS coroutine now has its result.
+                    self.coroutine_host.notify_coroutine_done(co.id, value.clone());
+                    return Ok(value);
+                }
+                Some(ControlFlow::Suspend(target)) => {
+                    self.pending_continuation
+                        .extend(co.frames[fi + 1..].iter().cloned());
+                    self.park_coroutine(
+                        co.remaining.clone(),
+                        target,
+                        &co.function_name,
+                        co.is_instance_method,
+                    );
+                    self.environment.pop_scope();
+                    return Ok(Variant::Nil);
+                }
+                _ => {}
+            }
+        }
+
         let mut return_val = Variant::Nil;
         let mut i = 0;
         while i < co.remaining.len() {
@@ -1139,7 +1286,103 @@ impl Interpreter {
             i += 1;
         }
         self.environment.pop_scope();
+        // The body ran to the end (or hit a `return`): wake any caller that
+        // parked on this coroutine with `await helper()` (pat-0q2kx.78).
+        self.coroutine_host
+            .notify_coroutine_done(co.id, return_val.clone());
         Ok(return_val)
+    }
+
+    /// Replays one [`ResumeFrame`](crate::coroutine::ResumeFrame), i.e. finishes
+    /// the construct it stands for.
+    ///
+    /// Returns the control flow that escaped it, so the caller can re-park on a
+    /// further suspension or unwind on a `return`.
+    fn run_resume_frame(
+        &mut self,
+        frame: &crate::coroutine::ResumeFrame,
+    ) -> Result<Option<ControlFlow>, RuntimeError> {
+        use crate::coroutine::ResumeFrame;
+        match frame {
+            // The tail of the block the await sat in. Executed WITHOUT a fresh
+            // scope: its bindings were snapshotted into the resumed environment,
+            // and pushing a scope here would hide later writes from them.
+            //
+            // ⚠️ Tracks its own index rather than delegating to
+            // `exec_block_no_scope`: a second await inside this tail owes the
+            // statements after it, and that helper records nothing.
+            ResumeFrame::Block { remaining } => {
+                for (i, stmt) in remaining.iter().enumerate() {
+                    if let Some(cf) = self.exec_stmt(stmt)? {
+                        if matches!(cf, ControlFlow::Suspend(_)) {
+                            let rest = remaining[i + 1..].to_vec();
+                            if !rest.is_empty() {
+                                self.pending_continuation
+                                    .push(ResumeFrame::Block { remaining: rest });
+                            }
+                        }
+                        return Ok(Some(cf));
+                    }
+                }
+                Ok(None)
+            }
+
+            // Continue iterating the items the loop never reached. The current
+            // iteration's tail is a `Block` frame beneath this one and has
+            // already run by the time we get here.
+            ResumeFrame::For {
+                var,
+                body,
+                pending_items,
+            } => {
+                for (idx, item) in pending_items.iter().enumerate() {
+                    self.environment.define(var.clone(), item.clone());
+                    if let Some(cf) = self.exec_block(body)? {
+                        match cf {
+                            ControlFlow::Break => break,
+                            ControlFlow::Continue => continue,
+                            ControlFlow::Return(_) => return Ok(Some(cf)),
+                            ControlFlow::Suspend(_) => {
+                                // Re-park the REST of this loop, exactly as the
+                                // original `Stmt::For` arm does.
+                                self.pending_continuation.push(ResumeFrame::For {
+                                    var: var.clone(),
+                                    body: body.clone(),
+                                    pending_items: pending_items[idx + 1..].to_vec(),
+                                });
+                                return Ok(Some(cf));
+                            }
+                        }
+                    }
+                }
+                Ok(None)
+            }
+
+            // Re-test the condition and keep looping.
+            ResumeFrame::While { condition, body } => {
+                loop {
+                    let cond = self.eval_expr(condition)?;
+                    if !cond.is_truthy() {
+                        break;
+                    }
+                    if let Some(cf) = self.exec_block(body)? {
+                        match cf {
+                            ControlFlow::Break => break,
+                            ControlFlow::Continue => continue,
+                            ControlFlow::Return(_) => return Ok(Some(cf)),
+                            ControlFlow::Suspend(_) => {
+                                self.pending_continuation.push(ResumeFrame::While {
+                                    condition: condition.clone(),
+                                    body: body.clone(),
+                                });
+                                return Ok(Some(cf));
+                            }
+                        }
+                    }
+                }
+                Ok(None)
+            }
+        }
     }
     /// Attempts to match `value` against `pattern`. Returns `Ok(Some(binds))`
     /// with any `var` bindings when the pattern matches, `Ok(None)` when it
@@ -3635,6 +3878,58 @@ impl Interpreter {
                     Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "add_child() requires scene access".into(),
                     )))
+                }
+            }
+            // Godot `Node.rpc(method, ...)` / `Node.rpc_id(peer, method, ...)`:
+            // send through the tree's MultiplayerAPI. Neither existed in the
+            // interpreter at all, so a script could never reach the (working)
+            // networking layer (pat-0q2kx.79).
+            "rpc" | "rpc_id" => {
+                let is_targeted = name == "rpc_id";
+                let mut rest = args.iter();
+                let peer = if is_targeted {
+                    match rest.next() {
+                        Some(Variant::Int(p)) => *p,
+                        _ => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "rpc_id() takes (peer_id, method, ...)".into(),
+                            )))
+                        }
+                    }
+                } else {
+                    0
+                };
+                let method = match rest.next() {
+                    Some(Variant::String(m)) => m.clone(),
+                    Some(Variant::StringName(m)) => m.as_str().to_string(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            format!("{name}() requires a method name"),
+                        )))
+                    }
+                };
+                let call_args: Vec<Variant> = rest.cloned().collect();
+                // Same shape as the `queue_free` arm below: a tuple `if let`
+                // over the two disjoint fields.
+                if let (Some(ref mut access), Some(node_id)) =
+                    (&mut self.scene_access, self.current_node_id)
+                {
+                    let sent = if is_targeted {
+                        access.node_rpc_id(node_id, peer, &method, &call_args)
+                    } else {
+                        access.node_rpc(node_id, &method, &call_args)
+                    };
+                    match sent {
+                        // Godot errors on an RPC the node never configured; so
+                        // does the transport, and that error is surfaced rather
+                        // than swallowed.
+                        Err(e) => Err(RuntimeError::new(RuntimeErrorKind::TypeError(e))),
+                        Ok(()) => Ok(Some(Variant::Nil)),
+                    }
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "{name}() requires scene access"
+                    ))))
                 }
             }
             "queue_free" => {
@@ -8086,11 +8381,15 @@ impl Interpreter {
                     params,
                     body,
                     is_static,
+                    annotations,
                     ..
                 } => {
-                    class_def
-                        .methods
-                        .insert(name.clone(), FuncDef::from_params(params, body, *is_static));
+                    // Keep the annotations: `@rpc` on a method is what the host
+                    // registers with the MultiplayerAPI (pat-0q2kx.79).
+                    class_def.methods.insert(
+                        name.clone(),
+                        FuncDef::from_params_annotated(params, body, *is_static, annotations),
+                    );
                 }
                 Stmt::VarDecl {
                     name,
@@ -8134,6 +8433,9 @@ impl Interpreter {
                                 defaults: vec![None],
                                 body: body.clone(),
                                 is_static: false,
+                                // A property accessor body is not a declared
+                                // function, so it carries no annotations.
+                                annotations: Vec::new(),
                             },
                         );
                         class_def.setters.insert(name.clone(), fname);
@@ -8147,6 +8449,9 @@ impl Interpreter {
                                 defaults: vec![],
                                 body: body.clone(),
                                 is_static: false,
+                                // A property accessor body is not a declared
+                                // function, so it carries no annotations.
+                                annotations: Vec::new(),
                             },
                         );
                         class_def.getters.insert(name.clone(), fname);
@@ -8211,11 +8516,17 @@ impl Interpreter {
                                 params,
                                 body,
                                 is_static,
+                                annotations,
                                 ..
                             } => {
                                 inner.methods.insert(
                                     name.clone(),
-                                    FuncDef::from_params(params, body, *is_static),
+                                    FuncDef::from_params_annotated(
+                                        params,
+                                        body,
+                                        *is_static,
+                                        annotations,
+                                    ),
                                 );
                             }
                             Stmt::SignalDecl { name, .. } => {
