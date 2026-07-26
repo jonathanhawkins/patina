@@ -10760,8 +10760,15 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var opts = [
         { label: 'Expand/Collapse Branch', act: function() { showFsToast('Expand/Collapse Branch'); } },
         { label: 'Show in FileSystem', act: function() { showFsToast('Show in FileSystem'); } },
+        // pat-0q2kx.170: this copied the numeric node id, which is useless in a
+        // script. The /api/scene payload already carries the real NodePath from
+        // `tree.node_path()`, so copy that — falling back to the id only if the
+        // node somehow is not in the cached tree.
         { label: 'Copy Node Path', act: function() {
-            if (selectedNodeId !== null) { fsCopyToClipboard(String(selectedNodeId), 'Copied Node Path'); } else { showFsToast('Select a node first'); }
+            if (selectedNodeId === null) { showFsToast('Select a node first'); return; }
+            var n = findNodeInTree(sceneData ? sceneData.nodes : null, selectedNodeId);
+            var np = (n && n.path) ? n.path : String(selectedNodeId);
+            fsCopyToClipboard(np, 'Copied Node Path');
           } }
       ];
       for (var oi = 0; oi < opts.length; oi++) {

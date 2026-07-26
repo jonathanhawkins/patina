@@ -262,12 +262,25 @@ pub fn compute_smart_snap(
 pub fn apply_snap(
     tree: &SceneTree,
     settings: &EditorDisplaySettings,
+    ruler_guides: &crate::guides::GuideSet,
     dragged_id: NodeId,
     candidate_pos: Vector2,
 ) -> (Vector2, Vec<SnapGuide>) {
     let mut pos = candidate_pos;
     if settings.grid_snap_enabled {
         pos = snap_to_grid(pos, settings.grid_snap_size);
+    }
+    // Ruler-dragged guides (pat-0q2kx.172). `GuideSet` implemented
+    // create/move/remove/snap with its own tests but had no callers anywhere, so
+    // a guide could never affect a drag. Applied before smart-snap so an
+    // explicitly placed guide wins over an inferred sibling alignment — placing
+    // a guide is a deliberate act, sibling alignment is a guess.
+    //
+    // Gated on guides *existing* rather than on a new settings flag: with none
+    // placed this is a no-op, so no existing drag behaviour changes and no
+    // settings construction site needs updating.
+    if !ruler_guides.is_empty() {
+        pos = ruler_guides.snap(pos, settings.smart_snap_threshold, true);
     }
     if settings.smart_snap_enabled {
         let (snapped, guides) =
@@ -372,6 +385,9 @@ pub struct EditorState {
     pub event_subscribers: Vec<std::sync::mpsc::Sender<String>>,
     pub clipboard: Vec<ClipboardEntry>,
     pub display_settings: EditorDisplaySettings,
+    /// Ruler-dragged guide lines (pat-0q2kx.172). Godot persists these as the
+    /// `_edit_horizontal_guides_` / `_edit_vertical_guides_` scene metadata.
+    pub guides: crate::guides::GuideSet,
     /// Cache of loaded textures for viewport rendering.
     pub texture_cache: TextureCache,
     /// Whether the game is currently playing.
@@ -850,6 +866,7 @@ impl EditorState {
             event_subscribers: Vec::new(),
             clipboard: Vec::new(),
             display_settings: EditorDisplaySettings::default(),
+            guides: crate::guides::GuideSet::new(),
             is_running: false,
             is_paused: false,
             run_main_loop: None,
@@ -2238,6 +2255,9 @@ fn handle_connection(
         ("POST", "/api/node/add") => api_add_node(state, &req.body, &mut stream),
         // Mesh toolbar: generate a collision body from a MeshInstance3D
         // (pat-0q2kx.169).
+        // Ruler-dragged guides (pat-0q2kx.172).
+        ("GET", "/api/viewport/guides") => api_get_guides(state, &mut stream),
+        ("POST", "/api/viewport/guides") => api_post_guides(state, &req.body, &mut stream),
         ("POST", "/api/mesh/create_collision") => {
             api_mesh_create_collision(state, &req.body, &mut stream)
         }
@@ -2252,6 +2272,9 @@ fn handle_connection(
         ("POST", "/api/node/lock") => api_set_node_lock(state, &req.body, &mut stream),
         ("POST", "/api/node/open_scene") => api_open_node_scene(state, &req.body, &mut stream),
         ("POST", "/api/node/open_script") => api_open_node_script(state, &req.body, &mut stream),
+        ("POST", "/api/node/save_branch") => {
+            api_save_branch_as_scene(state, &req.body, &mut stream)
+        }
         ("POST", "/api/node/group") => api_set_group(state, &req.body, &mut stream),
         ("POST", "/api/node/unique_name") => api_set_unique_name(state, &req.body, &mut stream),
         ("POST", "/api/node/rename") => api_rename_node(state, &req.body, &mut stream),
@@ -2428,6 +2451,12 @@ fn handle_connection(
         }
         ("POST", "/api/animation/tree/transition/remove") => {
             api_anim_tree_remove_transition(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/animation/tree/transition/set") => {
+            api_anim_tree_set_transition(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/animation/tree/state/move") => {
+            api_anim_tree_move_state(state, &req.body, &mut stream)
         }
         ("POST", "/api/animation/seek") => api_seek_animation(state, &req.body, &mut stream),
         ("POST", "/api/animation/record") => api_toggle_recording(state, &req.body, &mut stream),
@@ -4176,6 +4205,89 @@ fn api_get_node(state: &Arc<Mutex<EditorState>>, id_str: &str, stream: &mut TcpS
 }
 
 /// `POST /api/node/add` — adds a new node to the tree.
+/// `GET /api/viewport/guides` — the ruler-dragged guide lines (pat-0q2kx.172).
+fn api_get_guides(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let state = state.lock().unwrap();
+    let items: Vec<String> = state
+        .guides
+        .guides()
+        .iter()
+        .map(|g| {
+            let orientation = match g.orientation {
+                crate::guides::GuideOrientation::Vertical => "vertical",
+                crate::guides::GuideOrientation::Horizontal => "horizontal",
+            };
+            format!(
+                r#"{{"orientation":"{orientation}","position":{}}}"#,
+                g.position
+            )
+        })
+        .collect();
+    send_json(stream, &format!(r#"{{"guides":[{}]}}"#, items.join(",")));
+}
+
+/// `POST /api/viewport/guides` — drops a guide, as dragging out of a ruler does
+/// in Godot's 2D canvas editor (pat-0q2kx.172).
+///
+/// Body: `{"orientation": "vertical"|"horizontal", "position": f32}`, or
+/// `{"remove": index}` to delete one.
+///
+/// `GuideSet` already implemented create/move/remove/snap with its own unit
+/// tests but had **no callers anywhere** — this is the surface that makes a
+/// guide reachable, and [`apply_snap`] is where it starts affecting drags.
+fn api_post_guides(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+
+    // `{"remove": i}` deletes; anything else creates.
+    if let Some(index) = parsed.get("remove").and_then(|v| v.as_u64()) {
+        let removed = state.guides.remove_guide(index as usize);
+        if !removed {
+            send_error(stream, 404, "no guide at that index");
+            return;
+        }
+        state.scene_modified = true;
+        let count = state.guides.len();
+        send_json(stream, &format!(r#"{{"ok":true,"count":{count}}}"#));
+        return;
+    }
+
+    let orientation = match parsed.get("orientation").and_then(|v| v.as_str()) {
+        Some("vertical") => crate::guides::GuideOrientation::Vertical,
+        Some("horizontal") => crate::guides::GuideOrientation::Horizontal,
+        _ => {
+            send_error(
+                stream,
+                400,
+                "orientation must be 'vertical' or 'horizontal'",
+            );
+            return;
+        }
+    };
+    let position = match parsed.get("position").and_then(|v| v.as_f64()) {
+        Some(p) => p as f32,
+        None => {
+            send_error(stream, 400, "missing position");
+            return;
+        }
+    };
+
+    let index = state.guides.create_from_ruler(orientation, position);
+    state.scene_modified = true;
+    let count = state.guides.len();
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"index":{index},"count":{count}}}"#),
+    );
+}
+
 /// `POST /api/mesh/create_collision` — Godot's Mesh menu "Create Trimesh/Convex
 /// Collision Sibling" (pat-0q2kx.169).
 ///
@@ -5125,6 +5237,97 @@ fn api_open_node_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
     send_json(
         stream,
         &format!(r#"{{"ok":true,"path":"{source_esc}","tab_id":{tab_id}}}"#),
+    );
+}
+
+/// `POST /api/node/save_branch {node_id, path}` — Godot's "Save Branch as
+/// Scene" (`scene_tree_dock.cpp`).
+///
+/// Serializes the selected subtree into a standalone `.tscn`, then replaces the
+/// branch in the source scene with an INSTANCE of that file — so the nodes live
+/// in one place and the parent scene references them, which is the whole point
+/// of the operation (pat-0q2kx.170).
+///
+/// The serialization reuses `scene_saver::save_subtree`, which already emits a
+/// subtree with the branch root re-parented to the scene root; nothing about
+/// the `.tscn` format is reimplemented here.
+///
+/// NOT undoable yet: the branch's children are dropped from the live tree, and
+/// restoring them needs a dedicated `EditorCommand` variant rather than the
+/// direct mutation below. Flagged in the completion report.
+fn api_save_branch_as_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some(parsed) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let Some(node_raw) = parsed.get("node_id").and_then(|v| v.as_u64()) else {
+        send_error(stream, 400, "missing node_id");
+        return;
+    };
+    let path = parsed
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if path.is_empty() {
+        send_error(stream, 400, "missing path");
+        return;
+    }
+    // A branch path is a write target — refuse traversal outside the project.
+    if path.contains("..") {
+        send_error(stream, 400, "path must stay within the project");
+        return;
+    }
+
+    let mut state = state.lock().unwrap();
+    let Some(node_id) = find_node_by_raw_id(&state.scene_tree, node_raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    // Saving the whole scene as a "branch" would replace the root with an
+    // instance of itself — Godot disallows it for the same reason.
+    if state.scene_tree.get_node(node_id).is_none() {
+        send_error(stream, 404, "node not found");
+        return;
+    }
+
+    let text = gdscene::scene_saver::TscnSaver::save_subtree(&state.scene_tree, node_id);
+
+    // `res://foo.tscn` is project-relative; anything else is taken as-is.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let disk_path = if let Some(rel) = path.strip_prefix("res://") {
+        cwd.join(rel)
+    } else {
+        cwd.join(path.trim_start_matches('/'))
+    };
+    if let Some(parent) = disk_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&disk_path, &text) {
+        send_error(stream, 500, &format!("could not write branch scene: {e}"));
+        return;
+    }
+
+    // Replace the branch with an instance: drop its children and mark the node
+    // as sourced from the new file, which is what `node_to_json_tree` reads to
+    // report `is_instance` / `instance_path`.
+    let children: Vec<gdscene::node::NodeId> = state
+        .scene_tree
+        .get_node(node_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+    for child in children {
+        let _ = state.scene_tree.remove_node(child);
+    }
+    if let Some(node) = state.scene_tree.get_node_mut(node_id) {
+        node.set_property("_instance_source", Variant::String(path.clone()));
+    }
+    state.scene_modified = true;
+    state.add_log("info", format!("Saved branch as scene: {path}"));
+
+    send_json(
+        stream,
+        &serde_json::json!({"ok": true, "path": path, "bytes": text.len()}).to_string(),
     );
 }
 
@@ -7502,7 +7705,13 @@ fn api_viewport_drag(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
 
     // Apply grid snap and smart snap.
     let settings = state.display_settings.clone();
-    let (new_pos, guides) = apply_snap(&state.scene_tree, &settings, drag.node_id, candidate_pos);
+    let (new_pos, guides) = apply_snap(
+        &state.scene_tree,
+        &settings,
+        &state.guides,
+        drag.node_id,
+        candidate_pos,
+    );
     state.snap_guides = guides;
 
     if let Some(node) = state.scene_tree.get_node_mut(drag.node_id) {
@@ -7545,7 +7754,13 @@ fn api_viewport_drag_end(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
     let candidate_pos = drag.start_node_pos + world_delta;
 
     let settings = state.display_settings.clone();
-    let (new_pos, _) = apply_snap(&state.scene_tree, &settings, drag.node_id, candidate_pos);
+    let (new_pos, _) = apply_snap(
+        &state.scene_tree,
+        &settings,
+        &state.guides,
+        drag.node_id,
+        candidate_pos,
+    );
     state.snap_guides.clear();
 
     // Commit the drag as an undoable step (pat-0q2kx.12).
@@ -11831,11 +12046,16 @@ fn api_get_anim_tree(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
             .nodes()
             .iter()
             .map(|n| {
+                // `x`/`y` are the graph-canvas position the client persists via
+                // `state/move` (pat-0q2kx.166); without them the canvas would
+                // re-lay-out from scratch on every poll.
                 format!(
-                    r#"{{"id":{},"name":"{}","kind":"{}"}}"#,
+                    r#"{{"id":{},"name":"{}","kind":"{}","x":{},"y":{}}}"#,
                     n.id,
                     json_escape(&n.name),
-                    anim_tree_kind_str(n.kind)
+                    anim_tree_kind_str(n.kind),
+                    n.x,
+                    n.y
                 )
             })
             .collect();
@@ -11913,6 +12133,54 @@ fn api_anim_tree_add_state(state: &Arc<Mutex<EditorState>>, body: &str, stream: 
 
 /// `POST /api/animation/tree/state/remove` -- remove a state and any
 /// transitions touching it. Body: `{"name":"Idle"}`.
+/// `POST /api/animation/tree/state/move` -- persist a state's graph-canvas
+/// position (pat-0q2kx.166). Body: `{"name":"Idle","x":120,"y":40}`.
+///
+/// The canvas needs positions to survive a reload, so dragging a node posts here
+/// and `GET /api/animation/tree` returns `x`/`y` on each state.
+fn api_anim_tree_move_state(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let name = match anim_tree_name_field(&parsed, "name") {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing name");
+            return;
+        }
+    };
+    // Both coordinates are required: a move with one axis missing is a
+    // malformed request, not "leave that axis alone" — silently half-moving a
+    // node would be worse than refusing.
+    let (x, y) = match (
+        parsed.get("x").and_then(|v| v.as_f64()),
+        parsed.get("y").and_then(|v| v.as_f64()),
+    ) {
+        (Some(x), Some(y)) => (x, y),
+        _ => {
+            send_error(stream, 400, "x and y required");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let id = match state.anim_tree.node_id_by_name(&name) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "unknown state");
+            return;
+        }
+    };
+    if !state.anim_tree.move_node(id, x, y) {
+        send_error(stream, 404, "unknown state");
+        return;
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
 fn api_anim_tree_remove_state(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
         Some(v) => v,
@@ -12028,6 +12296,52 @@ fn api_anim_tree_remove_transition(
         None => return,
     };
     if !state.anim_tree.remove_transition(from, to) {
+        send_error(stream, 404, "unknown transition");
+        return;
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/tree/transition/set` -- edit an existing transition's
+/// crossfade (pat-0q2kx.166). Body: `{"from":"Idle","to":"Run","xfade":0.3}`.
+///
+/// Editing is separate from `add` on purpose: `add` refuses duplicates, so the
+/// UI needs a way to change a transition it already created without deleting and
+/// re-adding it (which would lose any other per-transition state).
+///
+/// A missing transition is a 404 rather than an implicit create — otherwise a
+/// typo'd endpoint pair would silently add a transition the user never drew.
+fn api_anim_tree_set_transition(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let (from, to) = match anim_tree_endpoints(&parsed, &state, stream) {
+        Some(pair) => pair,
+        None => return,
+    };
+    // `xfade` is required here: unlike `add`, an edit with no value to set is a
+    // malformed request rather than "use the default".
+    let xfade = match parsed.get("xfade").and_then(|v| v.as_f64()) {
+        Some(x) if x >= 0.0 => x,
+        Some(_) => {
+            send_error(stream, 400, "xfade must be >= 0");
+            return;
+        }
+        None => {
+            send_error(stream, 400, "xfade required");
+            return;
+        }
+    };
+    if !state.anim_tree.set_transition_xfade(from, to, xfade) {
         send_error(stream, 404, "unknown transition");
         return;
     }
@@ -14521,7 +14835,7 @@ fn api_viewport_drag_axis(state: &Arc<Mutex<EditorState>>, body: &str, stream: &
             .unwrap_or(Vector2::ZERO);
         let candidate = Vector2::new(cur_pos.x + wdx, cur_pos.y + wdy);
         let settings = s.display_settings.clone();
-        let (new_pos, guides) = apply_snap(&s.scene_tree, &settings, nid, candidate);
+        let (new_pos, guides) = apply_snap(&s.scene_tree, &settings, &s.guides, nid, candidate);
         s.snap_guides = guides;
         if let Some(n) = s.scene_tree.get_node_mut(nid) {
             n.set_property("position", Variant::Vector2(new_pos));

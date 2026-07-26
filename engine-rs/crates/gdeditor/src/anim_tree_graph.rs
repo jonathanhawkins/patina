@@ -35,6 +35,15 @@ pub struct Node {
     pub kind: NodeKind,
     /// Editable parameters.
     pub params: BTreeMap<String, String>,
+    /// Graph-canvas position in editor pixels (pat-0q2kx.166).
+    ///
+    /// Typed rather than stuffed into [`params`](Self::params) because the canvas
+    /// reads these every frame and a stringly-typed coordinate would have to be
+    /// re-parsed each time — and a malformed one would fail silently. Godot keeps
+    /// the equivalent on the `AnimationNodeStateMachine` resource.
+    pub x: f64,
+    /// Graph-canvas Y position in editor pixels.
+    pub y: f64,
 }
 
 /// A directed link (blend-tree connection or state transition).
@@ -79,8 +88,25 @@ impl AnimTreeGraph {
             name: name.into(),
             kind,
             params: BTreeMap::new(),
+            // Origin until the canvas moves it; Godot likewise starts a new state
+            // at the drop point rather than a computed layout.
+            x: 0.0,
+            y: 0.0,
         });
         id
+    }
+
+    /// Moves a node on the graph canvas. Returns whether the node existed —
+    /// a missing id is a 404, not a silent no-op (pat-0q2kx.166).
+    pub fn move_node(&mut self, id: NodeId, x: f64, y: f64) -> bool {
+        match self.nodes.iter_mut().find(|n| n.id == id) {
+            Some(n) => {
+                n.x = x;
+                n.y = y;
+                true
+            }
+            None => false,
+        }
     }
 
     /// The number of nodes.
@@ -297,5 +323,102 @@ mod tests {
         assert_eq!(g.connections().len(), 0); // idle -> blend removed
         assert_eq!(g.transitions().len(), 0); // idle -> run removed
         assert!(!g.remove_node(idle)); // already gone
+    }
+
+    // -- transition crossfade (pat-0q2kx.166) -------------------------------
+    //
+    // `.166`'s acceptance criterion requires a transition to carry an xfade of
+    // 0.3 and for the served graph to report it. Before this, `Link` had no
+    // crossfade field at all and `xfade` appeared nowhere in `editor_server.rs`,
+    // so the criterion could not be met however the UI was wired.
+
+    #[test]
+    fn transition_carries_an_explicit_crossfade() {
+        let mut g = AnimTreeGraph::new();
+        let idle = g.add_node("Idle", NodeKind::Animation);
+        let run = g.add_node("Run", NodeKind::Animation);
+
+        assert!(g.add_transition_with_xfade(idle, run, 0.3));
+        assert_eq!(g.transition_xfade(idle, run), Some(0.3));
+        assert_eq!(
+            g.transitions()[0].xfade,
+            0.3,
+            "the stored Link must carry the crossfade the caller asked for"
+        );
+    }
+
+    /// The 2-argument form must keep Godot's default rather than inventing one:
+    /// `xfade_time` defaults to `0.0`, i.e. an instant switch.
+    #[test]
+    fn plain_add_transition_defaults_to_godot_zero_crossfade() {
+        let mut g = AnimTreeGraph::new();
+        let a = g.add_node("A", NodeKind::Animation);
+        let b = g.add_node("B", NodeKind::Animation);
+
+        assert!(g.add_transition(a, b));
+        assert_eq!(g.transition_xfade(a, b), Some(0.0));
+    }
+
+    /// A blend-tree connection has no crossfade concept, so it must stay `0.0`
+    /// rather than inherit whatever a transition happened to set.
+    #[test]
+    fn blend_tree_connection_has_no_crossfade() {
+        let mut g = AnimTreeGraph::new();
+        let a = g.add_node("A", NodeKind::Animation);
+        let b = g.add_node("Blend", NodeKind::Blend2);
+
+        assert!(g.connect(a, b));
+        assert_eq!(g.connections()[0].xfade, 0.0);
+    }
+
+    /// Canvas positions must persist per node and start at the origin, which is
+    /// what `state/move` + the `x`/`y` fields in the served graph exist for.
+    #[test]
+    fn nodes_carry_a_persisted_canvas_position() {
+        let mut g = AnimTreeGraph::new();
+        let idle = g.add_node("Idle", NodeKind::Animation);
+        let run = g.add_node("Run", NodeKind::Animation);
+
+        // A fresh node sits at the origin rather than an unset/NaN position.
+        assert_eq!(
+            (g.get_node(idle).unwrap().x, g.get_node(idle).unwrap().y),
+            (0.0, 0.0)
+        );
+
+        assert!(g.move_node(idle, 120.0, 40.0));
+        let n = g.get_node(idle).unwrap();
+        assert_eq!((n.x, n.y), (120.0, 40.0));
+
+        // Moving one node must not disturb another.
+        let other = g.get_node(run).unwrap();
+        assert_eq!((other.x, other.y), (0.0, 0.0));
+    }
+
+    /// Moving a node that does not exist must fail rather than no-op silently, so
+    /// the route can answer 404 instead of a misleading success.
+    #[test]
+    fn moving_a_missing_node_fails() {
+        let mut g = AnimTreeGraph::new();
+        let a = g.add_node("A", NodeKind::Animation);
+        assert!(!g.move_node(a + 999, 5.0, 5.0));
+    }
+
+    /// Editing an absent transition must fail rather than silently create one —
+    /// otherwise a typo'd endpoint pair would report success and quietly add a
+    /// transition the user never asked for.
+    #[test]
+    fn setting_crossfade_on_a_missing_transition_fails() {
+        let mut g = AnimTreeGraph::new();
+        let a = g.add_node("A", NodeKind::Animation);
+        let b = g.add_node("B", NodeKind::Animation);
+
+        assert!(!g.set_transition_xfade(a, b, 0.5), "no such transition");
+        assert_eq!(g.transitions().len(), 0, "and none may be created");
+        assert_eq!(g.transition_xfade(a, b), None);
+
+        // Once it exists, the edit lands.
+        assert!(g.add_transition(a, b));
+        assert!(g.set_transition_xfade(a, b, 0.5));
+        assert_eq!(g.transition_xfade(a, b), Some(0.5));
     }
 }

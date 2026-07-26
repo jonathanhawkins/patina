@@ -223,34 +223,59 @@ impl TextAlign {
     }
 }
 
-/// Stretch mode for TextureRect nodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Stretch mode for `TextureRect` nodes — Godot's `TextureRect.StretchMode`
+/// (`scene/gui/texture_rect.h`), all seven constants in declaration order.
+///
+/// ⚠️ **These integers were wrong before pat-0q2kx.179.** The table read
+/// `Keep => 1`, `KeepAspect => 5`, `KeepAspectCentered => 6` and had no `Tile`,
+/// `KeepCentered` or `KeepAspectCovered` at all — so **every non-zero
+/// `stretch_mode` in a `.tscn` was misread**: `1` (TILE) became `Keep`, `4`
+/// (KEEP_ASPECT) fell through to `Scale`, `5` became `KeepAspect` and `6` became
+/// `KeepAspectCentered`. A wrong constant table is worse than a missing feature,
+/// because it silently renders the wrong thing instead of nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StretchMode {
-    /// Scale to fill the rect.
+    /// `STRETCH_SCALE` = 0 — scale to fill the rect. Godot's default.
+    #[default]
     Scale,
-    /// Keep original size.
+    /// `STRETCH_TILE` = 1 — repeat the texture at its natural size.
+    Tile,
+    /// `STRETCH_KEEP` = 2 — draw at original size, anchored top-left.
     Keep,
-    /// Keep aspect ratio, fit inside rect.
+    /// `STRETCH_KEEP_CENTERED` = 3 — original size, centred in the rect.
+    KeepCentered,
+    /// `STRETCH_KEEP_ASPECT` = 4 — fit inside the rect, anchored top-left.
     KeepAspect,
-    /// Keep aspect ratio, centered inside rect.
+    /// `STRETCH_KEEP_ASPECT_CENTERED` = 5 — fit inside the rect, centred.
     KeepAspectCentered,
+    /// `STRETCH_KEEP_ASPECT_COVERED` = 6 — cover the rect, cropping overflow.
+    KeepAspectCovered,
 }
 
 impl StretchMode {
-    fn to_int(self) -> i64 {
+    /// The Godot integer constant for this mode.
+    pub fn to_int(self) -> i64 {
         match self {
             StretchMode::Scale => 0,
-            StretchMode::Keep => 1,
-            StretchMode::KeepAspect => 5,
-            StretchMode::KeepAspectCentered => 6,
+            StretchMode::Tile => 1,
+            StretchMode::Keep => 2,
+            StretchMode::KeepCentered => 3,
+            StretchMode::KeepAspect => 4,
+            StretchMode::KeepAspectCentered => 5,
+            StretchMode::KeepAspectCovered => 6,
         }
     }
 
-    fn from_int(v: i64) -> Self {
+    /// Reads Godot's integer constant, falling back to `Scale` (the documented
+    /// default) for anything out of range.
+    pub fn from_int(v: i64) -> Self {
         match v {
-            1 => StretchMode::Keep,
-            5 => StretchMode::KeepAspect,
-            6 => StretchMode::KeepAspectCentered,
+            1 => StretchMode::Tile,
+            2 => StretchMode::Keep,
+            3 => StretchMode::KeepCentered,
+            4 => StretchMode::KeepAspect,
+            5 => StretchMode::KeepAspectCentered,
+            6 => StretchMode::KeepAspectCovered,
             _ => StretchMode::Scale,
         }
     }
@@ -591,18 +616,85 @@ fn hit_test_control(
     } else {
         parent_global
     };
+    // A `SubViewportContainer` hosts a whole sub-scene drawn at `1/stretch_shrink`
+    // scale, so a click inside it must be re-targeted into the sub-viewport's own
+    // coordinate space before the children are tested — otherwise a Button that
+    // renders at half scale is only hit at its unscaled position, i.e. never
+    // where the user actually clicked (pat-0q2kx.178).
+    //
+    // `subviewport_container_to_viewport_coord` already existed for exactly this
+    // and had no caller outside its own test.
+    let mut child_point = if is_subviewport_container(tree, node_id) {
+        let (stretch, shrink) = subviewport_container_stretch(tree, node_id);
+        global_pos + subviewport_container_to_viewport_coord(point - global_pos, stretch, shrink)
+    } else {
+        point
+    };
+    // Godot's `Control::has_point` maps the query through the INVERSE of the
+    // control's transform, so a rotated/scaled control is hit where it is drawn
+    // rather than where its unrotated rect used to be
+    // (`control.cpp::get_transform`). Patina compared against the axis-aligned
+    // rect only, so a 45°-rotated panel still swallowed clicks in its old
+    // corners and missed them along its new diagonal (pat-0q2kx.181).
+    //
+    // The mapping applies to this control's own rect test AND to everything
+    // beneath it, since children inherit the parent's frame.
+    if is_ctrl {
+        child_point =
+            global_pos + inverse_control_transform(tree, node_id, child_point - global_pos);
+    }
     for &child in children.iter().rev() {
-        if let Some(hit) = hit_test_control(tree, child, point, global_pos) {
+        if let Some(hit) = hit_test_control(tree, child, child_point, global_pos) {
             return Some(hit);
         }
     }
     if is_ctrl
         && get_mouse_filter(tree, node_id) != MouseFilter::Ignore
-        && rect_has_point(global_pos, get_size(tree, node_id), point)
+        && rect_has_point(global_pos, get_size(tree, node_id), child_point)
     {
         return Some(node_id);
     }
     None
+}
+
+/// Maps a control-local point through the INVERSE of the control's
+/// rotation/scale about its `pivot_offset` (pat-0q2kx.181).
+///
+/// Godot builds the forward transform as
+/// `translate(pivot) * rotate(rotation) * scale(scale) * translate(-pivot)`,
+/// so the inverse un-scales and un-rotates about the same pivot. `rotation` is
+/// stored in RADIANS on the node (Godot exposes `rotation_degrees` separately).
+///
+/// Returns `local` unchanged for an untransformed control, which keeps the
+/// common case exact rather than routing it through float trig.
+fn inverse_control_transform(tree: &SceneTree, node_id: NodeId, local: Vector2) -> Vector2 {
+    let Some(node) = tree.get_node(node_id) else {
+        return local;
+    };
+    let rotation = match node.get_property("rotation") {
+        Variant::Float(v) => v as f32,
+        Variant::Int(v) => v as f32,
+        _ => 0.0,
+    };
+    let scale = match node.get_property("scale") {
+        Variant::Vector2(v) if v.x != 0.0 && v.y != 0.0 => v,
+        // A zero scale is degenerate — dividing by it would produce NaN and make
+        // every later comparison false, silently swallowing the click.
+        _ => Vector2::new(1.0, 1.0),
+    };
+    if rotation == 0.0 && scale.x == 1.0 && scale.y == 1.0 {
+        return local;
+    }
+    let pivot = match node.get_property("pivot_offset") {
+        Variant::Vector2(v) => v,
+        _ => Vector2::ZERO,
+    };
+
+    let v = local - pivot;
+    // Un-rotate, then un-scale — the reverse order of the forward transform.
+    let (sin, cos) = (-rotation).sin_cos();
+    let rotated = Vector2::new(v.x * cos - v.y * sin, v.x * sin + v.y * cos);
+    Vector2::new(rotated.x / scale.x, rotated.y / scale.y) + pivot
 }
 
 /// Returns the topmost Control at `point` (in the viewport's global coordinate
@@ -655,6 +747,11 @@ const CONTROL_HIT_CLASSES: &[&str] = &[
     "MarginContainer",
     "CenterContainer",
     "ScrollContainer",
+    // Container <- Control in Godot, and its absence here was its own bug: with
+    // ClassDB unpopulated the container was invisible to hit-testing, so its
+    // rect never contributed a global offset and the sub-scene beneath it could
+    // not be reached at all (pat-0q2kx.178).
+    "SubViewportContainer",
     "FlowContainer",
     "HFlowContainer",
     "VFlowContainer",
@@ -1770,6 +1867,33 @@ fn arrange_split(
 /// sub-viewport is `stretch_shrink`× smaller than the container, so the click
 /// divides by the shrink factor; otherwise the mapping is 1:1. Mirrors Godot's
 /// `SubViewportContainer` input forwarding.
+/// True when `node_id` is a `SubViewportContainer`.
+///
+/// Checked by class name as well as ClassDB so hit-testing still works in bare
+/// unit tests where the inheritance table is unpopulated — the same fallback
+/// [`CONTROL_HIT_CLASSES`] uses.
+fn is_subviewport_container(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .map(|n| n.class_name() == "SubViewportContainer" || n.is_class("SubViewportContainer"))
+        .unwrap_or(false)
+}
+
+/// Reads a `SubViewportContainer`'s `stretch` / `stretch_shrink`.
+///
+/// Godot's defaults are `stretch = false` and `stretch_shrink = 1`, and a shrink
+/// below 1 would invert the mapping, so it is clamped.
+fn subviewport_container_stretch(tree: &SceneTree, node_id: NodeId) -> (bool, i64) {
+    let Some(node) = tree.get_node(node_id) else {
+        return (false, 1);
+    };
+    let stretch = matches!(node.get_property("stretch"), Variant::Bool(true));
+    let shrink = match node.get_property("stretch_shrink") {
+        Variant::Int(v) if v >= 1 => v,
+        _ => 1,
+    };
+    (stretch, shrink)
+}
+
 pub fn subviewport_container_to_viewport_coord(
     local: Vector2,
     stretch: bool,
@@ -2863,6 +2987,112 @@ pub fn remove_theme_color_override(tree: &mut SceneTree, node_id: NodeId, name: 
 /// checking the `theme_type_variation` type first and then the control's own
 /// type; then (3) the `default` Theme with the same variation/type order.
 /// Returns `None` if the color is unset everywhere.
+/// The `theme_override_*` property prefix Godot uses for each data type
+/// (pat-0q2kx.180).
+///
+/// These names are the wire format: a `.tscn` writes
+/// `theme_override_font_sizes/font_size = 24`, so getting one wrong means the
+/// override is silently ignored rather than erroring.
+pub fn theme_override_prefix(kind: crate::theme::ThemePropertyType) -> &'static str {
+    use crate::theme::ThemePropertyType as T;
+    match kind {
+        T::Color => "theme_override_colors",
+        T::Constant => "theme_override_constants",
+        T::Font => "theme_override_fonts",
+        T::FontSize => "theme_override_font_sizes",
+        T::Stylebox => "theme_override_styles",
+        T::Icon => "theme_override_icons",
+    }
+}
+
+/// Godot's full theme lookup for any of the six data types (pat-0q2kx.180).
+///
+/// `Control::_get_theme_item` (`scene/gui/control.cpp`) resolves, in order:
+///
+/// 1. the node's own `theme_override_<kind>/<name>`;
+/// 2. the node's own theme resource;
+/// 3. **each ancestor's** theme resource, nearest first;
+/// 4. the default (project/ThemeDB) theme.
+///
+/// At every theme it tries `theme_type_variation` before `control_type`, so a
+/// `BigButton` entry wins over `Button`.
+///
+/// The previous [`resolve_theme_color`] handled colours only and stopped at
+/// step 2 — it never walked ancestors, so a theme set on a parent Control could
+/// not reach its children at all. It also had no production callers.
+///
+/// `node_themes` maps a node to the theme resource assigned to it. Callers with
+/// no per-node themes pass an empty map and get the override → default chain.
+pub fn resolve_theme_item(
+    tree: &SceneTree,
+    node_id: NodeId,
+    kind: crate::theme::ThemePropertyType,
+    control_type: &str,
+    variation: &str,
+    name: &str,
+    node_themes: &std::collections::HashMap<NodeId, crate::theme::Theme>,
+    default: &crate::theme::Theme,
+) -> Option<Variant> {
+    // 1. A local override beats every theme in the chain.
+    if let Some(node) = tree.get_node(node_id) {
+        let key = format!("{}/{name}", theme_override_prefix(kind));
+        let v = node.get_property(&key);
+        if !matches!(v, Variant::Nil) {
+            return Some(v);
+        }
+    }
+
+    // 2 + 3. This node's theme, then each ancestor's, nearest first. Godot
+    // stops at the first theme that HAS the item rather than at the first node
+    // that has a theme, so a parent theme still answers when the child's theme
+    // is silent about this item.
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        if let Some(theme) = node_themes.get(&id) {
+            if let Some(v) = theme_item_with_variation(theme, kind, control_type, variation, name) {
+                return Some(v);
+            }
+        }
+        current = tree.get_node(id).and_then(|n| n.parent());
+    }
+
+    // 4. Default theme, variation first.
+    theme_item_with_variation(default, kind, control_type, variation, name)
+}
+
+/// One theme's lookup: the variation type before the base control type.
+fn theme_item_with_variation(
+    theme: &crate::theme::Theme,
+    kind: crate::theme::ThemePropertyType,
+    control_type: &str,
+    variation: &str,
+    name: &str,
+) -> Option<Variant> {
+    if !variation.is_empty() {
+        if let Some(v) = theme_item_typed(theme, kind, variation, name) {
+            return Some(v);
+        }
+    }
+    theme_item_typed(theme, kind, control_type, name)
+}
+
+/// Reads one item, preferring the typed maps (which the `.tscn` loader and the
+/// default theme populate) and falling back to the generic store.
+fn theme_item_typed(
+    theme: &crate::theme::Theme,
+    kind: crate::theme::ThemePropertyType,
+    control_type: &str,
+    name: &str,
+) -> Option<Variant> {
+    use crate::theme::ThemePropertyType as T;
+    match kind {
+        T::Color => theme.get_color(control_type, name).map(Variant::Color),
+        T::Constant => theme.get_constant(control_type, name).map(Variant::Int),
+        _ => None,
+    }
+    .or_else(|| theme.get_item(kind, control_type, name).cloned())
+}
+
 pub fn resolve_theme_color(
     tree: &SceneTree,
     node_id: NodeId,
@@ -2896,6 +3126,145 @@ pub fn resolve_theme_color(
         }
     }
     default.get_color(control_type, name)
+}
+
+// ---------------------------------------------------------------------------
+// Mouse cursor shape (pat-0q2kx.175)
+// ---------------------------------------------------------------------------
+
+/// Godot's `Control.CursorShape`, in `scene/gui/control.h` declaration order.
+///
+/// `Arrow` is enum-zero **and** the documented default of
+/// `mouse_default_cursor_shape`, which is unusual for a Godot enum — most default
+/// to something other than their zero value, so this one is safe to fall back to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    /// `CURSOR_ARROW` — the default.
+    #[default]
+    Arrow,
+    /// `CURSOR_IBEAM` — text editing.
+    IBeam,
+    /// `CURSOR_POINTING_HAND` — links.
+    PointingHand,
+    /// `CURSOR_CROSS`.
+    Cross,
+    /// `CURSOR_WAIT`.
+    Wait,
+    /// `CURSOR_BUSY`.
+    Busy,
+    /// `CURSOR_DRAG` — a drag in progress.
+    Drag,
+    /// `CURSOR_CAN_DROP` — hovering a valid drop target.
+    CanDrop,
+    /// `CURSOR_FORBIDDEN`.
+    Forbidden,
+    /// `CURSOR_VSIZE` — vertical resize.
+    VSize,
+    /// `CURSOR_HSIZE` — horizontal resize.
+    HSize,
+    /// `CURSOR_BDIAGSIZE`.
+    BDiagSize,
+    /// `CURSOR_FDIAGSIZE`.
+    FDiagSize,
+    /// `CURSOR_MOVE`.
+    Move,
+    /// `CURSOR_VSPLIT`.
+    VSplit,
+    /// `CURSOR_HSPLIT`.
+    HSplit,
+    /// `CURSOR_HELP`.
+    Help,
+}
+
+impl CursorShape {
+    /// Maps Godot's integer constant onto a shape, falling back to [`Arrow`] for
+    /// anything out of range.
+    ///
+    /// [`Arrow`]: CursorShape::Arrow
+    pub fn from_godot_int(v: i64) -> Self {
+        match v {
+            1 => Self::IBeam,
+            2 => Self::PointingHand,
+            3 => Self::Cross,
+            4 => Self::Wait,
+            5 => Self::Busy,
+            6 => Self::Drag,
+            7 => Self::CanDrop,
+            8 => Self::Forbidden,
+            9 => Self::VSize,
+            10 => Self::HSize,
+            11 => Self::BDiagSize,
+            12 => Self::FDiagSize,
+            13 => Self::Move,
+            14 => Self::VSplit,
+            15 => Self::HSplit,
+            16 => Self::Help,
+            _ => Self::Arrow,
+        }
+    }
+
+    /// The Godot integer constant for this shape.
+    pub fn to_godot_int(self) -> i64 {
+        match self {
+            Self::Arrow => 0,
+            Self::IBeam => 1,
+            Self::PointingHand => 2,
+            Self::Cross => 3,
+            Self::Wait => 4,
+            Self::Busy => 5,
+            Self::Drag => 6,
+            Self::CanDrop => 7,
+            Self::Forbidden => 8,
+            Self::VSize => 9,
+            Self::HSize => 10,
+            Self::BDiagSize => 11,
+            Self::FDiagSize => 12,
+            Self::Move => 13,
+            Self::VSplit => 14,
+            Self::HSplit => 15,
+            Self::Help => 16,
+        }
+    }
+
+    /// The CSS `cursor` keyword for this shape, so the web shell can set it
+    /// directly (pat-0q2kx.175).
+    pub fn css_name(self) -> &'static str {
+        match self {
+            Self::Arrow => "default",
+            Self::IBeam => "text",
+            Self::PointingHand => "pointer",
+            Self::Cross => "crosshair",
+            Self::Wait => "wait",
+            Self::Busy => "progress",
+            Self::Drag => "grabbing",
+            Self::CanDrop => "copy",
+            Self::Forbidden => "not-allowed",
+            Self::VSize => "ns-resize",
+            Self::HSize => "ew-resize",
+            Self::BDiagSize => "nesw-resize",
+            Self::FDiagSize => "nwse-resize",
+            Self::Move => "move",
+            Self::VSplit => "row-resize",
+            Self::HSplit => "col-resize",
+            Self::Help => "help",
+        }
+    }
+}
+
+/// The cursor shape a control declares — Godot's `Control.get_cursor_shape`
+/// default behaviour, which returns `mouse_default_cursor_shape`
+/// (pat-0q2kx.175).
+///
+/// A node with no such property (or a non-integer value) resolves to
+/// [`CursorShape::Arrow`], matching the registered default rather than failing.
+pub fn get_cursor_shape(tree: &SceneTree, node_id: NodeId) -> CursorShape {
+    match tree
+        .get_node(node_id)
+        .map(|n| n.get_property("mouse_default_cursor_shape"))
+    {
+        Some(Variant::Int(i)) => CursorShape::from_godot_int(i),
+        _ => CursorShape::Arrow,
+    }
 }
 
 #[cfg(test)]
@@ -3823,4 +4192,5 @@ func _on_pressed():
         assert_eq!(cur_pos, Vector2::new(0.0, TAB_BAR_HEIGHT));
         assert_eq!(cur_size, Vector2::new(300.0, 200.0 - TAB_BAR_HEIGHT));
     }
+
 }

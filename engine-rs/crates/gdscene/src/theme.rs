@@ -31,6 +31,14 @@ pub enum ThemePropertyType {
     Constant,
     /// Stylebox resources (stored as Variant for flexibility).
     Stylebox,
+    /// Icon (texture) resources — Godot's sixth theme data type
+    /// (`Theme.DATA_TYPE_ICON`), pat-0q2kx.180.
+    ///
+    /// Unlike the five above, icons have no dedicated map: they live in the
+    /// generic `items` store, which is keyed by category and already handles
+    /// any type. A separate map would buy nothing here and would need every
+    /// construction site updated.
+    Icon,
 }
 
 // ===========================================================================
@@ -267,6 +275,15 @@ impl Theme {
             ThemePropertyType::Constant => collect(self.constants.keys().collect()),
             ThemePropertyType::Stylebox => collect(self.styleboxes.keys().collect()),
             ThemePropertyType::Font => collect(self.fonts.keys().collect()),
+            // Icons live only in the generic `items` store, so their names come
+            // from there rather than from a dedicated map.
+            ThemePropertyType::Icon => collect(
+                self.items
+                    .keys()
+                    .filter(|(cat, _)| *cat == ThemePropertyType::Icon)
+                    .map(|(_, key)| key)
+                    .collect(),
+            ),
         }
     }
 

@@ -249,7 +249,11 @@ mod tests {
         layer.motion_mirroring = Vector2::new(100.0, 0.0);
         let ofs = layer.compute_offset(Vector2::new(250.0, 250.0));
         assert!((ofs.x - 50.0).abs() < 1e-3, "x wraps, got {}", ofs.x);
-        assert!((ofs.y - 250.0).abs() < 1e-3, "y is unmirrored, got {}", ofs.y);
+        assert!(
+            (ofs.y - 250.0).abs() < 1e-3,
+            "y is unmirrored, got {}",
+            ofs.y
+        );
     }
 
     /// The background composes scroll_offset * base_scale + base_offset and

@@ -157,6 +157,75 @@ pub fn box_set_handle(
     (box_size, box_position)
 }
 
+/// Resolves a `BoxShape3D` face-handle drag on `node_id` into UNDOABLE editor
+/// commands (pat-0q2kx.173).
+///
+/// This is the wiring the handle math above was missing: `box_get_handles` /
+/// `box_set_handle` were a faithful Godot port with tests and **zero callers**,
+/// so no drag could ever reach them.
+///
+/// Returns `(size_command, position_command)`. Both are plain
+/// [`SetProperty`](crate::EditorCommand::SetProperty) commands, which buys three
+/// things at once rather than needing a bespoke command variant:
+///
+/// * undo/redo for free, via the existing stack;
+/// * persistence for free — a `CollisionShape3D`'s shape sub-resource is
+///   flattened onto the node as `__shape__*`, and `scene_saver` already writes
+///   those companions, so the new size survives a `.tscn` round trip;
+/// * the renderer already reads `__shape__size`, so the wireframe follows the
+///   drag with no extra plumbing.
+///
+/// `ra` is the point on the dragged handle's axis closest to the mouse ray, in
+/// the shape's LOCAL space — the caller computes it because it needs the camera.
+/// Returns `None` when the node has no box size to edit.
+pub fn box_handle_drag_commands(
+    tree: &gdscene::scene_tree::SceneTree,
+    node_id: gdscene::node::NodeId,
+    handle_id: usize,
+    ra: Vector3,
+    symmetric: bool,
+    snap_step: Option<f32>,
+) -> Option<(crate::EditorCommand, crate::EditorCommand)> {
+    if handle_id >= BOX_HANDLE_COUNT {
+        return None;
+    }
+    let node = tree.get_node(node_id)?;
+    let initial_size = match node.get_property("__shape__size") {
+        gdvariant::Variant::Vector3(v) => v,
+        // A node with no recorded size is not a box we can edit; refusing is
+        // better than inventing a default and silently resizing to it.
+        _ => return None,
+    };
+    let initial_transform = gdscene::node3d::get_global_transform(tree, node_id);
+
+    let (new_size, new_position) = box_set_handle(
+        initial_size,
+        &initial_transform,
+        handle_id,
+        ra,
+        symmetric,
+        snap_step,
+    );
+
+    Some((
+        crate::EditorCommand::SetProperty {
+            node_id,
+            property: "__shape__size".to_string(),
+            new_value: gdvariant::Variant::Vector3(new_size),
+            old_value: gdvariant::Variant::Nil,
+        },
+        // A non-symmetric drag moves one face, so the node re-centres to keep
+        // the opposite face fixed — that shift is a real position edit and has
+        // to be undoable alongside the size.
+        crate::EditorCommand::SetProperty {
+            node_id,
+            property: "position".to_string(),
+            new_value: gdvariant::Variant::Vector3(new_position),
+            old_value: gdvariant::Variant::Nil,
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

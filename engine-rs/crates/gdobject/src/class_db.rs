@@ -5747,7 +5747,41 @@ pub fn register_2d_classes() {
                 .property(PropertyInfo::new("anchor_bottom", Variant::Float(0.0)))
                 // `accept_event()` is how a `_gui_input` handler stops an event
                 // from bubbling to ancestor Controls (pat-0q2kx.82).
-                .method(MethodInfo::new("accept_event", 0)),
+                .method(MethodInfo::new("accept_event", 0))
+                // Aux input surface (pat-0q2kx.175). Neither was registered, so a
+                // `.tscn` carrying either silently dropped it and the inspector
+                // had nothing to show.
+                .property(PropertyInfo::new(
+                    "tooltip_text",
+                    Variant::String(String::new()),
+                ))
+                // `Control.CursorShape`, declaration order from
+                // `scene/gui/control.h`. Here enum-zero genuinely IS the default
+                // (`CURSOR_ARROW`), unlike most Godot enums.
+                .property(PropertyInfo::new(
+                    "mouse_default_cursor_shape",
+                    Variant::Int(0),
+                ))
+                .enumeration(
+                    EnumInfo::new("CursorShape")
+                        .constant("CURSOR_ARROW", 0)
+                        .constant("CURSOR_IBEAM", 1)
+                        .constant("CURSOR_POINTING_HAND", 2)
+                        .constant("CURSOR_CROSS", 3)
+                        .constant("CURSOR_WAIT", 4)
+                        .constant("CURSOR_BUSY", 5)
+                        .constant("CURSOR_DRAG", 6)
+                        .constant("CURSOR_CAN_DROP", 7)
+                        .constant("CURSOR_FORBIDDEN", 8)
+                        .constant("CURSOR_VSIZE", 9)
+                        .constant("CURSOR_HSIZE", 10)
+                        .constant("CURSOR_BDIAGSIZE", 11)
+                        .constant("CURSOR_FDIAGSIZE", 12)
+                        .constant("CURSOR_MOVE", 13)
+                        .constant("CURSOR_VSPLIT", 14)
+                        .constant("CURSOR_HSPLIT", 15)
+                        .constant("CURSOR_HELP", 16),
+                ),
         );
     }
     if !class_exists("Button") {
@@ -5816,6 +5850,85 @@ pub fn register_2d_classes() {
     }
     if !class_exists("ColorRect") {
         register_class(ClassRegistration::new("ColorRect").parent("Control"));
+    }
+    // The menu family (pat-0q2kx.177). A full `PopupMenu` model already existed
+    // in `gdscene::popup` (items, separators, `activate_item` → `id_pressed`)
+    // but the class was never registered, so a `.tscn` naming one could not
+    // instantiate it and nothing could open it.
+    //
+    // Godot's chain is `PopupMenu <- Popup <- Window`, NOT `<- Control`: a popup
+    // is its own window, which is why it can draw outside its parent's rect.
+    if !class_exists("Popup") {
+        register_class(ClassRegistration::new("Popup").parent("Window"));
+    }
+    if !class_exists("PopupMenu") {
+        register_class(
+            ClassRegistration::new("PopupMenu")
+                .parent("Popup")
+                .property(PropertyInfo::new(
+                    "hide_on_item_selection",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new(
+                    "hide_on_checkable_item_selection",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new("allow_search", Variant::Bool(true))),
+        );
+    }
+    // `MenuButton <- Button`: it is a button that owns a popup, so it inherits
+    // the whole BaseButton press surface.
+    if !class_exists("MenuButton") {
+        register_class(
+            ClassRegistration::new("MenuButton")
+                .parent("Button")
+                .property(PropertyInfo::new("switch_on_hover", Variant::Bool(false)))
+                .property(PropertyInfo::new("item_count", Variant::Int(0))),
+        );
+    }
+    // `MenuBar <- Control`: the strip draws its own titles rather than being a
+    // container of buttons.
+    if !class_exists("MenuBar") {
+        register_class(
+            ClassRegistration::new("MenuBar")
+                .parent("Control")
+                .property(PropertyInfo::new("flat", Variant::Bool(false)))
+                .property(PropertyInfo::new("switch_on_hover", Variant::Bool(true)))
+                .property(PropertyInfo::new("prefer_global_menu", Variant::Bool(true))),
+        );
+    }
+    // The colour-picker family (pat-0q2kx.176). `ColorPicker` previously existed
+    // only as an editor inspector enum, never as a registered scene Control, so
+    // a `.tscn` naming one could not instantiate it. Defaults from
+    // doc/classes/ColorPicker.xml and ColorPickerButton.xml.
+    if !class_exists("ColorPicker") {
+        register_class(
+            ClassRegistration::new("ColorPicker")
+                .parent("VBoxContainer")
+                .property(PropertyInfo::new(
+                    "color",
+                    Variant::Color(gdcore::math::Color::WHITE),
+                ))
+                .property(PropertyInfo::new("edit_alpha", Variant::Bool(true)))
+                .property(PropertyInfo::new("color_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("picker_shape", Variant::Int(0))),
+        );
+    }
+    // `ColorPickerButton` derives from Button, not from ColorPicker — it *hosts*
+    // a picker in a popup rather than being one.
+    if !class_exists("ColorPickerButton") {
+        register_class(
+            ClassRegistration::new("ColorPickerButton")
+                .parent("Button")
+                .property(PropertyInfo::new(
+                    "color",
+                    Variant::Color(gdcore::math::Color::BLACK),
+                ))
+                .property(PropertyInfo::new("edit_alpha", Variant::Bool(true))),
+        );
+    }
+    if !class_exists("ColorPalette") {
+        register_class(ClassRegistration::new("ColorPalette").parent("Resource"));
     }
     if !class_exists("Container") {
         register_class(ClassRegistration::new("Container").parent("Control"));

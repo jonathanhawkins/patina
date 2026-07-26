@@ -3923,6 +3923,95 @@ impl Interpreter {
                 set_random_seed(to_float(&args[0])? as i64);
                 Ok(Some(Variant::Nil))
             }
+            // `error_string(code)` — Godot's `variant_utility.cpp` maps an Error
+            // code to the message in `core/error/error_list.cpp`'s `error_names`
+            // (pat-0q2kx.174). Out-of-range codes report Godot's own
+            // "(invalid error code)" rather than panicking on the index.
+            "error_string" => {
+                let code = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "error_string() takes an Error code".into(),
+                        )))
+                    }
+                };
+                Ok(Some(Variant::String(error_code_string(code))))
+            }
+            // `get_stack()` — the live call stack, innermost LAST, as Godot
+            // returns it. Each frame is `{function, line, source}`.
+            // `call_stack_frames` was already tracked for error reporting but no
+            // builtin ever exposed it (pat-0q2kx.174).
+            "get_stack" => {
+                let frames: Vec<Variant> = self
+                    .call_stack_frames
+                    .iter()
+                    .map(|f| {
+                        let mut d = gdvariant::Dictionary::new();
+                        d.insert("function", Variant::String(f.function_name.clone()));
+                        d.insert(
+                            "line",
+                            Variant::Int(
+                                f.source_location
+                                    .as_ref()
+                                    .map(|l| l.line as i64)
+                                    .unwrap_or(0),
+                            ),
+                        );
+                        d.insert("source", Variant::String(String::new()));
+                        Variant::Dictionary(d)
+                    })
+                    .collect();
+                Ok(Some(Variant::Array(frames)))
+            }
+            // `print_stack()` prints the same frames rather than returning them.
+            "print_stack" => {
+                for f in self.call_stack_frames.clone() {
+                    let line = f.source_location.as_ref().map(|l| l.line).unwrap_or(0);
+                    self.output.push(format!(
+                        "  at function: {} (line {})",
+                        f.function_name, line
+                    ));
+                }
+                Ok(Some(Variant::Nil))
+            }
+            // `type_exists(name)` — ClassDB membership, which is what Godot
+            // answers here (not GDScript-visible builtin types).
+            "type_exists" => {
+                let name = match args.first() {
+                    Some(Variant::String(s)) => s.clone(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "type_exists() takes a class name".into(),
+                        )))
+                    }
+                };
+                Ok(Some(Variant::Bool(gdobject::class_exists(&name))))
+            }
+            // `is_instance_id_valid(id)` — a non-zero id that still resolves.
+            // Without scene access nothing can resolve, so it answers false
+            // rather than claiming validity it cannot check.
+            "is_instance_id_valid" => {
+                let id = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "is_instance_id_valid() takes an id".into(),
+                        )))
+                    }
+                };
+                // No `node_exists` on the scene-access trait, so existence is
+                // probed by reading a property every node carries: a missing
+                // node answers Nil.
+                let valid = id > 0
+                    && self
+                        .scene_access
+                        .as_ref()
+                        .map(|a| !matches!(a.get_node_property(id as u64, "name"), Variant::Nil))
+                        .unwrap_or(false);
+                Ok(Some(Variant::Bool(valid)))
+            }
             "randomize" => {
                 if !args.is_empty() {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -13704,6 +13793,72 @@ fn request_engine_debugger_break(
 /// [`drain_engine_debugger_messages`].
 pub fn take_engine_debugger_break() -> Option<EngineDebuggerBreak> {
     DEBUG_PENDING_BREAK.with(|b| b.borrow_mut().take())
+}
+
+/// Godot's `error_names` table (`core/error/error_list.cpp`), indexed by Error
+/// code — what `error_string()` returns (pat-0q2kx.174).
+const ERROR_NAMES: [&str; 49] = [
+    "OK",
+    "Failed",
+    "Unavailable",
+    "Unconfigured",
+    "Unauthorized",
+    "Parameter out of range",
+    "Out of memory",
+    "File not found",
+    "File: Bad drive",
+    "File: Bad path",
+    "File: Permission denied",
+    "File already in use",
+    "Can't open file",
+    "Can't write file",
+    "Can't read file",
+    "File unrecognized",
+    "File corrupt",
+    "Missing dependencies for file",
+    "End of file",
+    "Can't open",
+    "Can't create",
+    "Query failed",
+    "Already in use",
+    "Locked",
+    "Timeout",
+    "Can't connect",
+    "Can't resolve",
+    "Connection error",
+    "Can't acquire resource",
+    "Can't fork",
+    "Invalid data",
+    "Invalid parameter",
+    "Already exists",
+    "Does not exist",
+    "Can't read database",
+    "Can't write database",
+    "Compilation failed",
+    "Method not found",
+    "Link failed",
+    "Script failed",
+    "Cyclic link detected",
+    "Invalid declaration",
+    "Duplicate symbol",
+    "Parse error",
+    "Busy",
+    "Skip",
+    "Help",
+    "Bug",
+    "Printer on fire",
+];
+
+/// `error_string(code)`. Godot answers `"(invalid error code)"` for anything
+/// outside the table rather than erroring, so a bad code cannot abort a script.
+fn error_code_string(code: i64) -> String {
+    if code < 0 {
+        return "(invalid error code)".to_string();
+    }
+    ERROR_NAMES
+        .get(code as usize)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "(invalid error code)".to_string())
 }
 
 // ---------------------------------------------------------------------------

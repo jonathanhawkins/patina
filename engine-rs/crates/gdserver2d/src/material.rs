@@ -234,6 +234,28 @@ pub struct VisualShader {
     pub nodes: Vec<VisualShaderNode>,
     /// Port-to-port connections.
     pub connections: Vec<VisualShaderConnection>,
+    /// Which shader stage the graph compiles to (pat-0q2kx.171).
+    pub mode: VisualShaderMode,
+}
+
+/// The shader type a [`VisualShader`] compiles to — Godot's `Shader.Mode`
+/// restricted to the two stages Patina's codegen emits (pat-0q2kx.171).
+///
+/// ⚠️ **`CanvasItem` is the default here, but Godot's `MODE_SPATIAL` is enum
+/// zero and is what a fresh `VisualShader` resource uses.** Patina's codegen has
+/// only ever emitted `shader_type canvas_item`, so defaulting to `Spatial` would
+/// silently change the output of every existing graph. The divergence is
+/// deliberate and belongs to whoever wires `.tres` round-tripping: a resource
+/// that records its own mode should set it explicitly rather than rely on this
+/// default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VisualShaderMode {
+    /// 2D: `shader_type canvas_item`, writing `COLOR`.
+    #[default]
+    CanvasItem,
+    /// 3D: `shader_type spatial`, writing `ALBEDO` — what a `MeshInstance`
+    /// material needs.
+    Spatial,
 }
 
 impl VisualShader {
@@ -264,6 +286,62 @@ impl VisualShader {
         self.nodes.iter().find(|n| n.id == id)
     }
 
+    /// Removes a node **and every connection touching it**, returning whether it
+    /// existed (pat-0q2kx.171).
+    ///
+    /// Dropping the connections is the load-bearing part: a dangling
+    /// `VisualShaderConnection` would make `resolve_input` chase a `from_node`
+    /// that is gone, silently falling back to the default expression instead of
+    /// reporting a broken graph.
+    pub fn remove_node(&mut self, id: u32) -> bool {
+        let before = self.nodes.len();
+        self.nodes.retain(|n| n.id != id);
+        if self.nodes.len() == before {
+            return false;
+        }
+        self.connections
+            .retain(|c| c.from_node != id && c.to_node != id);
+        true
+    }
+
+    /// Removes one port-to-port connection, returning whether it existed.
+    pub fn disconnect(
+        &mut self,
+        from_node: u32,
+        from_port: u32,
+        to_node: u32,
+        to_port: u32,
+    ) -> bool {
+        let before = self.connections.len();
+        self.connections.retain(|c| {
+            !(c.from_node == from_node
+                && c.from_port == from_port
+                && c.to_node == to_node
+                && c.to_port == to_port)
+        });
+        self.connections.len() != before
+    }
+
+    /// Sets a node's input-port literal — the inline parameter edit the graph
+    /// canvas performs (pat-0q2kx.171).
+    ///
+    /// Returns false for an unknown node **or** an out-of-range port rather than
+    /// growing `inputs`: a port index the node does not have is a client bug, and
+    /// silently extending the vector would produce a node whose arity no longer
+    /// matches its type.
+    pub fn set_param(&mut self, id: u32, port: u32, value: Variant) -> bool {
+        match self.nodes.iter_mut().find(|n| n.id == id) {
+            Some(node) => match node.inputs.get_mut(port as usize) {
+                Some(slot) => {
+                    *slot = value;
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        }
+    }
+
     /// Compiles the graph into GDShader source (Godot's `VisualShader.get_code`,
     /// pat-nzgdu.140).
     ///
@@ -278,16 +356,39 @@ impl VisualShader {
     /// point of the class. A graph with no output node (or an empty graph) yields
     /// a valid pass-through shader rather than invalid source.
     pub fn get_code(&self) -> String {
-        let body = match self
+        let output = self
             .nodes
             .iter()
-            .find(|n| n.node_type == VisualShaderNodeType::Output)
-        {
-            // Godot's canvas_item output takes its colour on port 0.
-            Some(output) => format!("COLOR = {};", self.resolve_input(output, 0, 0)),
-            None => "COLOR = COLOR;".to_string(),
-        };
-        format!("shader_type canvas_item;\n\nvoid fragment() {{\n\t{body}\n}}\n")
+            .find(|n| n.node_type == VisualShaderNodeType::Output);
+        match self.mode {
+            VisualShaderMode::CanvasItem => {
+                let body = match output {
+                    // Godot's canvas_item output takes its colour on port 0.
+                    Some(output) => format!("COLOR = {};", self.resolve_input(output, 0, 0)),
+                    None => "COLOR = COLOR;".to_string(),
+                };
+                format!("shader_type canvas_item;\n\nvoid fragment() {{\n\t{body}\n}}\n")
+            }
+            VisualShaderMode::Spatial => {
+                // `ALBEDO` is a `vec3`, while port expressions are `vec4` (colours
+                // and the fallback) or `vec3`. `.rgb` is valid on both, so the
+                // whole expression is parenthesised and swizzled rather than
+                // guessed at from its text.
+                //
+                // A graph whose output port resolves to a bare scalar would emit
+                // `(0.5).rgb`, which is invalid — but that is the existing
+                // untyped-port limitation, not new here: the canvas_item branch
+                // equally assigns a possibly-scalar expression to `COLOR`. Real
+                // port typing is the fix, and it is out of scope for this bead.
+                let body = match output {
+                    Some(output) => {
+                        format!("ALBEDO = ({}).rgb;", self.resolve_input(output, 0, 0))
+                    }
+                    None => "ALBEDO = ALBEDO;".to_string(),
+                };
+                format!("shader_type spatial;\n\nvoid fragment() {{\n\t{body}\n}}\n")
+            }
+        }
     }
 
     /// Resolves the expression feeding `node`'s input port `port`: the connected
@@ -708,5 +809,191 @@ mod tests {
         assert_ne!(VisualShaderNodeType::Output, VisualShaderNodeType::Float);
         assert_ne!(VisualShaderNodeType::Add, VisualShaderNodeType::Multiply);
         assert_eq!(VisualShaderNodeType::Mix, VisualShaderNodeType::Mix);
+    }
+
+    // -- spatial shader mode (pat-0q2kx.171) --------------------------------
+    //
+    // `.171`'s acceptance path is "ColorConstant -> Output **albedo**" driving a
+    // **MeshInstance**. `ALBEDO` is a spatial output; `get_code()` only ever
+    // emitted `shader_type canvas_item` with `COLOR`, so that path was
+    // unreachable however the editor routes were wired.
+
+    /// The default must stay `canvas_item`, because every pre-existing caller and
+    /// test depends on that output. (Godot's own enum-zero is `MODE_SPATIAL`, so
+    /// this is a deliberate divergence — see `VisualShaderMode`.)
+    #[test]
+    fn default_mode_is_canvas_item_not_godot_enum_zero() {
+        let vs = VisualShader::new();
+        assert_eq!(vs.mode, VisualShaderMode::CanvasItem);
+        assert!(
+            vs.get_code().contains("shader_type canvas_item;"),
+            "the default must keep emitting canvas_item"
+        );
+    }
+
+    /// A spatial graph writes `ALBEDO` in a `spatial` shader.
+    #[test]
+    fn spatial_mode_emits_albedo_from_a_colour_node() {
+        let mut vs = VisualShader::new();
+        vs.mode = VisualShaderMode::Spatial;
+        let color = vs.add_node(node(
+            1,
+            VisualShaderNodeType::Color,
+            vec![Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0))],
+        ));
+        let out = vs.add_node(output_node(2));
+        vs.connect(color, 0, out, 0);
+
+        let code = vs.get_code();
+        assert!(
+            code.contains("shader_type spatial;"),
+            "spatial mode must declare shader_type spatial, got:\n{code}"
+        );
+        assert!(
+            code.contains("ALBEDO ="),
+            "spatial mode must write ALBEDO, not COLOR, got:\n{code}"
+        );
+        assert!(
+            !code.contains("COLOR ="),
+            "spatial mode must NOT write COLOR, got:\n{code}"
+        );
+        // `ALBEDO` is a vec3, so the vec4 colour expression is swizzled.
+        assert!(
+            code.contains(".rgb"),
+            "the vec4 expression must be narrowed to vec3 for ALBEDO, got:\n{code}"
+        );
+        assert!(
+            code.contains("1.0") && code.contains("0.0"),
+            "the node's colour literal must reach the source, got:\n{code}"
+        );
+    }
+
+    /// With no Output node a spatial graph must still emit compilable source
+    /// rather than an empty or half-written body.
+    #[test]
+    fn spatial_mode_without_an_output_is_still_valid_source() {
+        let mut vs = VisualShader::new();
+        vs.mode = VisualShaderMode::Spatial;
+        let code = vs.get_code();
+        assert!(code.contains("shader_type spatial;"));
+        assert!(code.contains("ALBEDO = ALBEDO;"), "got:\n{code}");
+        assert!(code.contains("void fragment()"));
+    }
+
+    /// Removing a node must take its connections with it, or `resolve_input`
+    /// chases a `from_node` that no longer exists and silently yields the default
+    /// expression instead of surfacing a broken graph.
+    #[test]
+    fn removing_a_node_drops_its_connections() {
+        let mut vs = VisualShader::new();
+        let color = vs.add_node(node(
+            1,
+            VisualShaderNodeType::Color,
+            vec![Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0))],
+        ));
+        let out = vs.add_node(output_node(2));
+        vs.connect(color, 0, out, 0);
+        assert_eq!(vs.connections.len(), 1);
+
+        assert!(vs.remove_node(color));
+        assert!(vs.get_node(color).is_none());
+        assert_eq!(
+            vs.connections.len(),
+            0,
+            "the connection feeding the removed node must go with it"
+        );
+        assert!(!vs.remove_node(color), "already gone");
+
+        // The graph still compiles, now falling back to the default expression.
+        assert!(vs.get_code().contains("void fragment()"));
+    }
+
+    #[test]
+    fn disconnect_removes_only_the_named_connection() {
+        let mut vs = VisualShader::new();
+        let a = vs.add_node(node(
+            1,
+            VisualShaderNodeType::Float,
+            vec![Variant::Float(1.0)],
+        ));
+        let b = vs.add_node(node(
+            2,
+            VisualShaderNodeType::Float,
+            vec![Variant::Float(2.0)],
+        ));
+        // A `Mix` node genuinely has several input ports, so feeding two of them
+        // models a real graph. `output_node` has only port 0, and connecting to
+        // its port 1 would describe a graph that cannot exist — the model does not
+        // validate port ranges, so such a test would pass while lying.
+        let mix = vs.add_node(node(
+            3,
+            VisualShaderNodeType::Mix,
+            vec![Variant::Nil, Variant::Nil, Variant::Float(0.5)],
+        ));
+        vs.connect(a, 0, mix, 0);
+        vs.connect(b, 0, mix, 1);
+
+        assert!(vs.disconnect(a, 0, mix, 0));
+        assert_eq!(vs.connections.len(), 1, "only one goes");
+        assert_eq!(vs.connections[0].from_node, b, "the other survives");
+        assert_eq!(vs.connections[0].to_port, 1, "on its own port");
+
+        // A connection that does not exist must report false, not silently pass.
+        assert!(!vs.disconnect(a, 0, mix, 0));
+        assert!(!vs.disconnect(99, 0, mix, 0));
+    }
+
+    /// `set_param` edits an existing port and refuses unknown nodes/ports rather
+    /// than growing `inputs`, which would leave a node whose arity no longer
+    /// matches its type.
+    #[test]
+    fn set_param_edits_a_port_and_refuses_bad_targets() {
+        let mut vs = VisualShader::new();
+        let color = vs.add_node(node(
+            1,
+            VisualShaderNodeType::Color,
+            vec![Variant::Color(Color::new(0.0, 0.0, 0.0, 1.0))],
+        ));
+        let out = vs.add_node(output_node(2));
+        vs.connect(color, 0, out, 0);
+
+        assert!(vs.set_param(color, 0, Variant::Color(Color::new(0.25, 0.5, 0.75, 1.0))));
+        assert!(
+            vs.get_code().contains("vec4(0.25, 0.5, 0.75, 1.0)"),
+            "the edited literal must reach the generated source:\n{}",
+            vs.get_code()
+        );
+
+        assert!(!vs.set_param(color, 7, Variant::Float(1.0)), "no such port");
+        assert!(!vs.set_param(999, 0, Variant::Float(1.0)), "no such node");
+        assert_eq!(
+            vs.get_node(color).unwrap().inputs.len(),
+            1,
+            "a rejected set_param must not grow the input list"
+        );
+    }
+
+    /// Switching mode must change only the stage/output, leaving the resolved
+    /// expression identical — the graph itself is mode-independent.
+    #[test]
+    fn mode_switch_reuses_the_same_resolved_expression() {
+        let mut vs = VisualShader::new();
+        let color = vs.add_node(node(
+            1,
+            VisualShaderNodeType::Color,
+            vec![Variant::Color(Color::new(0.25, 0.5, 0.75, 1.0))],
+        ));
+        let out = vs.add_node(output_node(2));
+        vs.connect(color, 0, out, 0);
+
+        let canvas = vs.get_code();
+        vs.mode = VisualShaderMode::Spatial;
+        let spatial = vs.get_code();
+
+        // The same vec4 literal appears in both, just assigned differently.
+        let literal = "vec4(0.25, 0.5, 0.75, 1.0)";
+        assert!(canvas.contains(literal), "canvas_item:\n{canvas}");
+        assert!(spatial.contains(literal), "spatial:\n{spatial}");
+        assert_ne!(canvas, spatial, "the two stages must differ");
     }
 }

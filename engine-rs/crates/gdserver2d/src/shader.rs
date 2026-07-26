@@ -1701,7 +1701,8 @@ uniform bool enabled = true;
 
     // -- pat-nzgdu.139: shader_type sky stage + EYEDIR built-in ---------------
 
-    const SKY_SRC: &str = "shader_type sky;\nvoid sky() {\n    COLOR = vec3(EYEDIR.y, 0.0, 1.0);\n}";
+    const SKY_SRC: &str =
+        "shader_type sky;\nvoid sky() {\n    COLOR = vec3(EYEDIR.y, 0.0, 1.0);\n}";
 
     #[test]
     fn sky_shader_computes_color_from_eyedir() {
@@ -1733,7 +1734,8 @@ uniform bool enabled = true;
 
     #[test]
     fn sky_shader_reads_every_eyedir_axis() {
-        let src = "shader_type sky;\nvoid sky() {\n    COLOR = vec3(EYEDIR.x, EYEDIR.y, EYEDIR.z);\n}";
+        let src =
+            "shader_type sky;\nvoid sky() {\n    COLOR = vec3(EYEDIR.x, EYEDIR.y, EYEDIR.z);\n}";
         let ctx = FragmentContext {
             eyedir: (0.1, 0.2, 0.3),
             ..Default::default()
@@ -1745,7 +1747,8 @@ uniform bool enabled = true;
     #[test]
     fn parse_sky_body_ignores_a_canvas_item_shader() {
         // Stage mismatch yields nothing rather than misfiring on fragment().
-        let canvas = "shader_type canvas_item;\nvoid fragment() {\n    COLOR = vec4(1.0, 0.0, 0.0, 1.0);\n}";
+        let canvas =
+            "shader_type canvas_item;\nvoid fragment() {\n    COLOR = vec4(1.0, 0.0, 0.0, 1.0);\n}";
         assert!(parse_sky_body(canvas).is_empty());
         // ...and the converse: a sky program has no fragment() body.
         assert!(parse_fragment_body(SKY_SRC).is_empty());

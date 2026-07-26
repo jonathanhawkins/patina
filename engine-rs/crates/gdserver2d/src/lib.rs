@@ -22,7 +22,8 @@ pub use canvas::{CanvasItem, CanvasItemId, DrawCommand};
 pub use canvas_layer::CanvasLayer;
 pub use material::{
     BlendMode, CanvasItemMaterial, CullMode, LightMode, Material3D, StandardMaterial3D,
-    TransparencyMode, VisualShader, VisualShaderConnection, VisualShaderNode, VisualShaderNodeType,
+    TransparencyMode, VisualShader, VisualShaderConnection, VisualShaderMode, VisualShaderNode,
+    VisualShaderNodeType,
 };
 pub use mesh::{Mesh3D, PrimitiveType};
 pub use parallax::ParallaxLayer;

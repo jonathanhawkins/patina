@@ -44,6 +44,14 @@ pub struct FrameOutput {
     pub delta: f64,
     /// Number of physics ticks that ran during this frame.
     pub physics_steps: u32,
+    /// The cursor shape the currently hovered `Control` asks for
+    /// (pat-0q2kx.175).
+    ///
+    /// Reported per frame so the host shell can set its CSS cursor — the shape is
+    /// a property of whatever is under the mouse, so it has to be recomputed as
+    /// the hover moves rather than pushed on change. Falls back to
+    /// [`CursorShape::Arrow`] when nothing is hovered.
+    pub cursor_shape: crate::control::CursorShape,
 }
 
 /// A snapshot of a single node's properties at a given frame.
@@ -2491,10 +2499,18 @@ impl MainLoop {
             self.frame_counter,
         );
 
+        // Resolved from the hovered control each frame; no hover means the
+        // default arrow, which is also what an unhovered viewport shows.
+        let cursor_shape = match self.tree.hovered_control() {
+            Some(id) => crate::control::get_cursor_shape(&self.tree, id),
+            None => crate::control::CursorShape::Arrow,
+        };
+
         FrameOutput {
             frame_count: self.frame_counter,
             delta: delta_secs,
             physics_steps,
+            cursor_shape,
         }
     }
 
