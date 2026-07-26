@@ -1926,6 +1926,203 @@ pub fn register_3d_classes() {
     register_class(ClassRegistration::new("CCDIK3D").parent("IterateIK3D"));
     register_class(ClassRegistration::new("JacobianIK3D").parent("IterateIK3D"));
 
+    // LookAtModifier3D (pat-0q2kx.156). Aims a bone at a target with optional
+    // angle limits and time-based interpolation.
+    //
+    // Defaults come from `upstream/godot/scene/3d/look_at_modifier_3d.h`, NOT the
+    // doc XML: the doc omits a default for every limit/damp member, and guessing
+    // 0.0 would mean "cannot rotate at all" where Godot's real default is TAU
+    // ("unlimited"). `symmetry_limitation` is likewise `true` in the header while
+    // the doc lists no default.
+    let tau = std::f32::consts::TAU;
+    let pi = std::f32::consts::PI;
+    register_class(
+        ClassRegistration::new("LookAtModifier3D")
+            .parent("SkeletonModifier3D")
+            .property(PropertyInfo::new("bone", Variant::Int(-1)))
+            .property(PropertyInfo::new(
+                "bone_name",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new(
+                "target_node",
+                Variant::NodePath(gdcore::node_path::NodePath::empty()),
+            ))
+            // BoneAxis: 0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z. Godot aims +Z by default.
+            .property(PropertyInfo::new("forward_axis", Variant::Int(4)))
+            // Vector3.Axis: 0=X 1=Y 2=Z.
+            .property(PropertyInfo::new("primary_rotation_axis", Variant::Int(1)))
+            .property(PropertyInfo::new(
+                "use_secondary_rotation",
+                Variant::Bool(true),
+            ))
+            .property(PropertyInfo::new("relative", Variant::Bool(false)))
+            .property(PropertyInfo::new("origin_from", Variant::Int(0)))
+            .property(PropertyInfo::new("origin_bone", Variant::Int(-1)))
+            .property(PropertyInfo::new(
+                "origin_bone_name",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new(
+                "origin_external_node",
+                Variant::NodePath(gdcore::node_path::NodePath::empty()),
+            ))
+            .property(PropertyInfo::new(
+                "origin_offset",
+                Variant::Vector3(Vector3::ZERO),
+            ))
+            .property(PropertyInfo::new("origin_safe_margin", Variant::Float(0.1)))
+            .property(PropertyInfo::new("duration", Variant::Float(0.0)))
+            .property(PropertyInfo::new("transition_type", Variant::Int(0)))
+            .property(PropertyInfo::new("ease_type", Variant::Int(0)))
+            .property(PropertyInfo::new(
+                "use_angle_limitation",
+                Variant::Bool(false),
+            ))
+            .property(PropertyInfo::new(
+                "symmetry_limitation",
+                Variant::Bool(true),
+            ))
+            .property(PropertyInfo::new(
+                "primary_limit_angle",
+                Variant::Float(tau as f64),
+            ))
+            .property(PropertyInfo::new(
+                "primary_damp_threshold",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new(
+                "primary_positive_limit_angle",
+                Variant::Float(pi as f64),
+            ))
+            .property(PropertyInfo::new(
+                "primary_positive_damp_threshold",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new(
+                "primary_negative_limit_angle",
+                Variant::Float(pi as f64),
+            ))
+            .property(PropertyInfo::new(
+                "primary_negative_damp_threshold",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new(
+                "secondary_limit_angle",
+                Variant::Float(tau as f64),
+            ))
+            .property(PropertyInfo::new(
+                "secondary_damp_threshold",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new(
+                "secondary_positive_limit_angle",
+                Variant::Float(pi as f64),
+            ))
+            .property(PropertyInfo::new(
+                "secondary_positive_damp_threshold",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new(
+                "secondary_negative_limit_angle",
+                Variant::Float(pi as f64),
+            ))
+            .property(PropertyInfo::new(
+                "secondary_negative_damp_threshold",
+                Variant::Float(1.0),
+            ))
+            .enumeration(
+                EnumInfo::new("OriginFrom")
+                    .constant("ORIGIN_FROM_SELF", 0)
+                    .constant("ORIGIN_FROM_SPECIFIC_BONE", 1)
+                    .constant("ORIGIN_FROM_EXTERNAL_NODE", 2),
+            ),
+    );
+
+    // SpringBoneSimulator3D + its collision shapes (pat-0q2kx.156).
+    //
+    // The simulator declares only THREE plain members; every per-chain and
+    // per-joint knob (stiffness/drag/gravity/radius) is reached through indexed
+    // `settings/<i>/...` accessors rather than a flat property, which is why
+    // `doc/classes/SpringBoneSimulator3D.xml` lists so little. Inventing flat
+    // properties for those would be a schema Godot does not have.
+    register_class(
+        ClassRegistration::new("SpringBoneSimulator3D")
+            .parent("SkeletonModifier3D")
+            .property(PropertyInfo::new(
+                "external_force",
+                Variant::Vector3(Vector3::ZERO),
+            ))
+            .property(PropertyInfo::new("mutable_bone_axes", Variant::Bool(true)))
+            .property(PropertyInfo::new("setting_count", Variant::Int(0))),
+    );
+
+    // The collision base carries the bone binding; each shape adds its own
+    // geometry. `inside` flips containment (keep the joint inside the shape
+    // rather than outside).
+    register_class(
+        ClassRegistration::new("SpringBoneCollision3D")
+            .parent("Node3D")
+            .property(PropertyInfo::new("bone", Variant::Int(-1)))
+            .property(PropertyInfo::new(
+                "bone_name",
+                Variant::String(String::new()),
+            )),
+    );
+    register_class(
+        ClassRegistration::new("SpringBoneCollisionSphere3D")
+            .parent("SpringBoneCollision3D")
+            .property(PropertyInfo::new("radius", Variant::Float(0.1)))
+            .property(PropertyInfo::new("inside", Variant::Bool(false))),
+    );
+    register_class(
+        ClassRegistration::new("SpringBoneCollisionCapsule3D")
+            .parent("SpringBoneCollision3D")
+            .property(PropertyInfo::new("radius", Variant::Float(0.1)))
+            .property(PropertyInfo::new("height", Variant::Float(0.5)))
+            .property(PropertyInfo::new("inside", Variant::Bool(false))),
+    );
+    // A plane has no size of its own — its normal comes from the node transform.
+    register_class(
+        ClassRegistration::new("SpringBoneCollisionPlane3D").parent("SpringBoneCollision3D"),
+    );
+
+    // The remaining leaves whose schema is fully known (pat-0q2kx.156).
+    //
+    // `TwoBoneIK3D` and `SplineIK3D` each declare exactly ONE plain member; like
+    // `SpringBoneSimulator3D` their real knobs are indexed `settings/<i>/...`
+    // accessors. They inherit the usable ones (`target_position`, `root_bone`,
+    // `tip_bone`) from `IKModifier3D` / `ChainIK3D`.
+    //
+    // ⚠️ Registration only — `process_modifiers` has no branch for any of these,
+    // so a node of these classes does not move a bone yet.
+    register_class(
+        ClassRegistration::new("TwoBoneIK3D")
+            .parent("IKModifier3D")
+            .property(PropertyInfo::new("setting_count", Variant::Int(0))),
+    );
+    register_class(
+        ClassRegistration::new("SplineIK3D")
+            .parent("ChainIK3D")
+            .property(PropertyInfo::new("setting_count", Variant::Int(0))),
+    );
+    // Republishes a bone's pose as a child transform.
+    register_class(
+        ClassRegistration::new("ModifierBoneTarget3D")
+            .parent("SkeletonModifier3D")
+            .property(PropertyInfo::new("bone", Variant::Int(-1)))
+            .property(PropertyInfo::new(
+                "bone_name",
+                Variant::String(String::new()),
+            )),
+    );
+    // NOT registered here: `SkeletonIK3D`. It declares 10 members and its
+    // `interpolation` has no default in `doc/classes/SkeletonIK3D.xml` and no
+    // plain field in the header — only `_set_interpolation`/`_get_interpolation`,
+    // because the class is deprecated in Godot 4. Registering 9 of 10 members
+    // would misreport the schema and inventing the 10th would be a guess, so it
+    // is deliberately left out rather than half-declared.
+
     register_class(
         ClassRegistration::new("IKModifier3D")
             .parent("SkeletonModifier3D")
@@ -2546,14 +2743,37 @@ pub fn register_3d_classes() {
             ))
             .property(PropertyInfo::new("custom_aabb", Variant::Nil)),
     );
+    // CSG chain, per `modules/csg/csg_shape.h` (pat-0q2kx.161):
+    //
+    //   GeometryInstance3D <- CSGShape3D <- CSGPrimitive3D <- CSGBox3D/…
+    //                                    <- CSGCombiner3D
+    //
+    // CSGShape3D sat under `Node3D`, which severed it from the VisualInstance3D
+    // branch: a CSG node is a *rendered* node, so `is_class("VisualInstance3D")`
+    // and every GeometryInstance3D property (cast_shadow, visibility ranges,
+    // custom_aabb) were invisible to it. `CSGPrimitive3D` was missing entirely,
+    // so the solids inherited straight from CSGShape3D and `smooth_faces` —
+    // which Godot puts on the primitive base — had nowhere to live.
+    //
+    // ORDERING IS LOAD-BEARING: `GeometryInstance3D` is registered above (this
+    // same function) before this point, so the new parent resolves. Reparenting
+    // onto a base that has not been registered yet silently severs the chain.
     register_class(
         ClassRegistration::new("CSGShape3D")
-            .parent("Node3D")
+            .parent("GeometryInstance3D")
             .abstract_class(),
     );
-    register_class(ClassRegistration::new("CSGBox3D").parent("CSGShape3D"));
-    register_class(ClassRegistration::new("CSGSphere3D").parent("CSGShape3D"));
-    register_class(ClassRegistration::new("CSGCylinder3D").parent("CSGShape3D"));
+    register_class(
+        ClassRegistration::new("CSGPrimitive3D")
+            .parent("CSGShape3D")
+            .abstract_class()
+            .property(PropertyInfo::new("smooth_faces", Variant::Bool(true))),
+    );
+    register_class(ClassRegistration::new("CSGBox3D").parent("CSGPrimitive3D"));
+    register_class(ClassRegistration::new("CSGSphere3D").parent("CSGPrimitive3D"));
+    register_class(ClassRegistration::new("CSGCylinder3D").parent("CSGPrimitive3D"));
+    // CSGCombiner3D is NOT a primitive — it is a boolean grouping node, and
+    // Godot parents it straight to CSGShape3D. Leave it there.
     register_class(ClassRegistration::new("CSGCombiner3D").parent("CSGShape3D"));
     // VisualScript is deprecated but inherits Script → Resource in Godot's hierarchy.
     //
@@ -2564,6 +2784,42 @@ pub fn register_3d_classes() {
     // ref-counted half nor any other `register_*_classes`, so it guards here.
     if !class_exists("RefCounted") {
         register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
+    // RegEx/RegExMatch are RefCounted in Godot (extension_api.json). The engine
+    // has lived in `gdcore::regex` all along — compile/search/search_all/sub
+    // with named groups — but neither class was registered, so ClassDB denied
+    // their existence and a script could not construct one (pat-0q2kx.165).
+    // Registered right after RefCounted so the parent always resolves.
+    if !class_exists("RegEx") {
+        register_class(
+            ClassRegistration::new("RegEx")
+                .parent("RefCounted")
+                .method(MethodInfo::new("compile", 1))
+                .method(MethodInfo::new("search", 1))
+                .method(MethodInfo::new("search_all", 1))
+                // `sub(subject, replacement, all)` — `all` defaults to false.
+                .method(MethodInfo::new("sub", 3))
+                .method(MethodInfo::new("get_pattern", 0))
+                .method(MethodInfo::new("is_valid", 0))
+                .method(MethodInfo::new("get_group_count", 0))
+                .method(MethodInfo::new("get_names", 0))
+                .method(MethodInfo::new("clear", 0)),
+        );
+    }
+    if !class_exists("RegExMatch") {
+        register_class(
+            ClassRegistration::new("RegExMatch")
+                .parent("RefCounted")
+                // The group accessors take an int index OR a capture name, so
+                // Godot documents them with one optional argument.
+                .method(MethodInfo::new("get_string", 1))
+                .method(MethodInfo::new("get_start", 1))
+                .method(MethodInfo::new("get_end", 1))
+                .method(MethodInfo::new("get_group_count", 0))
+                .method(MethodInfo::new("get_names", 0))
+                .method(MethodInfo::new("get_strings", 0))
+                .method(MethodInfo::new("get_subject", 0)),
+        );
     }
     if !class_exists("Resource") {
         register_class(ClassRegistration::new("Resource").parent("RefCounted"));
@@ -5142,6 +5398,33 @@ pub fn register_2d_classes() {
     // chain, which is strictly worse. `register_2d_classes` is the ONLY
     // function that registers these three (verified structurally), and it
     // already bootstraps Object/RefCounted/Resource above.
+    // `gdcore::rng::Rng` already implemented Godot's whole generator surface and
+    // powered the global `randi()`/`randf()` builtins, but the class itself was
+    // never registered — so `RandomNumberGenerator.new()` was unknown to scripts
+    // and `ClassDB.class_exists("RandomNumberGenerator")` answered false
+    // (pat-0q2kx.164). Defaults from doc/classes/RandomNumberGenerator.xml.
+    //
+    // Godot also documents `rand_weighted`, which `Rng` does not implement; it
+    // is deliberately NOT registered here rather than advertising a method that
+    // would fail at call time.
+    if !class_exists("RandomNumberGenerator") {
+        register_class(
+            ClassRegistration::new("RandomNumberGenerator")
+                .parent("RefCounted")
+                .property(PropertyInfo::new("seed", Variant::Int(0)))
+                .property(PropertyInfo::new("state", Variant::Int(0)))
+                .method(MethodInfo::new("randi", 0))
+                .method(MethodInfo::new("randf", 0))
+                .method(MethodInfo::new("randi_range", 2))
+                .method(MethodInfo::new("randf_range", 2))
+                .method(MethodInfo::new("randfn", 2))
+                .method(MethodInfo::new("randomize", 0))
+                .method(MethodInfo::new("set_seed", 1))
+                .method(MethodInfo::new("get_seed", 0))
+                .method(MethodInfo::new("set_state", 1))
+                .method(MethodInfo::new("get_state", 0)),
+        );
+    }
     if !class_exists("AudioEffect") {
         register_class(
             ClassRegistration::new("AudioEffect")
@@ -5167,6 +5450,81 @@ pub fn register_2d_classes() {
     }
     if !class_exists("AudioEffectEQ") {
         register_class(ClassRegistration::new("AudioEffectEQ").parent("AudioEffect"));
+    }
+    // Delay and Distortion carry their full Godot property surfaces (names and
+    // defaults from doc/classes/AudioEffectDelay.xml and
+    // AudioEffectDistortion.xml) so a `.tres` chain or the bus-layout loader can
+    // instantiate them by type name and set properties (pat-0q2kx.158). The
+    // three above stay propertyless — filling them in is separate work.
+    // The spectrum analyzer and its instance companion (pat-0q2kx.160). The FFT
+    // and `get_magnitude_for_frequency_range` already existed in
+    // `gdaudio::effects` with a passing unit test, but neither class was
+    // registered, so a `.tscn`/`.tres` bus layout could not name the effect and
+    // no script could reach it. Defaults are from
+    // `doc/classes/AudioEffectSpectrumAnalyzer.xml`.
+    if !class_exists("AudioEffectSpectrumAnalyzer") {
+        register_class(
+            ClassRegistration::new("AudioEffectSpectrumAnalyzer")
+                .parent("AudioEffect")
+                .property(PropertyInfo::new("buffer_length", Variant::Float(2.0)))
+                // `fft_size` is the FFTSize enum, whose default 2 is
+                // FFT_SIZE_1024 — not a raw sample count.
+                .property(PropertyInfo::new("fft_size", Variant::Int(2)))
+                .property(PropertyInfo::new("tap_back_pos", Variant::Float(0.01))),
+        );
+    }
+    // Like `AudioEffectInstance` above, the analyzer's instance derives from the
+    // instance base, NOT from AudioEffect — registering it under AudioEffect
+    // would make the effect picker offer it as an insertable effect.
+    if !class_exists("AudioEffectSpectrumAnalyzerInstance") {
+        register_class(
+            ClassRegistration::new("AudioEffectSpectrumAnalyzerInstance")
+                .parent("AudioEffectInstance"),
+        );
+    }
+    if !class_exists("AudioEffectDelay") {
+        register_class(
+            ClassRegistration::new("AudioEffectDelay")
+                .parent("AudioEffect")
+                .property(PropertyInfo::new("dry", Variant::Float(1.0)))
+                .property(PropertyInfo::new("tap1/active", Variant::Bool(true)))
+                .property(PropertyInfo::new("tap1/delay_ms", Variant::Float(250.0)))
+                .property(PropertyInfo::new("tap1/level_db", Variant::Float(-6.0)))
+                .property(PropertyInfo::new("tap1/pan", Variant::Float(0.2)))
+                .property(PropertyInfo::new("tap2/active", Variant::Bool(true)))
+                .property(PropertyInfo::new("tap2/delay_ms", Variant::Float(500.0)))
+                .property(PropertyInfo::new("tap2/level_db", Variant::Float(-12.0)))
+                .property(PropertyInfo::new("tap2/pan", Variant::Float(-0.4)))
+                .property(PropertyInfo::new("feedback/active", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "feedback/delay_ms",
+                    Variant::Float(340.0),
+                ))
+                .property(PropertyInfo::new("feedback/level_db", Variant::Float(-6.0)))
+                .property(PropertyInfo::new(
+                    "feedback/lowpass",
+                    Variant::Float(16000.0),
+                )),
+        );
+    }
+    if !class_exists("AudioEffectDistortion") {
+        register_class(
+            ClassRegistration::new("AudioEffectDistortion")
+                .parent("AudioEffect")
+                .property(PropertyInfo::new("mode", Variant::Int(0)))
+                .property(PropertyInfo::new("pre_gain", Variant::Float(0.0)))
+                .property(PropertyInfo::new("keep_hf_hz", Variant::Float(16000.0)))
+                .property(PropertyInfo::new("drive", Variant::Float(0.0)))
+                .property(PropertyInfo::new("post_gain", Variant::Float(0.0)))
+                .enumeration(
+                    EnumInfo::new("Mode")
+                        .constant("MODE_CLIP", 0)
+                        .constant("MODE_ATAN", 1)
+                        .constant("MODE_LOFI", 2)
+                        .constant("MODE_OVERDRIVE", 3)
+                        .constant("MODE_WAVESHAPE", 4),
+                ),
+        );
     }
 
     if !class_exists("Light2D") {

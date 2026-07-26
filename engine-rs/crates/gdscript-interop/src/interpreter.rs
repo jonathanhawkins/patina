@@ -1729,6 +1729,20 @@ impl Interpreter {
                 // Check if the object evaluates to an ObjectId
                 let obj_val = self.eval_expr(object)?;
                 if let Variant::ObjectId(oid) = &obj_val {
+                    // `r.seed = 42` on a RandomNumberGenerator. Handled before
+                    // the scene path below, which would try to resolve the
+                    // handle as a node and silently drop the write
+                    // (pat-0q2kx.164).
+                    if is_rng_handle(*oid) {
+                        let cur = rng_get_property(*oid, member).unwrap_or(Variant::Nil);
+                        let final_val = if matches!(op, AssignOp::Assign) {
+                            rhs
+                        } else {
+                            self.apply_assign_op(op, &cur, &rhs)?
+                        };
+                        rng_set_property(*oid, member, &final_val);
+                        return Ok(());
+                    }
                     let final_val = if matches!(op, AssignOp::Assign) {
                         rhs
                     } else {
@@ -2141,6 +2155,28 @@ impl Interpreter {
                             if let Some(result) = self.try_builtin(member, &evaluated_args)? {
                                 return Ok(result);
                             }
+                            // Indexed property paths are `Object` methods living on
+                            // the ObjectId arm of `call_method_on`, and this branch
+                            // returns early — so without this route
+                            // `self.set_indexed("position:x", 5)` would reach
+                            // neither the builtins nor the user funcs and fail,
+                            // while `node.set_indexed(...)` worked (pat-0q2kx.162).
+                            //
+                            // Placed at the same precedence as `try_builtin` above
+                            // (before user funcs), matching how `add_child` and
+                            // `queue_free` already resolve on `self`.
+                            if matches!(member.as_str(), "set_indexed" | "get_indexed") {
+                                if let Some(nid) = self.current_node_id {
+                                    let obj =
+                                        Variant::ObjectId(gdcore::id::ObjectId::from_raw(nid));
+                                    return self.call_method_on(
+                                        &obj,
+                                        member,
+                                        &evaluated_args,
+                                        object,
+                                    );
+                                }
+                            }
                             return self.call_self_func_or_native(member, &evaluated_args);
                         }
                         // Handle Input singleton: Input.is_action_pressed(), etc.
@@ -2253,6 +2289,20 @@ impl Interpreter {
                                 if class_name == "UndoRedo" {
                                     return Ok(Variant::ObjectId(new_undo_redo_handle()));
                                 }
+                                // RandomNumberGenerator is RefCounted: each
+                                // instance owns its own stream, independent of
+                                // the global randi()/randf() builtins
+                                // (pat-0q2kx.164).
+                                if class_name == "RandomNumberGenerator" {
+                                    return Ok(Variant::ObjectId(new_rng_handle()));
+                                }
+                                // RegEx is RefCounted — `RegEx.new().compile(p)`
+                                // is the standard idiom (pat-0q2kx.165). The
+                                // engine already existed in gdcore; nothing bound
+                                // it, so scripts could not construct one.
+                                if class_name == "RegEx" {
+                                    return Ok(Variant::ObjectId(new_regex_handle()));
+                                }
                                 if is_node_class_name(class_name) {
                                     if let Some(ref mut access) = self.scene_access {
                                         if let Some(raw_id) =
@@ -2340,6 +2390,15 @@ impl Interpreter {
                 let obj = self.eval_expr(object)?;
                 // ObjectId property access via scene_access
                 if let Variant::ObjectId(oid) = &obj {
+                    // RandomNumberGenerator exposes `seed`/`state` as
+                    // properties. Checked before the scene lookup because an
+                    // RNG handle names no node — resolving it against the scene
+                    // would answer Nil (pat-0q2kx.164).
+                    if is_rng_handle(*oid) {
+                        if let Some(v) = rng_get_property(*oid, member) {
+                            return Ok(v);
+                        }
+                    }
                     let raw = oid.raw();
                     // `$Other.my_signal` is a `Signal` value in Godot, not a
                     // property. Checked before the property read because a
@@ -6035,11 +6094,20 @@ impl Interpreter {
             if gdplatform::websocket_peer::is_websocket_peer_handle(*oid) {
                 return call_websocket_peer_instance(*oid, method, args);
             }
+            if is_rng_handle(*oid) {
+                return call_rng_instance(*oid, method, args);
+            }
             if is_undo_redo_handle(*oid) {
                 // UndoRedo applies its recorded property writes through the
                 // scene, so it is the one handle family that needs access.
                 let access = self.scene_access.as_deref_mut();
                 return call_undo_redo_instance(*oid, method, args, access);
+            }
+            if is_regex_handle(*oid) {
+                return call_regex_instance(*oid, method, args);
+            }
+            if is_regex_match_handle(*oid) {
+                return call_regex_match_instance(*oid, method, args);
             }
             // MUST precede the Variant::ObjectId arm below, which resolves ids
             // against the live scene. An EncodedObjectAsID reports its id and
@@ -8170,6 +8238,76 @@ impl Interpreter {
                             )))
                         }
                     }
+                    // `set_indexed("position:x", 5.0)` — Godot's
+                    // `object.cpp:494`. The path is a property name followed by a
+                    // `:`-separated subname chain addressing components of a math
+                    // value. Without a chain it is just `set`.
+                    "set_indexed" => {
+                        let path = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::NodePath(p)) => p.to_string(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "set_indexed() takes (path, value)".into(),
+                                )))
+                            }
+                        };
+                        let value = args.get(1).cloned().unwrap_or(Variant::Nil);
+                        let mut parts = path.split(':');
+                        let base = parts.next().unwrap_or_default().to_string();
+                        let chain: Vec<&str> = parts.filter(|s| !s.is_empty()).collect();
+                        let Some(ref mut access) = self.scene_access else {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )));
+                        };
+                        if chain.is_empty() {
+                            access.set_node_property(id, &base, value);
+                            return Ok(Variant::Nil);
+                        }
+                        // Read-modify-write: the sub-field lives inside a math
+                        // value, so the whole property has to be rebuilt.
+                        let current = access.get_node_property(id, &base);
+                        match assign_subname_chain(&current, &chain, &value) {
+                            Some(updated) => {
+                                access.set_node_property(id, &base, updated);
+                                Ok(Variant::Nil)
+                            }
+                            None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                "set_indexed: cannot resolve '{path}' on {current:?}"
+                            )))),
+                        }
+                    }
+                    // `get_indexed("position:x")` — Godot's `object.cpp:553`.
+                    "get_indexed" => {
+                        let path = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::NodePath(p)) => p.to_string(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "get_indexed() takes (path)".into(),
+                                )))
+                            }
+                        };
+                        let mut parts = path.split(':');
+                        let base = parts.next().unwrap_or_default().to_string();
+                        let chain: Vec<&str> = parts.filter(|s| !s.is_empty()).collect();
+                        let Some(ref mut access) = self.scene_access else {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )));
+                        };
+                        let root = access.get_node_property(id, &base);
+                        if chain.is_empty() {
+                            return Ok(root);
+                        }
+                        match resolve_subname_chain(&root, &chain) {
+                            Some(v) => Ok(v),
+                            None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                "get_indexed: cannot resolve '{path}' on {root:?}"
+                            )))),
+                        }
+                    }
                     "get" if args.len() == 1 => {
                         let prop = match &args[0] {
                             Variant::String(s) => s.clone(),
@@ -10107,6 +10245,167 @@ fn str_similarity(a: &str, b: &str) -> f64 {
 }
 
 /// djb2 string hash matching Godot's `String.hash`.
+/// Reads one named component out of a math `Variant` — the subname step of
+/// Godot's indexed-path resolution (`core/object/object.cpp:553 get_indexed`,
+/// pat-0q2kx.162).
+///
+/// Returns `None` for an unknown component so callers can report the failing
+/// path rather than silently yielding `Nil`, which would be indistinguishable
+/// from a component that really holds `Nil`.
+fn variant_component(value: &Variant, name: &str) -> Option<Variant> {
+    match (value, name) {
+        (Variant::Vector2(v), "x") => Some(Variant::Float(v.x as f64)),
+        (Variant::Vector2(v), "y") => Some(Variant::Float(v.y as f64)),
+        (Variant::Vector2i(v), "x") => Some(Variant::Int(v.x as i64)),
+        (Variant::Vector2i(v), "y") => Some(Variant::Int(v.y as i64)),
+        (Variant::Vector3(v), "x") => Some(Variant::Float(v.x as f64)),
+        (Variant::Vector3(v), "y") => Some(Variant::Float(v.y as f64)),
+        (Variant::Vector3(v), "z") => Some(Variant::Float(v.z as f64)),
+        (Variant::Vector3i(v), "x") => Some(Variant::Int(v.x as i64)),
+        (Variant::Vector3i(v), "y") => Some(Variant::Int(v.y as i64)),
+        (Variant::Vector3i(v), "z") => Some(Variant::Int(v.z as i64)),
+        (Variant::Color(c), "r") => Some(Variant::Float(c.r as f64)),
+        (Variant::Color(c), "g") => Some(Variant::Float(c.g as f64)),
+        (Variant::Color(c), "b") => Some(Variant::Float(c.b as f64)),
+        (Variant::Color(c), "a") => Some(Variant::Float(c.a as f64)),
+        // Nested one level: `rect:position:x` walks through here.
+        (Variant::Rect2(r), "position") => Some(Variant::Vector2(r.position)),
+        (Variant::Rect2(r), "size") => Some(Variant::Vector2(r.size)),
+        _ => None,
+    }
+}
+
+/// Writes one named component into a math `Variant`, returning the updated
+/// value — the subname step of `object.cpp:494 set_indexed`.
+///
+/// Accepts `Int` where a float component is expected, because GDScript's `5` and
+/// `5.0` are both ordinary ways to write a coordinate.
+fn variant_with_component(value: &Variant, name: &str, new: &Variant) -> Option<Variant> {
+    let as_f32 = || match new {
+        Variant::Float(f) => Some(*f as f32),
+        Variant::Int(i) => Some(*i as f32),
+        _ => None,
+    };
+    let as_i64 = || match new {
+        Variant::Int(i) => Some(*i),
+        Variant::Float(f) => Some(*f as i64),
+        _ => None,
+    };
+    match (value, name) {
+        (Variant::Vector2(v), "x") => {
+            let mut v = *v;
+            v.x = as_f32()?;
+            Some(Variant::Vector2(v))
+        }
+        (Variant::Vector2(v), "y") => {
+            let mut v = *v;
+            v.y = as_f32()?;
+            Some(Variant::Vector2(v))
+        }
+        (Variant::Vector2i(v), "x") => {
+            let mut v = *v;
+            v.x = as_i64()? as i32;
+            Some(Variant::Vector2i(v))
+        }
+        (Variant::Vector2i(v), "y") => {
+            let mut v = *v;
+            v.y = as_i64()? as i32;
+            Some(Variant::Vector2i(v))
+        }
+        (Variant::Vector3(v), "x") => {
+            let mut v = *v;
+            v.x = as_f32()?;
+            Some(Variant::Vector3(v))
+        }
+        (Variant::Vector3(v), "y") => {
+            let mut v = *v;
+            v.y = as_f32()?;
+            Some(Variant::Vector3(v))
+        }
+        (Variant::Vector3(v), "z") => {
+            let mut v = *v;
+            v.z = as_f32()?;
+            Some(Variant::Vector3(v))
+        }
+        (Variant::Vector3i(v), "x") => {
+            let mut v = *v;
+            v.x = as_i64()? as i32;
+            Some(Variant::Vector3i(v))
+        }
+        (Variant::Vector3i(v), "y") => {
+            let mut v = *v;
+            v.y = as_i64()? as i32;
+            Some(Variant::Vector3i(v))
+        }
+        (Variant::Vector3i(v), "z") => {
+            let mut v = *v;
+            v.z = as_i64()? as i32;
+            Some(Variant::Vector3i(v))
+        }
+        (Variant::Color(c), "r") => {
+            let mut c = *c;
+            c.r = as_f32()?;
+            Some(Variant::Color(c))
+        }
+        (Variant::Color(c), "g") => {
+            let mut c = *c;
+            c.g = as_f32()?;
+            Some(Variant::Color(c))
+        }
+        (Variant::Color(c), "b") => {
+            let mut c = *c;
+            c.b = as_f32()?;
+            Some(Variant::Color(c))
+        }
+        (Variant::Color(c), "a") => {
+            let mut c = *c;
+            c.a = as_f32()?;
+            Some(Variant::Color(c))
+        }
+        (Variant::Rect2(r), "position") => {
+            let mut r = *r;
+            r.position = match new {
+                Variant::Vector2(v) => *v,
+                _ => return None,
+            };
+            Some(Variant::Rect2(r))
+        }
+        (Variant::Rect2(r), "size") => {
+            let mut r = *r;
+            r.size = match new {
+                Variant::Vector2(v) => *v,
+                _ => return None,
+            };
+            Some(Variant::Rect2(r))
+        }
+        _ => None,
+    }
+}
+
+/// Resolves a `:`-separated subname chain against `root`, e.g. the `x` of
+/// `"position:x"` or the `position:x` of `"rect:position:x"`.
+fn resolve_subname_chain(root: &Variant, chain: &[&str]) -> Option<Variant> {
+    let mut cur = root.clone();
+    for part in chain {
+        cur = variant_component(&cur, part)?;
+    }
+    Some(cur)
+}
+
+/// Rebuilds `root` with the value at the end of a `:`-separated subname chain
+/// replaced. Applied innermost-first so nested paths update the whole spine.
+fn assign_subname_chain(root: &Variant, chain: &[&str], value: &Variant) -> Option<Variant> {
+    let (head, rest) = chain.split_first()?;
+    if rest.is_empty() {
+        return variant_with_component(root, head, value);
+    }
+    // Recurse into the component, then write the rebuilt component back, so
+    // `rect:position:x` updates `position` *and* the `rect` that contains it.
+    let inner = variant_component(root, head)?;
+    let updated = assign_subname_chain(&inner, rest, value)?;
+    variant_with_component(root, head, &updated)
+}
+
 /// Every argument bound onto a callable, outermost `bind` last — Godot appends
 /// each `bind` after the previous ones (pat-0q2kx.67).
 fn collect_bound_args(callable: &CallableRef) -> Vec<Variant> {
@@ -13408,6 +13707,153 @@ pub fn take_engine_debugger_break() -> Option<EngineDebuggerBreak> {
 }
 
 // ---------------------------------------------------------------------------
+// RandomNumberGenerator (pat-0q2kx.164)
+// ---------------------------------------------------------------------------
+
+/// Tags an `ObjectId` issued by [`new_rng_handle`]; mirrors the ConfigFile /
+/// FileAccess / DirAccess / CameraFeed / UndoRedo handle tags
+/// (0xCF / 0xFA / 0xDA / 0xCA / 0xED).
+const RNG_HANDLE_TAG: u64 = 0xB900_0000_0000_0000;
+
+thread_local! {
+    /// Live `RandomNumberGenerator` instances, keyed by handle sequence.
+    ///
+    /// Per-instance state is the whole point of the class: Godot's
+    /// `RandomNumberGenerator` draws from its own stream, independent of the
+    /// global `randi()`/`randf()` builtins (wired in pat-0q2kx.152). Two
+    /// identically seeded instances therefore replay the same sequence no
+    /// matter what else in the program is drawing.
+    static RNG_INSTANCES: std::cell::RefCell<HashMap<u64, gdcore::rng::Rng>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Sequence backing the handle id.
+    static NEXT_RNG: std::cell::Cell<u64> = std::cell::Cell::new(1);
+}
+
+/// Mints a fresh `RandomNumberGenerator` handle.
+fn new_rng_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_RNG.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    RNG_INSTANCES.with(|m| {
+        m.borrow_mut().insert(seq, gdcore::rng::Rng::new());
+    });
+    gdcore::id::ObjectId::from_raw(RNG_HANDLE_TAG | seq)
+}
+
+/// Returns `true` when `id` was issued by [`new_rng_handle`].
+fn is_rng_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == RNG_HANDLE_TAG
+}
+
+/// Runs `f` against the generator behind `id`, if it is still live.
+fn with_rng<R>(id: gdcore::id::ObjectId, f: impl FnOnce(&mut gdcore::rng::Rng) -> R) -> Option<R> {
+    let seq = id.raw() & 0x00FF_FFFF_FFFF_FFFF;
+    RNG_INSTANCES.with(|m| m.borrow_mut().get_mut(&seq).map(f))
+}
+
+/// A `seed`/`state` value as Godot stores it — both are integers.
+fn rng_u64_arg(value: &Variant) -> u64 {
+    match value {
+        Variant::Int(i) => *i as u64,
+        Variant::Float(f) => *f as u64,
+        _ => 0,
+    }
+}
+
+/// Reads `seed`/`state`, which Godot exposes as properties rather than getters.
+fn rng_get_property(id: gdcore::id::ObjectId, name: &str) -> Option<Variant> {
+    with_rng(id, |r| match name {
+        "seed" => Some(Variant::Int(r.seed() as i64)),
+        "state" => Some(Variant::Int(r.state() as i64)),
+        _ => None,
+    })
+    .flatten()
+}
+
+/// Writes `seed`/`state`. Assigning `seed` restarts the stream, which is what
+/// makes `r.seed = 42` reproducible across instances.
+fn rng_set_property(id: gdcore::id::ObjectId, name: &str, value: &Variant) -> bool {
+    with_rng(id, |r| match name {
+        "seed" => {
+            r.set_seed(rng_u64_arg(value));
+            true
+        }
+        "state" => {
+            r.set_state(rng_u64_arg(value));
+            true
+        }
+        _ => false,
+    })
+    .unwrap_or(false)
+}
+
+/// `RandomNumberGenerator` instance methods (doc/classes/RandomNumberGenerator.xml).
+fn call_rng_instance(
+    id: gdcore::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let f = |i: usize| -> f64 {
+        args.get(i)
+            .map(|v| match v {
+                Variant::Int(n) => *n as f64,
+                Variant::Float(x) => *x,
+                _ => 0.0,
+            })
+            .unwrap_or(0.0)
+    };
+    let i = |idx: usize| -> i64 {
+        args.get(idx)
+            .map(|v| match v {
+                Variant::Int(n) => *n,
+                Variant::Float(x) => *x as i64,
+                _ => 0,
+            })
+            .unwrap_or(0)
+    };
+
+    let out = with_rng(id, |r| match method {
+        // `randi` is Godot's uint32 draw; widening to i64 keeps it non-negative
+        // rather than wrapping into the sign bit.
+        "randi" => Some(Variant::Int(r.randi() as i64)),
+        "randf" => Some(Variant::Float(r.randf())),
+        "randi_range" => Some(Variant::Int(r.randi_range(i(0), i(1)))),
+        "randf_range" => Some(Variant::Float(r.randf_range(f(0), f(1)))),
+        // Godot's defaults are mean 0.0, deviation 1.0.
+        "randfn" => {
+            let mean = if args.is_empty() { 0.0 } else { f(0) };
+            let deviation = if args.len() < 2 { 1.0 } else { f(1) };
+            Some(Variant::Float(r.randfn(mean, deviation)))
+        }
+        "randomize" => {
+            r.randomize();
+            Some(Variant::Nil)
+        }
+        // The property pair is also reachable as calls, as in Godot.
+        "set_seed" => {
+            r.set_seed(rng_u64_arg(args.first().unwrap_or(&Variant::Nil)));
+            Some(Variant::Nil)
+        }
+        "get_seed" => Some(Variant::Int(r.seed() as i64)),
+        "set_state" => {
+            r.set_state(rng_u64_arg(args.first().unwrap_or(&Variant::Nil)));
+            Some(Variant::Nil)
+        }
+        "get_state" => Some(Variant::Int(r.state() as i64)),
+        _ => None,
+    })
+    .flatten();
+
+    out.ok_or_else(|| {
+        RuntimeError::new(RuntimeErrorKind::UndefinedFunction(format!(
+            "RandomNumberGenerator has no method '{method}'"
+        )))
+    })
+}
+
+// ---------------------------------------------------------------------------
 // UndoRedo (pat-nzgdu.155)
 // ---------------------------------------------------------------------------
 
@@ -13595,6 +14041,252 @@ fn call_encoded_object_as_id_instance(
             format!("EncodedObjectAsID.{other}"),
         ))),
     }
+}
+
+// ---------------------------------------------------------------------------
+// RegEx / RegExMatch (pat-0q2kx.165)
+// ---------------------------------------------------------------------------
+//
+// `gdcore::regex` is a complete engine — compile, search, search_all, sub,
+// named groups — but nothing bound it, so a script could not construct one.
+// Both are RefCounted in Godot, so they follow the handle-table idiom used by
+// ConfigFile/CameraFeed/UndoRedo rather than being scene nodes.
+
+/// Tag bits marking an `ObjectId` as a `RegEx` handle.
+const REGEX_HANDLE_TAG: u64 = 0xE2_00_0000_0000_0000;
+/// Tag bits marking an `ObjectId` as a `RegExMatch` handle.
+const REGEX_MATCH_HANDLE_TAG: u64 = 0xE3_00_0000_0000_0000;
+
+thread_local! {
+    /// Live `RegEx` handles, keyed by raw ObjectId.
+    static REGEXES: std::cell::RefCell<HashMap<u64, gdcore::regex::RegEx>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_REGEX: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    /// Live `RegExMatch` handles. A match is a value object in `gdcore`, so the
+    /// table owns a snapshot rather than borrowing from its RegEx — which is
+    /// what lets a match outlive a `re.clear()`, as it does in Godot.
+    static REGEX_MATCHES: std::cell::RefCell<HashMap<u64, gdcore::regex::RegExMatch>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_REGEX_MATCH: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Returns `true` when `id` was issued by [`new_regex_handle`].
+fn is_regex_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == REGEX_HANDLE_TAG
+}
+
+/// Returns `true` when `id` names a `RegExMatch`.
+fn is_regex_match_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == REGEX_MATCH_HANDLE_TAG
+}
+
+/// Allocates a `RegEx` in the handle table (script `RegEx.new()`).
+fn new_regex_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_REGEX.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = REGEX_HANDLE_TAG | seq;
+    REGEXES.with(|m| m.borrow_mut().insert(raw, gdcore::regex::RegEx::new()));
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Stores a match and returns its handle.
+fn new_regex_match_handle(m: gdcore::regex::RegExMatch) -> gdcore::id::ObjectId {
+    let seq = NEXT_REGEX_MATCH.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = REGEX_MATCH_HANDLE_TAG | seq;
+    REGEX_MATCHES.with(|t| t.borrow_mut().insert(raw, m));
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// String argument helper — every RegEx method takes text.
+fn regex_str_arg(args: &[Variant], what: &str) -> Result<String, RuntimeError> {
+    match args.first() {
+        Some(Variant::String(s)) => Ok(s.clone()),
+        Some(Variant::StringName(s)) => Ok(s.as_str().to_string()),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{what} expects a string argument"
+        )))),
+    }
+}
+
+/// `RegEx`'s script method surface (`doc/classes/RegEx.xml`).
+fn call_regex_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let raw = id.raw();
+    match method {
+        // Godot returns an Error code: OK (0) on success, FAILED (1) otherwise.
+        "compile" => {
+            let pattern = regex_str_arg(args, "RegEx.compile()")?;
+            let ok = REGEXES.with(|m| {
+                m.borrow_mut()
+                    .get_mut(&raw)
+                    .map(|re| re.compile(&pattern).is_ok())
+                    .unwrap_or(false)
+            });
+            Ok(Variant::Int(if ok { 0 } else { 1 }))
+        }
+        // `search` returns a RegExMatch, or null when nothing matched — scripts
+        // branch on `if m:`, so Nil is load-bearing.
+        "search" => {
+            let subject = regex_str_arg(args, "RegEx.search()")?;
+            let found = REGEXES.with(|m| {
+                m.borrow()
+                    .get(&raw)
+                    .and_then(|re| re.search(&subject, 0, subject.len()))
+            });
+            Ok(match found {
+                Some(hit) => Variant::ObjectId(new_regex_match_handle(hit)),
+                None => Variant::Nil,
+            })
+        }
+        "search_all" => {
+            let subject = regex_str_arg(args, "RegEx.search_all()")?;
+            let hits = REGEXES.with(|m| {
+                m.borrow()
+                    .get(&raw)
+                    .map(|re| re.search_all(&subject, 0, subject.len()))
+                    .unwrap_or_default()
+            });
+            Ok(Variant::Array(
+                hits.into_iter()
+                    .map(|h| Variant::ObjectId(new_regex_match_handle(h)))
+                    .collect(),
+            ))
+        }
+        "sub" => {
+            let subject = regex_str_arg(args, "RegEx.sub()")?;
+            let replacement = match args.get(1) {
+                Some(Variant::String(s)) => s.clone(),
+                Some(Variant::StringName(s)) => s.as_str().to_string(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "RegEx.sub() expects (subject, replacement)".into(),
+                    )))
+                }
+            };
+            // Godot's third argument is `all`, defaulting to false.
+            let all = matches!(args.get(2), Some(Variant::Bool(true)));
+            let out = REGEXES.with(|m| {
+                m.borrow()
+                    .get(&raw)
+                    .map(|re| re.sub(&subject, &replacement, all, 0, subject.len()))
+                    .unwrap_or_default()
+            });
+            Ok(Variant::String(out))
+        }
+        "get_pattern" => Ok(Variant::String(REGEXES.with(|m| {
+            m.borrow()
+                .get(&raw)
+                .map(|re| re.get_pattern().to_string())
+                .unwrap_or_default()
+        }))),
+        "is_valid" => Ok(Variant::Bool(REGEXES.with(|m| {
+            m.borrow()
+                .get(&raw)
+                .map(|re| re.is_valid())
+                .unwrap_or(false)
+        }))),
+        "get_group_count" => Ok(Variant::Int(REGEXES.with(|m| {
+            m.borrow()
+                .get(&raw)
+                .map(|re| re.get_group_count() as i64)
+                .unwrap_or(0)
+        }))),
+        "get_names" => Ok(Variant::Array(REGEXES.with(|m| {
+            m.borrow()
+                .get(&raw)
+                .map(|re| re.get_names().into_iter().map(Variant::String).collect())
+                .unwrap_or_default()
+        }))),
+        "clear" => {
+            REGEXES.with(|m| {
+                if let Some(re) = m.borrow_mut().get_mut(&raw) {
+                    re.clear();
+                }
+            });
+            Ok(Variant::Nil)
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("RegEx.{other}"),
+        ))),
+    }
+}
+
+/// `RegExMatch`'s accessors (`doc/classes/RegExMatch.xml`).
+///
+/// Godot's group accessors take either an int index or a capture NAME, and both
+/// spellings appear in real scripts, so each one accepts both.
+fn call_regex_match_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let raw = id.raw();
+    // Resolve the requested group to an index into `strings`. Absent argument
+    // means group 0, the whole match.
+    let group_index = |m: &gdcore::regex::RegExMatch| -> Option<usize> {
+        match args.first() {
+            None | Some(Variant::Nil) => Some(0),
+            Some(Variant::Int(i)) if *i >= 0 => Some(*i as usize),
+            Some(Variant::String(name)) => m
+                .names
+                .iter()
+                .position(|(n, _)| n == name)
+                .and_then(|pos| m.strings.get(pos + 1).map(|_| pos + 1)),
+            _ => None,
+        }
+    };
+
+    REGEX_MATCHES.with(|t| {
+        let table = t.borrow();
+        let Some(m) = table.get(&raw) else {
+            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                "RegExMatch handle is no longer valid".into(),
+            )));
+        };
+        match method {
+            "get_string" => Ok(Variant::String(
+                group_index(m)
+                    .and_then(|i| m.strings.get(i).cloned())
+                    .unwrap_or_default(),
+            )),
+            // Godot reports -1 for a group that did not participate.
+            "get_start" => Ok(Variant::Int(match group_index(m) {
+                Some(0) => m.start as i64,
+                Some(i) if i < m.strings.len() => m.start as i64,
+                _ => -1,
+            })),
+            "get_end" => Ok(Variant::Int(match group_index(m) {
+                Some(0) => m.end as i64,
+                Some(i) if i < m.strings.len() => m.end as i64,
+                _ => -1,
+            })),
+            // Godot counts capture groups, excluding the full match at 0.
+            "get_group_count" => Ok(Variant::Int(m.strings.len().saturating_sub(1) as i64)),
+            "get_names" => Ok(Variant::Array(
+                m.names
+                    .iter()
+                    .map(|(n, _)| Variant::String(n.clone()))
+                    .collect(),
+            )),
+            "get_strings" => Ok(Variant::Array(
+                m.strings.iter().cloned().map(Variant::String).collect(),
+            )),
+            "get_subject" => Ok(Variant::String(m.subject.clone())),
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("RegExMatch.{other}"),
+            ))),
+        }
+    })
 }
 
 /// Allocates an `UndoRedo` in the handle table (script `UndoRedo.new()`).
@@ -21231,5 +21923,95 @@ match x:
             err.kind,
             RuntimeErrorKind::IndexOutOfBounds { .. }
         ));
+    }
+
+    // -- indexed property paths (pat-0q2kx.162) -----------------------------
+    //
+    // `set_indexed("position:x", 5.0)` / `get_indexed("position:x")` resolve a
+    // `:`-separated subname chain against a math value. These cover the
+    // resolution logic the interpreter arms delegate to; the arms themselves are
+    // thin read-modify-write wrappers over `get_node_property`/`set_node_property`.
+
+    #[test]
+    fn indexed_path_reads_vector_components() {
+        let v2 = Variant::Vector2(Vector2::new(3.0, 4.0));
+        assert_eq!(variant_component(&v2, "x"), Some(Variant::Float(3.0)));
+        assert_eq!(variant_component(&v2, "y"), Some(Variant::Float(4.0)));
+
+        let v3 = Variant::Vector3(Vector3::new(1.0, 2.0, 3.0));
+        assert_eq!(variant_component(&v3, "z"), Some(Variant::Float(3.0)));
+
+        let c = Variant::Color(Color::new(0.25, 0.5, 0.75, 1.0));
+        assert_eq!(variant_component(&c, "b"), Some(Variant::Float(0.75)));
+    }
+
+    #[test]
+    fn indexed_path_writes_a_single_component_leaving_others() {
+        let v3 = Variant::Vector3(Vector3::new(1.0, 2.0, 3.0));
+        let updated = assign_subname_chain(&v3, &["y"], &Variant::Float(9.0)).expect("assign y");
+        match updated {
+            Variant::Vector3(v) => {
+                assert_eq!(v.y, 9.0, "y must be written");
+                assert_eq!(v.x, 1.0, "x must survive the write");
+                assert_eq!(v.z, 3.0, "z must survive the write");
+            }
+            other => panic!("expected Vector3, got {other:?}"),
+        }
+    }
+
+    /// The subtle case: writing `rect:position:x` has to rebuild `position`
+    /// **and** the `Rect2` that contains it. A single-level implementation would
+    /// update the inner copy and silently discard it.
+    #[test]
+    fn indexed_path_walks_and_rebuilds_a_nested_spine() {
+        let rect = Variant::Rect2(gdcore::math::Rect2::new(
+            Vector2::new(1.0, 2.0),
+            Vector2::new(10.0, 20.0),
+        ));
+
+        assert_eq!(
+            resolve_subname_chain(&rect, &["position", "x"]),
+            Some(Variant::Float(1.0)),
+            "reading through two levels must work"
+        );
+
+        let updated = assign_subname_chain(&rect, &["position", "x"], &Variant::Float(7.5))
+            .expect("nested assign");
+        match updated {
+            Variant::Rect2(r) => {
+                assert_eq!(r.position.x, 7.5, "the nested write must reach the Rect2");
+                assert_eq!(r.position.y, 2.0, "the sibling component must survive");
+                assert_eq!(r.size.x, 10.0, "the outer sibling field must survive");
+            }
+            other => panic!("expected Rect2, got {other:?}"),
+        }
+    }
+
+    /// GDScript writes `5` and `5.0` interchangeably for a coordinate, so an
+    /// `Int` must be accepted where a float component is expected.
+    #[test]
+    fn indexed_path_accepts_int_for_a_float_component() {
+        let v2 = Variant::Vector2(Vector2::new(0.0, 0.0));
+        let updated = assign_subname_chain(&v2, &["x"], &Variant::Int(5)).expect("int accepted");
+        match updated {
+            Variant::Vector2(v) => assert_eq!(v.x, 5.0),
+            other => panic!("expected Vector2, got {other:?}"),
+        }
+    }
+
+    /// An unknown component must report failure rather than yield `Nil`, which
+    /// would be indistinguishable from a component that legitimately holds `Nil`
+    /// and would turn a typo into a silent no-op.
+    #[test]
+    fn indexed_path_rejects_an_unknown_component() {
+        let v2 = Variant::Vector2(Vector2::new(1.0, 2.0));
+        assert_eq!(variant_component(&v2, "z"), None, "Vector2 has no z");
+        assert_eq!(
+            assign_subname_chain(&v2, &["w"], &Variant::Float(1.0)),
+            None,
+            "writing an unknown component must fail, not no-op silently"
+        );
+        // A non-math value has no components at all.
+        assert_eq!(variant_component(&Variant::Int(3), "x"), None);
     }
 }

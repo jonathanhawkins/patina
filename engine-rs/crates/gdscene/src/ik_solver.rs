@@ -173,7 +173,12 @@ fn pole_direction(root: Vector3, pole: Vector3, axis: Vector3) -> Vector3 {
 }
 
 /// Any unit vector perpendicular to (approximately unit) `axis`.
-fn any_perpendicular(axis: Vector3) -> Vector3 {
+///
+/// Public because the anti-parallel case shows up outside this module too:
+/// `skeleton3d::apply_look_at_modifier` needs it to turn a bone toward a target
+/// sitting exactly behind it, where the cross product vanishes and there is no
+/// unique rotation axis (pat-0q2kx.156).
+pub fn any_perpendicular(axis: Vector3) -> Vector3 {
     let seed = if axis.x.abs() < 0.9 {
         Vector3::new(1.0, 0.0, 0.0)
     } else {

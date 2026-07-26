@@ -2236,6 +2236,11 @@ fn handle_connection(
         }
         ("POST", "/api/viewport/resize") => api_viewport_resize(state, &req.body, &mut stream),
         ("POST", "/api/node/add") => api_add_node(state, &req.body, &mut stream),
+        // Mesh toolbar: generate a collision body from a MeshInstance3D
+        // (pat-0q2kx.169).
+        ("POST", "/api/mesh/create_collision") => {
+            api_mesh_create_collision(state, &req.body, &mut stream)
+        }
         ("POST", "/api/node/delete") => api_delete_node(state, &req.body, &mut stream),
         ("POST", "/api/node/select") => api_select_node(state, &req.body, &mut stream),
         ("POST", "/api/node/reparent") => api_reparent_node(state, &req.body, &mut stream),
@@ -2605,6 +2610,7 @@ fn handle_connection(
         ("POST", "/api/viewport/set_mode") => api_set_viewport_mode(state, &req.body, &mut stream),
         ("GET", "/api/viewport/mode") => api_get_viewport_mode(state, &mut stream),
         ("GET", "/api/search") => api_search_scripts(&req.query, &mut stream),
+        ("POST", "/api/search/replace_all") => api_search_replace_all(&req.body, &mut stream),
         ("POST", "/api/signal/disconnect") => api_disconnect_signal(state, &req.body, &mut stream),
         // pat-jwuv1.4: Signals dock go-to-method + auto-create receiver stub
         ("POST", "/api/signal/goto_method") => api_signal_goto_method(&req.body, &mut stream),
@@ -4170,6 +4176,226 @@ fn api_get_node(state: &Arc<Mutex<EditorState>>, id_str: &str, stream: &mut TcpS
 }
 
 /// `POST /api/node/add` — adds a new node to the tree.
+/// `POST /api/mesh/create_collision` — Godot's Mesh menu "Create Trimesh/Convex
+/// Collision Sibling" (pat-0q2kx.169).
+///
+/// Body: `{"node_id": u64, "kind": "trimesh"|"convex", "placement": "sibling"|"child"}`.
+/// `kind` defaults to `trimesh` and `placement` to `sibling`, matching the menu's
+/// primary entries in `editor/scene/3d/mesh_instance_3d_editor_plugin.cpp`.
+///
+/// Builds a `StaticBody3D` holding a `CollisionShape3D` from the geometry the
+/// viewport actually draws (see `mesh_geometry_for_node`), so the shape cannot
+/// silently disagree with what is on screen:
+///
+/// * **trimesh** → `ConcavePolygonShape3D.data`, the full triangle soup (every
+///   three points is one triangle, which is the format `shape_from_node_3d`
+///   reads).
+/// * **convex** → `ConvexPolygonShape3D.points`, the mesh's distinct vertices;
+///   the physics side derives the hull, so interior points are harmless.
+///
+/// Both nodes and the shape properties are pushed as ONE
+/// [`EditorCommand::Group`], so a single undo removes the whole thing rather
+/// than leaving a childless `StaticBody3D` behind.
+fn api_mesh_create_collision(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let kind = parsed
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("trimesh")
+        .to_string();
+    if kind != "trimesh" && kind != "convex" {
+        send_error(stream, 400, "kind must be 'trimesh' or 'convex'");
+        return;
+    }
+    let placement = parsed
+        .get("placement")
+        .and_then(|v| v.as_str())
+        .unwrap_or("sibling")
+        .to_string();
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    let (class_name, mesh_name) = match state.scene_tree.get_node(node_id) {
+        Some(n) => (n.class_name().to_string(), n.name().to_string()),
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    if class_name != "MeshInstance3D" {
+        send_error(stream, 400, "node is not a MeshInstance3D");
+        return;
+    }
+
+    let mesh = match crate::viewport_3d_render::mesh_geometry_for_node(&state.scene_tree, node_id) {
+        Some(m) => m,
+        None => {
+            send_error(stream, 400, "MeshInstance3D names no mesh");
+            return;
+        }
+    };
+
+    // Triangle soup. A non-indexed mesh is already a triangle list, so fall back
+    // to the raw vertices rather than emitting nothing.
+    let mut faces: Vec<gdcore::math::Vector3> = Vec::new();
+    if mesh.indices.is_empty() {
+        faces.extend(mesh.vertices.iter().copied());
+    } else {
+        for tri in mesh.indices.chunks(3) {
+            if tri.len() < 3 {
+                continue;
+            }
+            for &i in tri {
+                if let Some(v) = mesh.vertices.get(i as usize) {
+                    faces.push(*v);
+                }
+            }
+        }
+    }
+    if faces.is_empty() {
+        send_error(stream, 400, "mesh has no triangles");
+        return;
+    }
+    // Whole triangles only — a trailing partial would be a malformed soup.
+    faces.truncate(faces.len() - faces.len() % 3);
+
+    let (shape_class, shape_property, shape_points) = if kind == "convex" {
+        let mut points: Vec<gdcore::math::Vector3> = Vec::new();
+        for v in &mesh.vertices {
+            if !points.contains(v) {
+                points.push(*v);
+            }
+        }
+        ("ConvexPolygonShape3D", "points", points)
+    } else {
+        ("ConcavePolygonShape3D", "data", faces)
+    };
+
+    // "Sibling" attaches to the mesh's parent, matching the menu's wording;
+    // "child" nests under the mesh itself. A root mesh has no parent, so it
+    // takes the child placement rather than failing.
+    let parent_id = if placement == "child" {
+        node_id
+    } else {
+        state
+            .scene_tree
+            .get_node(node_id)
+            .and_then(|n| n.parent())
+            .unwrap_or(node_id)
+    };
+
+    // Godot names the generated body `<mesh>_col`.
+    let body_name = format!("{mesh_name}_col");
+    let mut body_cmd = EditorCommand::AddNode {
+        parent_id,
+        name: body_name.clone(),
+        class_name: "StaticBody3D".to_string(),
+        created_id: None,
+    };
+    if let Err(e) = body_cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    let body_id = match &body_cmd {
+        EditorCommand::AddNode { created_id, .. } => match created_id {
+            Some(id) => *id,
+            None => {
+                send_error(stream, 500, "StaticBody3D was not created");
+                return;
+            }
+        },
+        _ => unreachable!(),
+    };
+
+    // The shape node's parent is only known once the body exists, so the group
+    // is assembled from already-executed commands rather than built upfront.
+    let mut shape_cmd = EditorCommand::AddNode {
+        parent_id: body_id,
+        name: "CollisionShape3D".to_string(),
+        class_name: "CollisionShape3D".to_string(),
+        created_id: None,
+    };
+    if let Err(e) = shape_cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    let shape_id = match &shape_cmd {
+        EditorCommand::AddNode { created_id, .. } => match created_id {
+            Some(id) => *id,
+            None => {
+                send_error(stream, 500, "CollisionShape3D was not created");
+                return;
+            }
+        },
+        _ => unreachable!(),
+    };
+
+    let mut class_cmd = EditorCommand::SetProperty {
+        node_id: shape_id,
+        property: "shape".to_string(),
+        new_value: Variant::String(shape_class.to_string()),
+        old_value: Variant::Nil,
+    };
+    let mut data_cmd = EditorCommand::SetProperty {
+        node_id: shape_id,
+        property: shape_property.to_string(),
+        new_value: Variant::PackedVector3Array(shape_points.clone()),
+        old_value: Variant::Nil,
+    };
+    for cmd in [&mut class_cmd, &mut data_cmd] {
+        if let Err(e) = cmd.execute(&mut state.scene_tree) {
+            send_error(stream, 500, &e.to_string());
+            return;
+        }
+    }
+
+    let point_count = shape_points.len();
+    let triangle_count = if kind == "convex" { 0 } else { point_count / 3 };
+
+    state.undo_stack.push(EditorCommand::Group {
+        label: format!("Create {kind} collision"),
+        commands: vec![body_cmd, shape_cmd, class_cmd, data_cmd],
+    });
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    state.selected_node = Some(body_id);
+    state.selected_nodes = vec![body_id];
+    state.add_log(
+        "info",
+        format!("Created {kind} collision '{body_name}' from '{mesh_name}'"),
+    );
+
+    let json = format!(
+        r#"{{"body_id":{},"shape_id":{},"shape":"{}","point_count":{},"triangle_count":{}}}"#,
+        body_id.raw(),
+        shape_id.raw(),
+        shape_class,
+        point_count,
+        triangle_count
+    );
+    send_json(stream, &json);
+}
+
 fn api_add_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let parsed = match parse_json_body(body) {
         Some(v) => v,
@@ -11613,10 +11839,12 @@ fn api_get_anim_tree(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
                 )
             })
             .collect();
+        // Transitions carry `xfade` (Godot's `xfade_time`); connections below do
+        // not, because a blend-tree connection has no crossfade (pat-0q2kx.166).
         let transitions: Vec<String> = g
             .transitions()
             .iter()
-            .map(|l| format!(r#"{{"from":{},"to":{}}}"#, l.from, l.to))
+            .map(|l| format!(r#"{{"from":{},"to":{},"xfade":{}}}"#, l.from, l.to, l.xfade))
             .collect();
         let connections: Vec<String> = g
             .connections()
@@ -11768,8 +11996,12 @@ fn api_anim_tree_add_transition(
         Some(pair) => pair,
         None => return,
     };
+    // Optional crossfade in seconds — Godot's `xfade_time`, defaulting to its
+    // `0.0` (pat-0q2kx.166). Absent means "no crossfade", not "invalid body", so
+    // the pre-existing two-field callers keep working unchanged.
+    let xfade = parsed.get("xfade").and_then(|v| v.as_f64()).unwrap_or(0.0);
     // Rejects self-transitions and duplicates (see AnimTreeGraph::add_link).
-    if !state.anim_tree.add_transition(from, to) {
+    if !state.anim_tree.add_transition_with_xfade(from, to, xfade) {
         send_error(stream, 400, "invalid or duplicate transition");
         return;
     }
@@ -16679,7 +16911,248 @@ fn api_script_main_view(state: &Arc<Mutex<EditorState>>, query: &str, stream: &m
 }
 
 /// `GET /api/search?q=<query>` — searches all .gd script files for a string.
+/// Walks `root` collecting `(path, contents)` for every file whose extension is
+/// in `exts`, skipping dotfiles and `target/`.
+///
+/// Shared by search and replace_all so the two cannot disagree about which
+/// files are in scope — a replace that considered a different file set than the
+/// search that produced the preview would rewrite something the user never saw.
+fn collect_searchable_files(
+    root: &std::path::Path,
+    exts: &[String],
+    depth: usize,
+    out: &mut Vec<(String, String)>,
+) {
+    if depth > 6 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name == "target" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_searchable_files(&path, exts, depth + 1, out);
+        } else {
+            let matches_ext = exts
+                .iter()
+                .any(|e| name.ends_with(&format!(".{}", e.trim_start_matches('.'))));
+            if matches_ext {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    out.push((path.display().to_string(), content));
+                }
+            }
+        }
+    }
+}
+
+/// Parses the `ext` query parameter (`gd,tscn`) into a list, defaulting to `gd`.
+fn parse_ext_filter(raw: Option<String>) -> Vec<String> {
+    let list: Vec<String> = raw
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().trim_start_matches('.').to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if list.is_empty() {
+        vec!["gd".to_string()]
+    } else {
+        list
+    }
+}
+
+/// `GET /api/search?q=&folder=&ext=&case=` — Find in Files.
+///
+/// Returns results GROUPED PER FILE with line *and column* and the full line
+/// text, which is what the results panel needs to render Godot's per-file
+/// grouping and to open a file at the exact caret position (pat-0q2kx.168).
+/// The previous shape was a flat list of `{file, line, text}` with no column
+/// and no grouping, and it hardcoded `.gd` with a case-sensitive `contains`.
+///
+/// The matching itself delegates to `find_in_files::find_in_files`, which
+/// already implemented case folding, columns and multiple matches per line —
+/// it simply had no caller.
 fn api_search_scripts(query: &str, stream: &mut TcpStream) {
+    let search = match query_param(query, "q") {
+        Some(q) => url_decode(q),
+        None => {
+            send_error(stream, 400, "missing q parameter");
+            return;
+        }
+    };
+    if search.is_empty() {
+        send_json(stream, r#"{"results":[]}"#);
+        return;
+    }
+
+    let exts = parse_ext_filter(query_param(query, "ext").map(url_decode));
+    // `case=1` opts into case-sensitive matching; Godot's dialog defaults off.
+    let case_sensitive = matches!(query_param(query, "case"), Some("1") | Some("true"));
+    let cwd = std::env::current_dir().unwrap_or_default();
+    // A `folder` scope is resolved under the project root; an absolute or
+    // escaping path would let a search read outside the project.
+    let root = match query_param(query, "folder").map(url_decode) {
+        Some(f) if !f.is_empty() && !f.contains("..") => cwd.join(f.trim_start_matches('/')),
+        _ => cwd.clone(),
+    };
+
+    let mut files = Vec::new();
+    collect_searchable_files(&root, &exts, 0, &mut files);
+    let borrowed: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    let groups = crate::find_in_files::find_in_files(
+        &borrowed,
+        &search,
+        crate::find_in_files::SearchOptions { case_sensitive },
+    );
+
+    let results: Vec<serde_json::Value> = groups
+        .iter()
+        .map(|g| {
+            serde_json::json!({
+                "file": g.path,
+                "matches": g.matches.iter().map(|m| serde_json::json!({
+                    "line": m.line,
+                    "column": m.column,
+                    "line_text": m.context,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let total: usize = groups.iter().map(|g| g.matches.len()).sum();
+    send_json(
+        stream,
+        &serde_json::json!({"results": results, "total": total}).to_string(),
+    );
+}
+
+/// `POST /api/search/replace_all {term, replacement, files?, case?}` —
+/// Replace in Files.
+///
+/// Rewrites matched occurrences on disk and reports per-file counts. When
+/// `files` is omitted every searchable file under the project is considered, so
+/// the dialog can replace across the whole result set without echoing it back.
+///
+/// A file is only written when its contents actually changed, so an unaffected
+/// file keeps its original mtime and bytes.
+fn api_search_replace_all(body: &str, stream: &mut TcpStream) {
+    let Some(payload) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON body");
+        return;
+    };
+    let term = payload
+        .get("term")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if term.is_empty() {
+        send_error(stream, 400, "missing term");
+        return;
+    }
+    let replacement = payload
+        .get("replacement")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let case_sensitive = payload
+        .get("case")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let explicit: Vec<String> = payload
+        .get("files")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    if explicit.is_empty() {
+        collect_searchable_files(&cwd, &parse_ext_filter(None), 0, &mut candidates);
+    } else {
+        for f in explicit {
+            // Reject traversal: a replace is a write, so scope matters more here
+            // than for search.
+            if f.contains("..") {
+                continue;
+            }
+            let path = if std::path::Path::new(&f).is_absolute() {
+                std::path::PathBuf::from(&f)
+            } else {
+                cwd.join(&f)
+            };
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                candidates.push((path.display().to_string(), content));
+            }
+        }
+    }
+
+    let mut changed = Vec::new();
+    let mut total = 0usize;
+    for (path, content) in &candidates {
+        let (updated, count) = replace_occurrences(content, &term, &replacement, case_sensitive);
+        if count == 0 {
+            continue;
+        }
+        if std::fs::write(path, &updated).is_ok() {
+            total += count;
+            changed.push(serde_json::json!({"file": path, "count": count}));
+        }
+    }
+    send_json(
+        stream,
+        &serde_json::json!({"files": changed, "total": total}).to_string(),
+    );
+}
+
+/// Replaces every occurrence of `term`, returning the new text and the count.
+///
+/// Case-insensitive mode matches on a lowercased copy but splices from the
+/// ORIGINAL text, so the surrounding bytes — including their original casing —
+/// are preserved exactly. Naively lowercasing the whole file would "replace"
+/// by destroying every other character's case.
+fn replace_occurrences(
+    content: &str,
+    term: &str,
+    replacement: &str,
+    case_sensitive: bool,
+) -> (String, usize) {
+    if term.is_empty() {
+        return (content.to_string(), 0);
+    }
+    if case_sensitive {
+        let count = content.matches(term).count();
+        return (content.replace(term, replacement), count);
+    }
+    let haystack = content.to_lowercase();
+    let needle = term.to_lowercase();
+    let mut out = String::with_capacity(content.len());
+    let mut count = 0usize;
+    let mut cursor = 0usize;
+    while let Some(rel) = haystack[cursor..].find(&needle) {
+        let at = cursor + rel;
+        out.push_str(&content[cursor..at]);
+        out.push_str(replacement);
+        cursor = at + needle.len();
+        count += 1;
+    }
+    out.push_str(&content[cursor..]);
+    (out, count)
+}
+
+/// Legacy flat-list walker, retained for the older callers below.
+#[allow(dead_code)]
+fn api_search_scripts_legacy(query: &str, stream: &mut TcpStream) {
     let search = match query_param(query, "q") {
         Some(q) => url_decode(q),
         None => {

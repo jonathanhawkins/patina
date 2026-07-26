@@ -555,6 +555,8 @@ pub const FABRIK_CLASS: &str = "FABRIK3D";
 pub const CCDIK_CLASS: &str = "CCDIK3D";
 /// Godot's `JacobianIK3D` — the third `IterateIK3D` sibling (pat-0q2kx.156).
 pub const JACOBIAN_IK_CLASS: &str = "JacobianIK3D";
+/// Godot's `LookAtModifier3D` — aims one bone at a target (pat-0q2kx.156).
+pub const LOOK_AT_CLASS: &str = "LookAtModifier3D";
 
 /// Below this the chain is treated as already aligned and left alone, so a
 /// solved chain doesn't jitter.
@@ -624,6 +626,14 @@ pub fn process_modifiers(tree: &mut SceneTree, skeleton_id: NodeId) {
         // Godot picks the algorithm by CLASS: FABRIK3D, CCDIK3D and
         // JacobianIK3D are siblings under IterateIK3D that share every knob and
         // differ only in how they solve (pat-nzgdu.183).
+        // Not an IK solver — it aims a single bone, so it does not go through
+        // `IkSolverKind`/`apply_ik_modifier` at all.
+        if class == LOOK_AT_CLASS {
+            if modifier_active(tree, child) {
+                apply_look_at_modifier(tree, skeleton_id, child);
+            }
+            continue;
+        }
         let solver = match class.as_str() {
             IK_MODIFIER_CLASS => IkSolverKind::Ccd,
             FABRIK_CLASS => IkSolverKind::Fabrik,
@@ -641,6 +651,144 @@ pub fn process_modifiers(tree: &mut SceneTree, skeleton_id: NodeId) {
         }
         apply_ik_modifier(tree, skeleton_id, child, solver);
     }
+}
+
+/// Maps Godot's `SkeletonModifier3D.BoneAxis` to a unit direction in the bone's
+/// local frame: `0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z`.
+///
+/// `4` (`BONE_AXIS_PLUS_Z`) is `LookAtModifier3D`'s default, so an unset or
+/// unrecognised value must fall back to +Z — **not** to axis 0 (+X), which is
+/// what treating enum-zero as the default would give.
+fn bone_axis_vector(axis: i64) -> Vector3 {
+    match axis {
+        0 => Vector3::new(1.0, 0.0, 0.0),
+        1 => Vector3::new(-1.0, 0.0, 0.0),
+        2 => Vector3::new(0.0, 1.0, 0.0),
+        3 => Vector3::new(0.0, -1.0, 0.0),
+        5 => Vector3::new(0.0, 0.0, -1.0),
+        _ => Vector3::new(0.0, 0.0, 1.0),
+    }
+}
+
+/// Aims one bone's forward axis at a target — Godot's `LookAtModifier3D`
+/// (pat-0q2kx.156).
+///
+/// The target is `target_node` (a NodePath resolved relative to the modifier,
+/// which is Godot's API), falling back to a literal `target_position` so the
+/// modifier is usable without a scene node — the same key the IK modifiers in
+/// this file already accept.
+///
+/// Rotation is built as an explicit axis/angle rather than through
+/// [`crate::ik_solver::aim_rotation`] because `use_angle_limitation` has to clamp
+/// the **angle** before it becomes a rotation, and a quaternion would have to be
+/// decomposed again to do that. The frame conversion at the end is the same one
+/// `solve_fabrik_chain` and `solve_ccd` use: poses are stored in the bone's
+/// parent frame, so a skeleton-space delta must be conjugated into it.
+///
+/// Not yet modelled: `duration`/`transition_type`/`ease_type` time-based
+/// interpolation, `use_secondary_rotation`, the per-axis positive/negative limit
+/// split, damp thresholds, and `origin_from`/`origin_offset`. Those properties
+/// are registered but do not affect the result.
+fn apply_look_at_modifier(tree: &mut SceneTree, skeleton_id: NodeId, modifier_id: NodeId) {
+    // Collect every read before mutating, so the immutable borrows end here.
+    let (bone, forward_axis, use_limit, limit, target_path, literal_target) = {
+        let node = match tree.get_node(modifier_id) {
+            Some(n) => n,
+            None => return,
+        };
+        // `bone` defaults to -1 ("unset"); Godot aims nothing in that case.
+        let bone = match node.get_property("bone") {
+            Variant::Int(i) if i >= 0 => i as usize,
+            _ => return,
+        };
+        let forward_axis = match node.get_property("forward_axis") {
+            Variant::Int(i) => i,
+            _ => 4,
+        };
+        let use_limit = matches!(
+            node.get_property("use_angle_limitation"),
+            Variant::Bool(true)
+        );
+        // Godot's default is TAU — unlimited. A missing value must not read as 0,
+        // which would forbid rotation entirely.
+        let limit = match node.get_property("primary_limit_angle") {
+            Variant::Float(f) => f as f32,
+            Variant::Int(i) => i as f32,
+            _ => std::f32::consts::TAU,
+        };
+        let target_path = match node.get_property("target_node") {
+            Variant::NodePath(p) if !p.is_empty() => Some(p.to_string()),
+            Variant::String(s) if !s.is_empty() => Some(s),
+            _ => None,
+        };
+        let literal_target = match node.get_property(IK_TARGET_POSITION_KEY) {
+            Variant::Vector3(v) => Some(v),
+            _ => None,
+        };
+        (
+            bone,
+            forward_axis,
+            use_limit,
+            limit,
+            target_path,
+            literal_target,
+        )
+    };
+
+    let target = match target_path
+        .and_then(|p| tree.get_node_or_null(modifier_id, &p))
+        .map(|id| crate::node3d::get_global_transform(tree, id).origin)
+        .or(literal_target)
+    {
+        Some(t) => t,
+        None => return,
+    };
+
+    let bone_global = get_bone_global_pose(tree, skeleton_id, bone);
+    let to_vec = target - bone_global.origin;
+    // `Basis` has no `Mul<Vector3>`; `xform` is the vector-transform API here.
+    let forward_world = bone_global.basis.xform(bone_axis_vector(forward_axis));
+    if to_vec.length() < IK_EPSILON || forward_world.length() < IK_EPSILON {
+        return;
+    }
+
+    let from = forward_world.normalized();
+    let to = to_vec.normalized();
+    let mut axis = from.cross(to);
+    if axis.length() < IK_EPSILON {
+        // Degenerate: the cross product vanishes both when already aimed and when
+        // the target sits exactly BEHIND the bone. Those need opposite handling.
+        if from.dot(to) > 0.0 {
+            return; // already aimed — nothing to do
+        }
+        // Exactly opposed. Any perpendicular axis gives a valid 180° turn, which
+        // is what `ik_solver::aim_rotation` does for the same case. Returning
+        // early here instead would make a target directly behind the bone
+        // permanently unreachable — the bone would sit at its old aim forever.
+        axis = crate::ik_solver::any_perpendicular(from);
+    }
+    let mut angle = from.dot(to).clamp(-1.0, 1.0).acos();
+    if use_limit {
+        angle = angle.min(limit);
+    }
+    angle *= modifier_influence(tree, modifier_id);
+    if angle.abs() < IK_EPSILON {
+        return;
+    }
+
+    let delta = Basis::from_quaternion(Quaternion::from_axis_angle(axis.normalized(), angle));
+    let parent = get_bone_parent(tree, skeleton_id, bone);
+    let parent_basis = if parent >= 0 {
+        get_bone_global_pose(tree, skeleton_id, parent as usize).basis
+    } else {
+        Basis::IDENTITY
+    };
+    let rest = get_bone_rest(tree, skeleton_id, bone);
+    let pose = get_bone_pose(tree, skeleton_id, bone);
+    let frame = parent_basis * rest.basis;
+    let mut new_pose = pose;
+    new_pose.basis = frame.inverse() * delta * frame * pose.basis;
+    set_bone_pose(tree, skeleton_id, bone, new_pose);
 }
 
 /// Which algorithm a modifier's class selects.

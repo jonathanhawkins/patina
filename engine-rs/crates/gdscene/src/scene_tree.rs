@@ -2054,7 +2054,7 @@ impl SceneTree {
         for node_id in node_ids {
             // Advance the player and gather everything we need while only the
             // player is borrowed, so we can then mutate nodes and scripts.
-            let (values, skip, method_calls, root_motion, root_node, signals, current) =
+            let (values, skip, method_calls, audio_keys, root_motion, root_node, signals, current) =
                 match self.animation_players.get_mut(&node_id) {
                     Some(player) => {
                         let prev = player.position();
@@ -2067,6 +2067,9 @@ impl SceneTree {
                         let skip: std::collections::HashSet<String> =
                             player.non_property_track_paths().into_iter().collect();
                         let method_calls = player.method_calls_in_range(prev, curr);
+                        // Audio keys crossed this frame; applied below like
+                        // method tracks (pat-0q2kx.157).
+                        let audio_keys = audio_keys_in_range(player, prev, curr);
                         let root_motion = player.consume_root_motion(prev, curr);
                         let root_node = player.root_node.clone();
                         // Playback signals queued by `advance` (and by the
@@ -2083,6 +2086,7 @@ impl SceneTree {
                             values,
                             skip,
                             method_calls,
+                            audio_keys,
                             root_motion,
                             root_node,
                             signals,
@@ -2149,6 +2153,35 @@ impl SceneTree {
                     }
                 };
                 self.call_script_with_access(target, &call.method, &call.args);
+            }
+
+            // Fire audio-track keys at the `AudioStreamPlayer` named by the
+            // track, resolved relative to `base_node` exactly like method and
+            // property tracks (pat-0q2kx.157). Point it at the keyed stream,
+            // seek to the key's `start_offset`, and start it. `MainLoop::step`
+            // runs the animation phase before the audio phase, so the voice is
+            // audible on the very frame the key is crossed.
+            for (track_node_path, stream, start_offset) in audio_keys {
+                let target = if track_node_path.is_empty() || track_node_path == "." {
+                    base_node
+                } else {
+                    match self.get_node_or_null(base_node, &track_node_path) {
+                        Some(t) => t,
+                        None => continue,
+                    }
+                };
+                if let Some(node) = self.nodes.get_mut(&target) {
+                    node.set_property("stream", Variant::String(stream));
+                    // The bridge prefers a non-empty `__extres__stream`
+                    // companion over `stream`, so a scene-authored stream would
+                    // otherwise win over the key. Clear it so the keyed stream
+                    // is what plays.
+                    node.set_property("__extres__stream", Variant::Nil);
+                    if start_offset > 0.0 {
+                        node.set_property("seek_request", Variant::Float(start_offset));
+                    }
+                    node.set_property("playing", Variant::Bool(true));
+                }
             }
 
             // Re-emit playback signals on the player node itself, mirroring
@@ -4084,6 +4117,67 @@ fn sprite_frames_from_node(node: &Node) -> Option<SpriteFrames> {
         frames.add_animation_frames(name, entries, speed, loops);
     }
     Some(frames)
+}
+
+/// Audio-track keys the playhead crossed between `prev` and `curr`, as
+/// `(node_path, stream_path, start_offset)` triples (pat-0q2kx.157).
+///
+/// `TrackType::Audio` parsed and round-tripped but was never applied: the
+/// advance path handled only Method and property tracks, so a keyed stream
+/// stayed silent forever. Crossing semantics mirror
+/// [`AnimationPlayer::method_calls_in_range`] exactly — `(prev, curr]` forward,
+/// `[curr, prev)` reversed — so a key fires once as the playhead passes it and
+/// once again only if the animation loops back over it.
+///
+/// This lives here rather than beside `method_calls_in_range` in `animation.rs`
+/// because everything it needs is already public (`animations`, `tracks`,
+/// `node_path`, `track_type`, `keyframes`) and that file was held under an
+/// exclusive reservation by another agent when this landed. Moving it next to
+/// its sibling later is a pure relocation with no call-site changes.
+fn audio_keys_in_range(
+    player: &crate::animation::AnimationPlayer,
+    prev: f64,
+    curr: f64,
+) -> Vec<(String, String, f64)> {
+    let Some(name) = player.current_animation() else {
+        return Vec::new();
+    };
+    let Some(anim) = player.animations.get(name) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for track in &anim.tracks {
+        if track.track_type != crate::animation::TrackType::Audio {
+            continue;
+        }
+        for kf in track.keyframes() {
+            let crossed = if curr >= prev {
+                kf.time > prev && kf.time <= curr
+            } else {
+                kf.time < prev && kf.time >= curr
+            };
+            if !crossed {
+                continue;
+            }
+            // Godot's audio keys are `{stream, start_offset, end_offset}` dicts
+            // (see the `TrackType::Audio` doc in `animation.rs`). A key without
+            // a usable stream is skipped rather than starting a silent voice.
+            let Variant::Dictionary(d) = &kf.value else {
+                continue;
+            };
+            let stream = match d.get("stream") {
+                Some(Variant::String(s)) if !s.is_empty() => s.clone(),
+                _ => continue,
+            };
+            let start_offset = match d.get("start_offset") {
+                Some(Variant::Float(f)) => *f,
+                Some(Variant::Int(i)) => *i as f64,
+                _ => 0.0,
+            };
+            out.push((track.node_path.clone(), stream, start_offset));
+        }
+    }
+    out
 }
 
 fn apply_root_motion_delta(node: &mut Node, delta: &crate::animation::RootMotionDelta) {

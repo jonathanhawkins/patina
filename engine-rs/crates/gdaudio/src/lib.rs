@@ -26,9 +26,10 @@ pub use decode::{
     decode_mp3, is_mp3, AudioBuffer, AudioStreamGenerator, DecodeError, PolyphonicPlayer,
 };
 pub use effects::{
-    process_buffer, AudioEffect, AudioEffectAmplify, AudioEffectCompressor, AudioEffectEQ,
-    AudioEffectFilter, AudioEffectHardLimiter, AudioEffectLimiter, AudioEffectReverb,
-    AudioEffectSpectrumAnalyzer, EffectChain, FilterMode,
+    process_buffer, AudioEffect, AudioEffectAmplify, AudioEffectCompressor, AudioEffectDelay,
+    AudioEffectDistortion, AudioEffectEQ, AudioEffectFilter, AudioEffectHardLimiter,
+    AudioEffectLimiter, AudioEffectReverb, AudioEffectSpectrumAnalyzer, DistortionMode,
+    EffectChain, FilterMode,
 };
 pub use mixer::AudioMixer;
 pub use output::{mix_and_write, CaptureAudioOutput, PlatformAudioError, PlatformAudioOutput};

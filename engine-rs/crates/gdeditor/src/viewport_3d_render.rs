@@ -215,7 +215,10 @@ fn collision_shape_for(shape: &str) -> (CollisionShapeKind, Vector3) {
 /// deterministic per path, so we generate it once and clone from the cache — a
 /// clone is a cheap memcpy vs. the trig-heavy tessellation. The cache is naturally
 /// bounded by the fixed set of primitive descriptors.
-fn mesh_for_primitive(path: &str) -> Mesh3D {
+/// `pub(crate)` so the Mesh toolbar's collision generator can read the same
+/// geometry the viewport draws (pat-0q2kx.169) — a collision shape built from
+/// different geometry than the rendered mesh would be a silent mismatch.
+pub(crate) fn mesh_for_primitive(path: &str) -> Mesh3D {
     use std::cell::RefCell;
     use std::collections::HashMap;
     thread_local! {
@@ -353,6 +356,22 @@ const MESH_PROP_KEYS: [&str; 10] = [
 /// `.tscn` instancing path already uses for collision shapes (`__shape__*`). A node
 /// with no companions yields its marker unchanged, so nothing regresses for scenes
 /// that never authored mesh properties.
+/// The exact geometry the viewport draws for `node_id`, or `None` when the node
+/// names no mesh (pat-0q2kx.169).
+///
+/// The Mesh toolbar's collision generator goes through here rather than
+/// re-deriving geometry: it resolves the same `__viewport_mesh__` marker and
+/// folds in the same `__mesh__*` sub-resource properties, so a generated
+/// collision shape cannot silently disagree with what is on screen.
+pub(crate) fn mesh_geometry_for_node(
+    tree: &SceneTree,
+    node_id: gdscene::node::NodeId,
+) -> Option<Mesh3D> {
+    let base = gdscene::node3d::get_mesh_path(tree, node_id)?;
+    let marker = mesh_marker_with_props(tree, node_id.raw(), base);
+    Some(mesh_for_primitive(&marker))
+}
+
 fn mesh_marker_with_props(tree: &SceneTree, node_id: u64, path: String) -> String {
     if !path.starts_with("primitive:") {
         return path;

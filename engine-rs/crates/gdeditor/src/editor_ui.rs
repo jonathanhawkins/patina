@@ -2560,6 +2560,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         <button class="bottom-tab" data-tab="audio">Audio</button>
         <button class="bottom-tab" data-tab="animation">Animation</button>
         <button class="bottom-tab" data-tab="scene-info">Scene Info</button>
+        <!-- pat-0q2kx.168: Godot streams Find-in-Files hits into a bottom panel
+             grouped per file, where each entry opens the file at its line. -->
+        <button class="bottom-tab" data-tab="find-in-files">Find in Files</button>
         <!-- pat-0q2kx.74: Godot's SpriteFrames panel appears only while an
              AnimatedSprite2D is selected (sprite_frames_editor_plugin.cpp). -->
         <button class="bottom-tab" data-tab="spriteframes" id="spriteframes-tab-btn" style="display:none">SpriteFrames</button>
@@ -2594,6 +2597,20 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
               <div id="sf-frame-strip" style="display:flex; gap:4px; flex-wrap:wrap"></div>
             </div>
           </div>
+        </div>
+        <!-- Find in Files results (pat-0q2kx.168). Populated by
+             renderFindInFilesPanel(); each `.fif-hit` carries data-file/line/
+             column and opens the script at that caret via findInFilesOpen. -->
+        <div class="bottom-content-tab" data-tab="find-in-files">
+          <div id="find-in-files-toolbar">
+            <input id="fif-term" type="text" placeholder="Find in Files…" />
+            <input id="fif-ext" type="text" placeholder="gd,tscn" size="10" />
+            <label><input id="fif-case" type="checkbox" /> Match Case</label>
+            <button onclick="scriptFindInFiles(document.getElementById('fif-term').value, {ext: document.getElementById('fif-ext').value, caseSensitive: document.getElementById('fif-case').checked})">Search</button>
+            <input id="fif-replacement" type="text" placeholder="Replace with…" />
+            <button onclick="findInFilesReplaceAll(document.getElementById('fif-replacement').value)">Replace in Files</button>
+          </div>
+          <div id="find-in-files-results"></div>
         </div>
         <div class="bottom-content-tab active" data-tab="output">
           <!-- Output panel (Godot EditorLog parity, editor_log.cpp:505-617):
@@ -9346,15 +9363,86 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     }
     scriptFindInEditor(term, false);
   }
-  async function scriptFindInFiles(term) {
+  // Find in Files (pat-0q2kx.168). Godot streams grouped results into a bottom
+  // panel where each entry opens the file AT ITS LINE; Patina previously dumped
+  // a flat list into a static text popup with no way to act on a hit.
+  var findInFilesResults = [];
+  var findInFilesTerm = '';
+
+  async function scriptFindInFiles(term, opts) {
     if (!term) return;
-    var data = await api('GET', '/api/search?q=' + encodeURIComponent(term));
-    var results = (data && (data.results || data.matches || data.hits)) || [];
-    var lines = results.map(function(r) {
-      if (typeof r === 'string') return r;
-      return (r.path || r.file || '') + (r.line ? (':' + r.line) : '') + (r.text ? ('  ' + String(r.text).trim()) : '');
+    opts = opts || {};
+    findInFilesTerm = term;
+    var url = '/api/search?q=' + encodeURIComponent(term);
+    if (opts.folder) url += '&folder=' + encodeURIComponent(opts.folder);
+    if (opts.ext) url += '&ext=' + encodeURIComponent(opts.ext);
+    if (opts.caseSensitive) url += '&case=1';
+    var data = await api('GET', url);
+    findInFilesResults = (data && data.results) || [];
+    renderFindInFilesPanel();
+  }
+
+  function renderFindInFilesPanel() {
+    var el = document.getElementById('find-in-files-results');
+    if (!el) return;
+    if (!findInFilesResults.length) {
+      el.innerHTML = '<div class="fif-empty">No results for "' + escapeHtml(findInFilesTerm) + '"</div>';
+      return;
+    }
+    var html = '';
+    for (var f = 0; f < findInFilesResults.length; f++) {
+      var group = findInFilesResults[f];
+      var hits = group.matches || [];
+      // One collapsible group per file, matching Godot's grouping.
+      html += '<div class="fif-file"><div class="fif-file-name">' + escapeHtml(group.file) +
+              ' <span class="fif-count">(' + hits.length + ')</span></div>';
+      for (var m = 0; m < hits.length; m++) {
+        var hit = hits[m];
+        html += '<div class="fif-hit" data-file="' + escapeHtml(group.file) +
+                '" data-line="' + hit.line + '" data-column="' + (hit.column || 1) +
+                '" onclick="findInFilesOpen(this)">' +
+                '<span class="fif-line">' + hit.line + '</span>' +
+                '<span class="fif-text">' + escapeHtml(String(hit.line_text || '').trim()) + '</span></div>';
+      }
+      html += '</div>';
+    }
+    el.innerHTML = html;
+    // `bottomPanelOpen` is the programmatic opener installed by
+    // setupBottomPanel; it honours the Pin lock when opened automatically.
+    if (typeof window.bottomPanelOpen === 'function') window.bottomPanelOpen('find-in-files', false);
+  }
+
+  // Click-to-open: reuse the existing script open + goto-line flow so a result
+  // lands the caret exactly where the match is.
+  async function findInFilesOpen(node) {
+    if (!node) return;
+    var path = node.getAttribute('data-file');
+    var line = parseInt(node.getAttribute('data-line'), 10) || 1;
+    if (!path) return;
+    await fetchScript(path);
+    if (typeof scriptGotoLine === 'function') scriptGotoLine(line);
+  }
+
+  // The whole script lives inside an IIFE, so these are NOT global — but the
+  // panel markup calls them from inline `onclick`, which only resolves globals.
+  // Without these bindings the panel renders and every button is a silent
+  // ReferenceError. Same pattern as `window.bottomPanelOpen`.
+  window.scriptFindInFiles = scriptFindInFiles;
+  window.findInFilesOpen = findInFilesOpen;
+  // Declared below — `function` declarations hoist, so binding it here is safe.
+  window.findInFilesReplaceAll = findInFilesReplaceAll;
+
+  // Replace in Files — applied server-side across the current result set, then
+  // open editors reload so they do not keep showing pre-replace text.
+  async function findInFilesReplaceAll(replacement) {
+    if (!findInFilesTerm) return;
+    var files = findInFilesResults.map(function(g) { return g.file; });
+    var res = await api('POST', '/api/search/replace_all', {
+      term: findInFilesTerm, replacement: replacement, files: files
     });
-    showFsInfoPopup('Find in Files: ' + term, lines);
+    if (currentScriptPath) await fetchScript(currentScriptPath);
+    await scriptFindInFiles(findInFilesTerm);
+    return res;
   }
   function scriptCloseActive() {
     var idx = -1;

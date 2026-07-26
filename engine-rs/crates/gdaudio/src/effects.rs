@@ -17,6 +17,20 @@ pub trait AudioEffect: Send {
     fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16);
     /// Reset internal state (delay lines, filters).
     fn reset(&mut self);
+
+    /// Peak magnitude in `[from_hz, to_hz]`, for effects that analyse spectrum
+    /// (pat-0q2kx.160).
+    ///
+    /// This is Godot's
+    /// `AudioEffectSpectrumAnalyzerInstance.get_magnitude_for_frequency_range`.
+    /// Godot models it on a separate per-playback *instance* object; Patina
+    /// keeps the analysis state on the effect itself, so the query rides on the
+    /// effect trait instead. Defaulted to `None` so the analyzer is the only
+    /// impl that answers and no other effect needs to change — the alternative,
+    /// an `as_any` downcast hook, would have touched every effect in this file.
+    fn magnitude_for_frequency_range(&self, _from_hz: f32, _to_hz: f32) -> Option<f32> {
+        None
+    }
 }
 
 /// Amplify effect — multiplies the signal by a linear gain derived from dB.
@@ -230,61 +244,374 @@ impl AudioEffect for AudioEffectEQ {
     }
 }
 
+/// Godot's `AudioEffectDelay` — two independent taps plus a feedback line.
+///
+/// Mirrors `servers/audio/effects/audio_effect_delay.cpp`: each tap is an
+/// independent echo at its own delay/level/pan, and the feedback line re-injects
+/// its own output through a one-pole lowpass so repeats darken instead of
+/// ringing forever. `dry` keeps the unprocessed signal.
+#[derive(Debug, Clone)]
+pub struct AudioEffectDelay {
+    /// Dry (unprocessed) mix in \[0, 1\].
+    pub dry: f32,
+    /// Enable the first tap.
+    pub tap1_active: bool,
+    /// First tap delay in milliseconds.
+    pub tap1_delay_ms: f32,
+    /// First tap level in dB.
+    pub tap1_level_db: f32,
+    /// Enable the second tap.
+    pub tap2_active: bool,
+    /// Second tap delay in milliseconds.
+    pub tap2_delay_ms: f32,
+    /// Second tap level in dB.
+    pub tap2_level_db: f32,
+    /// Enable the feedback line.
+    pub feedback_active: bool,
+    /// Feedback delay in milliseconds.
+    pub feedback_delay_ms: f32,
+    /// Feedback level in dB.
+    pub feedback_level_db: f32,
+    /// One-pole lowpass cutoff applied to the feedback path, in Hz.
+    pub feedback_lowpass: f32,
+    buffer: Vec<f32>,
+    write_pos: usize,
+    lp_state: f32,
+}
+
+impl AudioEffectDelay {
+    /// Godot's defaults.
+    pub fn new() -> Self {
+        Self {
+            dry: 1.0,
+            tap1_active: true,
+            tap1_delay_ms: 250.0,
+            tap1_level_db: -6.0,
+            tap2_active: true,
+            tap2_delay_ms: 500.0,
+            tap2_level_db: -12.0,
+            feedback_active: false,
+            feedback_delay_ms: 340.0,
+            feedback_level_db: -6.0,
+            feedback_lowpass: 16000.0,
+            buffer: Vec::new(),
+            write_pos: 0,
+            lp_state: 0.0,
+        }
+    }
+
+    fn db_to_linear(db: f32) -> f32 {
+        10.0f32.powf(db / 20.0)
+    }
+
+    /// Ring-buffer frames needed to cover the longest configured delay.
+    fn required_frames(&self, sample_rate: u32) -> usize {
+        let longest = self
+            .tap1_delay_ms
+            .max(self.tap2_delay_ms)
+            .max(self.feedback_delay_ms)
+            .max(1.0);
+        ((longest / 1000.0) * sample_rate as f32).ceil() as usize + 1
+    }
+
+    /// Read the sample `delay_ms` in the past for `channel`, or 0 when that
+    /// reaches past the start of the ring.
+    fn tap(
+        &self,
+        delay_ms: f32,
+        sample_rate: u32,
+        frames: usize,
+        channels: usize,
+        channel: usize,
+    ) -> f32 {
+        let back = (((delay_ms / 1000.0) * sample_rate as f32).round() as usize).max(1);
+        if back >= frames {
+            return 0.0;
+        }
+        let idx = (self.write_pos + frames - back) % frames;
+        self.buffer[idx * channels + channel]
+    }
+}
+
+impl Default for AudioEffectDelay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AudioEffect for AudioEffectDelay {
+    fn name(&self) -> &str {
+        "Delay"
+    }
+
+    fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
+        let ch = channels.max(1) as usize;
+        let frames = self.required_frames(sample_rate);
+        if self.buffer.len() != frames * ch {
+            self.buffer = vec![0.0; frames * ch];
+            self.write_pos = 0;
+            self.lp_state = 0.0;
+        }
+
+        let tap1_gain = Self::db_to_linear(self.tap1_level_db);
+        let tap2_gain = Self::db_to_linear(self.tap2_level_db);
+        let fb_gain = Self::db_to_linear(self.feedback_level_db);
+        // One-pole lowpass coefficient for the feedback path.
+        let cutoff = self.feedback_lowpass.clamp(1.0, sample_rate as f32 * 0.5);
+        let alpha = 1.0 - (-2.0 * std::f32::consts::PI * cutoff / sample_rate as f32).exp();
+
+        for frame in samples.chunks_mut(ch) {
+            for (c, sample) in frame.iter_mut().enumerate() {
+                let dry_in = *sample;
+
+                let mut wet = 0.0;
+                if self.tap1_active {
+                    wet += self.tap(self.tap1_delay_ms, sample_rate, frames, ch, c) * tap1_gain;
+                }
+                if self.tap2_active {
+                    wet += self.tap(self.tap2_delay_ms, sample_rate, frames, ch, c) * tap2_gain;
+                }
+
+                // Feedback is written back into the line, darkened each pass.
+                let mut written = dry_in;
+                if self.feedback_active {
+                    let fb = self.tap(self.feedback_delay_ms, sample_rate, frames, ch, c) * fb_gain;
+                    self.lp_state += alpha * (fb - self.lp_state);
+                    written += self.lp_state;
+                    wet += self.lp_state;
+                }
+
+                self.buffer[self.write_pos * ch + c] = written;
+                *sample = dry_in * self.dry + wet;
+            }
+            self.write_pos = (self.write_pos + 1) % frames;
+        }
+    }
+
+    fn reset(&mut self) {
+        for s in self.buffer.iter_mut() {
+            *s = 0.0;
+        }
+        self.write_pos = 0;
+        self.lp_state = 0.0;
+    }
+}
+
+/// Waveshaping mode for [`AudioEffectDistortion`], matching Godot's enum order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DistortionMode {
+    /// Hard clip at ±1 after drive.
+    Clip,
+    /// Soft saturation via `atan`.
+    ATan,
+    /// Bit/rate crush.
+    LoFi,
+    /// Asymmetric overdrive.
+    Overdrive,
+    /// `sin`-based wave shaping.
+    WaveShape,
+}
+
+/// Godot's `AudioEffectDistortion` (`audio_effect_distortion.cpp`).
+#[derive(Debug, Clone)]
+pub struct AudioEffectDistortion {
+    /// Shaping curve.
+    pub mode: DistortionMode,
+    /// Input gain in dB, applied before shaping.
+    pub pre_gain_db: f32,
+    /// Output gain in dB, applied after shaping.
+    pub post_gain_db: f32,
+    /// Drive amount in \[0, 1\] — how hard the signal is pushed into the curve.
+    pub drive: f32,
+}
+
+impl AudioEffectDistortion {
+    /// Godot's defaults (Clip, 0 dB pre, 0 dB post, drive 0).
+    pub fn new() -> Self {
+        Self {
+            mode: DistortionMode::Clip,
+            pre_gain_db: 0.0,
+            post_gain_db: 0.0,
+            drive: 0.0,
+        }
+    }
+
+    /// Apply the shaping curve to one sample already scaled by drive.
+    fn shape(&self, x: f32) -> f32 {
+        match self.mode {
+            DistortionMode::Clip => x.clamp(-1.0, 1.0),
+            DistortionMode::ATan => x.atan() * std::f32::consts::FRAC_2_PI,
+            // Quantise to a coarse step — the audible part of Godot's lofi.
+            DistortionMode::LoFi => {
+                let steps = 32.0;
+                (x * steps).round() / steps
+            }
+            DistortionMode::Overdrive => {
+                // Asymmetric: compress the positive half harder.
+                if x >= 0.0 {
+                    1.0 - (-x).exp()
+                } else {
+                    -(1.0 - x.exp())
+                }
+            }
+            DistortionMode::WaveShape => (x * std::f32::consts::FRAC_PI_2).sin(),
+        }
+    }
+}
+
+impl Default for AudioEffectDistortion {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AudioEffect for AudioEffectDistortion {
+    fn name(&self) -> &str {
+        "Distortion"
+    }
+
+    fn process(&mut self, samples: &mut [f32], _sample_rate: u32, _channels: u16) {
+        let pre = 10.0f32.powf(self.pre_gain_db / 20.0);
+        let post = 10.0f32.powf(self.post_gain_db / 20.0);
+        // drive 0 still shapes (Godot clips at unity); higher drive pushes further in.
+        let drive = 1.0 + self.drive.clamp(0.0, 1.0) * 30.0;
+        for s in samples.iter_mut() {
+            *s = self.shape(*s * pre * drive) * post;
+        }
+    }
+
+    fn reset(&mut self) {}
+}
+
+/// One insert slot: the effect plus Godot's per-slot bypass flag.
+///
+/// Godot models a bus insert as an effect *and* an enabled bit
+/// (`AudioServer.set_bus_effect_enabled`), so a designer can audition a chain
+/// without destroying it. Patina stored a bare `Vec<Box<dyn AudioEffect>>`,
+/// which left the bus-layout loader no choice but to DROP disabled effects on
+/// load — losing them from the chain entirely (pat-0q2kx.158).
+struct EffectSlot {
+    effect: Box<dyn AudioEffect>,
+    enabled: bool,
+}
+
 /// Owned effect chain applied in insertion order.
 #[derive(Default)]
 pub struct EffectChain {
-    effects: Vec<Box<dyn AudioEffect>>,
+    slots: Vec<EffectSlot>,
 }
 
 impl EffectChain {
     /// Empty chain.
     pub fn new() -> Self {
-        Self {
-            effects: Vec::new(),
-        }
+        Self { slots: Vec::new() }
     }
 
     /// Number of inserts.
     pub fn len(&self) -> usize {
-        self.effects.len()
+        self.slots.len()
+    }
+
+    /// The effect in slot `index`, or `None` when out of range
+    /// (pat-0q2kx.160).
+    ///
+    /// Backs `AudioServer.get_bus_effect_instance`. Returns the effect whether
+    /// or not the slot is bypassed: Godot's `get_bus_effect_instance` hands
+    /// back the instance regardless of `set_bus_effect_enabled`, and a
+    /// visualizer reading a bypassed analyzer should get its (silent) data, not
+    /// a null.
+    pub fn effect_at(&self, index: usize) -> Option<&dyn AudioEffect> {
+        self.slots.get(index).map(|s| s.effect.as_ref())
     }
 
     /// True when empty.
     pub fn is_empty(&self) -> bool {
-        self.effects.is_empty()
+        self.slots.is_empty()
     }
 
-    /// Append an effect.
+    /// Append an effect, enabled.
     pub fn add(&mut self, effect: Box<dyn AudioEffect>) {
-        self.effects.push(effect);
+        self.slots.push(EffectSlot {
+            effect,
+            enabled: true,
+        });
+    }
+
+    /// Insert at `index`, mirroring `AudioServer.add_bus_effect(at_position)`.
+    ///
+    /// An out-of-range index appends, which is what Godot does for the default
+    /// `at_position = -1`.
+    pub fn insert(&mut self, index: usize, effect: Box<dyn AudioEffect>) {
+        let at = index.min(self.slots.len());
+        self.slots.insert(
+            at,
+            EffectSlot {
+                effect,
+                enabled: true,
+            },
+        );
     }
 
     /// Remove effect at index.
     pub fn remove(&mut self, index: usize) -> Option<Box<dyn AudioEffect>> {
-        if index < self.effects.len() {
-            Some(self.effects.remove(index))
+        if index < self.slots.len() {
+            Some(self.slots.remove(index).effect)
         } else {
             None
         }
     }
 
-    /// Process the buffer through every effect in order.
-    pub fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
-        for e in &mut self.effects {
-            e.process(samples, sample_rate, channels);
+    /// Exchange two slots (`AudioServer.swap_bus_effects`). Returns false when
+    /// either index is out of range, leaving the chain untouched.
+    pub fn swap(&mut self, a: usize, b: usize) -> bool {
+        if a < self.slots.len() && b < self.slots.len() {
+            self.slots.swap(a, b);
+            true
+        } else {
+            false
         }
     }
 
-    /// Reset all effects.
+    /// Set a slot's bypass flag (`AudioServer.set_bus_effect_enabled`).
+    /// Returns false for an out-of-range index.
+    pub fn set_enabled(&mut self, index: usize, enabled: bool) -> bool {
+        match self.slots.get_mut(index) {
+            Some(slot) => {
+                slot.enabled = enabled;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the slot at `index` currently processes. False when absent.
+    pub fn is_enabled(&self, index: usize) -> bool {
+        self.slots.get(index).map(|s| s.enabled).unwrap_or(false)
+    }
+
+    /// Process the buffer through every ENABLED effect in order.
+    ///
+    /// A disabled slot is skipped entirely rather than processed-and-mixed-out,
+    /// so bypassing is bit-exact with the dry path.
+    pub fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
+        for slot in &mut self.slots {
+            if slot.enabled {
+                slot.effect.process(samples, sample_rate, channels);
+            }
+        }
+    }
+
+    /// Reset all effects, including disabled ones — a bypassed delay line must
+    /// not resume with stale audio when it is switched back on.
     pub fn reset(&mut self) {
-        for e in &mut self.effects {
-            e.reset();
+        for slot in &mut self.slots {
+            slot.effect.reset();
         }
     }
 
     /// Effect type names in order.
     pub fn names(&self) -> Vec<&str> {
-        self.effects.iter().map(|e| e.name()).collect()
+        self.slots.iter().map(|s| s.effect.name()).collect()
     }
 }
 
@@ -726,6 +1053,13 @@ impl AudioEffectSpectrumAnalyzer {
 impl AudioEffect for AudioEffectSpectrumAnalyzer {
     fn name(&self) -> &str {
         "SpectrumAnalyzer"
+    }
+
+    /// The analyzer is the one effect that answers the spectrum query
+    /// (pat-0q2kx.160) — this is what makes it reachable through a bus's
+    /// effect chain rather than only on a directly-owned value.
+    fn magnitude_for_frequency_range(&self, from_hz: f32, to_hz: f32) -> Option<f32> {
+        Some(self.get_magnitude_for_frequency_range(from_hz, to_hz))
     }
 
     fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {

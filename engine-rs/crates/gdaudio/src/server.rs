@@ -33,19 +33,151 @@ pub struct AudioServer {
     /// via [`take_finished`](Self::take_finished) to emit Godot's
     /// `AudioStreamPlayer::finished` signal.
     finished: Vec<PlaybackId>,
+    /// Per-bus `(left, right)` LINEAR peak levels from the most recent mix,
+    /// indexed by bus index — what drives Godot's editor VU meters via
+    /// `get_bus_peak_volume_left_db` / `_right_db` (pat-0q2kx.159).
+    ///
+    /// Held linear rather than in dB so the decay below is a plain multiply;
+    /// the getters convert.
+    peaks: Vec<(f32, f32)>,
+    /// Global multiplier on stream advancement (`AudioServer.playback_speed_scale`).
+    /// Scales both the resample step and the time each voice advances, so it
+    /// shifts pitch and tempo together the way Godot's does.
+    playback_speed_scale: f32,
 }
+
+/// Per-mix decay applied to a bus peak that is no longer being driven.
+///
+/// Godot's meters fall back toward silence instead of latching, so an idle bus
+/// visibly releases. This is a per-`mix()` factor, not per-second — the exact
+/// slope is cosmetic, but it must be < 1.0 so an idle bus converges on the
+/// floor rather than holding its last peak forever.
+const PEAK_DECAY: f32 = 0.85;
+
+/// Floor reported for silence, matching Godot's `-200 dB` sentinel.
+const PEAK_FLOOR_DB: f32 = -200.0;
 
 impl AudioServer {
     /// Creates a new audio server with default settings (44100 Hz, stereo).
+    ///
+    /// 44100 is Godot's `audio/driver/mix_rate` default (`audio_server.cpp`);
+    /// a project that overrides it should build the server with
+    /// [`with_sample_rate`](Self::with_sample_rate).
     pub fn new() -> Self {
+        Self::with_sample_rate(44100)
+    }
+
+    /// Creates a server running at `sample_rate`, honouring a project's
+    /// `audio/driver/mix_rate` (pat-0q2kx.159).
+    ///
+    /// A zero or absurd rate would make `dt` and the resample step degenerate
+    /// (division by zero in `mix`), so it is clamped into a sane audio range
+    /// rather than trusted from project text.
+    pub fn with_sample_rate(sample_rate: u32) -> Self {
         Self {
             mixer: AudioMixer::new(),
             streams: Vec::new(),
             next_id: 1,
-            output_sample_rate: 44100,
+            output_sample_rate: sample_rate.clamp(8_000, 384_000),
             output_channels: 2,
             finished: Vec::new(),
+            peaks: Vec::new(),
+            playback_speed_scale: 1.0,
         }
+    }
+
+    /// Build a server honouring a project's `audio/driver/mix_rate`.
+    ///
+    /// Godot reads this at startup (`audio_server.cpp`) and defaults it to
+    /// 44100. Patina hardcoded 44100 and never consulted the project at all, so
+    /// a 48 kHz project mixed every stream at the wrong rate — audibly wrong
+    /// pitch, since the resample step is `src_rate / output_rate`
+    /// (pat-0q2kx.159).
+    ///
+    /// A non-numeric or absent value falls back to the default rather than
+    /// failing: a malformed setting should not stop audio from starting.
+    pub fn from_project_settings(settings: &gdcore::project_settings::ProjectSettings) -> Self {
+        let rate = match settings.get("audio/driver/mix_rate") {
+            Some(gdcore::project_settings::SettingsValue::Int(v)) if *v > 0 => *v as u32,
+            Some(gdcore::project_settings::SettingsValue::Float(v)) if *v > 0.0 => *v as u32,
+            _ => 44100,
+        };
+        Self::with_sample_rate(rate)
+    }
+
+    /// Global playback speed multiplier (`AudioServer.playback_speed_scale`).
+    pub fn playback_speed_scale(&self) -> f32 {
+        self.playback_speed_scale
+    }
+
+    /// Set the global playback speed multiplier. Negative values are clamped to
+    /// zero — Godot does not play streams backwards through this knob.
+    pub fn set_playback_speed_scale(&mut self, scale: f32) {
+        self.playback_speed_scale = scale.max(0.0);
+    }
+
+    /// Left-channel peak of `bus_idx` for channel pair `channel`, in dB.
+    ///
+    /// Returns the `-200 dB` floor for silence, an unknown bus, or a channel
+    /// pair this output does not have — Godot reports the floor rather than
+    /// failing, since the meters poll every frame.
+    pub fn get_bus_peak_volume_left_db(&self, bus_idx: usize, channel: usize) -> f32 {
+        Self::linear_to_db(self.peak_pair(bus_idx, channel).map(|p| p.0))
+    }
+
+    /// Right-channel peak of `bus_idx` for channel pair `channel`, in dB.
+    pub fn get_bus_peak_volume_right_db(&self, bus_idx: usize, channel: usize) -> f32 {
+        Self::linear_to_db(self.peak_pair(bus_idx, channel).map(|p| p.1))
+    }
+
+    /// Raw linear `(left, right)` peak, or `None` when out of range.
+    ///
+    /// Only channel pair 0 exists while output is stereo; a surround output
+    /// would extend this to one pair per two channels.
+    fn peak_pair(&self, bus_idx: usize, channel: usize) -> Option<(f32, f32)> {
+        if channel >= (self.output_channels as usize).div_ceil(2).max(1) {
+            return None;
+        }
+        self.peaks.get(bus_idx).copied()
+    }
+
+    fn linear_to_db(linear: Option<f32>) -> f32 {
+        match linear {
+            Some(v) if v > 0.0 => (20.0 * v.log10()).max(PEAK_FLOOR_DB),
+            _ => PEAK_FLOOR_DB,
+        }
+    }
+
+    /// Raise `peaks[bus_idx]` to this block's `max(|sample|)` per channel.
+    ///
+    /// Takes `&mut Vec` rather than `&mut self` so it can be called while a
+    /// bus buffer is borrowed out of `bus_bufs` during `mix`.
+    ///
+    /// This MAXes against the decayed value instead of overwriting it, so a
+    /// quiet block cannot yank the meter down faster than the release slope —
+    /// which is what makes the reading a peak meter rather than a level meter.
+    fn record_peak(peaks: &mut [(f32, f32)], bus_idx: usize, samples: &[f32], out_ch: usize) {
+        let Some(slot) = peaks.get_mut(bus_idx) else {
+            return;
+        };
+        let ch = out_ch.max(1);
+        let mut left = 0.0f32;
+        let mut right = 0.0f32;
+        for (i, s) in samples.iter().enumerate() {
+            let a = s.abs();
+            // Channel 0 is left; channel 1 is right. A mono output mirrors its
+            // single channel into both meters so the VU pair is never half-dead.
+            if i % ch == 0 {
+                left = left.max(a);
+                if ch == 1 {
+                    right = right.max(a);
+                }
+            } else if i % ch == 1 {
+                right = right.max(a);
+            }
+        }
+        slot.0 = slot.0.max(left);
+        slot.1 = slot.1.max(right);
     }
 
     /// Returns a reference to the mixer.
@@ -214,11 +346,21 @@ impl AudioServer {
         let num_samples = frame_count * out_ch;
         let rate = self.output_sample_rate;
         let dt = frame_count as f32 / rate as f32;
+        let speed = self.playback_speed_scale;
 
         let bus_count = self.mixer.bus_count();
         // One accumulation buffer per bus, indexed by bus index.
         let mut bus_bufs: Vec<Vec<f32>> =
             (0..bus_count).map(|_| vec![0.0f32; num_samples]).collect();
+
+        // Meters decay first, then each bus overwrites its entry if it is
+        // louder this mix. A bus that goes quiet therefore releases toward the
+        // floor instead of latching its last peak (pat-0q2kx.159).
+        self.peaks.resize(bus_count, (0.0, 0.0));
+        for p in self.peaks.iter_mut() {
+            p.0 *= PEAK_DECAY;
+            p.1 *= PEAK_DECAY;
+        }
 
         // 1. Sum each playing stream into its target bus buffer at stream volume.
         for (_id, stream) in &mut self.streams {
@@ -243,7 +385,7 @@ impl AudioServer {
             let src_rate = stream.buffer.sample_rate;
 
             if src_channels == 0 || src_rate == 0 {
-                stream.playback.advance(dt);
+                stream.playback.advance(dt * speed);
                 continue;
             }
 
@@ -254,7 +396,10 @@ impl AudioServer {
             // (a 22050 Hz stream on 44100 Hz output steps 0.5 src frames/out
             // frame) and honors `pitch_scale` (2.0 doubles the step → +1 octave).
             // Fractional cursor positions are linearly interpolated.
-            let pitch = stream.playback.pitch_scale().max(0.0);
+            // `playback_speed_scale` multiplies the per-voice pitch, so it
+            // shifts every stream's pitch AND tempo together — the same knob
+            // Godot uses to fast-forward a whole game's audio.
+            let pitch = stream.playback.pitch_scale().max(0.0) * speed;
             let step = (src_rate as f32 / rate as f32) * pitch;
             let src_pos_start = pos_secs * src_rate as f32;
             let frame_total = stream.buffer.frame_count();
@@ -381,6 +526,10 @@ impl AudioServer {
 
             // Take this bus's processed samples out and route them into the target.
             let src = std::mem::take(&mut bus_bufs[i]);
+            // Meter what this bus actually produced — post volume/effects, but
+            // BEFORE the send level, since the meter shows the bus's own output
+            // rather than its contribution to the target.
+            Self::record_peak(&mut self.peaks, i, &src, out_ch);
             if audible {
                 if let Some(t) = target_idx {
                     if t != i && t < bus_count {
@@ -412,6 +561,8 @@ impl AudioServer {
                 *s = 0.0;
             }
         }
+        // Master is metered after its own gate, so a muted master reads silent.
+        Self::record_peak(&mut self.peaks, 0, &bus_bufs[0], out_ch);
 
         // A stream reaches `Stopped` here only by running past its end (an
         // explicit `stop` removes it immediately). Record those handles as
@@ -432,6 +583,46 @@ impl AudioServer {
     /// Apply the effect chain of a named bus to an interleaved buffer.
     ///
     /// Used by tests and by pipelines that mix per-bus then combine.
+    /// The live effect in slot `effect_idx` of bus `bus_name`
+    /// (`AudioServer.get_bus_effect_instance`, pat-0q2kx.160).
+    ///
+    /// Godot returns an `AudioEffectInstance` — the per-playback companion that
+    /// carries the effect's running state. Patina keeps that state on the effect
+    /// itself, so the live effect *is* the instance and this hands back a
+    /// borrow of it. That is what makes a spectrum analyzer inserted on a bus
+    /// queryable: without it the FFT in
+    /// [`AudioEffectSpectrumAnalyzer`](crate::effects::AudioEffectSpectrumAnalyzer)
+    /// ran on real mixed audio every frame and no caller could ever read it.
+    ///
+    /// Returns `None` for an unknown bus or an out-of-range slot.
+    pub fn get_bus_effect_instance(
+        &self,
+        bus_name: &str,
+        effect_idx: usize,
+    ) -> Option<&dyn crate::effects::AudioEffect> {
+        let idx = self.mixer.get_bus_by_name(bus_name)?;
+        self.mixer.get_bus(idx)?.effects().effect_at(effect_idx)
+    }
+
+    /// Peak magnitude in `[from_hz, to_hz]` from the analyzer in slot
+    /// `effect_idx` of `bus_name` (pat-0q2kx.160).
+    ///
+    /// Convenience over [`get_bus_effect_instance`](Self::get_bus_effect_instance)
+    /// for callers that cannot hold a borrow across a language boundary — the
+    /// script bridge being the motivating one. `None` when the bus or slot does
+    /// not exist, or when that slot holds an effect that does not analyse
+    /// spectrum.
+    pub fn bus_effect_magnitude(
+        &self,
+        bus_name: &str,
+        effect_idx: usize,
+        from_hz: f32,
+        to_hz: f32,
+    ) -> Option<f32> {
+        self.get_bus_effect_instance(bus_name, effect_idx)?
+            .magnitude_for_frequency_range(from_hz, to_hz)
+    }
+
     pub fn process_bus_effects(&mut self, bus_name: &str, samples: &mut [f32]) -> bool {
         let Some(idx) = self.mixer.get_bus_by_name(bus_name) else {
             return false;

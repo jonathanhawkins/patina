@@ -38,12 +38,21 @@ pub struct Node {
 }
 
 /// A directed link (blend-tree connection or state transition).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Eq` is deliberately **not** derived: `xfade` is an `f64`, and no container
+/// here needs `Link` as a hash/BTree key — every use is a `Vec<Link>` or a
+/// `&[Link]`. `PartialEq` is kept for assertions.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Link {
     /// Source node.
     pub from: NodeId,
     /// Destination node.
     pub to: NodeId,
+    /// Crossfade time in seconds for a state transition — Godot's
+    /// `AnimationNodeStateMachineTransition.xfade_time`, spelled `xfade_time` in
+    /// a `.tscn` (pat-0q2kx.166). Always `0.0` for a blend-tree connection, which
+    /// has no such concept, and `0.0` is also Godot's transition default.
+    pub xfade: f64,
 }
 
 /// An editable AnimationTree graph.
@@ -145,10 +154,43 @@ impl AnimTreeGraph {
         &self.connections
     }
 
-    /// Creates a state transition. Returns false if either node is missing, the
-    /// endpoints are equal, or the transition already exists.
+    /// Creates a state transition with Godot's default crossfade (`0.0`).
+    /// Returns false if either node is missing, the endpoints are equal, or the
+    /// transition already exists.
     pub fn add_transition(&mut self, from: NodeId, to: NodeId) -> bool {
-        self.add_link(from, to, true)
+        self.add_transition_with_xfade(from, to, 0.0)
+    }
+
+    /// Creates a state transition carrying an explicit crossfade time in seconds
+    /// (pat-0q2kx.166). The 2-argument [`add_transition`] is kept as the default
+    /// case so existing callers need no change.
+    pub fn add_transition_with_xfade(&mut self, from: NodeId, to: NodeId, xfade: f64) -> bool {
+        self.add_link_with_xfade(from, to, true, xfade)
+    }
+
+    /// Updates an existing transition's crossfade time. Returns whether the
+    /// transition existed — the caller reports a 404 rather than silently
+    /// creating one, so a typo'd endpoint pair cannot masquerade as success.
+    pub fn set_transition_xfade(&mut self, from: NodeId, to: NodeId, xfade: f64) -> bool {
+        match self
+            .transitions
+            .iter_mut()
+            .find(|l| l.from == from && l.to == to)
+        {
+            Some(link) => {
+                link.xfade = xfade;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The crossfade time of a transition, if it exists.
+    pub fn transition_xfade(&self, from: NodeId, to: NodeId) -> Option<f64> {
+        self.transitions
+            .iter()
+            .find(|l| l.from == from && l.to == to)
+            .map(|l| l.xfade)
     }
 
     /// Removes a state transition. Returns whether it existed.
@@ -158,7 +200,9 @@ impl AnimTreeGraph {
 
     /// Whether a transition `from -> to` exists.
     pub fn has_transition(&self, from: NodeId, to: NodeId) -> bool {
-        self.transitions.iter().any(|l| l.from == from && l.to == to)
+        self.transitions
+            .iter()
+            .any(|l| l.from == from && l.to == to)
     }
 
     /// The state transitions.
@@ -167,10 +211,17 @@ impl AnimTreeGraph {
     }
 
     fn add_link(&mut self, from: NodeId, to: NodeId, transition: bool) -> bool {
-        if from == to
-            || self.get_node(from).is_none()
-            || self.get_node(to).is_none()
-        {
+        self.add_link_with_xfade(from, to, transition, 0.0)
+    }
+
+    fn add_link_with_xfade(
+        &mut self,
+        from: NodeId,
+        to: NodeId,
+        transition: bool,
+        xfade: f64,
+    ) -> bool {
+        if from == to || self.get_node(from).is_none() || self.get_node(to).is_none() {
             return false;
         }
         let list = if transition {
@@ -181,7 +232,7 @@ impl AnimTreeGraph {
         if list.iter().any(|l| l.from == from && l.to == to) {
             return false;
         }
-        list.push(Link { from, to });
+        list.push(Link { from, to, xfade });
         true
     }
 }
@@ -234,7 +285,7 @@ mod tests {
         assert_eq!(g.transitions().len(), 2);
         assert!(g.has_transition(idle, run));
         assert!(!g.add_transition(idle, run)); // duplicate
-        // Remove one.
+                                               // Remove one.
         assert!(g.remove_transition(run, idle));
         assert_eq!(g.transitions().len(), 1);
         assert!(!g.remove_transition(run, idle)); // already gone
