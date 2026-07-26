@@ -117,9 +117,11 @@ while tmux has-session -t "=$SESSION" 2>/dev/null; do
     continue
   fi
   drought=$(( now - last_progress ))
-  [ "$drought" -lt "$STALL_SECS" ] && continue
   ready="$(ready_count)"; ready="${ready:-0}"
   wp="$(worker_panes)"
+  # Readable heartbeat every check so the window shows it is alive + swarm state.
+  log "ok — closed=$cur ready=$ready workers=$wp no-close=${drought}s/${STALL_SECS}s level=$level"
+  [ "$drought" -lt "$STALL_SECS" ] && continue
   if [ "$ready" -lt 1 ] || [ "${wp:-0}" -lt 1 ]; then
     log "no-close ${drought}s but not a stall (ready=$ready workers=$wp) — holding"
     continue
