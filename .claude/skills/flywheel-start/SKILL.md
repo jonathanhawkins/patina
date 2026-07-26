@@ -204,6 +204,23 @@ Present a launch summary:
 - Check inbox: `/mail-inbox`
 ```
 
+### 7b. Start the self-healing watchdog
+
+Launch the stall-recovery watchdog in its own window so it lives and dies with
+the session. It watches forward progress (bead closes) and, on a stall with
+work available, auto-recovers by escalating: renew identities + forced assign →
+reap orphans + restart coordinator → restart workers (after a launch-queue
+drain check) → alert the operator. This is what makes the swarm survive the
+identity-desync, orphan-wedge, and worker-stuck stalls without a human.
+
+```bash
+tmux new-window -t "$SESSION" -n watchdog
+tmux send-keys -t "$SESSION:watchdog" -l "WATCHDOG_STALL_SECS=2400 bash /Users/bone/dev/games/patina/scripts/flywheel-watchdog.sh $SESSION"
+sleep 0.5; tmux send-keys -t "$SESSION:watchdog" Enter
+```
+
+Verify it's running: `pgrep -fl flywheel-watchdog` and `tail .codex/orchestrator/watchdog.log`.
+
 ### 8. Trigger initial assignment cycle (if beads are available)
 
 If there are open/ready beads, kick off an immediate assignment so workers don't sit idle waiting for the first poll cycle:
