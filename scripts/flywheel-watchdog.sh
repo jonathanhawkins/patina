@@ -54,6 +54,23 @@ launch_queue_clear() {
     rm -rf "$d"; exit 0 )
 }
 
+# Unstick any worker blocked on an interactive question (AskUserQuestion /
+# numbered menu). In an unattended swarm these block the worker forever. We
+# cancel the prompt (Esc) and redirect it to park the bead + move on. Keyed on
+# the AskUserQuestion footer, which a working (non-blocked) worker never shows.
+unstick_stuck_questions() {
+  local p cap
+  for p in $(tmux list-panes -t "$SESSION:0" -F '#{pane_index}' 2>/dev/null | awk '$1>=4'); do
+    cap="$(tmux capture-pane -t "$SESSION:0.$p" -p 2>/dev/null | tail -20)"
+    if printf '%s' "$cap" | grep -qE "Esc to[[:space:]]*$|to navigate ·|· Esc to cancel|Enter to select"; then
+      log "UNSTICK: pane $p blocked on an interactive question — Esc + park-and-continue"
+      tmux send-keys -t "$SESSION:0.$p" Escape 2>/dev/null; sleep 2
+      tmux send-keys -t "$SESSION:0.$p" -l "You blocked on an interactive question — there is NO human watching this autonomous swarm, so never use AskUserQuestion or menus. If your current bead needs an owner decision, park it now: br update <bead> --add-label needs-attention, then claim the next ready bead via /skill flywheel-worker." 2>/dev/null
+      sleep 0.5; tmux send-keys -t "$SESSION:0.$p" Enter 2>/dev/null
+    fi
+  done
+}
+
 reap_and_restart_coordinator() {
   log "L1: reaping orphan cargo/verifier + restarting coordinator daemon"
   pkill -9 -f "cargo-nextest" 2>/dev/null || true
@@ -109,6 +126,10 @@ level=0
 
 while tmux has-session -t "=$SESSION" 2>/dev/null; do
   sleep "$CHECK_SECS"
+  # EVERY cycle, before anything else: unstick any worker blocked on an
+  # interactive question. Runs regardless of close-progress — one blocked
+  # worker may not stop swarm-wide closes, but it wastes a worker until freed.
+  unstick_stuck_questions
   cur="$(closed_count)"
   now="$(date +%s)"
   if [ "${cur:-0}" -gt "${last_closed:-0}" ]; then

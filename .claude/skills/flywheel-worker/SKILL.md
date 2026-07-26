@@ -136,3 +136,4 @@ Read the output:
 - Follow `AGENTS.md`
 - Do not create or close beads (coordinator handles lifecycle)
 - If blocked, report the block instead of expanding scope
+- **NEVER ask the operator a question or use an interactive prompt (AskUserQuestion, a numbered menu, "how should I proceed?"). There is NO human watching — an interactive prompt blocks your worker forever.** If a bead needs an owner decision you cannot make (a product/design choice, a won't-do judgment, an external-dependency call), PARK it and move on: `br update <bead> --add-label needs-attention` (this pulls it from the ready queue and surfaces it to the operator), note the decision needed in your `/mail-complete`, then claim the next `br ready` bead. Parking is always correct; blocking on a question is never correct.
