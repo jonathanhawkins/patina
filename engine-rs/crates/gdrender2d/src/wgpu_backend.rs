@@ -13,6 +13,7 @@ use gdserver2d::viewport::Viewport;
 
 use crate::draw;
 use crate::font;
+use crate::polygon_raster;
 use crate::renderer::FrameBuffer;
 use crate::texture::Texture2D;
 
@@ -242,6 +243,117 @@ impl WgpuRenderer {
                     let t = global_transform.xform(*to);
                     draw::draw_line(fb, f, t, *color, *width);
                 }
+                // Stroke/fill family (pat-0q2kx.129). Shares `polygon_raster`
+                // with the software renderer so both paths agree; this match is
+                // exhaustive, so these arms are also what keeps the backend
+                // compiling as the command set grows.
+                DrawCommand::DrawPolyline {
+                    points,
+                    color,
+                    width,
+                    closed,
+                } => {
+                    let pts = transform_points(global_transform, points);
+                    polygon_raster::draw_polyline(
+                        fb,
+                        &pts,
+                        scaled_width(global_transform, *width),
+                        *color,
+                        *closed,
+                        polygon_raster::LineCap::None,
+                        polygon_raster::LineJoint::Round,
+                    );
+                }
+                DrawCommand::DrawMultiline {
+                    points,
+                    color,
+                    width,
+                } => {
+                    let w = scaled_width(global_transform, *width);
+                    for pair in points.chunks_exact(2) {
+                        let seg = [
+                            global_transform.xform(pair[0]),
+                            global_transform.xform(pair[1]),
+                        ];
+                        polygon_raster::draw_polyline(
+                            fb,
+                            &seg,
+                            w,
+                            *color,
+                            false,
+                            polygon_raster::LineCap::None,
+                            polygon_raster::LineJoint::Sharp,
+                        );
+                    }
+                }
+                DrawCommand::DrawDashedLine {
+                    from,
+                    to,
+                    color,
+                    width,
+                    dash,
+                } => {
+                    let f = global_transform.xform(*from);
+                    let t = global_transform.xform(*to);
+                    let span = t - f;
+                    let len = span.length();
+                    let step = scaled_width(global_transform, *dash).max(0.1);
+                    if len > 1e-6 {
+                        let dir = span * (1.0 / len);
+                        let w = scaled_width(global_transform, *width);
+                        let mut travelled = 0.0_f32;
+                        while travelled < len {
+                            let end = (travelled + step).min(len);
+                            let seg = [f + dir * travelled, f + dir * end];
+                            polygon_raster::draw_polyline(
+                                fb,
+                                &seg,
+                                w,
+                                *color,
+                                false,
+                                polygon_raster::LineCap::None,
+                                polygon_raster::LineJoint::Sharp,
+                            );
+                            travelled = end + step;
+                        }
+                    }
+                }
+                DrawCommand::DrawArc {
+                    center,
+                    radius,
+                    start_angle,
+                    end_angle,
+                    point_count,
+                    color,
+                    width,
+                } => {
+                    let steps = (*point_count).max(2);
+                    let sweep = *end_angle - *start_angle;
+                    let pts: Vec<Vector2> = (0..steps)
+                        .map(|i| {
+                            let t = i as f32 / (steps - 1) as f32;
+                            let a = *start_angle + sweep * t;
+                            global_transform.xform(Vector2::new(
+                                center.x + radius * a.cos(),
+                                center.y + radius * a.sin(),
+                            ))
+                        })
+                        .collect();
+                    polygon_raster::draw_polyline(
+                        fb,
+                        &pts,
+                        scaled_width(global_transform, *width),
+                        *color,
+                        false,
+                        polygon_raster::LineCap::None,
+                        polygon_raster::LineJoint::Round,
+                    );
+                }
+                DrawCommand::DrawPolygon { points, colors } => {
+                    let pts = transform_points(global_transform, points);
+                    let color = colors.first().copied().unwrap_or(Color::WHITE);
+                    polygon_raster::fill_polygon(fb, &pts, color);
+                }
                 DrawCommand::DrawTextureRect {
                     texture_path,
                     rect,
@@ -344,6 +456,20 @@ impl WgpuRenderer {
 }
 
 /// Transforms an axis-aligned rect through a 2D transform, returning the AABB.
+/// Transforms a run of local-space points into pixel space (pat-0q2kx.129).
+fn transform_points(xform: Transform2D, points: &[Vector2]) -> Vec<Vector2> {
+    points.iter().map(|p| xform.xform(*p)).collect()
+}
+
+/// Scales a stroke width by the item's transform, using the mean of the two
+/// basis scale factors — the same convention the `DrawCircle` arm uses for its
+/// radius. A non-positive width is Godot's "thinnest visible line".
+fn scaled_width(xform: Transform2D, width: f32) -> f32 {
+    let sx = xform.basis_xform(Vector2::new(1.0, 0.0)).length();
+    let sy = xform.basis_xform(Vector2::new(0.0, 1.0)).length();
+    width.max(1.0) * (sx + sy) * 0.5
+}
+
 fn transform_rect(xform: Transform2D, rect: Rect2) -> Rect2 {
     let p0 = xform.xform(rect.position);
     let p1 = xform.xform(Vector2::new(rect.position.x + rect.size.x, rect.position.y));

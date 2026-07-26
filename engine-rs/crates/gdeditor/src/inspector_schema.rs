@@ -97,8 +97,9 @@ pub fn editor_schema(class_name: &str) -> Option<Vec<EditorProp>> {
 
 /// The classes that have a seeded flattened editor schema. The table is
 /// generated from the Godot 4.6.1 goldens by `tools/oracle/gen_inspector_schema.py`
-/// (see `inspector_schema_generated.rs`) — 33 classes covering every class in the
-/// captured oracle scenes.
+/// (see `inspector_schema_generated.rs`) — every class in the captured oracle
+/// scenes, plus the common node/resource classes no scene contained, whose
+/// schema is synthesized from the vendored `doc/classes/*.xml` (pat-0q2kx.128).
 fn seeded_schema(class_name: &str) -> Option<Vec<EditorProp>> {
     crate::inspector_schema_generated::generated_schema(class_name)
 }
@@ -182,6 +183,12 @@ pub fn parent_of(class_name: &str) -> Option<&'static str> {
         .iter()
         .find(|(c, _)| *c == class_name)
         .map(|(_, p)| *p)
+        // Curated table first, then every `inherits` edge Godot declares
+        // (pat-0q2kx.128). The curated list only covers classes the oracle
+        // scenes happened to contain, so without this fallback a class like
+        // `Line2D` or `Button` returned None and `editor_schema` gave up
+        // instead of walking to its nearest seeded base.
+        .or_else(|| crate::inspector_schema_generated::generated_parent_of(class_name))
 }
 
 #[cfg(test)]
@@ -219,7 +226,9 @@ mod tests {
     fn node3d_defaults_match_godot() {
         let s = editor_schema("Node3D").unwrap();
         let scale = s.iter().find(|p| p.name == "scale").unwrap();
-        assert!(matches!(&scale.default, Variant::Vector3(v) if v.x == 1.0 && v.y == 1.0 && v.z == 1.0));
+        assert!(
+            matches!(&scale.default, Variant::Vector3(v) if v.x == 1.0 && v.y == 1.0 && v.z == 1.0)
+        );
         let order = s.iter().find(|p| p.name == "rotation_order").unwrap();
         assert!(matches!(&order.default, Variant::Int(2)));
     }
@@ -276,7 +285,7 @@ mod tests {
     fn uncaptured_class_resolves_to_nearest_seeded_ancestor() {
         // Path2D is not captured; it should resolve up to Node2D (27 props).
         assert!(parent_of("Path2D").is_none()); // not in the parent table either
-                                                 // but a known intermediate resolves:
+                                                // but a known intermediate resolves:
         assert_eq!(editor_schema("BoxContainer").unwrap().len(), 72); // -> Control
     }
 

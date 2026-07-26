@@ -51,6 +51,7 @@ use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use gdcore::error::{EngineError, EngineResult};
+use gdcore::file_access::{FileAccess, MountedPack};
 
 use crate::loader::{ResourceLoader, TresLoader};
 use crate::resource::Resource;
@@ -161,6 +162,11 @@ pub struct PckArchive {
     pub header: PckHeader,
     /// File entries keyed by their `res://` path.
     pub entries: BTreeMap<String, PckEntry>,
+    /// Paths this pack *removes* — Godot patch packs carry `PACK_FILE_REMOVAL`
+    /// records so an update can delete a file a base pack still contains
+    /// (`file_access_pack.h`). These were parsed and discarded before, so a
+    /// removal entry had no effect at all (pat-0q2kx.134).
+    pub removed: Vec<String>,
 }
 
 impl PckArchive {
@@ -259,6 +265,7 @@ impl PckArchive {
 
         // Directory entries.
         let mut entries = BTreeMap::new();
+        let mut removed: Vec<String> = Vec::new();
         for _ in 0..file_count {
             let path_len = read_u32(&mut cursor)? as usize;
             let mut path_buf = vec![0u8; path_len];
@@ -276,8 +283,11 @@ impl PckArchive {
 
             let flags = read_u32(&mut cursor)?;
 
-            // A removal record marks a path deleted by a patch pack — skip it.
+            // A removal record marks a path deleted by a patch pack. It carries
+            // no data, so it is kept out of `entries` — but it must be recorded,
+            // or mounting the patch could not hide the base pack's copy.
             if flags & PACK_FILE_REMOVAL != 0 {
+                removed.push(path);
                 continue;
             }
             if flags & PACK_FILE_ENCRYPTED != 0 {
@@ -301,7 +311,11 @@ impl PckArchive {
             );
         }
 
-        Ok(Self { header, entries })
+        Ok(Self {
+            header,
+            entries,
+            removed,
+        })
     }
 
     /// Extracts the data for a specific file entry from the archive bytes.
@@ -422,8 +436,7 @@ impl PckPacker {
 
         // Header size (V2): magic(4) + version(4) + ver×3(12) + pack_flags(4)
         //                   + file_base(8) + reserved(64) + file_count(4) = 100.
-        let header_size: u64 =
-            4 + 4 + 12 + 4 + 8 + (RESERVED_FIELD_COUNT as u64 * 4) + 4;
+        let header_size: u64 = 4 + 4 + 12 + 4 + 8 + (RESERVED_FIELD_COUNT as u64 * 4) + 4;
         let data_start = align_up(header_size + dir_size, self.alignment);
         // file_base is written relative to the pack start (here the buffer start).
         // Matching Godot's writer, PACK_REL_FILEBASE is set so the reader adds the
@@ -787,6 +800,106 @@ impl ResourceLoader for PckMountManager {
 }
 
 // ---------------------------------------------------------------------------
+// Mounting a PCK over res:// (pat-0q2kx.134)
+// ---------------------------------------------------------------------------
+
+/// A [`PckResourceLoader`] adapted to `gdcore`'s [`MountedPack`] overlay so
+/// `res://` reads resolve out of the archive.
+///
+/// `gdcore` cannot depend on this crate (the dependency runs the other way), so
+/// the overlay is defined there as a trait and implemented here.
+#[derive(Debug)]
+pub struct PckMount {
+    loader: PckResourceLoader,
+}
+
+impl PckMount {
+    /// Wraps already-parsed PCK bytes.
+    pub fn from_bytes(data: Vec<u8>) -> io::Result<Self> {
+        Ok(Self {
+            loader: PckResourceLoader::from_bytes(data)?,
+        })
+    }
+
+    /// The underlying loader, for callers that want the archive directory.
+    pub fn loader(&self) -> &PckResourceLoader {
+        &self.loader
+    }
+}
+
+impl MountedPack for PckMount {
+    fn has_file(&self, res_path: &str) -> bool {
+        self.loader.has_file(res_path)
+    }
+
+    fn read_file(&self, res_path: &str) -> Option<Vec<u8>> {
+        self.loader.extract_raw(res_path).map(|b| b.to_vec())
+    }
+
+    fn removed_files(&self) -> Vec<String> {
+        self.loader.archive().removed.clone()
+    }
+}
+
+/// Mounts a `.pck` over `res://`, Godot's `ProjectSettings.load_resource_pack`.
+///
+/// * `label` identifies the mount for later [`unmount_resource_pack`].
+/// * `replace` mirrors Godot's `replace_files`: `true` mounts above everything
+///   already mounted (its files win), `false` mounts below them so existing
+///   content keeps precedence.
+/// * `offset` skips into the file, for a pack embedded after another payload.
+///
+/// The bytes are read through [`FileAccess::read_file_bytes`], so a pack can
+/// itself live inside an already-mounted pack — which is how a game ships DLC
+/// referenced from its own `res://`.
+pub fn load_resource_pack(
+    label: impl Into<String>,
+    path: &str,
+    replace: bool,
+    offset: u64,
+) -> EngineResult<()> {
+    let mut bytes = FileAccess::read_file_bytes(path)?;
+    if offset > 0 {
+        if (offset as usize) >= bytes.len() {
+            return Err(EngineError::InvalidOperation(format!(
+                "resource pack offset {offset} is past the end of {path}"
+            )));
+        }
+        bytes.drain(..offset as usize);
+    }
+    let mount = PckMount::from_bytes(bytes)
+        .map_err(|e| EngineError::Parse(format!("{path} is not a valid .pck: {e}")))?;
+    // Godot's `replace_files` decides precedence rather than whether files are
+    // overwritten on disk: a replacing pack is searched before the packs already
+    // mounted, a non-replacing one after them.
+    let priority = if replace {
+        next_mount_priority_above()
+    } else {
+        next_mount_priority_below()
+    };
+    gdcore::file_access::mount_pack(label, Arc::new(mount), priority);
+    Ok(())
+}
+
+/// Removes a pack mounted by [`load_resource_pack`].
+pub fn unmount_resource_pack(label: &str) -> bool {
+    gdcore::file_access::unmount_pack(label)
+}
+
+/// Priority counters for mount ordering. `load_resource_pack` needs "above
+/// everything" and "below everything" without the caller tracking numbers.
+static MOUNT_ABOVE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static MOUNT_BELOW: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+fn next_mount_priority_above() -> i32 {
+    MOUNT_ABOVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+fn next_mount_priority_below() -> i32 {
+    MOUNT_BELOW.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) - 1
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1026,7 +1139,10 @@ mod tests {
         let archive = PckArchive::from_bytes(&data).unwrap();
         let entry = archive.get_entry("res://a.txt").unwrap();
         assert_eq!(entry.offset, file_base); // first file sits at file_base + 0
-        assert_eq!(archive.extract_file(&data, "res://a.txt").unwrap(), b"hello");
+        assert_eq!(
+            archive.extract_file(&data, "res://a.txt").unwrap(),
+            b"hello"
+        );
     }
 
     #[test]
@@ -1045,7 +1161,7 @@ mod tests {
             d.extend_from_slice(&0u32.to_le_bytes()); // [32..96] reserved 16×u32
         }
         d.extend_from_slice(&1u32.to_le_bytes()); //  [96..100] file_count = 1
-        // ---- entry ----
+                                                  // ---- entry ----
         d.extend_from_slice(&12u32.to_le_bytes()); // [100..104] path_len = 12 (11+NUL)
         d.extend_from_slice(b"res://a.txt\0"); //     [104..116] path (NUL-padded)
         d.extend_from_slice(&0u64.to_le_bytes()); //  [116..124] offset = 0 (rel file_base)
@@ -1082,7 +1198,7 @@ mod tests {
             d.extend_from_slice(&0u32.to_le_bytes()); // [40..104] reserved (skipped by seek)
         }
         d.extend_from_slice(b"hello"); //             [104..109] file data at file_base
-        // ---- directory at dir_offset = 109 ----
+                                       // ---- directory at dir_offset = 109 ----
         d.extend_from_slice(&1u32.to_le_bytes()); //  [109..113] file_count = 1
         d.extend_from_slice(&12u32.to_le_bytes()); // [113..117] path_len = 12
         d.extend_from_slice(b"res://a.txt\0"); //     [117..129] path
@@ -1230,8 +1346,14 @@ mod tests {
         let archive = PckArchive::from_bytes(&data).unwrap();
         let a = archive.get_entry("res://a.txt").unwrap();
         assert_eq!(a.offset, file_base); // first file: relative offset 0
-        assert_eq!(archive.extract_file(&data, "res://a.txt").unwrap(), b"alpha");
-        assert_eq!(archive.extract_file(&data, "res://b.txt").unwrap(), b"beta!");
+        assert_eq!(
+            archive.extract_file(&data, "res://a.txt").unwrap(),
+            b"alpha"
+        );
+        assert_eq!(
+            archive.extract_file(&data, "res://b.txt").unwrap(),
+            b"beta!"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1621,5 +1743,168 @@ name = "FromMount"
         let result = mgr.mount("bad", vec![0, 1, 2, 3], 0);
         assert!(result.is_err());
         assert_eq!(mgr.mount_count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod mount_tests {
+    use super::*;
+
+    /// Builds a pck whose directory carries a `PACK_FILE_REMOVAL` record for
+    /// `removed_path`, which `PckPacker` has no API to emit. Written by hand so
+    /// the parser's removal branch is exercised against real bytes rather than a
+    /// synthesised `PckArchive` (pat-0q2kx.134).
+    fn pack_with_removal(present: (&str, &[u8]), removed_path: &str) -> Vec<u8> {
+        // The removal is packed as its own single-entry archive and layered by
+        // mount precedence — simpler and far less brittle than splicing an extra
+        // entry into an existing directory and fixing up every offset.
+        let _ = present;
+        let mut only_removal = PckPacker::new();
+        only_removal.add_file(removed_path, Vec::new());
+        let mut bytes = only_removal.pack().expect("pack");
+        // Flip the entry's flags word to PACK_FILE_REMOVAL. The entry layout is
+        // path_len(4) + padded path + offset(8) + size(8) + md5(16) + flags(4),
+        // so the flags are the last 4 bytes before the (empty) data section.
+        let flags_pos = find_removal_flags_offset(&bytes, removed_path);
+        bytes[flags_pos..flags_pos + 4].copy_from_slice(&PACK_FILE_REMOVAL.to_le_bytes());
+        bytes
+    }
+
+    /// Locates the `flags` u32 of `path`'s directory entry in a freshly packed
+    /// single-file archive.
+    ///
+    /// The padded path length is read from the entry's own `path_len` field —
+    /// `PckPacker` writes the *already padded* length there — rather than
+    /// scanning for NUL padding, which would run into the following `offset`
+    /// whenever that field's low byte happens to be zero.
+    fn find_removal_flags_offset(bytes: &[u8], path: &str) -> usize {
+        let needle = path.as_bytes();
+        let at = bytes
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("path present in directory");
+        let len_field = at - 4;
+        let padded_len = u32::from_le_bytes([
+            bytes[len_field],
+            bytes[len_field + 1],
+            bytes[len_field + 2],
+            bytes[len_field + 3],
+        ]) as usize;
+        assert!(
+            padded_len >= needle.len(),
+            "path_len field must cover the path",
+        );
+        // path_len(4) + padded path + offset(8) + size(8) + md5(16) → flags.
+        at + padded_len + 8 + 8 + 16
+    }
+
+    fn reset() {
+        gdcore::file_access::clear_mounted_packs();
+    }
+
+    #[test]
+    fn mounted_pack_serves_res_reads_without_a_disk_file() {
+        reset();
+        let mut packer = PckPacker::new();
+        packer.add_file("res://icon.png", b"PNGDATA".to_vec());
+        let bytes = packer.pack().expect("pack");
+
+        let mount = PckMount::from_bytes(bytes).expect("valid pck");
+        gdcore::file_access::mount_pack("game", Arc::new(mount), 0);
+
+        assert!(
+            FileAccess::file_exists("res://icon.png"),
+            "a packed file must satisfy FileAccess.file_exists with nothing on disk",
+        );
+        assert_eq!(
+            FileAccess::read_file_bytes("res://icon.png").expect("read"),
+            b"PNGDATA".to_vec(),
+        );
+        assert!(
+            !FileAccess::file_exists("res://absent.png"),
+            "a path in no pack must not report as existing",
+        );
+        reset();
+    }
+
+    #[test]
+    fn higher_priority_mount_overrides_a_lower_one() {
+        reset();
+        let mut base = PckPacker::new();
+        base.add_file("res://data.txt", b"base".to_vec());
+        let mut patch = PckPacker::new();
+        patch.add_file("res://data.txt", b"patch".to_vec());
+
+        gdcore::file_access::mount_pack(
+            "base",
+            Arc::new(PckMount::from_bytes(base.pack().unwrap()).unwrap()),
+            0,
+        );
+        gdcore::file_access::mount_pack(
+            "patch",
+            Arc::new(PckMount::from_bytes(patch.pack().unwrap()).unwrap()),
+            10,
+        );
+
+        assert_eq!(
+            FileAccess::read_file_string("res://data.txt").unwrap(),
+            "patch",
+            "the higher-priority mount must win",
+        );
+        assert!(gdcore::file_access::unmount_pack("patch"));
+        assert_eq!(
+            FileAccess::read_file_string("res://data.txt").unwrap(),
+            "base",
+            "unmounting the patch must fall back to the base pack",
+        );
+        reset();
+    }
+
+    #[test]
+    fn a_removal_entry_hides_a_lower_mounts_file() {
+        reset();
+        let mut base = PckPacker::new();
+        base.add_file("res://gone.txt", b"still here".to_vec());
+        gdcore::file_access::mount_pack(
+            "base",
+            Arc::new(PckMount::from_bytes(base.pack().unwrap()).unwrap()),
+            0,
+        );
+        assert!(FileAccess::file_exists("res://gone.txt"));
+
+        let patch = pack_with_removal(("res://kept.txt", b"kept"), "res://gone.txt");
+        let mount = PckMount::from_bytes(patch).expect("valid pck");
+        assert_eq!(
+            mount.removed_files(),
+            vec!["res://gone.txt".to_string()],
+            "the removal record must survive parsing — it used to be discarded",
+        );
+        gdcore::file_access::mount_pack("patch", Arc::new(mount), 10);
+
+        assert!(
+            !FileAccess::file_exists("res://gone.txt"),
+            "a patch pack's removal entry must hide the base pack's copy",
+        );
+        assert!(
+            FileAccess::read_file_bytes("res://gone.txt").is_err(),
+            "reading a removed path must fail rather than serve the stale bytes",
+        );
+        reset();
+    }
+
+    #[test]
+    fn non_res_paths_are_never_served_from_packs() {
+        reset();
+        let mut packer = PckPacker::new();
+        packer.add_file("res://x.txt", b"x".to_vec());
+        gdcore::file_access::mount_pack(
+            "game",
+            Arc::new(PckMount::from_bytes(packer.pack().unwrap()).unwrap()),
+            0,
+        );
+        // `user://` is writable state, never packed; a plain path is the host FS.
+        assert!(gdcore::file_access::read_from_packs("user://x.txt").is_none());
+        assert!(gdcore::file_access::read_from_packs("/tmp/x.txt").is_none());
+        reset();
     }
 }

@@ -63,6 +63,124 @@ pub fn user_root() -> Option<PathBuf> {
         .clone()
 }
 
+// ---------------------------------------------------------------------------
+// Mounted resource packs (pat-0q2kx.134)
+// ---------------------------------------------------------------------------
+
+/// A read-only archive mounted over `res://`, as Godot's `PackedData` mounts a
+/// `.pck` (`core/io/file_access_pack.cpp`).
+///
+/// This is a trait rather than a concrete PCK type on purpose: the `.pck` reader
+/// lives in `gdresource`, which depends on `gdcore`, so the dependency can only
+/// point one way. `gdresource` implements this and registers its archives here,
+/// which is what lets `FileAccess` serve `res://` reads out of a pack without
+/// `gdcore` knowing the container format.
+pub trait MountedPack: Send + Sync {
+    /// Whether this pack supplies `res_path` (a full `res://…` path).
+    fn has_file(&self, res_path: &str) -> bool;
+
+    /// The bytes of `res_path`, or `None` when this pack does not supply it.
+    fn read_file(&self, res_path: &str) -> Option<Vec<u8>>;
+
+    /// Paths this pack *removes* — Godot's patch packs carry removal entries so
+    /// an update can delete a file that a lower-priority pack still contains
+    /// (`PackedData::add_path` with a zero-length removal marker). A removed
+    /// path hides lower mounts **and** the loose file on disk.
+    fn removed_files(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+struct PackMount {
+    label: String,
+    priority: i32,
+    pack: std::sync::Arc<dyn MountedPack>,
+}
+
+static PACK_MOUNTS: RwLock<Vec<PackMount>> = RwLock::new(Vec::new());
+
+fn with_mounts<T>(f: impl FnOnce(&Vec<PackMount>) -> T) -> T {
+    let guard = PACK_MOUNTS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&guard)
+}
+
+/// Mounts `pack` over `res://` under `label`, replacing any mount with the same
+/// label. Higher `priority` is consulted first.
+///
+/// Mirrors `ProjectSettings.load_resource_pack`: a mounted pack shadows the
+/// loose files on disk, so an exported game reads its own content even when a
+/// stale project directory is still present.
+pub fn mount_pack(label: impl Into<String>, pack: std::sync::Arc<dyn MountedPack>, priority: i32) {
+    let label = label.into();
+    let mut guard = PACK_MOUNTS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.retain(|m| m.label != label);
+    guard.push(PackMount {
+        label,
+        priority,
+        pack,
+    });
+    // Descending priority, so the search order is the mount order.
+    guard.sort_by(|a, b| b.priority.cmp(&a.priority));
+}
+
+/// Unmounts the pack registered under `label`. Returns whether one was removed.
+pub fn unmount_pack(label: &str) -> bool {
+    let mut guard = PACK_MOUNTS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let before = guard.len();
+    guard.retain(|m| m.label != label);
+    guard.len() < before
+}
+
+/// Removes every mounted pack. Used by tests and by a runner switching projects.
+pub fn clear_mounted_packs() {
+    PACK_MOUNTS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear()
+}
+
+/// Labels of the mounted packs, highest priority first.
+pub fn mounted_pack_labels() -> Vec<String> {
+    with_mounts(|m| m.iter().map(|p| p.label.clone()).collect())
+}
+
+/// Whether any mount marks `path` as removed (a patch pack's removal entry).
+fn pack_removes(path: &str) -> bool {
+    with_mounts(|mounts| {
+        mounts
+            .iter()
+            .any(|m| m.pack.removed_files().iter().any(|r| r == path))
+    })
+}
+
+/// Whether a mounted pack supplies `path`.
+///
+/// A path a higher-priority mount *removes* reports `false` even when a lower
+/// mount still carries it, which is the point of a removal entry.
+pub fn pack_has_file(path: &str) -> bool {
+    if !path.starts_with("res://") {
+        return false;
+    }
+    if pack_removes(path) {
+        return false;
+    }
+    with_mounts(|mounts| mounts.iter().any(|m| m.pack.has_file(path)))
+}
+
+/// Reads `path` from the highest-priority mounted pack that supplies it.
+pub fn read_from_packs(path: &str) -> Option<Vec<u8>> {
+    if !path.starts_with("res://") || pack_removes(path) {
+        return None;
+    }
+    with_mounts(|mounts| mounts.iter().find_map(|m| m.pack.read_file(path)))
+}
+
 /// Resolves a Godot-style path (`res://`, `user://`, or plain) to a filesystem path.
 ///
 /// # Errors
@@ -182,11 +300,52 @@ impl FileAccess {
     }
 
     /// Returns `true` if a file exists at `path` (after `res://` / `user://` resolution).
+    ///
+    /// Mounted resource packs are consulted first, so an exported game's
+    /// `FileAccess.file_exists("res://icon.png")` is true when the file lives in
+    /// the `.pck` and nothing is on disk (pat-0q2kx.134). A path a patch pack
+    /// removes reports `false` even if it is still present on disk — that is what
+    /// makes a removal entry meaningful.
     pub fn file_exists(path: &str) -> bool {
+        if path.starts_with("res://") {
+            if pack_removes(path) {
+                return false;
+            }
+            if pack_has_file(path) {
+                return true;
+            }
+        }
         match resolve_path(path) {
             Ok(p) => p.is_file(),
             Err(_) => false,
         }
+    }
+
+    /// Reads a whole `res://` / `user://` / plain file as bytes, serving mounted
+    /// packs before disk (pat-0q2kx.134).
+    ///
+    /// This is the read path a resource loader should use so packed and loose
+    /// projects behave identically. `FileAccess::open` still returns a real
+    /// `File` handle and therefore cannot serve a pack — seeking inside a packed
+    /// entry is a separate concern from reading it whole, which is what every
+    /// current loader does.
+    pub fn read_file_bytes(path: &str) -> EngineResult<Vec<u8>> {
+        if let Some(bytes) = read_from_packs(path) {
+            return Ok(bytes);
+        }
+        if path.starts_with("res://") && pack_removes(path) {
+            return Err(EngineError::InvalidOperation(format!(
+                "{path} is removed by a mounted patch pack"
+            )));
+        }
+        let resolved = resolve_path(path)?;
+        fs::read(&resolved).map_err(EngineError::from)
+    }
+
+    /// [`read_file_bytes`](Self::read_file_bytes) decoded as UTF-8 (lossy, as
+    /// Godot's `FileAccess.get_as_text` is).
+    pub fn read_file_string(path: &str) -> EngineResult<String> {
+        Ok(String::from_utf8_lossy(&Self::read_file_bytes(path)?).into_owned())
     }
 
     /// Absolute filesystem path this handle is bound to.

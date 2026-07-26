@@ -3,11 +3,14 @@
 use gdcore::math::Color;
 use gdcore::math3d::Transform3D;
 
+use crate::decal::Decal3D;
+use crate::fog_volume::FogVolume;
 use crate::instance::{GeometryInstanceSettings, Instance3DId};
 use crate::light::{Light3D, Light3DId};
 use crate::material::Material3D;
 use crate::mesh::Mesh3D;
 use crate::multimesh::MultiMesh3D;
+use crate::occluder::OccluderInstance3D;
 use crate::reflection_probe::{ReflectionProbe, ReflectionProbeId};
 use crate::shader::ShaderMaterial3D;
 use crate::viewport::Viewport3D;
@@ -95,6 +98,22 @@ pub trait RenderingServer3D {
 
     /// Removes a reflection probe from the scene.
     fn remove_reflection_probe(&mut self, id: ReflectionProbeId);
+
+    /// Adds a `FogVolume` at `transform` to this frame's scene (pat-0q2kx.132).
+    ///
+    /// Default no-op, like [`update_reflection_probe`](Self::update_reflection_probe):
+    /// a renderer without a fog-volume pass stays trait-compatible and simply
+    /// draws no fog, rather than every backend being forced to grow one.
+    fn add_fog_volume(&mut self, _volume: FogVolume, _transform: Transform3D) {}
+
+    /// Adds a `Decal` to this frame's scene (pat-0q2kx.132). The decal carries
+    /// its own `global_transform`. Default no-op.
+    fn add_decal(&mut self, _decal: Decal3D) {}
+
+    /// Adds an `OccluderInstance3D` to this frame's occlusion set
+    /// (pat-0q2kx.132). Default no-op — a renderer that does not cull simply
+    /// draws everything, which is correct, just slower.
+    fn add_occluder(&mut self, _occluder: OccluderInstance3D) {}
 
     /// Renders a frame for the given 3D viewport.
     fn render_frame(&mut self, viewport: &Viewport3D) -> FrameData3D;

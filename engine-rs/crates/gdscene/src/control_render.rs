@@ -250,6 +250,13 @@ pub fn control_draw_items(
                     modulate: *modulate,
                     z,
                 }),
+                // The stroke/fill family (polyline, multiline, dashed line, arc,
+                // polygon — pat-0q2kx.129) has no `ControlDrawItem` counterpart:
+                // this list models what a *theme* draws, and no Control theme
+                // emits those. A script's `_draw` reaches the framebuffer
+                // through the renderer's own command path instead, so nothing
+                // is lost by skipping them here.
+                _ => {}
             }
         }
     }

@@ -2706,6 +2706,32 @@ pub fn register_3d_classes() {
             .method(MethodInfo::new("set_shader_parameter", 2))
             .method(MethodInfo::new("get_shader_parameter", 1)),
     );
+    // The 2D counterpart (pat-0q2kx.131). Only 3D materials were registered, so
+    // `CanvasItemMaterial` — the resource that decides how a 2D item composites
+    // — could not be instantiated or inspected at all. Defaults are Godot's:
+    // BLEND_MODE_MIX (0), LIGHT_MODE_NORMAL (0), particles animation off.
+    register_class(
+        ClassRegistration::new("CanvasItemMaterial")
+            .parent("Material")
+            .property(PropertyInfo::new("blend_mode", Variant::Int(0)))
+            .property(PropertyInfo::new("light_mode", Variant::Int(0)))
+            .property(PropertyInfo::new(
+                "particles_animation",
+                Variant::Bool(false),
+            ))
+            .property(PropertyInfo::new(
+                "particles_anim_h_frames",
+                Variant::Int(1),
+            ))
+            .property(PropertyInfo::new(
+                "particles_anim_v_frames",
+                Variant::Int(1),
+            ))
+            .property(PropertyInfo::new(
+                "particles_anim_loop",
+                Variant::Bool(false),
+            )),
+    );
     // ShaderInclude → Resource (reusable `.gdshaderinc` fragments); Godot's
     // ShaderGlobalsOverride is a Node that overrides project shader globals.
     register_class(ClassRegistration::new("ShaderInclude").parent("Resource"));
@@ -3695,7 +3721,38 @@ pub fn register_2d_classes() {
 
     // -- Common 2D nodes --
     if !class_exists("Sprite2D") {
-        register_class(ClassRegistration::new("Sprite2D").parent("Node2D"));
+        // Sprite2D: 12 own properties from doc/classes/Sprite2D.xml.
+        register_class(
+            ClassRegistration::new("Sprite2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("centered", Variant::Bool(true)))
+                .property(PropertyInfo::new("flip_h", Variant::Bool(false)))
+                .property(PropertyInfo::new("flip_v", Variant::Bool(false)))
+                .property(PropertyInfo::new("frame", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "frame_coords",
+                    Variant::Vector2i(gdcore::math::Vector2i::new(0, 0)),
+                ))
+                .property(PropertyInfo::new("hframes", Variant::Int(1)))
+                .property(PropertyInfo::new(
+                    "offset",
+                    Variant::Vector2(Vector2::new(0.0, 0.0)),
+                ))
+                .property(PropertyInfo::new("region_enabled", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "region_filter_clip_enabled",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "region_rect",
+                    Variant::Rect2(gdcore::math::Rect2::new(
+                        Vector2::new(0.0, 0.0),
+                        Vector2::new(0.0, 0.0),
+                    )),
+                ))
+                .property(PropertyInfo::new("texture", Variant::Nil))
+                .property(PropertyInfo::new("vframes", Variant::Int(1))),
+        );
     }
     // AnimatedSprite2D was registered as a bare name with no properties,
     // signals or methods, so nothing could inspect it, no `.tscn` property
@@ -3744,7 +3801,75 @@ pub fn register_2d_classes() {
         );
     }
     if !class_exists("Camera2D") {
-        register_class(ClassRegistration::new("Camera2D").parent("Node2D"));
+        // Camera2D: 28 own properties from doc/classes/Camera2D.xml.
+        register_class(
+            ClassRegistration::new("Camera2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("anchor_mode", Variant::Int(1)))
+                .property(PropertyInfo::new("custom_viewport", Variant::Nil))
+                .property(PropertyInfo::new("drag_bottom_margin", Variant::Float(0.2)))
+                .property(PropertyInfo::new(
+                    "drag_horizontal_enabled",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "drag_horizontal_offset",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("drag_left_margin", Variant::Float(0.2)))
+                .property(PropertyInfo::new("drag_right_margin", Variant::Float(0.2)))
+                .property(PropertyInfo::new("drag_top_margin", Variant::Float(0.2)))
+                .property(PropertyInfo::new(
+                    "drag_vertical_enabled",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "drag_vertical_offset",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "editor_draw_drag_margin",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "editor_draw_limits",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("editor_draw_screen", Variant::Bool(true)))
+                .property(PropertyInfo::new("enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("ignore_rotation", Variant::Bool(true)))
+                .property(PropertyInfo::new("limit_bottom", Variant::Int(10000000)))
+                .property(PropertyInfo::new("limit_enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("limit_left", Variant::Int(-10000000)))
+                .property(PropertyInfo::new("limit_right", Variant::Int(10000000)))
+                .property(PropertyInfo::new("limit_smoothed", Variant::Bool(false)))
+                .property(PropertyInfo::new("limit_top", Variant::Int(-10000000)))
+                .property(PropertyInfo::new(
+                    "offset",
+                    Variant::Vector2(Vector2::new(0.0, 0.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "position_smoothing_enabled",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "position_smoothing_speed",
+                    Variant::Float(5.0),
+                ))
+                .property(PropertyInfo::new("process_callback", Variant::Int(1)))
+                .property(PropertyInfo::new(
+                    "rotation_smoothing_enabled",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "rotation_smoothing_speed",
+                    Variant::Float(5.0),
+                ))
+                .property(PropertyInfo::new(
+                    "zoom",
+                    Variant::Vector2(Vector2::new(1.0, 1.0)),
+                )),
+        );
     }
     // pat-0q2kx.108: TileMapLayer had a bare registration, so an inspector
     // never showed the properties a painted layer actually carries and a
@@ -3904,30 +4029,297 @@ pub fn register_2d_classes() {
         );
     }
     if !class_exists("GPUParticles2D") {
-        register_class(ClassRegistration::new("GPUParticles2D").parent("Node2D"));
+        // GPUParticles2D: 26 own properties from doc/classes/GPUParticles2D.xml.
+        register_class(
+            ClassRegistration::new("GPUParticles2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("amount", Variant::Int(8)))
+                .property(PropertyInfo::new("amount_ratio", Variant::Float(1.0)))
+                .property(PropertyInfo::new(
+                    "collision_base_size",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new("draw_order", Variant::Int(1)))
+                .property(PropertyInfo::new("emitting", Variant::Bool(true)))
+                .property(PropertyInfo::new("explosiveness", Variant::Float(0.0)))
+                .property(PropertyInfo::new("fixed_fps", Variant::Int(30)))
+                .property(PropertyInfo::new("fract_delta", Variant::Bool(true)))
+                .property(PropertyInfo::new("interp_to_end", Variant::Float(0.0)))
+                .property(PropertyInfo::new("interpolate", Variant::Bool(true)))
+                .property(PropertyInfo::new("lifetime", Variant::Float(1.0)))
+                .property(PropertyInfo::new("local_coords", Variant::Bool(false)))
+                .property(PropertyInfo::new("one_shot", Variant::Bool(false)))
+                .property(PropertyInfo::new("preprocess", Variant::Float(0.0)))
+                .property(PropertyInfo::new("process_material", Variant::Nil))
+                .property(PropertyInfo::new("randomness", Variant::Float(0.0)))
+                .property(PropertyInfo::new("seed", Variant::Int(0)))
+                .property(PropertyInfo::new("speed_scale", Variant::Float(1.0)))
+                .property(PropertyInfo::new(
+                    "sub_emitter",
+                    Variant::NodePath(gdcore::node_path::NodePath::new("")),
+                ))
+                .property(PropertyInfo::new("texture", Variant::Nil))
+                .property(PropertyInfo::new("trail_enabled", Variant::Bool(false)))
+                .property(PropertyInfo::new("trail_lifetime", Variant::Float(0.3)))
+                .property(PropertyInfo::new(
+                    "trail_section_subdivisions",
+                    Variant::Int(4),
+                ))
+                .property(PropertyInfo::new("trail_sections", Variant::Int(8)))
+                .property(PropertyInfo::new("use_fixed_seed", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "visibility_rect",
+                    Variant::Rect2(gdcore::math::Rect2::new(
+                        Vector2::new(-100.0, -100.0),
+                        Vector2::new(200.0, 200.0),
+                    )),
+                )),
+        );
     }
     if !class_exists("CPUParticles2D") {
-        register_class(ClassRegistration::new("CPUParticles2D").parent("Node2D"));
+        // CPUParticles2D: 70 own properties from doc/classes/CPUParticles2D.xml.
+        register_class(
+            ClassRegistration::new("CPUParticles2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("amount", Variant::Int(8)))
+                .property(PropertyInfo::new("angle_curve", Variant::Nil))
+                .property(PropertyInfo::new("angle_max", Variant::Float(0.0)))
+                .property(PropertyInfo::new("angle_min", Variant::Float(0.0)))
+                .property(PropertyInfo::new("angular_velocity_curve", Variant::Nil))
+                .property(PropertyInfo::new(
+                    "angular_velocity_max",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "angular_velocity_min",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("anim_offset_curve", Variant::Nil))
+                .property(PropertyInfo::new("anim_offset_max", Variant::Float(0.0)))
+                .property(PropertyInfo::new("anim_offset_min", Variant::Float(0.0)))
+                .property(PropertyInfo::new("anim_speed_curve", Variant::Nil))
+                .property(PropertyInfo::new("anim_speed_max", Variant::Float(0.0)))
+                .property(PropertyInfo::new("anim_speed_min", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "color",
+                    Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
+                ))
+                .property(PropertyInfo::new("color_initial_ramp", Variant::Nil))
+                .property(PropertyInfo::new("color_ramp", Variant::Nil))
+                .property(PropertyInfo::new("damping_curve", Variant::Nil))
+                .property(PropertyInfo::new("damping_max", Variant::Float(0.0)))
+                .property(PropertyInfo::new("damping_min", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "direction",
+                    Variant::Vector2(Vector2::new(1.0, 0.0)),
+                ))
+                .property(PropertyInfo::new("draw_order", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "emission_colors",
+                    Variant::PackedColorArray(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "emission_normals",
+                    Variant::PackedVector2Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "emission_points",
+                    Variant::PackedVector2Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "emission_rect_extents",
+                    Variant::Vector2(Vector2::new(0.0, 0.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "emission_ring_inner_radius",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "emission_ring_radius",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("emission_shape", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "emission_sphere_radius",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("emitting", Variant::Bool(true)))
+                .property(PropertyInfo::new("explosiveness", Variant::Float(0.0)))
+                .property(PropertyInfo::new("fixed_fps", Variant::Int(0)))
+                .property(PropertyInfo::new("fract_delta", Variant::Bool(true)))
+                .property(PropertyInfo::new(
+                    "gravity",
+                    Variant::Vector2(Vector2::new(0.0, 980.0)),
+                ))
+                .property(PropertyInfo::new("hue_variation_curve", Variant::Nil))
+                .property(PropertyInfo::new("hue_variation_max", Variant::Float(0.0)))
+                .property(PropertyInfo::new("hue_variation_min", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "initial_velocity_max",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "initial_velocity_min",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("lifetime", Variant::Float(1.0)))
+                .property(PropertyInfo::new(
+                    "lifetime_randomness",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("linear_accel_curve", Variant::Nil))
+                .property(PropertyInfo::new("linear_accel_max", Variant::Float(0.0)))
+                .property(PropertyInfo::new("linear_accel_min", Variant::Float(0.0)))
+                .property(PropertyInfo::new("local_coords", Variant::Bool(false)))
+                .property(PropertyInfo::new("one_shot", Variant::Bool(false)))
+                .property(PropertyInfo::new("orbit_velocity_curve", Variant::Nil))
+                .property(PropertyInfo::new("orbit_velocity_max", Variant::Float(0.0)))
+                .property(PropertyInfo::new("orbit_velocity_min", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "particle_flag_align_y",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "physics_interpolation_mode",
+                    Variant::Int(2),
+                ))
+                .property(PropertyInfo::new("preprocess", Variant::Float(0.0)))
+                .property(PropertyInfo::new("radial_accel_curve", Variant::Nil))
+                .property(PropertyInfo::new("radial_accel_max", Variant::Float(0.0)))
+                .property(PropertyInfo::new("radial_accel_min", Variant::Float(0.0)))
+                .property(PropertyInfo::new("randomness", Variant::Float(0.0)))
+                .property(PropertyInfo::new("scale_amount_curve", Variant::Nil))
+                .property(PropertyInfo::new("scale_amount_max", Variant::Float(1.0)))
+                .property(PropertyInfo::new("scale_amount_min", Variant::Float(1.0)))
+                .property(PropertyInfo::new("scale_curve_x", Variant::Nil))
+                .property(PropertyInfo::new("scale_curve_y", Variant::Nil))
+                .property(PropertyInfo::new("seed", Variant::Int(0)))
+                .property(PropertyInfo::new("speed_scale", Variant::Float(1.0)))
+                .property(PropertyInfo::new("split_scale", Variant::Bool(false)))
+                .property(PropertyInfo::new("spread", Variant::Float(45.0)))
+                .property(PropertyInfo::new("tangential_accel_curve", Variant::Nil))
+                .property(PropertyInfo::new(
+                    "tangential_accel_max",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "tangential_accel_min",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("texture", Variant::Nil))
+                .property(PropertyInfo::new("use_fixed_seed", Variant::Bool(false))),
+        );
     }
     if !class_exists("Line2D") {
-        register_class(ClassRegistration::new("Line2D").parent("Node2D"));
+        // Line2D: 14 own properties from doc/classes/Line2D.xml.
+        register_class(
+            ClassRegistration::new("Line2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("antialiased", Variant::Bool(false)))
+                .property(PropertyInfo::new("begin_cap_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("closed", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "default_color",
+                    Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
+                ))
+                .property(PropertyInfo::new("end_cap_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("gradient", Variant::Nil))
+                .property(PropertyInfo::new("joint_mode", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "points",
+                    Variant::PackedVector2Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new("round_precision", Variant::Int(8)))
+                .property(PropertyInfo::new("sharp_limit", Variant::Float(2.0)))
+                .property(PropertyInfo::new("texture", Variant::Nil))
+                .property(PropertyInfo::new("texture_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("width", Variant::Float(10.0)))
+                .property(PropertyInfo::new("width_curve", Variant::Nil)),
+        );
     }
     if !class_exists("Polygon2D") {
-        register_class(ClassRegistration::new("Polygon2D").parent("Node2D"));
+        // Polygon2D: 15 own properties from doc/classes/Polygon2D.xml.
+        register_class(
+            ClassRegistration::new("Polygon2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("antialiased", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "color",
+                    Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
+                ))
+                .property(PropertyInfo::new("internal_vertex_count", Variant::Int(0)))
+                .property(PropertyInfo::new("invert_border", Variant::Float(100.0)))
+                .property(PropertyInfo::new("invert_enabled", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "offset",
+                    Variant::Vector2(Vector2::new(0.0, 0.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "polygon",
+                    Variant::PackedVector2Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new("polygons", Variant::Array(Vec::new())))
+                .property(PropertyInfo::new(
+                    "skeleton",
+                    Variant::NodePath(gdcore::node_path::NodePath::new("")),
+                ))
+                .property(PropertyInfo::new("texture", Variant::Nil))
+                .property(PropertyInfo::new(
+                    "texture_offset",
+                    Variant::Vector2(Vector2::new(0.0, 0.0)),
+                ))
+                .property(PropertyInfo::new("texture_rotation", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "texture_scale",
+                    Variant::Vector2(Vector2::new(1.0, 1.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "uv",
+                    Variant::PackedVector2Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "vertex_colors",
+                    Variant::PackedColorArray(Vec::new()),
+                )),
+        );
     }
     // Skeleton2D / Bone2D — 2D skeletal deform for Polygon2D skinning
     // (pat-u3l8c.100). Both derive from Node2D in Godot's hierarchy.
     if !class_exists("Skeleton2D") {
+        // Godot documents no own properties for Skeleton2D; its surface is
+        // entirely inherited (pat-0q2kx.127).
         register_class(ClassRegistration::new("Skeleton2D").parent("Node2D"));
     }
     if !class_exists("Bone2D") {
-        register_class(ClassRegistration::new("Bone2D").parent("Node2D"));
+        // Bone2D: 1 own properties from doc/classes/Bone2D.xml.
+        register_class(ClassRegistration::new("Bone2D").parent("Node2D").property(
+            PropertyInfo::new(
+                "rest",
+                Variant::Transform2D(gdcore::math::Transform2D::IDENTITY),
+            ),
+        ));
     }
     if !class_exists("Path2D") {
-        register_class(ClassRegistration::new("Path2D").parent("Node2D"));
+        // Path2D: 1 own properties from doc/classes/Path2D.xml.
+        register_class(
+            ClassRegistration::new("Path2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("curve", Variant::Nil)),
+        );
     }
     if !class_exists("PathFollow2D") {
-        register_class(ClassRegistration::new("PathFollow2D").parent("Node2D"));
+        // PathFollow2D: 7 own properties from doc/classes/PathFollow2D.xml.
+        register_class(
+            ClassRegistration::new("PathFollow2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("cubic_interp", Variant::Bool(true)))
+                .property(PropertyInfo::new("h_offset", Variant::Float(0.0)))
+                .property(PropertyInfo::new("loop", Variant::Bool(true)))
+                .property(PropertyInfo::new("progress", Variant::Float(0.0)))
+                .property(PropertyInfo::new("progress_ratio", Variant::Float(0.0)))
+                .property(PropertyInfo::new("rotates", Variant::Bool(true)))
+                .property(PropertyInfo::new("v_offset", Variant::Float(0.0))),
+        );
     }
     // 2D lights + occluder (pat-p0s82.6)
     if !class_exists("Path3D") {
@@ -4069,7 +4461,22 @@ pub fn register_2d_classes() {
         register_class(ClassRegistration::new("RemoteTransform3D").parent("Node3D"));
     }
     if !class_exists("RemoteTransform2D") {
-        register_class(ClassRegistration::new("RemoteTransform2D").parent("Node2D"));
+        // RemoteTransform2D: 5 own properties from doc/classes/RemoteTransform2D.xml.
+        register_class(
+            ClassRegistration::new("RemoteTransform2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new(
+                    "remote_path",
+                    Variant::NodePath(gdcore::node_path::NodePath::new("")),
+                ))
+                .property(PropertyInfo::new("update_position", Variant::Bool(true)))
+                .property(PropertyInfo::new("update_rotation", Variant::Bool(true)))
+                .property(PropertyInfo::new("update_scale", Variant::Bool(true)))
+                .property(PropertyInfo::new(
+                    "use_global_coordinates",
+                    Variant::Bool(true),
+                )),
+        );
     }
     // These two 3D nodes are registered from the 2D table, so the bases they
     // derive from must exist here too — `inheritance_chain` resolves parents BY
@@ -4441,16 +4848,68 @@ pub fn register_2d_classes() {
     }
 
     if !class_exists("Light2D") {
-        register_class(ClassRegistration::new("Light2D").parent("Node2D"));
+        // Light2D: 15 own properties from doc/classes/Light2D.xml.
+        register_class(
+            ClassRegistration::new("Light2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("blend_mode", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "color",
+                    Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
+                ))
+                .property(PropertyInfo::new("editor_only", Variant::Bool(false)))
+                .property(PropertyInfo::new("enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("energy", Variant::Float(1.0)))
+                .property(PropertyInfo::new("range_item_cull_mask", Variant::Int(1)))
+                .property(PropertyInfo::new("range_layer_max", Variant::Int(0)))
+                .property(PropertyInfo::new("range_layer_min", Variant::Int(0)))
+                .property(PropertyInfo::new("range_z_max", Variant::Int(1024)))
+                .property(PropertyInfo::new("range_z_min", Variant::Int(-1024)))
+                .property(PropertyInfo::new(
+                    "shadow_color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 0.0)),
+                ))
+                .property(PropertyInfo::new("shadow_enabled", Variant::Bool(false)))
+                .property(PropertyInfo::new("shadow_filter", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "shadow_filter_smooth",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("shadow_item_cull_mask", Variant::Int(1))),
+        );
     }
     if !class_exists("PointLight2D") {
-        register_class(ClassRegistration::new("PointLight2D").parent("Light2D"));
+        // PointLight2D: 4 own properties from doc/classes/PointLight2D.xml.
+        register_class(
+            ClassRegistration::new("PointLight2D")
+                .parent("Light2D")
+                .property(PropertyInfo::new("height", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "offset",
+                    Variant::Vector2(Vector2::new(0.0, 0.0)),
+                ))
+                .property(PropertyInfo::new("texture", Variant::Nil))
+                .property(PropertyInfo::new("texture_scale", Variant::Float(1.0))),
+        );
     }
     if !class_exists("DirectionalLight2D") {
-        register_class(ClassRegistration::new("DirectionalLight2D").parent("Light2D"));
+        // DirectionalLight2D: 2 own properties from doc/classes/DirectionalLight2D.xml.
+        register_class(
+            ClassRegistration::new("DirectionalLight2D")
+                .parent("Light2D")
+                .property(PropertyInfo::new("height", Variant::Float(0.0)))
+                .property(PropertyInfo::new("max_distance", Variant::Float(10000.0))),
+        );
     }
     if !class_exists("LightOccluder2D") {
-        register_class(ClassRegistration::new("LightOccluder2D").parent("Node2D"));
+        // LightOccluder2D: 3 own properties from doc/classes/LightOccluder2D.xml.
+        register_class(
+            ClassRegistration::new("LightOccluder2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("occluder", Variant::Nil))
+                .property(PropertyInfo::new("occluder_light_mask", Variant::Int(1)))
+                .property(PropertyInfo::new("sdf_collision", Variant::Bool(true))),
+        );
     }
     if !class_exists("NavigationRegion2D") {
         // Mirrors NavigationRegion3D above; defaults from

@@ -8,6 +8,7 @@ use gdcore::math::{Color, Rect2, Transform2D, Vector2};
 use gdserver2d::shader::{execute_fragment, FragmentContext, FragmentInstruction};
 use gdvariant::variant::Variant;
 
+use crate::canvas_material;
 use crate::renderer::FrameBuffer;
 use crate::texture::Texture2D;
 
@@ -260,15 +261,22 @@ pub fn draw_texture_rect(fb: &mut FrameBuffer, texture: &Texture2D, rect: Rect2,
         .max(0)
         .min(fb.height as i32) as u32;
 
+    // Copy out before the loop: the sampling modes are read while `fb` is
+    // borrowed mutably for the pixel writes.
+    let tex_filter = fb.texture_filter;
+    let tex_repeat = fb.texture_repeat;
     for py in y_min..y_max {
         for px in x_min..x_max {
-            // Map pixel to texture coordinates.
             let u = (px as f32 - rect.position.x) / rect.size.x;
             let v = (py as f32 - rect.position.y) / rect.size.y;
-            let tx = ((u * texture.width as f32) as u32).min(texture.width - 1);
-            let ty = ((v * texture.height as f32) as u32).min(texture.height - 1);
-
-            let texel = texture.get_pixel(tx, ty);
+            // pat-0q2kx.131: sample through `canvas_material` so the item's
+            // resolved texture_filter/texture_repeat apply. This used to be a
+            // hardcoded nearest-clamp, which is why LINEAR and ENABLED had no
+            // observable effect no matter what a scene authored. The modes ride
+            // on the framebuffer (like `scissor`/`blend_mode`) rather than
+            // through every texture routine's signature.
+            let texel =
+                canvas_material::sample_texture(texture, u, v, tex_filter, tex_repeat);
             let final_color = Color::new(
                 texel.r * modulate.r,
                 texel.g * modulate.g,
@@ -660,14 +668,22 @@ pub fn draw_texture_rect_blended(
         .max(0)
         .min(fb.height as i32) as u32;
 
+    // Copy out before the loop: the sampling modes are read while `fb` is
+    // borrowed mutably for the pixel writes.
+    let tex_filter = fb.texture_filter;
+    let tex_repeat = fb.texture_repeat;
     for py in y_min..y_max {
         for px in x_min..x_max {
             let u = (px as f32 - rect.position.x) / rect.size.x;
             let v = (py as f32 - rect.position.y) / rect.size.y;
-            let tx = ((u * texture.width as f32) as u32).min(texture.width - 1);
-            let ty = ((v * texture.height as f32) as u32).min(texture.height - 1);
-
-            let texel = texture.get_pixel(tx, ty);
+            // pat-0q2kx.131: sample through `canvas_material` so the item's
+            // resolved texture_filter/texture_repeat apply. This used to be a
+            // hardcoded nearest-clamp, which is why LINEAR and ENABLED had no
+            // observable effect no matter what a scene authored. The modes ride
+            // on the framebuffer (like `scissor`/`blend_mode`) rather than
+            // through every texture routine's signature.
+            let texel =
+                canvas_material::sample_texture(texture, u, v, tex_filter, tex_repeat);
             let final_color = Color::new(
                 texel.r * modulate.r,
                 texel.g * modulate.g,
@@ -713,14 +729,22 @@ pub fn draw_texture_rect_shaded(
         .max(0)
         .min(fb.height as i32) as u32;
 
+    // Copy out before the loop: the sampling modes are read while `fb` is
+    // borrowed mutably for the pixel writes.
+    let tex_filter = fb.texture_filter;
+    let tex_repeat = fb.texture_repeat;
     for py in y_min..y_max {
         for px in x_min..x_max {
             let u = (px as f32 - rect.position.x) / rect.size.x;
             let v = (py as f32 - rect.position.y) / rect.size.y;
-            let tx = ((u * texture.width as f32) as u32).min(texture.width - 1);
-            let ty = ((v * texture.height as f32) as u32).min(texture.height - 1);
-
-            let texel = texture.get_pixel(tx, ty);
+            // pat-0q2kx.131: sample through `canvas_material` so the item's
+            // resolved texture_filter/texture_repeat apply. This used to be a
+            // hardcoded nearest-clamp, which is why LINEAR and ENABLED had no
+            // observable effect no matter what a scene authored. The modes ride
+            // on the framebuffer (like `scissor`/`blend_mode`) rather than
+            // through every texture routine's signature.
+            let texel =
+                canvas_material::sample_texture(texture, u, v, tex_filter, tex_repeat);
             // The incoming COLOR is the sampled texel modulated by the item's
             // tint — the value Godot's default canvas_item fragment produces
             // via `COLOR = texture(TEXTURE, UV) * MODULATE`.

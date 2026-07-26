@@ -486,6 +486,39 @@ impl PackedScene {
             }
         }
 
+        // Flatten a node-level `CanvasItemMaterial` onto the node under
+        // `__canvas_material__*` (pat-0q2kx.131).
+        //
+        // The ShaderMaterial pass below/above deliberately filters `material` to
+        // `ShaderMaterial`, and the `__material__*` pass only ever looks at a 3D
+        // mesh's material — so a 2D node carrying `material =
+        // SubResource("CanvasItemMaterial_x")` matched neither and its blend
+        // mode was dropped at load. Same companion-property mechanism as
+        // `__shape__*`: by render time the sub-resource is gone and only the
+        // `SceneTree` remains.
+        for tmpl in &mut templates {
+            let Some(mat_id) = sub_ref_id(tmpl.properties.get("material")) else {
+                continue;
+            };
+            if sub_resources.get(&mat_id).map(String::as_str) != Some("CanvasItemMaterial") {
+                continue;
+            }
+            let Some(mat_props) = sub_resource_props.get(&mat_id) else {
+                continue;
+            };
+            // Verbatim, so this stays free of per-property knowledge — the same
+            // reasoning as the shape and 3D-material passes.
+            for (key, value) in mat_props {
+                tmpl.properties
+                    .insert(format!("__canvas_material__{key}"), value.clone());
+            }
+            // A CanvasItemMaterial with every property left at its default has
+            // an empty property bag, so record its presence explicitly rather
+            // than inferring it from the companions.
+            tmpl.properties
+                .insert("__canvas_material__present".into(), Variant::Bool(true));
+        }
+
         // Flatten a `PhysicsMaterial` override onto the body node
         // (pat-0q2kx.115).
         //

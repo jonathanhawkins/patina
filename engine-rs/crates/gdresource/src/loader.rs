@@ -230,6 +230,66 @@ pub fn parse_uid_string(uid_str: &str) -> ResourceUid {
 }
 
 /// Parses a single property value string into a [`Variant`].
+/// Builtin literals `Variant` has no kind for yet, preserved verbatim by
+/// [`parse_variant_value`] instead of being dropped or retyped (pat-0q2kx.136).
+pub const UNPARSED_BUILTINS: &[&str] = &[
+    "Vector4i",
+    "Vector4",
+    "Rect2i",
+    "Projection",
+    "PackedVector4Array",
+];
+
+/// Dictionary key naming the builtin a preserved literal came from.
+pub const UNPARSED_TYPE_KEY: &str = "__gd_unparsed_type__";
+/// Dictionary key holding the literal exactly as it was authored.
+pub const UNPARSED_LITERAL_KEY: &str = "__gd_unparsed_literal__";
+/// Dictionary key holding the literal's parsed numeric components.
+pub const UNPARSED_ARGS_KEY: &str = "__gd_unparsed_args__";
+/// Dictionary key naming the class of a parsed `Object(...)` literal.
+pub const UNPARSED_CLASS_KEY: &str = "__gd_object_class__";
+
+/// If `v` is a preserved builtin literal, returns `(type_name, literal_text)`.
+///
+/// The saver uses this to re-emit the original text; a consumer uses it to tell
+/// "this really was a `Rect2i`" from "someone stored a dictionary".
+pub fn unparsed_literal(v: &Variant) -> Option<(&str, &str)> {
+    let Variant::Dictionary(d) = v else {
+        return None;
+    };
+    let (Some(Variant::String(ty)), Some(Variant::String(lit))) =
+        (d.get(UNPARSED_TYPE_KEY), d.get(UNPARSED_LITERAL_KEY))
+    else {
+        return None;
+    };
+    Some((ty.as_str(), lit.as_str()))
+}
+
+/// If `v` is a parsed `Object(Class, ...)` literal, returns its class name.
+pub fn object_literal_class(v: &Variant) -> Option<&str> {
+    let Variant::Dictionary(d) = v else {
+        return None;
+    };
+    match d.get(UNPARSED_CLASS_KEY) {
+        Some(Variant::String(c)) => Some(c.as_str()),
+        _ => None,
+    }
+}
+
+/// Parses a value, additionally reporting a typed array's element type.
+///
+/// `parse_variant_value` returns a plain [`Variant::Array`] for `Array[int](…)`
+/// so every existing consumer keeps working; the element annotation is real
+/// information Godot round-trips, so it is offered here rather than discarded
+/// (pat-0q2kx.136). Returns `None` for anything that is not a typed array.
+pub fn parse_variant_value_typed(s: &str) -> EngineResult<(Variant, Option<String>)> {
+    let trimmed = s.trim();
+    let elem = trimmed
+        .strip_prefix("Array[")
+        .and_then(|rest| rest.find(']').map(|close| rest[..close].trim().to_string()));
+    Ok((parse_variant_value(s)?, elem))
+}
+
 pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
     let s = s.trim();
 
@@ -533,6 +593,77 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
         )));
     }
 
+    // NodePath literal: `^"Path/To/Node"` (pat-0q2kx.136). Godot writes node
+    // paths with a `^` sigil exactly as it writes StringNames with `&`; without
+    // this arm every authored NodePath property failed to parse and was dropped.
+    if let Some(rest) = s.strip_prefix('^') {
+        let rest = rest.trim();
+        if rest.starts_with('"') && rest.ends_with('"') && rest.len() >= 2 {
+            let path = unescape_string(&rest[1..rest.len() - 1]);
+            return Ok(Variant::NodePath(NodePath::new(&path)));
+        }
+        return Err(EngineError::Parse(format!("invalid NodePath literal: {s}")));
+    }
+
+    // `Object(Class, "prop": value, ...)` — an inline sub-object, used by theme
+    // overrides and embedded InputEvents (pat-0q2kx.136).
+    //
+    // `Variant` has no object-literal kind, so this becomes a tagged dictionary:
+    // the class under `UNPARSED_CLASS_KEY` and every property as a real key. A
+    // consumer reads the properties directly; the saver re-emits from the class
+    // plus those keys.
+    if let Some(inner) = try_strip_call(s, "Object") {
+        let parts = split_args(inner);
+        let Some((class, props)) = parts.split_first() else {
+            return Err(EngineError::Parse(format!("empty Object literal: {s}")));
+        };
+        let mut dict = Dictionary::new();
+        dict.insert(
+            UNPARSED_CLASS_KEY,
+            Variant::String(class.trim().trim_matches('"').to_string()),
+        );
+        for entry in props {
+            // Each remaining arg is `"name": value`.
+            let Some((key, value)) = entry.split_once(':') else {
+                return Err(EngineError::Parse(format!(
+                    "Object property needs a `name: value` pair, got `{entry}` in {s}"
+                )));
+            };
+            let key = key.trim().trim_matches('"').to_string();
+            dict.insert(key, parse_variant_value(value)?);
+        }
+        return Ok(Variant::Dictionary(dict));
+    }
+
+    // Builtins that `Variant` has no kind for yet: Vector4/Vector4i, Rect2i,
+    // Projection and PackedVector4Array (pat-0q2kx.136).
+    //
+    // These are preserved *tagged and verbatim* rather than dropped or
+    // retyped. Godot never loses a property it can parse, and silently
+    // widening `Rect2i` to a float `Rect2` would corrupt it the same way
+    // `Vector2i` used to be corrupted (pat-nzgdu.78) — so the literal is kept
+    // exactly as authored, letting the saver round-trip it byte-for-byte and
+    // letting a later core-variant bead promote it to a real kind without any
+    // data having been lost in the meantime.
+    for name in UNPARSED_BUILTINS {
+        if let Some(inner) = try_strip_call(s, name) {
+            let mut dict = Dictionary::new();
+            dict.insert(UNPARSED_TYPE_KEY, Variant::String((*name).to_string()));
+            dict.insert(UNPARSED_LITERAL_KEY, Variant::String(s.to_string()));
+            // The numeric components, so a consumer can read the value without
+            // re-parsing the literal text.
+            let args: Vec<Variant> = split_args(inner)
+                .iter()
+                .map(|a| match a.trim().parse::<f64>() {
+                    Ok(f) => Variant::Float(f),
+                    Err(_) => Variant::String(a.trim().to_string()),
+                })
+                .collect();
+            dict.insert(UNPARSED_ARGS_KEY, Variant::Array(args));
+            return Ok(Variant::Dictionary(dict));
+        }
+    }
+
     // Typed array: `Array[Type]([elem, ...])`. The element type annotation is
     // accepted but not retained (stored as a plain Variant::Array).
     if let Some(rest) = s.strip_prefix("Array[") {
@@ -563,7 +694,9 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
         return Ok(Variant::Int(i));
     }
 
-    // Float
+    // Float. This also covers Godot's non-finite literals: Rust's `f64` parser
+    // accepts `inf`, `-inf` and `nan` case-insensitively, which are exactly the
+    // spellings `variant_parser.cpp` emits (pat-0q2kx.136).
     if let Ok(f) = s.parse::<f64>() {
         return Ok(Variant::Float(f));
     }

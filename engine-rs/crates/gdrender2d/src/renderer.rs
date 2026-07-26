@@ -12,8 +12,10 @@ use gdserver2d::shader::{parse_fragment_body, FragmentInstruction, ShaderMateria
 use gdserver2d::viewport::Viewport;
 use gdvariant::variant::Variant;
 
+use crate::canvas_material::{self, BlendMode, TextureFilter, TextureRepeat};
 use crate::draw;
 use crate::font;
+use crate::polygon_raster;
 use crate::texture::Texture2D;
 
 /// A pixel framebuffer for the software renderer.
@@ -38,6 +40,22 @@ pub struct FrameBuffer {
     /// three writes are the only paths to a pixel — one check covers rects,
     /// circles, lines, textures, nine-patches and text alike.
     pub scissor: Option<Rect2>,
+    /// Blend equation for every write through [`blend_pixel`](Self::blend_pixel)
+    /// and the [`Raster`] impl (pat-0q2kx.131).
+    ///
+    /// Set per canvas item from that item's `CanvasItemMaterial`, for the same
+    /// reason `scissor` lives here: these writes are the only paths to a pixel,
+    /// so one dispatch point covers rects, circles, lines, textures,
+    /// nine-patches, polygons and text alike. Threading a mode parameter
+    /// through every `draw::` routine instead would touch dozens of signatures
+    /// and still miss whichever one was added next.
+    pub blend_mode: BlendMode,
+    /// Resolved texture sampling filter for the item currently being drawn
+    /// (pat-0q2kx.131). Carried here, like `blend_mode` and `scissor`, so the
+    /// `draw::` texture routines pick it up without seven signature changes.
+    pub texture_filter: TextureFilter,
+    /// Resolved UV wrap mode for the item currently being drawn.
+    pub texture_repeat: TextureRepeat,
 }
 
 impl FrameBuffer {
@@ -48,6 +66,9 @@ impl FrameBuffer {
             height,
             pixels: vec![clear_color; (width * height) as usize],
             scissor: None,
+            blend_mode: BlendMode::Mix,
+            texture_filter: TextureFilter::Nearest,
+            texture_repeat: TextureRepeat::Disabled,
         }
     }
 
@@ -93,14 +114,9 @@ impl FrameBuffer {
         if x < self.width && y < self.height && self.in_scissor(x, y) {
             let idx = (y * self.width + x) as usize;
             let dst = self.pixels[idx];
-            let a = color.a;
-            let inv_a = 1.0 - a;
-            self.pixels[idx] = Color::new(
-                color.r * a + dst.r * inv_a,
-                color.g * a + dst.g * inv_a,
-                color.b * a + dst.b * inv_a,
-                (a + dst.a * inv_a).min(1.0),
-            );
+            // `Mix` here is exactly the source-over this used to inline; any
+            // other mode is the item's CanvasItemMaterial talking.
+            self.pixels[idx] = canvas_material::blend(color, dst, self.blend_mode);
         }
     }
 
@@ -183,12 +199,12 @@ impl Raster for FrameBuffer {
         let a = a.min(1.0);
         let idx = (y as u32 * self.width + x as u32) as usize;
         let d = self.pixels[idx];
-        self.pixels[idx] = Color {
-            r: d.r * (1.0 - a) + color.r * a,
-            g: d.g * (1.0 - a) + color.g * a,
-            b: d.b * (1.0 - a) + color.b * a,
-            a: 1.0,
-        };
+        // Coverage multiplies into the source alpha, then the item's blend mode
+        // decides the equation — so an anti-aliased edge on an ADD-blended item
+        // adds partially rather than mixing.
+        let src = Color::new(color.r, color.g, color.b, color.a * a);
+        let out = canvas_material::blend(src, d, self.blend_mode);
+        self.pixels[idx] = Color { a: 1.0, ..out };
     }
 }
 
@@ -387,6 +403,22 @@ impl SoftwareRenderer {
         // the same transform as the commands it bounds. Items are rasterized
         // flat (see `render_frame`), so the previous scissor is restored on the
         // way out rather than relying on a draw-order stack.
+        // pat-0q2kx.131: the item's CanvasItemMaterial blend mode applies to
+        // every command it emits, and is restored on the way out for the same
+        // reason the scissor is — items are rasterized flat, so there is no
+        // draw-order stack to unwind.
+        let prev_blend = fb.blend_mode;
+        fb.blend_mode = item
+            .canvas_material
+            .map(|m| m.blend_mode)
+            .unwrap_or(BlendMode::Mix);
+        let prev_filter = fb.texture_filter;
+        let prev_repeat = fb.texture_repeat;
+        // The bridge already resolved PARENT_NODE up the ancestor chain, so
+        // these are concrete sampling modes by the time they arrive.
+        fb.texture_filter = item.texture_filter;
+        fb.texture_repeat = item.texture_repeat;
+
         let prev_scissor = fb.scissor;
         if let Some(clip) = item.clip_rect {
             let clip = Self::transform_rect(global_transform, clip);
@@ -460,6 +492,126 @@ impl SoftwareRenderer {
                     let f = global_transform.xform(*from);
                     let t = global_transform.xform(*to);
                     draw::draw_line_blended(fb, f, t, *color, *width);
+                }
+                // The stroke/fill family (pat-0q2kx.129). `polygon_raster` had
+                // the scanline fill and the capped/jointed stroke written and
+                // unit-tested but no caller anywhere in the workspace; these
+                // arms are what connect it to the frame. Points are transformed
+                // into pixel space first, so the item's rotation and scale
+                // apply to the geometry itself rather than to a bounding box.
+                DrawCommand::DrawPolyline {
+                    points,
+                    color,
+                    width,
+                    closed,
+                } => {
+                    let pts = Self::transform_points(global_transform, points);
+                    polygon_raster::draw_polyline(
+                        fb,
+                        &pts,
+                        Self::scaled_width(global_transform, *width),
+                        *color,
+                        *closed,
+                        polygon_raster::LineCap::None,
+                        // Round joints: a sharp joint leaves a wedge missing on
+                        // every corner, which is exactly what makes a chain of
+                        // `draw_line` calls look broken.
+                        polygon_raster::LineJoint::Round,
+                    );
+                }
+                DrawCommand::DrawMultiline {
+                    points,
+                    color,
+                    width,
+                } => {
+                    let w = Self::scaled_width(global_transform, *width);
+                    for pair in points.chunks_exact(2) {
+                        let seg = [
+                            global_transform.xform(pair[0]),
+                            global_transform.xform(pair[1]),
+                        ];
+                        polygon_raster::draw_polyline(
+                            fb,
+                            &seg,
+                            w,
+                            *color,
+                            false,
+                            polygon_raster::LineCap::None,
+                            polygon_raster::LineJoint::Sharp,
+                        );
+                    }
+                }
+                DrawCommand::DrawDashedLine {
+                    from,
+                    to,
+                    color,
+                    width,
+                    dash,
+                } => {
+                    let f = global_transform.xform(*from);
+                    let t = global_transform.xform(*to);
+                    let span = t - f;
+                    let len = span.length();
+                    let step = Self::scaled_width(global_transform, *dash).max(0.1);
+                    if len > 1e-6 {
+                        let dir = span * (1.0 / len);
+                        let w = Self::scaled_width(global_transform, *width);
+                        // Walk the line laying down `dash` on, `dash` off.
+                        let mut travelled = 0.0_f32;
+                        while travelled < len {
+                            let end = (travelled + step).min(len);
+                            let seg = [f + dir * travelled, f + dir * end];
+                            polygon_raster::draw_polyline(
+                                fb,
+                                &seg,
+                                w,
+                                *color,
+                                false,
+                                polygon_raster::LineCap::None,
+                                polygon_raster::LineJoint::Sharp,
+                            );
+                            travelled = end + step;
+                        }
+                    }
+                }
+                DrawCommand::DrawArc {
+                    center,
+                    radius,
+                    start_angle,
+                    end_angle,
+                    point_count,
+                    color,
+                    width,
+                } => {
+                    let steps = (*point_count).max(2);
+                    let sweep = *end_angle - *start_angle;
+                    let pts: Vec<Vector2> = (0..steps)
+                        .map(|i| {
+                            let t = i as f32 / (steps - 1) as f32;
+                            let a = *start_angle + sweep * t;
+                            global_transform.xform(Vector2::new(
+                                center.x + radius * a.cos(),
+                                center.y + radius * a.sin(),
+                            ))
+                        })
+                        .collect();
+                    polygon_raster::draw_polyline(
+                        fb,
+                        &pts,
+                        Self::scaled_width(global_transform, *width),
+                        *color,
+                        false,
+                        polygon_raster::LineCap::None,
+                        polygon_raster::LineJoint::Round,
+                    );
+                }
+                DrawCommand::DrawPolygon { points, colors } => {
+                    let pts = Self::transform_points(global_transform, points);
+                    // Godot accepts one color for the whole polygon or one per
+                    // vertex; the software rasterizer has no per-vertex
+                    // interpolation, so the first color wins.
+                    let color = colors.first().copied().unwrap_or(Color::WHITE);
+                    polygon_raster::fill_polygon(fb, &pts, color);
                 }
                 DrawCommand::DrawTextureRect {
                     texture_path,
@@ -560,6 +712,9 @@ impl SoftwareRenderer {
         }
 
         fb.scissor = prev_scissor;
+        fb.blend_mode = prev_blend;
+        fb.texture_filter = prev_filter;
+        fb.texture_repeat = prev_repeat;
     }
 
     /// The overlap of two rects, or an empty rect at `a`'s origin when they do
@@ -589,6 +744,21 @@ impl SoftwareRenderer {
     /// computed. Only valid as a draw rect for axis-aligned transforms —
     /// rotated/skewed items must use the `*_transformed` draw paths (see
     /// [`Self::transform_is_axis_aligned`]).
+    /// Transforms a run of local-space points into pixel space.
+    fn transform_points(xform: Transform2D, points: &[Vector2]) -> Vec<Vector2> {
+        points.iter().map(|p| xform.xform(*p)).collect()
+    }
+
+    /// Scales a stroke width by the item's transform, using the mean of the
+    /// two basis scale factors — the same convention `DrawCircle` uses for its
+    /// radius, so a scaled item's strokes and circles stay consistent.
+    fn scaled_width(xform: Transform2D, width: f32) -> f32 {
+        let sx = xform.basis_xform(Vector2::new(1.0, 0.0)).length();
+        let sy = xform.basis_xform(Vector2::new(0.0, 1.0)).length();
+        // Godot treats a non-positive width as "thinnest visible line".
+        width.max(1.0) * (sx + sy) * 0.5
+    }
+
     fn transform_rect(xform: Transform2D, rect: Rect2) -> Rect2 {
         let p0 = xform.xform(rect.position);
         let p1 = xform.xform(Vector2::new(rect.position.x + rect.size.x, rect.position.y));

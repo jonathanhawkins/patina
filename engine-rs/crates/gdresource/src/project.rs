@@ -365,6 +365,22 @@ impl ProjectLoader {
         })
     }
 
+    /// Builds a loader from already-read `project.godot` text (pat-0q2kx.134).
+    ///
+    /// [`load`](Self::load) reads from disk, which an exported game booted from a
+    /// `.pck` cannot do — its `project.godot` lives inside the archive. This is
+    /// the same parse against text the caller has already obtained, with
+    /// `project_root` kept for the paths the loader reports.
+    pub fn from_text(project_root: &Path, content: &str) -> EngineResult<ProjectLoader> {
+        let project_file = GodotProjectFile::parse(content)?;
+        let config = ProjectConfig::from_project_file(&project_file)?;
+        Ok(ProjectLoader {
+            project_root: project_root.to_path_buf(),
+            project_file,
+            config,
+        })
+    }
+
     /// Returns the extracted project configuration.
     pub fn config(&self) -> &ProjectConfig {
         &self.config

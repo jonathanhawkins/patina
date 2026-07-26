@@ -243,6 +243,11 @@ pub struct Render2DItem {
     /// ancestor with `clip_children` set (Godot's canvas-group clip). `None` means
     /// unclipped (pat-0q2kx.39).
     pub clip_rect: Option<Rect2>,
+    /// The node's `CanvasItem.light_mask` (Godot default layer 1) — which 2D
+    /// lights may reach it. A light applies only when this intersects the light's
+    /// `range_item_cull_mask`, so it has to travel with the item rather than be
+    /// assumed frame-wide (pat-0q2kx.130).
+    pub light_mask: u32,
     /// What to draw for this node.
     pub kind: Render2DKind,
 }
@@ -301,6 +306,11 @@ pub fn collect_canvas_items(tree: &SceneTree) -> Vec<Render2DItem> {
                 z_index: canvas_order::effective_z_index(tree, id) as i64,
                 canvas_layer: canvas_layer_for(tree, id),
                 clip_rect: clip_rect_for(tree, id),
+                // Godot's `CanvasItem.light_mask` default is layer 1.
+                light_mask: match node.get_property("light_mask") {
+                    Variant::Int(i) => i as u32,
+                    _ => 1,
+                },
                 kind: render_kind_for(tree, id, node.class_name()),
             })
         })
@@ -815,6 +825,8 @@ pub fn build_control_render_items(
             // Control primitives are drawn by their own layout pass, which has
             // already resolved them inside their container.
             clip_rect: None,
+            // Control primitives inherit the default lighting layer.
+            light_mask: 1,
             kind,
         });
     }
@@ -1216,20 +1228,120 @@ pub fn shade_runtime_canvas(tree: &SceneTree, fb: &mut FrameBuffer) {
     let lights = gdscene::light2d_scene::collect_lights_2d(tree);
     if !lights.is_empty() {
         let occluders = gdscene::light2d_scene::collect_occluders_2d(tree);
-        gdrender2d::light2d::apply_lights_to_framebuffer(
+        // Godot culls lights per canvas item, comparing the *item's* `light_mask`
+        // against the light's `range_item_cull_mask`, so the mask varies across
+        // the frame (pat-0q2kx.130). The buffer starts at layer 1 — the default
+        // a fresh CanvasItem is on, and what this pass used to assume for the
+        // whole frame — and each item stamps its own mask over its own pixels.
+        let masks = item_light_mask_buffer(tree, fb.width, fb.height);
+        gdrender2d::light2d::apply_lights_with_item_masks(
             fb,
+            &masks,
             &lights,
             &occluders,
             gdrender2d::light2d::CanvasAmbient::default(),
-            // Godot's default `item_cull_mask` is layer 1; a receiver opts out
-            // by clearing its bit rather than by the light naming it.
-            1,
         );
     }
     // CanvasModulate tints the finished frame whether or not anything is lit.
     if let Some(color) = gdscene::light2d_scene::collect_canvas_modulate(tree) {
         gdscene::light2d_scene::apply_canvas_modulate(fb, color);
     }
+}
+
+/// Builds a per-pixel `light_mask` buffer for the frame (pat-0q2kx.130).
+///
+/// Each canvas item's own `light_mask` is stamped over the screen-space bounds of
+/// what it draws, in draw order, so a later item wins where they overlap — the
+/// same precedence the colour buffer already has. Pixels no item covers keep the
+/// default layer 1.
+///
+/// The bounds are the item's **axis-aligned extent**, not its exact coverage: a
+/// rotated sprite's mask therefore spills into its corners. That is a deliberate
+/// bound on scope — it is exact for the axis-aligned rects and sprites that make
+/// up almost every 2D scene, and per-pixel coverage would mean threading a mask
+/// through every `draw::*` call in the rasterizer.
+fn item_light_mask_buffer(tree: &SceneTree, width: u32, height: u32) -> Vec<u32> {
+    let mut masks = vec![1u32; (width as usize) * (height as usize)];
+    for item in collect_canvas_items(tree) {
+        let mask = item.light_mask;
+        let Some(bounds) = item_screen_bounds(&item) else {
+            continue;
+        };
+        let x0 = bounds.position.x.floor().max(0.0) as u32;
+        let y0 = bounds.position.y.floor().max(0.0) as u32;
+        let x1 = ((bounds.position.x + bounds.size.x).ceil().max(0.0) as u32).min(width);
+        let y1 = ((bounds.position.y + bounds.size.y).ceil().max(0.0) as u32).min(height);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                masks[(y * width + x) as usize] = mask;
+            }
+        }
+    }
+    masks
+}
+
+/// The screen-space axis-aligned bounds of what `item` draws, or `None` when the
+/// kind has no bounded extent this pass can derive.
+fn item_screen_bounds(item: &Render2DItem) -> Option<Rect2> {
+    let local = match &item.kind {
+        Render2DKind::ColorRect { size, .. } => Rect2::new(Vector2::ZERO, *size),
+        Render2DKind::TileMap { cells } => {
+            let first = cells.first()?;
+            let mut r = first.dest;
+            for cell in &cells[1..] {
+                let (min_x, min_y) = (
+                    r.position.x.min(cell.dest.position.x),
+                    r.position.y.min(cell.dest.position.y),
+                );
+                let (max_x, max_y) = (
+                    (r.position.x + r.size.x).max(cell.dest.position.x + cell.dest.size.x),
+                    (r.position.y + r.size.y).max(cell.dest.position.y + cell.dest.size.y),
+                );
+                r = Rect2::new(
+                    Vector2::new(min_x, min_y),
+                    Vector2::new(max_x - min_x, max_y - min_y),
+                );
+            }
+            r
+        }
+        Render2DKind::Polygon { points, .. } | Render2DKind::Line { points, .. } => {
+            let first = points.first()?;
+            let (mut min, mut max) = (*first, *first);
+            for p in &points[1..] {
+                min = Vector2::new(min.x.min(p.x), min.y.min(p.y));
+                max = Vector2::new(max.x.max(p.x), max.y.max(p.y));
+            }
+            Rect2::new(min, Vector2::new(max.x - min.x, max.y - min.y))
+        }
+        // Sprites need their texture's size to bound them, which this pass does
+        // not load; markers and text have no lit extent worth masking.
+        _ => return None,
+    };
+    // Transform the four corners and take their axis-aligned extent, so a
+    // rotated or scaled item still bounds correctly.
+    let xf = item.global_transform;
+    let corners = [
+        xf.xform(local.position),
+        xf.xform(Vector2::new(
+            local.position.x + local.size.x,
+            local.position.y,
+        )),
+        xf.xform(Vector2::new(
+            local.position.x + local.size.x,
+            local.position.y + local.size.y,
+        )),
+        xf.xform(Vector2::new(
+            local.position.x,
+            local.position.y + local.size.y,
+        )),
+    ];
+    let mut min = corners[0];
+    let mut max = corners[0];
+    for c in &corners[1..] {
+        min = Vector2::new(min.x.min(c.x), min.y.min(c.y));
+        max = Vector2::new(max.x.max(c.x), max.y.max(c.y));
+    }
+    Some(Rect2::new(min, Vector2::new(max.x - min.x, max.y - min.y)))
 }
 
 /// Convenience: [`build_runtime_render_list`] + [`rasterize_render_list`] in one

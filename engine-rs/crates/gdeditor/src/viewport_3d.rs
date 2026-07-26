@@ -759,7 +759,7 @@ impl EnvironmentPreview3D {
 ///
 /// Unrecognised properties are ignored; missing ones keep their defaults, since
 /// a `.tscn` only serialises what differs from Godot's default.
-fn fog_volume_from_node_properties<'a>(
+pub(crate) fn fog_volume_from_node_properties<'a>(
     props: impl Iterator<Item = (&'a String, &'a gdvariant::Variant)>,
 ) -> FogVolume {
     use gdvariant::Variant;
@@ -2415,7 +2415,11 @@ mod tests {
             !vec3_approx_eq(cam.focus_point, focus_before, 1e-6),
             "pan moves the focus point"
         );
-        assert_eq!((cam.yaw, cam.pitch), (yaw_p, pitch_p), "pan does not rotate");
+        assert_eq!(
+            (cam.yaw, cam.pitch),
+            (yaw_p, pitch_p),
+            "pan does not rotate"
+        );
 
         // Zoom: scrolling in moves closer, out moves farther (within clamps).
         let dist_before = cam.distance;
@@ -2457,7 +2461,10 @@ mod tests {
             position: point,
             size: Vector3::ZERO,
         });
-        assert!(cam.distance >= MIN_DISTANCE, "framing a point keeps a valid distance");
+        assert!(
+            cam.distance >= MIN_DISTANCE,
+            "framing a point keeps a valid distance"
+        );
         assert!(
             vec3_approx_eq(cam.focus_point, point, 1e-6),
             "framing a point focuses on it"
@@ -3229,9 +3236,21 @@ mod tests {
             Color::new(0.385, 0.454, 0.55, 1.0),
             Color::new(0.2, 0.169, 0.133, 1.0),
         );
-        assert!((mat.sky_horizon_color.r - 0.66224).abs() < 1e-3, "r={}", mat.sky_horizon_color.r);
-        assert!((mat.sky_horizon_color.g - 0.67174).abs() < 1e-3, "g={}", mat.sky_horizon_color.g);
-        assert!((mat.sky_horizon_color.b - 0.68674).abs() < 1e-3, "b={}", mat.sky_horizon_color.b);
+        assert!(
+            (mat.sky_horizon_color.r - 0.66224).abs() < 1e-3,
+            "r={}",
+            mat.sky_horizon_color.r
+        );
+        assert!(
+            (mat.sky_horizon_color.g - 0.67174).abs() < 1e-3,
+            "g={}",
+            mat.sky_horizon_color.g
+        );
+        assert!(
+            (mat.sky_horizon_color.b - 0.68674).abs() < 1e-3,
+            "b={}",
+            mat.sky_horizon_color.b
+        );
         // Both horizons share the derived color; top/bottom flow from pickers.
         assert_eq!(mat.sky_horizon_color, mat.ground_horizon_color);
         assert!((mat.sky_top_color.g - 0.454).abs() < 1e-6);
@@ -4188,7 +4207,10 @@ mod tests {
 
         assert!(ids.contains(&mesh_id.raw()), "MeshInstance3D collected");
         assert!(ids.contains(&cam_id.raw()), "Camera3D collected");
-        assert!(ids.contains(&light_id.raw()), "DirectionalLight3D collected");
+        assert!(
+            ids.contains(&light_id.raw()),
+            "DirectionalLight3D collected"
+        );
         assert!(
             !ids.contains(&sprite2d_id.raw()),
             "Sprite2D (non-spatial) excluded from 3D content"
@@ -4231,7 +4253,10 @@ mod tests {
             .map(|(id, _)| id)
             .collect();
 
-        assert!(pickable.contains(&visible_id.raw()), "visible node pickable");
+        assert!(
+            pickable.contains(&visible_id.raw()),
+            "visible node pickable"
+        );
         assert!(
             !pickable.contains(&hidden_id.raw()),
             "hidden node not pickable"
@@ -4270,9 +4295,7 @@ mod tests {
         // Adding a Node3D makes the scene report 3D content.
         let mut tree_3d = SceneTree::new();
         let root3 = tree_3d.root_id();
-        tree_3d
-            .add_child(root3, Node::new("N", "Node3D"))
-            .unwrap();
+        tree_3d.add_child(root3, Node::new("N", "Node3D")).unwrap();
         assert!(vp.has_scene_content(&tree_3d));
     }
 }

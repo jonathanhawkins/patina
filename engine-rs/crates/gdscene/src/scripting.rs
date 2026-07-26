@@ -59,6 +59,55 @@ fn arg_rect2(args: &[Variant], index: usize) -> Option<Rect2> {
     }
 }
 
+/// Reads a point list, accepting either a `PackedVector2Array` or a plain
+/// `Array` of `Vector2` — a GDScript literal `[Vector2(0,0), ...]` parses as
+/// the latter, which is exactly how these are written by hand (pat-0q2kx.129).
+fn arg_vec2_array(args: &[Variant], index: usize) -> Option<Vec<Vector2>> {
+    match args.get(index)? {
+        Variant::PackedVector2Array(pts) => Some(pts.clone()),
+        Variant::Array(items) => Some(
+            items
+                .iter()
+                .filter_map(|v| match v {
+                    Variant::Vector2(p) => Some(*p),
+                    Variant::Vector2i(p) => Some(Vector2::new(p.x as f32, p.y as f32)),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// Reads a color list (`PackedColorArray` or `Array` of `Color`).
+fn arg_color_array(args: &[Variant], index: usize) -> Vec<Color> {
+    match args.get(index) {
+        Some(Variant::PackedColorArray(cs)) => cs.clone(),
+        Some(Variant::Array(items)) => items
+            .iter()
+            .filter_map(|v| match v {
+                Variant::Color(c) => Some(*c),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// First color of a color-array argument, for the `*_colors` draw variants.
+fn arg_first_color(args: &[Variant], index: usize) -> Option<Color> {
+    arg_color_array(args, index).first().copied()
+}
+
+/// A stroke width in pixels. Godot's `-1` (and an absent argument) means
+/// "thinnest visible line", which the rasterizer wants as 1.
+fn positive_width(args: &[Variant], index: usize) -> f32 {
+    match arg_f32(args, index) {
+        Some(w) if w > 0.0 => w,
+        _ => 1.0,
+    }
+}
+
 /// Per-node script storage.
 pub type ScriptStore = HashMap<NodeId, Box<dyn ScriptInstance>>;
 
@@ -1409,6 +1458,109 @@ impl SceneAccess for SceneTreeAccessor {
                     radius,
                     color,
                 });
+                Some(Variant::Nil)
+            }
+            // -- stroke / fill family (pat-0q2kx.129) ------------------------
+            //
+            // These reach `polygon_raster`, which had the scanline fill and the
+            // capped/jointed stroke implemented and unit-tested but no caller
+            // anywhere — so a script could only ever draw rects, circles and
+            // single lines.
+            //
+            // draw_polyline(points, color, width = -1.0, antialiased = false)
+            "draw_polyline" | "draw_polyline_colors" => {
+                let points = arg_vec2_array(args, 0)?;
+                // `draw_polyline_colors` takes a PackedColorArray in slot 1;
+                // the software path has no per-vertex interpolation, so the
+                // first color applies to the whole stroke.
+                let color = arg_color(args, 1)
+                    .or_else(|| arg_first_color(args, 1))
+                    .unwrap_or(Color::WHITE);
+                self.tree_mut()
+                    .push_draw_command(DrawCommand::DrawPolyline {
+                        points,
+                        color,
+                        width: positive_width(args, 2),
+                        closed: false,
+                    });
+                Some(Variant::Nil)
+            }
+            // draw_multiline(points, color, width = -1.0)
+            "draw_multiline" | "draw_multiline_colors" => {
+                let points = arg_vec2_array(args, 0)?;
+                let color = arg_color(args, 1)
+                    .or_else(|| arg_first_color(args, 1))
+                    .unwrap_or(Color::WHITE);
+                self.tree_mut()
+                    .push_draw_command(DrawCommand::DrawMultiline {
+                        points,
+                        color,
+                        width: positive_width(args, 2),
+                    });
+                Some(Variant::Nil)
+            }
+            // draw_dashed_line(from, to, color, width = -1.0, dash = 2.0)
+            "draw_dashed_line" => {
+                let from = arg_vec2(args, 0)?;
+                let to = arg_vec2(args, 1)?;
+                let color = arg_color(args, 2).unwrap_or(Color::WHITE);
+                let dash = match arg_f32(args, 4) {
+                    Some(d) if d > 0.0 => d,
+                    _ => 2.0,
+                };
+                self.tree_mut()
+                    .push_draw_command(DrawCommand::DrawDashedLine {
+                        from,
+                        to,
+                        color,
+                        width: positive_width(args, 3),
+                        dash,
+                    });
+                Some(Variant::Nil)
+            }
+            // draw_arc(center, radius, start_angle, end_angle, point_count,
+            //          color, width = -1.0, antialiased = false)
+            "draw_arc" => {
+                let center = arg_vec2(args, 0)?;
+                let radius = arg_f32(args, 1)?;
+                let start_angle = arg_f32(args, 2)?;
+                let end_angle = arg_f32(args, 3)?;
+                let point_count = match args.get(4) {
+                    Some(Variant::Int(i)) if *i > 1 => *i as u32,
+                    Some(Variant::Float(f)) if *f > 1.0 => *f as u32,
+                    _ => 24,
+                };
+                let color = arg_color(args, 5).unwrap_or(Color::WHITE);
+                self.tree_mut().push_draw_command(DrawCommand::DrawArc {
+                    center,
+                    radius,
+                    start_angle,
+                    end_angle,
+                    point_count,
+                    color,
+                    width: positive_width(args, 6),
+                });
+                Some(Variant::Nil)
+            }
+            // draw_polygon(points, colors, uvs = [], texture = null)
+            // draw_colored_polygon(points, color, uvs = [], texture = null)
+            "draw_polygon" | "draw_colored_polygon" => {
+                let points = arg_vec2_array(args, 0)?;
+                // `draw_polygon` takes an array of colors, `draw_colored_polygon`
+                // a single one — accept either shape in slot 1.
+                let colors = match arg_color(args, 1) {
+                    Some(c) => vec![c],
+                    None => {
+                        let list = arg_color_array(args, 1);
+                        if list.is_empty() {
+                            vec![Color::WHITE]
+                        } else {
+                            list
+                        }
+                    }
+                };
+                self.tree_mut()
+                    .push_draw_command(DrawCommand::DrawPolygon { points, colors });
                 Some(Variant::Nil)
             }
             // draw_texture(texture, position, modulate = WHITE). Patina's

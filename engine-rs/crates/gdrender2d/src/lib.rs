@@ -17,12 +17,12 @@ pub mod label_settings;
 pub mod light2d;
 pub mod occluder_polygon;
 pub mod polygon_raster;
-pub mod text_layout;
-pub mod text_server;
-pub mod ttf_font;
 pub mod renderer;
 pub mod test_adapter;
+pub mod text_layout;
+pub mod text_server;
 pub mod texture;
+pub mod ttf_font;
 #[cfg(feature = "gpu")]
 pub mod wgpu_backend;
 
@@ -32,19 +32,16 @@ pub use export::{
     save_ppm,
 };
 pub use font::{BitmapFont, FontFile, Glyph};
-pub use text_server::TextServerLite;
-pub use ttf_font::{
-    draw_label_text, draw_ttf_text, AtlasGlyph, GlyphAtlas, RasterGlyph, TtfFont,
-};
-pub use label_settings::{
-    FontHinting, FontSpacing, FontVariation, LabelSettings, SystemFont,
-};
+pub use label_settings::{FontHinting, FontSpacing, FontVariation, LabelSettings, SystemFont};
 pub use light2d::{
-    apply_lights_to_framebuffer, composite_light, is_occluded, light_factor_at, CanvasAmbient,
-    Light2D, Light2DBlendMode, Light2DKind, LightOccluder2D, LIGHT2D_CLASS_NAMES,
+    apply_lights_to_framebuffer, apply_lights_with_item_masks, composite_light, is_occluded,
+    light_contribution_at, light_factor_at, shade_pixel, shadow_visibility, CanvasAmbient, Light2D,
+    Light2DBlendMode, Light2DKind, LightOccluder2D, ShadowFilter, LIGHT2D_CLASS_NAMES,
 };
 pub use occluder_polygon::{OccluderCullMode, OccluderPolygon2D};
 pub use renderer::{Bgra8Image, FrameBuffer, Raster, SoftwareRenderer};
+pub use text_server::TextServerLite;
 pub use texture::{decode_png, load_png, resolve_res_path, Texture2D};
+pub use ttf_font::{draw_label_text, draw_ttf_text, AtlasGlyph, GlyphAtlas, RasterGlyph, TtfFont};
 #[cfg(feature = "gpu")]
 pub use wgpu_backend::{BackendType, DeviceInfo, DrawBatch, SurfaceConfig, WgpuRenderer};

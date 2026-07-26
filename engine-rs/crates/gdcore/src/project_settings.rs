@@ -423,6 +423,19 @@ impl ProjectSettings {
     }
 
     /// Returns all settings under a given section prefix.
+    /// Every setting this project declares, as `(path, value)` in path order
+    /// (pat-0q2kx.135).
+    ///
+    /// [`get_section`](Self::get_section) can only answer for one prefix, so
+    /// there was no way to hand the whole table to another layer — which is what
+    /// seeding the interpreter's `ProjectSettings` singleton at boot needs.
+    /// Yields only what the project actually declares, NOT the Godot default
+    /// table, so a consumer can still tell "set by the project" from "engine
+    /// default".
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &SettingsValue)> {
+        self.properties.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
     pub fn get_section(&self, prefix: &str) -> Vec<(&str, &SettingsValue)> {
         let prefix_slash = if prefix.ends_with('/') {
             prefix.to_string()

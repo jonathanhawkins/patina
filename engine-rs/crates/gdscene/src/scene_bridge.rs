@@ -39,6 +39,9 @@ use gdvariant::Variant;
 
 use gdrender2d::SoftwareRenderer;
 use gdserver2d::canvas::{CanvasItem, CanvasItemId, DrawCommand};
+use gdserver2d::material::{
+    BlendMode, CanvasItemMaterial, LightMode, TextureFilter, TextureRepeat,
+};
 use gdserver2d::server::{FrameData, RenderingServer2D};
 use gdserver2d::shader::{Shader, ShaderMaterial, ShaderType};
 use gdserver2d::viewport::Viewport;
@@ -123,12 +126,113 @@ fn visit(
         if let Some(material) = resolve_canvas_shader_material(tree, node_id) {
             item.set_material(material);
         }
+        // pat-0q2kx.131: the item's blend mode and its resolved sampling modes.
+        // `blend`/`sample_texture` in `gdrender2d::canvas_material` had no
+        // production caller at all, so an authored CanvasItemMaterial composited
+        // as plain Mix and every texture sampled nearest-clamped.
+        item.canvas_material = resolve_canvas_item_material(tree, node_id);
+        item.texture_filter = resolve_texture_filter(tree, node_id);
+        item.texture_repeat = resolve_texture_repeat(tree, node_id);
         viewport.add_canvas_item(item);
     }
 
     for child in canvas_order::draw_ordered_children(tree, node_id) {
         visit(tree, child, viewport, next_id, texture_size);
     }
+}
+
+// ---------------------------------------------------------------------------
+// CanvasItemMaterial + texture filter/repeat (pat-0q2kx.131)
+// ---------------------------------------------------------------------------
+
+/// Reads an integer enum property, accepting the int or float form a `.tscn`
+/// may carry.
+fn enum_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<i64> {
+    match tree.get_node(node_id)?.get_property(key) {
+        Variant::Int(i) => Some(i),
+        Variant::Float(f) => Some(f as i64),
+        _ => None,
+    }
+}
+
+/// Builds the node's [`CanvasItemMaterial`] from the `__canvas_material__*`
+/// companions `packed_scene` flattens at load.
+///
+/// `None` when the node has no CanvasItemMaterial, which is the common case —
+/// the renderer then composites with plain `Mix`.
+fn resolve_canvas_item_material(tree: &SceneTree, node_id: NodeId) -> Option<CanvasItemMaterial> {
+    let node = tree.get_node(node_id)?;
+    // A material with every property defaulted flattens to an empty bag, so
+    // presence is recorded explicitly rather than inferred from the companions.
+    let present = matches!(
+        node.get_property("__canvas_material__present"),
+        Variant::Bool(true)
+    );
+    if !present {
+        return None;
+    }
+    // Godot's `CanvasItemMaterial.BlendMode`: MIX/ADD/SUB/MUL/PREMULT_ALPHA.
+    let blend_mode = match enum_prop(tree, node_id, "__canvas_material__blend_mode") {
+        Some(1) => BlendMode::Add,
+        Some(2) => BlendMode::Sub,
+        Some(3) => BlendMode::Mul,
+        Some(4) => BlendMode::PremultAlpha,
+        _ => BlendMode::Mix,
+    };
+    // `LightMode`: NORMAL/UNSHADED/LIGHT_ONLY. Carried through so the lighting
+    // pass can gate on it; nothing here consumes it yet.
+    let light_mode = match enum_prop(tree, node_id, "__canvas_material__light_mode") {
+        Some(1) => LightMode::Unshaded,
+        Some(2) => LightMode::LightOnly,
+        _ => LightMode::Normal,
+    };
+    Some(CanvasItemMaterial {
+        blend_mode,
+        light_mode,
+    })
+}
+
+/// Resolves `texture_filter` up the ancestor chain (`FILTER_PARENT_NODE`).
+///
+/// Godot's enum: 0 = PARENT_NODE, 1 = NEAREST, 2 = LINEAR, 3/4 add mipmaps and
+/// 5..7 anisotropy — the software rasterizer has no mip chain, so the mipmap
+/// variants collapse onto their base filter rather than being ignored.
+///
+/// The chain terminates at the project default
+/// (`rendering/textures/canvas_textures/default_texture_filter`, which Patina
+/// seeds as 1 = NEAREST), so a root node left on PARENT_NODE still samples.
+fn resolve_texture_filter(tree: &SceneTree, node_id: NodeId) -> TextureFilter {
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        match enum_prop(tree, id, "texture_filter") {
+            Some(1) | Some(3) => return TextureFilter::Nearest,
+            Some(2) | Some(4) => return TextureFilter::Linear,
+            Some(5) => return TextureFilter::Nearest,
+            Some(6) | Some(7) => return TextureFilter::Linear,
+            // 0 (PARENT_NODE) or absent: keep walking up.
+            _ => {}
+        }
+        current = tree.get_node(id).and_then(|n| n.parent());
+    }
+    TextureFilter::Nearest
+}
+
+/// Resolves `texture_repeat` up the ancestor chain (`REPEAT_PARENT_NODE`).
+///
+/// Godot's enum: 0 = PARENT_NODE, 1 = DISABLED, 2 = ENABLED, 3 = MIRROR. The
+/// chain terminates at the project default, which is DISABLED.
+fn resolve_texture_repeat(tree: &SceneTree, node_id: NodeId) -> TextureRepeat {
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        match enum_prop(tree, id, "texture_repeat") {
+            Some(1) => return TextureRepeat::Disabled,
+            Some(2) => return TextureRepeat::Enabled,
+            Some(3) => return TextureRepeat::Mirror,
+            _ => {}
+        }
+        current = tree.get_node(id).and_then(|n| n.parent());
+    }
+    TextureRepeat::Disabled
 }
 
 /// Resolves the node's `ShaderMaterial` from the flat properties `packed_scene`

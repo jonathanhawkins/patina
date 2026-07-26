@@ -9,7 +9,10 @@
 //! them to a framebuffer honoring per-item `light_mask`.
 
 use gdcore::math::{Color, Vector2};
-use gdrender2d::light2d::{apply_lights_to_framebuffer, CanvasAmbient, Light2D, LightOccluder2D};
+use gdrender2d::light2d::{
+    apply_lights_to_framebuffer, CanvasAmbient, Light2D, Light2DBlendMode, LightOccluder2D,
+    ShadowFilter,
+};
 use gdrender2d::renderer::FrameBuffer;
 use gdvariant::Variant;
 
@@ -53,6 +56,37 @@ fn prop_vec2(node: &Node, key: &str, default: Vector2) -> Vector2 {
 }
 
 /// Builds [`Light2D`] values from `PointLight2D`/`DirectionalLight2D` nodes.
+/// Reads the `Light2D` base-class properties both light nodes share
+/// (pat-0q2kx.130). Kept in one place so `PointLight2D` and
+/// `DirectionalLight2D` cannot drift apart.
+///
+/// Every default is Godot's: `blend_mode` MIX, cull masks layer 1, an opaque
+/// black `shadow_color` (a fully blocking shadow), no shadow filtering.
+fn apply_common_light_props(node: &crate::node::Node, light: &mut Light2D) {
+    light.editor_only = prop_bool(node, "editor_only", false);
+    light.blend_mode = match node.get_property("blend_mode") {
+        Variant::Int(1) => Light2DBlendMode::Sub,
+        Variant::Int(2) => Light2DBlendMode::Mix,
+        // Godot's enum is ADD=0, SUB=1, MIX=2, but the *property* default is
+        // ADD's neighbour MIX; an absent value keeps the constructor's MIX.
+        Variant::Int(0) => Light2DBlendMode::Add,
+        Variant::String(ref s) => match s.as_str() {
+            "add" | "ADD" => Light2DBlendMode::Add,
+            "sub" | "SUB" => Light2DBlendMode::Sub,
+            _ => Light2DBlendMode::Mix,
+        },
+        _ => light.blend_mode,
+    };
+    light.range_item_cull_mask = prop_u32(node, "range_item_cull_mask", 1);
+    light.shadow_item_cull_mask = prop_u32(node, "shadow_item_cull_mask", 1);
+    light.shadow_color = prop_color(node, "shadow_color", Color::new(0.0, 0.0, 0.0, 1.0));
+    light.shadow_filter = match node.get_property("shadow_filter") {
+        Variant::Int(i) => ShadowFilter::from_godot_int(i),
+        _ => ShadowFilter::None,
+    };
+    light.shadow_filter_smooth = prop_f32(node, "shadow_filter_smooth", 0.0);
+}
+
 pub fn collect_lights_2d(tree: &SceneTree) -> Vec<Light2D> {
     let mut lights = Vec::new();
     for id in tree.all_nodes_in_tree_order() {
@@ -71,6 +105,14 @@ pub fn collect_lights_2d(tree: &SceneTree) -> Vec<Light2D> {
                 light.light_mask = prop_u32(node, "light_mask", 1);
                 light.enabled = prop_bool(node, "enabled", true);
                 light.shadow_enabled = prop_bool(node, "shadow_enabled", true);
+                apply_common_light_props(node, &mut light);
+                // PointLight2D-only footprint controls (pat-0q2kx.130).
+                light.offset = prop_vec2(node, "offset", Vector2::new(0.0, 0.0));
+                light.texture_scale = prop_f32(node, "texture_scale", 1.0);
+                light.texture_path = match node.get_property("texture") {
+                    Variant::String(path) if !path.is_empty() => Some(path),
+                    _ => None,
+                };
                 lights.push(light);
             }
             "DirectionalLight2D" => {
@@ -81,6 +123,7 @@ pub fn collect_lights_2d(tree: &SceneTree) -> Vec<Light2D> {
                 );
                 light.light_mask = prop_u32(node, "light_mask", 1);
                 light.enabled = prop_bool(node, "enabled", true);
+                apply_common_light_props(node, &mut light);
                 lights.push(light);
             }
             _ => {}

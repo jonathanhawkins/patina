@@ -10,16 +10,20 @@
 //! It lives in its own module (over the public `viewport_3d` API) to compose
 //! with the viewport without growing that already-large file.
 
-use gdcore::math::{Color, Vector3};
+use gdcore::math::{Color, Vector2, Vector3};
 use gdcore::math3d::Transform3D;
 use gdrender2d::renderer::{Bgra8Image, FrameBuffer, Raster};
 use gdrender3d::SoftwareRenderer3D;
 use gdscene::node::NodeId;
 use gdscene::SceneTree;
+use gdserver3d::decal::Decal3D;
+use gdserver3d::fog_volume::FogVolume;
 use gdserver3d::instance::GeometryInstanceSettings;
 use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::Material3D;
 use gdserver3d::mesh::Mesh3D;
+use gdserver3d::occluder::{Occluder3D, OccluderInstance3D};
+use gdserver3d::reflection_probe::{ReflectionProbe, ReflectionProbeId};
 use gdserver3d::server::RenderingServer3D;
 use gdserver3d::viewport::Viewport3D as RenderViewport3D;
 
@@ -1360,6 +1364,32 @@ pub struct Editor3DRenderInputs {
     /// The scene's `DirectionalLight3D` lights (direction + color/energy/angular
     /// size), in tree order, capped at 4. Empty → fall back to the preview sun.
     pub scene_lights: Vec<SceneLight3D>,
+    /// The scene's environment-effect nodes (pat-0q2kx.132).
+    pub env_effects: SceneEnvEffects3D,
+}
+
+/// The `FogVolume` / `Decal` / `ReflectionProbe` / `OccluderInstance3D` nodes of
+/// a scene, snapshotted from the tree so the render step needs no tree access
+/// (pat-0q2kx.132).
+///
+/// The renderer had a full pass for each of these — `apply_fog_volume_pass`,
+/// `apply_decal_pass`, `is_occluded`, `sample_reflection_probes` — and a rich
+/// type behind each, but **no production code ever called `add_*`**. Fog volumes
+/// reached a preview list nobody read, probes only a test-only adapter, and
+/// decals and occluders had no producer at all. Authoring any of the four
+/// changed not one pixel; this is what carries them from `.tscn` to the frame.
+#[derive(Debug, Clone, Default)]
+pub struct SceneEnvEffects3D {
+    /// Fog volumes with the node's global transform — the transform is the half
+    /// that was missing before: the preview list built the volume without one,
+    /// so every fog volume sat at the origin regardless of where it was placed.
+    pub fog_volumes: Vec<(FogVolume, Transform3D)>,
+    /// Decals, each already carrying its own `global_transform`.
+    pub decals: Vec<Decal3D>,
+    /// Reflection probes, positioned and sized from their nodes.
+    pub reflection_probes: Vec<ReflectionProbe>,
+    /// Occluders, each with a shape and world transform.
+    pub occluders: Vec<OccluderInstance3D>,
 }
 
 /// Builds [`Editor3DRenderInputs`] from the viewport + scene tree. This is the
@@ -1369,6 +1399,159 @@ pub fn editor_3d_render_inputs(viewport: &Viewport3D, tree: &SceneTree) -> Edito
     Editor3DRenderInputs {
         items: viewport.build_render_list(tree),
         scene_lights: scene_lights(tree),
+        env_effects: scene_env_effects(tree),
+    }
+}
+
+/// Reads a float node property, accepting an `Int` spelling too (a `.tscn`
+/// writes `intensity = 1` without a decimal point).
+fn env_f32(node: &gdscene::node::Node, key: &str, default: f32) -> f32 {
+    match node.get_property(key) {
+        gdvariant::Variant::Float(f) => f as f32,
+        gdvariant::Variant::Int(i) => i as f32,
+        _ => default,
+    }
+}
+
+fn env_bool(node: &gdscene::node::Node, key: &str, default: bool) -> bool {
+    match node.get_property(key) {
+        gdvariant::Variant::Bool(b) => b,
+        gdvariant::Variant::Int(i) => i != 0,
+        _ => default,
+    }
+}
+
+fn env_vec3(node: &gdscene::node::Node, key: &str, default: Vector3) -> Vector3 {
+    match node.get_property(key) {
+        gdvariant::Variant::Vector3(v) => v,
+        _ => default,
+    }
+}
+
+/// Walks the tree for the four environment-effect node classes and snapshots
+/// them, ready to hand to the renderer (pat-0q2kx.132).
+///
+/// Hidden nodes are skipped, matching Godot: all four are `VisualInstance3D`s,
+/// and hiding one drops it from the scenario rather than merely dimming it.
+fn scene_env_effects(tree: &SceneTree) -> SceneEnvEffects3D {
+    let mut out = SceneEnvEffects3D::default();
+    let mut next_probe_id = 1u64;
+
+    for nid in tree.all_nodes_in_tree_order() {
+        let Some(node) = tree.get_node(nid) else {
+            continue;
+        };
+        let is_fog = node.is_class("FogVolume");
+        let is_decal = node.is_class("Decal");
+        let is_probe = node.is_class("ReflectionProbe");
+        let is_occluder = node.is_class("OccluderInstance3D");
+        if !(is_fog || is_decal || is_probe || is_occluder) {
+            continue;
+        }
+        if !gdscene::node3d::is_visible_in_tree(tree, nid) {
+            continue;
+        }
+        let transform = gdscene::node3d::get_global_transform(tree, nid);
+
+        if is_fog {
+            // The parser already existed (`viewport_3d.rs`), but the one caller
+            // threw the transform away, so a fog volume authored anywhere in the
+            // scene fogged the origin.
+            let volume = crate::viewport_3d::fog_volume_from_node_properties(node.properties());
+            out.fog_volumes.push((volume, transform));
+        } else if is_decal {
+            let mut decal = Decal3D::new();
+            decal.global_transform = transform;
+            decal.size = env_vec3(node, "size", decal.size);
+            decal.modulate = match node.get_property("modulate") {
+                gdvariant::Variant::Color(c) => c,
+                _ => decal.modulate,
+            };
+            decal.albedo_mix = env_f32(node, "albedo_mix", decal.albedo_mix as f32) as f64;
+            decal.emission_energy =
+                env_f32(node, "emission_energy", decal.emission_energy as f32) as f64;
+            decal.normal_fade = env_f32(node, "normal_fade", decal.normal_fade as f32) as f64;
+            decal.upper_fade = env_f32(node, "upper_fade", decal.upper_fade as f32) as f64;
+            decal.lower_fade = env_f32(node, "lower_fade", decal.lower_fade as f32) as f64;
+            decal.distance_fade_enabled =
+                env_bool(node, "distance_fade_enabled", decal.distance_fade_enabled);
+            decal.distance_fade_begin = env_f32(
+                node,
+                "distance_fade_begin",
+                decal.distance_fade_begin as f32,
+            ) as f64;
+            decal.distance_fade_length = env_f32(
+                node,
+                "distance_fade_length",
+                decal.distance_fade_length as f32,
+            ) as f64;
+            if let gdvariant::Variant::Int(mask) = node.get_property("cull_mask") {
+                decal.cull_mask = mask as u32;
+            }
+            out.decals.push(decal);
+        } else if is_probe {
+            let mut probe = ReflectionProbe::new(ReflectionProbeId(next_probe_id));
+            next_probe_id += 1;
+            probe.transform = transform;
+            probe.size = env_vec3(node, "size", probe.size);
+            probe.origin_offset = env_vec3(node, "origin_offset", probe.origin_offset);
+            probe.intensity = env_f32(node, "intensity", probe.intensity);
+            probe.max_distance = env_f32(node, "max_distance", probe.max_distance);
+            probe.box_projection = env_bool(node, "box_projection", probe.box_projection);
+            probe.interior = env_bool(node, "interior", probe.interior);
+            probe.enable_shadows = env_bool(node, "enable_shadows", probe.enable_shadows);
+            probe.ambient_color_energy =
+                env_f32(node, "ambient_color_energy", probe.ambient_color_energy);
+            if let gdvariant::Variant::Color(c) = node.get_property("ambient_color") {
+                probe.ambient_color = c;
+            }
+            if let gdvariant::Variant::Int(mask) = node.get_property("cull_mask") {
+                probe.cull_mask = mask as u32;
+            }
+            out.reflection_probes.push(probe);
+        } else {
+            let mut inst = OccluderInstance3D::new();
+            inst.transform = transform;
+            inst.occluder = occluder_shape_from_node(node);
+            if let gdvariant::Variant::Int(mask) = node.get_property("bake_mask") {
+                inst.bake_mask = mask as u32;
+            }
+            inst.bake_simplification_distance = env_f32(
+                node,
+                "bake_simplification_distance",
+                inst.bake_simplification_distance,
+            );
+            out.occluders.push(inst);
+        }
+    }
+    out
+}
+
+/// The occluder shape an `OccluderInstance3D` node carries.
+///
+/// Godot points `occluder` at a separate `Occluder3D` *resource*; a `.tscn`
+/// spells that as a sub-resource, which the loader flattens onto the node (see
+/// the `__x__<key>` companion convention). Both spellings are read here, and a
+/// node that names no shape yields `None` — an occluder with no shape occludes
+/// nothing, which is what Godot does too.
+fn occluder_shape_from_node(node: &gdscene::node::Node) -> Option<Occluder3D> {
+    let kind = match node.get_property("occluder") {
+        gdvariant::Variant::String(s) => s,
+        _ => match node.get_property("__occluder__type") {
+            gdvariant::Variant::String(s) => s,
+            _ => return None,
+        },
+    };
+    let size = env_vec3(node, "__occluder__size", Vector3::new(1.0, 1.0, 1.0));
+    match kind.as_str() {
+        "BoxOccluder3D" => Some(Occluder3D::Box { size }),
+        "SphereOccluder3D" => Some(Occluder3D::Sphere {
+            radius: env_f32(node, "__occluder__radius", 1.0),
+        }),
+        "QuadOccluder3D" => Some(Occluder3D::Quad {
+            size: Vector2::new(size.x, size.y),
+        }),
+        _ => None,
     }
 }
 
@@ -1385,7 +1568,24 @@ fn populate_editor_scene_3d(
     renderer: &mut dyn RenderingServer3D,
     viewport: &Viewport3D,
     items: &[Render3DItem],
+    env_effects: &SceneEnvEffects3D,
 ) -> EditorOverlays3D {
+    // Environment effects first: `is_occluded` runs during the instance draw
+    // loop, so the occluders have to be in place before the meshes are, or the
+    // first frame after a change culls nothing (pat-0q2kx.132).
+    for occluder in &env_effects.occluders {
+        renderer.add_occluder(occluder.clone());
+    }
+    for (volume, transform) in &env_effects.fog_volumes {
+        renderer.add_fog_volume(volume.clone(), *transform);
+    }
+    for decal in &env_effects.decals {
+        renderer.add_decal(decal.clone());
+    }
+    for probe in &env_effects.reflection_probes {
+        renderer.add_reflection_probe(probe.id);
+        renderer.update_reflection_probe(probe);
+    }
     let mut selected_tfs: Vec<Transform3D> = Vec::new();
     let mut primary_tf: Option<Transform3D> = None;
     let mut node_gizmos: Vec<(Transform3D, PrimitiveShape)> = Vec::new();
@@ -1812,7 +2012,8 @@ fn render_editor_3d_frame_from_inputs(
     let height = viewport.height.max(1);
     let mut renderer = SoftwareRenderer3D::new();
 
-    let overlays = populate_editor_scene_3d(&mut renderer, viewport, &inputs.items);
+    let overlays =
+        populate_editor_scene_3d(&mut renderer, viewport, &inputs.items, &inputs.env_effects);
     setup_editor_lighting_3d(&mut renderer, viewport, &inputs.scene_lights);
 
     // --- Render from the editor camera. Godot's "Preview Environment" toolbar
@@ -1918,7 +2119,8 @@ pub fn render_editor_3d_frame_gpu(
         // lock (the caller snapshotted `inputs` under it), so `/api` handlers stay
         // responsive during the render.
         renderer.reset_scene();
-        let overlays = populate_editor_scene_3d(&mut *renderer, viewport, &inputs.items);
+        let overlays =
+            populate_editor_scene_3d(&mut *renderer, viewport, &inputs.items, &inputs.env_effects);
         setup_editor_lighting_3d(&mut *renderer, viewport, &inputs.scene_lights);
         let mut rv = editor_render_viewport(viewport, width, height);
         // Same environment as the software path: the GPU renderer draws the

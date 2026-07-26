@@ -10,38 +10,11 @@ use gdcore::math::Color;
 
 use crate::texture::Texture2D;
 
-/// Godot `CanvasItemMaterial.BlendMode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BlendMode {
-    /// Standard source-over alpha compositing.
-    Mix,
-    /// Additive (light-accumulating).
-    Add,
-    /// Subtractive.
-    Sub,
-    /// Multiplicative.
-    Mul,
-}
-
-/// Per-item texture sampling filter (Godot `texture_filter`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TextureFilter {
-    /// Nearest-neighbor (pixel-art).
-    Nearest,
-    /// Bilinear interpolation of the 4 nearest texels.
-    Linear,
-}
-
-/// Per-item UV wrap mode (Godot `texture_repeat`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TextureRepeat {
-    /// Clamp UVs to `[0, 1]`.
-    Disabled,
-    /// Wrap (tile) UVs.
-    Enabled,
-    /// Mirror on each repeat.
-    Mirror,
-}
+// The blend/sampling modes are `gdserver2d`'s: a `CanvasItem` carries them, so
+// defining a parallel set here would mean a conversion at every call site and
+// two enums to keep in step. Re-exported so `canvas_material::BlendMode` still
+// resolves for existing callers.
+pub use gdserver2d::material::{BlendMode, TextureFilter, TextureRepeat};
 
 /// Composites `src` over `dst` using `mode`.
 ///
@@ -73,12 +46,25 @@ pub fn blend(src: Color, dst: Color, mode: BlendMode) -> Color {
             let product = Color::new(dst.r * src.r, dst.g * src.g, dst.b * src.b, dst.a);
             dst.lerp(product, a)
         }
+        // The source colour is already multiplied by its own alpha, so it is
+        // added straight on rather than scaled by `a` again — scaling twice is
+        // what makes a premultiplied sprite look washed out.
+        BlendMode::PremultAlpha => Color::new(
+            (dst.r + src.r).min(1.0),
+            (dst.g + src.g).min(1.0),
+            (dst.b + src.b).min(1.0),
+            (a + dst.a * (1.0 - a)).min(1.0),
+        ),
     }
 }
 
 fn apply_repeat(coord: f32, repeat: TextureRepeat) -> f32 {
     match repeat {
-        TextureRepeat::Disabled => coord.clamp(0.0, 1.0),
+        // `ParentNode` should have been resolved by the scene bridge before it
+        // reaches the rasterizer; clamping is Godot's viewport default, so an
+        // unresolved value degrades to the common case rather than tiling
+        // unexpectedly.
+        TextureRepeat::ParentNode | TextureRepeat::Disabled => coord.clamp(0.0, 1.0),
         TextureRepeat::Enabled => coord.rem_euclid(1.0),
         TextureRepeat::Mirror => {
             let t = coord.rem_euclid(2.0);
@@ -107,7 +93,10 @@ pub fn sample_texture(
     let u = apply_repeat(u, repeat);
     let v = apply_repeat(v, repeat);
     match filter {
-        TextureFilter::Nearest => {
+        // As above: unresolved `ParentNode` falls back to the viewport default,
+        // which Godot ships as LINEAR — but Patina's project default is NEAREST
+        // (`default_texture_filter = 1`), so it groups with Nearest here.
+        TextureFilter::ParentNode | TextureFilter::Nearest => {
             let x = ((u * tex.width as f32) as u32).min(tex.width - 1);
             let y = ((v * tex.height as f32) as u32).min(tex.height - 1);
             tex.get_pixel(x, y)

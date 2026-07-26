@@ -19,7 +19,8 @@
 
 use std::path::{Path, PathBuf};
 
-use gdcore::{resolve_path, set_path_roots, ProjectSettings};
+use gdcore::file_access::FileAccess;
+use gdcore::{set_path_roots, ProjectSettings};
 use gdplatform::InputMap;
 use gdresource::{AutoloadEntry, ProjectLoader};
 use gdscene::{add_packed_scene_to_tree, Node, NodeId, PackedScene, SceneTree};
@@ -45,6 +46,47 @@ pub fn boot_project(project_dir: &Path) -> Result<BootedProject, String> {
     boot_project_with_user_root(project_dir, None)
 }
 
+/// Boots an exported game from a Godot `.pck`, the way Godot boots a shipped
+/// build (pat-0q2kx.134).
+///
+/// The pack is mounted over `res://` before anything is parsed, so
+/// `project.godot`, the main scene, the autoloads and every texture they
+/// reference all resolve out of the archive — the loose project directory does
+/// not need to exist. `res://` still points at the pack's own directory, so a
+/// file deliberately shipped beside the pack keeps resolving.
+///
+/// `user_dir` maps `user://` exactly as in [`boot_project_with_user_root`].
+pub fn boot_project_from_pck(
+    pck_path: &Path,
+    user_dir: Option<PathBuf>,
+) -> Result<BootedProject, String> {
+    let bytes = std::fs::read(pck_path)
+        .map_err(|e| format!("failed to read pack '{}': {e}", pck_path.display()))?;
+    let mount = gdresource::pck::PckMount::from_bytes(bytes)
+        .map_err(|e| format!("'{}' is not a valid .pck: {e}", pck_path.display()))?;
+
+    // `res://` falls back to the pack's directory for anything not packed.
+    let fallback_root = pck_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    set_path_roots(Some(fallback_root.clone()), user_dir.clone());
+
+    let label = pck_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "game".to_string());
+    gdcore::file_access::mount_pack(label, std::sync::Arc::new(mount), 0);
+
+    let content = FileAccess::read_file_string("res://project.godot").map_err(|e| {
+        format!(
+            "pack '{}' has no readable res://project.godot: {e}",
+            pck_path.display()
+        )
+    })?;
+    boot_from_project_text(&fallback_root, &content, user_dir)
+}
+
 /// Like [`boot_project`], but with an explicit `user://` root (e.g. the platform
 /// application-data directory). Passing `None` leaves `user://` unmapped.
 pub fn boot_project_with_user_root(
@@ -52,15 +94,34 @@ pub fn boot_project_with_user_root(
     user_dir: Option<PathBuf>,
 ) -> Result<BootedProject, String> {
     let project_root = project_dir.to_path_buf();
-
-    // (1) Parse project.godot for scene/autoloads/input and for ProjectSettings.
-    let loader = ProjectLoader::load(&project_root).map_err(|e| {
+    let content = std::fs::read_to_string(project_root.join("project.godot")).map_err(|e| {
         format!(
             "failed to load project.godot from {}: {e}",
             project_root.display()
         )
     })?;
-    let settings = ProjectSettings::load_godot_project(&project_root.join("project.godot"))
+    // `res://` must resolve before the shared body loads scenes.
+    set_path_roots(Some(project_root.clone()), user_dir.clone());
+    boot_from_project_text(&project_root, &content, user_dir)
+}
+
+/// The boot body shared by the loose-directory and `.pck` entry points.
+///
+/// Everything from here on reads through `res://`, so it does not care whether
+/// the bytes come from disk or from a mounted pack. `project_root` is only the
+/// `res://` fallback and the path reported in messages; both callers have already
+/// installed the path roots.
+fn boot_from_project_text(
+    project_root: &Path,
+    content: &str,
+    user_dir: Option<PathBuf>,
+) -> Result<BootedProject, String> {
+    let project_root = project_root.to_path_buf();
+
+    // (1) Parse project.godot for scene/autoloads/input and for ProjectSettings.
+    let loader = ProjectLoader::from_text(&project_root, content)
+        .map_err(|e| format!("failed to parse project.godot: {e}"))?;
+    let settings = ProjectSettings::from_godot_format(content)
         .map_err(|e| format!("failed to load ProjectSettings: {e}"))?;
 
     // (1a) Name the `user://` directory after the project, the way Godot does
@@ -78,6 +139,26 @@ pub fn boot_project_with_user_root(
         }
     }
 
+    // (1a2) Publish the parsed settings to the script-visible `ProjectSettings`
+    // singleton (pat-0q2kx.135). The interpreter's store was seeded by nothing,
+    // so `ProjectSettings.get_setting("physics/2d/default_gravity")` answered
+    // Nil inside a project that plainly declares it. Feature tags come from the
+    // same OS layer that answers `OS.has_feature`, so `setting.web` resolves
+    // against the same truth, and the source path is remembered so
+    // `ProjectSettings.save()` writes back where it read from.
+    gdscript_interop::interpreter::seed_project_settings(
+        settings
+            .iter()
+            .filter_map(|(k, v)| settings_value_to_variant(v).map(|var| (k.to_string(), var))),
+    );
+    gdscript_interop::interpreter::set_project_feature_tags(active_feature_tags());
+    gdscript_interop::interpreter::set_project_settings_path(
+        project_root
+            .join("project.godot")
+            .to_string_lossy()
+            .to_string(),
+    );
+
     // (1b) Install the DisplayServer backend now that the project's configured
     // viewport is known. Without this a script calling
     // `DisplayServer.window_get_size()` got a hardcoded 1920x1080 from inside
@@ -90,7 +171,9 @@ pub fn boot_project_with_user_root(
         ),
     ));
 
-    // (2) Wire res:// / user:// roots so FileAccess (and res:// scene loads) resolve.
+    // (2) Re-assert res:// / user:// roots. Both entry points set them before
+    // calling in (the `.pck` path must, to read project.godot at all); doing it
+    // again here keeps `user://` correct now that the project name is known.
     set_path_roots(Some(project_root.clone()), user_dir);
 
     let mut tree = SceneTree::new();
@@ -117,18 +200,11 @@ pub fn boot_project_with_user_root(
     // and then registers each project action with its real deadzone and bound
     // events (keycodes), so `Input.is_action_pressed` fires for project actions
     // after a matching key press. `ProjectLoader::get_input_map` keeps only
-    // lossy action names (no deadzone, no bound events), so hand the raw
-    // project.godot text to the full parser instead. `ProjectLoader::load`
-    // above already proved the file reads; on the unexpected re-read failure we
-    // fall back to just the builtin `ui_*` set.
-    let input_map = match std::fs::read_to_string(project_root.join("project.godot")) {
-        Ok(content) => InputMap::load_from_project_godot(&content),
-        Err(_) => {
-            let mut m = InputMap::new();
-            m.install_builtin_ui_actions();
-            m
-        }
-    };
+    // lossy action names (no deadzone, no bound events), so the raw
+    // project.godot text goes to the full parser instead. That text is already
+    // in hand, which also removes the old re-read-from-disk fallback and is what
+    // lets this work for a packed project (pat-0q2kx.134).
+    let input_map = InputMap::load_from_project_godot(content);
 
     Ok(BootedProject {
         tree,
@@ -137,6 +213,43 @@ pub fn boot_project_with_user_root(
         main_scene_root,
         autoload_roots,
     })
+}
+
+/// Maps a `project.godot` value to the `Variant` a script sees
+/// (pat-0q2kx.135). Every `SettingsValue` has a Variant counterpart, so this is
+/// total — there is no silently dropped setting.
+fn settings_value_to_variant(v: &gdcore::SettingsValue) -> Option<Variant> {
+    use gdcore::SettingsValue as S;
+    Some(match v {
+        S::Bool(b) => Variant::Bool(*b),
+        S::Int(i) => Variant::Int(*i),
+        S::Float(f) => Variant::Float(*f),
+        S::String(s) => Variant::String(s.clone()),
+        S::Vector2(x, y) => Variant::Vector2(gdcore::math::Vector2::new(*x as f32, *y as f32)),
+        S::Vector3(x, y, z) => {
+            Variant::Vector3(gdcore::math::Vector3::new(*x as f32, *y as f32, *z as f32))
+        }
+        S::Color(r, g, b, a) => Variant::Color(gdcore::math::Color::new(
+            *r as f32, *g as f32, *b as f32, *a as f32,
+        )),
+    })
+}
+
+/// The feature tags active for this run, in the order
+/// `get_setting_with_override` should try them.
+///
+/// Sourced from `gdplatform::os::has_feature` so a script's
+/// `OS.has_feature("web")` and a `setting.web` override can never disagree —
+/// two tables answering the same question is the bug pat-0q2kx.123 removed.
+fn active_feature_tags() -> Vec<String> {
+    [
+        "web", "editor", "template", "debug", "release", "pc", "desktop", "mobile", "linuxbsd",
+        "macos", "windows", "linux", "android", "ios", "x86_64", "arm64",
+    ]
+    .into_iter()
+    .filter(|tag| gdplatform::os::has_feature(tag))
+    .map(str::to_string)
+    .collect()
 }
 
 /// Instantiates one autoload under `parent`, returning its node id. Scene
@@ -169,12 +282,14 @@ fn load_scene_into_tree(
     parent: NodeId,
     res_path: &str,
 ) -> Result<NodeId, String> {
-    let fs_path =
-        resolve_path(res_path).map_err(|e| format!("failed to resolve '{res_path}': {e}"))?;
-    let source = std::fs::read_to_string(&fs_path)
-        .map_err(|e| format!("failed to read scene '{}': {e}", fs_path.display()))?;
+    // Pack-aware: `FileAccess::read_file_string` serves a mounted `.pck` before
+    // disk, so a packed and a loose project take the identical load path
+    // (pat-0q2kx.134). The `res://` path is used in errors rather than a
+    // filesystem path, because a packed read has none.
+    let source = FileAccess::read_file_string(res_path)
+        .map_err(|e| format!("failed to read scene '{res_path}': {e}"))?;
     let packed = PackedScene::from_tscn(&source)
-        .map_err(|e| format!("failed to parse scene '{}': {e}", fs_path.display()))?;
+        .map_err(|e| format!("failed to parse scene '{res_path}': {e}"))?;
     add_packed_scene_to_tree(tree, parent, &packed)
         .map_err(|e| format!("failed to instance scene '{res_path}': {e}"))
 }

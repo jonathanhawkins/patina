@@ -119,6 +119,14 @@ fn write_properties(out: &mut String, resource: &Resource) -> EngineResult<()> {
 
 /// Formats a Variant value in `.tres` syntax.
 fn format_variant(v: &Variant) -> String {
+    // A builtin `Variant` has no kind for (Vector4, Rect2i, Projection,
+    // PackedVector4Array) was preserved verbatim at load; re-emit that exact
+    // text (pat-0q2kx.136). Without this the round-trip would write the
+    // preservation dictionary into the file — which is a worse corruption than
+    // the drop it replaced, so it is checked before the normal match.
+    if let Some((_ty, literal)) = crate::loader::unparsed_literal(v) {
+        return literal.to_string();
+    }
     match v {
         Variant::Nil => "null".to_string(),
         Variant::Bool(b) => b.to_string(),

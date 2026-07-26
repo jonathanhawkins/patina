@@ -32,6 +32,191 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 ORACLE_DIR = os.path.join(REPO, "engine-rs/fixtures/editor_oracle")
 TRUE_DEFAULTS_PATH = os.path.join(ORACLE_DIR, "true_defaults.json")
 OUT = os.path.join(REPO, "engine-rs/crates/gdeditor/src/inspector_schema_generated.rs")
+DOC_DIR = os.path.join(REPO, "upstream/godot/doc/classes")
+
+# Classes the editor must show a real schema for that no captured scene happens
+# to contain (pat-0q2kx.128). The goldens only cover what the oracle scenes used,
+# so Line2D / Button / GPUParticles2D / … resolved to `None` and the inspector
+# fell back to a stored-only, near-empty list for freshly created nodes.
+#
+# For these the schema is synthesized from the vendored `doc/classes/*.xml`,
+# which carries both membership and Godot's documented defaults, walked
+# base-first up the `inherits` chain the same way a golden's flattened list
+# reads. A captured golden always wins over synthesis.
+SYNTHESIZE_FROM_DOCS = [
+    # 2D nodes
+    "Line2D",
+    "Polygon2D",
+    "AnimatedSprite2D",
+    "GPUParticles2D",
+    "CPUParticles2D",
+    "PointLight2D",
+    "DirectionalLight2D",
+    "LightOccluder2D",
+    "TouchScreenButton",
+    "RemoteTransform2D",
+    # 3D nodes
+    "GPUParticles3D",
+    "CPUParticles3D",
+    "Label3D",
+    "Decal",
+    "SpotLight3D",
+    "ReflectionProbe",
+    # GUI
+    "Button",
+    "LineEdit",
+    "TextEdit",
+    "RichTextLabel",
+    "OptionButton",
+    "CheckBox",
+    "CheckButton",
+    "TextureRect",
+    "TextureButton",
+    "ProgressBar",
+    "HSlider",
+    "VSlider",
+    "ItemList",
+    "Tree",
+    "TabBar",
+    "ScrollContainer",
+    # Resources
+    "StandardMaterial3D",
+    "BoxMesh",
+    "SphereMesh",
+    "CylinderMesh",
+    "PlaneMesh",
+    "Gradient",
+    "Curve",
+]
+
+# Doc XML defaults that name a constructor with no arguments (`PackedVector2Array()`,
+# `Callable()`, …) carry no value — treat them as the type's empty form.
+_EMPTY_CTOR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\(\s*\)$")
+
+
+def _doc_path(cls):
+    return os.path.join(DOC_DIR, f"{cls}.xml")
+
+
+def doc_class(cls, _cache={}):
+    """Parse `doc/classes/<cls>.xml` into (inherits, [(name, type, default)]).
+
+    Returns `None` when the class has no vendored doc page. `default` is the raw
+    attribute string, or `None` when the doc declares no default (Godot shows
+    those as unset — a resource slot, typically).
+    """
+    if cls in _cache:
+        return _cache[cls]
+    path = _doc_path(cls)
+    if not os.path.exists(path):
+        _cache[cls] = None
+        return None
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError:
+        _cache[cls] = None
+        return None
+    inherits = root.get("inherits")
+    members = []
+    for m in root.findall("./members/member"):
+        name = m.get("name")
+        if not name:
+            continue
+        members.append((name, m.get("type", ""), m.get("default")))
+    result = (inherits, members)
+    _cache[cls] = result
+    return result
+
+
+def doc_default_value(type_name, raw):
+    """Convert a doc XML `default="…"` string into the shape `rust_default` takes.
+
+    The golden path feeds `rust_default` JSON values; the vector-ish branches
+    already accept a `"(x, y)"`-style string, so most doc defaults pass straight
+    through. The ones that must NOT are the scalars: doc writes `"false"`, and a
+    non-empty Python string is truthy, so a bool would come out `true`.
+    """
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if type_name == "bool":
+        return raw == "true"
+    if type_name == "int":
+        try:
+            return int(raw, 0)
+        except ValueError:
+            return 0
+    if type_name == "float":
+        try:
+            return float(raw.rstrip("f"))
+        except ValueError:
+            return 0.0
+    if type_name in ("String", "StringName", "NodePath"):
+        # `""`, `&""`, `^""`, `NodePath("")` → the inner text.
+        inner = re.search(r'"(.*)"', raw)
+        return inner.group(1) if inner else ""
+    if type_name == "Array" or type_name.startswith("Packed"):
+        return []
+    if _EMPTY_CTOR.match(raw):
+        # `Callable()`, `RID()`, … — no value to show.
+        return None
+    if raw == "null":
+        return None
+    # Color(…) / Vector2(…) / Rect2(…) / AABB(…): `rust_default` parses the
+    # numbers straight out of the string.
+    return raw
+
+
+def synthesize_entry(cls):
+    """Build a golden-shaped entry for `cls` from the vendored doc XML.
+
+    Walks the `inherits` chain base-first so the flattened order matches how a
+    captured golden reads (Node members, then CanvasItem, then Node2D, then the
+    leaf). Hints are unavailable in the doc XML, so they are 0/"" — the property
+    still shows with its name, type and Godot default, which is the difference
+    between a populated inspector and an empty one.
+    """
+    chain = []
+    seen_cls = set()
+    cur = cls
+    while cur and cur not in seen_cls:
+        doc = doc_class(cur)
+        if doc is None:
+            break
+        seen_cls.add(cur)
+        chain.append((cur, doc[1]))
+        cur = doc[0]
+    if not chain:
+        return None
+    chain.reverse()  # base-first
+
+    entry = {"order": [], "hint": {}, "hint_string": {}, "type": {}, "default": {}, "allvals": {}}
+    for _owner, members in chain:
+        for name, tname, raw in members:
+            if name in entry["type"]:
+                continue  # a subclass redeclaration keeps the base's position
+            entry["order"].append(name)
+            entry["type"][name] = tname
+            entry["hint"][name] = 0
+            entry["hint_string"][name] = ""
+            entry["default"][name] = doc_default_value(tname, raw)
+    return entry
+
+
+def load_api_parents():
+    """`child -> parent` for every class in the captured extension_api dump."""
+    path = os.path.join(ORACLE_DIR, "godot_extension_api.json")
+    if not os.path.exists(path):
+        return {}
+    data = json.load(open(path))
+    out = {}
+    for c in data.get("classes", []):
+        name, inherits = c.get("name"), c.get("inherits")
+        if name and inherits:
+            out[name] = inherits
+    return out
 
 
 def fmt_f(v):
@@ -264,14 +449,31 @@ def main():
                 if p.get("is_default") and name not in entry["default"]:
                     entry["default"][name] = p.get("value")
 
+    # Fill in the classes no captured scene contains (pat-0q2kx.128). A golden
+    # always wins: synthesis only runs for a class the goldens never saw.
+    synthesized = []
+    missing_docs = []
+    for cls in SYNTHESIZE_FROM_DOCS:
+        if cls in classes:
+            continue
+        entry = synthesize_entry(cls)
+        if entry is None or not entry["order"]:
+            missing_docs.append(cls)
+            continue
+        classes[cls] = entry
+        synthesized.append(cls)
+
     lines = []
     lines.append("//! GENERATED — do not edit by hand.")
     lines.append("//!")
     lines.append("//! Per-class editor property schema transcribed from the real Godot 4.6.1")
-    lines.append("//! inspector goldens (`fixtures/editor_oracle/inspector_*.json`).")
+    lines.append("//! inspector goldens (`fixtures/editor_oracle/inspector_*.json`), plus")
+    lines.append("//! classes synthesized from the vendored `upstream/godot/doc/classes/*.xml`")
+    lines.append("//! for the ones no captured scene contains (pat-0q2kx.128). A golden always")
+    lines.append("//! wins; synthesized entries carry Godot's documented defaults but no hints.")
     lines.append("//! Regenerate with: `python3 tools/oracle/gen_inspector_schema.py`")
     lines.append("//!")
-    lines.append(f"//! {len(classes)} classes seeded.")
+    lines.append(f"//! {len(classes)} classes seeded ({len(synthesized)} synthesized from doc XML).")
     lines.append("")
     lines.append("use gdcore::math::{Color, Rect2, Vector2, Vector3};")
     lines.append("use gdcore::math3d::Aabb;")
@@ -325,11 +527,38 @@ def main():
     lines.append("];")
     lines.append("")
 
+    # Complete `inherits` map straight from extension_api.json (pat-0q2kx.128).
+    # `inspector_schema::parent_of` keeps its curated table as the authority and
+    # falls back here, so ANY class — not just the ones in the oracle scenes —
+    # resolves up to its nearest seeded base instead of returning None.
+    parents = load_api_parents()
+    lines.append("/// Every `inherits` edge Godot 4.6.1 declares, from")
+    lines.append("/// `fixtures/editor_oracle/godot_extension_api.json`.")
+    lines.append("///")
+    lines.append("/// [`crate::inspector_schema::parent_of`] consults its own curated table first")
+    lines.append("/// and falls back to this, so a class outside the captured oracle scenes still")
+    lines.append("/// walks up to its nearest seeded base rather than losing its schema.")
+    lines.append("pub fn generated_parent_of(class_name: &str) -> Option<&'static str> {")
+    lines.append("    const PARENTS: &[(&str, &str)] = &[")
+    for child in sorted(parents):
+        lines.append(f"        ({rust_str(child)}, {rust_str(parents[child])}),")
+    lines.append("    ];")
+    lines.append("    PARENTS")
+    lines.append("        .binary_search_by(|(c, _)| c.cmp(&class_name))")
+    lines.append("        .ok()")
+    lines.append("        .map(|i| PARENTS[i].1)")
+    lines.append("}")
+    lines.append("")
+
     with open(OUT, "w") as fh:
         fh.write("\n".join(lines))
 
     total_props = sum(len(c["order"]) for c in classes.values())
     print(f"Wrote {OUT}")
+    if synthesized:
+        print(f"  synthesized from doc XML ({len(synthesized)}): {', '.join(sorted(synthesized))}")
+    if missing_docs:
+        print(f"  NO doc page, still unseeded ({len(missing_docs)}): {', '.join(sorted(missing_docs))}")
     print(f"  {len(classes)} classes, {total_props} total properties")
     for cls in sorted(classes, key=lambda c: -len(classes[c]["order"])):
         print(f"    {cls:22s} {len(classes[cls]['order'])}")

@@ -12098,6 +12098,140 @@ thread_local! {
     /// each test runs in its own process, so this store is test-isolated.
     static PROJECT_SETTINGS: std::cell::RefCell<HashMap<String, Variant>> =
         std::cell::RefCell::new(HashMap::new());
+    /// Feature tags active for this run, consulted by `get_setting_with_override`
+    /// (pat-0q2kx.135). Godot resolves `setting.web` ahead of `setting` when the
+    /// `web` tag is active; with no tags the override is just the base value.
+    static PROJECT_FEATURE_TAGS: std::cell::RefCell<Vec<String>> =
+        std::cell::RefCell::new(Vec::new());
+    /// Absolute path of the `project.godot` the settings were seeded from, so
+    /// `ProjectSettings.save()` can write back where it read from.
+    static PROJECT_SETTINGS_PATH: std::cell::RefCell<Option<String>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Runtime hook: publish the booted project's settings to the script-visible
+/// `ProjectSettings` singleton (pat-0q2kx.135).
+///
+/// The store used to be seeded by nothing, so every `get_setting` of a real
+/// project value answered `Nil` — the singleton could only echo back values a
+/// script had set itself. `boot_project` calls this with the parsed
+/// `project.godot`, which is what makes a project's settings visible to the
+/// scripts running inside it.
+///
+/// Existing entries are replaced; entries a script added that the project does
+/// not declare are left alone, so seeding after a `set_setting` is not lossy.
+pub fn seed_project_settings<I, K>(settings: I)
+where
+    I: IntoIterator<Item = (K, Variant)>,
+    K: Into<String>,
+{
+    PROJECT_SETTINGS.with(|s| {
+        let mut store = s.borrow_mut();
+        for (key, value) in settings {
+            store.insert(key.into(), value);
+        }
+    });
+}
+
+/// Runtime hook: set the feature tags `get_setting_with_override` resolves
+/// against (Godot's `web`, `editor`, `debug`, custom export tags, …).
+pub fn set_project_feature_tags<I, S>(tags: I)
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    PROJECT_FEATURE_TAGS.with(|t| {
+        *t.borrow_mut() = tags.into_iter().map(Into::into).collect();
+    });
+}
+
+/// The feature tags currently active for override resolution.
+pub fn project_feature_tags() -> Vec<String> {
+    PROJECT_FEATURE_TAGS.with(|t| t.borrow().clone())
+}
+
+/// Runtime hook: remember which `project.godot` the settings came from, so
+/// `ProjectSettings.save()` writes back to it.
+pub fn set_project_settings_path(path: impl Into<String>) {
+    PROJECT_SETTINGS_PATH.with(|p| *p.borrow_mut() = Some(path.into()));
+}
+
+/// Clears the seeded settings, tags and save path. For tests that share a
+/// thread, and for a host switching projects.
+pub fn reset_project_settings() {
+    PROJECT_SETTINGS.with(|s| s.borrow_mut().clear());
+    PROJECT_FEATURE_TAGS.with(|t| t.borrow_mut().clear());
+    PROJECT_SETTINGS_PATH.with(|p| *p.borrow_mut() = None);
+}
+
+/// Maps a script-side `Variant` to the `SettingsValue` `project.godot` can
+/// store. Returns `None` for types the file format has no syntax for (objects,
+/// callables, arrays), which are then skipped by the writer rather than being
+/// written as something unparseable.
+fn variant_to_settings_value(v: &Variant) -> Option<gdcore::SettingsValue> {
+    use gdcore::SettingsValue as S;
+    Some(match v {
+        Variant::Bool(b) => S::Bool(*b),
+        Variant::Int(i) => S::Int(*i),
+        Variant::Float(f) => S::Float(*f),
+        Variant::String(s) => S::String(s.clone()),
+        Variant::StringName(s) => S::String(s.as_str().to_string()),
+        Variant::NodePath(p) => S::String(p.to_string()),
+        Variant::Vector2(v) => S::Vector2(v.x as f64, v.y as f64),
+        Variant::Vector3(v) => S::Vector3(v.x as f64, v.y as f64, v.z as f64),
+        Variant::Color(c) => S::Color(c.r as f64, c.g as f64, c.b as f64, c.a as f64),
+        _ => return None,
+    })
+}
+
+/// Writes the current settings to `path` in `project.godot` format, returning
+/// Godot's error code (pat-0q2kx.135).
+///
+/// Built through `gdcore::ProjectSettings` rather than hand-rolled INI so the
+/// output is exactly what `load_godot_project` parses back — the acceptance is
+/// that the saved file RELOADS, not merely that bytes were written. Starting
+/// from `from_godot_format("")` gives an empty `properties` map (the Godot
+/// default table lives in a separate field), so a save writes only real
+/// settings and not the ~300 engine defaults.
+fn save_project_settings_to(path: &str) -> i64 {
+    const OK: i64 = 0;
+    const ERR_FILE_CANT_OPEN: i64 = 12;
+    let Ok(mut ps) = gdcore::ProjectSettings::from_godot_format("") else {
+        return ERR_FILE_CANT_OPEN;
+    };
+    PROJECT_SETTINGS.with(|s| {
+        for (key, value) in s.borrow().iter() {
+            // `to_godot_format` splits each key at its first `/` into
+            // section + key, so a key with no section cannot be represented.
+            if !key.contains('/') {
+                continue;
+            }
+            if let Some(sv) = variant_to_settings_value(value) {
+                ps.set(key, sv);
+            }
+        }
+    });
+    match std::fs::write(path, ps.to_godot_format()) {
+        Ok(()) => OK,
+        Err(_) => ERR_FILE_CANT_OPEN,
+    }
+}
+
+/// Resolves `name` honoring the active feature tags: `name.<tag>` wins over
+/// `name`, in tag order, mirroring
+/// `ProjectSettings::get_setting_with_override`.
+fn project_setting_with_override(name: &str) -> Option<Variant> {
+    PROJECT_SETTINGS.with(|s| {
+        let store = s.borrow();
+        PROJECT_FEATURE_TAGS.with(|t| {
+            for tag in t.borrow().iter() {
+                if let Some(v) = store.get(&format!("{name}.{tag}")) {
+                    return Some(v.clone());
+                }
+            }
+            store.get(name).cloned()
+        })
+    })
 }
 
 /// `ProjectSettings` singleton (pat-u3l8c.21, pat-nzgdu.68). `get_setting` /
@@ -12124,11 +12258,37 @@ fn call_projectsettings_static(method: &str, args: &[Variant]) -> Result<Variant
             Ok(stored.unwrap_or_else(|| args.get(1).cloned().unwrap_or(Variant::Nil)))
         }
         "get_setting_with_override" => {
-            // Feature-tag overrides require the project.godot feature set (not
-            // yet seeded), so fall back to the base value for now.
+            // `setting.<tag>` wins over `setting` for every active feature tag,
+            // in order (pat-0q2kx.135). This used to ignore tags entirely and
+            // always answer the base value.
             let name = setting_name(args, "ProjectSettings.get_setting_with_override()")?;
-            let stored = PROJECT_SETTINGS.with(|s| s.borrow().get(&name).cloned());
+            let stored = project_setting_with_override(&name);
             Ok(stored.unwrap_or_else(|| args.get(1).cloned().unwrap_or(Variant::Nil)))
+        }
+        // `ProjectSettings.save()` — writes the store back to the
+        // `project.godot` it was seeded from, in Godot's INI format
+        // (pat-0q2kx.135). Returns Godot's error code: OK (0), or
+        // ERR_FILE_CANT_OPEN (12) with no seeded path / on a write failure.
+        "save" => {
+            const ERR_FILE_CANT_OPEN: i64 = 12;
+            let Some(path) = PROJECT_SETTINGS_PATH.with(|p| p.borrow().clone()) else {
+                // No project was booted, so there is nowhere to save to.
+                return Ok(Variant::Int(ERR_FILE_CANT_OPEN));
+            };
+            Ok(Variant::Int(save_project_settings_to(&path)))
+        }
+        "save_custom" => {
+            const ERR_FILE_CANT_OPEN: i64 = 12;
+            let path = setting_name(args, "ProjectSettings.save_custom()")?;
+            if path.is_empty() {
+                return Ok(Variant::Int(ERR_FILE_CANT_OPEN));
+            }
+            // Godot accepts a res:// path here; resolve it the same way the
+            // rest of the singleton's path handling does.
+            let resolved = gdcore::resolve_path(&path)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or(path);
+            Ok(Variant::Int(save_project_settings_to(&resolved)))
         }
         "set_setting" => {
             let name = setting_name(args, "ProjectSettings.set_setting()")?;

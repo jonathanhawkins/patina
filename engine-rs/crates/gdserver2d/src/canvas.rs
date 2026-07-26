@@ -5,6 +5,7 @@
 
 use gdcore::math::{Color, Rect2, Transform2D, Vector2};
 
+use crate::material::{CanvasItemMaterial, TextureFilter, TextureRepeat};
 use crate::shader::ShaderMaterial;
 
 /// Unique identifier for a canvas draw item.
@@ -32,6 +33,75 @@ pub enum DrawCommand {
         to: Vector2,
         color: Color,
         width: f32,
+    },
+    /// Draw a connected run of line segments (`CanvasItem.draw_polyline`).
+    ///
+    /// Unlike a chain of [`DrawLine`](Self::DrawLine)s this is rasterized as one
+    /// stroke, so the joints between segments are filled instead of leaving a
+    /// notch on every turn.
+    DrawPolyline {
+        /// Vertices in the item's local space.
+        points: Vec<Vector2>,
+        /// Stroke color.
+        color: Color,
+        /// Stroke width in pixels.
+        width: f32,
+        /// Whether the last point joins back to the first.
+        closed: bool,
+    },
+    /// Draw a set of independent segments, each `points[2i] -> points[2i+1]`
+    /// (`CanvasItem.draw_multiline`). Odd trailing points are ignored.
+    DrawMultiline {
+        /// Segment endpoints, in pairs.
+        points: Vec<Vector2>,
+        /// Stroke color.
+        color: Color,
+        /// Stroke width in pixels.
+        width: f32,
+    },
+    /// Draw a dashed line from `from` to `to` (`CanvasItem.draw_dashed_line`).
+    DrawDashedLine {
+        /// Start point.
+        from: Vector2,
+        /// End point.
+        to: Vector2,
+        /// Stroke color.
+        color: Color,
+        /// Stroke width in pixels.
+        width: f32,
+        /// Length of each dash (and of each gap) in pixels.
+        dash: f32,
+    },
+    /// Draw a circular arc as a stroked polyline (`CanvasItem.draw_arc`).
+    ///
+    /// Angles are in radians and follow Godot's convention: 0 points along +X
+    /// and the sweep runs toward +Y.
+    DrawArc {
+        /// Arc centre in local space.
+        center: Vector2,
+        /// Arc radius.
+        radius: f32,
+        /// Start angle in radians.
+        start_angle: f32,
+        /// End angle in radians.
+        end_angle: f32,
+        /// How many segments approximate the arc.
+        point_count: u32,
+        /// Stroke color.
+        color: Color,
+        /// Stroke width in pixels.
+        width: f32,
+    },
+    /// Fill a polygon (`CanvasItem.draw_polygon` / `draw_colored_polygon`).
+    ///
+    /// `colors` holds either one color for the whole polygon or one per vertex;
+    /// the software rasterizer fills with the first, since it has no
+    /// per-vertex interpolation.
+    DrawPolygon {
+        /// Vertices in the item's local space.
+        points: Vec<Vector2>,
+        /// Per-polygon or per-vertex colors.
+        colors: Vec<Color>,
     },
     /// Draw a texture stretched into `rect`, tinted by `modulate`.
     DrawTextureRect {
@@ -119,6 +189,23 @@ pub struct CanvasItem {
     /// renderer walks items flat and resolves each one's transform
     /// independently — there is no draw-order stack for a pop to unwind.
     pub clip_rect: Option<Rect2>,
+    /// Optional [`CanvasItemMaterial`] controlling how this item composites
+    /// (pat-0q2kx.131).
+    ///
+    /// Separate from [`material`](Self::material), which is a *shader*
+    /// material: Godot's `CanvasItem.material` slot holds either, and they do
+    /// different jobs — a shader rewrites the colour, this decides how the
+    /// result lands on the framebuffer. `None` means plain `Mix`.
+    pub canvas_material: Option<CanvasItemMaterial>,
+    /// Resolved texture sampling filter for this item's textured draws.
+    ///
+    /// The scene bridge resolves `ParentNode` up the ancestor chain to the
+    /// project default before setting it here, so the rasterizer never has to
+    /// walk parents.
+    pub texture_filter: TextureFilter,
+    /// Resolved UV wrap mode, resolved the same way as
+    /// [`texture_filter`](Self::texture_filter).
+    pub texture_repeat: TextureRepeat,
 }
 
 impl CanvasItem {
@@ -135,6 +222,9 @@ impl CanvasItem {
             layer_id: None,
             material: None,
             clip_rect: None,
+            canvas_material: None,
+            texture_filter: TextureFilter::default(),
+            texture_repeat: TextureRepeat::default(),
         }
     }
 

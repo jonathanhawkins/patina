@@ -2007,6 +2007,32 @@ impl RenderingServer3D for SoftwareRenderer3D {
         self.reflection_probes.retain(|p| p.id != id);
     }
 
+    // The fog/decal/occluder passes were fully implemented on the concrete
+    // renderer (`apply_fog_volume_pass`, `apply_decal_pass`, `is_occluded`) and
+    // wired into `render_frame` — but the `add_*` entry points were inherent
+    // methods only, so nothing reachable through `&mut dyn RenderingServer3D`
+    // could feed them and no scene ever did (pat-0q2kx.132).
+
+    // ⚠️ These push directly rather than delegating to the identically-named
+    // inherent methods above. `SoftwareRenderer3D::add_fog_volume(self, …)` is
+    // path syntax, and inherent-over-trait preference applies to *method call*
+    // syntax (`self.add_fog_volume(…)`), not to a path — with an inherent fn and
+    // a trait fn of the same name both applicable, a path call is E0034
+    // "multiple applicable items in scope". Method-call syntax would resolve to
+    // the inherent fn and silently recurse forever instead.
+    fn add_fog_volume(&mut self, volume: FogVolume, transform: Transform3D) {
+        self.fog_volumes
+            .push(PlacedFogVolume::new(volume, transform));
+    }
+
+    fn add_decal(&mut self, decal: Decal3D) {
+        self.decals.push(decal);
+    }
+
+    fn add_occluder(&mut self, occluder: OccluderInstance3D) {
+        self.occluders.push(occluder);
+    }
+
     fn render_frame(&mut self, viewport: &Viewport3D) -> FrameData3D {
         match self.render_mode {
             RenderMode::Wireframe => self.render_frame_wireframe(viewport),

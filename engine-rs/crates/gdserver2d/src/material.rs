@@ -118,6 +118,41 @@ pub enum BlendMode {
     Sub,
     /// Multiplicative blending.
     Mul,
+    /// Premultiplied-alpha add: the source is already multiplied by its alpha,
+    /// so it is added straight on top (`CanvasItemMaterial.BLEND_MODE_PREMULT_ALPHA`).
+    PremultAlpha,
+}
+
+/// Godot `CanvasItem.TextureFilter`.
+///
+/// `ParentNode` is the default and is *not* a sampling mode — it means "use
+/// whatever my ancestor resolved to", ultimately falling back to the viewport
+/// default (`rendering/textures/canvas_textures/default_texture_filter`). The
+/// scene bridge resolves it before the value reaches the renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextureFilter {
+    /// Inherit from the parent canvas item, then the viewport default.
+    #[default]
+    ParentNode,
+    /// Nearest-neighbour (pixel-art).
+    Nearest,
+    /// Bilinear interpolation of the 4 nearest texels.
+    Linear,
+}
+
+/// Godot `CanvasItem.TextureRepeat`. `ParentNode` inherits, exactly as
+/// [`TextureFilter::ParentNode`] does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextureRepeat {
+    /// Inherit from the parent canvas item, then the viewport default.
+    #[default]
+    ParentNode,
+    /// Clamp UVs to `[0, 1]`.
+    Disabled,
+    /// Wrap (tile) UVs.
+    Enabled,
+    /// Mirror on each repeat.
+    Mirror,
 }
 
 /// Light interaction mode for a 2D canvas material.
@@ -243,7 +278,11 @@ impl VisualShader {
     /// point of the class. A graph with no output node (or an empty graph) yields
     /// a valid pass-through shader rather than invalid source.
     pub fn get_code(&self) -> String {
-        let body = match self.nodes.iter().find(|n| n.node_type == VisualShaderNodeType::Output) {
+        let body = match self
+            .nodes
+            .iter()
+            .find(|n| n.node_type == VisualShaderNodeType::Output)
+        {
             // Godot's canvas_item output takes its colour on port 0.
             Some(output) => format!("COLOR = {};", self.resolve_input(output, 0, 0)),
             None => "COLOR = COLOR;".to_string(),
@@ -473,11 +512,7 @@ mod tests {
             !instructions.is_empty(),
             "generated source did not parse as a fragment program:\n{code}",
         );
-        execute_fragment(
-            &instructions,
-            &FragmentContext::default(),
-            &HashMap::new(),
-        )
+        execute_fragment(&instructions, &FragmentContext::default(), &HashMap::new())
     }
 
     #[test]
@@ -495,7 +530,10 @@ mod tests {
         let code = vs.get_code();
         assert!(code.starts_with("shader_type canvas_item;"), "{code}");
         assert!(code.contains("void fragment()"), "{code}");
-        assert!(code.contains("COLOR = vec4(1.0, 0.5, 0.25, 1.0);"), "{code}");
+        assert!(
+            code.contains("COLOR = vec4(1.0, 0.5, 0.25, 1.0);"),
+            "{code}"
+        );
 
         // The generated source really runs and yields the graph's colour.
         let out = render(&code);
@@ -528,7 +566,10 @@ mod tests {
         vs.connect(2, 0, 3, 0);
 
         let code = vs.get_code();
-        assert!(code.contains("mix(vec4(1.0, 0.0, 0.0, 1.0), vec4(0.0, 0.0, 1.0, 1.0), 0.5)"), "{code}");
+        assert!(
+            code.contains("mix(vec4(1.0, 0.0, 0.0, 1.0), vec4(0.0, 0.0, 1.0, 1.0), 0.5)"),
+            "{code}"
+        );
 
         let out = render(&code);
         assert_eq!((out.r, out.b, out.a), (0.5, 0.5, 1.0));
@@ -553,7 +594,10 @@ mod tests {
 
         let code = vs.get_code();
         assert!(code.contains("vec4(0.0, 1.0, 0.0, 1.0)"), "{code}");
-        assert!(!code.contains("0.123"), "orphan node leaked into codegen:\n{code}");
+        assert!(
+            !code.contains("0.123"),
+            "orphan node leaked into codegen:\n{code}"
+        );
         assert_eq!(render(&code).g, 1.0);
     }
 
@@ -569,7 +613,10 @@ mod tests {
         });
 
         let code = vs.get_code();
-        assert!(code.contains("COLOR = vec4(0.25, 0.25, 0.25, 1.0);"), "{code}");
+        assert!(
+            code.contains("COLOR = vec4(0.25, 0.25, 0.25, 1.0);"),
+            "{code}"
+        );
         assert_eq!(render(&code).r, 0.25);
     }
 
@@ -604,7 +651,11 @@ mod tests {
     fn get_code_survives_a_cyclic_graph() {
         // A cycle must terminate rather than recurse forever.
         let mut vs = VisualShader::new();
-        vs.add_node(node(0, VisualShaderNodeType::Add, vec![Variant::Nil, Variant::Nil]));
+        vs.add_node(node(
+            0,
+            VisualShaderNodeType::Add,
+            vec![Variant::Nil, Variant::Nil],
+        ));
         vs.add_node(output_node(1));
         vs.connect(0, 0, 1, 0);
         vs.connect(0, 0, 0, 0); // self-feeding input
