@@ -550,6 +550,11 @@ pub const IK_MODIFIER_CLASS: &str = "IKModifier3D";
 /// Godot's `FABRIK3D` class name — an `IterateIK3D` whose solver is FABRIK
 /// (pat-nzgdu.183).
 pub const FABRIK_CLASS: &str = "FABRIK3D";
+/// Godot's `CCDIK3D` — the `IterateIK3D` sibling whose solver is CCD
+/// (pat-0q2kx.156).
+pub const CCDIK_CLASS: &str = "CCDIK3D";
+/// Godot's `JacobianIK3D` — the third `IterateIK3D` sibling (pat-0q2kx.156).
+pub const JACOBIAN_IK_CLASS: &str = "JacobianIK3D";
 
 /// Below this the chain is treated as already aligned and left alone, so a
 /// solved chain doesn't jitter.
@@ -622,6 +627,13 @@ pub fn process_modifiers(tree: &mut SceneTree, skeleton_id: NodeId) {
         let solver = match class.as_str() {
             IK_MODIFIER_CLASS => IkSolverKind::Ccd,
             FABRIK_CLASS => IkSolverKind::Fabrik,
+            CCDIK_CLASS => IkSolverKind::Ccd,
+            // ⚠️ Godot's JacobianIK3D solves by Jacobian transpose/DLS, which
+            // Patina has no solver for. Routing it to CCD makes the class reach
+            // its target — both are iterative — but the convergence path is not
+            // Godot's. This is a deliberate placeholder, not parity; a real
+            // Jacobian solver belongs in `ik_solver.rs`.
+            JACOBIAN_IK_CLASS => IkSolverKind::Ccd,
             _ => continue,
         };
         if !modifier_active(tree, child) {

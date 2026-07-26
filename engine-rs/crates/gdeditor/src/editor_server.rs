@@ -3519,6 +3519,28 @@ fn node_properties_json(
         }
     }
 
+    // 1b. Shader uniforms as `shader_parameter/<name>` (pat-0q2kx.143).
+    //
+    // Godot's inspector grows a "Shader Parameters" section for any node whose
+    // material is a `ShaderMaterial`, one editor per uniform, driven by the
+    // uniform's hint. Patina had both halves and no join: `packed_scene`
+    // flattens `shader_code` / `shader_parameter/*` onto the node, and
+    // `gdserver3d::shader::parse_uniforms` reads the uniform table with hints —
+    // but the editor exposed neither, so a shader's parameters were invisible
+    // and uneditable.
+    //
+    // Emitted before the extras pass so a stored `shader_parameter/*` gets its
+    // typed, hinted entry here instead of falling through as untyped metadata.
+    for entry in shader_parameter_entries(node) {
+        if let Some(name) = entry.get("name").and_then(|n| n.as_str()) {
+            if emitted.contains(name) {
+                continue;
+            }
+            emitted.insert(name.to_string());
+        }
+        props.push(entry);
+    }
+
     // 2. Any stored properties the schema did not already cover (never regress
     //    what the editor previously exposed). Sorted for deterministic output.
     //    `__resref__*` / `__viewport_*` companions are internal metadata — never shown.
@@ -3548,6 +3570,70 @@ fn node_properties_json(
         "path": path,
         "properties": props
     })
+}
+
+/// The inspector entries for a node's `ShaderMaterial` uniforms, as Godot's
+/// `shader_parameter/<name>` properties (pat-0q2kx.143).
+///
+/// Empty unless the node carries `shader_code` — the flattened form
+/// `packed_scene` produces for an inline `ShaderMaterial` (a `shader_path`-only
+/// node references an external `.gdshader` whose source the editor has not
+/// loaded, so there are no uniforms to enumerate).
+///
+/// Each entry carries the uniform's editor type, its current value (the stored
+/// `shader_parameter/<name>` override, else the uniform's own default), and a
+/// hint so the client can pick the right editor: a `hint_range` uniform becomes
+/// a slider with its bounds in `hint_string`, `source_color` a colour picker.
+/// The hint codes are Godot's `PROPERTY_HINT_RANGE` (1) and
+/// `PROPERTY_HINT_COLOR_NO_ALPHA` (0 here — the value keeps its alpha, the flag
+/// only tells the client to draw a colour swatch).
+fn shader_parameter_entries(node: &Node) -> Vec<serde_json::Value> {
+    use gdserver3d::shader::{ShaderHint, UniformType};
+
+    let Variant::String(source) = node.get_property("shader_code") else {
+        return Vec::new();
+    };
+
+    gdserver3d::shader::parse_uniforms(&source)
+        .into_iter()
+        .map(|uniform| {
+            let name = format!("shader_parameter/{}", uniform.name);
+            // The authored override wins; otherwise the uniform's own default is
+            // what the shader actually runs with, which is what Godot shows.
+            let stored = node.get_property(&name);
+            let is_default = matches!(stored, Variant::Nil);
+            let value = if is_default {
+                uniform.default_value.clone()
+            } else {
+                stored
+            };
+
+            let type_name = match uniform.uniform_type {
+                UniformType::Float => "float",
+                UniformType::Int => "int",
+                UniformType::Bool => "bool",
+                UniformType::Vec2 => "Vector2",
+                UniformType::Vec3 => "Vector3",
+                UniformType::Vec4 => "Vector4",
+                UniformType::Color => "Color",
+                _ => "",
+            };
+
+            let (hint, hint_string) = match uniform.parsed_hint() {
+                Some(ShaderHint::Range { min, max, step }) => (
+                    1,
+                    match step {
+                        Some(s) => format!("{min},{max},{s}"),
+                        None => format!("{min},{max}"),
+                    },
+                ),
+                Some(ShaderHint::SourceColor) => (0, "source_color".to_string()),
+                _ => (0, uniform.hint.clone().unwrap_or_default()),
+            };
+
+            property_entry(&name, type_name, &value, hint, &hint_string, is_default)
+        })
+        .collect()
 }
 
 /// Builds the inspector entry for a resource-typed property from its captured

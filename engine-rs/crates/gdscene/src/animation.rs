@@ -1678,6 +1678,195 @@ pub fn blend_animations(
 }
 
 // ---------------------------------------------------------------------------
+// glTF animation import (pat-0q2kx.155)
+// ---------------------------------------------------------------------------
+
+/// Maps a glTF node index to the node name the importer gave it, from the
+/// document's `nodes` array.
+fn gltf_node_names(resource: &gdresource::Resource) -> HashMap<i64, String> {
+    let mut out = HashMap::new();
+    if let Some(Variant::Array(nodes)) = resource.get_property("nodes") {
+        for n in nodes {
+            if let Variant::Dictionary(d) = n {
+                if let (Some(Variant::Int(i)), Some(Variant::String(name))) =
+                    (d.get("index"), d.get("name"))
+                {
+                    out.insert(*i, name.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Reads a `Variant::Array` of `Variant::Float` into `f32`s.
+fn gltf_float_array(v: Option<&Variant>) -> Vec<f32> {
+    match v {
+        Some(Variant::Array(arr)) => arr
+            .iter()
+            .filter_map(|x| match x {
+                Variant::Float(f) => Some(*f as f32),
+                Variant::Int(i) => Some(*i as f32),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Builds `Animation` clips from a glTF document produced by
+/// [`gdresource::import_gltf`] (pat-0q2kx.155).
+///
+/// `parse_animations` produced this data and nothing consumed it — the imported
+/// scene had no clips at all. The importer now publishes it on the document and
+/// this is the consumer. The conversion lives here rather than in
+/// `gltf_import.rs` because [`Animation`] is a `gdscene` type and `gdscene`
+/// depends on `gdresource`, so the dependency edge only runs one way.
+///
+/// Track mapping follows Godot's `GLTFDocument::_import_animation`:
+/// `translation`/`rotation`/`scale` become [`TrackType::Position3D`],
+/// [`TrackType::Rotation3D`] and [`TrackType::Scale3D`] on the target node's
+/// name; `weights` becomes one [`TrackType::BlendShape`] track per morph target.
+pub fn animations_from_gltf_resource(resource: &gdresource::Resource) -> Vec<Animation> {
+    let names = gltf_node_names(resource);
+    let Some(Variant::Array(clips)) = resource.get_property("animations") else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for clip in clips {
+        let Variant::Dictionary(clip) = clip else {
+            continue;
+        };
+        let clip_name = match clip.get("name") {
+            Some(Variant::String(s)) => s.clone(),
+            _ => format!("animation_{}", out.len()),
+        };
+        let length = match clip.get("length") {
+            Some(Variant::Float(f)) => *f,
+            _ => 0.0,
+        };
+        let mut anim = Animation::new(clip_name, length);
+
+        let Some(Variant::Array(channels)) = clip.get("channels") else {
+            out.push(anim);
+            continue;
+        };
+        for ch in channels {
+            let Variant::Dictionary(ch) = ch else {
+                continue;
+            };
+            let target = match ch.get("target_node") {
+                Some(Variant::Int(i)) => *i,
+                _ => continue,
+            };
+            // A channel targeting a node the importer did not build cannot be
+            // addressed by path — dropping it beats emitting a track that
+            // silently animates nothing.
+            let Some(node_name) = names.get(&target) else {
+                continue;
+            };
+            let path = match ch.get("path") {
+                Some(Variant::String(s)) => s.as_str(),
+                _ => continue,
+            };
+            let components = match ch.get("components") {
+                Some(Variant::Int(i)) => (*i).max(1) as usize,
+                _ => continue,
+            };
+            let times = gltf_float_array(ch.get("times"));
+            let values = gltf_float_array(ch.get("values"));
+            if times.is_empty() {
+                continue;
+            }
+
+            // glTF CUBICSPLINE stores in-tangent, value, out-tangent per key, so
+            // each key occupies 3x the components and the value is the middle
+            // element. Godot's cubic track interpolates through key values, which
+            // is the closest available behaviour.
+            let cubic =
+                matches!(ch.get("interpolation"), Some(Variant::String(s)) if s == "cubicspline");
+            let stride = if cubic { components * 3 } else { components };
+            let offset = if cubic { components } else { 0 };
+
+            let transition = match ch.get("interpolation") {
+                Some(Variant::String(s)) if s == "step" => TransitionType::Nearest,
+                _ => TransitionType::Linear,
+            };
+
+            // `weights` drives one track per morph target; the transform paths
+            // drive exactly one.
+            let track_count = if path == "weights" { components } else { 1 };
+            for slot in 0..track_count {
+                // Property names must match `implicit_property_path` in
+                // `animation_tscn.rs`: a rotation track drives `quaternion`, not
+                // `rotation` — Godot's `rotation` is Euler `Vector3`, so writing a
+                // quaternion there would set the wrong property with a wrong type.
+                let (track_type, property) = match path {
+                    "translation" => (TrackType::Position3D, "position".to_string()),
+                    "rotation" => (TrackType::Rotation3D, "quaternion".to_string()),
+                    "scale" => (TrackType::Scale3D, "scale".to_string()),
+                    "weights" => (
+                        TrackType::BlendShape,
+                        // Morph-target names are not carried on the document, so
+                        // the target is addressed by index.
+                        format!("blend_shapes/morph_{slot}"),
+                    ),
+                    _ => break,
+                };
+                let mut track = AnimationTrack::with_type(node_name.clone(), property, track_type);
+                if cubic {
+                    track.set_interpolation(TrackInterpolation::Cubic);
+                }
+
+                for (ki, t) in times.iter().enumerate() {
+                    let base = ki * stride + offset;
+                    let value = match track_type {
+                        TrackType::Position3D | TrackType::Scale3D => {
+                            if base + 2 >= values.len() {
+                                break;
+                            }
+                            Variant::Vector3(Vector3::new(
+                                values[base],
+                                values[base + 1],
+                                values[base + 2],
+                            ))
+                        }
+                        TrackType::Rotation3D => {
+                            if base + 3 >= values.len() {
+                                break;
+                            }
+                            // glTF stores quaternions xyzw, matching
+                            // `Quaternion::new`'s argument order.
+                            Variant::Quaternion(gdcore::math3d::Quaternion::new(
+                                values[base],
+                                values[base + 1],
+                                values[base + 2],
+                                values[base + 3],
+                            ))
+                        }
+                        _ => {
+                            let idx = base + slot;
+                            if idx >= values.len() {
+                                break;
+                            }
+                            Variant::Float(values[idx] as f64)
+                        }
+                    };
+                    track.add_keyframe(KeyFrame::new(*t as f64, value, transition));
+                }
+
+                if track.keyframe_count() > 0 {
+                    anim.tracks.push(track);
+                }
+            }
+        }
+        out.push(anim);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

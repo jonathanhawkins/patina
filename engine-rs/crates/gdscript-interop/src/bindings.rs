@@ -805,6 +805,16 @@ pub trait SceneAccess {
     /// (`Node.set_physics_process`).
     fn set_physics_process(&mut self, _node: u64, _enabled: bool) {}
 
+    /// Enables/disables input delivery to `node` (`Node.set_process_input`) —
+    /// pat-0q2kx.138. Defaults to a no-op for hosts without a scene tree.
+    fn set_process_input(&mut self, _node: u64, _enabled: bool) {}
+
+    /// Whether the input stages deliver to `node`
+    /// (`Node.is_processing_input`).
+    fn is_processing_input(&self, _node: u64) -> bool {
+        false
+    }
+
     /// Whether `_physics_process` runs on `node`
     /// (`Node.is_physics_processing`).
     fn is_physics_processing(&self, _node: u64) -> bool {

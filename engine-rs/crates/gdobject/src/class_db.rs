@@ -1921,6 +1921,10 @@ pub fn register_3d_classes() {
     // between FABRIK3D and its siblings CCDIK3D/JacobianIK3D is only the
     // algorithm that runs during the modifier pass.
     register_class(ClassRegistration::new("FABRIK3D").parent("IterateIK3D"));
+    // The siblings the comment above describes, now registered too
+    // (pat-0q2kx.156). Same reasoning: no properties of their own.
+    register_class(ClassRegistration::new("CCDIK3D").parent("IterateIK3D"));
+    register_class(ClassRegistration::new("JacobianIK3D").parent("IterateIK3D"));
 
     register_class(
         ClassRegistration::new("IKModifier3D")
@@ -2706,6 +2710,18 @@ pub fn register_3d_classes() {
             .method(MethodInfo::new("set_shader_parameter", 2))
             .method(MethodInfo::new("get_shader_parameter", 1)),
     );
+    // A deferred sub-scene stand-in (pat-0q2kx.139). `instance_placeholder=`
+    // nodes loaded as plain `Node`s because this class did not exist, so
+    // `create_instance()` had nothing to dispatch on.
+    if !class_exists("InstancePlaceholder") {
+        register_class(
+            ClassRegistration::new("InstancePlaceholder")
+                .parent("Node")
+                .method(MethodInfo::new("get_stored_values", 0))
+                .method(MethodInfo::new("get_instance_path", 0))
+                .method(MethodInfo::new("create_instance", 2)),
+        );
+    }
     // The 2D counterpart (pat-0q2kx.131). Only 3D materials were registered, so
     // `CanvasItemMaterial` — the resource that decides how a 2D item composites
     // — could not be instantiated or inspected at all. Defaults are Godot's:
@@ -3669,11 +3685,317 @@ pub fn register_2d_classes() {
     // -- StyleBox resource family (pat-nzgdu.90). Registering these lets ClassDB
     // resolve `[sub_resource type="StyleBoxFlat"]` (etc.) in a .tscn/.tres theme
     // to their proper class + parent chain, matching Godot's Resource hierarchy.
+    // -- Font resource family (pat-0q2kx.146) --
+    //
+    // Godot imports a .ttf/.otf as a `FontFile`, and `Font` is the abstract base
+    // carrying the `fallbacks` chain (scene/resources/font.cpp). None of these
+    // were in ClassDB, so `ClassDB.instantiate("FontFile")` failed and a
+    // `theme_override_fonts/font` slot had no class to resolve against. Names
+    // and defaults from doc/classes/<Name>.xml.
+    if !class_exists("Font") {
+        register_class(
+            ClassRegistration::new("Font")
+                .parent("Resource")
+                .abstract_class()
+                .property(PropertyInfo::new("fallbacks", Variant::Nil)),
+        );
+        register_class(
+            ClassRegistration::new("FontFile")
+                .parent("Font")
+                .property(PropertyInfo::new(
+                    "allow_system_fallback",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new("antialiasing", Variant::Int(1)))
+                .property(PropertyInfo::new(
+                    "data",
+                    Variant::PackedByteArray(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "disable_embedded_bitmaps",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new("fixed_size", Variant::Int(0)))
+                .property(PropertyInfo::new("fixed_size_scale_mode", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "font_name",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new("font_stretch", Variant::Int(100)))
+                .property(PropertyInfo::new("font_style", Variant::Int(0)))
+                .property(PropertyInfo::new("font_weight", Variant::Int(400)))
+                .property(PropertyInfo::new("force_autohinter", Variant::Bool(false)))
+                .property(PropertyInfo::new("generate_mipmaps", Variant::Bool(false)))
+                .property(PropertyInfo::new("hinting", Variant::Int(1)))
+                .property(PropertyInfo::new(
+                    "keep_rounding_remainders",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new(
+                    "modulate_color_glyphs",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("msdf_pixel_range", Variant::Int(16)))
+                .property(PropertyInfo::new("msdf_size", Variant::Int(48)))
+                .property(PropertyInfo::new(
+                    "multichannel_signed_distance_field",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "opentype_feature_overrides",
+                    Variant::Dictionary(Default::default()),
+                ))
+                .property(PropertyInfo::new("oversampling", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "style_name",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new("subpixel_positioning", Variant::Int(1))),
+        );
+        register_class(
+            ClassRegistration::new("FontVariation")
+                .parent("Font")
+                .property(PropertyInfo::new("base_font", Variant::Nil))
+                .property(PropertyInfo::new("baseline_offset", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "opentype_features",
+                    Variant::Dictionary(Default::default()),
+                ))
+                .property(PropertyInfo::new("spacing_bottom", Variant::Int(0)))
+                .property(PropertyInfo::new("spacing_glyph", Variant::Int(0)))
+                .property(PropertyInfo::new("spacing_space", Variant::Int(0)))
+                .property(PropertyInfo::new("spacing_top", Variant::Int(0)))
+                .property(PropertyInfo::new("variation_embolden", Variant::Float(0.0)))
+                .property(PropertyInfo::new("variation_face_index", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "variation_opentype",
+                    Variant::Dictionary(Default::default()),
+                ))
+                .property(PropertyInfo::new("variation_transform", Variant::Nil)),
+        );
+        register_class(
+            ClassRegistration::new("SystemFont")
+                .parent("Font")
+                .property(PropertyInfo::new(
+                    "allow_system_fallback",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new("antialiasing", Variant::Int(1)))
+                .property(PropertyInfo::new(
+                    "disable_embedded_bitmaps",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new("font_italic", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "font_names",
+                    Variant::PackedStringArray(Vec::new()),
+                ))
+                .property(PropertyInfo::new("font_stretch", Variant::Int(100)))
+                .property(PropertyInfo::new("font_weight", Variant::Int(400)))
+                .property(PropertyInfo::new("force_autohinter", Variant::Bool(false)))
+                .property(PropertyInfo::new("generate_mipmaps", Variant::Bool(false)))
+                .property(PropertyInfo::new("hinting", Variant::Int(1)))
+                .property(PropertyInfo::new(
+                    "keep_rounding_remainders",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new(
+                    "modulate_color_glyphs",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("msdf_pixel_range", Variant::Int(16)))
+                .property(PropertyInfo::new("msdf_size", Variant::Int(48)))
+                .property(PropertyInfo::new(
+                    "multichannel_signed_distance_field",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("oversampling", Variant::Float(0.0)))
+                .property(PropertyInfo::new("subpixel_positioning", Variant::Int(1))),
+        );
+        register_class(
+            ClassRegistration::new("LabelSettings")
+                .parent("Resource")
+                .property(PropertyInfo::new("font", Variant::Nil))
+                .property(PropertyInfo::new(
+                    "font_color",
+                    Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
+                ))
+                .property(PropertyInfo::new("font_size", Variant::Int(16)))
+                .property(PropertyInfo::new("line_spacing", Variant::Float(3.0)))
+                .property(PropertyInfo::new(
+                    "outline_color",
+                    Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
+                ))
+                .property(PropertyInfo::new("outline_size", Variant::Int(0)))
+                .property(PropertyInfo::new("paragraph_spacing", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "shadow_color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 0.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "shadow_offset",
+                    Variant::Vector2(gdcore::math::Vector2::new(1.0, 1.0)),
+                ))
+                .property(PropertyInfo::new("shadow_size", Variant::Int(1)))
+                .property(PropertyInfo::new("stacked_outline_count", Variant::Int(0)))
+                .property(PropertyInfo::new("stacked_shadow_count", Variant::Int(0))),
+        );
+    }
+    // pat-0q2kx.148: the StyleBox family was registered as bare class names with
+    // no properties, so the inspector had nothing to show and a `.tscn`
+    // round-trip had no defaults to compare against. Names and defaults are
+    // Godot 4.6.1's (`scene/resources/style_box*.cpp`).
+    //
+    // `content_margin_*` sits on the **base** class: every subtype carries
+    // padding, which is what makes `StyleBoxEmpty` Godot's standard
+    // pad-without-painting resource. Its default is -1 ("unset, derive").
     if !class_exists("StyleBox") {
-        register_class(ClassRegistration::new("StyleBox").parent("Resource"));
-        register_class(ClassRegistration::new("StyleBoxFlat").parent("StyleBox"));
-        register_class(ClassRegistration::new("StyleBoxTexture").parent("StyleBox"));
-        register_class(ClassRegistration::new("StyleBoxLine").parent("StyleBox"));
+        let content_margins = |reg: ClassRegistration| -> ClassRegistration {
+            reg.property(PropertyInfo::new(
+                "content_margin_left",
+                Variant::Float(-1.0),
+            ))
+            .property(PropertyInfo::new(
+                "content_margin_top",
+                Variant::Float(-1.0),
+            ))
+            .property(PropertyInfo::new(
+                "content_margin_right",
+                Variant::Float(-1.0),
+            ))
+            .property(PropertyInfo::new(
+                "content_margin_bottom",
+                Variant::Float(-1.0),
+            ))
+        };
+        // ONLY the base carries these. `get_property_list` walks the whole
+        // inheritance chain and concatenates without deduping, so applying
+        // `content_margins` to a subtype as well would report all four twice —
+        // 8 properties on `StyleBoxEmpty`, and a duplicated row per margin in
+        // the inspector. Subtypes inherit them.
+        register_class(content_margins(
+            ClassRegistration::new("StyleBox").parent("Resource"),
+        ));
+        register_class(
+            ClassRegistration::new("StyleBoxFlat")
+                .parent("StyleBox")
+                .property(PropertyInfo::new(
+                    "bg_color",
+                    Variant::Color(gdcore::math::Color::new(0.6, 0.6, 0.6, 1.0)),
+                ))
+                .property(PropertyInfo::new("draw_center", Variant::Bool(true)))
+                .property(PropertyInfo::new("skew", Variant::Vector2(Vector2::ZERO)))
+                .property(PropertyInfo::new("border_width_left", Variant::Int(0)))
+                .property(PropertyInfo::new("border_width_top", Variant::Int(0)))
+                .property(PropertyInfo::new("border_width_right", Variant::Int(0)))
+                .property(PropertyInfo::new("border_width_bottom", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "border_color",
+                    Variant::Color(gdcore::math::Color::new(0.8, 0.8, 0.8, 1.0)),
+                ))
+                .property(PropertyInfo::new("border_blend", Variant::Bool(false)))
+                .property(PropertyInfo::new("corner_radius_top_left", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "corner_radius_top_right",
+                    Variant::Int(0),
+                ))
+                .property(PropertyInfo::new(
+                    "corner_radius_bottom_right",
+                    Variant::Int(0),
+                ))
+                .property(PropertyInfo::new(
+                    "corner_radius_bottom_left",
+                    Variant::Int(0),
+                ))
+                .property(PropertyInfo::new("corner_detail", Variant::Int(8)))
+                .property(PropertyInfo::new("expand_margin_left", Variant::Float(0.0)))
+                .property(PropertyInfo::new("expand_margin_top", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "expand_margin_right",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "expand_margin_bottom",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "shadow_color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 0.6)),
+                ))
+                .property(PropertyInfo::new("shadow_size", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "shadow_offset",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("anti_aliasing", Variant::Bool(true)))
+                .property(PropertyInfo::new("anti_aliasing_size", Variant::Float(1.0))),
+        );
+        register_class(
+            ClassRegistration::new("StyleBoxTexture")
+                .parent("StyleBox")
+                .property(PropertyInfo::new("texture", Variant::Nil))
+                .property(PropertyInfo::new(
+                    "texture_margin_left",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("texture_margin_top", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "texture_margin_right",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "texture_margin_bottom",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("expand_margin_left", Variant::Float(0.0)))
+                .property(PropertyInfo::new("expand_margin_top", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "expand_margin_right",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "expand_margin_bottom",
+                    Variant::Float(0.0),
+                ))
+                // Godot AxisStretchMode: STRETCH = 0, TILE = 1, TILE_FIT = 2.
+                .property(PropertyInfo::new(
+                    "axis_stretch_horizontal",
+                    Variant::Int(0),
+                ))
+                .property(PropertyInfo::new("axis_stretch_vertical", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "region_rect",
+                    Variant::Rect2(gdcore::math::Rect2::new(
+                        Vector2::ZERO,
+                        Vector2::new(0.0, 0.0),
+                    )),
+                ))
+                .property(PropertyInfo::new(
+                    "modulate_color",
+                    Variant::Color(gdcore::math::Color::WHITE),
+                ))
+                .property(PropertyInfo::new("draw_center", Variant::Bool(true)))
+                .enumeration(
+                    EnumInfo::new("AxisStretchMode")
+                        .constant("AXIS_STRETCH_MODE_STRETCH", 0)
+                        .constant("AXIS_STRETCH_MODE_TILE", 1)
+                        .constant("AXIS_STRETCH_MODE_TILE_FIT", 2),
+                ),
+        );
+        register_class(
+            ClassRegistration::new("StyleBoxLine")
+                .parent("StyleBox")
+                .property(PropertyInfo::new(
+                    "color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                ))
+                .property(PropertyInfo::new("grow_begin", Variant::Float(1.0)))
+                .property(PropertyInfo::new("grow_end", Variant::Float(1.0)))
+                .property(PropertyInfo::new("thickness", Variant::Int(1)))
+                .property(PropertyInfo::new("vertical", Variant::Bool(false))),
+        );
+        // StyleBoxEmpty adds nothing of its own — the base content margins ARE
+        // its whole purpose, and it inherits them.
         register_class(ClassRegistration::new("StyleBoxEmpty").parent("StyleBox"));
     }
 

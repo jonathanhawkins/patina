@@ -130,6 +130,9 @@ pub struct Node {
     /// Whether `_physics_process` runs on this node (Godot's
     /// `set_physics_process`).
     physics_process_enabled: bool,
+    /// Whether the input stages deliver to this node (Godot's
+    /// `set_process_input`) — pat-0q2kx.138.
+    process_input_enabled: bool,
 }
 
 impl Node {
@@ -156,6 +159,7 @@ impl Node {
             process_mode: ProcessMode::default(),
             process_enabled: true,
             physics_process_enabled: true,
+            process_input_enabled: true,
         };
         node.notification_log.push(NOTIFICATION_POSTINITIALIZE);
         node
@@ -183,6 +187,7 @@ impl Node {
             process_mode: ProcessMode::default(),
             process_enabled: true,
             physics_process_enabled: true,
+            process_input_enabled: true,
         };
         node.notification_log.push(NOTIFICATION_POSTINITIALIZE);
         node
@@ -442,6 +447,24 @@ impl Node {
     /// `Node.is_physics_processing`).
     pub fn is_physics_processing(&self) -> bool {
         self.physics_process_enabled
+    }
+
+    /// Enables or disables input delivery to this node (Godot's
+    /// `Node.set_process_input`) — pat-0q2kx.138.
+    ///
+    /// Separate from [`process_mode`](Self::process_mode): `process_mode`
+    /// answers "may this node run while the tree is paused", this answers "does
+    /// this node want input at all". Godot's `_call_input_pause` checks both,
+    /// and a node that opted out of input must receive nothing even while the
+    /// tree is running normally.
+    pub fn set_process_input(&mut self, enabled: bool) {
+        self.process_input_enabled = enabled;
+    }
+
+    /// Whether the input stages deliver to this node (Godot's
+    /// `Node.is_processing_input`).
+    pub fn is_processing_input(&self) -> bool {
+        self.process_input_enabled
     }
 
     // -- process priority / mode --------------------------------------------

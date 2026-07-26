@@ -1,10 +1,14 @@
 //! pat-z35r2.19 — `GPUParticles2D`/`3D` are CPU-simulated aliases, and this pins it.
 //!
 //! The bead's finding was that the `GPU` prefix "may overclaim". It does:
-//! `MainLoop::process_particles` drives `GPUParticles2D`, `GPUParticles3D`,
-//! `CPUParticles2D` and `CPUParticles3D` through the same CPU `ParticleSimulator`,
-//! so the prefix is a Godot-compatibility name, not a statement about where the
-//! work happens.
+//! `MainLoop::process_particles` drives all four classes through a CPU
+//! simulator, so the prefix is a Godot-compatibility name, not a statement
+//! about where the work happens.
+//!
+//! Since pat-0q2kx.154 the 2D pair run `ParticleSimulator` and the 3D pair run
+//! `ParticleSimulator3D` (both CPU). Each test below still compares a `GPU*`
+//! node against its `CPU*` twin, so the parity claim is unchanged — only the
+//! simulator each PAIR shares is different.
 //!
 //! The bead accepts "document CPU-sim **or** add a collision-bounce test". A
 //! collision-bounce test cannot pass: there is no collider input to the simulator
@@ -46,8 +50,12 @@ fn particle_node(name: &str, class: &str) -> Node {
 fn counts_for(gpu_class: &str, cpu_class: &str) -> (Vec<usize>, Vec<usize>) {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let gpu_id = tree.add_child(root, particle_node("Gpu", gpu_class)).unwrap();
-    let cpu_id = tree.add_child(root, particle_node("Cpu", cpu_class)).unwrap();
+    let gpu_id = tree
+        .add_child(root, particle_node("Gpu", gpu_class))
+        .unwrap();
+    let cpu_id = tree
+        .add_child(root, particle_node("Cpu", cpu_class))
+        .unwrap();
 
     let mut ml = MainLoop::new(tree);
     let mut gpu = Vec::with_capacity(FRAMES);
@@ -91,6 +99,7 @@ fn gpu_particles_3d_are_cpu_simulated() {
     );
     assert_eq!(
         gpu, cpu,
-        "GPUParticles3D must match CPUParticles3D frame-for-frame (shared CPU simulator)"
+        "GPUParticles3D must match CPUParticles3D frame-for-frame (both run the \
+         CPU ParticleSimulator3D since pat-0q2kx.154)"
     );
 }

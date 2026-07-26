@@ -15,7 +15,7 @@
 use gdcore::math::{Color, Rect2, Transform2D, Vector2};
 use gdrender2d::renderer::SoftwareRenderer;
 use gdrender2d::texture::Texture2D;
-use gdserver2d::canvas::{CanvasItem, CanvasItemId, DrawCommand};
+use gdserver2d::canvas::{CanvasItem, CanvasItemId, DrawCommand, NinePatchAxis};
 use gdserver2d::server::RenderingServer2D;
 use gdserver2d::viewport::Viewport;
 
@@ -1446,6 +1446,8 @@ fn nine_patch_through_renderer() {
         margin_right: 2.0,
         margin_bottom: 2.0,
         draw_center: true,
+        axis_h: NinePatchAxis::Stretch,
+        axis_v: NinePatchAxis::Stretch,
         modulate: white(),
     });
     vp.add_canvas_item(item);
@@ -1475,6 +1477,8 @@ fn nine_patch_no_center_through_renderer() {
         margin_right: 2.0,
         margin_bottom: 2.0,
         draw_center: false,
+        axis_h: NinePatchAxis::Stretch,
+        axis_v: NinePatchAxis::Stretch,
         modulate: white(),
     });
     vp.add_canvas_item(item);
@@ -1505,6 +1509,8 @@ fn nine_patch_with_modulate_through_renderer() {
         margin_right: 2.0,
         margin_bottom: 2.0,
         draw_center: true,
+        axis_h: NinePatchAxis::Stretch,
+        axis_v: NinePatchAxis::Stretch,
         modulate: blue(),
     });
     vp.add_canvas_item(item);
@@ -1540,6 +1546,8 @@ fn nine_patch_asymmetric_corners() {
         margin_right: 2.0,
         margin_bottom: 2.0,
         draw_center: true,
+        axis_h: NinePatchAxis::Stretch,
+        axis_v: NinePatchAxis::Stretch,
         modulate: white(),
     });
     vp.add_canvas_item(item);
@@ -1785,6 +1793,8 @@ fn nine_patch_with_transform() {
         margin_right: 2.0,
         margin_bottom: 2.0,
         draw_center: true,
+        axis_h: NinePatchAxis::Stretch,
+        axis_v: NinePatchAxis::Stretch,
         modulate: white(),
     });
     vp.add_canvas_item(item);
@@ -1835,6 +1845,8 @@ fn mixed_rect_texture_ninepatch_on_single_item() {
         margin_right: 2.0,
         margin_bottom: 2.0,
         draw_center: true,
+        axis_h: NinePatchAxis::Stretch,
+        axis_v: NinePatchAxis::Stretch,
         modulate: white(),
     });
     vp.add_canvas_item(item);
@@ -1916,6 +1928,8 @@ fn nine_patch_over_texture_z_order() {
         margin_right: 2.0,
         margin_bottom: 2.0,
         draw_center: true,
+        axis_h: NinePatchAxis::Stretch,
+        axis_v: NinePatchAxis::Stretch,
         modulate: white(),
     });
     vp.add_canvas_item(fg);
@@ -2025,6 +2039,8 @@ fn deterministic_ninepatch_scene() {
             margin_right: 2.0,
             margin_bottom: 2.0,
             draw_center: true,
+            axis_h: NinePatchAxis::Stretch,
+            axis_v: NinePatchAxis::Stretch,
             modulate: Color::rgb(0.5, 1.0, 0.5),
         });
         vp.add_canvas_item(np);

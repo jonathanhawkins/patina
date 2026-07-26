@@ -80,9 +80,7 @@ fn resolve_import_artifact(source_path: &Path) -> EngineResult<Option<PathBuf>> 
                 .map(|(_, v)| v.as_str())
                 .next()
         })
-        .ok_or_else(|| {
-            EngineError::Parse(format!("{} has no [remap] path", sidecar.display()))
-        })?;
+        .ok_or_else(|| EngineError::Parse(format!("{} has no [remap] path", sidecar.display())))?;
 
     let project_root = find_project_root(source_path).ok_or_else(|| {
         EngineError::NotFound(format!(
@@ -161,9 +159,7 @@ pub fn import_image_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource
     if let Some(pixels) = decode_png_pixels(data).or_else(|| decode_png_via_image(data)) {
         let colors: Vec<Variant> = pixels
             .into_iter()
-            .map(|(r, g, b, a)| {
-                Variant::Color(gdcore::math::Color::new(r, g, b, a))
-            })
+            .map(|(r, g, b, a)| Variant::Color(gdcore::math::Color::new(r, g, b, a)))
             .collect();
         res.set_property("pixels", Variant::Array(colors));
         res.set_property("has_pixel_data", Variant::Bool(true));
@@ -409,7 +405,8 @@ fn decode_png_pixels(data: &[u8]) -> Option<Vec<(f32, f32, f32, f32)>> {
                     } else {
                         0
                     };
-                    unfiltered[dst_off + i] = src[i].wrapping_add(((a as u16 + b as u16) / 2) as u8);
+                    unfiltered[dst_off + i] =
+                        src[i].wrapping_add(((a as u16 + b as u16) / 2) as u8);
                 }
             }
             4 => {
@@ -909,7 +906,10 @@ fn load_text_or_binary(path: &Path) -> EngineResult<Arc<Resource>> {
 /// declaration, so that property is simply omitted for them.
 pub fn load_gdshader(path: &Path) -> EngineResult<Arc<Resource>> {
     let source = std::fs::read_to_string(path).map_err(EngineError::Io)?;
-    Ok(Arc::new(shader_from_source(&source, path.to_str().unwrap_or(""))))
+    Ok(Arc::new(shader_from_source(
+        &source,
+        path.to_str().unwrap_or(""),
+    )))
 }
 
 /// Builds a `Shader` [`Resource`] from raw shader source (no filesystem access).
@@ -917,7 +917,9 @@ pub fn load_gdshader(path: &Path) -> EngineResult<Arc<Resource>> {
 /// Shared by [`load_gdshader`] and the tscn/tres loaders, which encounter inline
 /// `[sub_resource type="Shader"]` sections with a `code = "..."` property.
 pub fn shader_from_source(source: &str, res_path: &str) -> Resource {
-    use crate::shader_tokenizer::{extract_shader_type, extract_uniforms, tokenize_shader_no_comments};
+    use crate::shader_tokenizer::{
+        extract_shader_type, extract_uniforms, tokenize_shader_no_comments,
+    };
 
     let mut res = Resource::new("Shader");
     if !res_path.is_empty() {
@@ -1062,11 +1064,8 @@ mod tests {
 
     /// Minimal 1×1 red RGB PNG (8-bit) with valid IHDR+IDAT+IEND.
     fn tiny_red_png() -> Vec<u8> {
-        std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/fixtures/red1x1.png"
-        ))
-        .expect("fixture red1x1.png")
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/red1x1.png"))
+            .expect("fixture red1x1.png")
     }
 
     #[test]
@@ -1075,7 +1074,10 @@ mod tests {
         let path = dir.path().join("red.png");
         std::fs::write(&path, tiny_red_png()).unwrap();
         let res = import_image(&path).unwrap();
-        assert_eq!(res.get_property("has_pixel_data"), Some(&Variant::Bool(true)));
+        assert_eq!(
+            res.get_property("has_pixel_data"),
+            Some(&Variant::Bool(true))
+        );
         match res.get_property("pixels") {
             Some(Variant::Array(a)) => {
                 assert_eq!(a.len(), 1, "1x1 image");
@@ -1107,13 +1109,13 @@ mod tests {
         data.push(6);
         data.extend_from_slice(&[0u8, 0u8, 0u8]); // compression, filter, interlace
         data.extend_from_slice(&[0u8; 4]); // CRC placeholder
-        // IDAT: one scanline = filter byte 0 followed by RGBA.
+                                           // IDAT: one scanline = filter byte 0 followed by RGBA.
         let idat = compress_to_vec_zlib(&[0u8, r, g, b, a], 6);
         data.extend_from_slice(&(idat.len() as u32).to_be_bytes());
         data.extend_from_slice(b"IDAT");
         data.extend_from_slice(&idat);
         data.extend_from_slice(&[0u8; 4]); // CRC placeholder
-        // IEND
+                                           // IEND
         data.extend_from_slice(&0u32.to_be_bytes());
         data.extend_from_slice(b"IEND");
         data.extend_from_slice(&[0u8; 4]);
@@ -1560,7 +1562,10 @@ antialiased=true
         std::fs::write(&png, tiny_red_png()).unwrap();
         let res = import_image(&png).unwrap();
         assert_eq!(res.class_name, "Texture2D");
-        assert_eq!(res.get_property("has_pixel_data"), Some(&Variant::Bool(true)));
+        assert_eq!(
+            res.get_property("has_pixel_data"),
+            Some(&Variant::Bool(true))
+        );
     }
 
     #[test]
@@ -1571,7 +1576,10 @@ antialiased=true
         let rfl = ResourceFormatLoader::with_defaults();
         let res = rfl.load_resource(&path).unwrap();
         assert_eq!(res.class_name, "Texture2D");
-        assert_eq!(res.get_property("format"), Some(&Variant::String("RGBA".into())));
+        assert_eq!(
+            res.get_property("format"),
+            Some(&Variant::String("RGBA".into()))
+        );
     }
 
     // -- .gdshader loader (pat-u3l8c.43) -------------------------------------

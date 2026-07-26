@@ -12,6 +12,31 @@ use crate::shader::ShaderMaterial;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CanvasItemId(pub u64);
 
+/// How a nine-patch fills its edge and centre regions along one axis
+/// (Godot `StyleBoxTexture.AxisStretchMode`, pat-0q2kx.148).
+///
+/// This type lives here rather than being reused from `gdscene::stylebox`
+/// because `DrawCommand` is defined in this crate and the dependency only runs
+/// the other way — gdscene maps its own enum onto this one when it emits the
+/// command.
+///
+/// NOTE: keep this declaration ABOVE `DrawCommand`. It was originally inserted
+/// between `DrawCommand`'s doc comment and its `#[derive]`, which silently
+/// reassigned that derive to this enum — `NinePatchAxis` then derived `Debug`,
+/// `Clone` and `PartialEq` twice (E0119) while `DrawCommand` derived nothing
+/// (E0277: `Vec<DrawCommand>` is not `Clone`), breaking `gdserver2d` and every
+/// crate downstream of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NinePatchAxis {
+    /// Scale the region to fill the span. Godot's default.
+    #[default]
+    Stretch,
+    /// Repeat the region at its natural size, clipping the final partial tile.
+    Tile,
+    /// Repeat at a size adjusted so a whole number of tiles fills the span.
+    TileFit,
+}
+
 /// A drawing command that can be queued on a [`CanvasItem`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum DrawCommand {
@@ -147,6 +172,10 @@ pub enum DrawCommand {
         margin_bottom: f32,
         /// Whether to draw the center region.
         draw_center: bool,
+        /// How the left/right edges and the centre fill horizontally.
+        axis_h: NinePatchAxis,
+        /// How the top/bottom edges and the centre fill vertically.
+        axis_v: NinePatchAxis,
         /// Tint color applied to all nine regions.
         modulate: Color,
     },
@@ -289,6 +318,8 @@ mod tests {
             margin_right: 8.0,
             margin_bottom: 8.0,
             draw_center: true,
+            axis_h: NinePatchAxis::Stretch,
+            axis_v: NinePatchAxis::Stretch,
             modulate: Color::WHITE,
         });
         assert_eq!(item.commands.len(), 1);

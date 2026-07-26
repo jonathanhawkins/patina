@@ -506,11 +506,33 @@ impl TweenStep {
 // Tween
 // ---------------------------------------------------------------------------
 
+/// How a `Tween` behaves while the `SceneTree` is paused
+/// (Godot `Tween.TweenPauseMode`, `scene/animation/tween.h:76`).
+///
+/// ⚠️ These are Godot's three real variants. The audit for pat-0q2kx.140
+/// described them as "bound/process/idle", which conflates this enum with the
+/// separate `TweenProcessMode` (PHYSICS/IDLE) that chooses *which* phase a tween
+/// advances in. Only the pause mode is modelled here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TweenPauseMode {
+    /// Follow the bound node: the tween pauses exactly when that node stops
+    /// processing. Godot's default.
+    #[default]
+    Bound,
+    /// Always stop while the tree is paused, whatever the bound node does.
+    Stop,
+    /// Always keep advancing, even while the tree is paused — the mode a
+    /// pause-menu animation needs.
+    Process,
+}
+
 /// A procedural animation that tweens property values over time.
 ///
 /// Supports sequential and parallel step execution, easing, delays, and looping.
 #[derive(Debug, Clone)]
 pub struct Tween {
+    /// How this tween responds to tree pause (Godot `set_pause_mode`).
+    pub pause_mode: TweenPauseMode,
     /// The steps in this tween.
     pub steps: Vec<TweenStep>,
     /// Whether the tween is currently running.
@@ -540,6 +562,7 @@ impl Tween {
     /// Creates a new empty tween.
     pub fn new() -> Self {
         Self {
+            pause_mode: TweenPauseMode::default(),
             steps: Vec::new(),
             running: false,
             loops: 1,
@@ -560,6 +583,29 @@ impl Tween {
     /// Stops the tween.
     pub fn stop(&mut self) {
         self.running = false;
+    }
+
+    /// Whether this tween may advance this frame, given the tree's pause state
+    /// (pat-0q2kx.140).
+    ///
+    /// Port of Godot's `Tween::can_process` (`scene/animation/tween.cpp`):
+    ///
+    /// * [`TweenPauseMode::Bound`] defers to the bound node — pass its
+    ///   `should_process_node` result as `bound_node_can_process`. `None` means
+    ///   the tween is unbound (or the node is gone), which falls through to the
+    ///   tree rule below, exactly as Godot's null check does.
+    /// * Otherwise the tween runs unless the tree is paused, and
+    ///   [`TweenPauseMode::Process`] runs even then.
+    ///
+    /// [`TweenPauseMode::Stop`] needs no branch of its own: it is precisely the
+    /// fallback behaviour, which is why Godot has no case for it either.
+    pub fn can_process(&self, tree_paused: bool, bound_node_can_process: Option<bool>) -> bool {
+        if self.pause_mode == TweenPauseMode::Bound {
+            if let Some(node_can_process) = bound_node_can_process {
+                return node_can_process;
+            }
+        }
+        !tree_paused || self.pause_mode == TweenPauseMode::Process
     }
 
     /// Sets the number of loops (-1 for infinite).
@@ -1343,6 +1389,66 @@ mod tests {
         assert!(
             t.advance(1.0),
             "killed tween reports complete and does nothing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pause_mode_tests {
+    use super::*;
+
+    /// Godot's default is `TWEEN_PAUSE_BOUND` (`tween.h:108`).
+    #[test]
+    fn default_pause_mode_is_bound() {
+        assert_eq!(Tween::new().pause_mode, TweenPauseMode::Bound);
+        assert_eq!(TweenPauseMode::default(), TweenPauseMode::Bound);
+    }
+
+    /// `Bound` defers to the bound node, whatever the tree says — that is the
+    /// whole point of the mode, and it is what lets an Always-mode pause menu
+    /// keep its tweens running.
+    #[test]
+    fn bound_mode_follows_the_bound_node() {
+        let mut t = Tween::new();
+        t.pause_mode = TweenPauseMode::Bound;
+
+        // Node still processes while the tree is paused (ProcessMode::Always).
+        assert!(t.can_process(true, Some(true)));
+        // Node does not process even though the tree is running (Disabled).
+        assert!(!t.can_process(false, Some(false)));
+    }
+
+    /// An unbound `Bound` tween falls through to the tree rule, matching Godot's
+    /// null-node check rather than assuming it may run.
+    #[test]
+    fn unbound_bound_mode_falls_back_to_the_tree() {
+        let t = Tween::new();
+        assert!(t.can_process(false, None), "runs while the tree runs");
+        assert!(!t.can_process(true, None), "stops while the tree is paused");
+    }
+
+    /// `Stop` ignores the bound node and always halts under pause.
+    #[test]
+    fn stop_mode_always_halts_when_paused() {
+        let mut t = Tween::new();
+        t.pause_mode = TweenPauseMode::Stop;
+        assert!(t.can_process(false, Some(true)));
+        assert!(
+            !t.can_process(true, Some(true)),
+            "Stop must halt under pause even if the bound node would process",
+        );
+    }
+
+    /// `Process` keeps advancing under pause — the mode a pause-menu animation
+    /// needs, and the one that distinguishes this enum from a plain bool.
+    #[test]
+    fn process_mode_advances_even_when_paused() {
+        let mut t = Tween::new();
+        t.pause_mode = TweenPauseMode::Process;
+        assert!(t.can_process(true, None));
+        assert!(
+            t.can_process(true, Some(false)),
+            "Process ignores the bound node's state as well as the tree's",
         );
     }
 }

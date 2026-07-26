@@ -15,7 +15,11 @@ fn misc_controls_tabbar_optionbutton_ninepatch() {
     ob.add_item("B", 2);
     // `pick_item` selects the item and returns the `item_selected` payload
     // (the chosen index) for an enabled item.
-    assert_eq!(ob.pick_item(1), Some(1), "item_selected(1) when picking index 1");
+    assert_eq!(
+        ob.pick_item(1),
+        Some(1),
+        "item_selected(1) when picking index 1"
+    );
     assert_eq!(ob.get_selected(), 1, "selected index == 1");
     assert_eq!(
         ob.get_selected_id(),
@@ -53,10 +57,15 @@ fn misc_controls_tabbar_optionbutton_ninepatch() {
         margin_right: 8.0,
         margin_bottom: 8.0,
         draw_center: true,
+        axis_h: gdserver2d::canvas::NinePatchAxis::Stretch,
+        axis_v: gdserver2d::canvas::NinePatchAxis::Stretch,
         modulate: Color::WHITE,
     });
     assert!(
-        matches!(item.commands.last(), Some(DrawCommand::DrawNinePatch { .. })),
+        matches!(
+            item.commands.last(),
+            Some(DrawCommand::DrawNinePatch { .. })
+        ),
         "a NinePatchRect emits a DrawNinePatch command",
     );
 }

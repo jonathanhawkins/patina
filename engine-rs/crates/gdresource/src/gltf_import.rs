@@ -359,8 +359,10 @@ fn build_document(
 
     // --- cameras (core glTF) ---
     if let Some(cameras) = json.get("cameras").and_then(|v| v.as_array()) {
-        let cam_dicts: Vec<Variant> =
-            cameras.iter().map(|c| Variant::Dictionary(camera_dict(c))).collect();
+        let cam_dicts: Vec<Variant> = cameras
+            .iter()
+            .map(|c| Variant::Dictionary(camera_dict(c)))
+            .collect();
         doc.set_property("camera_count", Variant::Int(cam_dicts.len() as i64));
         doc.set_property("cameras", Variant::Array(cam_dicts));
     }
@@ -372,8 +374,10 @@ fn build_document(
         .and_then(|l| l.get("lights"))
         .and_then(|v| v.as_array())
     {
-        let light_dicts: Vec<Variant> =
-            lights.iter().map(|l| Variant::Dictionary(light_dict(l))).collect();
+        let light_dicts: Vec<Variant> = lights
+            .iter()
+            .map(|l| Variant::Dictionary(light_dict(l)))
+            .collect();
         doc.set_property("light_count", Variant::Int(light_dicts.len() as i64));
         doc.set_property("lights", Variant::Array(light_dicts));
     }
@@ -399,6 +403,85 @@ fn build_document(
                 doc.set_property("scene_roots", Variant::Array(root_ids));
             }
         }
+    }
+
+    // --- animations (pat-0q2kx.155) ---
+    //
+    // `parse_animations` already produced this data and *nothing consumed it*:
+    // the clips never reached the imported scene. Publish it on the document so
+    // the scene layer can build `Animation`s from it. The conversion cannot live
+    // here — `Animation`/`AnimationPlayer` are `gdscene` types and `gdscene`
+    // depends on this crate, so the dependency only runs one way.
+    //
+    // Deliberately stored as document PROPERTIES, not subresources:
+    // `mesh3d_from_gltf_resource` sorts `subresources` by key and treats
+    // `subs[0]` as the primary surface, aborting on a missing `vertices`. An
+    // `animation_*` key sorts before `mesh_0_prim_0`, so adding clips as
+    // subresources would silently break mesh loading for every animated .glb.
+    let animations = parse_animations(json, &buffers)?;
+    if !animations.is_empty() {
+        let clips: Vec<Variant> = animations
+            .iter()
+            .map(|anim| {
+                let mut clip = Dictionary::new();
+                clip.insert("name", Variant::String(anim.name.clone()));
+                clip.insert("length", Variant::Float(anim.length as f64));
+                let channels: Vec<Variant> = anim
+                    .channels
+                    .iter()
+                    .map(|ch| {
+                        let mut c = Dictionary::new();
+                        c.insert("target_node", Variant::Int(ch.target_node as i64));
+                        c.insert(
+                            "path",
+                            Variant::String(
+                                match ch.path {
+                                    GltfAnimationPath::Translation => "translation",
+                                    GltfAnimationPath::Rotation => "rotation",
+                                    GltfAnimationPath::Scale => "scale",
+                                    GltfAnimationPath::Weights => "weights",
+                                }
+                                .to_string(),
+                            ),
+                        );
+                        c.insert(
+                            "interpolation",
+                            Variant::String(
+                                match ch.interpolation {
+                                    GltfInterpolation::Linear => "linear",
+                                    GltfInterpolation::Step => "step",
+                                    GltfInterpolation::CubicSpline => "cubicspline",
+                                }
+                                .to_string(),
+                            ),
+                        );
+                        // Needed to slice `values`: 3 for translation/scale, 4 for
+                        // rotation, and one per morph target for weights.
+                        c.insert("components", Variant::Int(ch.components as i64));
+                        c.insert(
+                            "times",
+                            Variant::Array(
+                                ch.times.iter().map(|t| Variant::Float(*t as f64)).collect(),
+                            ),
+                        );
+                        c.insert(
+                            "values",
+                            Variant::Array(
+                                ch.values
+                                    .iter()
+                                    .map(|v| Variant::Float(*v as f64))
+                                    .collect(),
+                            ),
+                        );
+                        Variant::Dictionary(c)
+                    })
+                    .collect();
+                clip.insert("channels", Variant::Array(channels));
+                Variant::Dictionary(clip)
+            })
+            .collect();
+        doc.set_property("animation_count", Variant::Int(clips.len() as i64));
+        doc.set_property("animations", Variant::Array(clips));
     }
 
     Ok(Arc::new(doc))
@@ -530,12 +613,16 @@ fn resolve_texture_uri(textures: &[Value], images: &[Value], tex_idx: usize) -> 
 /// carry `yfov`/`aspect`/`znear`/`zfar`; orthographic carry `xmag`/`ymag`.
 fn camera_dict(cam: &Value) -> Dictionary {
     let mut d = Dictionary::new();
-    let cam_type = cam.get("type").and_then(|v| v.as_str()).unwrap_or("perspective");
+    let cam_type = cam
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("perspective");
     d.insert("type", Variant::String(cam_type.to_string()));
     if let Some(name) = cam.get("name").and_then(|v| v.as_str()) {
         d.insert("name", Variant::String(name.to_string()));
     }
-    let getf = |obj: Option<&Value>, key: &str| obj.and_then(|o| o.get(key)).and_then(|v| v.as_f64());
+    let getf =
+        |obj: Option<&Value>, key: &str| obj.and_then(|o| o.get(key)).and_then(|v| v.as_f64());
     if cam_type == "orthographic" {
         let ortho = cam.get("orthographic");
         if let Some(v) = getf(ortho, "xmag") {
@@ -573,7 +660,10 @@ fn camera_dict(cam: &Value) -> Dictionary {
 /// and spot cone angles for spot lights.
 fn light_dict(light: &Value) -> Dictionary {
     let mut d = Dictionary::new();
-    let light_type = light.get("type").and_then(|v| v.as_str()).unwrap_or("point");
+    let light_type = light
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("point");
     d.insert("type", Variant::String(light_type.to_string()));
     if let Some(name) = light.get("name").and_then(|v| v.as_str()) {
         d.insert("name", Variant::String(name.to_string()));
@@ -591,7 +681,10 @@ fn light_dict(light: &Value) -> Dictionary {
         })
         .unwrap_or(Color::WHITE);
     d.insert("color", Variant::Color(color));
-    let intensity = light.get("intensity").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let intensity = light
+        .get("intensity")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.0);
     d.insert("intensity", Variant::Float(intensity));
     if let Some(range) = light.get("range").and_then(|v| v.as_f64()) {
         d.insert("range", Variant::Float(range));
@@ -663,36 +756,16 @@ where
     let trace = m00 + m11 + m22;
     let (x, y, z, w) = if trace > 0.0 {
         let s = 0.5 / (trace + 1.0).sqrt();
-        (
-            (m21 - m12) * s,
-            (m02 - m20) * s,
-            (m10 - m01) * s,
-            0.25 / s,
-        )
+        ((m21 - m12) * s, (m02 - m20) * s, (m10 - m01) * s, 0.25 / s)
     } else if m00 > m11 && m00 > m22 {
         let s = 2.0 * (1.0 + m00 - m11 - m22).sqrt();
-        (
-            0.25 * s,
-            (m01 + m10) / s,
-            (m02 + m20) / s,
-            (m21 - m12) / s,
-        )
+        (0.25 * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s)
     } else if m11 > m22 {
         let s = 2.0 * (1.0 + m11 - m00 - m22).sqrt();
-        (
-            (m01 + m10) / s,
-            0.25 * s,
-            (m12 + m21) / s,
-            (m02 - m20) / s,
-        )
+        ((m01 + m10) / s, 0.25 * s, (m12 + m21) / s, (m02 - m20) / s)
     } else {
         let s = 2.0 * (1.0 + m22 - m00 - m11).sqrt();
-        (
-            (m02 + m20) / s,
-            (m12 + m21) / s,
-            0.25 * s,
-            (m10 - m01) / s,
-        )
+        ((m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s)
     };
 
     // Normalize to guard against accumulated float error.
@@ -1477,7 +1550,9 @@ mod tests {
             ]
         });
         let (t, r, s) = node_trs(&node);
-        assert!((t[0] - 5.0).abs() < 1e-5 && (t[1] - 6.0).abs() < 1e-5 && (t[2] - 7.0).abs() < 1e-5);
+        assert!(
+            (t[0] - 5.0).abs() < 1e-5 && (t[1] - 6.0).abs() < 1e-5 && (t[2] - 7.0).abs() < 1e-5
+        );
         assert!((s[0] - 2.0).abs() < 1e-5, "sx: {s:?}");
         assert!((s[1] - 3.0).abs() < 1e-5, "sy: {s:?}");
         assert!((s[2] - 4.0).abs() < 1e-5, "sz: {s:?}");
@@ -1485,17 +1560,17 @@ mod tests {
         let s45 = std::f32::consts::FRAC_1_SQRT_2;
         let expected = [0.0, s45, 0.0, s45];
         for (got, exp) in r.iter().zip(expected.iter()) {
-            assert!((got - exp).abs() < 1e-4, "quat: got {r:?}, expected {expected:?}");
+            assert!(
+                (got - exp).abs() < 1e-4,
+                "quat: got {r:?}, expected {expected:?}"
+            );
         }
     }
 
     #[test]
     fn material_imports_textures_and_alpha_mode() {
         use serde_json::json;
-        let textures = vec![
-            json!({ "source": 0 }),
-            json!({ "source": 1 }),
-        ];
+        let textures = vec![json!({ "source": 0 }), json!({ "source": 1 })];
         let images = vec![
             json!({ "uri": "albedo.png" }),
             json!({ "uri": "normal.png" }),
@@ -1591,9 +1666,15 @@ mod tests {
             Variant::Dictionary(d) => d,
             other => panic!("light: {other:?}"),
         };
-        assert_eq!(light.get("type"), Some(&Variant::String("spot".to_string())));
+        assert_eq!(
+            light.get("type"),
+            Some(&Variant::String("spot".to_string()))
+        );
         assert_eq!(light.get("intensity"), Some(&Variant::Float(3.0)));
-        assert_eq!(light.get("spot_outer_cone_angle"), Some(&Variant::Float(0.5)));
+        assert_eq!(
+            light.get("spot_outer_cone_angle"),
+            Some(&Variant::Float(0.5))
+        );
     }
 
     fn make_triangle_glb() -> Vec<u8> {

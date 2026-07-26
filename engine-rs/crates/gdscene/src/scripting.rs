@@ -1690,6 +1690,16 @@ impl SceneAccess for SceneTreeAccessor {
         self.tree_mut().set_node_physics_process(nid, enabled);
     }
 
+    fn set_process_input(&mut self, node: u64, enabled: bool) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().set_node_process_input(nid, enabled);
+    }
+
+    fn is_processing_input(&self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().is_node_processing_input(nid)
+    }
+
     fn is_physics_processing(&self, node: u64) -> bool {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         self.tree().is_node_physics_processing(nid)

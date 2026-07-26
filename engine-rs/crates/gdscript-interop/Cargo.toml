@@ -10,6 +10,10 @@ gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
 gdobject = { path = "../gdobject" }
 gdresource = { path = "../gdresource" }
+# Shader uniform parsing (`parse_uniforms`) for the Shader script API
+# (pat-0q2kx.144). gdserver2d sits below this crate — it depends only on
+# gdcore/gdvariant — so this is acyclic, and gdscene already depends on both.
+gdserver2d = { path = "../gdserver2d" }
 # WebSocketPeer is a RefCounted class scripts construct directly, and its RFC
 # 6455 implementation lives in the platform layer (pat-0q2kx.96). gdplatform does
 # not depend on gdscript-interop, so this edge is acyclic.

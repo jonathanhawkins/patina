@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use gdcore::math::{Color, Rect2, Transform2D, Vector2};
+use gdserver2d::canvas::NinePatchAxis;
 use gdserver2d::shader::{execute_fragment, FragmentContext, FragmentInstruction};
 use gdvariant::variant::Variant;
 
@@ -275,8 +276,7 @@ pub fn draw_texture_rect(fb: &mut FrameBuffer, texture: &Texture2D, rect: Rect2,
             // observable effect no matter what a scene authored. The modes ride
             // on the framebuffer (like `scissor`/`blend_mode`) rather than
             // through every texture routine's signature.
-            let texel =
-                canvas_material::sample_texture(texture, u, v, tex_filter, tex_repeat);
+            let texel = canvas_material::sample_texture(texture, u, v, tex_filter, tex_repeat);
             let final_color = Color::new(
                 texel.r * modulate.r,
                 texel.g * modulate.g,
@@ -415,6 +415,45 @@ pub fn fill_rect_blended(fb: &mut FrameBuffer, rect: Rect2, color: Color) {
 /// Corners are drawn at their natural size, edges are stretched along one
 /// axis, and the center region is stretched in both axes (if `draw_center`
 /// is true). Each texel is tinted by `modulate`.
+/// One axis's tiling plan: `(dst_offset, dst_extent, src_offset, src_extent)`
+/// spans that together fill `dst_len` from a `src_len`-wide source region.
+///
+/// * `Stretch` → a single span scaling source to destination (Godot's default).
+/// * `Tile` → whole tiles at the source's natural size, with the final partial
+///   tile clipped on *both* sides so it shows a partial slice of the source
+///   rather than a squashed whole one.
+/// * `TileFit` → the tile size is adjusted to the nearest whole count so no
+///   partial tile appears.
+fn axis_spans(dst_len: f32, src_len: f32, mode: NinePatchAxis) -> Vec<(f32, f32, f32, f32)> {
+    if dst_len <= 0.0 || src_len <= 0.0 {
+        return Vec::new();
+    }
+    match mode {
+        NinePatchAxis::Stretch => vec![(0.0, dst_len, 0.0, src_len)],
+        NinePatchAxis::Tile | NinePatchAxis::TileFit => {
+            let step = if mode == NinePatchAxis::TileFit {
+                // Round to at least one whole tile so the span divides evenly.
+                let count = (dst_len / src_len).round().max(1.0);
+                dst_len / count
+            } else {
+                src_len
+            };
+            let mut spans = Vec::new();
+            let mut at = 0.0f32;
+            // Guard against a pathological step producing an unbounded loop.
+            while at < dst_len - 1e-4 && spans.len() < 4096 {
+                let remain = dst_len - at;
+                let d = step.min(remain);
+                // A clipped tile shows a proportional slice of the source.
+                let s = src_len * (d / step);
+                spans.push((at, d, 0.0, s));
+                at += step;
+            }
+            spans
+        }
+    }
+}
+
 pub fn draw_nine_patch(
     fb: &mut FrameBuffer,
     texture: &Texture2D,
@@ -424,6 +463,41 @@ pub fn draw_nine_patch(
     margin_right: f32,
     margin_bottom: f32,
     draw_center: bool,
+    modulate: Color,
+) {
+    draw_nine_patch_axes(
+        fb,
+        texture,
+        rect,
+        margin_left,
+        margin_top,
+        margin_right,
+        margin_bottom,
+        draw_center,
+        NinePatchAxis::Stretch,
+        NinePatchAxis::Stretch,
+        modulate,
+    );
+}
+
+/// [`draw_nine_patch`] honouring Godot's per-axis `AxisStretchMode`
+/// (pat-0q2kx.148).
+///
+/// The modes were previously modelled on `StyleBoxTexture` and dropped before
+/// reaching any rasterizer, so `axis_stretch_horizontal = Tile` stretched the
+/// edge exactly like the default.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_nine_patch_axes(
+    fb: &mut FrameBuffer,
+    texture: &Texture2D,
+    rect: Rect2,
+    margin_left: f32,
+    margin_top: f32,
+    margin_right: f32,
+    margin_bottom: f32,
+    draw_center: bool,
+    axis_h: NinePatchAxis,
+    axis_v: NinePatchAxis,
     modulate: Color,
 ) {
     if texture.width == 0 || texture.height == 0 {
@@ -474,10 +548,37 @@ pub fn draw_nine_patch(
         draw_texture_region(fb, texture, dst, src, modulate);
     };
 
+    // Tiling-aware variant: splits the destination into spans per axis and
+    // blits each, so `Tile`/`TileFit` repeat the source instead of scaling it
+    // (pat-0q2kx.148). `Stretch` on both axes yields exactly one span and is
+    // therefore identical to `draw_patch`.
+    let mut draw_patch_tiled = |fb: &mut FrameBuffer,
+                                dx: f32,
+                                dy: f32,
+                                dw: f32,
+                                dh: f32,
+                                sx: f32,
+                                sy: f32,
+                                sw: f32,
+                                sh: f32,
+                                mode_h: NinePatchAxis,
+                                mode_v: NinePatchAxis| {
+        if dw <= 0.0 || dh <= 0.0 || sw <= 0.0 || sh <= 0.0 {
+            return;
+        }
+        for (ox, ew, osx, esw) in axis_spans(dw, sw, mode_h) {
+            for (oy, eh, osy, esh) in axis_spans(dh, sh, mode_v) {
+                let dst = Rect2::new(Vector2::new(dx + ox, dy + oy), Vector2::new(ew, eh));
+                let src = Rect2::new(Vector2::new(sx + osx, sy + osy), Vector2::new(esw, esh));
+                draw_texture_region(fb, texture, dst, src, modulate);
+            }
+        }
+    };
+
     // Top-left corner
     draw_patch(fb, dst_x0, dst_y0, ml, mt, 0.0, 0.0, src_left, src_top);
     // Top edge
-    draw_patch(
+    draw_patch_tiled(
         fb,
         dst_x1,
         dst_y0,
@@ -487,6 +588,8 @@ pub fn draw_nine_patch(
         0.0,
         src_right - src_left,
         src_top,
+        axis_h,
+        NinePatchAxis::Stretch,
     );
     // Top-right corner
     draw_patch(
@@ -502,7 +605,7 @@ pub fn draw_nine_patch(
     );
 
     // Left edge
-    draw_patch(
+    draw_patch_tiled(
         fb,
         dst_x0,
         dst_y1,
@@ -512,10 +615,12 @@ pub fn draw_nine_patch(
         src_top,
         src_left,
         src_bottom - src_top,
+        NinePatchAxis::Stretch,
+        axis_v,
     );
     // Center
     if draw_center {
-        draw_patch(
+        draw_patch_tiled(
             fb,
             dst_x1,
             dst_y1,
@@ -525,10 +630,12 @@ pub fn draw_nine_patch(
             src_top,
             src_right - src_left,
             src_bottom - src_top,
+            axis_h,
+            axis_v,
         );
     }
     // Right edge
-    draw_patch(
+    draw_patch_tiled(
         fb,
         dst_x2,
         dst_y1,
@@ -538,6 +645,8 @@ pub fn draw_nine_patch(
         src_top,
         tw - src_right,
         src_bottom - src_top,
+        NinePatchAxis::Stretch,
+        axis_v,
     );
 
     // Bottom-left corner
@@ -553,7 +662,7 @@ pub fn draw_nine_patch(
         th - src_bottom,
     );
     // Bottom edge
-    draw_patch(
+    draw_patch_tiled(
         fb,
         dst_x1,
         dst_y2,
@@ -563,6 +672,8 @@ pub fn draw_nine_patch(
         src_bottom,
         src_right - src_left,
         th - src_bottom,
+        axis_h,
+        NinePatchAxis::Stretch,
     );
     // Bottom-right corner
     draw_patch(
@@ -682,8 +793,7 @@ pub fn draw_texture_rect_blended(
             // observable effect no matter what a scene authored. The modes ride
             // on the framebuffer (like `scissor`/`blend_mode`) rather than
             // through every texture routine's signature.
-            let texel =
-                canvas_material::sample_texture(texture, u, v, tex_filter, tex_repeat);
+            let texel = canvas_material::sample_texture(texture, u, v, tex_filter, tex_repeat);
             let final_color = Color::new(
                 texel.r * modulate.r,
                 texel.g * modulate.g,
@@ -743,8 +853,7 @@ pub fn draw_texture_rect_shaded(
             // observable effect no matter what a scene authored. The modes ride
             // on the framebuffer (like `scissor`/`blend_mode`) rather than
             // through every texture routine's signature.
-            let texel =
-                canvas_material::sample_texture(texture, u, v, tex_filter, tex_repeat);
+            let texel = canvas_material::sample_texture(texture, u, v, tex_filter, tex_repeat);
             // The incoming COLOR is the sampled texel modulated by the item's
             // tint — the value Godot's default canvas_item fragment produces
             // via `COLOR = texture(TEXTURE, UV) * MODULATE`.
@@ -1153,5 +1262,131 @@ mod tests {
         assert_eq!(fb.get_pixel(15, 15), green);
         // Corners of the original square far from center should be black.
         assert_eq!(fb.get_pixel(0, 0), Color::BLACK);
+    }
+}
+
+#[cfg(test)]
+mod nine_patch_axis_tests {
+    use super::*;
+
+    /// `Stretch` is one span covering the whole destination — the pre-existing
+    /// behaviour, which must be untouched.
+    #[test]
+    fn stretch_is_a_single_span() {
+        let spans = axis_spans(100.0, 10.0, NinePatchAxis::Stretch);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0], (0.0, 100.0, 0.0, 10.0));
+    }
+
+    /// `Tile` repeats at the source's natural size. 100 / 10 = 10 whole tiles.
+    #[test]
+    fn tile_repeats_at_natural_size() {
+        let spans = axis_spans(100.0, 10.0, NinePatchAxis::Tile);
+        assert_eq!(spans.len(), 10, "ten whole tiles, got {spans:?}");
+        for (i, (off, ext, _, sext)) in spans.iter().enumerate() {
+            assert_eq!(*off, i as f32 * 10.0);
+            assert_eq!(*ext, 10.0, "each tile keeps the source size");
+            assert_eq!(*sext, 10.0, "and samples the whole source");
+        }
+    }
+
+    /// A destination that is not a whole multiple clips the final tile on BOTH
+    /// sides — a partial destination showing a *partial* source, not a squashed
+    /// whole one. Getting this wrong is the classic nine-patch tiling artefact.
+    #[test]
+    fn tile_clips_the_final_partial_tile_proportionally() {
+        let spans = axis_spans(25.0, 10.0, NinePatchAxis::Tile);
+        assert_eq!(spans.len(), 3, "two whole tiles plus a half, got {spans:?}");
+        assert_eq!(spans[2].1, 5.0, "final destination extent is the remainder");
+        assert_eq!(
+            spans[2].3, 5.0,
+            "and it samples only half the source, so the tile is not squashed"
+        );
+        // The spans exactly tile the destination with no gap or overlap.
+        let covered: f32 = spans.iter().map(|s| s.1).sum();
+        assert_eq!(covered, 25.0);
+    }
+
+    /// `TileFit` adjusts the tile size so a whole number fits — no partial tile.
+    #[test]
+    fn tile_fit_divides_evenly_with_no_partial_tile() {
+        // 25 / 10 rounds to 3 tiles ⇒ step 8.333…
+        let spans = axis_spans(25.0, 10.0, NinePatchAxis::TileFit);
+        assert_eq!(spans.len(), 3);
+        for (_, ext, _, sext) in &spans {
+            assert!(
+                (*ext - 25.0 / 3.0).abs() < 1e-3,
+                "every TileFit tile is the same adjusted size, got {ext}"
+            );
+            assert!(
+                (*sext - 10.0).abs() < 1e-3,
+                "and samples the FULL source — that is what makes it fit \
+                 rather than clip, got {sext}"
+            );
+        }
+        let covered: f32 = spans.iter().map(|s| s.1).sum();
+        assert!((covered - 25.0).abs() < 1e-3);
+    }
+
+    /// Degenerate spans yield nothing rather than looping forever.
+    #[test]
+    fn degenerate_spans_are_empty() {
+        assert!(axis_spans(0.0, 10.0, NinePatchAxis::Tile).is_empty());
+        assert!(axis_spans(10.0, 0.0, NinePatchAxis::Tile).is_empty());
+        assert!(axis_spans(-5.0, 10.0, NinePatchAxis::Tile).is_empty());
+    }
+
+    /// End to end: a tiled edge paints a repeating pattern where a stretched one
+    /// paints a smooth ramp. Uses a 2-colour source so repetition is visible.
+    #[test]
+    fn tiled_edge_repeats_where_stretched_edge_does_not() {
+        // 4x4 texture, 1px margins ⇒ the top edge source is 2px wide.
+        // Left source pixel red, right source pixel blue.
+        let mut pixels = vec![Color::new(0.0, 0.0, 0.0, 1.0); 16];
+        for y in 0..4 {
+            pixels[y * 4 + 1] = Color::new(1.0, 0.0, 0.0, 1.0);
+            pixels[y * 4 + 2] = Color::new(0.0, 0.0, 1.0, 1.0);
+        }
+        let tex = Texture2D {
+            width: 4,
+            height: 4,
+            pixels,
+        };
+        let rect = Rect2::new(Vector2::ZERO, Vector2::new(20.0, 6.0));
+
+        let render = |mode: NinePatchAxis| {
+            let mut fb = FrameBuffer::new(20, 6, Color::new(0.0, 0.0, 0.0, 1.0));
+            draw_nine_patch_axes(
+                &mut fb,
+                &tex,
+                rect,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                true,
+                mode,
+                NinePatchAxis::Stretch,
+                Color::WHITE,
+            );
+            // Count red→blue transitions along the top edge row.
+            let mut flips = 0;
+            for x in 2..17 {
+                let a = fb.pixels[x];
+                let b = fb.pixels[x + 1];
+                if (a.r > 0.5) != (b.r > 0.5) {
+                    flips += 1;
+                }
+            }
+            flips
+        };
+
+        let stretched = render(NinePatchAxis::Stretch);
+        let tiled = render(NinePatchAxis::Tile);
+        assert!(
+            tiled > stretched,
+            "a tiled edge must alternate more often than a stretched one \
+             (tiled {tiled} flips vs stretched {stretched})"
+        );
     }
 }

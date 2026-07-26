@@ -165,6 +165,9 @@ pub enum Render2DKind {
         font_size: i64,
         /// The horizontal text alignment.
         h_align: TextAlign,
+        /// `theme_override_fonts/font` resource path, or `None` for the default
+        /// face (pat-0q2kx.146).
+        font_path: Option<String>,
     },
     /// A `GPUParticles2D`/`CPUParticles2D` node's live particles: one textured
     /// (or solid) quad each, in the emitter's local space (pat-0q2kx.51).
@@ -518,6 +521,7 @@ fn render_kind_for(tree: &SceneTree, id: gdscene::NodeId, class: &str) -> Render
                 text: control::get_label_text(tree, id),
                 font_size: control::get_font_size(tree, id),
                 h_align: control::get_h_align(tree, id),
+                font_path: gdscene::control_render::font_override_path(tree, id),
             };
         }
         "GPUParticles2D" | "CPUParticles2D" => {
@@ -779,6 +783,7 @@ pub fn build_control_render_items(
                 text,
                 position,
                 font_size,
+                font_path,
                 z,
                 ..
             } => (
@@ -788,6 +793,7 @@ pub fn build_control_render_items(
                     text,
                     font_size: font_size as i64,
                     h_align: TextAlign::Left,
+                    font_path,
                 },
             ),
             ControlDrawItem::Texture {
@@ -1095,12 +1101,36 @@ pub fn rasterize_render_list(
                 draw::fill_rect_transformed(&mut fb, xform, rect, modulate(*color, item.modulate));
             }
             Render2DKind::Text {
-                text, font_size, ..
+                text,
+                font_size,
+                font_path,
+                ..
             } => {
-                // Map Godot's font size onto the built-in bitmap font's integer
-                // pixel scale (native cell height), at least 1.
-                let scale = ((*font_size as f32 / font.char_height as f32).round() as u32).max(1);
-                draw_string(&mut fb, &font, xform.origin, text, item.modulate, scale);
+                // A `theme_override_fonts/font` draws through the real outline
+                // rasterizer at the authored pixel size; everything else keeps
+                // the built-in bitmap font, so no unrelated editor text changes
+                // appearance (pat-0q2kx.146).
+                let drawn = font_path.as_deref().is_some_and(|path| {
+                    with_override_font(path, |ttf, atlas| {
+                        gdrender2d::ttf_font::draw_ttf_text_with_fallbacks(
+                            &mut fb,
+                            atlas,
+                            ttf,
+                            &[],
+                            text,
+                            xform.origin,
+                            *font_size as f32,
+                            item.modulate,
+                        );
+                    })
+                });
+                if !drawn {
+                    // Map Godot's font size onto the built-in bitmap font's integer
+                    // pixel scale (native cell height), at least 1.
+                    let scale =
+                        ((*font_size as f32 / font.char_height as f32).round() as u32).max(1);
+                    draw_string(&mut fb, &font, xform.origin, text, item.modulate, scale);
+                }
             }
             Render2DKind::Polygon { points, color } => {
                 fill_polygon(&mut fb, xform, points, modulate(*color, item.modulate));
@@ -1705,6 +1735,7 @@ mod tests {
                 text,
                 font_size,
                 h_align,
+                ..
             } => {
                 assert_eq!(text, "Hello, Patina");
                 assert_eq!(*font_size, 24);
@@ -1713,4 +1744,45 @@ mod tests {
             other => panic!("expected Text, got {other:?}"),
         }
     }
+}
+
+/// Runs `f` with the outline font at `path` and a shared glyph atlas, returning
+/// whether the font was available (pat-0q2kx.146).
+///
+/// Cached per process and keyed by path: a Label redraws every frame, and
+/// re-parsing a `.ttf` per frame would dominate the render. A path that fails to
+/// load caches its failure too, so a scene pointing at a missing font degrades
+/// to the built-in face once rather than retrying the read every frame.
+fn with_override_font<
+    F: FnOnce(&gdrender2d::ttf_font::TtfFont, &mut gdrender2d::ttf_font::GlyphAtlas),
+>(
+    path: &str,
+    f: F,
+) -> bool {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static FONTS: RefCell<HashMap<String, Option<gdrender2d::ttf_font::TtfFont>>> =
+            RefCell::new(HashMap::new());
+        static ATLAS: RefCell<gdrender2d::ttf_font::GlyphAtlas> =
+            RefCell::new(gdrender2d::ttf_font::GlyphAtlas::new(512, 512));
+    }
+    FONTS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let entry = cache.entry(path.to_string()).or_insert_with(|| {
+            // `res://` is the project-relative spelling; strip it so the path
+            // resolves against the working directory like every other asset read.
+            let disk = path.strip_prefix("res://").unwrap_or(path);
+            std::fs::read(disk)
+                .ok()
+                .and_then(|bytes| gdrender2d::ttf_font::TtfFont::from_bytes(bytes).ok())
+        });
+        match entry {
+            Some(ttf) => {
+                ATLAS.with(|atlas| f(ttf, &mut atlas.borrow_mut()));
+                true
+            }
+            None => false,
+        }
+    })
 }

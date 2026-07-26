@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use gdcore::file_access::FileAccess;
 use gdresource::pck::{load_resource_pack, unmount_resource_pack, PckPacker};
+use gdscene::SceneTree;
 use patina_runner::project_boot::boot_project_from_pck;
 
 /// The `res://` roots and pack mounts are process-global, so these tests must
@@ -209,6 +210,74 @@ fn non_replacing_pack_does_not_override_existing_content() {
     reset();
 }
 
+/// A **script** calling `ProjectSettings.load_resource_pack(...)` mounts the
+/// pack, which is the surface a game actually uses for DLC (pat-0q2kx.134).
+///
+/// The Rust API is covered above; this proves the interpreter arm reaches it and
+/// returns Godot's `Error` int rather than raising `UndefinedFunction`.
+#[test]
+fn script_load_resource_pack_mounts_the_pack() {
+    use gdscene::node::Node;
+    use gdscene::GDScriptNodeInstance;
+    use gdscript_interop::bindings::ScriptInstance;
+
+    let _lock = BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset();
+
+    let dir = temp_dir("script");
+    let base_path = dir.join("game.pck");
+    std::fs::write(&base_path, pack_project()).expect("write base");
+    boot_project_from_pck(&base_path, None).expect("boot");
+
+    let mut dlc = PckPacker::new();
+    dlc.add_file("res://dlc.txt", b"DLC CONTENT".to_vec());
+    let dlc_path = dir.join("dlc.pck");
+    std::fs::write(&dlc_path, dlc.pack().unwrap()).expect("write dlc");
+
+    assert!(
+        !FileAccess::file_exists("res://dlc.txt"),
+        "the DLC file must not be reachable before the pack is loaded",
+    );
+
+    // `load_resource_pack` returns OK (0) on success.
+    let src = format!(
+        "extends Node\nvar code = -1\nfunc run():\n    self.code = ProjectSettings.load_resource_pack(\"{}\")\n",
+        dlc_path.to_str().unwrap()
+    );
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    let node = tree.add_child(root, Node::new("Probe", "Node")).unwrap();
+    let script = GDScriptNodeInstance::from_source(&src, node).expect("script parses");
+    tree.attach_script(node, Box::new(script));
+    tree.get_script_mut(node)
+        .expect("script attached")
+        .call_method("run", &[])
+        .expect("ProjectSettings.load_resource_pack must not raise");
+
+    let code = tree
+        .get_script(node)
+        .unwrap()
+        .list_properties()
+        .into_iter()
+        .find(|p| p.name == "code")
+        .map(|p| p.default_value);
+    assert_eq!(
+        code,
+        Some(gdvariant::Variant::Int(0)),
+        "the script call must return OK (0), got {code:?}",
+    );
+    assert!(
+        FileAccess::file_exists("res://dlc.txt"),
+        "the script-loaded pack must be mounted over res://",
+    );
+    assert_eq!(
+        FileAccess::read_file_bytes("res://dlc.txt").unwrap(),
+        b"DLC CONTENT".to_vec(),
+    );
+
+    reset();
+}
+
 /// Booting a file that is not a pack fails with a clear message rather than
 /// panicking or half-mounting.
 #[test]
@@ -220,7 +289,12 @@ fn booting_a_non_pck_reports_an_error() {
     let bad = dir.join("not-a-pack.pck");
     std::fs::write(&bad, b"just some bytes").expect("write");
 
-    let err = boot_project_from_pck(&bad, None).expect_err("must reject a non-pck");
+    // `expect_err` would require `BootedProject: Debug`; matching keeps the
+    // assertion without forcing a derive onto the public boot type.
+    let err = match boot_project_from_pck(&bad, None) {
+        Ok(_) => panic!("a non-pck file must not boot"),
+        Err(e) => e,
+    };
     assert!(
         err.contains("not a valid .pck"),
         "error should name the problem, got: {err}"

@@ -627,6 +627,27 @@ impl PhysicsServer {
         self.world.gravity()
     }
 
+    /// Every registered collider node whose shape contains `world_point`
+    /// (pat-0q2kx.138) — Godot's `intersect_point` with
+    /// `collide_with_areas = true`, resolved back to scene nodes.
+    ///
+    /// Bodies and areas both, because physics picking targets either and an
+    /// `Area2D` is the usual click target. Bodies come first, then areas, each
+    /// group in id order, so the result is deterministic.
+    pub fn colliders_at_point(&self, world_point: Vector2) -> Vec<NodeId> {
+        let bodies = self
+            .world
+            .point_query(world_point)
+            .into_iter()
+            .filter_map(|id| self.node_for_body(id));
+        let areas = self
+            .area_store
+            .point_query(world_point)
+            .into_iter()
+            .filter_map(|id| self.area_to_node.get(&id).copied());
+        bodies.chain(areas).collect()
+    }
+
     /// Applies the space-wide `physics/2d/*` project settings — default damping,
     /// sleep thresholds and `time_before_sleep` (pat-0q2kx.116).
     ///

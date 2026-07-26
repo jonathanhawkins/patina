@@ -463,6 +463,10 @@ impl EngineBootstrap {
             settings.viewport_width() as f32,
             settings.viewport_height() as f32,
         );
+        // Mirror the state onto the root node so a script's
+        // `get_window().content_scale_mode` answers the project's value rather
+        // than the ClassDB registration default (pat-0q2kx.141).
+        tree.publish_root_window_state();
 
         self.tree = Some(tree);
         Ok(())

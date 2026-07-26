@@ -213,7 +213,10 @@ impl UidRegistry {
             let mut buf = vec![0u8; len];
             reader.read_exact(&mut buf)?;
             let path = String::from_utf8(buf).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("invalid UTF-8 in UID cache: {e}"))
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid UTF-8 in UID cache: {e}"),
+                )
             })?;
             self.register(ResourceUid::new(id), path);
         }
@@ -466,7 +469,7 @@ mod tests {
         // Hand-built uid_cache.bin: entry_count then (id u64, len u32, bytes).
         let mut d: Vec<u8> = Vec::new();
         d.extend_from_slice(&2u32.to_le_bytes()); // entry_count = 2
-        // entry 1: id 12345 -> "res://a.tres"
+                                                  // entry 1: id 12345 -> "res://a.tres"
         d.extend_from_slice(&12345u64.to_le_bytes());
         d.extend_from_slice(&12u32.to_le_bytes());
         d.extend_from_slice(b"res://a.tres");
@@ -479,9 +482,15 @@ mod tests {
         let n = reg.load_from_cache_bytes(&d).unwrap();
         assert_eq!(n, 2);
         assert_eq!(reg.len(), 2);
-        assert_eq!(reg.lookup_uid(ResourceUid::new(12345)), Some("res://a.tres"));
+        assert_eq!(
+            reg.lookup_uid(ResourceUid::new(12345)),
+            Some("res://a.tres")
+        );
         // Resolvable via the decoded uid:// text as well.
-        assert_eq!(reg.lookup_uid(text_to_id("uid://kxd")), Some("res://a.tres"));
+        assert_eq!(
+            reg.lookup_uid(text_to_id("uid://kxd")),
+            Some("res://a.tres")
+        );
         assert_eq!(reg.lookup_uid(ResourceUid::new(34)), Some("res://b.tres"));
     }
 

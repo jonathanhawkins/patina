@@ -334,6 +334,66 @@ impl AvoidanceNodeParams3D {
     }
 }
 
+/// Godot's particle nodes default `emitting` to true (pat-0q2kx.154).
+fn emitting_flag(node: &crate::node::Node) -> bool {
+    !matches!(node.get_property("emitting"), Variant::Bool(false))
+}
+
+/// Builds a [`ParticleEmitter3D`](crate::particle3d::ParticleEmitter3D) from a
+/// `GPUParticles3D`/`CPUParticles3D` node's authored properties
+/// (pat-0q2kx.154).
+///
+/// Reads `direction` and `gravity` as **Vector3**. The 2D path this replaced
+/// matched only `Variant::Vector2`, so a 3D node's authored gravity fell
+/// through and the emitter silently kept its default — the particles fell the
+/// wrong way (or not at all) with no error anywhere.
+fn read_emitter_3d(node: &crate::node::Node) -> crate::particle3d::ParticleEmitter3D {
+    use gdcore::math::Vector3;
+    let mut emitter = crate::particle3d::ParticleEmitter3D::default();
+    if let Variant::Int(a) = node.get_property("amount") {
+        if a > 0 {
+            emitter.amount = a as u32;
+        }
+    }
+    if let Some(l) = prop_f32(node.get_property("lifetime")) {
+        if l > 0.0 {
+            emitter.lifetime = l;
+        }
+    }
+    if let Variant::Bool(o) = node.get_property("one_shot") {
+        emitter.one_shot = o;
+    }
+    if let Some(e) = prop_f32(node.get_property("explosiveness")) {
+        emitter.explosiveness = e;
+    }
+    if let Some(sp) = prop_f32(node.get_property("speed_scale")) {
+        emitter.speed_scale = sp;
+    }
+    if let Variant::Vector3(d) = node.get_property("direction") {
+        if d != Vector3::ZERO {
+            emitter.material.direction = d;
+        }
+    }
+    if let Variant::Vector3(g) = node.get_property("gravity") {
+        emitter.material.gravity = g;
+    }
+    if let Some(sp) = prop_f32(node.get_property("spread")) {
+        emitter.material.spread = sp;
+    }
+    if let Some(v) = prop_f32(node.get_property("initial_velocity_min")) {
+        emitter.material.initial_velocity_min = v;
+    }
+    if let Some(v) = prop_f32(node.get_property("initial_velocity_max")) {
+        emitter.material.initial_velocity_max = v;
+    }
+    if let Variant::Color(c) = node.get_property("color") {
+        // `ColorCurve` is a gradient (`keys: Vec<(f32, Color)>`), not a
+        // start/end pair — a flat authored `color` is the degenerate gradient.
+        emitter.material.color_curve = crate::particle3d::ColorCurve::linear(c, c);
+    }
+    emitter
+}
+
 /// Drives a [`SceneTree`] through a deterministic frame loop.
 ///
 /// # Example
@@ -396,6 +456,13 @@ pub struct MainLoop {
     /// CPU particle simulators for emitting particle nodes, keyed by node id
     /// (pat-u3l8c.4). Built on demand in [`process_particles`](Self::process_particles).
     particles: HashMap<NodeId, ParticleSimulator>,
+    /// 3D particle simulators, keyed by node (pat-0q2kx.154).
+    ///
+    /// Separate from `particles` because `GPUParticles3D`/`CPUParticles3D` used
+    /// to route through the 2D simulator, whose property reads match
+    /// `Variant::Vector2` — so an authored `Vector3` gravity never matched and
+    /// the node silently kept 2D defaults.
+    particles_3d: HashMap<NodeId, crate::particle3d::ParticleSimulator3D>,
     /// Per-node 2D navigation agents, keyed by node id (pat-u3l8c.5). Hold the
     /// computed path + waypoint index across frames so agents advance smoothly.
     nav_agents_2d: HashMap<NodeId, NavigationAgent2D>,
@@ -490,6 +557,7 @@ impl MainLoop {
             cursor: gdplatform::cursor::CursorManager::new(),
             pending_input: Vec::new(),
             particles: HashMap::new(),
+            particles_3d: HashMap::new(),
             nav_agents_2d: HashMap::new(),
             nav_agents_3d: HashMap::new(),
         }
@@ -505,21 +573,28 @@ impl MainLoop {
     /// stopped emitting are dropped once their remaining particles die out.
     pub fn process_particles(&mut self, dt: f32) {
         use gdcore::math::{Color, Vector2};
-        const PARTICLE_CLASSES: [&str; 4] = [
-            "GPUParticles2D",
-            "GPUParticles3D",
-            "CPUParticles2D",
-            "CPUParticles3D",
-        ];
+        const PARTICLE_CLASSES: [&str; 2] = ["GPUParticles2D", "CPUParticles2D"];
+        // 3D emitters go to the 3D simulator instead (pat-0q2kx.154). They used
+        // to be in the list above, which meant they ran the 2D simulator and
+        // read `direction`/`gravity` as `Variant::Vector2` — a `Vector3` never
+        // matched, so an authored 3D gravity silently kept the 2D default.
+        const PARTICLE_CLASSES_3D: [&str; 2] = ["GPUParticles3D", "CPUParticles3D"];
 
         // Collect every particle node's config (emitting flag + emitter params)
         // while the tree is borrowed immutably.
         let mut configs: Vec<(NodeId, bool, ParticleEmitter)> = Vec::new();
+        let mut configs_3d: Vec<(NodeId, bool, crate::particle3d::ParticleEmitter3D)> = Vec::new();
         let mut present: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        let mut present_3d: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
         for id in self.tree.all_nodes_in_tree_order() {
             let Some(node) = self.tree.get_node(id) else {
                 continue;
             };
+            if PARTICLE_CLASSES_3D.contains(&node.class_name()) {
+                present_3d.insert(id);
+                configs_3d.push((id, emitting_flag(node), read_emitter_3d(node)));
+                continue;
+            }
             if !PARTICLE_CLASSES.contains(&node.class_name()) {
                 continue;
             }
@@ -644,6 +719,41 @@ impl MainLoop {
                 (*id, sim.draw_commands_in_local_space(global))
             })
             .collect();
+        // --- 3D simulators (pat-0q2kx.154) ---
+        self.particles_3d.retain(|id, _| present_3d.contains(id));
+        for (id, is_emitting, emitter) in configs_3d {
+            let sim = self
+                .particles_3d
+                .entry(id)
+                .or_insert_with(|| crate::particle3d::ParticleSimulator3D::new(emitter.clone()));
+            // Re-read the authored config each frame so a property edited at
+            // runtime takes effect, matching how the 2D path behaves.
+            sim.emitter = emitter;
+            sim.emitter.emitting = is_emitting;
+            sim.step(dt);
+        }
+        let positions_3d: Vec<(NodeId, Vec<gdcore::math::Vector3>, Vec<Color>)> = self
+            .particles_3d
+            .iter()
+            .map(|(id, sim)| {
+                (
+                    *id,
+                    sim.active_particles.iter().map(|p| p.position).collect(),
+                    sim.active_particles.iter().map(|p| p.color).collect(),
+                )
+            })
+            .collect();
+        for (id, positions, colors) in positions_3d {
+            if let Some(node) = self.tree.get_node_mut(id) {
+                node.set_property("particle_count", Variant::Int(positions.len() as i64));
+                node.set_property(
+                    "_particle_positions",
+                    Variant::PackedVector3Array(positions),
+                );
+                node.set_property("_particle_colors", Variant::PackedColorArray(colors));
+            }
+        }
+
         for (id, cmds) in draws {
             if let Some(node) = self.tree.get_node_mut(id) {
                 node.set_property("particle_count", Variant::Int(cmds.len() as i64));
@@ -663,10 +773,23 @@ impl MainLoop {
     /// Returns the number of live particles currently simulated for `node_id`
     /// (0 if the node has no active particle simulator).
     pub fn particle_count(&self, node_id: NodeId) -> usize {
-        self.particles
+        if let Some(sim) = self.particles.get(&node_id) {
+            return sim.active_particles.len();
+        }
+        // A 3D emitter lives in its own simulator (pat-0q2kx.154).
+        self.particles_3d
             .get(&node_id)
             .map(|s| s.active_particles.len())
             .unwrap_or(0)
+    }
+
+    /// Live 3D particle positions for `node_id`, in world space
+    /// (pat-0q2kx.154). Empty when the node has no 3D simulator.
+    pub fn particle_positions_3d(&self, node_id: NodeId) -> Vec<gdcore::math::Vector3> {
+        self.particles_3d
+            .get(&node_id)
+            .map(|s| s.active_particles.iter().map(|p| p.position).collect())
+            .unwrap_or_default()
     }
 
     /// Drives `PathFollow2D`/`PathFollow3D` nodes along their parent Path's
@@ -1732,6 +1855,58 @@ impl MainLoop {
         self.input_state.process_event(event);
     }
 
+    /// Godot's physics object picking — the final input stage, after
+    /// `_unhandled_input` (pat-0q2kx.138).
+    ///
+    /// `Viewport::_process_picking` queries the 2D physics space at the cursor
+    /// and calls `_input_event(viewport, event, shape_idx)` on every
+    /// `CollisionObject2D` under it whose `input_pickable` is set
+    /// (upstream/godot/scene/main/viewport.cpp). Patina had the point query and
+    /// the `input_pickable` property but nothing joined them, so a click never
+    /// reached an Area2D.
+    ///
+    /// Skipped entirely once the event is handled: an earlier stage — most
+    /// often the GUI stage consuming a click on a Control — takes the event out
+    /// of circulation, which is exactly how a button stops a click from also
+    /// hitting the world behind it.
+    fn physics_pick_input(&mut self, event: &InputEvent) {
+        let position = match event {
+            InputEvent::MouseButton { position, .. } => *position,
+            InputEvent::MouseMotion { position, .. } => *position,
+            // Picking is a pointer-space query; keys have no cursor position.
+            _ => return,
+        };
+        if self.tree.is_input_handled() {
+            return;
+        }
+
+        // Resolve the hit bodies to their scene nodes first, so the physics
+        // borrow is released before any script runs (a script reached through
+        // `_input_event` can mutate the tree).
+        let hits: Vec<NodeId> = self
+            .physics_server
+            .colliders_at_point(position)
+            .into_iter()
+            .filter(|nid| {
+                // Godot's default is `input_pickable = true`, so a collider that
+                // never mentions the property still picks.
+                self.tree.get_node(*nid).is_some_and(|n| {
+                    !matches!(n.get_property("input_pickable"), Variant::Bool(false))
+                })
+            })
+            .collect();
+
+        let payload = crate::scene_tree::input_event_to_variant(event);
+        for nid in hits {
+            if self.tree.is_input_handled() {
+                return;
+            }
+            let _ = self
+                .tree
+                .call_script_method(nid, "_input_event", &[payload.clone()]);
+        }
+    }
+
     /// Sets the [`InputMap`] that maps physical events to named actions.
     ///
     /// Must be called before pushing events if scripts rely on action names
@@ -2040,14 +2215,37 @@ impl MainLoop {
         if !self.pending_input.is_empty() {
             for event in std::mem::take(&mut self.pending_input) {
                 self.tree.push_input(&event);
+                // Physics object picking is Godot's LAST input stage, after
+                // `_unhandled_input` (viewport.cpp:3464-3580) — and it lives
+                // here rather than in `push_input` because it needs the physics
+                // world, which the scene tree does not own (pat-0q2kx.138).
+                self.physics_pick_input(&event);
             }
         }
 
         let physics_dt = 1.0 / self.physics_ticks_per_second as f64;
 
+        // Whether the tree is paused, sampled once so every phase below agrees
+        // (pat-0q2kx.140). Godot's `SceneTree::set_pause`
+        // (scene/main/scene_tree.cpp:1111-1140) calls
+        // `PhysicsServer2D/3D::set_active(!paused)`, so a paused game does not
+        // step physics at all — the whole phase is skipped rather than each body
+        // being filtered. Before this, a paused Patina game kept simulating
+        // everything except script callbacks: bodies fell, timers counted down,
+        // animations and tweens advanced.
+        let paused = self.tree.paused();
+
         // -- physics phase --
         // Godot per-tick order: INTERNAL_PHYSICS_PROCESS -> PHYSICS_PROCESS
+        // While paused the accumulator is still fed, so unpausing does not
+        // suddenly run a burst of catch-up ticks for the paused interval — it is
+        // drained below instead.
         self.physics_accumulator += delta_secs;
+        if paused {
+            // Godot's servers are inactive while paused; drop the accumulated
+            // time so resuming continues from now rather than fast-forwarding.
+            self.physics_accumulator = 0.0;
+        }
         let mut physics_steps = 0u32;
         // `Engine.is_in_physics_frame()` is true for the whole fixed-step
         // section, so a script called from `_physics_process` can tell which
@@ -2142,51 +2340,67 @@ impl MainLoop {
         // -- animation / tween phase --
         // Idle-mode players only; PHYSICS players already advanced in the tick
         // loop above and MANUAL players are never advanced by the loop.
-        self.tree.process_animations(delta_secs);
-        // AnimationTree nodes advance in the same phase as the players they pull
-        // clips from, after them so a tree's blended pose wins where both write
-        // the same property (pat-0q2kx.2).
-        self.tree.process_animation_trees(delta_secs);
-        // AnimatedSprite2D advances its own frame counter in the idle phase,
-        // independent of any AnimationPlayer (pat-0q2kx.74).
-        self.tree.process_animated_sprites(delta_secs);
-        self.tree.process_tweens(delta_secs);
+        //
+        // Every simulation phase from here to the timer phase is skipped while
+        // the tree is paused (pat-0q2kx.140). ⚠️ Godot filters these *per node*
+        // by `process_mode`, so an `Always` AnimationPlayer keeps playing under
+        // pause; this whole-phase skip does not model that yet — see the note on
+        // `paused` above and the bead's follow-up.
+        if !paused {
+            self.tree.process_animations(delta_secs);
+            // AnimationTree nodes advance in the same phase as the players they pull
+            // clips from, after them so a tree's blended pose wins where both write
+            // the same property (pat-0q2kx.2).
+            self.tree.process_animation_trees(delta_secs);
+            // AnimatedSprite2D advances its own frame counter in the idle phase,
+            // independent of any AnimationPlayer (pat-0q2kx.74).
+            self.tree.process_animated_sprites(delta_secs);
+            self.tree.process_tweens(delta_secs);
 
-        // -- skeleton phase (pat-0q2kx.3) --
-        // Godot's NOTIFICATION_UPDATE_SKELETON: after the mixer has written
-        // poses, each Skeleton3D routes its 3D bone tracks onto bone poses, runs
-        // its SkeletonModifier3D stack (IK layers on top of animation), then
-        // snaps BoneAttachment3D children to their bone. The render bridge reads
-        // the resulting poses to skin bound MeshInstance3D meshes.
-        crate::skeleton3d::process_skeletons(&mut self.tree);
+            // -- skeleton phase (pat-0q2kx.3) --
+            // Godot's NOTIFICATION_UPDATE_SKELETON: after the mixer has written
+            // poses, each Skeleton3D routes its 3D bone tracks onto bone poses, runs
+            // its SkeletonModifier3D stack (IK layers on top of animation), then
+            // snaps BoneAttachment3D children to their bone. The render bridge reads
+            // the resulting poses to skin bound MeshInstance3D meshes.
+            crate::skeleton3d::process_skeletons(&mut self.tree);
 
-        // -- particle phase (pat-u3l8c.4) --
-        // Advance CPU particle simulators for emitting particle nodes so that
-        // GPUParticles2D/3D and CPUParticles2D/3D actually simulate at runtime.
-        self.process_particles(delta_secs as f32);
+            // -- particle phase (pat-u3l8c.4) --
+            // Advance CPU particle simulators for emitting particle nodes so that
+            // GPUParticles2D/3D and CPUParticles2D/3D actually simulate at runtime.
+            self.process_particles(delta_secs as f32);
 
-        // -- path-follow phase (pat-u3l8c.6) --
-        // Project PathFollow2D/3D nodes onto their parent Path's curve each
-        // frame so their transform tracks `progress` (and any auto-advance).
-        self.process_path_follows(delta_secs as f32);
+            // -- path-follow phase (pat-u3l8c.6) --
+            // Project PathFollow2D/3D nodes onto their parent Path's curve each
+            // frame so their transform tracks `progress` (and any auto-advance).
+            self.process_path_follows(delta_secs as f32);
 
-        // -- navigation phase (pat-u3l8c.5) --
-        // Drive NavigationAgent2D/3D nodes along their computed paths so agents
-        // with a target_position advance across frames at runtime.
-        self.process_navigation(delta_secs as f32);
+            // -- navigation phase (pat-u3l8c.5) --
+            // Drive NavigationAgent2D/3D nodes along their computed paths so agents
+            // with a target_position advance across frames at runtime.
+            self.process_navigation(delta_secs as f32);
 
-        // -- raycast phase (pat-u3l8c.49) --
-        // Cast each RayCast2D against the (already-synced) physics world and
-        // publish is_colliding / collider so scripts can read them this frame.
-        self.process_raycasts();
+            // -- raycast phase (pat-u3l8c.49) --
+            // Cast each RayCast2D against the (already-synced) physics world and
+            // publish is_colliding / collider so scripts can read them this frame.
+            self.process_raycasts();
 
-        // -- 3D query-node phase (pat-nzgdu.12) --
-        // Drive RayCast3D/ShapeCast3D/SpringArm3D against the synced 3D physics
-        // world so is_colliding()/get_collider()/hit_length update at runtime.
-        self.process_queries_3d();
+            // -- 3D query-node phase (pat-nzgdu.12) --
+            // Drive RayCast3D/ShapeCast3D/SpringArm3D against the synced 3D physics
+            // world so is_colliding()/get_collider()/hit_length update at runtime.
+            self.process_queries_3d();
 
-        // -- Timer nodes (Godot Timer, idle process mode) (pat-u3l8c.3) --
-        self.tree.process_timer_nodes(delta_secs);
+            // -- Timer nodes (Godot Timer, idle process mode) (pat-u3l8c.3) --
+            // A default-process_mode Timer stops while paused, which is why Godot's
+            // pause menus use `Always` timers (pat-0q2kx.140).
+            self.tree.process_timer_nodes(delta_secs);
+        } // end of the `if !paused` simulation block (pat-0q2kx.140)
+          //
+          // The raycast and 3D-query phases sit inside this block too. That is
+          // deliberate: they publish `is_colliding`/`get_collider` from the
+          // physics world, and while paused that world does not change, so
+          // re-publishing would burn work to write identical values. Godot
+          // reaches the same place via each RayCast's own `process_mode`.
 
         // -- multiplayer poll (pat-u3l8c.75) --
         // Decode inbound RPCs and dispatch them to node scripts before the

@@ -2363,6 +2363,12 @@ impl Interpreter {
                         return Ok(self.get_property_with_virtual(raw, &member));
                     }
                 }
+                // `shader.code`, and any other property a loaded resource
+                // carries. Godot's `Object::get` answers Nil for a name the
+                // resource does not have, rather than erroring (pat-0q2kx.144).
+                if let Variant::Resource(res) = &obj {
+                    return Ok(res.properties.get(member).cloned().unwrap_or(Variant::Nil));
+                }
                 match &obj {
                     Variant::Vector2(v) => match member.as_str() {
                         "x" => Ok(Variant::Float(v.x as f64)),
@@ -2539,6 +2545,8 @@ impl Interpreter {
                 | "Dictionary"
                 | "Vector2"
                 | "Vector3"
+                | "Vector2i"
+                | "Vector3i"
                 | "Color"
                 | "Rect2"
                 | "Callable"
@@ -2556,6 +2564,11 @@ impl Interpreter {
             "Dictionary" => matches!(v, Variant::Dictionary(_)),
             "Vector2" => matches!(v, Variant::Vector2(_)),
             "Vector3" => matches!(v, Variant::Vector3(_)),
+            // Listed alongside their float counterparts so `v is Vector2i`
+            // answers from the Variant kind rather than falling through to the
+            // type-name string match below (pat-0q2kx.153).
+            "Vector2i" => matches!(v, Variant::Vector2i(_)),
+            "Vector3i" => matches!(v, Variant::Vector3i(_)),
             "Color" => matches!(v, Variant::Color(_)),
             "Callable" => matches!(v, Variant::Callable(_)),
             "Rect2" => matches!(v, Variant::Rect2(_)),
@@ -3467,10 +3480,20 @@ impl Interpreter {
                         } else {
                             "Resource"
                         };
+                        // A `Shader` carries its source in `code` (pat-0q2kx.144).
+                        // This used to hand back an EMPTY property bag, so
+                        // `load("res://f.gdshader").code` was Nil and the file
+                        // was never read at all.
+                        let mut properties = HashMap::new();
+                        if class_name == "Shader" {
+                            if let Some(code) = read_resource_text(&path) {
+                                properties.insert("code".to_string(), Variant::String(code));
+                            }
+                        }
                         Ok(Some(Variant::Resource(Box::new(ResourceRef {
                             path: path.clone(),
                             class_name: class_name.to_string(),
-                            properties: HashMap::new(),
+                            properties,
                         }))))
                     }
                     // If already a Resource, pass through
@@ -3541,10 +3564,38 @@ impl Interpreter {
                         "lerp() takes 3 arguments".into(),
                     )));
                 }
-                let a = to_float(&args[0])?;
-                let b = to_float(&args[1])?;
-                let t = to_float(&args[2])?;
-                Ok(Some(Variant::Float(a + (b - a) * t)))
+                // Godot's global `lerp` is Variant-generic: it interpolates
+                // vectors, colors and quaternions componentwise, not just
+                // floats (pat-0q2kx.151). This used to `to_float` both ends, so
+                // `lerp(Vector2(0,0), Vector2(10,20), 0.5)` — the single most
+                // common use — raised a TypeError.
+                //
+                // Each type delegates to the `lerp` its own math type already
+                // provides; a quaternion uses `slerp`, because a componentwise
+                // blend of two rotations is not a rotation.
+                let t = to_float(&args[2])? as f32;
+                match (&args[0], &args[1]) {
+                    (Variant::Vector2(a), Variant::Vector2(b)) => {
+                        Ok(Some(Variant::Vector2(a.lerp(*b, t))))
+                    }
+                    (Variant::Vector3(a), Variant::Vector3(b)) => {
+                        Ok(Some(Variant::Vector3(a.lerp(*b, t))))
+                    }
+                    (Variant::Color(a), Variant::Color(b)) => {
+                        Ok(Some(Variant::Color(a.lerp(*b, t))))
+                    }
+                    (Variant::Quaternion(a), Variant::Quaternion(b)) => {
+                        Ok(Some(Variant::Quaternion(a.slerp(*b, t))))
+                    }
+                    // Anything else keeps the scalar behaviour, so `lerp(0, 10,
+                    // 0.5)` and int/float mixes are unchanged.
+                    _ => {
+                        let a = to_float(&args[0])?;
+                        let b = to_float(&args[1])?;
+                        let t = to_float(&args[2])?;
+                        Ok(Some(Variant::Float(a + (b - a) * t)))
+                    }
+                }
             }
             "sign" => {
                 if args.len() != 1 {
@@ -3801,6 +3852,74 @@ impl Interpreter {
                 Ok(Some(Variant::Float(to_float(&args[0])?.cos())))
             }
             "randi" => Ok(Some(Variant::Int(deterministic_randi()))),
+            // Godot's seedable-RNG surface (pat-0q2kx.152). Without these,
+            // `seed()` was undefined and no script could make its sequence
+            // reproducible.
+            "seed" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "seed() takes 1 argument".into(),
+                    )));
+                }
+                set_random_seed(to_float(&args[0])? as i64);
+                Ok(Some(Variant::Nil))
+            }
+            "randomize" => {
+                if !args.is_empty() {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "randomize() takes 0 arguments".into(),
+                    )));
+                }
+                // Godot seeds from the system clock; the point is only that two
+                // runs differ, so nanosecond resolution is enough.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0);
+                set_random_seed(now & i64::MAX);
+                Ok(Some(Variant::Nil))
+            }
+            "rand_from_seed" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "rand_from_seed() takes 1 argument".into(),
+                    )));
+                }
+                // Godot returns `[value, next_seed]` and does NOT disturb the
+                // global RNG — it is a pure function of the seed, which is what
+                // makes it usable for reproducible per-object randomness.
+                let seed = to_float(&args[0])? as i64;
+                let value = lcg_step(seed);
+                Ok(Some(Variant::PackedInt64Array(vec![
+                    value,
+                    seed.wrapping_add(1),
+                ])))
+            }
+            "randfn" => {
+                // Godot: `randfn(mean = 0.0, deviation = 1.0)`.
+                let mean = match args.first() {
+                    Some(v) => to_float(v)?,
+                    None => 0.0,
+                };
+                let deviation = match args.get(1) {
+                    Some(v) => to_float(v)?,
+                    None => 1.0,
+                };
+                // Box-Muller. `u1` must be strictly positive or `ln` is -inf, so
+                // a zero draw is nudged to the smallest usable value rather than
+                // producing a NaN the caller would have to discover at runtime.
+                let u1 = {
+                    let u = (deterministic_randi() as f64) / (i64::MAX as f64);
+                    if u <= f64::EPSILON {
+                        f64::EPSILON
+                    } else {
+                        u
+                    }
+                };
+                let u2 = (deterministic_randi() as f64) / (i64::MAX as f64);
+                let z = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
+                Ok(Some(Variant::Float(mean + deviation * z)))
+            }
             "randf" => Ok(Some(Variant::Float(
                 (deterministic_randi() as f64) / (i64::MAX as f64),
             ))),
@@ -4085,6 +4204,56 @@ impl Interpreter {
                 let y = to_float(&args[1])? as f32;
                 Ok(Some(Variant::Vector2(gdcore::math::Vector2::new(x, y))))
             }
+            // `Vector2i` / `Vector3i` had a `Variant` arm, a `gdcore` type and a
+            // `.tscn` literal form, but no script constructor — `Vector2i(1, 2)`
+            // raised "unknown function", so a script could receive an integer
+            // vector (a `TileMap` cell, a `GridMap` coordinate) but never build
+            // one (pat-0q2kx.153).
+            //
+            // Godot also accepts the float vector as a single argument and
+            // truncates toward zero, which is how `Vector2i(get_position())`
+            // is normally written.
+            "Vector2i" => match args.len() {
+                0 => Ok(Some(Variant::Vector2i(gdcore::math::Vector2i::ZERO))),
+                1 => match &args[0] {
+                    Variant::Vector2(v) => Ok(Some(Variant::Vector2i(
+                        gdcore::math::Vector2i::new(v.x as i32, v.y as i32),
+                    ))),
+                    Variant::Vector2i(v) => Ok(Some(Variant::Vector2i(*v))),
+                    other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "Vector2i() expects a Vector2, got {}",
+                        other.variant_type()
+                    )))),
+                },
+                2 => Ok(Some(Variant::Vector2i(gdcore::math::Vector2i::new(
+                    to_int(&args[0])? as i32,
+                    to_int(&args[1])? as i32,
+                )))),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Vector2i() takes 0, 1 or 2 arguments".into(),
+                ))),
+            },
+            "Vector3i" => match args.len() {
+                0 => Ok(Some(Variant::Vector3i(gdcore::math::Vector3i::ZERO))),
+                1 => match &args[0] {
+                    Variant::Vector3(v) => Ok(Some(Variant::Vector3i(
+                        gdcore::math::Vector3i::new(v.x as i32, v.y as i32, v.z as i32),
+                    ))),
+                    Variant::Vector3i(v) => Ok(Some(Variant::Vector3i(*v))),
+                    other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "Vector3i() expects a Vector3, got {}",
+                        other.variant_type()
+                    )))),
+                },
+                3 => Ok(Some(Variant::Vector3i(gdcore::math::Vector3i::new(
+                    to_int(&args[0])? as i32,
+                    to_int(&args[1])? as i32,
+                    to_int(&args[2])? as i32,
+                )))),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Vector3i() takes 0, 1 or 3 arguments".into(),
+                ))),
+            },
             "Vector3" => {
                 if args.is_empty() {
                     return Ok(Some(Variant::Vector3(gdcore::math::Vector3::ZERO)));
@@ -6400,8 +6569,25 @@ impl Interpreter {
                             let parts: Vec<String> = a.iter().map(|v| format!("{v}")).collect();
                             Ok(Variant::String(parts.join(s)))
                         }
+                        // Godot's signature is literally
+                        // `String.join(parts: PackedStringArray)`, so the packed
+                        // form is the *common* argument, not an edge case —
+                        // rejecting it made `",".join(some_packed_array)` fail
+                        // on the very shape the docs show (pat-0q2kx.147).
+                        Variant::PackedStringArray(a) => Ok(Variant::String(a.join(s))),
+                        // Every other packed array joins by element display, the
+                        // same way a plain `Array` of numbers does.
+                        other if other.is_packed_array() => {
+                            let parts: Vec<String> = other
+                                .packed_to_array()
+                                .unwrap_or_default()
+                                .iter()
+                                .map(|v| format!("{v}"))
+                                .collect();
+                            Ok(Variant::String(parts.join(s)))
+                        }
                         _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "join() arg must be array".into(),
+                            "join() arg must be an array or packed array".into(),
                         ))),
                     }
                 }
@@ -8266,6 +8452,34 @@ impl Interpreter {
                 ))),
             },
             Variant::Resource(res_ref) => match method {
+                // `Shader.get_shader_uniform_list()` (pat-0q2kx.144). Godot
+                // returns one Dictionary per declared uniform; `grep` for this
+                // method across the workspace previously returned ZERO.
+                "get_shader_uniform_list" => {
+                    let code = match res_ref.properties.get("code") {
+                        Some(Variant::String(c)) => c.clone(),
+                        _ => String::new(),
+                    };
+                    Ok(Variant::Array(
+                        gdserver2d::shader::parse_uniforms(&code)
+                            .into_iter()
+                            .map(|u| {
+                                let mut d = Dictionary::new();
+                                d.insert("name".to_string(), Variant::String(u.name));
+                                d.insert(
+                                    "type".to_string(),
+                                    Variant::String(uniform_type_name(&u.uniform_type)),
+                                );
+                                d.insert(
+                                    "hint".to_string(),
+                                    Variant::String(u.hint.clone().unwrap_or_default()),
+                                );
+                                d.insert("default".to_string(), u.default_value);
+                                Variant::Dictionary(d)
+                            })
+                            .collect(),
+                    ))
+                }
                 "get_path" => Ok(Variant::String(res_ref.path.clone())),
                 "get_class" => Ok(Variant::String(res_ref.class_name.clone())),
                 "get" => {
@@ -10668,6 +10882,16 @@ fn gd_escape_string(s: &str) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            // Godot escapes these rather than emitting them raw
+            // (`variant_parser.cpp` VariantWriter). A raw newline is not just
+            // cosmetic: dictionaries serialize multi-line, so an unescaped one
+            // inside a string key would be indistinguishable from the layout
+            // (pat-0q2kx.153).
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
             _ => out.push(c),
         }
     }
@@ -10715,13 +10939,23 @@ fn variant_to_gd_string(v: &Variant) -> String {
             if d.is_empty() {
                 "{}".to_string()
             } else {
-                let items: Vec<String> = d
+                // Godot writes dictionaries newline-delimited with the keys
+                // sorted (`variant_parser.cpp` VariantWriter, StringLikeVariantOrder)
+                // so that two equal dictionaries serialize identically
+                // regardless of insertion order (pat-0q2kx.153). Sorting on the
+                // serialized key text gives lexicographic order for the
+                // string-like keys that dominate, and a stable order for the
+                // rest.
+                let mut items: Vec<(String, String)> = d
                     .iter()
-                    .map(|(k, val)| {
-                        format!("{}: {}", variant_to_gd_string(k), variant_to_gd_string(val))
-                    })
+                    .map(|(k, val)| (variant_to_gd_string(k), variant_to_gd_string(val)))
                     .collect();
-                format!("{{ {} }}", items.join(", "))
+                items.sort_by(|a, b| a.0.cmp(&b.0));
+                let body: Vec<String> = items
+                    .into_iter()
+                    .map(|(k, v)| format!("{k}: {v}"))
+                    .collect();
+                format!("{{\n{}\n}}", body.join(",\n"))
             }
         }
         // Constructor text for the remaining types (pat-0q2kx.69). `var_to_str`
@@ -10813,6 +11047,56 @@ fn variant_to_gd_string(v: &Variant) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        // The types that still fell through to `Display` (pat-0q2kx.153).
+        // `Display` prints Godot's *display* shape — `[X: (1, 0, 0), …]` for a
+        // Transform3D, `[…]` for the packed arrays — which `str_to_var` cannot
+        // read back, so these could not round-trip at all.
+        //
+        // Godot writes the packed arrays as a flat comma-separated component
+        // list (`PackedVector2Array(1, 2, 3, 4)`), which is exactly what
+        // `gdresource`'s parser consumes on the way back in.
+        Variant::Transform3D(t) => format!(
+            "Transform3D({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+            format_gd_float(t.basis.x.x as f64),
+            format_gd_float(t.basis.x.y as f64),
+            format_gd_float(t.basis.x.z as f64),
+            format_gd_float(t.basis.y.x as f64),
+            format_gd_float(t.basis.y.y as f64),
+            format_gd_float(t.basis.y.z as f64),
+            format_gd_float(t.basis.z.x as f64),
+            format_gd_float(t.basis.z.y as f64),
+            format_gd_float(t.basis.z.z as f64),
+            format_gd_float(t.origin.x as f64),
+            format_gd_float(t.origin.y as f64),
+            format_gd_float(t.origin.z as f64)
+        ),
+        Variant::PackedByteArray(a) => format!("PackedByteArray({})", join_gd(a.iter())),
+        Variant::PackedVector2Array(a) => format!(
+            "PackedVector2Array({})",
+            join_gd(
+                a.iter()
+                    .flat_map(|v| [format_gd_float(v.x as f64), format_gd_float(v.y as f64)])
+            )
+        ),
+        Variant::PackedVector3Array(a) => format!(
+            "PackedVector3Array({})",
+            join_gd(a.iter().flat_map(|v| [
+                format_gd_float(v.x as f64),
+                format_gd_float(v.y as f64),
+                format_gd_float(v.z as f64)
+            ]))
+        ),
+        Variant::PackedColorArray(a) => format!(
+            "PackedColorArray({})",
+            join_gd(a.iter().flat_map(|c| [
+                format_gd_float(c.r as f64),
+                format_gd_float(c.g as f64),
+                format_gd_float(c.b as f64),
+                format_gd_float(c.a as f64)
+            ]))
+        ),
+        // Objects, callables and signals have no re-parseable textual form in
+        // Godot either; `Display` is the honest answer for them.
         other => format!("{other}"),
     }
 }
@@ -10878,6 +11162,25 @@ impl GdTextParser {
                     match esc {
                         'n' => s.push('\n'),
                         't' => s.push('\t'),
+                        'r' => s.push('\r'),
+                        'b' => s.push('\u{8}'),
+                        'f' => s.push('\u{c}'),
+                        // `\uXXXX` — four hex digits, as Godot writes for any
+                        // character it does not have a short escape for.
+                        'u' => {
+                            let mut code = 0u32;
+                            for _ in 0..4 {
+                                let Some(h) = self.peek() else { break };
+                                let Some(d) = h.to_digit(16) else { break };
+                                self.pos += 1;
+                                code = code * 16 + d;
+                            }
+                            if let Some(ch) = char::from_u32(code) {
+                                s.push(ch);
+                            }
+                        }
+                        // `\"` and `\\` land here and push themselves, which is
+                        // exactly right.
                         other => s.push(other),
                     }
                 }
@@ -11145,13 +11448,43 @@ fn type_code_to_name(code: i64) -> &'static str {
     }
 }
 
-fn deterministic_randi() -> i64 {
-    use std::sync::atomic::{AtomicI64, Ordering};
-    static COUNTER: AtomicI64 = AtomicI64::new(42);
-    let c = COUNTER.fetch_add(1, Ordering::Relaxed);
-    (c.wrapping_mul(6364136223846793005)
+/// The RNG state behind every `randi`/`randf`/`randi_range`/`randf_range`,
+/// `pick_random` and `shuffle` (pat-0q2kx.152).
+///
+/// Godot's global RNG is SEEDABLE: `seed(n)` makes the whole sequence
+/// reproducible, which is what deterministic replays and procedural generation
+/// rely on. This was a fixed-start counter with no way to set it, so `seed()`
+/// did not exist and every run produced the same unchangeable sequence.
+///
+/// Starts at 42, the value the old counter used, so a run that never calls
+/// `seed()` produces exactly the sequence it always did.
+static RNG_STATE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(42);
+
+/// Advances `state` one step of the LCG and returns a non-negative value.
+///
+/// Extracted so `rand_from_seed` can run the SAME generator without touching
+/// the global state — Godot's `rand_from_seed` is a pure function of its seed.
+fn lcg_step(state: i64) -> i64 {
+    (state
+        .wrapping_mul(6364136223846793005)
         .wrapping_add(1442695040888963407))
         & i64::MAX
+}
+
+/// Sets the global RNG seed (Godot `seed()`).
+pub fn set_random_seed(seed: i64) {
+    RNG_STATE.store(seed, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The current global RNG seed, for hosts that want to save/restore it.
+pub fn random_seed() -> i64 {
+    RNG_STATE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn deterministic_randi() -> i64 {
+    use std::sync::atomic::Ordering;
+    let c = RNG_STATE.fetch_add(1, Ordering::Relaxed);
+    lcg_step(c)
 }
 fn string_format(fmt: &str, values: &[Variant]) -> String {
     let mut result = String::new();
@@ -11210,6 +11543,38 @@ fn string_format(fmt: &str, values: &[Variant]) -> String {
 }
 
 /// Resolves static member access on built-in type names (e.g. `Vector2.ZERO`).
+/// Reads a `res://` (or plain filesystem) text resource, or `None` when it
+/// cannot be read (pat-0q2kx.144).
+///
+/// A shader that fails to load leaves `code` unset rather than inventing an
+/// empty source, so `get_shader_uniform_list()` reports nothing instead of
+/// silently claiming the shader declares no uniforms.
+fn read_resource_text(path: &str) -> Option<String> {
+    let resolved = gdcore::resolve_path(path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string());
+    std::fs::read_to_string(resolved).ok()
+}
+
+/// Godot's shader type keyword for a parsed uniform type (pat-0q2kx.144).
+fn uniform_type_name(t: &gdserver2d::shader::UniformType) -> String {
+    use gdserver2d::shader::UniformType as U;
+    match t {
+        U::Float => "float",
+        U::Vec2 => "vec2",
+        U::Vec3 => "vec3",
+        U::Vec4 => "vec4",
+        // Godot declares a colour uniform as `vec4 : source_color`; the hint is
+        // what distinguishes it, so the type keyword stays `vec4`.
+        U::Color => "vec4",
+        U::Int => "int",
+        U::Bool => "bool",
+        U::Sampler2D => "sampler2D",
+        U::Mat4 => "mat4",
+    }
+    .to_string()
+}
+
 fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
     use gdcore::math::{Color, Vector2, Vector3};
     match type_name {
@@ -12289,6 +12654,35 @@ fn call_projectsettings_static(method: &str, args: &[Variant]) -> Result<Variant
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or(path);
             Ok(Variant::Int(save_project_settings_to(&resolved)))
+        }
+        // `ProjectSettings.load_resource_pack(path, replace_files = true,
+        // offset = 0)` — mounts a `.pck` over `res://`, which is how a game
+        // loads DLC or a patch at runtime (pat-0q2kx.134). Returns OK/FAILED as
+        // a Godot `Error` int, not a bool.
+        "load_resource_pack" => {
+            const OK: i64 = 0;
+            const ERR_FILE_CANT_OPEN: i64 = 12;
+            let path = setting_name(args, "ProjectSettings.load_resource_pack()")?;
+            // Godot's `replace_files` defaults to true.
+            let replace = match args.get(1) {
+                Some(Variant::Bool(b)) => *b,
+                Some(Variant::Nil) | None => true,
+                Some(other) => other.to_bool(),
+            };
+            let offset = match args.get(2) {
+                Some(Variant::Int(i)) => (*i).max(0) as u64,
+                Some(Variant::Float(f)) => (*f).max(0.0) as u64,
+                _ => 0,
+            };
+            // The mount label is the path, so loading the same pack twice
+            // replaces rather than stacks it — Godot does not double-mount.
+            match gdresource::pck::load_resource_pack(path.clone(), &path, replace, offset) {
+                Ok(()) => Ok(Variant::Int(OK)),
+                Err(err) => {
+                    tracing::warn!("ProjectSettings.load_resource_pack({path}) failed: {err}");
+                    Ok(Variant::Int(ERR_FILE_CANT_OPEN))
+                }
+            }
         }
         "set_setting" => {
             let name = setting_name(args, "ProjectSettings.set_setting()")?;
@@ -13980,40 +14374,31 @@ fn call_resourceuid_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
     }
 }
 
-thread_local! {
-    /// Active locale for `TranslationServer` / `tr()` (pat-nzgdu.92). Godot's
-    /// default is the OS locale; headless defaults to "en".
-    static TR_LOCALE: std::cell::RefCell<String> = std::cell::RefCell::new(String::from("en"));
-    /// Loaded translation catalogs, `locale -> (source -> translated)`. The
-    /// `.po` / `.csv` importers (gdresource) populate this at boot; scripts /
-    /// tests can seed it via `TranslationServer.add_message`.
-    static TR_CATALOGS: std::cell::RefCell<HashMap<String, HashMap<String, String>>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
-/// Translates `key` via the active-locale catalog, returning `key` unchanged
+/// Translates `key` through the engine-wide catalog, returning `key` unchanged
 /// when there is no entry (Godot's fallback). Shared by `tr()` and
 /// `TranslationServer.translate()`.
+///
+/// Delegates to `gdcore::translation`'s process-global server (pat-0q2kx.147).
+/// This used to be a `thread_local` catalog private to the interpreter, which
+/// is why a project's `.po` files never reached `tr()`: boot loaded them into
+/// one store and the script read a different, empty one. `gdcore` also owns the
+/// locale-resolution chain (`fr_FR` → `fr` → fallback), so this no longer
+/// re-implements it.
 fn tr_lookup(key: &str) -> String {
-    let locale = TR_LOCALE.with(|l| l.borrow().clone());
-    TR_CATALOGS.with(|c| {
-        c.borrow()
-            .get(&locale)
-            .and_then(|cat| cat.get(key))
-            .cloned()
-            .unwrap_or_else(|| key.to_string())
-    })
+    gdcore::translation::translate(key)
 }
 
 /// Plural-aware lookup (`tr_n` / `translate_plural`): picks the singular `key`
 /// for `n == 1`, otherwise `plural`, then translates.
+///
+/// Godot applies per-locale plural rules (`core/string/plural_rules.cpp`);
+/// this is still the English-shaped `n == 1` split, which the catalog cannot
+/// improve on until `parse_po` retains `msgstr[n]` forms.
 fn tr_lookup_plural(key: &str, plural: &str, n: i64) -> String {
     tr_lookup(if n == 1 { key } else { plural })
 }
 
-/// `TranslationServer` singleton (pat-nzgdu.92) — locale state + catalog lookup.
-/// The `.po`/`.csv` loaders (gdresource) and Translation resources are the
-/// cross-crate remainder; `add_message` is the interim seed path for the store.
+/// `TranslationServer` singleton, backed by the engine-wide catalog.
 fn call_translationserver_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
     let arg_string = |idx: usize, who: &str| -> Result<String, RuntimeError> {
         match args.get(idx) {
@@ -14027,10 +14412,20 @@ fn call_translationserver_static(method: &str, args: &[Variant]) -> Result<Varia
     match method {
         "set_locale" => {
             let loc = arg_string(0, "TranslationServer.set_locale()")?;
-            TR_LOCALE.with(|l| *l.borrow_mut() = loc);
+            gdcore::translation::with_translation_server_mut(|s| s.set_locale(loc));
             Ok(Variant::Nil)
         }
-        "get_locale" => Ok(Variant::String(TR_LOCALE.with(|l| l.borrow().clone()))),
+        "get_locale" => Ok(Variant::String(
+            gdcore::translation::with_translation_server(|s| s.get_locale().to_string()),
+        )),
+        "set_fallback_locale" => {
+            let loc = arg_string(0, "TranslationServer.set_fallback_locale()")?;
+            gdcore::translation::with_translation_server_mut(|s| s.set_fallback(loc));
+            Ok(Variant::Nil)
+        }
+        "get_fallback_locale" => Ok(Variant::String(
+            gdcore::translation::with_translation_server(|s| s.get_fallback().to_string()),
+        )),
         "translate" => Ok(Variant::String(tr_lookup(&arg_string(
             0,
             "TranslationServer.translate()",
@@ -14041,25 +14436,25 @@ fn call_translationserver_static(method: &str, args: &[Variant]) -> Result<Varia
             let n = to_int(args.get(2).unwrap_or(&Variant::Int(1)))?;
             Ok(Variant::String(tr_lookup_plural(&key, &plural, n)))
         }
-        // Patina seed path pending the .po/.csv loaders + Translation resources:
-        // add_message(locale, source, translated).
         "add_message" => {
             let locale = arg_string(0, "TranslationServer.add_message()")?;
             let src = arg_string(1, "TranslationServer.add_message()")?;
             let xlated = arg_string(2, "TranslationServer.add_message()")?;
-            TR_CATALOGS.with(|c| {
-                c.borrow_mut()
-                    .entry(locale)
-                    .or_default()
-                    .insert(src, xlated);
+            gdcore::translation::with_translation_server_mut(|s| {
+                s.add_message(&locale, &src, &xlated)
             });
             Ok(Variant::Nil)
         }
+        "remove_translation" => {
+            let locale = arg_string(0, "TranslationServer.remove_translation()")?;
+            gdcore::translation::with_translation_server_mut(|s| s.remove_translation(&locale));
+            Ok(Variant::Nil)
+        }
         "get_loaded_locales" => Ok(Variant::PackedStringArray(
-            TR_CATALOGS.with(|c| c.borrow().keys().cloned().collect()),
+            gdcore::translation::with_translation_server(|s| s.get_loaded_locales()),
         )),
         "clear" => {
-            TR_CATALOGS.with(|c| c.borrow_mut().clear());
+            gdcore::translation::with_translation_server_mut(|s| s.clear());
             Ok(Variant::Nil)
         }
         "get_translation_object" => Ok(Variant::Nil),
@@ -15065,17 +15460,22 @@ fn is_node_class_name(name: &str) -> bool {
 
 fn variant_eq(a: &Variant, b: &Variant) -> bool {
     match (a, b) {
-        (Variant::Nil, Variant::Nil) => true,
-        (Variant::Bool(a), Variant::Bool(b)) => a == b,
-        (Variant::Int(a), Variant::Int(b)) => a == b,
-        (Variant::Float(a), Variant::Float(b)) => a == b,
+        // Godot compares int and float numerically across the two types
+        // (`Variant::evaluate` OP_EQUAL promotes), so `1 == 1.0` is true.
         (Variant::Int(a), Variant::Float(b)) => (*a as f64) == *b,
         (Variant::Float(a), Variant::Int(b)) => *a == (*b as f64),
-        (Variant::String(a), Variant::String(b)) => a == b,
-        (Variant::Vector2(a), Variant::Vector2(b)) => a == b,
-        (Variant::Vector3(a), Variant::Vector3(b)) => a == b,
-        (Variant::Color(a), Variant::Color(b)) => a == b,
-        _ => false,
+        // Everything else compares structurally.
+        //
+        // This arm used to be `_ => false`, which enumerated only Nil/Bool/Int/
+        // Float/String/Vector2/Vector3/Color and silently answered *false* for
+        // every other pair — two equal Dictionaries, Arrays, Vector2is,
+        // Quaternions, Transforms or packed arrays never compared equal, so
+        // `==` was not merely incomplete but actively wrong (pat-0q2kx.153).
+        //
+        // `Variant`'s derived `PartialEq` is structural and already returns
+        // false for mismatched kinds, and `Dictionary`'s hand-written impl is
+        // order-independent — which is what Godot's recursive `==` does.
+        _ => a == b,
     }
 }
 

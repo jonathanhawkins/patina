@@ -276,7 +276,13 @@ mod tests {
 
     fn build_ctex_png(width: u32, height: u32, png: &[u8]) -> Vec<u8> {
         let mut d = ctex_header(width, height);
-        ctex_inner(&mut d, CTEX_DATA_FORMAT_PNG, width as u16, height as u16, IMG_FORMAT_RGBA8);
+        ctex_inner(
+            &mut d,
+            CTEX_DATA_FORMAT_PNG,
+            width as u16,
+            height as u16,
+            IMG_FORMAT_RGBA8,
+        );
         d.extend_from_slice(&(png.len() as u32).to_le_bytes()); // level-0 size
         d.extend_from_slice(png);
         d
@@ -284,7 +290,13 @@ mod tests {
 
     fn build_ctex_image(width: u32, height: u32, img_format: u32, raw: &[u8]) -> Vec<u8> {
         let mut d = ctex_header(width, height);
-        ctex_inner(&mut d, CTEX_DATA_FORMAT_IMAGE, width as u16, height as u16, img_format);
+        ctex_inner(
+            &mut d,
+            CTEX_DATA_FORMAT_IMAGE,
+            width as u16,
+            height as u16,
+            img_format,
+        );
         d.extend_from_slice(raw);
         d
     }
@@ -320,7 +332,10 @@ mod tests {
         let res = load_ctex_bytes(&ctex, Path::new("art.ctex")).unwrap();
         assert_eq!(res.class_name, "Texture2D");
         assert_eq!(res.get_property("width"), Some(&Variant::Int(2)));
-        assert_eq!(res.get_property("format"), Some(&Variant::String("RGBA".into())));
+        assert_eq!(
+            res.get_property("format"),
+            Some(&Variant::String("RGBA".into()))
+        );
         let px = pixels_of(&res);
         assert_eq!(px.len(), 2);
         match (&px[0], &px[1]) {
@@ -336,7 +351,10 @@ mod tests {
     fn ctex_raw_l8_decodes() {
         let ctex = build_ctex_image(1, 1, IMG_FORMAT_L8, &[128u8]);
         let res = load_ctex_bytes(&ctex, Path::new("g.ctex")).unwrap();
-        assert_eq!(res.get_property("format"), Some(&Variant::String("L".into())));
+        assert_eq!(
+            res.get_property("format"),
+            Some(&Variant::String("L".into()))
+        );
         match &pixels_of(&res)[0] {
             Variant::Color(c) => {
                 assert!((c.r - 128.0 / 255.0).abs() < 0.01);
@@ -354,14 +372,20 @@ mod tests {
             Path::new("la.ctex"),
         )
         .unwrap();
-        assert_eq!(la.get_property("format"), Some(&Variant::String("LA".into())));
+        assert_eq!(
+            la.get_property("format"),
+            Some(&Variant::String("LA".into()))
+        );
 
         let rgb = load_ctex_bytes(
             &build_ctex_image(1, 1, IMG_FORMAT_RGB8, &[0, 255, 0]),
             Path::new("rgb.ctex"),
         )
         .unwrap();
-        assert_eq!(rgb.get_property("format"), Some(&Variant::String("RGB".into())));
+        assert_eq!(
+            rgb.get_property("format"),
+            Some(&Variant::String("RGB".into()))
+        );
         match &pixels_of(&rgb)[0] {
             Variant::Color(c) => assert!(c.g > 0.9 && c.r < 0.1 && c.b < 0.1),
             other => panic!("expected Color, got {other:?}"),
@@ -379,7 +403,9 @@ mod tests {
     fn ctex_newer_version_unsupported() {
         let mut d = build_ctex_image(1, 1, IMG_FORMAT_RGBA8, &[0, 0, 0, 0]);
         d[4..8].copy_from_slice(&99u32.to_le_bytes()); // version field
-        let err = load_ctex_bytes(&d, Path::new("v.ctex")).unwrap_err().to_string();
+        let err = load_ctex_bytes(&d, Path::new("v.ctex"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("version"), "got: {err}");
     }
 
@@ -387,15 +413,25 @@ mod tests {
     fn ctex_webp_unsupported() {
         let mut d = ctex_header(1, 1);
         ctex_inner(&mut d, CTEX_DATA_FORMAT_WEBP, 1, 1, IMG_FORMAT_RGBA8);
-        let err = load_ctex_bytes(&d, Path::new("w.ctex")).unwrap_err().to_string();
+        let err = load_ctex_bytes(&d, Path::new("w.ctex"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("WebP"), "got: {err}");
     }
 
     #[test]
     fn ctex_basis_unsupported() {
         let mut d = ctex_header(1, 1);
-        ctex_inner(&mut d, CTEX_DATA_FORMAT_BASIS_UNIVERSAL, 1, 1, IMG_FORMAT_RGBA8);
-        let err = load_ctex_bytes(&d, Path::new("b.ctex")).unwrap_err().to_string();
+        ctex_inner(
+            &mut d,
+            CTEX_DATA_FORMAT_BASIS_UNIVERSAL,
+            1,
+            1,
+            IMG_FORMAT_RGBA8,
+        );
+        let err = load_ctex_bytes(&d, Path::new("b.ctex"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Basis"), "got: {err}");
     }
 
@@ -403,7 +439,9 @@ mod tests {
     fn ctex_unsupported_image_format_errors() {
         // FORMAT_RG8 (3) is a valid Godot format but unsupported here.
         let d = build_ctex_image(1, 1, 3, &[0, 0]);
-        let err = load_ctex_bytes(&d, Path::new("rg.ctex")).unwrap_err().to_string();
+        let err = load_ctex_bytes(&d, Path::new("rg.ctex"))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not supported"), "got: {err}");
     }
 

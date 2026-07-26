@@ -213,3 +213,36 @@ fn sort_orders_strings_and_floats() {
     assert_eq!(got[2], Variant::Float(-1.0));
     assert_eq!(got[3], Variant::Float(2.5));
 }
+
+/// `String.join` takes a `PackedStringArray` in Godot — that is its declared
+/// signature (`String.join(parts: PackedStringArray)`), so the packed form is
+/// the common argument rather than an edge case.
+///
+/// It used to accept only a plain `Array` and raise
+/// `TypeError("join() arg must be array")` on the very shape the docs show,
+/// which is how a `TranslationServer.get_loaded_locales()` result could not be
+/// joined (pat-0q2kx.147).
+#[test]
+fn join_accepts_packed_arrays() {
+    let joined = run(&[
+        "var s = PackedStringArray()",
+        "s.append(\"fr\")",
+        "s.append(\"en\")",
+        "return \",\".join(s)",
+    ]);
+    assert_eq!(joined, Variant::String("fr,en".into()));
+
+    // A plain Array still works — the packed arm is additive.
+    let plain = run(&["return \"-\".join([\"a\", \"b\"])"]);
+    assert_eq!(plain, Variant::String("a-b".into()));
+
+    // Numeric packed arrays join by element display, as a plain Array of
+    // numbers does.
+    let nums = run(&[
+        "var f = PackedInt32Array()",
+        "f.append(1)",
+        "f.append(2)",
+        "return \"+\".join(f)",
+    ]);
+    assert_eq!(nums, Variant::String("1+2".into()));
+}

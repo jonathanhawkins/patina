@@ -393,11 +393,16 @@ impl WgpuRenderer {
                     margin_right,
                     margin_bottom,
                     draw_center,
+                    axis_h,
+                    axis_v,
                     modulate,
                 } => {
                     if let Some(tex) = self.find_texture(texture_path) {
                         let transformed = transform_rect(global_transform, *rect);
-                        draw::draw_nine_patch(
+                        // Must honour the per-axis stretch modes, same as the CPU
+                        // renderer (`renderer.rs`). Matching with `..` here would
+                        // compile and silently stretch a `Tile`/`TileFit` stylebox.
+                        draw::draw_nine_patch_axes(
                             fb,
                             tex,
                             transformed,
@@ -406,6 +411,8 @@ impl WgpuRenderer {
                             *margin_right,
                             *margin_bottom,
                             *draw_center,
+                            *axis_h,
+                            *axis_v,
                             *modulate,
                         );
                     }
@@ -569,6 +576,8 @@ impl RenderingServer2D for WgpuRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Not among the crate-level imports that `super::*` re-exports.
+    use gdserver2d::canvas::NinePatchAxis;
 
     #[test]
     fn create_renderer_default() {
@@ -847,5 +856,90 @@ mod tests {
         let frame_sw = sw.render_frame(&vp2);
 
         assert_eq!(frame_wgpu.pixels, frame_sw.pixels);
+    }
+
+    /// A `StyleBoxTexture` with `axis_stretch_horizontal = Tile` must actually
+    /// tile on **this** backend too (pat-0q2kx.148).
+    ///
+    /// Regression guard for a real bug: adding `axis_h`/`axis_v` to
+    /// `DrawCommand::DrawNinePatch` broke this arm's exhaustive destructure, and
+    /// silencing it with `..` + the stretch-only `draw_nine_patch` compiled
+    /// perfectly while discarding the mode. The CPU renderer honoured `Tile` and
+    /// this path silently stretched, so the two backends disagreed.
+    #[test]
+    fn wgpu_nine_patch_honours_axis_stretch_mode() {
+        // 4x4, 1px margins ⇒ the top edge source is 2px wide: one red column and
+        // one blue column, so repetition is visible as extra colour flips.
+        let tex = {
+            let mut pixels = vec![Color::rgb(0.0, 0.0, 0.0); 16];
+            for y in 0..4 {
+                pixels[y * 4 + 1] = Color::rgb(1.0, 0.0, 0.0);
+                pixels[y * 4 + 2] = Color::rgb(0.0, 0.0, 1.0);
+            }
+            Texture2D {
+                width: 4,
+                height: 4,
+                pixels,
+            }
+        };
+
+        // Renders the same nine-patch through a chosen backend and counts
+        // red/blue transitions along the top edge row.
+        let flips = |axis: NinePatchAxis, use_wgpu: bool| {
+            let mut vp = Viewport::new(20, 6, Color::rgb(0.0, 0.0, 0.0));
+            let mut item = CanvasItem::new(CanvasItemId(1));
+            item.commands.push(DrawCommand::DrawNinePatch {
+                texture_path: "panel.png".to_string(),
+                rect: Rect2::new(Vector2::ZERO, Vector2::new(20.0, 6.0)),
+                margin_left: 1.0,
+                margin_top: 1.0,
+                margin_right: 1.0,
+                margin_bottom: 1.0,
+                draw_center: true,
+                axis_h: axis,
+                axis_v: NinePatchAxis::Stretch,
+                modulate: Color::WHITE,
+            });
+            vp.add_canvas_item(item);
+
+            let frame = if use_wgpu {
+                let mut r = WgpuRenderer::new();
+                r.register_texture("panel.png", tex.clone());
+                r.render_frame(&vp)
+            } else {
+                let mut r = crate::renderer::SoftwareRenderer::new();
+                r.register_texture("panel.png", tex.clone());
+                r.render_frame(&vp)
+            };
+            let mut n = 0;
+            for x in 2..17 {
+                if (frame.pixels[x].r > 0.5) != (frame.pixels[x + 1].r > 0.5) {
+                    n += 1;
+                }
+            }
+            n
+        };
+
+        // The load-bearing assertion: on the wgpu path, tiling must not look
+        // like stretching. With the mode discarded these were equal.
+        let stretched = flips(NinePatchAxis::Stretch, true);
+        let tiled = flips(NinePatchAxis::Tile, true);
+        assert!(
+            tiled > stretched,
+            "wgpu backend must honour Tile: {tiled} colour flips tiled vs \
+             {stretched} stretched — equal counts mean axis_h was discarded",
+        );
+
+        // And it must agree with the CPU renderer rather than merely differing.
+        assert_eq!(
+            tiled,
+            flips(NinePatchAxis::Tile, false),
+            "the two backends must tile identically",
+        );
+        assert_eq!(
+            stretched,
+            flips(NinePatchAxis::Stretch, false),
+            "the two backends must stretch identically",
+        );
     }
 }

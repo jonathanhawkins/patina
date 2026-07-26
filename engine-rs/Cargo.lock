@@ -1029,6 +1029,7 @@ dependencies = [
  "gdobject",
  "gdplatform",
  "gdresource",
+ "gdserver2d",
  "gdvariant",
  "proptest",
  "serde_json",

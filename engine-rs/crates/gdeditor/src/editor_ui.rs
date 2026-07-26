@@ -3505,6 +3505,13 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     return [cls || 'Node', 'Node'];
   }
   function getPropDecl(name, nodeClass, chain) {
+    // Shader uniforms arrive as `shader_parameter/<name>` and are not in
+    // PROP_DECL (they are per-shader, not per-class), so route them into
+    // Godot's own "Shader Parameters" subgroup rather than letting them fall
+    // out ungrouped under the node's class (pat-0q2kx.143).
+    if (name.indexOf('shader_parameter/') === 0) {
+      return { cls: nodeClass, group: 'Shader Parameters' };
+    }
     var d = PROP_DECL[name];
     if (d) {
       var c = d.cls === '__self__' ? nodeClass : d.cls;

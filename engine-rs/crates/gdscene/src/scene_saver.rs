@@ -424,7 +424,9 @@ struct SpriteFramesTables {
     /// `node id -> sub-resource id`, for `sprite_frames = SubResource("...")`.
     nodes: HashMap<NodeId, String>,
     /// The frame textures as `[ext_resource]` rows, merged into the header.
-    ext: Vec<(String, String, String)>,
+    /// Frame textures carry no uid — they are authored by the editor, not
+    /// loaded from a `.tscn` that declared one.
+    ext: Vec<(String, String, String, Option<String>)>,
 }
 
 impl SpriteFramesTables {
@@ -512,7 +514,10 @@ fn collect_spriteframes_tables(tree: &SceneTree, node_ids: &[NodeId]) -> SpriteF
         nodes,
         ext: ext
             .into_iter()
-            .map(|(id, (res_type, path))| (id, res_type, path))
+            // Frame textures are authored by the editor rather than loaded from
+            // a `.tscn` that declared a uid, so they contribute none
+            // (pat-0q2kx.137).
+            .map(|(id, (res_type, path))| (id, res_type, path, None))
             .collect(),
     }
 }
@@ -670,18 +675,25 @@ impl TscnSaver {
         // External resource table. Frame textures join the rows the node
         // properties contributed; `or_insert` semantics upstream mean an id
         // already present is not duplicated here either.
-        let mut ext_rows: Vec<&(String, String, String)> = tables.ext.iter().collect();
+        let mut ext_rows: Vec<&(String, String, String, Option<String>)> =
+            tables.ext.iter().collect();
         for row in &sframes.ext {
-            if !ext_rows.iter().any(|(id, _, _)| id == &row.0) {
+            if !ext_rows.iter().any(|(id, _, _, _)| id == &row.0) {
                 ext_rows.push(row);
             }
         }
         if !ext_rows.is_empty() {
             out.push('\n');
-            for (id, res_type, path) in &ext_rows {
+            for (id, res_type, path, uid) in &ext_rows {
+                // Godot writes `uid=` between `type=` and `path=`, and omits it
+                // when the resource has none (pat-0q2kx.137).
+                let uid_attr = match uid {
+                    Some(u) if !u.is_empty() => format!(" uid=\"{u}\""),
+                    _ => String::new(),
+                };
                 writeln!(
                     out,
-                    "[ext_resource type=\"{res_type}\" path=\"{path}\" id=\"{id}\"]"
+                    "[ext_resource type=\"{res_type}\"{uid_attr} path=\"{path}\" id=\"{id}\"]"
                 )
                 .unwrap();
             }
@@ -759,10 +771,24 @@ impl TscnSaver {
     }
 }
 
+/// The `uid://...` the loader cached for `property`'s `ExtResource` reference,
+/// if the scene declared one (pat-0q2kx.137).
+///
+/// `script` and `_instance` keep their path under `_script_path`/`_instance_path`
+/// rather than `__extres__`, but the uid companion is keyed by the property name
+/// in every case.
+fn ext_uid_companion(node: &crate::node::Node, property: &str) -> Option<String> {
+    match node.get_property(&format!("__extuid__{property}")) {
+        Variant::String(u) if !u.is_empty() => Some(u),
+        _ => None,
+    }
+}
+
 /// External and inline resource declarations reconstructed for a saved scene.
 struct ResourceTables {
-    /// External resources as `(id, res_type, path)`, ordered by id.
-    ext: Vec<(String, String, String)>,
+    /// External resources as `(id, res_type, path, uid)`, ordered by id
+    /// (pat-0q2kx.137 added the uid).
+    ext: Vec<(String, String, String, Option<String>)>,
     /// Inline sub-resources as `(id, class)`, ordered by id.
     sub: Vec<(String, String)>,
 }
@@ -854,6 +880,10 @@ fn is_internal_prop(key: &str) -> bool {
         // reference, which is what round-trips; emitting the cache would invent
         // a property Godot has never heard of.
         || key.starts_with("__extres__")
+        // `__extuid__<prop>` is the same cache for the reference's `uid://`
+        // (pat-0q2kx.137). It is re-emitted on the `[ext_resource]` row, so
+        // writing it as a node property too would invent one Godot cannot parse.
+        || key.starts_with("__extuid__")
         // `__sf_*` holds the AnimatedSprite2D frame library the editor authors
         // into the flat property bag (pat-0q2kx.74). It is regenerated above as
         // a real `SpriteFrames` sub-resource, so emitting the raw keys too would
@@ -903,7 +933,7 @@ fn ext_resource_type_for(path: &str) -> String {
 /// `ExtResource("id")` / `SubResource("id")` references so a save/load round-trip
 /// is stable.
 fn collect_resource_tables(tree: &SceneTree, node_ids: &[NodeId]) -> ResourceTables {
-    let mut ext_by_id: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut ext_by_id: BTreeMap<String, (String, String, Option<String>)> = BTreeMap::new();
     let mut sub_by_id: BTreeMap<String, String> = BTreeMap::new();
 
     for &nid in node_ids {
@@ -919,7 +949,10 @@ fn collect_resource_tables(tree: &SceneTree, node_ids: &[NodeId]) -> ResourceTab
             node.get_property("_script_path"),
         ) {
             if let Some(id) = parse_ext_resource_id(&script_ref) {
-                ext_by_id.entry(id).or_insert(("Script".to_string(), path));
+                let uid = ext_uid_companion(node, "script");
+                ext_by_id
+                    .entry(id)
+                    .or_insert(("Script".to_string(), path, uid));
             }
         }
 
@@ -929,9 +962,10 @@ fn collect_resource_tables(tree: &SceneTree, node_ids: &[NodeId]) -> ResourceTab
             node.get_property("_instance_path"),
         ) {
             if let Some(id) = parse_ext_resource_id(&inst_ref) {
+                let uid = ext_uid_companion(node, "_instance");
                 ext_by_id
                     .entry(id)
-                    .or_insert(("PackedScene".to_string(), path));
+                    .or_insert(("PackedScene".to_string(), path, uid));
             }
         }
 
@@ -973,14 +1007,15 @@ fn collect_resource_tables(tree: &SceneTree, node_ids: &[NodeId]) -> ResourceTab
                 _ => continue,
             };
             let res_type = ext_resource_type_for(&path);
-            ext_by_id.entry(id).or_insert((res_type, path));
+            let uid = ext_uid_companion(node, k);
+            ext_by_id.entry(id).or_insert((res_type, path, uid));
         }
     }
 
     ResourceTables {
         ext: ext_by_id
             .into_iter()
-            .map(|(id, (ty, path))| (id, ty, path))
+            .map(|(id, (ty, path, uid))| (id, ty, path, uid))
             .collect(),
         sub: sub_by_id.into_iter().collect(),
     }

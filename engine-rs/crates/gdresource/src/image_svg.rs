@@ -38,7 +38,11 @@ use resvg::{tiny_skia, usvg};
 /// non-finite or non-positive `scale` is treated as `1.0`, and the dimensions
 /// are clamped to a minimum of 1px so a degenerate SVG still allocates.
 pub fn rasterize_svg_bytes(bytes: &[u8], scale: f32) -> EngineResult<(u32, u32, Vec<Color>)> {
-    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
 
     let options = usvg::Options::default();
     let tree = usvg::Tree::from_data(bytes, &options)
@@ -151,7 +155,9 @@ mod tests {
         let rfl = ResourceFormatLoader::with_defaults();
         assert!(rfl.can_load(".svg"), ".svg must be a registered loader");
 
-        let res = rfl.load_resource(&svg_path).expect("load .svg via registry");
+        let res = rfl
+            .load_resource(&svg_path)
+            .expect("load .svg via registry");
         assert_eq!(res.class_name, "Texture2D", "svg imports as a Texture2D");
         assert_eq!(int_prop(&res, "width"), 32, "viewBox width at scale 1.0");
         assert_eq!(int_prop(&res, "height"), 32, "viewBox height at scale 1.0");

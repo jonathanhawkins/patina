@@ -316,8 +316,76 @@ impl SceneTree {
 
     /// Mutable access to the root window, for the boot path that installs the
     /// project's `display/window/stretch/*` settings and for window resizes.
+    ///
+    /// Call [`publish_root_window_state`](Self::publish_root_window_state)
+    /// afterwards so a script's `get_window().content_scale_mode` sees the
+    /// change — this accessor writes the Rust struct only.
     pub fn root_window_mut(&mut self) -> &mut crate::viewport::RootWindow {
         &mut self.root_window
+    }
+
+    /// Mirrors the root window's content-scale state onto the root NODE's
+    /// property bag (pat-0q2kx.141).
+    ///
+    /// `Window`'s `content_scale_*` properties were declared in ClassDB but
+    /// never populated from the booted project, so `get_window().content_scale_mode`
+    /// answered the registration's default `0` inside a project that plainly
+    /// sets `canvas_items`. The scaling itself worked — only the script-visible
+    /// half was missing, which is the sort of gap that reads as "implemented"
+    /// right up until a script asks.
+    ///
+    /// Enum values are Godot's `Window.ContentScaleMode` /
+    /// `ContentScaleAspect` / `ContentScaleStretch` ordinals.
+    pub fn publish_root_window_state(&mut self) {
+        use gdcore::content_scale::{ContentScaleAspect, ContentScaleMode, ContentScaleStretch};
+        let cfg = self.root_window.config;
+        let size = self.root_window.size;
+        let mode = match cfg.mode {
+            ContentScaleMode::Disabled => 0,
+            ContentScaleMode::CanvasItems => 1,
+            ContentScaleMode::Viewport => 2,
+        };
+        let aspect = match cfg.aspect {
+            ContentScaleAspect::Ignore => 0,
+            ContentScaleAspect::Keep => 1,
+            ContentScaleAspect::KeepWidth => 2,
+            ContentScaleAspect::KeepHeight => 3,
+            ContentScaleAspect::Expand => 4,
+        };
+        let stretch = match cfg.stretch {
+            ContentScaleStretch::Fractional => 0,
+            ContentScaleStretch::Integer => 1,
+        };
+        let root = self.root_id();
+        if let Some(node) = self.get_node_mut(root) {
+            node.set_property("content_scale_mode", Variant::Int(mode));
+            node.set_property("content_scale_aspect", Variant::Int(aspect));
+            node.set_property("content_scale_stretch", Variant::Int(stretch));
+            node.set_property("content_scale_factor", Variant::Float(cfg.factor as f64));
+            node.set_property("content_scale_size", Variant::Vector2(cfg.base_size));
+            node.set_property("size", Variant::Vector2(size));
+        }
+    }
+
+    /// Resizes the root window and, when the size actually changed, republishes
+    /// the state and emits `size_changed` on the root (pat-0q2kx.141).
+    ///
+    /// Godot's `Viewport` emits `size_changed` whenever the viewport's size
+    /// changes, which is how a game re-lays-out on a window resize. Nothing in
+    /// Patina emitted it — the signal name appeared NOWHERE in the workspace —
+    /// so a script connecting to it waited forever.
+    ///
+    /// Returns whether the size changed. A resize to the same size is silent,
+    /// as in Godot.
+    pub fn resize_root_window(&mut self, size: gdcore::math::Vector2) -> bool {
+        if self.root_window.size == size {
+            return false;
+        }
+        self.root_window.size = size;
+        self.publish_root_window_state();
+        let root = self.root_id();
+        self.emit_signal(root, "size_changed", &[]);
+        true
     }
 
     // -- multiplayer (pat-u3l8c.75) ----------------------------------------
@@ -2970,6 +3038,17 @@ impl SceneTree {
             if !self.should_process_node(node_id) {
                 continue;
             }
+            // `should_process_node` answers the *pause* question
+            // (`process_mode`); this answers whether the node wants input at
+            // all. Godot's `_call_input_pause` checks `is_processing_input()`
+            // too, so a node that called `set_process_input(false)` receives
+            // nothing even while the tree runs normally (pat-0q2kx.138).
+            if !self
+                .get_node(node_id)
+                .is_some_and(|n| n.is_processing_input())
+            {
+                continue;
+            }
             self.call_script_with_access(node_id, stage, std::slice::from_ref(payload));
         }
     }
@@ -3438,6 +3517,27 @@ impl SceneTree {
 
     /// Enables/disables `_process` on `node_id` (`Node.set_process`).
     /// Returns whether the node exists.
+    /// Enables/disables input delivery to `node_id` (Godot
+    /// `Node.set_process_input`) — pat-0q2kx.138. Returns `false` for an
+    /// unknown node.
+    pub fn set_node_process_input(&mut self, node_id: NodeId, enabled: bool) -> bool {
+        match self.nodes.get_mut(&node_id) {
+            Some(n) => {
+                n.set_process_input(enabled);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the input stages deliver to `node_id`
+    /// (Godot `Node.is_processing_input`).
+    pub fn is_node_processing_input(&self, node_id: NodeId) -> bool {
+        self.nodes
+            .get(&node_id)
+            .is_some_and(|n| n.is_processing_input())
+    }
+
     pub fn set_node_process(&mut self, node_id: NodeId, enabled: bool) -> bool {
         match self.nodes.get_mut(&node_id) {
             Some(n) => {
@@ -4025,7 +4125,7 @@ fn apply_root_motion_delta(node: &mut Node, delta: &crate::animation::RootMotion
 /// yet, so each event is described by a Dictionary carrying a `type` tag plus
 /// that variant's payload (e.g. `{"type": "key", "keycode": "A", "pressed": true}`).
 /// Scripts read it with `event["keycode"]`.
-fn input_event_to_variant(event: &gdplatform::input::InputEvent) -> Variant {
+pub(crate) fn input_event_to_variant(event: &gdplatform::input::InputEvent) -> Variant {
     use gdplatform::input::InputEvent as Ev;
 
     let mut d = gdvariant::Dictionary::new();

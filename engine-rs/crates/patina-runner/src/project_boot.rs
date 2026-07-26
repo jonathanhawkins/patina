@@ -105,6 +105,100 @@ pub fn boot_project_with_user_root(
     boot_from_project_text(&project_root, &content, user_dir)
 }
 
+/// Splits a `.tscn`-style string list into its paths.
+///
+/// `ProjectSettings` has no array kind, so `translations=PackedStringArray("a",
+/// "b")` reaches us as the **raw literal text, wrapper and all**. Splitting that
+/// on commas directly would yield `PackedStringArray("a"` and ` "b")` — paths
+/// that resolve to nothing — so the constructor wrapper is stripped first.
+/// `Array[String](…)` and a bare `[…]` are accepted for the same reason.
+fn parse_res_path_list(raw: &str) -> Vec<String> {
+    let mut s = raw.trim();
+    for prefix in ["PackedStringArray(", "Array[String](", "["] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest
+                .trim_end()
+                .strip_suffix(if prefix == "[" { "]" } else { ")" })
+                .unwrap_or(rest);
+            break;
+        }
+    }
+    // A nested `Array[String]([…])` leaves one more bracket layer behind.
+    let s = s
+        .trim()
+        .strip_prefix('[')
+        .and_then(|r| r.strip_suffix(']'))
+        .unwrap_or(s);
+
+    s.split(',')
+        .map(|p| p.trim().trim_matches('"').trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// Loads `internationalization/locale/translations` into the engine-wide
+/// [`TranslationServer`](gdcore::translation::TranslationServer) (pat-0q2kx.147).
+///
+/// Godot's setting is a `PackedStringArray` of `res://` paths to `.po` files or
+/// CSV-imported `.translation` resources. A `.po` names exactly one locale; a
+/// `.csv` carries one column per locale and so yields several catalogs.
+///
+/// The locale comes from `internationalization/locale/test` when set (Godot
+/// uses it to force a locale for testing), else `.../locale/fallback`.
+/// Unreadable or unparseable entries are skipped rather than aborting the boot:
+/// Godot logs and continues, and a missing translation degrades to the key
+/// itself rather than to no game.
+fn load_project_translations(project_root: &Path, settings: &ProjectSettings) {
+    let paths: Vec<String> = settings
+        .get("internationalization/locale/translations")
+        .and_then(|v| v.as_string())
+        .map(parse_res_path_list)
+        .unwrap_or_default();
+
+    gdcore::translation::with_translation_server_mut(|server| {
+        for res_path in &paths {
+            let rel = res_path.strip_prefix("res://").unwrap_or(res_path);
+            let full = project_root.join(rel);
+            let Ok(text) = std::fs::read_to_string(&full) else {
+                tracing::warn!("translation `{res_path}` could not be read; skipping");
+                continue;
+            };
+            if rel.ends_with(".csv") {
+                for t in gdcore::translation::parse_csv(&text) {
+                    server.add_translation(t);
+                }
+            } else {
+                // A `.po`'s locale is its file stem (`fr.po` -> `fr`), which is
+                // the convention Godot's importer uses for the output name.
+                let locale = std::path::Path::new(rel)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("en");
+                server.add_translation(gdcore::translation::parse_po(locale, &text));
+            }
+        }
+
+        if let Some(fallback) = settings
+            .get("internationalization/locale/fallback")
+            .and_then(|v| v.as_string())
+        {
+            if !fallback.is_empty() {
+                server.set_fallback(fallback);
+            }
+        }
+        // `locale/test` forces a locale for testing and wins over the fallback,
+        // matching Godot.
+        if let Some(test_locale) = settings
+            .get("internationalization/locale/test")
+            .and_then(|v| v.as_string())
+        {
+            if !test_locale.is_empty() {
+                server.set_locale(test_locale);
+            }
+        }
+    });
+}
+
 /// The boot body shared by the loose-directory and `.pck` entry points.
 ///
 /// Everything from here on reads through `res://`, so it does not care whether
@@ -138,6 +232,16 @@ fn boot_from_project_text(
             }
         }
     }
+
+    // (1a1) Load the project's translation catalogs (pat-0q2kx.147).
+    //
+    // Godot boots `TranslationServer` from
+    // `internationalization/locale/translations` plus the locale/fallback
+    // settings (`core/string/translation_server.cpp`). Patina had a correct
+    // catalog in `gdcore::translation` that **nothing called**, while the
+    // interpreter read a private thread-local store seeded only by a scripted
+    // `add_message` — so a project's `.po` files never reached `tr()`.
+    load_project_translations(&project_root, &settings);
 
     // (1a2) Publish the parsed settings to the script-visible `ProjectSettings`
     // singleton (pat-0q2kx.135). The interpreter's store was seeded by nothing,

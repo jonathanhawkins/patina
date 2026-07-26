@@ -345,3 +345,92 @@ mod tests {
         assert_eq!(cats[0].get_message("GREETING"), Some("Hello, world"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Process-global server (pat-0q2kx.147)
+// ---------------------------------------------------------------------------
+
+/// The engine-wide [`TranslationServer`].
+///
+/// Deliberately process-global rather than thread-local: the boot path loads a
+/// project's catalogs, and script evaluation may run on a different thread. A
+/// `thread_local` store — which is what the interpreter used to keep — cannot
+/// see anything boot loaded, which is exactly why project translations never
+/// reached `tr()`.
+static GLOBAL_SERVER: std::sync::OnceLock<std::sync::Mutex<TranslationServer>> =
+    std::sync::OnceLock::new();
+
+fn global_server() -> &'static std::sync::Mutex<TranslationServer> {
+    GLOBAL_SERVER.get_or_init(|| std::sync::Mutex::new(TranslationServer::new()))
+}
+
+/// Reads the global server.
+///
+/// A poisoned lock is recovered from rather than propagated: a translation
+/// lookup failing is never worth taking the process down, and Godot's
+/// `tr()` has no failure mode at all.
+pub fn with_translation_server<R>(f: impl FnOnce(&TranslationServer) -> R) -> R {
+    let guard = global_server().lock().unwrap_or_else(|e| e.into_inner());
+    f(&guard)
+}
+
+/// Mutates the global server.
+pub fn with_translation_server_mut<R>(f: impl FnOnce(&mut TranslationServer) -> R) -> R {
+    let mut guard = global_server().lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
+}
+
+/// Translates `key` through the global server — the one entry point `tr()`,
+/// `atr()` and `TranslationServer.translate()` all share.
+pub fn translate(key: &str) -> String {
+    with_translation_server(|s| s.translate(key))
+}
+
+impl TranslationServer {
+    /// Every locale that has a loaded catalog, in load order and de-duplicated
+    /// (`TranslationServer.get_loaded_locales`).
+    pub fn get_loaded_locales(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for t in &self.translations {
+            if !out.iter().any(|l| l == t.locale()) {
+                out.push(t.locale().to_string());
+            }
+        }
+        out
+    }
+
+    /// The fallback locale.
+    pub fn get_fallback(&self) -> &str {
+        &self.fallback
+    }
+
+    /// Drops every catalog for `locale` (`TranslationServer.remove_translation`).
+    pub fn remove_translation(&mut self, locale: &str) {
+        self.translations.retain(|t| t.locale() != locale);
+    }
+
+    /// Drops every catalog.
+    pub fn clear(&mut self) {
+        self.translations.clear();
+    }
+
+    /// Adds a single message, creating the locale's catalog if needed.
+    ///
+    /// This is `TranslationServer.add_message`; it appends to the last catalog
+    /// for that locale so repeated calls accumulate instead of each one
+    /// shadowing the last.
+    pub fn add_message(&mut self, locale: &str, key: &str, text: &str) {
+        if let Some(t) = self
+            .translations
+            .iter_mut()
+            .rev()
+            .find(|t| t.locale() == locale)
+        {
+            t.add_message(key, text);
+            return;
+        }
+        let mut t = Translation::new(locale);
+        t.add_message(key, text);
+        self.translations.push(t);
+    }
+}

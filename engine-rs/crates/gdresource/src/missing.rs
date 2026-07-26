@@ -154,10 +154,7 @@ mod tests {
         assert!(p.contains("custom"));
         // Insertion order preserved (position stays first despite the overwrite).
         let pairs: Vec<(&str, &str)> = p.iter().collect();
-        assert_eq!(
-            pairs,
-            vec![("position", "Vector2(3, 4)"), ("custom", "42")]
-        );
+        assert_eq!(pairs, vec![("position", "Vector2(3, 4)"), ("custom", "42")]);
     }
 
     #[test]

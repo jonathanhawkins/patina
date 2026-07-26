@@ -140,6 +140,9 @@ pub enum ControlDrawItem {
         color: Color,
         /// Font size.
         font_size: u32,
+        /// The `theme_override_fonts/font` resource path this control asked for,
+        /// or `None` to use the renderer's default face (pat-0q2kx.146).
+        font_path: Option<String>,
         /// Paint order.
         z: i32,
     },
@@ -175,7 +178,8 @@ pub fn control_draw_items(
         viewport_size.y.max(1.0) as u32,
         Color::new(0.0, 0.0, 0.0, 0.0),
     );
-    render_control_tree(tree, root, theme, &mut viewport, viewport_size);
+    let mut fonts: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+    render_control_tree_with_fonts(tree, root, theme, &mut viewport, viewport_size, &mut fonts);
 
     let mut out = Vec::new();
     // `get_sorted_items` orders by z, which the walk assigned in pre-order, so
@@ -226,6 +230,10 @@ pub fn control_draw_items(
                     position: *position,
                     color: *color,
                     font_size: *font_size,
+                    // The walk recorded the override per canvas item, because a
+                    // `DrawCommand` carries no node identity and `CanvasItem`
+                    // carries no node id (pat-0q2kx.146).
+                    font_path: fonts.get(&item.id.0).cloned(),
                     z,
                 }),
                 DrawCommand::DrawTextureRect {
@@ -276,6 +284,26 @@ pub fn render_control_tree(
     viewport: &mut Viewport,
     viewport_size: Vector2,
 ) {
+    let mut fonts = std::collections::HashMap::new();
+    render_control_tree_with_fonts(tree, root, theme, viewport, viewport_size, &mut fonts);
+}
+
+/// [`render_control_tree`] that also records each canvas item's
+/// `theme_override_fonts/font` (pat-0q2kx.146).
+///
+/// The map is keyed by `CanvasItemId` because that is the only identity that
+/// survives into the flattened draw stream: a `DrawCommand` carries no font
+/// field (adding one touches 41 call sites) and `CanvasItem` carries no node id,
+/// so the override has to be recorded during the walk — the one place where both
+/// the node and the item id are in hand.
+pub fn render_control_tree_with_fonts(
+    tree: &mut SceneTree,
+    root: NodeId,
+    theme: &Theme,
+    viewport: &mut Viewport,
+    viewport_size: Vector2,
+    fonts: &mut std::collections::HashMap<u64, String>,
+) {
     let mut order: u64 = 0;
     render_node(
         tree,
@@ -287,6 +315,7 @@ pub fn render_control_tree(
         &mut order,
         None,
         false,
+        fonts,
     );
 }
 
@@ -343,6 +372,7 @@ fn render_node(
     order: &mut u64,
     clip: Option<Rect2>,
     parent_is_container: bool,
+    fonts: &mut std::collections::HashMap<u64, String>,
 ) {
     if is_control(tree, node_id) {
         // Resolve this control's rect from anchors/offsets against the parent
@@ -382,6 +412,13 @@ fn render_node(
         let seq = *order;
         *order += 1;
         let mut item = CanvasItem::new(CanvasItemId(seq + 1));
+        // Godot resolves a Control's font as local `theme_override_fonts/font`
+        // first, then the Theme — the same precedence the colour override above
+        // already follows. Recorded here because this is the only point where
+        // the node id and the canvas item id are both known (pat-0q2kx.146).
+        if let Some(path) = font_override_path(tree, node_id) {
+            fonts.insert(seq + 1, path);
+        }
         // Pre-order sequence as z so children (added later) paint on top.
         item.z_index = seq as i32;
         item.clip_rect = clip;
@@ -404,6 +441,7 @@ fn render_node(
                 order,
                 clip,
                 is_container,
+                fonts,
             );
         }
 
@@ -435,6 +473,7 @@ fn render_node(
                 order,
                 clip,
                 false,
+                fonts,
             );
         }
     }
@@ -540,6 +579,19 @@ fn color_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<Color> {
 }
 
 /// Reads a `String`-typed node property, if present.
+/// The font resource path a Control asks for via `theme_override_fonts/font`
+/// (pat-0q2kx.146), or `None` to use the renderer's default face.
+///
+/// A `.tscn` writes the slot as `ExtResource("id")`, which the loader resolves
+/// into an `__extres__<prop>` companion holding the real `res://` path, so the
+/// companion is preferred and the raw property is the fallback for a
+/// hand-written scene that spells the path directly.
+pub fn font_override_path(tree: &SceneTree, node_id: NodeId) -> Option<String> {
+    string_prop(tree, node_id, "__extres__theme_override_fonts/font")
+        .or_else(|| string_prop(tree, node_id, "theme_override_fonts/font"))
+        .filter(|p| !p.is_empty() && !p.starts_with("ExtResource("))
+}
+
 fn string_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<String> {
     match tree.get_node(node_id)?.get_property(key) {
         Variant::String(s) => Some(s),
@@ -561,10 +613,19 @@ fn float_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<f64> {
 /// are stored as `Variant::Color` (their flat background). Falls back to
 /// `fallback` when the item is missing or a different Variant type.
 fn stylebox_bg(theme: &Theme, control_type: &str, property: &str, fallback: Color) -> Color {
-    match theme.get_item(ThemePropertyType::Stylebox, control_type, property) {
-        Some(Variant::Color(c)) => *c,
-        _ => fallback,
+    // The generic Variant item wins when set — that is how `default_theme`
+    // stores its colours. A Godot-authored `.tres` instead yields a *typed*
+    // StyleBox, so the typed map is consulted next; without this a loaded theme
+    // parsed correctly and then changed no pixels (pat-0q2kx.150).
+    if let Some(Variant::Color(c)) =
+        theme.get_item(ThemePropertyType::Stylebox, control_type, property)
+    {
+        return *c;
     }
+    theme
+        .get_stylebox(control_type, property)
+        .and_then(|sb| sb.bg_color())
+        .unwrap_or(fallback)
 }
 
 /// Maps a theme font size (in points) to the built-in 5×7 font's integer pixel
@@ -815,6 +876,114 @@ fn num_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<f64> {
 }
 
 /// Reads a `bool`-typed node property, if present.
+/// Reads an integer-valued node property (Godot enums arrive as ints).
+fn int_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<i64> {
+    match tree.get_node(node_id)?.get_property(key) {
+        Variant::Int(i) => Some(i),
+        Variant::Float(f) => Some(f as i64),
+        _ => None,
+    }
+}
+
+/// The advance between two words, chosen so that
+/// `width(a) + SPACE + width(b) == text_width("a b")` — the wrap is only
+/// correct if the width model the layout uses matches the one that draws.
+fn space_advance(scale: u32) -> f32 {
+    (GLYPH_W + 2.0 * GLYPH_GAP) * scale as f32
+}
+
+/// Lays a `Label`'s text out as Godot does and emits one `DrawString` per line
+/// (pat-0q2kx.149).
+///
+/// Honors `autowrap_mode` (OFF/ARBITRARY/WORD/WORD_SMART),
+/// `horizontal_alignment` (LEFT/CENTER/RIGHT/FILL) and
+/// `text_overrun_behavior` (NONE / TRIM_ELLIPSIS and friends), delegating the
+/// actual computation to `gdrender2d::text_layout` rather than reimplementing
+/// it here.
+///
+/// ⚠️ Godot distinguishes ARBITRARY (break mid-word) from WORD; `text_layout`
+/// only implements word breaking, so ARBITRARY is treated as WORD. That is a
+/// narrower wrap than Godot for a single word wider than the rect, and is
+/// called out rather than silently approximated.
+fn layout_label_lines(
+    tree: &SceneTree,
+    node_id: NodeId,
+    text: &str,
+    rect: Rect2,
+    color: Color,
+    scale: u32,
+) -> Vec<DrawCommand> {
+    use gdrender2d::text_layout::{align_offset, break_lines_word, ellipsis_word_count, HAlign};
+
+    // Godot: AUTOWRAP_OFF 0, ARBITRARY 1, WORD 2, WORD_SMART 3.
+    let autowrap = int_prop(tree, node_id, "autowrap_mode").unwrap_or(0);
+    // Godot: LEFT 0, CENTER 1, RIGHT 2, FILL 3.
+    let align = match int_prop(tree, node_id, "horizontal_alignment").unwrap_or(0) {
+        1 => HAlign::Center,
+        2 => HAlign::Right,
+        3 => HAlign::Fill,
+        _ => HAlign::Left,
+    };
+    // Godot: NONE 0, TRIM_CHAR 1, TRIM_WORD 2, ELLIPSIS 3, WORD_ELLIPSIS 4.
+    let overrun = int_prop(tree, node_id, "text_overrun_behavior").unwrap_or(0);
+
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let widths: Vec<f32> = words.iter().map(|w| text_width(w, scale)).collect();
+    let space = space_advance(scale);
+    let max_width = rect.size.x;
+    let line_height = (GLYPH_H + GLYPH_GAP) * scale as f32;
+
+    // Wrapping is off unless the node asks for it, matching Godot's default.
+    let lines = if autowrap == 0 {
+        vec![gdrender2d::text_layout::LineRange {
+            start: 0,
+            end: words.len(),
+            width: widths.iter().sum::<f32>() + space * (words.len() as f32 - 1.0),
+        }]
+    } else {
+        break_lines_word(&widths, space, max_width)
+    };
+
+    let mut out = Vec::new();
+    for (row, line) in lines.iter().enumerate() {
+        let mut slice: Vec<&str> = words[line.start..line.end].to_vec();
+        let mut line_width = line.width;
+
+        // Overrun trimming only applies to a line that still overflows — i.e.
+        // when wrapping is off, or a single word is wider than the rect.
+        let ellipsis_requested = matches!(overrun, 3 | 4);
+        if ellipsis_requested && line_width > max_width {
+            let ell = "...";
+            let ell_w = text_width(ell, scale);
+            let widths_slice = &widths[line.start..line.end];
+            if let Some(keep) = ellipsis_word_count(widths_slice, space, max_width, ell_w) {
+                slice.truncate(keep);
+                slice.push(ell);
+                line_width = widths_slice[..keep].iter().sum::<f32>() + space * keep as f32 + ell_w;
+            }
+        }
+
+        let text_line = slice.join(" ");
+        if text_line.is_empty() {
+            continue;
+        }
+        let dx = align_offset(line_width, max_width, align);
+        out.push(DrawCommand::DrawString {
+            text: text_line,
+            position: Vector2::new(
+                rect.position.x + dx,
+                rect.position.y + row as f32 * line_height,
+            ),
+            color,
+            font_size: scale,
+        });
+    }
+    out
+}
+
 fn bool_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<bool> {
     match tree.get_node(node_id)?.get_property(key) {
         Variant::Bool(b) => Some(b),
@@ -930,12 +1099,15 @@ fn draw_control(
                     .unwrap_or(Color::WHITE);
                 let font_size = theme.get_font_size("Label", "font_size").unwrap_or(16);
                 let scale = text_scale(font_size);
-                out.push(DrawCommand::DrawString {
-                    text,
-                    position: rect.position,
-                    color: font_color,
-                    font_size: scale,
-                });
+                // Lay the text out instead of drawing one flush-left line
+                // (pat-0q2kx.149). `gdrender2d::text_layout` implemented word
+                // breaking, alignment and ellipsis trimming with unit tests but
+                // had ZERO consumers anywhere in the workspace, so an authored
+                // `autowrap_mode`/`horizontal_alignment`/`text_overrun_behavior`
+                // changed nothing on screen.
+                for cmd in layout_label_lines(tree, node_id, &text, rect, font_color, scale) {
+                    out.push(cmd);
+                }
             }
         }
         "TextureRect" => {

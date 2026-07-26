@@ -258,6 +258,34 @@ impl AreaStore {
         self.areas.len()
     }
 
+    /// Every area whose shape contains `world_point`, smallest id first
+    /// (pat-0q2kx.138).
+    ///
+    /// The area-side twin of [`PhysicsWorld2D::point_query`], which walks bodies
+    /// only. Godot's picking is `intersect_point` with
+    /// `collide_with_areas = true`, and an `Area2D` is the *usual* pickable —
+    /// a click target is far more often a trigger volume than a solid body — so
+    /// without this, physics picking finds nothing for the common case.
+    ///
+    /// [`PhysicsWorld2D::point_query`]: crate::world::PhysicsWorld2D::point_query
+    pub fn point_query(&self, world_point: Vector2) -> Vec<AreaId> {
+        let mut hits: Vec<AreaId> = self
+            .areas
+            .iter()
+            .filter_map(|(&id, area)| {
+                // World -> local, the same inversion `point_query` applies to a
+                // body, so a rotated area picks on its rotated shape.
+                let mut tf = Transform2D::rotated(area.rotation);
+                tf.origin = area.position;
+                let local = tf.affine_inverse().xform(world_point);
+                area.shape.contains_point(local).then_some(id)
+            })
+            .collect();
+        // `AreaId` is not `Ord`; sort by its inner id for a deterministic order.
+        hits.sort_by_key(|id| id.0);
+        hits
+    }
+
     /// Detects overlaps between all areas and the given bodies.
     ///
     /// Returns enter/exit events by comparing against the previous frame.

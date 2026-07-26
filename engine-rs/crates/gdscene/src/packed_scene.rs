@@ -92,6 +92,13 @@ pub struct ExtResourceEntry {
     pub res_type: String,
     /// The resource path (e.g. `"res://scripts/player.gd"`).
     pub path: String,
+    /// The `uid://...` the section declared, if any (pat-0q2kx.137).
+    ///
+    /// Godot writes `uid=` on every `[ext_resource]` it saves and resolves a
+    /// moved file through it. Dropping it here meant an editor open+save
+    /// rewrote the scene without uids, so the references degraded to
+    /// path-only and stopped surviving a move.
+    pub uid: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +316,15 @@ impl PackedScene {
                         (attrs.get("id").cloned(), attrs.get("path").cloned())
                     {
                         let res_type = attrs.get("type").cloned().unwrap_or_default();
-                        ext_resources.insert(id, ExtResourceEntry { res_type, path });
+                        let uid = attrs.get("uid").cloned();
+                        ext_resources.insert(
+                            id,
+                            ExtResourceEntry {
+                                res_type,
+                                path,
+                                uid,
+                            },
+                        );
                     }
                 } else if inner.starts_with("sub_resource") {
                     // Capture the type by id so `mesh = SubResource("id")` can be
@@ -773,7 +788,7 @@ impl PackedScene {
         // intact for scene round-trip and the inspector, matching how
         // `__viewport_mesh__` / `__resref__<prop>` already work.
         for tmpl in &mut templates {
-            let resolved: Vec<(String, String)> = tmpl
+            let resolved: Vec<(String, String, Option<String>)> = tmpl
                 .properties
                 .iter()
                 .filter_map(|(k, v)| {
@@ -783,11 +798,19 @@ impl PackedScene {
                     };
                     let id = parse_ext_resource_ref(s)?;
                     let entry = ext_resources.get(&id)?;
-                    Some((format!("__extres__{k}"), entry.path.clone()))
+                    // The uid rides along as its own companion so the saver can
+                    // re-emit it; `__extres__` alone only carries the path
+                    // (pat-0q2kx.137).
+                    Some((k.clone(), entry.path.clone(), entry.uid.clone()))
                 })
                 .collect();
-            for (key, path) in resolved {
-                tmpl.properties.insert(key, Variant::String(path));
+            for (key, path, uid) in resolved {
+                tmpl.properties
+                    .insert(format!("__extres__{key}"), Variant::String(path));
+                if let Some(uid) = uid {
+                    tmpl.properties
+                        .insert(format!("__extuid__{key}"), Variant::String(uid));
+                }
             }
         }
 
@@ -1198,23 +1221,69 @@ impl PackedScene {
         let mut nodes: Vec<Node> = Vec::new();
         let mut path_to_index: HashMap<String, usize> = HashMap::new();
 
-        // Create root node (may itself be a sub-scene instance, but that's
-        // handled by the caller).
-        let mut root_node = Node::new(&root_tmpl.name, &root_tmpl.class_name);
-        for (key, value) in &root_tmpl.properties {
-            root_node.set_property(key, value.clone());
+        // An INHERITED scene: the root `[node]` carries `instance=` and no
+        // `type=` (packed_scene.cpp SceneState). The base scene instantiates
+        // first and this scene's templates apply as a diff on top.
+        //
+        // This used to be skipped with a comment saying the caller handled it,
+        // which nothing did — so an inherited scene lost its entire base tree
+        // and loaded as a bare root (pat-0q2kx.139). Recursive, so a scene
+        // inheriting an inherited scene resolves all the way down.
+        let inherited_base = root_tmpl
+            .instance
+            .as_ref()
+            .and_then(|inst| self.resolve_ext_resource_path(inst))
+            // Called through an explicit closure, not passed as `&F` directly:
+            // `and_then` wants an owned `FnOnce(&str)`, and handing it the
+            // borrowed generic callback makes trait resolution fight the
+            // higher-ranked lifetime on `F: Fn(&str)`. Every other use of
+            // `resolve_scene` in this file is either a direct call or a `&F`
+            // parameter, which is why this was the one that broke.
+            .and_then(|path| resolve_scene(path));
+
+        if let Some(base) = inherited_base {
+            let base_nodes = base.instance_with_subscenes(resolve_scene)?;
+            if base_nodes.is_empty() {
+                return Err(EngineError::InvalidOperation(
+                    "inherited base scene produced no nodes".into(),
+                ));
+            }
+            nodes = base_nodes;
+            // The derived scene names the root and diffs its properties on top.
+            nodes[0].set_name(&root_tmpl.name);
+            for (key, value) in &root_tmpl.properties {
+                nodes[0].set_property(key, value.clone());
+            }
+            for group in &root_tmpl.groups {
+                nodes[0].add_to_group(group.clone());
+            }
+            nodes[0].set_unique_name(root_tmpl.unique_name);
+            if let Some(ref script_path) = root_tmpl.script_path {
+                nodes[0].set_property("_script_path", Variant::String(script_path.clone()));
+            }
+            path_to_index.insert(".".into(), 0);
+            path_to_index.insert(root_tmpl.name.clone(), 0);
+            // Base children are addressable by the bare paths the derived
+            // scene's templates use (`Sprite`, `Sprite/Child`), so a diff entry
+            // finds them instead of creating a duplicate.
+            Self::map_root_child_paths(&nodes, &mut path_to_index);
+        } else {
+            let mut root_node = Node::new(&root_tmpl.name, &root_tmpl.class_name);
+            for (key, value) in &root_tmpl.properties {
+                root_node.set_property(key, value.clone());
+            }
+            for group in &root_tmpl.groups {
+                root_node.add_to_group(group.clone());
+            }
+            root_node.set_unique_name(root_tmpl.unique_name);
+            if let Some(ref script_path) = root_tmpl.script_path {
+                root_node.set_property("_script_path", Variant::String(script_path.clone()));
+            }
+            path_to_index.insert(".".into(), 0);
+            path_to_index.insert(root_tmpl.name.clone(), 0);
+            nodes.push(root_node);
         }
-        for group in &root_tmpl.groups {
-            root_node.add_to_group(group.clone());
-        }
-        root_node.set_unique_name(root_tmpl.unique_name);
-        if let Some(ref script_path) = root_tmpl.script_path {
-            root_node.set_property("_script_path", Variant::String(script_path.clone()));
-        }
-        path_to_index.insert(".".into(), 0);
-        path_to_index.insert(root_tmpl.name.clone(), 0);
-        let root_id = root_node.id();
-        nodes.push(root_node);
+        let root_id = nodes[0].id();
 
         for tmpl in &self.templates[1..] {
             let parent_path = tmpl.parent_path.as_deref().unwrap_or(".");
@@ -1279,6 +1348,77 @@ impl PackedScene {
                 }
             }
 
+            let node_path = if parent_path == "." {
+                tmpl.name.clone()
+            } else {
+                format!("{}/{}", parent_path, tmpl.name)
+            };
+
+            // An OVERRIDE entry: a `[node]` whose path already exists, because
+            // it sits inside an instanced sub-scene or an inherited base. Godot
+            // writes every tweaked instance this way — `[node name="Sprite"
+            // parent="Enemy"]` with no `type=` — and it must *modify* the
+            // existing node (packed_scene.cpp SceneState).
+            //
+            // This branch used to be absent: the code below unconditionally
+            // built a new node, so an override produced a DUPLICATE sibling and
+            // the real instanced child kept its base values (pat-0q2kx.139).
+            if let Some(&existing_idx) = path_to_index.get(&node_path) {
+                let existing = &mut nodes[existing_idx];
+                for (key, value) in &tmpl.properties {
+                    existing.set_property(key, value.clone());
+                }
+                for group in &tmpl.groups {
+                    existing.add_to_group(group.clone());
+                }
+                // Only ever turn uniqueness on: an override that omits the `%`
+                // marker is not asking to revoke it.
+                if tmpl.unique_name {
+                    existing.set_unique_name(true);
+                }
+                if let Some(ref script_path) = tmpl.script_path {
+                    existing.set_property("_script_path", Variant::String(script_path.clone()));
+                }
+                continue;
+            }
+
+            // A deferred sub-scene: `instance_placeholder="res://…"` stands in
+            // for the real scene until `create_instance()` is called. Godot
+            // gives these the `InstancePlaceholder` class and stores the path
+            // plus the authored property bag for `get_stored_values()`.
+            // Previously they loaded as plain empty `Node`s, losing both.
+            if let Some(ref placeholder_path) = tmpl.instance_placeholder {
+                let mut node = Node::new(&tmpl.name, "InstancePlaceholder");
+                node.set_property(
+                    "_instance_placeholder_path",
+                    Variant::String(placeholder_path.clone()),
+                );
+                // The authored properties are the "stored values" the
+                // placeholder hands back — they are NOT applied to the
+                // placeholder itself, since it stands in for a different scene.
+                // Sorted by key: `properties` is a `HashMap`, so emitting it in
+                // iteration order would make `get_stored_values()` return a
+                // different order run to run.
+                let mut keys: Vec<&String> = tmpl.properties.keys().collect();
+                keys.sort();
+                let stored: Vec<Variant> = keys
+                    .into_iter()
+                    .flat_map(|k| [Variant::String(k.clone()), tmpl.properties[k].clone()])
+                    .collect();
+                node.set_property("_stored_values", Variant::Array(stored));
+                for group in &tmpl.groups {
+                    node.add_to_group(group.clone());
+                }
+                node.set_unique_name(tmpl.unique_name);
+                node.set_owner(Some(root_id));
+                let child_id = node.id();
+                path_to_index.insert(node_path, nodes.len());
+                node.set_parent(Some(nodes[parent_idx].id()));
+                nodes[parent_idx].add_child_id(child_id);
+                nodes.push(node);
+                continue;
+            }
+
             // Regular (non-instanced) node.
             let mut node = Node::new(&tmpl.name, &tmpl.class_name);
             for (key, value) in &tmpl.properties {
@@ -1302,12 +1442,6 @@ impl PackedScene {
 
             let child_id = node.id();
             let child_idx = nodes.len();
-
-            let node_path = if parent_path == "." {
-                tmpl.name.clone()
-            } else {
-                format!("{}/{}", parent_path, tmpl.name)
-            };
             path_to_index.insert(node_path, child_idx);
 
             node.set_parent(Some(nodes[parent_idx].id()));
@@ -1317,6 +1451,24 @@ impl PackedScene {
         }
 
         Ok(nodes)
+    }
+
+    /// Maps every descendant of node 0 by the *bare* path a template uses.
+    ///
+    /// [`map_child_paths`](Self::map_child_paths) prefixes with its `root_path`,
+    /// which would give `./Sprite` for a root child — but a template with
+    /// `parent="."` addresses it as plain `Sprite`, so an inherited scene's diff
+    /// entries would miss and duplicate every node (pat-0q2kx.139).
+    fn map_root_child_paths(nodes: &[Node], path_to_index: &mut HashMap<String, usize>) {
+        let root_id = nodes[0].id();
+        for (idx, node) in nodes.iter().enumerate() {
+            if idx == 0 || node.parent() != Some(root_id) {
+                continue;
+            }
+            let child_path = node.name().to_string();
+            path_to_index.insert(child_path.clone(), idx);
+            Self::map_child_paths(nodes, idx, &child_path, path_to_index);
+        }
     }
 
     /// Recursively maps child node paths for a subtree starting at `root_idx`.
@@ -1698,6 +1850,84 @@ pub fn add_packed_scene_to_tree(
 ///
 /// The `resolve_scene` callback is invoked for each `instance=ExtResource`
 /// reference, receiving the `res://` path and returning the parsed sub-scene.
+// ---------------------------------------------------------------------------
+// InstancePlaceholder runtime (pat-0q2kx.139)
+// ---------------------------------------------------------------------------
+
+/// The `res://` path an `InstancePlaceholder` stands in for
+/// (`InstancePlaceholder.get_instance_path`).
+pub fn placeholder_instance_path(
+    tree: &crate::scene_tree::SceneTree,
+    node_id: crate::node::NodeId,
+) -> Option<String> {
+    let node = tree.get_node(node_id)?;
+    if node.class_name() != "InstancePlaceholder" {
+        return None;
+    }
+    match node.get_property("_instance_placeholder_path") {
+        Variant::String(p) => Some(p),
+        _ => None,
+    }
+}
+
+/// The property overrides the placeholder is holding for the scene it stands in
+/// for (`InstancePlaceholder.get_stored_values`).
+///
+/// Stored as a flat `[key, value, key, value, …]` array because `Variant` has no
+/// ordered-map kind that survives the scene round-trip; this rebuilds the pairs.
+pub fn placeholder_stored_values(
+    tree: &crate::scene_tree::SceneTree,
+    node_id: crate::node::NodeId,
+) -> Vec<(String, Variant)> {
+    let Some(node) = tree.get_node(node_id) else {
+        return Vec::new();
+    };
+    let Variant::Array(flat) = node.get_property("_stored_values") else {
+        return Vec::new();
+    };
+    flat.chunks_exact(2)
+        .filter_map(|pair| match &pair[0] {
+            Variant::String(k) => Some((k.clone(), pair[1].clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Replaces an `InstancePlaceholder` with the real sub-scene
+/// (`InstancePlaceholder.create_instance`).
+///
+/// The placeholder's stored values are applied to the instanced root, matching
+/// Godot: the whole point of a placeholder is to defer the load while keeping
+/// the edits the scene author made to it. The placeholder node is removed and
+/// the new subtree takes its place under the same parent.
+///
+/// Returns the new root's id, or `None` when the node is not a placeholder or
+/// its scene cannot be resolved.
+pub fn placeholder_create_instance<F>(
+    tree: &mut crate::scene_tree::SceneTree,
+    node_id: crate::node::NodeId,
+    resolve_scene: &F,
+) -> Option<crate::node::NodeId>
+where
+    F: Fn(&str) -> Option<PackedScene>,
+{
+    let path = placeholder_instance_path(tree, node_id)?;
+    let stored = placeholder_stored_values(tree, node_id);
+    let scene = resolve_scene(&path)?;
+    let parent = tree.get_node(node_id).and_then(|n| n.parent())?;
+
+    let new_root =
+        add_packed_scene_to_tree_with_subscenes(tree, parent, &scene, resolve_scene).ok()?;
+    if let Some(node) = tree.get_node_mut(new_root) {
+        for (key, value) in stored {
+            node.set_property(&key, value);
+        }
+    }
+    // The placeholder has been superseded; leaving it would double the node.
+    let _ = tree.remove_node(node_id);
+    Some(new_root)
+}
+
 pub fn add_packed_scene_to_tree_with_subscenes<F>(
     tree: &mut crate::scene_tree::SceneTree,
     parent_id: crate::node::NodeId,

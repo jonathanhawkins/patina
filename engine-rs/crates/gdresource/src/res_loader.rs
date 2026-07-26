@@ -976,14 +976,19 @@ mod tests {
     fn load_res_binary_invalid_data() {
         let result = load_res_binary(b"not a res file", "test.res");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid binary resource magic"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid binary resource magic"));
     }
 
     #[test]
     fn load_res_binary_compressed_unsupported() {
         let mut data = RES_MAGIC_COMPRESSED.to_vec();
         data.extend_from_slice(&[0u8; 8]);
-        let err = load_res_binary(&data, "res://c.res").unwrap_err().to_string();
+        let err = load_res_binary(&data, "res://c.res")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("compressed"), "got: {err}");
     }
 
@@ -1213,9 +1218,7 @@ mod binary_tests {
                 }
             }
         }
-        let index_of = |name: &str| {
-            table.iter().position(|s| s.as_str() == name).unwrap() as u32
-        };
+        let index_of = |name: &str| table.iter().position(|s| s.as_str() == name).unwrap() as u32;
 
         let using_uids = flags & FORMAT_FLAG_UIDS != 0;
 
@@ -1262,7 +1265,9 @@ mod binary_tests {
         }
 
         // Internal-resource table (path + absolute offset).
-        let paths: Vec<String> = (0..internals.len()).map(|i| format!("local://{i}")).collect();
+        let paths: Vec<String> = (0..internals.len())
+            .map(|i| format!("local://{i}"))
+            .collect();
         let mut int_table_size = 4usize; // count u32
         for p in &paths {
             int_table_size += 4 + p.len() + 8;
@@ -1305,7 +1310,10 @@ mod binary_tests {
         assert_eq!(res.class_name, "MyResource");
         assert_eq!(res.path, "res://x.res");
         assert_eq!(res.get_property("count"), Some(&Variant::Int(42)));
-        assert_eq!(res.get_property("name"), Some(&Variant::String("hello".into())));
+        assert_eq!(
+            res.get_property("name"),
+            Some(&Variant::String("hello".into()))
+        );
         assert_eq!(
             res.get_property("pos"),
             Some(&Variant::Vector2(Vector2::new(1.0, 2.0)))
@@ -1436,7 +1444,9 @@ mod binary_tests {
     fn big_endian_flag_unsupported() {
         let mut data = build(0, &[], &[("R", vec![("x", v_int(1))])]);
         data[4] = 1; // set big_endian flag
-        let err = load_res_binary(&data, "res://be.res").unwrap_err().to_string();
+        let err = load_res_binary(&data, "res://be.res")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("big-endian"), "got: {err}");
     }
 
@@ -1445,7 +1455,9 @@ mod binary_tests {
         let mut data = build(0, &[], &[("R", vec![("x", v_int(1))])]);
         // ver_format is the 6th u32 (offset 20).
         data[20..24].copy_from_slice(&7u32.to_le_bytes());
-        let err = load_res_binary(&data, "res://v7.res").unwrap_err().to_string();
+        let err = load_res_binary(&data, "res://v7.res")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("format version"), "got: {err}");
     }
 
@@ -1508,7 +1520,9 @@ mod binary_tests {
         );
         assert_eq!(
             res.get_property("v3s"),
-            Some(&Variant::PackedVector3Array(vec![Vector3::new(1.0, 2.0, 3.0)]))
+            Some(&Variant::PackedVector3Array(vec![Vector3::new(
+                1.0, 2.0, 3.0
+            )]))
         );
         assert_eq!(
             res.get_property("cols"),
@@ -1590,7 +1604,9 @@ mod binary_tests {
         );
         assert_eq!(
             res.get_property("v3s"),
-            Some(&Variant::PackedVector3Array(vec![Vector3::new(1.5, 2.5, 3.5)]))
+            Some(&Variant::PackedVector3Array(vec![Vector3::new(
+                1.5, 2.5, 3.5
+            )]))
         );
         assert_eq!(
             res.get_property("cols"),
@@ -1676,7 +1692,9 @@ mod binary_tests {
         // Only one internal resource exists (index 0 = main), but a property
         // references internal index 5.
         let data = build(0, &[], &[("R", vec![("bad", v_internal_index(5))])]);
-        let err = load_res_binary(&data, "res://c.res").unwrap_err().to_string();
+        let err = load_res_binary(&data, "res://c.res")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("out of range"), "got: {err}");
     }
 
@@ -1684,7 +1702,9 @@ mod binary_tests {
     fn out_of_range_external_reference_errors() {
         // No external resources, but a property references external index 0.
         let data = build(0, &[], &[("R", vec![("bad", v_ext_index(0))])]);
-        let err = load_res_binary(&data, "res://c.res").unwrap_err().to_string();
+        let err = load_res_binary(&data, "res://c.res")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("out of range"), "got: {err}");
     }
 }

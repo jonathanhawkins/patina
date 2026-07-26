@@ -357,6 +357,45 @@ pub fn draw_ttf_text(
     px_size: f32,
     color: Color,
 ) {
+    draw_ttf_text_with_fallbacks(fb, atlas, font, &[], text, pos, px_size, color)
+}
+
+/// Picks the face that actually has `ch`: the primary if it covers the glyph,
+/// else the first fallback that does (pat-0q2kx.146).
+///
+/// Godot's `Font.fallbacks` is a per-glyph chain, not a per-string one — a run
+/// of Latin text with one CJK character pulls that single character from the
+/// fallback face and leaves the rest on the primary. Returning the primary when
+/// nothing covers `ch` is deliberate: that is what draws `.notdef`, which is the
+/// correct visible signal for a glyph no face in the chain has.
+fn face_for<'a>(primary: &'a TtfFont, fallbacks: &'a [TtfFont], ch: char) -> &'a TtfFont {
+    if primary.has_glyph(ch) {
+        return primary;
+    }
+    fallbacks
+        .iter()
+        .find(|f| f.has_glyph(ch))
+        .unwrap_or(primary)
+}
+
+/// [`draw_ttf_text`] with a Godot-style per-glyph fallback chain
+/// (pat-0q2kx.146).
+///
+/// Metrics stay on the **primary** face — ascent, line height and the baseline
+/// come from it — so a fallback glyph sits on the same baseline as its
+/// neighbours instead of shifting the line. Only the glyph outline and its
+/// advance come from the covering face, which is what Godot's text server does.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_ttf_text_with_fallbacks(
+    fb: &mut FrameBuffer,
+    atlas: &mut GlyphAtlas,
+    font: &TtfFont,
+    fallbacks: &[TtfFont],
+    text: &str,
+    pos: Vector2,
+    px_size: f32,
+    color: Color,
+) {
     let ascent = font.ascent(px_size);
     let line_height = font.line_height(px_size);
     let mut baseline_y = pos.y + ascent;
@@ -370,10 +409,15 @@ pub fn draw_ttf_text(
             prev = None;
             continue;
         }
+        // Kerning is a property of the face the pair is drawn from; a pair
+        // split across two faces has no shared kern table, so skip it.
+        let face = face_for(font, fallbacks, ch);
         if let Some(p) = prev {
-            pen_x += font.kern(p, ch, px_size);
+            if face.has_glyph(p) {
+                pen_x += face.kern(p, ch, px_size);
+            }
         }
-        if let Some(g) = atlas.get_or_insert(font, ch, px_size) {
+        if let Some(g) = atlas.get_or_insert(face, ch, px_size) {
             let ox = (pen_x + g.left).round() as i32;
             let oy = (baseline_y + g.top).round() as i32;
             for gy in 0..g.h {

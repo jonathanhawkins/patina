@@ -691,11 +691,13 @@ impl SoftwareRenderer {
                     margin_right,
                     margin_bottom,
                     draw_center,
+                    axis_h,
+                    axis_v,
                     modulate,
                 } => {
                     if let Some(tex) = self.find_texture(texture_path) {
                         let transformed = Self::transform_rect(global_transform, *rect);
-                        draw::draw_nine_patch(
+                        draw::draw_nine_patch_axes(
                             fb,
                             tex,
                             transformed,
@@ -704,6 +706,8 @@ impl SoftwareRenderer {
                             *margin_right,
                             *margin_bottom,
                             *draw_center,
+                            *axis_h,
+                            *axis_v,
                             *modulate,
                         );
                     }
@@ -1437,6 +1441,8 @@ mod tests {
             margin_right: 2.0,
             margin_bottom: 2.0,
             draw_center: true,
+            axis_h: gdserver2d::canvas::NinePatchAxis::Stretch,
+            axis_v: gdserver2d::canvas::NinePatchAxis::Stretch,
             modulate: Color::rgb(0.0, 1.0, 0.0),
         });
         vp.add_canvas_item(item);
