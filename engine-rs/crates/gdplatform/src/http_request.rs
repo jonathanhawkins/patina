@@ -443,7 +443,10 @@ mod tests {
         assert_eq!(seen[0].result, 0);
         assert_eq!(seen[0].response_code, 201);
         assert_eq!(seen[0].body, b"Hello");
-        assert_eq!(seen[0].headers, vec!["Content-Type: text/plain".to_string()]);
+        assert_eq!(
+            seen[0].headers,
+            vec!["Content-Type: text/plain".to_string()]
+        );
     }
 
     #[test]
@@ -504,7 +507,10 @@ mod tests {
         assert_eq!(HttpResultCode::ConnectionError.as_godot_result_code(), 4);
         assert_eq!(HttpResultCode::SslHandshakeError.as_godot_result_code(), 5);
         assert_eq!(HttpResultCode::Timeout.as_godot_result_code(), 13);
-        assert_eq!(HttpResultCode::RedirectLimitReached.as_godot_result_code(), 12);
+        assert_eq!(
+            HttpResultCode::RedirectLimitReached.as_godot_result_code(),
+            12
+        );
     }
 
     #[test]

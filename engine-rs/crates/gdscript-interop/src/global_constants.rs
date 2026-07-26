@@ -298,6 +298,26 @@ pub fn global_constant(name: &str) -> Option<Variant> {
         "MOUSE_MODE_CAPTURED" => 2,
         "MOUSE_MODE_CONFINED" => 3,
         "MOUSE_MODE_CONFINED_HIDDEN" => 4,
+        // -- Input.CursorShape (17) — Input.set_default_cursor_shape /
+        //    get_current_cursor_shape / set_custom_mouse_cursor, and
+        //    Control.mouse_default_cursor_shape (pat-0q2kx.90).
+        "CURSOR_ARROW" => 0,
+        "CURSOR_IBEAM" => 1,
+        "CURSOR_POINTING_HAND" => 2,
+        "CURSOR_CROSS" => 3,
+        "CURSOR_WAIT" => 4,
+        "CURSOR_BUSY" => 5,
+        "CURSOR_DRAG" => 6,
+        "CURSOR_CAN_DROP" => 7,
+        "CURSOR_FORBIDDEN" => 8,
+        "CURSOR_VSIZE" => 9,
+        "CURSOR_HSIZE" => 10,
+        "CURSOR_BDIAGSIZE" => 11,
+        "CURSOR_FDIAGSIZE" => 12,
+        "CURSOR_MOVE" => 13,
+        "CURSOR_VSPLIT" => 14,
+        "CURSOR_HSPLIT" => 15,
+        "CURSOR_HELP" => 16,
         // -- JoyButton (24) --
         "JOY_BUTTON_INVALID" => -1,
         "JOY_BUTTON_A" => 0,

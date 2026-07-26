@@ -360,6 +360,84 @@ pub fn map_to_local(tile_size: Vector2i, cell: Vector2i) -> Vector2 {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Per-tile navigation polygons (pat-0q2kx.99)
+// ---------------------------------------------------------------------------
+
+/// Node property listing the tile source ids whose tiles are walkable.
+///
+/// Godot stores navigation polygons per `TileData` inside the `TileSet`
+/// resource (`tile_map_layer.cpp` `_navigation_update`). Patina's `PackedScene`
+/// flattens sub-resources onto the node, so the TileSet's navigation layer
+/// arrives as these two flat properties — the same shape
+/// `NavigationRegion2D` uses for `__navmesh_vertices__`.
+pub const TILE_NAV_SOURCES: &str = "__tile_nav_sources__";
+
+/// Node property holding the **tile-local** navigation polygon, in pixels
+/// relative to the tile's top-left corner. Optional: a navigation-enabled tile
+/// with no explicit polygon is walkable across its whole rect, which is the
+/// common authoring case and what Godot's default tile navigation polygon is.
+pub const TILE_NAV_POLYGON: &str = "__tile_nav_polygon__";
+
+/// Builds one world-space navigation polygon per painted, navigation-enabled
+/// cell (pat-0q2kx.99).
+///
+/// Mirrors Godot's `TileMapLayer::_navigation_update`: every painted cell whose
+/// tile carries navigation data contributes a region positioned at that cell's
+/// world transform, and erasing the cell removes it. `origin` is the layer
+/// node's global position.
+///
+/// ⚠️ The polygons are emitted **per cell, untouched** rather than merged: the
+/// navigation mesh derives connectivity from shared edges, so two orthogonally
+/// adjacent tiles stitch automatically because their rects share an edge. Union
+/// them here and that edge information — the thing that makes a corridor
+/// traversable — is destroyed.
+pub fn tile_navigation_polygons(
+    cells: &HashMap<Vector2i, TileData>,
+    tile_size: Vector2i,
+    nav_sources: &[i32],
+    tile_local_polygon: &[Vector2],
+    origin: Vector2,
+) -> Vec<Vec<Vector2>> {
+    if nav_sources.is_empty() || tile_size.x <= 0 || tile_size.y <= 0 {
+        return Vec::new();
+    }
+    // Deterministic order so a path is reproducible run to run; a HashMap walk
+    // is not.
+    let mut painted: Vec<(&Vector2i, &TileData)> = cells.iter().collect();
+    painted.sort_by_key(|(cell, _)| (cell.y, cell.x));
+
+    let mut out = Vec::new();
+    for (cell, data) in painted {
+        if !nav_sources.contains(&data.source_id) {
+            continue;
+        }
+        // Top-left corner of the cell in layer-local pixels. `map_to_local`
+        // returns the cell CENTRE, so the half-tile offset must come back off
+        // — using the centre directly would shift every region by half a tile
+        // and open phantom gaps between neighbours.
+        let corner = Vector2::new(
+            cell.x as f32 * tile_size.x as f32,
+            cell.y as f32 * tile_size.y as f32,
+        ) + origin;
+
+        let poly: Vec<Vector2> = if tile_local_polygon.len() >= 3 {
+            tile_local_polygon.iter().map(|v| *v + corner).collect()
+        } else {
+            let w = tile_size.x as f32;
+            let h = tile_size.y as f32;
+            vec![
+                corner,
+                corner + Vector2::new(w, 0.0),
+                corner + Vector2::new(w, h),
+                corner + Vector2::new(0.0, h),
+            ]
+        };
+        out.push(poly);
+    }
+    out
+}
+
 /// Converts a local pixel position to grid cell coordinates.
 ///
 /// Matches Godot's `TileMap.local_to_map()`.

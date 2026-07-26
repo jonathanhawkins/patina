@@ -10,6 +10,10 @@ gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
 gdobject = { path = "../gdobject" }
 gdresource = { path = "../gdresource" }
+# WebSocketPeer is a RefCounted class scripts construct directly, and its RFC
+# 6455 implementation lives in the platform layer (pat-0q2kx.96). gdplatform does
+# not depend on gdscript-interop, so this edge is acyclic.
+gdplatform = { path = "../gdplatform" }
 serde_json = { workspace = true }
 stacker = "0.1"
 thiserror.workspace = true

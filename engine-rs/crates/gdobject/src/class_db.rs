@@ -1175,7 +1175,44 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new(
                 "debug_path_custom_point_size",
                 Variant::Float(4.0),
-            )),
+            ))
+            // The avoidance solve hands the agent its collision-free velocity
+            // through this signal every physics tick; a game connects to it and
+            // feeds the result to `move_and_slide` (pat-0q2kx.97).
+            .signal(SignalInfo::new("velocity_computed").arg("safe_velocity"))
+            .signal(SignalInfo::new("path_changed"))
+            .signal(SignalInfo::new("target_reached"))
+            .signal(SignalInfo::new("navigation_finished"))
+            .signal(SignalInfo::new("waypoint_reached").arg("details"))
+            .signal(SignalInfo::new("link_reached").arg("details")),
+    );
+    // NavigationObstacle3D — the dynamic avoidance obstacle (pat-0q2kx.97).
+    //
+    // Godot's obstacle contributes a moving radius(+height) cylinder that
+    // agents steer around, plus a static vertex outline for navmesh baking.
+    // Patina models the cylinder, which is the half that participates in the
+    // RVO solve; `vertices` is registered so a `.tscn` carrying one round-trips
+    // rather than losing the property.
+    register_class(
+        ClassRegistration::new("NavigationObstacle3D")
+            .parent("Node3D")
+            .property(PropertyInfo::new("radius", Variant::Float(0.0)))
+            .property(PropertyInfo::new("height", Variant::Float(1.0)))
+            .property(PropertyInfo::new(
+                "velocity",
+                Variant::Vector3(Vector3::ZERO),
+            ))
+            .property(PropertyInfo::new("avoidance_enabled", Variant::Bool(true)))
+            .property(PropertyInfo::new("avoidance_layers", Variant::Int(1)))
+            .property(PropertyInfo::new(
+                "affect_navigation_mesh",
+                Variant::Bool(false),
+            ))
+            .property(PropertyInfo::new(
+                "carve_navigation_mesh",
+                Variant::Bool(false),
+            ))
+            .property(PropertyInfo::new("vertices", Variant::Array(Vec::new()))),
     );
     // Vehicle / soft body scene types (physics sim lives in gdphysics2d; pat-n1gh1).
     register_class(
@@ -3333,7 +3370,20 @@ pub fn register_2d_classes() {
                     "modulate",
                     Variant::Color(gdcore::math::Color::WHITE),
                 ))
-                .property(PropertyInfo::new("z_index", Variant::Int(0))),
+                .property(PropertyInfo::new("z_index", Variant::Int(0)))
+                // The custom-drawing surface (pat-0q2kx.82). `queue_redraw` was
+                // not registered at all, so `has_method("queue_redraw")` — and
+                // anything else that answers from ClassDB rather than from the
+                // native dispatch table — reported that CanvasItem could not
+                // redraw itself.
+                .method(MethodInfo::new("queue_redraw", 0))
+                .method(MethodInfo::new("is_queued_for_redraw", 0))
+                .method(MethodInfo::new("draw_rect", 4))
+                .method(MethodInfo::new("draw_line", 4))
+                .method(MethodInfo::new("draw_circle", 4))
+                .method(MethodInfo::new("draw_texture", 3))
+                .method(MethodInfo::new("draw_texture_rect", 4))
+                .method(MethodInfo::new("draw_string", 7)),
         );
     }
 
@@ -3355,8 +3405,51 @@ pub fn register_2d_classes() {
     if !class_exists("Sprite2D") {
         register_class(ClassRegistration::new("Sprite2D").parent("Node2D"));
     }
+    // AnimatedSprite2D was registered as a bare name with no properties,
+    // signals or methods, so nothing could inspect it, no `.tscn` property
+    // round-tripped through a schema, and `has_signal("animation_finished")`
+    // answered false for the signal the playback phase emits (pat-0q2kx.100).
     if !class_exists("AnimatedSprite2D") {
-        register_class(ClassRegistration::new("AnimatedSprite2D").parent("Node2D"));
+        register_class(
+            ClassRegistration::new("AnimatedSprite2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("sprite_frames", Variant::Nil))
+                .property(PropertyInfo::new(
+                    "animation",
+                    // Godot's default animation name.
+                    Variant::String("default".to_string()),
+                ))
+                .property(PropertyInfo::new(
+                    "autoplay",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new("frame", Variant::Int(0)))
+                .property(PropertyInfo::new("frame_progress", Variant::Float(0.0)))
+                .property(PropertyInfo::new("speed_scale", Variant::Float(1.0)))
+                .property(PropertyInfo::new("playing", Variant::Bool(false)))
+                .property(PropertyInfo::new("centered", Variant::Bool(true)))
+                .property(PropertyInfo::new(
+                    "offset",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("flip_h", Variant::Bool(false)))
+                .property(PropertyInfo::new("flip_v", Variant::Bool(false)))
+                .signal(SignalInfo::new("sprite_frames_changed"))
+                .signal(SignalInfo::new("animation_changed"))
+                .signal(SignalInfo::new("frame_changed"))
+                .signal(SignalInfo::new("animation_looped"))
+                .signal(SignalInfo::new("animation_finished")),
+        );
+    }
+    // The resource those frames live in. Its contents reach a node as the flat
+    // `__sf_*` companion keys the `.tscn` parser writes, but the class itself
+    // has to exist for the inspector and for `ClassDB.class_exists`.
+    if !class_exists("SpriteFrames") {
+        register_class(
+            ClassRegistration::new("SpriteFrames")
+                .parent("Resource")
+                .property(PropertyInfo::new("animations", Variant::Array(Vec::new()))),
+        );
     }
     if !class_exists("Camera2D") {
         register_class(ClassRegistration::new("Camera2D").parent("Node2D"));
@@ -3458,13 +3551,21 @@ pub fn register_2d_classes() {
         );
     }
     // Overrides where 2D audio is heard from. Godot gives it no properties —
-    // it is driven entirely by `make_current()`/`clear_current()`, which set the
-    // `current` flag the audio bridge resolves the listener from (pat-0q2kx.57).
+    // it is driven entirely by `make_current()`/`clear_current()`, and asks with
+    // `is_current()`; doc/classes/AudioListener2D.xml declares zero `<member>`s
+    // and exactly those three methods.
+    //
+    // The runtime flag those methods flip is a plain node property the audio
+    // bridge reads (`audio_server_bridge.rs:303`), not a declared class
+    // property. Declaring it here made ClassDB advertise a `current` property
+    // Godot does not have — caught by
+    // `misc_canvas_nodes_register_and_wire::audio_listener_2d_has_no_properties_of_its_own`
+    // (pat-0q2kx.106). Removing the declaration is safe because that read is
+    // `matches!(…, Variant::Bool(true))`, so an unset flag is already false.
     if !class_exists("AudioListener2D") {
         register_class(
             ClassRegistration::new("AudioListener2D")
                 .parent("Node2D")
-                .property(PropertyInfo::new("current", Variant::Bool(false)))
                 .method(MethodInfo::new("make_current", 0))
                 .method(MethodInfo::new("clear_current", 0))
                 .method(MethodInfo::new("is_current", 0)),
@@ -3589,11 +3690,48 @@ pub fn register_2d_classes() {
                 .method(MethodInfo::new("get_item_preview", 1)),
         );
     }
+    // NavigationLink2D/3D — off-mesh connections between two points on the
+    // navigation map (pat-0q2kx.98). Defaults from
+    // doc/classes/NavigationLink{2D,3D}.xml. Both were registered as bare
+    // classes, so a `.tscn` link's authored `start_position`/`enabled`/… had no
+    // schema to land on and the runtime gather had nothing to read.
     if !class_exists("NavigationLink3D") {
-        register_class(ClassRegistration::new("NavigationLink3D").parent("Node3D"));
+        register_class(
+            ClassRegistration::new("NavigationLink3D")
+                .parent("Node3D")
+                .property(PropertyInfo::new("enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("bidirectional", Variant::Bool(true)))
+                .property(PropertyInfo::new(
+                    "start_position",
+                    Variant::Vector3(gdcore::math::Vector3::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "end_position",
+                    Variant::Vector3(gdcore::math::Vector3::ZERO),
+                ))
+                .property(PropertyInfo::new("navigation_layers", Variant::Int(1)))
+                .property(PropertyInfo::new("enter_cost", Variant::Float(0.0)))
+                .property(PropertyInfo::new("travel_cost", Variant::Float(1.0))),
+        );
     }
     if !class_exists("NavigationLink2D") {
-        register_class(ClassRegistration::new("NavigationLink2D").parent("Node2D"));
+        register_class(
+            ClassRegistration::new("NavigationLink2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("bidirectional", Variant::Bool(true)))
+                .property(PropertyInfo::new(
+                    "start_position",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "end_position",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("navigation_layers", Variant::Int(1)))
+                .property(PropertyInfo::new("enter_cost", Variant::Float(0.0)))
+                .property(PropertyInfo::new("travel_cost", Variant::Float(1.0))),
+        );
     }
     if !class_exists("RemoteTransform3D") {
         register_class(ClassRegistration::new("RemoteTransform3D").parent("Node3D"));
@@ -3695,7 +3833,60 @@ pub fn register_2d_classes() {
         register_class(ClassRegistration::new("ScrollContainer").parent("Container"));
     }
     if !class_exists("TabContainer") {
-        register_class(ClassRegistration::new("TabContainer").parent("Container"));
+        register_class(
+            ClassRegistration::new("TabContainer")
+                .parent("Container")
+                .property(PropertyInfo::new("current_tab", Variant::Int(0)))
+                .property(PropertyInfo::new("tabs_visible", Variant::Bool(true)))
+                .signal(SignalInfo::new("tab_changed").arg("tab"))
+                .signal(SignalInfo::new("tab_selected").arg("tab"))
+                .signal(SignalInfo::new("tab_clicked").arg("tab")),
+        );
+    }
+    // The item-view Controls (pat-0q2kx.85). Their item state lives in these
+    // properties — `gdscene::item_views` is the model/script/click bridge that
+    // reads and writes them — and `has_signal` has to answer for the signals
+    // a click emits even with nothing connected yet.
+    if !class_exists("ItemList") {
+        register_class(
+            ClassRegistration::new("ItemList")
+                .parent("Control")
+                .property(PropertyInfo::new("items", Variant::Array(Vec::new())))
+                // Godot `SELECT_SINGLE = 0`.
+                .property(PropertyInfo::new("select_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("allow_reselect", Variant::Bool(false)))
+                .signal(SignalInfo::new("item_selected").arg("index"))
+                .signal(SignalInfo::new("item_activated").arg("index"))
+                .signal(
+                    SignalInfo::new("item_clicked")
+                        .arg("index")
+                        .arg("at_position")
+                        .arg("mouse_button_index"),
+                )
+                .signal(
+                    SignalInfo::new("multi_selected")
+                        .arg("index")
+                        .arg("selected"),
+                )
+                .signal(
+                    SignalInfo::new("empty_clicked")
+                        .arg("at_position")
+                        .arg("mouse_button_index"),
+                ),
+        );
+    }
+    if !class_exists("TabBar") {
+        register_class(
+            ClassRegistration::new("TabBar")
+                .parent("Control")
+                .property(PropertyInfo::new("tabs", Variant::Array(Vec::new())))
+                .property(PropertyInfo::new("tab_count", Variant::Int(0)))
+                // Godot's TabBar starts with no tabs, hence no current one.
+                .property(PropertyInfo::new("current_tab", Variant::Int(-1)))
+                .signal(SignalInfo::new("tab_changed").arg("tab"))
+                .signal(SignalInfo::new("tab_selected").arg("tab"))
+                .signal(SignalInfo::new("tab_clicked").arg("tab")),
+        );
     }
     // Godot's GUI intermediates. Patina parented the leaves straight onto
     // Control/Container and never registered these, so `is_class("BaseButton")`
@@ -3760,7 +3951,15 @@ pub fn register_2d_classes() {
         register_class(ClassRegistration::new("CheckBox").parent("Button"));
     }
     if !class_exists("OptionButton") {
-        register_class(ClassRegistration::new("OptionButton").parent("Button"));
+        register_class(
+            ClassRegistration::new("OptionButton")
+                .parent("Button")
+                .property(PropertyInfo::new("items", Variant::Array(Vec::new())))
+                // Godot's `NONE_SELECTED = -1`.
+                .property(PropertyInfo::new("selected", Variant::Int(-1)))
+                .signal(SignalInfo::new("item_selected").arg("index"))
+                .signal(SignalInfo::new("item_focused").arg("index")),
+        );
     }
     if !class_exists("TextureRect") {
         register_class(ClassRegistration::new("TextureRect").parent("Control"));
@@ -3994,7 +4193,43 @@ pub fn register_2d_classes() {
                 .property(PropertyInfo::new(
                     "debug_path_custom_line_width",
                     Variant::Float(-1.0),
-                )),
+                ))
+                // Same avoidance contract as the 3D agent (pat-0q2kx.97): the
+                // solve publishes the collision-free velocity through this
+                // signal every physics tick.
+                .signal(SignalInfo::new("velocity_computed").arg("safe_velocity"))
+                .signal(SignalInfo::new("path_changed"))
+                .signal(SignalInfo::new("target_reached"))
+                .signal(SignalInfo::new("navigation_finished"))
+                .signal(SignalInfo::new("waypoint_reached").arg("details"))
+                .signal(SignalInfo::new("link_reached").arg("details")),
+        );
+    }
+    // NavigationObstacle2D — the 2D dynamic avoidance obstacle (pat-0q2kx.97).
+    //
+    // `gdscene::navigation::NavigationObstacle2D` has driven the 2D ORCA solve
+    // since pat-nzgdu.116, but the class was never registered, so a `.tscn`
+    // could not carry one and the inspector had no schema for it.
+    if !class_exists("NavigationObstacle2D") {
+        register_class(
+            ClassRegistration::new("NavigationObstacle2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("radius", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "velocity",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("avoidance_enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("avoidance_layers", Variant::Int(1)))
+                .property(PropertyInfo::new(
+                    "affect_navigation_mesh",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "carve_navigation_mesh",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("vertices", Variant::Array(Vec::new()))),
         );
     }
 
@@ -4006,7 +4241,10 @@ pub fn register_2d_classes() {
                 .property(PropertyInfo::new("anchor_left", Variant::Float(0.0)))
                 .property(PropertyInfo::new("anchor_top", Variant::Float(0.0)))
                 .property(PropertyInfo::new("anchor_right", Variant::Float(0.0)))
-                .property(PropertyInfo::new("anchor_bottom", Variant::Float(0.0))),
+                .property(PropertyInfo::new("anchor_bottom", Variant::Float(0.0)))
+                // `accept_event()` is how a `_gui_input` handler stops an event
+                // from bubbling to ancestor Controls (pat-0q2kx.82).
+                .method(MethodInfo::new("accept_event", 0)),
         );
     }
     if !class_exists("Button") {
@@ -4015,11 +4253,60 @@ pub fn register_2d_classes() {
     if !class_exists("Label") {
         register_class(ClassRegistration::new("Label").parent("Control"));
     }
+    // pat-0q2kx.87 — the editing surface. `LineEdit` was registered as a bare
+    // Control: no `text`, no caret, and no `text_changed`/`text_submitted`, so
+    // `has_signal("text_submitted")` answered false and a `connect` in a script
+    // had nothing to bind to.
+    //
+    // ⚠️ `editable` defaults to **true** and `max_length` to **0 = unlimited**.
+    // Registering either as the zero value would make every fresh LineEdit
+    // read-only or zero-length.
     if !class_exists("LineEdit") {
-        register_class(ClassRegistration::new("LineEdit").parent("Control"));
+        register_class(
+            ClassRegistration::new("LineEdit")
+                .parent("Control")
+                .property(PropertyInfo::new("text", Variant::String(String::new())))
+                .property(PropertyInfo::new(
+                    "placeholder_text",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new("max_length", Variant::Int(0)))
+                .property(PropertyInfo::new("editable", Variant::Bool(true)))
+                .property(PropertyInfo::new("secret", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "secret_character",
+                    Variant::String("•".to_string()),
+                ))
+                .property(PropertyInfo::new("caret_column", Variant::Int(0)))
+                .method(MethodInfo::new("select_all", 0))
+                .method(MethodInfo::new("deselect", 0))
+                .method(MethodInfo::new("has_selection", 0))
+                .method(MethodInfo::new("get_selected_text", 0))
+                .method(MethodInfo::new("insert_text_at_caret", 1))
+                .signal(SignalInfo::new("text_changed").arg("new_text"))
+                .signal(SignalInfo::new("text_submitted").arg("new_text")),
+        );
     }
     if !class_exists("TextEdit") {
-        register_class(ClassRegistration::new("TextEdit").parent("Control"));
+        register_class(
+            ClassRegistration::new("TextEdit")
+                .parent("Control")
+                .property(PropertyInfo::new("text", Variant::String(String::new())))
+                .property(PropertyInfo::new("editable", Variant::Bool(true)))
+                .property(PropertyInfo::new("caret_column", Variant::Int(0)))
+                .method(MethodInfo::new("select_all", 0))
+                .method(MethodInfo::new("deselect", 0))
+                .method(MethodInfo::new("has_selection", 0))
+                .method(MethodInfo::new("get_selected_text", 0))
+                .method(MethodInfo::new("insert_text_at_caret", 1))
+                .signal(SignalInfo::new("text_changed")),
+        );
+    }
+    // `CodeEdit` extends TextEdit in Godot. The `CodeHighlighter` resource was
+    // registered but its only consumer was not, so `ClassDB.class_exists`
+    // answered false for the node a highlighted script editor hangs off.
+    if !class_exists("CodeEdit") {
+        register_class(ClassRegistration::new("CodeEdit").parent("TextEdit"));
     }
     if !class_exists("Panel") {
         register_class(ClassRegistration::new("Panel").parent("Control"));
@@ -4129,6 +4416,371 @@ pub fn register_2d_classes() {
     }
     if !class_exists("ThemeDB") {
         register_class(ClassRegistration::new("ThemeDB").parent("Object"));
+    }
+
+    // -- Missing 2D nodes and resources (pat-0q2kx.106) ---------------------
+    //
+    // Seventeen Godot 4.6 2D classes had no ClassDB entry at all. That is not
+    // cosmetic: `Node::is_class` resolves through ClassDB (gdscene/src/node.rs),
+    // so an unregistered node answers `false` to `is_class("CanvasItem")` and
+    // silently drops out of every canvas walk — `collect_canvas_items` skips it,
+    // and the Create-Node dialog never offers it.
+    //
+    // Parents are the `inherits` attribute from each class's
+    // doc/classes/<Name>.xml; property defaults are that file's `default=`.
+
+    // `CanvasLayer` is registered here rather than assumed: it is
+    // ParallaxBackground's parent and appears nowhere else in this file, so
+    // without it that chain would resolve to nothing.
+    if !class_exists("CanvasLayer") {
+        register_class(
+            ClassRegistration::new("CanvasLayer")
+                .parent("Node")
+                .property(PropertyInfo::new("layer", Variant::Int(1)))
+                .property(PropertyInfo::new("visible", Variant::Bool(true)))
+                .property(PropertyInfo::new("offset", Variant::Vector2(Vector2::ZERO)))
+                .property(PropertyInfo::new("rotation", Variant::Float(0.0)))
+                .property(PropertyInfo::new("scale", Variant::Vector2(Vector2::ONE)))
+                .property(PropertyInfo::new(
+                    "follow_viewport_enabled",
+                    Variant::Bool(false),
+                )),
+        );
+    }
+
+    if !class_exists("RayCast2D") {
+        register_class(
+            ClassRegistration::new("RayCast2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("exclude_parent", Variant::Bool(true)))
+                .property(PropertyInfo::new(
+                    "target_position",
+                    Variant::Vector2(Vector2::new(0.0, 50.0)),
+                ))
+                .property(PropertyInfo::new("collision_mask", Variant::Int(1)))
+                .property(PropertyInfo::new(
+                    "collide_with_areas",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "collide_with_bodies",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new("hit_from_inside", Variant::Bool(false))),
+        );
+    }
+    if !class_exists("ShapeCast2D") {
+        register_class(
+            ClassRegistration::new("ShapeCast2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("exclude_parent", Variant::Bool(true)))
+                .property(PropertyInfo::new(
+                    "target_position",
+                    Variant::Vector2(Vector2::new(0.0, 50.0)),
+                ))
+                .property(PropertyInfo::new("collision_mask", Variant::Int(1)))
+                .property(PropertyInfo::new(
+                    "collide_with_areas",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "collide_with_bodies",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new("margin", Variant::Float(0.0)))
+                .property(PropertyInfo::new("max_results", Variant::Int(32))),
+        );
+    }
+    if !class_exists("CanvasModulate") {
+        register_class(
+            ClassRegistration::new("CanvasModulate")
+                .parent("Node2D")
+                .property(PropertyInfo::new(
+                    "color",
+                    Variant::Color(gdcore::math::Color::WHITE),
+                )),
+        );
+    }
+    if !class_exists("VisibleOnScreenNotifier2D") {
+        register_class(
+            ClassRegistration::new("VisibleOnScreenNotifier2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new(
+                    "rect",
+                    Variant::Rect2(gdcore::math::Rect2::new(
+                        Vector2::new(-10.0, -10.0),
+                        Vector2::new(20.0, 20.0),
+                    )),
+                ))
+                .property(PropertyInfo::new("show_rect", Variant::Bool(true)))
+                .signal(SignalInfo::new("screen_entered"))
+                .signal(SignalInfo::new("screen_exited")),
+        );
+    }
+    if !class_exists("VisibleOnScreenEnabler2D") {
+        register_class(
+            ClassRegistration::new("VisibleOnScreenEnabler2D")
+                .parent("VisibleOnScreenNotifier2D")
+                .property(PropertyInfo::new("enable_mode", Variant::Int(0)))
+                // Godot's default is `NodePath("..")`: the node it enables is
+                // its own parent (doc/classes/VisibleOnScreenEnabler2D.xml).
+                .property(PropertyInfo::new(
+                    "enable_node_path",
+                    Variant::NodePath(gdcore::node_path::NodePath::new("..")),
+                ))
+                .enumeration(
+                    EnumInfo::new("EnableMode")
+                        .constant("ENABLE_MODE_INHERIT", 0)
+                        .constant("ENABLE_MODE_ALWAYS", 1)
+                        .constant("ENABLE_MODE_WHEN_PAUSED", 2),
+                ),
+        );
+    }
+    if !class_exists("Parallax2D") {
+        register_class(
+            ClassRegistration::new("Parallax2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new(
+                    "scroll_scale",
+                    Variant::Vector2(Vector2::ONE),
+                ))
+                .property(PropertyInfo::new(
+                    "scroll_offset",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "repeat_size",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("repeat_times", Variant::Int(1)))
+                .property(PropertyInfo::new(
+                    "autoscroll",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "limit_begin",
+                    Variant::Vector2(Vector2::new(-1.0e7, -1.0e7)),
+                ))
+                .property(PropertyInfo::new(
+                    "limit_end",
+                    Variant::Vector2(Vector2::new(1.0e7, 1.0e7)),
+                ))
+                .property(PropertyInfo::new("follow_viewport", Variant::Bool(true)))
+                .property(PropertyInfo::new(
+                    "ignore_camera_scroll",
+                    Variant::Bool(false),
+                )),
+        );
+    }
+    if !class_exists("ParallaxBackground") {
+        register_class(
+            ClassRegistration::new("ParallaxBackground")
+                .parent("CanvasLayer")
+                .property(PropertyInfo::new(
+                    "scroll_offset",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "scroll_base_offset",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "scroll_base_scale",
+                    Variant::Vector2(Vector2::ONE),
+                ))
+                .property(PropertyInfo::new(
+                    "scroll_ignore_camera_zoom",
+                    Variant::Bool(false),
+                )),
+        );
+    }
+    if !class_exists("ParallaxLayer") {
+        register_class(
+            ClassRegistration::new("ParallaxLayer")
+                .parent("Node2D")
+                .property(PropertyInfo::new(
+                    "motion_scale",
+                    Variant::Vector2(Vector2::ONE),
+                ))
+                .property(PropertyInfo::new(
+                    "motion_offset",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "motion_mirroring",
+                    Variant::Vector2(Vector2::ZERO),
+                )),
+        );
+    }
+    if !class_exists("CollisionPolygon2D") {
+        register_class(
+            ClassRegistration::new("CollisionPolygon2D")
+                .parent("Node2D")
+                .property(PropertyInfo::new("build_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("disabled", Variant::Bool(false)))
+                .property(PropertyInfo::new("one_way_collision", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "one_way_collision_margin",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new(
+                    "polygon",
+                    Variant::PackedVector2Array(Vec::new()),
+                ))
+                .enumeration(
+                    EnumInfo::new("BuildMode")
+                        .constant("BUILD_SOLIDS", 0)
+                        .constant("BUILD_SEGMENTS", 1),
+                ),
+        );
+    }
+    if !class_exists("PhysicalBone2D") {
+        register_class(
+            ClassRegistration::new("PhysicalBone2D")
+                .parent("RigidBody2D")
+                .property(PropertyInfo::new(
+                    "bone2d_nodepath",
+                    Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                ))
+                .property(PropertyInfo::new("bone2d_index", Variant::Int(-1)))
+                .property(PropertyInfo::new(
+                    "auto_configure_joint",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new("simulate_physics", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "follow_bone_when_simulating",
+                    Variant::Bool(false),
+                )),
+        );
+    }
+    // The pre-4.3 monolithic TileMap node. Still instantiable in 4.6 (deprecated
+    // in favour of TileMapLayer), and a `.tscn` from an older project names it.
+    if !class_exists("TileMap") {
+        register_class(
+            ClassRegistration::new("TileMap")
+                .parent("Node2D")
+                .property(PropertyInfo::new(
+                    "rendering_quadrant_size",
+                    Variant::Int(16),
+                ))
+                .property(PropertyInfo::new(
+                    "collision_animatable",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "collision_visibility_mode",
+                    Variant::Int(0),
+                ))
+                .property(PropertyInfo::new(
+                    "navigation_visibility_mode",
+                    Variant::Int(0),
+                ))
+                .property(PropertyInfo::new("tile_set", Variant::Nil))
+                .signal(SignalInfo::new("changed")),
+        );
+    }
+
+    // Resources. `TileData` inherits Object, not Resource — the one exception in
+    // this family, per doc/classes/TileData.xml.
+    if !class_exists("Curve2D") {
+        register_class(
+            ClassRegistration::new("Curve2D")
+                .parent("Resource")
+                .property(PropertyInfo::new("bake_interval", Variant::Float(5.0)))
+                .property(PropertyInfo::new("point_count", Variant::Int(0))),
+        );
+    }
+    if !class_exists("SpriteFrames") {
+        register_class(ClassRegistration::new("SpriteFrames").parent("Resource"));
+    }
+    if !class_exists("OccluderPolygon2D") {
+        register_class(
+            ClassRegistration::new("OccluderPolygon2D")
+                .parent("Resource")
+                .property(PropertyInfo::new("closed", Variant::Bool(true)))
+                .property(PropertyInfo::new("cull_mode", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "polygon",
+                    Variant::PackedVector2Array(Vec::new()),
+                ))
+                .enumeration(
+                    EnumInfo::new("CullMode")
+                        .constant("CULL_DISABLED", 0)
+                        .constant("CULL_CLOCKWISE", 1)
+                        .constant("CULL_COUNTER_CLOCKWISE", 2),
+                ),
+        );
+    }
+    if !class_exists("TileSet") {
+        register_class(
+            ClassRegistration::new("TileSet")
+                .parent("Resource")
+                .property(PropertyInfo::new("tile_shape", Variant::Int(0)))
+                .property(PropertyInfo::new("tile_layout", Variant::Int(0)))
+                .property(PropertyInfo::new("tile_offset_axis", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "tile_size",
+                    Variant::Vector2(Vector2::new(16.0, 16.0)),
+                ))
+                .property(PropertyInfo::new("uv_clipping", Variant::Bool(false))),
+        );
+    }
+    if !class_exists("TileSetSource") {
+        register_class(ClassRegistration::new("TileSetSource").parent("Resource"));
+    }
+    if !class_exists("TileSetAtlasSource") {
+        register_class(
+            ClassRegistration::new("TileSetAtlasSource")
+                .parent("TileSetSource")
+                .property(PropertyInfo::new("texture", Variant::Nil))
+                .property(PropertyInfo::new(
+                    "texture_region_size",
+                    Variant::Vector2(Vector2::new(16.0, 16.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "margins",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "separation",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "use_texture_padding",
+                    Variant::Bool(true),
+                )),
+        );
+    }
+    if !class_exists("TileSetScenesCollectionSource") {
+        register_class(
+            ClassRegistration::new("TileSetScenesCollectionSource").parent("TileSetSource"),
+        );
+    }
+    if !class_exists("TileData") {
+        register_class(
+            ClassRegistration::new("TileData")
+                .parent("Object")
+                .property(PropertyInfo::new("flip_h", Variant::Bool(false)))
+                .property(PropertyInfo::new("flip_v", Variant::Bool(false)))
+                .property(PropertyInfo::new("transpose", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "texture_origin",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "modulate",
+                    Variant::Color(gdcore::math::Color::WHITE),
+                ))
+                .property(PropertyInfo::new("z_index", Variant::Int(0)))
+                .property(PropertyInfo::new("y_sort_origin", Variant::Int(0)))
+                .signal(SignalInfo::new("changed")),
+        );
+    }
+    if !class_exists("TileMapPattern") {
+        register_class(ClassRegistration::new("TileMapPattern").parent("Resource"));
     }
 
     // Viewport / SubViewport / ViewportTexture (pat-zx775).
@@ -6697,12 +7349,73 @@ pub fn register_networking_classes() {
                 .method(MethodInfo::new("close", 0)),
         );
     }
+    // pat-0q2kx.94: `MultiplayerAPI` had exactly two methods and no signals, so
+    // `multiplayer.peer_connected.connect(...)` — the single most common
+    // multiplayer line in any Godot project — had nothing to bind to.
     if !class_exists("MultiplayerAPI") {
         register_class(
             ClassRegistration::new("MultiplayerAPI")
                 .parent("RefCounted")
                 .method(MethodInfo::new("set_multiplayer_peer", 1))
-                .method(MethodInfo::new("is_server", 0)),
+                .method(MethodInfo::new("is_server", 0))
+                .method(MethodInfo::new("get_unique_id", 0))
+                .method(MethodInfo::new("get_peers", 0))
+                .method(MethodInfo::new("get_remote_sender_id", 0))
+                .method(MethodInfo::new("has_multiplayer_peer", 0))
+                .method(MethodInfo::new("poll", 0))
+                .method(MethodInfo::new("rpc", 4))
+                .method(MethodInfo::new("object_configuration_add", 2))
+                .method(MethodInfo::new("object_configuration_remove", 2))
+                .signal(SignalInfo::new("peer_connected").arg("id"))
+                .signal(SignalInfo::new("peer_disconnected").arg("id"))
+                .signal(SignalInfo::new("connected_to_server"))
+                .signal(SignalInfo::new("connection_failed"))
+                .signal(SignalInfo::new("server_disconnected")),
+        );
+    }
+    // `SceneMultiplayer` is the default MultiplayerAPI in Godot and adds the
+    // authentication handshake, raw `send_bytes`/`peer_packet`, and relay
+    // controls on top. It was absent entirely (grep = 0 hits).
+    if !class_exists("SceneMultiplayer") {
+        register_class(
+            ClassRegistration::new("SceneMultiplayer")
+                .parent("MultiplayerAPI")
+                .property(PropertyInfo::new(
+                    "refuse_new_connections",
+                    Variant::Bool(false),
+                ))
+                // ⚠️ Godot's defaults: relay ON, decoding OFF (decoding objects
+                // off the wire is an RCE risk, which is why it is opt-in), and a
+                // 3-second auth timeout.
+                .property(PropertyInfo::new("server_relay", Variant::Bool(true)))
+                .property(PropertyInfo::new(
+                    "allow_object_decoding",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("auth_timeout", Variant::Float(3.0)))
+                .method(MethodInfo::new("send_bytes", 4))
+                .method(MethodInfo::new("set_auth_callback", 1))
+                .method(MethodInfo::new("get_auth_callback", 0))
+                .method(MethodInfo::new("send_auth", 2))
+                .method(MethodInfo::new("complete_auth", 1))
+                .method(MethodInfo::new("get_authenticating_peers", 0))
+                .method(MethodInfo::new("disconnect_peer", 1))
+                .method(MethodInfo::new("clear", 0))
+                .signal(SignalInfo::new("peer_packet").arg("id").arg("packet"))
+                .signal(SignalInfo::new("peer_authenticating").arg("id"))
+                .signal(SignalInfo::new("peer_authentication_failed").arg("id")),
+        );
+    }
+    // The always-server loopback peer a single-player build runs with, so the
+    // same `multiplayer.is_server()` branches work with no sockets.
+    if !class_exists("OfflineMultiplayerPeer") {
+        register_class(
+            ClassRegistration::new("OfflineMultiplayerPeer")
+                .parent("MultiplayerPeer")
+                .method(MethodInfo::new("get_connection_status", 0))
+                .method(MethodInfo::new("get_unique_id", 0))
+                .method(MethodInfo::new("poll", 0))
+                .method(MethodInfo::new("close", 0)),
         );
     }
 

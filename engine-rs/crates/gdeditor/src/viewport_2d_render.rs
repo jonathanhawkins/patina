@@ -270,7 +270,11 @@ fn canvas_layer_for(tree: &SceneTree, id: gdscene::NodeId) -> i64 {
 /// class-tagged marker.
 fn render_kind_for(tree: &SceneTree, id: gdscene::NodeId, class: &str) -> Render2DKind {
     match class {
-        "Sprite2D" => {
+        // An AnimatedSprite2D draws exactly like a Sprite2D — the difference is
+        // only *which* texture, and the playback phase has already published the
+        // current frame's onto the node (pat-0q2kx.100). Without this arm the
+        // node fell through to `Marker` and animated content was invisible.
+        "Sprite2D" | "AnimatedSprite2D" => {
             if let Some(texture) = node2d::get_texture_path(tree, id) {
                 return Render2DKind::Sprite {
                     texture,
@@ -962,9 +966,47 @@ fn restore_outside_clip(fb: &mut FrameBuffer, rect: Rect2, before: &[Color]) {
     }
 }
 
+/// Applies the 2D light / occluder pass and `CanvasModulate` to an already
+/// rasterized frame (pat-0q2kx.103).
+///
+/// Godot shades the canvas after drawing it: `PointLight2D` / `DirectionalLight2D`
+/// contribute per-pixel light, `LightOccluder2D` polygons cast shadow into it,
+/// and a `CanvasModulate` multiplies the whole frame. Patina had all of that
+/// maths (`gdrender2d::light2d`) and the scene collectors
+/// (`gdscene::light2d_scene`) with **no production caller** — the Play canvas
+/// never shaded, so a lit scene rendered exactly like an unlit one.
+///
+/// ⚠️ The light pass is gated on the scene actually containing a light. With no
+/// lights, `light_factor_at` returns the ambient term alone — a dim 0.15 grey —
+/// so running it unconditionally would darken every unlit scene to a sixth of
+/// its brightness. "No lights" has to mean "no shading", not "ambient only".
+pub fn shade_runtime_canvas(tree: &SceneTree, fb: &mut FrameBuffer) {
+    let lights = gdscene::light2d_scene::collect_lights_2d(tree);
+    if !lights.is_empty() {
+        let occluders = gdscene::light2d_scene::collect_occluders_2d(tree);
+        gdrender2d::light2d::apply_lights_to_framebuffer(
+            fb,
+            &lights,
+            &occluders,
+            gdrender2d::light2d::CanvasAmbient::default(),
+            // Godot's default `item_cull_mask` is layer 1; a receiver opts out
+            // by clearing its bit rather than by the light naming it.
+            1,
+        );
+    }
+    // CanvasModulate tints the finished frame whether or not anything is lit.
+    if let Some(color) = gdscene::light2d_scene::collect_canvas_modulate(tree) {
+        gdscene::light2d_scene::apply_canvas_modulate(fb, color);
+    }
+}
+
 /// Convenience: [`build_runtime_render_list`] + [`rasterize_render_list`] in one
 /// call, for callers whose `tree` and `texture_cache` don't come from the same
 /// borrow (tests, and the texture-less `render_runtime_frame` 2D branch).
+///
+/// Also runs [`shade_runtime_canvas`], so the Play frame this produces is the
+/// *shaded* one — the light pass is part of rendering a canvas, not an extra
+/// step each caller has to remember (pat-0q2kx.103).
 pub fn render_runtime_canvas(
     tree: &SceneTree,
     width: u32,
@@ -973,7 +1015,9 @@ pub fn render_runtime_canvas(
     texture_cache: Option<&mut TextureCache>,
 ) -> FrameBuffer {
     let items = build_runtime_render_list(tree);
-    rasterize_render_list(&items, width, height, clear, texture_cache)
+    let mut fb = rasterize_render_list(&items, width, height, clear, texture_cache);
+    shade_runtime_canvas(tree, &mut fb);
+    fb
 }
 
 /// Component-wise multiply of a base color by a `modulate` tint.

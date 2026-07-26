@@ -25,6 +25,19 @@ pub struct FrameBuffer {
     pub height: u32,
     /// Pixel data in row-major order.
     pub pixels: Vec<Color>,
+    /// Optional scissor rectangle in framebuffer pixel space (pat-0q2kx.86).
+    ///
+    /// While set, every write through [`set_pixel`](Self::set_pixel),
+    /// [`blend_pixel`](Self::blend_pixel) and the [`Raster`] impl is discarded
+    /// outside the rect. The renderer sets it per canvas item from that item's
+    /// [`clip_rect`](gdserver2d::canvas::CanvasItem::clip_rect), which is what
+    /// makes `Control.clip_contents` (and therefore ScrollContainer) cut
+    /// content off instead of letting it overflow.
+    ///
+    /// Clipping lives here rather than in each `draw::` routine because these
+    /// three writes are the only paths to a pixel — one check covers rects,
+    /// circles, lines, textures, nine-patches and text alike.
+    pub scissor: Option<Rect2>,
 }
 
 impl FrameBuffer {
@@ -34,17 +47,40 @@ impl FrameBuffer {
             width,
             height,
             pixels: vec![clear_color; (width * height) as usize],
+            scissor: None,
         }
     }
 
     /// Clears the entire framebuffer to the given color.
+    ///
+    /// Ignores the scissor — clearing is a whole-frame operation, as it is in
+    /// Godot where the clear happens before any item is drawn.
     pub fn clear(&mut self, color: Color) {
         self.pixels.fill(color);
     }
 
-    /// Sets a pixel at `(x, y)`. No-op if out of bounds.
+    /// Whether `(x, y)` survives the current scissor. Always `true` when no
+    /// scissor is set.
+    ///
+    /// The test is half-open on the far edges, matching `Rect2::has_point`, so
+    /// a clip rect of exactly the control's size keeps the pixel column at
+    /// `position.x + size.x` outside.
+    fn in_scissor(&self, x: u32, y: u32) -> bool {
+        match self.scissor {
+            None => true,
+            Some(r) => {
+                let (px, py) = (x as f32, y as f32);
+                px >= r.position.x
+                    && py >= r.position.y
+                    && px < r.position.x + r.size.x
+                    && py < r.position.y + r.size.y
+            }
+        }
+    }
+
+    /// Sets a pixel at `(x, y)`. No-op if out of bounds or scissored away.
     pub fn set_pixel(&mut self, x: u32, y: u32, color: Color) {
-        if x < self.width && y < self.height {
+        if x < self.width && y < self.height && self.in_scissor(x, y) {
             self.pixels[(y * self.width + x) as usize] = color;
         }
     }
@@ -52,9 +88,9 @@ impl FrameBuffer {
     /// Alpha-blends a pixel on top of the existing pixel at `(x, y)`.
     ///
     /// Uses standard "source over" compositing: `out = src * src.a + dst * (1 - src.a)`.
-    /// No-op if out of bounds.
+    /// No-op if out of bounds or scissored away.
     pub fn blend_pixel(&mut self, x: u32, y: u32, color: Color) {
-        if x < self.width && y < self.height {
+        if x < self.width && y < self.height && self.in_scissor(x, y) {
             let idx = (y * self.width + x) as usize;
             let dst = self.pixels[idx];
             let a = color.a;
@@ -136,6 +172,12 @@ impl Raster for FrameBuffer {
     }
     fn blend(&mut self, x: i32, y: i32, color: Color, a: f32) {
         if a <= 0.0 || x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return;
+        }
+        // The anti-aliased path (text, thick lines) reaches pixels through here
+        // rather than set_pixel/blend_pixel, so it needs the same scissor test —
+        // otherwise clipped text would still show its edges (pat-0q2kx.86).
+        if !self.in_scissor(x as u32, y as u32) {
             return;
         }
         let a = a.min(1.0);
@@ -340,6 +382,20 @@ impl SoftwareRenderer {
         let global_transform = parent_transform * item.transform;
         let axis_aligned = Self::transform_is_axis_aligned(global_transform);
 
+        // pat-0q2kx.86: honor the item's clip rect for the whole of its command
+        // list. The rect is stored in the item's local space, so it goes through
+        // the same transform as the commands it bounds. Items are rasterized
+        // flat (see `render_frame`), so the previous scissor is restored on the
+        // way out rather than relying on a draw-order stack.
+        let prev_scissor = fb.scissor;
+        if let Some(clip) = item.clip_rect {
+            let clip = Self::transform_rect(global_transform, clip);
+            fb.scissor = Some(match prev_scissor {
+                Some(outer) => Self::rect_intersection(outer, clip),
+                None => clip,
+            });
+        }
+
         // pat-u3l8c.45: precompute this item's canvas_item fragment shader (if
         // any) once per item. `uniforms` merges the shader's declared defaults
         // with the material's runtime parameter overrides. Textured draws below
@@ -502,6 +558,22 @@ impl SoftwareRenderer {
                 }
             }
         }
+
+        fb.scissor = prev_scissor;
+    }
+
+    /// The overlap of two rects, or an empty rect at `a`'s origin when they do
+    /// not overlap — a nested clip can only ever shrink the visible area, never
+    /// reveal what an ancestor already cut off (pat-0q2kx.86).
+    fn rect_intersection(a: Rect2, b: Rect2) -> Rect2 {
+        let x0 = a.position.x.max(b.position.x);
+        let y0 = a.position.y.max(b.position.y);
+        let x1 = (a.position.x + a.size.x).min(b.position.x + b.size.x);
+        let y1 = (a.position.y + a.size.y).min(b.position.y + b.size.y);
+        Rect2::new(
+            Vector2::new(x0, y0),
+            Vector2::new((x1 - x0).max(0.0), (y1 - y0).max(0.0)),
+        )
     }
 
     /// Returns `true` when the transform has no rotation or skew (basis is

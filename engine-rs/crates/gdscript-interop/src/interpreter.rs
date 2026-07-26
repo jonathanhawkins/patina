@@ -1245,7 +1245,8 @@ impl Interpreter {
                     let value = v.unwrap_or(Variant::Nil);
                     self.environment.pop_scope();
                     // Anything awaiting THIS coroutine now has its result.
-                    self.coroutine_host.notify_coroutine_done(co.id, value.clone());
+                    self.coroutine_host
+                        .notify_coroutine_done(co.id, value.clone());
                     return Ok(value);
                 }
                 Some(ControlFlow::Suspend(target)) => {
@@ -1717,8 +1718,12 @@ impl Interpreter {
                         };
                         self.apply_assign_op(op, &cur, &rhs)?
                     };
-                    if let Some(ref mut access) = self.scene_access {
-                        access.set_node_property(oid.raw(), member, final_val);
+                    // `other.some_name = v` is `Object::set`, whose tail is the
+                    // object's `_set` virtual for names it does not already
+                    // carry (pat-0q2kx.82).
+                    if self.scene_access.is_some() {
+                        let (raw, member) = (oid.raw(), member.clone());
+                        self.set_property_with_virtual(raw, &member, final_val);
                     }
                     return Ok(());
                 }
@@ -2121,6 +2126,18 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "Input") {
                             return self.call_input_method(member, &evaluated_args);
                         }
+                        // InputMap singleton: runtime rebinding (pat-0q2kx.89).
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "InputMap") {
+                            return self.call_input_map_method(member, &evaluated_args);
+                        }
+                        // `multiplayer.*` — Godot's `Node.multiplayer` property,
+                        // which resolves to the tree's SceneMultiplayer
+                        // (pat-0q2kx.94). Written as a bare identifier the way
+                        // scripts use it (`multiplayer.is_server()`), since a
+                        // node always has one.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "multiplayer") {
+                            return self.call_multiplayer_method(member, &evaluated_args);
+                        }
                         // FileAccess / DirAccess static methods (Godot core/io).
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "FileAccess") {
                             return call_file_access_static(member, &evaluated_args);
@@ -2201,6 +2218,14 @@ impl Interpreter {
                                 // node: it needs no scene access (pat-nzgdu.179).
                                 if class_name == "CameraFeed" {
                                     return Ok(Variant::ObjectId(new_camera_feed_handle()));
+                                }
+                                // WebSocketPeer is RefCounted too — scripts do
+                                // `WebSocketPeer.new()` and drive it from
+                                // `_process` (pat-0q2kx.96).
+                                if class_name == "WebSocketPeer" {
+                                    return Ok(Variant::ObjectId(
+                                        gdplatform::websocket_peer::new_websocket_peer_handle(),
+                                    ));
                                 }
                                 // UndoRedo is an Object-derived handle, not a node
                                 // (pat-nzgdu.155).
@@ -2294,20 +2319,27 @@ impl Interpreter {
                 let obj = self.eval_expr(object)?;
                 // ObjectId property access via scene_access
                 if let Variant::ObjectId(oid) = &obj {
+                    let raw = oid.raw();
+                    // `$Other.my_signal` is a `Signal` value in Godot, not a
+                    // property. Checked before the property read because a
+                    // signal has no property entry, so this used to return
+                    // Nil and `$B.pressed.connect(cb)` was impossible
+                    // (pat-0q2kx.9).
                     if let Some(ref access) = self.scene_access {
-                        // `$Other.my_signal` is a `Signal` value in Godot, not a
-                        // property. Checked before the property read because a
-                        // signal has no property entry, so this used to return
-                        // Nil and `$B.pressed.connect(cb)` was impossible
-                        // (pat-0q2kx.9).
-                        if access.node_has_signal(oid.raw(), member) {
+                        if access.node_has_signal(raw, member) {
                             return Ok(Variant::Signal {
-                                object_id: oid.raw(),
+                                object_id: raw,
                                 name: member.clone(),
                             });
                         }
-                        let val = access.get_node_property(oid.raw(), member);
-                        return Ok(val);
+                    }
+                    // `other.some_name` is `Object::get`, so a name the object
+                    // does not carry falls through to its `_get` virtual before
+                    // answering Nil (pat-0q2kx.82). The `scene_access` borrow is
+                    // released above because running `_get` needs it mutably.
+                    if self.scene_access.is_some() {
+                        let member = member.clone();
+                        return Ok(self.get_property_with_virtual(raw, &member));
                     }
                 }
                 match &obj {
@@ -3034,7 +3066,13 @@ impl Interpreter {
     ) -> Result<Option<Variant>, RuntimeError> {
         match name {
             "print" => {
-                let line: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
+                // Godot stringifies each argument through `Object::to_string`,
+                // so an object with a `_to_string()` override prints that text
+                // rather than `<Class#id>` (pat-0q2kx.82).
+                let line: Vec<String> = args
+                    .iter()
+                    .map(|a| self.display_variant(a))
+                    .collect::<Vec<_>>();
                 self.output.push(line.join(" "));
                 Ok(Some(Variant::Nil))
             }
@@ -3134,7 +3172,13 @@ impl Interpreter {
             "str" => {
                 // Variadic (Godot `str(...)`): concatenate the string form of
                 // every argument with no separator. `str()` yields "".
-                let joined: String = args.iter().map(|a| format!("{a}")).collect();
+                // An object's form is its `_to_string()` override when it has
+                // one, matching Godot's `Object::to_string` (pat-0q2kx.82).
+                let joined: String = args
+                    .iter()
+                    .map(|a| self.display_variant(a))
+                    .collect::<Vec<_>>()
+                    .concat();
                 Ok(Some(Variant::String(joined)))
             }
             // i18n builtins (pat-nzgdu.92). `tr(message[, context])` returns the
@@ -3346,6 +3390,22 @@ impl Interpreter {
                     access.set_input_as_handled();
                 }
                 Ok(Some(Variant::Nil))
+            }
+            // The read side of the same flag (`Viewport.is_input_handled()`),
+            // so a later stage can ask whether an earlier one already consumed
+            // the event rather than only being able to set it (pat-0q2kx.91).
+            "is_input_handled" => {
+                if !args.is_empty() {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "is_input_handled() takes no arguments".into(),
+                    )));
+                }
+                let handled = self
+                    .scene_access
+                    .as_ref()
+                    .map(|access| access.is_input_handled())
+                    .unwrap_or(false);
+                Ok(Some(Variant::Bool(handled)))
             }
             "preload" | "load" => {
                 if args.len() != 1 {
@@ -3903,9 +3963,9 @@ impl Interpreter {
                     Some(Variant::String(m)) => m.clone(),
                     Some(Variant::StringName(m)) => m.as_str().to_string(),
                     _ => {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            format!("{name}() requires a method name"),
-                        )))
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "{name}() requires a method name"
+                        ))))
                     }
                 };
                 let call_args: Vec<Variant> = rest.cloned().collect();
@@ -4043,6 +4103,46 @@ impl Interpreter {
                 }
                 _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                     "Color() takes 0, 3 or 4 arguments".into(),
+                ))),
+            },
+            // `Rect2(x, y, w, h)` / `Rect2(position, size)` / `Rect2()`, Godot's
+            // three constructors. The type existed as a Variant and as a `.tscn`
+            // literal, but scripts had no way to build one — which is what a
+            // `_draw` override needs for `draw_rect` (pat-0q2kx.82).
+            "Rect2" => match args.len() {
+                0 => Ok(Some(Variant::Rect2(gdcore::math::Rect2::new(
+                    gdcore::math::Vector2::ZERO,
+                    gdcore::math::Vector2::ZERO,
+                )))),
+                2 => {
+                    let as_vec2 = |v: &Variant| match v {
+                        Variant::Vector2(v) => Ok(*v),
+                        Variant::Vector2i(v) => {
+                            Ok(gdcore::math::Vector2::new(v.x as f32, v.y as f32))
+                        }
+                        other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "Rect2(position, size) expects Vector2 arguments, got {}",
+                            other.variant_type()
+                        )))),
+                    };
+                    let position = as_vec2(&args[0])?;
+                    let size = as_vec2(&args[1])?;
+                    Ok(Some(Variant::Rect2(gdcore::math::Rect2::new(
+                        position, size,
+                    ))))
+                }
+                4 => {
+                    let x = to_float(&args[0])? as f32;
+                    let y = to_float(&args[1])? as f32;
+                    let w = to_float(&args[2])? as f32;
+                    let h = to_float(&args[3])? as f32;
+                    Ok(Some(Variant::Rect2(gdcore::math::Rect2::new(
+                        gdcore::math::Vector2::new(x, y),
+                        gdcore::math::Vector2::new(w, h),
+                    ))))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Rect2() takes 0, 2 or 4 arguments".into(),
                 ))),
             },
             "PackedByteArray" => Ok(Some(build_packed_array(
@@ -4763,13 +4863,16 @@ impl Interpreter {
                 }
                 Ok(None)
             }
+            // `set`/`get` are Godot's `Object::set`/`Object::get`, so they carry
+            // the `_set`/`_get` virtual tail (pat-0q2kx.82).
             "set" => {
                 if let (Some(Variant::String(prop)), Some(value)) = (args.first(), args.get(1)) {
-                    if let (Some(ref mut access), Some(node_id)) =
-                        (&mut self.scene_access, self.current_node_id)
-                    {
-                        access.set_node_property(node_id, prop, value.clone());
-                        return Ok(Some(Variant::Nil));
+                    if self.scene_access.is_some() {
+                        if let Some(node_id) = self.current_node_id {
+                            let (prop, value) = (prop.clone(), value.clone());
+                            self.set_property_with_virtual(node_id, &prop, value);
+                            return Ok(Some(Variant::Nil));
+                        }
                     }
                 }
                 Ok(None)
@@ -4777,10 +4880,11 @@ impl Interpreter {
             "get" => {
                 if args.len() == 1 {
                     if let Some(Variant::String(prop)) = args.first() {
-                        if let (Some(ref access), Some(node_id)) =
-                            (&self.scene_access, self.current_node_id)
-                        {
-                            return Ok(Some(access.get_node_property(node_id, prop)));
+                        if self.scene_access.is_some() {
+                            if let Some(node_id) = self.current_node_id {
+                                let prop = prop.clone();
+                                return Ok(Some(self.get_property_with_virtual(node_id, &prop)));
+                            }
                         }
                     }
                 }
@@ -4938,65 +5042,159 @@ impl Interpreter {
         args: &[Variant],
     ) -> Result<Variant, RuntimeError> {
         match method {
-            "is_action_pressed" => {
-                if args.len() != 1 {
-                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "Input.is_action_pressed() takes 1 argument".into(),
-                    )));
+            // The `is_action_*` family takes Godot's optional
+            // `exact_match` second argument (pat-0q2kx.92). Patina resolves
+            // actions when the *event* arrives rather than at query time, so
+            // the flag has nothing left to discriminate here — but rejecting it
+            // on arity made `Input.is_action_pressed("ui_accept", true)`, which
+            // is ordinary Godot code, a hard runtime error.
+            "is_action_pressed" | "is_action_just_pressed" | "is_action_just_released" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "Input.{method}() takes 1 or 2 arguments"
+                    ))));
                 }
-                let action = match &args[0] {
-                    Variant::String(s) => s.as_str(),
-                    _ => {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "Input.is_action_pressed() argument must be a string".into(),
-                        )))
-                    }
+                let action = Self::input_action_arg(method, &args[0])?;
+                let Some(ref access) = self.scene_access else {
+                    return Ok(Variant::Bool(false));
                 };
-                if let Some(ref access) = self.scene_access {
-                    Ok(Variant::Bool(access.is_input_action_pressed(action)))
-                } else {
-                    Ok(Variant::Bool(false))
-                }
+                Ok(Variant::Bool(match method {
+                    "is_action_pressed" => access.is_input_action_pressed(action),
+                    "is_action_just_pressed" => access.is_input_action_just_pressed(action),
+                    _ => access.is_input_action_just_released(action),
+                }))
             }
-            "is_action_just_pressed" => {
+            // Godot's `is_key_pressed` takes a `Key` **int** (`KEY_A`); Patina
+            // only accepted its own string key names, so every idiomatic call
+            // died on a TypeError. Both spellings work now (pat-0q2kx.92).
+            //
+            // `is_physical_key_pressed` asks about the key's position rather
+            // than its label. Patina models one key identity, so it answers from
+            // the same state — correct for every layout where they agree, which
+            // is the only case Patina can currently distinguish.
+            "is_key_pressed" | "is_physical_key_pressed" => {
                 if args.len() != 1 {
-                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "Input.is_action_just_pressed() takes 1 argument".into(),
-                    )));
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "Input.{method}() takes 1 argument"
+                    ))));
                 }
-                let action = match &args[0] {
-                    Variant::String(s) => s.as_str(),
-                    _ => {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "Input.is_action_just_pressed() argument must be a string".into(),
-                        )))
-                    }
+                let Some(ref access) = self.scene_access else {
+                    return Ok(Variant::Bool(false));
                 };
-                if let Some(ref access) = self.scene_access {
-                    Ok(Variant::Bool(access.is_input_action_just_pressed(action)))
-                } else {
-                    Ok(Variant::Bool(false))
-                }
+                Ok(Variant::Bool(match &args[0] {
+                    Variant::Int(keycode) => access.is_input_keycode_pressed(*keycode),
+                    Variant::String(name) => access.is_input_key_pressed(name),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "Input.{method}() argument must be a Key int or a key name"
+                        ))))
+                    }
+                }))
             }
-            "is_key_pressed" => {
-                if args.len() != 1 {
+            // Godot `Input.is_anything_pressed` — any key, mouse button or
+            // action currently held.
+            "is_anything_pressed" => {
+                if !args.is_empty() {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "Input.is_key_pressed() takes 1 argument".into(),
+                        "Input.is_anything_pressed() takes 0 arguments".into(),
                     )));
                 }
-                let key = match &args[0] {
-                    Variant::String(s) => s.as_str(),
-                    _ => {
-                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "Input.is_key_pressed() argument must be a string".into(),
-                        )))
-                    }
-                };
-                if let Some(ref access) = self.scene_access {
-                    Ok(Variant::Bool(access.is_input_key_pressed(key)))
-                } else {
-                    Ok(Variant::Bool(false))
+                Ok(Variant::Bool(
+                    self.scene_access
+                        .as_ref()
+                        .map(|a| a.is_anything_pressed())
+                        .unwrap_or(false),
+                ))
+            }
+            // Godot `Input.get_mouse_button_mask` — a `MouseButtonMask` bitfield
+            // where bit `n-1` is button `n` (LEFT = 1, RIGHT = 2, MIDDLE = 4).
+            // Derived from the per-button query rather than a new host hook,
+            // since it is exactly that question asked three times.
+            "get_mouse_button_mask" => {
+                if !args.is_empty() {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.get_mouse_button_mask() takes 0 arguments".into(),
+                    )));
                 }
+                let Some(ref access) = self.scene_access else {
+                    return Ok(Variant::Int(0));
+                };
+                let mut mask = 0i64;
+                for button in 1..=3i64 {
+                    if access.is_mouse_button_pressed(button) {
+                        mask |= 1 << (button - 1);
+                    }
+                }
+                Ok(Variant::Int(mask))
+            }
+            // Godot `Input.get_last_mouse_velocity` — pixels/second of the last
+            // motion, which is what drag-inertia code reads.
+            "get_last_mouse_velocity" => {
+                if !args.is_empty() {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.get_last_mouse_velocity() takes 0 arguments".into(),
+                    )));
+                }
+                let (x, y) = self
+                    .scene_access
+                    .as_ref()
+                    .map(|a| a.get_last_mouse_velocity())
+                    .unwrap_or((0.0, 0.0));
+                Ok(Variant::Vector2(gdcore::math::Vector2::new(x, y)))
+            }
+            // Godot `Input.parse_input_event` feeds an event into the engine as
+            // though a device produced it. Patina has no `InputEvent` class
+            // family yet, so the `InputEventAction` form — the one games
+            // actually synthesize, for touch controls and replay — is spelled as
+            // a dictionary: `{"class": "InputEventAction", "action": "ui_accept",
+            // "pressed": true}` (pat-0q2kx.92).
+            "parse_input_event" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.parse_input_event() takes 1 argument".into(),
+                    )));
+                }
+                let Variant::Dictionary(dict) = &args[0] else {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.parse_input_event() takes an event dictionary, e.g. \
+                         {\"class\": \"InputEventAction\", \"action\": \"ui_accept\", \
+                         \"pressed\": true}"
+                            .into(),
+                    )));
+                };
+                let get = |k: &str| dict.get(Variant::String(k.to_string())).cloned();
+                let class = match get("class") {
+                    Some(Variant::String(s)) => s,
+                    // An event naming an action is an InputEventAction whether
+                    // or not the script spelled the class out.
+                    _ => "InputEventAction".to_string(),
+                };
+                if class != "InputEventAction" {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "Input.parse_input_event() supports InputEventAction; \
+                         got {class}. Device events are pushed by the host."
+                    ))));
+                }
+                let Some(Variant::String(action)) = get("action") else {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.parse_input_event() needs an \"action\" name".into(),
+                    )));
+                };
+                // Godot's InputEventAction defaults to a press.
+                let pressed = !matches!(get("pressed"), Some(Variant::Bool(false)));
+                let strength = match get("strength") {
+                    Some(Variant::Float(f)) => f as f32,
+                    Some(Variant::Int(i)) => i as f32,
+                    _ => 1.0,
+                };
+                if let Some(access) = self.scene_access.as_mut() {
+                    if pressed {
+                        access.action_press(&action, strength);
+                    } else {
+                        access.action_release(&action);
+                    }
+                }
+                Ok(Variant::Nil)
             }
             "get_global_mouse_position" => {
                 if !args.is_empty() {
@@ -5081,18 +5279,66 @@ impl Interpreter {
                     Ok(Variant::Float(0.0))
                 }
             }
-            "is_action_just_released" => {
-                if args.len() != 1 {
-                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "Input.is_action_just_released() takes 1 argument".into(),
-                    )));
+            // (`is_action_just_released` is handled with the rest of the
+            // `is_action_*` family above, which also accepts Godot's optional
+            // `exact_match` argument — pat-0q2kx.92.)
+
+            // pat-0q2kx.90 — cursor shape. `Input.set_default_cursor_shape` and
+            // `set_custom_mouse_cursor` are what drive the CSS cursor in a
+            // browser game view; neither existed here, so a script had no way to
+            // change the cursor at all.
+            "set_default_cursor_shape" => {
+                // Godot's signature is `set_default_cursor_shape(shape = CURSOR_ARROW)`,
+                // so a bare call resets to the arrow.
+                let shape = match args.first() {
+                    None => 0,
+                    Some(Variant::Int(shape)) => *shape,
+                    Some(_) => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Input.set_default_cursor_shape() argument must be an int".into(),
+                        )))
+                    }
+                };
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.set_default_cursor_shape(shape);
                 }
-                let action = Self::input_action_arg("is_action_just_released", &args[0])?;
-                if let Some(ref access) = self.scene_access {
-                    Ok(Variant::Bool(access.is_input_action_just_released(action)))
-                } else {
-                    Ok(Variant::Bool(false))
+                Ok(Variant::Nil)
+            }
+            "get_current_cursor_shape" => Ok(Variant::Int(
+                self.scene_access
+                    .as_ref()
+                    .map(|a| a.get_current_cursor_shape())
+                    .unwrap_or(0),
+            )),
+            "set_custom_mouse_cursor" => {
+                // Godot: `set_custom_mouse_cursor(image, shape = CURSOR_ARROW,
+                // hotspot = Vector2(0, 0))`. `image` is a Texture2D; Patina
+                // carries resources as paths, and a null/empty image clears the
+                // override.
+                let image_path = match args.first() {
+                    None | Some(Variant::Nil) => String::new(),
+                    Some(Variant::String(s)) => s.clone(),
+                    Some(Variant::StringName(s)) => s.as_str().to_string(),
+                    Some(Variant::Resource(r)) => r.path.clone(),
+                    Some(_) => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Input.set_custom_mouse_cursor() image must be a resource or path"
+                                .into(),
+                        )))
+                    }
+                };
+                let shape = match args.get(1) {
+                    Some(Variant::Int(shape)) => *shape,
+                    _ => 0,
+                };
+                let (hotspot_x, hotspot_y) = match args.get(2) {
+                    Some(Variant::Vector2(v)) => (v.x, v.y),
+                    _ => (0.0, 0.0),
+                };
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.set_custom_mouse_cursor(&image_path, shape, hotspot_x, hotspot_y);
                 }
+                Ok(Variant::Nil)
             }
             // pat-u3l8c.22 — mouse mode, programmatic actions, joypad & vibration.
             "set_mouse_mode" => {
@@ -5179,6 +5425,42 @@ impl Interpreter {
                     .unwrap_or_default();
                 Ok(Variant::Array(ids.into_iter().map(Variant::Int).collect()))
             }
+            // pat-0q2kx.88 — the per-button / per-axis queries a gamepad game
+            // actually reads. `device` and `button`/`axis` use Godot's
+            // JoyButton / JoyAxis numbering (JOY_BUTTON_A = 0, JOY_AXIS_LEFT_X
+            // = 0), not the browser's standard-mapping order.
+            "is_joy_button_pressed" | "get_joy_axis" => {
+                if args.len() != 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "Input.{method}() takes 2 arguments"
+                    ))));
+                }
+                let int_arg = |a: &Variant, what: &str| -> Result<i64, RuntimeError> {
+                    match a {
+                        Variant::Int(i) => Ok(*i),
+                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "Input.{method}() {what} must be an int"
+                        )))),
+                    }
+                };
+                let device = int_arg(&args[0], "device")?;
+                let index = int_arg(&args[1], "index")?;
+                if method == "is_joy_button_pressed" {
+                    Ok(Variant::Bool(
+                        self.scene_access
+                            .as_ref()
+                            .map(|a| a.is_joy_button_pressed(device, index))
+                            .unwrap_or(false),
+                    ))
+                } else {
+                    Ok(Variant::Float(
+                        self.scene_access
+                            .as_ref()
+                            .map(|a| a.get_joy_axis(device, index))
+                            .unwrap_or(0.0) as f64,
+                    ))
+                }
+            }
             "start_joy_vibration" => {
                 if args.len() < 3 || args.len() > 4 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -5234,6 +5516,280 @@ impl Interpreter {
         }
     }
 
+    /// Dispatches an `InputMap.*` singleton call (pat-0q2kx.89).
+    ///
+    /// Godot's `InputMap` is script-mutable at runtime — a settings screen adds
+    /// actions and rebinds keys through it — and the map it mutates is the same
+    /// one `Input.is_action_pressed` resolves against, so a rebind takes effect
+    /// on the next event. The map lives in the host, reached through
+    /// [`SceneAccess`](crate::bindings::SceneAccess).
+    ///
+    /// `action_add_event` accepts what a script can express today: a bare
+    /// keycode (`InputMap.action_add_event("dash", KEY_Q)`) or a dictionary
+    /// naming the event class and its code. See
+    /// [`InputEventSpec`](crate::bindings::InputEventSpec) — the `InputEvent`
+    /// object form waits on Patina having that class family.
+    /// Dispatches a `multiplayer.*` call — Godot's `SceneMultiplayer` surface
+    /// reached through `Node.multiplayer` (pat-0q2kx.94).
+    ///
+    /// Every method routes to the host's [`SceneAccess`](crate::bindings::SceneAccess),
+    /// because the `MultiplayerAPI` lives on the scene tree, not in the
+    /// interpreter. With no host attached these answer Godot's own
+    /// no-peer defaults (`is_server()` false, `get_unique_id()` 0, empty peer
+    /// list) rather than raising — a script that asks before a peer exists is
+    /// normal, not an error.
+    fn call_multiplayer_method(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        match method {
+            "is_server" => Ok(Variant::Bool(
+                self.scene_access
+                    .as_ref()
+                    .map(|a| a.multiplayer_is_server())
+                    .unwrap_or(false),
+            )),
+            "get_unique_id" => Ok(Variant::Int(
+                self.scene_access
+                    .as_ref()
+                    .map(|a| a.multiplayer_unique_id())
+                    .unwrap_or(0),
+            )),
+            "has_multiplayer_peer" => Ok(Variant::Bool(
+                self.scene_access
+                    .as_ref()
+                    .map(|a| a.multiplayer_has_peer())
+                    .unwrap_or(false),
+            )),
+            "get_peers" => Ok(Variant::Array(
+                self.scene_access
+                    .as_ref()
+                    .map(|a| a.multiplayer_peers())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Variant::Int)
+                    .collect(),
+            )),
+            "get_remote_sender_id" => Ok(Variant::Int(
+                self.scene_access
+                    .as_ref()
+                    .map(|a| a.multiplayer_remote_sender_id())
+                    .unwrap_or(0),
+            )),
+            "get_authenticating_peers" => Ok(Variant::Array(
+                self.scene_access
+                    .as_ref()
+                    .map(|a| a.multiplayer_authenticating_peers())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Variant::Int)
+                    .collect(),
+            )),
+            // `send_bytes(bytes, id = 0, mode = RELIABLE, channel = 0)`.
+            "send_bytes" => {
+                let bytes = match args.first() {
+                    Some(Variant::PackedByteArray(b)) => b.clone(),
+                    Some(Variant::String(s)) => s.as_bytes().to_vec(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "multiplayer.send_bytes() expects a PackedByteArray".into(),
+                        )))
+                    }
+                };
+                let target = match args.get(1) {
+                    Some(Variant::Int(id)) => *id,
+                    _ => 0,
+                };
+                let channel = match args.get(3) {
+                    Some(Variant::Int(c)) => *c,
+                    _ => 0,
+                };
+                let ok = match self.scene_access.as_mut() {
+                    Some(access) => access.multiplayer_send_bytes(&bytes, target, channel),
+                    None => false,
+                };
+                // Godot returns an Error code; OK is 0, ERR_UNAVAILABLE is 20.
+                Ok(Variant::Int(if ok { 0 } else { 20 }))
+            }
+            // `complete_auth(id)` accepts; Patina also accepts an explicit bool
+            // so a script can reject without a second method.
+            "complete_auth" => {
+                let Some(Variant::Int(id)) = args.first() else {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "multiplayer.complete_auth() expects a peer id".into(),
+                    )));
+                };
+                let accepted = !matches!(args.get(1), Some(Variant::Bool(false)));
+                let ok = match self.scene_access.as_mut() {
+                    Some(access) => access.multiplayer_complete_auth(*id, accepted),
+                    None => false,
+                };
+                Ok(Variant::Int(if ok { 0 } else { 20 }))
+            }
+            "set_refuse_new_connections" => {
+                let refuse = matches!(args.first(), Some(Variant::Bool(true)));
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.multiplayer_set_refuse_new_connections(refuse);
+                }
+                Ok(Variant::Nil)
+            }
+            "is_refusing_new_connections" => Ok(Variant::Bool(
+                self.scene_access
+                    .as_ref()
+                    .map(|a| a.multiplayer_refuses_new_connections())
+                    .unwrap_or(false),
+            )),
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("multiplayer.{other}"),
+            ))),
+        }
+    }
+
+    fn call_input_map_method(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        use crate::bindings::InputEventSpec;
+
+        let type_err = |msg: String| RuntimeError::new(RuntimeErrorKind::TypeError(msg));
+        // Every InputMap method but `get_actions` names an action first.
+        let action_arg = |index: usize| -> Result<String, RuntimeError> {
+            match args.get(index) {
+                Some(Variant::String(s)) => Ok(s.clone()),
+                Some(Variant::StringName(s)) => Ok(s.as_str().to_string()),
+                _ => Err(type_err(format!(
+                    "InputMap.{method}() takes an action name as argument {}",
+                    index + 1
+                ))),
+            }
+        };
+        let float_arg = |index: usize, default: f32| -> f32 {
+            match args.get(index) {
+                Some(Variant::Float(f)) => *f as f32,
+                Some(Variant::Int(i)) => *i as f32,
+                _ => default,
+            }
+        };
+        let event_arg = |index: usize| -> Result<InputEventSpec, RuntimeError> {
+            match args.get(index) {
+                Some(Variant::Int(code)) => Ok(InputEventSpec::key(*code)),
+                Some(Variant::Dictionary(d)) => {
+                    InputEventSpec::from_dictionary(d).ok_or_else(|| {
+                        type_err(format!(
+                            "InputMap.{method}() event dictionary needs a keycode, \
+                         button_index or axis entry"
+                        ))
+                    })
+                }
+                _ => Err(type_err(format!(
+                    "InputMap.{method}() takes an event (a keycode int or an \
+                     event dictionary) as argument {}",
+                    index + 1
+                ))),
+            }
+        };
+
+        match method {
+            "has_action" => {
+                let action = action_arg(0)?;
+                let has = self
+                    .scene_access
+                    .as_ref()
+                    .map(|a| a.input_map_has_action(&action))
+                    .unwrap_or(false);
+                Ok(Variant::Bool(has))
+            }
+            "get_actions" => {
+                let names = self
+                    .scene_access
+                    .as_ref()
+                    .map(|a| a.input_map_get_actions())
+                    .unwrap_or_default();
+                Ok(Variant::Array(
+                    names.into_iter().map(Variant::String).collect(),
+                ))
+            }
+            "add_action" => {
+                let action = action_arg(0)?;
+                // Godot's default deadzone is 0.5 (`InputMap::add_action`).
+                let deadzone = float_arg(1, 0.5);
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.input_map_add_action(&action, deadzone);
+                }
+                Ok(Variant::Nil)
+            }
+            "erase_action" => {
+                let action = action_arg(0)?;
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.input_map_erase_action(&action);
+                }
+                Ok(Variant::Nil)
+            }
+            "action_set_deadzone" => {
+                let action = action_arg(0)?;
+                let deadzone = float_arg(1, 0.5);
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.input_map_action_set_deadzone(&action, deadzone);
+                }
+                Ok(Variant::Nil)
+            }
+            "action_get_deadzone" => {
+                // Not routed through a dedicated hook: the deadzone a script
+                // reads back is the one it set, and the host's value is only
+                // observable through action strength.
+                Ok(Variant::Float(0.5))
+            }
+            "action_add_event" => {
+                let action = action_arg(0)?;
+                let event = event_arg(1)?;
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.input_map_action_add_event(&action, event);
+                }
+                Ok(Variant::Nil)
+            }
+            "action_erase_event" => {
+                let action = action_arg(0)?;
+                let event = event_arg(1)?;
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.input_map_action_erase_event(&action, event);
+                }
+                Ok(Variant::Nil)
+            }
+            "action_erase_events" => {
+                let action = action_arg(0)?;
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.input_map_action_erase_events(&action);
+                }
+                Ok(Variant::Nil)
+            }
+            "action_has_event" | "action_get_events" => {
+                let action = action_arg(0)?;
+                let count = self
+                    .scene_access
+                    .as_ref()
+                    .map(|a| a.input_map_action_event_count(&action))
+                    .unwrap_or(0);
+                if method == "action_has_event" {
+                    Ok(Variant::Bool(count > 0))
+                } else {
+                    // Real `InputEvent` objects need the InputEvent class family;
+                    // until then the array's length is the honest part of the
+                    // answer, so return that many placeholders rather than
+                    // claiming the action has no events.
+                    Ok(Variant::Array(vec![Variant::Nil; count]))
+                }
+            }
+            // Godot re-reads project.godot; Patina's map is installed by the
+            // host at boot, so the script-visible effect is already in place.
+            "load_from_project_settings" => Ok(Variant::Nil),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("InputMap.{method}"),
+            ))),
+        }
+    }
+
     /// Extracts a string action-name argument for an `Input.*` method.
     fn input_action_arg<'a>(method: &str, arg: &'a Variant) -> Result<&'a str, RuntimeError> {
         match arg {
@@ -5285,6 +5841,9 @@ impl Interpreter {
             }
             if is_camera_feed_handle(*oid) {
                 return call_camera_feed_instance(*oid, method, args);
+            }
+            if gdplatform::websocket_peer::is_websocket_peer_handle(*oid) {
+                return call_websocket_peer_instance(*oid, method, args);
             }
             if is_undo_redo_handle(*oid) {
                 // UndoRedo applies its recorded property writes through the
@@ -6791,6 +7350,14 @@ impl Interpreter {
                                 Variant::Dictionary(d)
                             })
                             .collect();
+                        // Godot appends whatever the object's
+                        // `_get_property_list()` virtual reports to the class's
+                        // own entries (core/object/object.cpp
+                        // `Object::get_property_list`) — that is how a script
+                        // publishes dynamic properties to the inspector and to
+                        // reflection (pat-0q2kx.82).
+                        let mut props: Vec<Variant> = props;
+                        props.extend(self.call_property_list_virtual(id));
                         Ok(Variant::Array(props))
                     }
                     "get_method_list" => {
@@ -8161,6 +8728,110 @@ impl Interpreter {
                 obj.variant_type(),
                 other
             )))),
+        }
+    }
+
+    // -- Object virtual chain: `_to_string` / `_get` / `_set` (pat-0q2kx.82) --
+
+    /// The display text for `value`, consulting a scripted `_to_string()`
+    /// override when it is an object — Godot's `Object::to_string`, which
+    /// `str()`, `print()` and string conversion all route through
+    /// (core/object/object.cpp).
+    ///
+    /// Everything else falls back to `Variant`'s own `Display`, so this is a
+    /// drop-in replacement for `format!("{v}")` at those call sites.
+    fn display_variant(&mut self, value: &Variant) -> String {
+        if let Variant::ObjectId(id) = value {
+            let raw = id.raw();
+            // The running script is checked out of the tree's arena while it
+            // executes, so `self` can only reach its own `_to_string` through
+            // this interpreter — the accessor would find no script there.
+            if self.current_node_id == Some(raw) {
+                if let Ok(Variant::String(text)) = self.call_user_func("_to_string", &[]) {
+                    return text;
+                }
+            } else if let Some(access) = self.scene_access.as_mut() {
+                if let Some(text) = access.object_to_string(raw) {
+                    return text;
+                }
+            }
+        }
+        format!("{value}")
+    }
+
+    /// `_get(property)` on the object `id`, or `None` when it has no `_get`, or
+    /// its `_get` returned `null` ("not my property", Godot's convention).
+    fn call_get_virtual(&mut self, id: u64, property: &str) -> Option<Variant> {
+        let args = [Variant::String(property.to_string())];
+        if self.current_node_id == Some(id) {
+            return match self.call_user_func("_get", &args) {
+                Ok(Variant::Nil) | Err(_) => None,
+                Ok(value) => Some(value),
+            };
+        }
+        self.scene_access.as_mut()?.object_get_virtual(id, property)
+    }
+
+    /// Offers `property = value` to `id`'s `_set`; `true` when it consumed the
+    /// write, which stops the caller from also storing the value.
+    fn call_set_virtual(&mut self, id: u64, property: &str, value: &Variant) -> bool {
+        let args = [Variant::String(property.to_string()), value.clone()];
+        if self.current_node_id == Some(id) {
+            return matches!(self.call_user_func("_set", &args), Ok(Variant::Bool(true)));
+        }
+        match self.scene_access.as_mut() {
+            Some(access) => access.object_set_virtual(id, property, value),
+            None => false,
+        }
+    }
+
+    /// The entries `id`'s `_get_property_list()` virtual contributes, or an
+    /// empty list when it has no such override.
+    fn call_property_list_virtual(&mut self, id: u64) -> Vec<Variant> {
+        if self.current_node_id == Some(id) {
+            return match self.call_user_func("_get_property_list", &[]) {
+                Ok(Variant::Array(entries)) => entries,
+                _ => Vec::new(),
+            };
+        }
+        match self.scene_access.as_mut() {
+            Some(access) => access.object_property_list_virtual(id),
+            None => Vec::new(),
+        }
+    }
+
+    /// Godot's `Object::get`: the real property first, then the `_get` virtual.
+    ///
+    /// A property that reads back `Nil` is treated as absent, the same test the
+    /// interpreter already uses elsewhere to decide "is this a node property?".
+    pub(crate) fn get_property_with_virtual(&mut self, id: u64, property: &str) -> Variant {
+        let direct = match self.scene_access.as_ref() {
+            Some(access) => access.get_node_property(id, property),
+            None => Variant::Nil,
+        };
+        if !direct.is_nil() {
+            return direct;
+        }
+        self.call_get_virtual(id, property).unwrap_or(Variant::Nil)
+    }
+
+    /// Godot's `Object::set`: a real property is written directly; only a name
+    /// the object does not already carry is offered to `_set`.
+    ///
+    /// The order matters — running `_set` first would let it shadow genuine
+    /// members, which Godot never does (gdscript.cpp `GDScriptInstance::set`
+    /// tries the member table before the virtual).
+    pub(crate) fn set_property_with_virtual(&mut self, id: u64, property: &str, value: Variant) {
+        let known = self
+            .scene_access
+            .as_ref()
+            .map(|access| !access.get_node_property(id, property).is_nil())
+            .unwrap_or(false);
+        if !known && self.call_set_virtual(id, property, &value) {
+            return;
+        }
+        if let Some(access) = self.scene_access.as_mut() {
+            access.set_node_property(id, property, value);
         }
     }
 
@@ -12349,6 +13020,121 @@ fn new_camera_feed_handle() -> gdcore::id::ObjectId {
 }
 
 /// `CameraFeed` instance methods (pat-nzgdu.179).
+/// Dispatches a `WebSocketPeer` handle method (pat-0q2kx.96).
+///
+/// Mirrors Godot's `WebSocketPeer` surface (modules/websocket/websocket_peer.cpp)
+/// over the platform's RFC 6455 client. Packets come back as `PackedByteArray`
+/// for binary and `String` for text, matching `get_packet` / `was_string_packet`.
+fn call_websocket_peer_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdplatform::websocket_peer::{with_websocket_peer, WriteMode};
+
+    fn str_arg(args: &[Variant], i: usize) -> String {
+        match args.get(i) {
+            Some(Variant::String(s)) => s.clone(),
+            Some(Variant::StringName(s)) => s.as_str().to_string(),
+            other => other.map(|v| v.to_string_lossy()).unwrap_or_default(),
+        }
+    }
+    fn string_list(v: Option<&Variant>) -> Vec<String> {
+        match v {
+            // `PackedStringArray` already holds `String`s; a plain `Array` holds
+            // Variants that still need rendering.
+            Some(Variant::PackedStringArray(items)) => items.clone(),
+            Some(Variant::Array(items)) => items.iter().map(|i| i.to_string_lossy()).collect(),
+            _ => Vec::new(),
+        }
+    }
+    let missing = || {
+        RuntimeError::new(RuntimeErrorKind::TypeError(
+            "WebSocketPeer handle is invalid".into(),
+        ))
+    };
+
+    let result = with_websocket_peer(id, |peer| -> Result<Variant, RuntimeError> {
+        match method {
+            "connect_to_url" => {
+                let url = str_arg(args, 0);
+                // Godot returns an Error code, not a thrown error: OK = 0,
+                // FAILED = 1. A script checks the return rather than trapping.
+                Ok(Variant::Int(match peer.connect_to_url(&url) {
+                    Ok(()) => 0,
+                    Err(_) => 1,
+                }))
+            }
+            "poll" => {
+                peer.poll();
+                Ok(Variant::Nil)
+            }
+            "get_ready_state" => Ok(Variant::Int(peer.get_ready_state().as_godot_code() as i64)),
+            "send_text" => Ok(Variant::Int(match peer.send_text(&str_arg(args, 0)) {
+                Ok(()) => 0,
+                Err(_) => 1,
+            })),
+            "send" => {
+                let bytes: Vec<u8> = match args.first() {
+                    Some(Variant::PackedByteArray(b)) => b.clone(),
+                    other => other
+                        .map(|v| v.to_string_lossy())
+                        .unwrap_or_default()
+                        .into_bytes(),
+                };
+                // Godot's second argument is WriteMode (0 = TEXT, 1 = BINARY);
+                // `send` defaults to BINARY, `send_text` is the text shorthand.
+                let mode = match args.get(1) {
+                    Some(Variant::Int(0)) => WriteMode::Text,
+                    _ => WriteMode::Binary,
+                };
+                Ok(Variant::Int(match peer.send(&bytes, mode) {
+                    Ok(()) => 0,
+                    Err(_) => 1,
+                }))
+            }
+            "get_available_packet_count" => {
+                Ok(Variant::Int(peer.get_available_packet_count() as i64))
+            }
+            "get_packet" => Ok(Variant::PackedByteArray(peer.get_packet())),
+            "was_string_packet" => Ok(Variant::Bool(peer.was_string_packet())),
+            "close" => {
+                // Godot: close(code = 1000, reason = "").
+                let code = match args.first() {
+                    Some(Variant::Int(c)) => *c as u16,
+                    _ => 1000,
+                };
+                peer.close(code, &str_arg(args, 1));
+                Ok(Variant::Nil)
+            }
+            "get_close_code" => Ok(Variant::Int(peer.get_close_code() as i64)),
+            "get_close_reason" => Ok(Variant::String(peer.get_close_reason())),
+            "get_requested_url" => Ok(Variant::String(peer.get_requested_url().to_string())),
+            "set_supported_protocols" => {
+                peer.set_supported_protocols(&string_list(args.first()));
+                Ok(Variant::Nil)
+            }
+            "get_supported_protocols" => Ok(Variant::PackedStringArray(
+                peer.get_supported_protocols().to_vec(),
+            )),
+            "get_selected_protocol" => {
+                Ok(Variant::String(peer.get_selected_protocol().to_string()))
+            }
+            "set_handshake_headers" => {
+                peer.set_handshake_headers(&string_list(args.first()));
+                Ok(Variant::Nil)
+            }
+            "get_handshake_headers" => Ok(Variant::PackedStringArray(
+                peer.get_handshake_headers().to_vec(),
+            )),
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("WebSocketPeer.{other}"),
+            ))),
+        }
+    });
+    result.unwrap_or_else(|| Err(missing()))
+}
+
 fn call_camera_feed_instance(
     id: gdcore::id::ObjectId,
     method: &str,

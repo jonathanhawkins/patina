@@ -335,10 +335,24 @@ fn gamepad_axis_action_has_analog_strength() {
     state.process_event(gamepad_axis_event(GamepadAxis::RightTriggerAnalog, 0.6, 0));
 
     assert!(state.is_action_pressed("throttle"));
+    // Godot remaps the deadzone out of the reported strength:
+    // CLAMP(inverse_lerp(deadzone, 1, |v|), 0, 1)
+    // (upstream/godot/core/input/input_event.cpp
+    // `InputEventJoypadMotion::action_match`). With deadzone 0.1 and |v| 0.6
+    // that is (0.6 - 0.1) / (1 - 0.1) = 0.5555…, so strength rises smoothly
+    // from 0 at the deadzone instead of jumping to 0.1. This test previously
+    // asserted the raw 0.6 — Patina's pre-parity behaviour (pat-0q2kx.89).
     let strength = state.get_action_strength("throttle");
     assert!(
-        (strength - 0.6).abs() < 0.01,
-        "analog action strength should be 0.6, got {strength}"
+        (strength - 0.5555).abs() < 0.01,
+        "deadzone-remapped strength should be ~0.556, got {strength}"
+    );
+    // The raw deflection is still available, which is what Godot's
+    // `get_action_raw_strength` reports.
+    let raw = state.get_action_raw_strength("throttle");
+    assert!(
+        (raw - 0.6).abs() < 0.01,
+        "raw strength should be the undeadzoned 0.6, got {raw}"
     );
 }
 

@@ -28,9 +28,14 @@ use crate::theme::{Theme, ThemePropertyType};
 
 /// Nominal glyph metrics of the built-in 5×7 bitmap font used by the software
 /// renderer's `DrawString`. Used to place/centre control text.
-const GLYPH_W: f32 = 5.0;
-const GLYPH_H: f32 = 7.0;
-const GLYPH_GAP: f32 = 1.0;
+pub(crate) const GLYPH_W: f32 = 5.0;
+pub(crate) const GLYPH_H: f32 = 7.0;
+pub(crate) const GLYPH_GAP: f32 = 1.0;
+
+/// Width of a ScrollContainer's scrollbars, in pixels (pat-0q2kx.86). Stands in
+/// for Godot's `scroll` StyleBox minimum size, which the default theme sets to
+/// roughly this.
+pub(crate) const SCROLLBAR_THICKNESS: f32 = 8.0;
 
 /// Control classes handled by the render pass. Used as a fallback membership
 /// test in case the ClassDB inheritance chain is unavailable for `is_class`.
@@ -49,10 +54,19 @@ const CONTROL_CLASSES: &[&str] = &[
     // runs.
     "TextEdit",
     "CodeEdit",
+    // pat-0q2kx.87 — a LineEdit draws its text, selection and caret in
+    // draw_control; without it here `is_control` rejects the node whenever the
+    // ClassDB Control chain is unavailable and the arm never runs.
+    "LineEdit",
     "ProgressBar",
     "CheckBox",
     "CheckButton",
     "OptionButton",
+    // pat-0q2kx.85 — the item views draw rows/tabs in `draw_control`; without
+    // them here `is_control` rejects the node whenever the ClassDB Control chain
+    // is unavailable and the arm never runs.
+    "ItemList",
+    "TabBar",
     "TabContainer",
     "MarginContainer",
     "ScrollContainer",
@@ -264,7 +278,34 @@ pub fn render_control_tree(
         Vector2::ZERO,
         viewport_size,
         &mut order,
+        None,
+        false,
     );
+}
+
+/// Whether this control cuts its own drawing and its descendants off at its
+/// rect — Godot's `Control.clip_contents` (pat-0q2kx.86).
+///
+/// ScrollContainer clips unconditionally: `ScrollContainer::_notification`
+/// forces `set_clip_contents(true)` in its constructor
+/// (upstream/godot/scene/gui/scroll_container.cpp), and a `.tscn` never
+/// serializes that, so keying only off the property would leave every authored
+/// ScrollContainer spilling its content.
+fn clips_contents(tree: &SceneTree, node_id: NodeId, class: &str) -> bool {
+    class == "ScrollContainer" || bool_prop(tree, node_id, "clip_contents").unwrap_or(false)
+}
+
+/// The overlap of two rects, empty when they do not overlap. A nested clip can
+/// only shrink what an ancestor already allowed.
+fn rect_intersection(a: Rect2, b: Rect2) -> Rect2 {
+    let x0 = a.position.x.max(b.position.x);
+    let y0 = a.position.y.max(b.position.y);
+    let x1 = (a.position.x + a.size.x).min(b.position.x + b.size.x);
+    let y1 = (a.position.y + a.size.y).min(b.position.y + b.size.y);
+    Rect2::new(
+        Vector2::new(x0, y0),
+        Vector2::new((x1 - x0).max(0.0), (y1 - y0).max(0.0)),
+    )
 }
 
 fn is_control(tree: &SceneTree, node_id: NodeId) -> bool {
@@ -293,29 +334,86 @@ fn render_node(
     parent_global: Vector2,
     parent_size: Vector2,
     order: &mut u64,
+    clip: Option<Rect2>,
+    parent_is_container: bool,
 ) {
     if is_control(tree, node_id) {
         // Resolve this control's rect from anchors/offsets against the parent
         // rect. resolve_control_layout stores a parent-relative position.
-        control::resolve_control_layout(tree, node_id, parent_size);
+        //
+        // A container-managed child is the exception: the container already
+        // owns its rect (`Container::fit_child_in_rect` — Godot does not consult
+        // such a child's anchors either). Re-deriving here would snap every
+        // VBox child back to its own anchor rect, collapsing the stack onto one
+        // row, and would undo the `-scroll` offset `arrange_scroll` just applied
+        // so a ScrollContainer could never be observed to scroll (pat-0q2kx.86).
+        //
+        // This assumes the container has been sorted, which is the documented
+        // order for the render pass: `build_control_render_items` sorts every
+        // container before drawing.
+        if !parent_is_container {
+            control::resolve_control_layout(tree, node_id, parent_size);
+        }
         let local_pos = control::get_position(tree, node_id);
         let size = control::get_size(tree, node_id);
         let global_pos = parent_global + local_pos;
         let rect = Rect2::new(global_pos, size);
+
+        // pat-0q2kx.86: a clipping control narrows the clip for itself and for
+        // everything below it. Items are emitted flat here (no parent/child
+        // links, `z_index` alone orders them), so each one has to carry the
+        // resolved clip rather than inherit it at raster time.
+        let clip = if clips_contents(tree, node_id, &class_of(tree, node_id)) {
+            Some(match clip {
+                Some(outer) => rect_intersection(outer, rect),
+                None => rect,
+            })
+        } else {
+            clip
+        };
 
         let seq = *order;
         *order += 1;
         let mut item = CanvasItem::new(CanvasItemId(seq + 1));
         // Pre-order sequence as z so children (added later) paint on top.
         item.z_index = seq as i32;
+        item.clip_rect = clip;
         draw_control(tree, node_id, theme, rect, &mut item.commands);
         if !item.commands.is_empty() {
             viewport.add_canvas_item(item);
         }
 
         // Children anchor against this control's rect in its global space.
+        let class = class_of(tree, node_id);
+        let is_container = control::is_container_class_name(&class);
         for child in children_of(tree, node_id) {
-            render_node(tree, child, theme, viewport, global_pos, size, order);
+            render_node(
+                tree,
+                child,
+                theme,
+                viewport,
+                global_pos,
+                size,
+                order,
+                clip,
+                is_container,
+            );
+        }
+
+        // A ScrollContainer's bars are internal children that draw last, so
+        // they go in their own item after the content walk — otherwise the very
+        // content they scroll paints over them (pat-0q2kx.86).
+        if class == "ScrollContainer" {
+            let commands = scrollbar_commands(tree, node_id, rect);
+            if !commands.is_empty() {
+                let seq = *order;
+                *order += 1;
+                let mut bars = CanvasItem::new(CanvasItemId(seq + 1));
+                bars.z_index = seq as i32;
+                bars.clip_rect = clip;
+                bars.commands = commands;
+                viewport.add_canvas_item(bars);
+            }
         }
     } else {
         // Non-control node: pass the parent rect straight through to children.
@@ -328,9 +426,102 @@ fn render_node(
                 parent_global,
                 parent_size,
                 order,
+                clip,
+                false,
             );
         }
     }
+}
+
+/// The scrollbar draw commands for a ScrollContainer, or empty when nothing
+/// overflows (pat-0q2kx.86).
+///
+/// Godot's ScrollContainer creates internal HScrollBar / VScrollBar children in
+/// its constructor and sizes their grabbers from the Range model — `page` is the
+/// viewport extent, `max` the content extent
+/// (upstream/godot/scene/gui/scroll_container.cpp `_update_scrollbar_position`).
+/// Patina has no internal-node machinery, so the bars are built here from that
+/// same math. A bar appears only on the axis that actually overflows, as in
+/// Godot.
+///
+/// These go in their own canvas item emitted *after* the container's children
+/// (see [`render_node`]) because the internal bars are siblings that come last
+/// in Godot's draw order — folding them into the container's own item would
+/// paint them under the very content they scroll.
+fn scrollbar_commands(tree: &SceneTree, node_id: NodeId, rect: Rect2) -> Vec<DrawCommand> {
+    let mut out = Vec::new();
+    let content = control::scroll_content_size(tree, node_id, rect.size);
+    let scroll = control::get_scroll(tree, node_id);
+    let trough = Color::new(0.1, 0.1, 0.1, 1.0);
+    let grabber = Color::new(0.45, 0.45, 0.45, 1.0);
+
+    if content.y > rect.size.y {
+        let bar = Rect2::new(
+            Vector2::new(
+                rect.position.x + rect.size.x - SCROLLBAR_THICKNESS,
+                rect.position.y,
+            ),
+            Vector2::new(SCROLLBAR_THICKNESS, rect.size.y),
+        );
+        out.push(DrawCommand::DrawRect {
+            rect: bar,
+            color: trough,
+            filled: true,
+        });
+        // Grabber length is the visible fraction of the content; its
+        // offset is how far through the scrollable range we are.
+        let frac = (rect.size.y / content.y).clamp(0.0, 1.0);
+        let grab_h = (bar.size.y * frac).max(SCROLLBAR_THICKNESS);
+        let travel = (bar.size.y - grab_h).max(0.0);
+        let max_scroll = (content.y - rect.size.y).max(0.0);
+        let t = if max_scroll > 0.0 {
+            (scroll.y / max_scroll).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        out.push(DrawCommand::DrawRect {
+            rect: Rect2::new(
+                Vector2::new(bar.position.x, bar.position.y + travel * t),
+                Vector2::new(bar.size.x, grab_h),
+            ),
+            color: grabber,
+            filled: true,
+        });
+    }
+
+    if content.x > rect.size.x {
+        let bar = Rect2::new(
+            Vector2::new(
+                rect.position.x,
+                rect.position.y + rect.size.y - SCROLLBAR_THICKNESS,
+            ),
+            Vector2::new(rect.size.x, SCROLLBAR_THICKNESS),
+        );
+        out.push(DrawCommand::DrawRect {
+            rect: bar,
+            color: trough,
+            filled: true,
+        });
+        let frac = (rect.size.x / content.x).clamp(0.0, 1.0);
+        let grab_w = (bar.size.x * frac).max(SCROLLBAR_THICKNESS);
+        let travel = (bar.size.x - grab_w).max(0.0);
+        let max_scroll = (content.x - rect.size.x).max(0.0);
+        let t = if max_scroll > 0.0 {
+            (scroll.x / max_scroll).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        out.push(DrawCommand::DrawRect {
+            rect: Rect2::new(
+                Vector2::new(bar.position.x + travel * t, bar.position.y),
+                Vector2::new(grab_w, bar.size.y),
+            ),
+            color: grabber,
+            filled: true,
+        });
+    }
+
+    out
 }
 
 /// Reads a `Color`-typed node property, if present.
@@ -371,13 +562,13 @@ fn stylebox_bg(theme: &Theme, control_type: &str, property: &str, fallback: Colo
 
 /// Maps a theme font size (in points) to the built-in 5×7 font's integer pixel
 /// scale so glyph height ≈ the requested size.
-fn text_scale(font_size: i64) -> u32 {
+pub(crate) fn text_scale(font_size: i64) -> u32 {
     (font_size.max(1) as u32 / GLYPH_H as u32).max(1)
 }
 
 /// Approximate pixel width of `text` at the given scale, using the nominal
 /// 5×7 monospace metrics.
-fn text_width(text: &str, scale: u32) -> f32 {
+pub(crate) fn text_width(text: &str, scale: u32) -> f32 {
     let n = text.chars().count() as f32;
     if n <= 0.0 {
         return 0.0;
@@ -825,6 +1016,103 @@ fn draw_control(
                 }
             }
         }
+        // A LineEdit draws its background, then the selection band, then the
+        // text (masked when `secret`), then the caret — Godot's paint order in
+        // `LineEdit::_notification(NOTIFICATION_DRAW)`. Empty text falls back to
+        // `placeholder_text` in the dimmer placeholder colour. pat-0q2kx.87.
+        "LineEdit" => {
+            if let Some(sb) = theme.get_stylebox("LineEdit", "normal") {
+                out.extend(sb.draw(rect));
+            } else {
+                let bg = stylebox_bg(theme, "LineEdit", "normal", Color::new(0.1, 0.1, 0.1, 1.0));
+                out.push(DrawCommand::DrawRect {
+                    rect,
+                    color: bg,
+                    filled: true,
+                });
+            }
+
+            let font_size = theme.get_font_size("LineEdit", "font_size").unwrap_or(16);
+            let scale = text_scale(font_size);
+            let glyph_h = GLYPH_H * scale as f32;
+            // Vertically centre the single line, as Godot does.
+            let baseline_y = rect.position.y + (rect.size.y - glyph_h) * 0.5;
+
+            // The displayed string is the masked one; the caret and selection
+            // are measured against it so a `secret` field's caret still lands
+            // between mask glyphs rather than between the real characters.
+            let shown = crate::line_edit::display_text(tree, node_id);
+
+            // x offset of a caret sitting *before* character `column`.
+            let caret_x = |column: usize| -> f32 {
+                if column == 0 {
+                    return rect.position.x;
+                }
+                let prefix: String = shown.chars().take(column).collect();
+                rect.position.x + text_width(&prefix, scale) + GLYPH_GAP * scale as f32
+            };
+
+            if let Some((begin, end)) = crate::line_edit::selection(tree, node_id) {
+                let x0 = caret_x(begin);
+                let x1 = caret_x(end);
+                if x1 > x0 {
+                    let selection_color = theme
+                        .get_color("LineEdit", "selection_color")
+                        .unwrap_or(Color::new(0.3, 0.45, 0.7, 1.0));
+                    out.push(DrawCommand::DrawRect {
+                        rect: Rect2::new(
+                            Vector2::new(x0, baseline_y),
+                            Vector2::new(x1 - x0, glyph_h),
+                        ),
+                        color: selection_color,
+                        filled: true,
+                    });
+                }
+            }
+
+            if shown.is_empty() {
+                let placeholder =
+                    string_prop(tree, node_id, "placeholder_text").unwrap_or_default();
+                if !placeholder.is_empty() {
+                    let color = theme
+                        .get_color("LineEdit", "font_placeholder_color")
+                        .unwrap_or(Color::new(0.6, 0.6, 0.6, 1.0));
+                    out.push(DrawCommand::DrawString {
+                        text: placeholder,
+                        position: Vector2::new(rect.position.x, baseline_y),
+                        color,
+                        font_size: scale,
+                    });
+                }
+            } else {
+                let font_color = color_prop(tree, node_id, "theme_override_colors/font_color")
+                    .or_else(|| theme.get_color("LineEdit", "font_color"))
+                    .unwrap_or(Color::WHITE);
+                out.push(DrawCommand::DrawString {
+                    text: shown.clone(),
+                    position: Vector2::new(rect.position.x, baseline_y),
+                    color: font_color,
+                    font_size: scale,
+                });
+            }
+
+            // Godot only paints the caret while the field holds focus, so an
+            // unfocused LineEdit must not sprout one.
+            if tree.focus_owner() == Some(node_id) {
+                let caret_color = theme
+                    .get_color("LineEdit", "caret_color")
+                    .unwrap_or(Color::WHITE);
+                let x = caret_x(crate::line_edit::caret_column(tree, node_id));
+                out.push(DrawCommand::DrawRect {
+                    rect: Rect2::new(
+                        Vector2::new(x, baseline_y),
+                        Vector2::new(scale.max(1) as f32, glyph_h),
+                    ),
+                    color: caret_color,
+                    filled: true,
+                });
+            }
+        }
         // A TextEdit/CodeEdit draws its `text` line by line. When a
         // CodeHighlighter is assigned — its `keyword_colors` carried on the node
         // as the `syntax_highlighter/keyword_colors` dictionary, so the renderer
@@ -970,9 +1258,21 @@ fn draw_control(
                 .get_font_size("OptionButton", "font_size")
                 .unwrap_or(16);
             let scale = text_scale(font_size);
-            // Selected item text (falls back to `text`).
+            // Godot's `OptionButton::_select` mirrors the chosen item's label
+            // onto the button's own `text`, so that is the first source. A
+            // `.tscn` that only carries `items` + `selected` (never having gone
+            // through a select call) is resolved from the item model instead —
+            // otherwise the button draws blank (pat-0q2kx.85).
             let text = string_prop(tree, node_id, "text")
                 .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    let ob = crate::item_views::load_option_button(tree, node_id);
+                    let sel = ob.get_selected();
+                    if sel < 0 {
+                        return None;
+                    }
+                    ob.get_item(sel as usize).map(|it| it.text.clone())
+                })
                 .or_else(|| string_prop(tree, node_id, "selected_text"))
                 .unwrap_or_default();
             if !text.is_empty() {
@@ -1003,6 +1303,134 @@ fn draw_control(
                 filled: true,
             });
         }
+        // One row per item, the selected one behind a highlight — Godot draws
+        // these in `ItemList::_notification(NOTIFICATION_DRAW)` from the same
+        // item model the click path selects into (pat-0q2kx.85).
+        "ItemList" => {
+            let bg = stylebox_bg(
+                theme,
+                "ItemList",
+                "panel",
+                Color::new(0.12, 0.12, 0.12, 1.0),
+            );
+            out.push(DrawCommand::DrawRect {
+                rect,
+                color: bg,
+                filled: true,
+            });
+            let selected_bg = stylebox_bg(
+                theme,
+                "ItemList",
+                "selected",
+                Color::new(0.26, 0.42, 0.66, 1.0),
+            );
+            let font_color = color_prop(tree, node_id, "theme_override_colors/font_color")
+                .or_else(|| theme.get_color("ItemList", "font_color"))
+                .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
+            let font_color_off = theme
+                .get_color("ItemList", "font_disabled_color")
+                .unwrap_or(Color::new(0.5, 0.5, 0.5, 1.0));
+            let scale = text_scale(theme.get_font_size("ItemList", "font_size").unwrap_or(16));
+            let th = GLYPH_H * scale as f32;
+            let list = crate::item_views::load_item_list(tree, node_id);
+            for (i, row) in crate::item_views::item_row_rects(list.item_count(), rect)
+                .into_iter()
+                .enumerate()
+            {
+                // Rows past the bottom edge are scrolled out of view.
+                if row.position.y >= rect.position.y + rect.size.y {
+                    break;
+                }
+                let Some(item) = list.get_item(i) else { break };
+                if item.selected {
+                    out.push(DrawCommand::DrawRect {
+                        rect: row,
+                        color: selected_bg,
+                        filled: true,
+                    });
+                }
+                if !item.text.is_empty() {
+                    out.push(DrawCommand::DrawString {
+                        text: item.text.clone(),
+                        position: Vector2::new(
+                            row.position.x + GLYPH_GAP * 2.0 * scale as f32,
+                            row.position.y + (row.size.y - th) * 0.5,
+                        ),
+                        color: if item.disabled {
+                            font_color_off
+                        } else {
+                            font_color
+                        },
+                        font_size: scale,
+                    });
+                }
+            }
+        }
+        // A standalone tab strip. Same span layout as the TabContainer header
+        // (pat-0q2kx.83), so the two draw and hit-test alike.
+        "TabBar" => {
+            let unselected_bg = stylebox_bg(
+                theme,
+                "TabBar",
+                "tab_unselected",
+                Color::new(0.16, 0.16, 0.16, 1.0),
+            );
+            out.push(DrawCommand::DrawRect {
+                rect,
+                color: unselected_bg,
+                filled: true,
+            });
+            let selected_bg = stylebox_bg(
+                theme,
+                "TabBar",
+                "tab_selected",
+                Color::new(0.22, 0.22, 0.22, 1.0),
+            );
+            let font_color = theme
+                .get_color("TabBar", "font_selected_color")
+                .unwrap_or(Color::new(0.95, 0.95, 0.95, 1.0));
+            let font_color_off = theme
+                .get_color("TabBar", "font_unselected_color")
+                .unwrap_or(Color::new(0.7, 0.7, 0.7, 1.0));
+            let scale = text_scale(crate::control::get_font_size(tree, node_id));
+            let th = GLYPH_H * scale as f32;
+            let current = float_prop(tree, node_id, "current_tab").unwrap_or(-1.0) as i64;
+            let titles = crate::item_views::tab_titles(tree, node_id);
+            for (i, (x, w)) in crate::item_views::tab_spans(tree, node_id)
+                .into_iter()
+                .enumerate()
+            {
+                if x >= rect.size.x {
+                    break;
+                }
+                if i as i64 == current {
+                    out.push(DrawCommand::DrawRect {
+                        rect: Rect2::new(
+                            Vector2::new(rect.position.x + x, rect.position.y),
+                            Vector2::new(w.min(rect.size.x - x), rect.size.y),
+                        ),
+                        color: selected_bg,
+                        filled: true,
+                    });
+                }
+                let Some(title) = titles.get(i) else { break };
+                if !title.is_empty() {
+                    out.push(DrawCommand::DrawString {
+                        text: title.clone(),
+                        position: Vector2::new(
+                            rect.position.x + x + crate::control::TAB_H_PADDING,
+                            rect.position.y + (rect.size.y - th) * 0.5,
+                        ),
+                        color: if i as i64 == current {
+                            font_color
+                        } else {
+                            font_color_off
+                        },
+                        font_size: scale,
+                    });
+                }
+            }
+        }
         "TabContainer" => {
             // Panel background behind the content area, plus a header strip.
             let panel_bg = stylebox_bg(
@@ -1016,18 +1444,70 @@ fn draw_control(
                 color: panel_bg,
                 filled: true,
             });
-            let tab_bar_h = crate::control::TAB_BAR_HEIGHT.min(rect.size.y);
-            let header_bg = stylebox_bg(
+            let tab_bar_h = crate::control::get_tab_bar_height(tree, node_id).min(rect.size.y);
+            if tab_bar_h <= 0.0 {
+                return;
+            }
+            let selected_bg = stylebox_bg(
                 theme,
                 "TabContainer",
                 "tab_selected",
                 Color::new(0.22, 0.22, 0.22, 1.0),
             );
+            let unselected_bg = stylebox_bg(
+                theme,
+                "TabContainer",
+                "tab_unselected",
+                Color::new(0.16, 0.16, 0.16, 1.0),
+            );
             out.push(DrawCommand::DrawRect {
                 rect: Rect2::new(rect.position, Vector2::new(rect.size.x, tab_bar_h)),
-                color: header_bg,
+                color: unselected_bg,
                 filled: true,
             });
+            // One box per tab plus its title, with the current tab highlighted —
+            // Godot draws the tab StyleBoxes and titles in
+            // `TabBar::_notification(NOTIFICATION_DRAW)` (pat-0q2kx.83).
+            let current = crate::control::get_current_tab(tree, node_id);
+            let font_color = theme
+                .get_color("TabContainer", "font_selected_color")
+                .unwrap_or(Color::new(0.95, 0.95, 0.95, 1.0));
+            let font_color_off = theme
+                .get_color("TabContainer", "font_unselected_color")
+                .unwrap_or(Color::new(0.7, 0.7, 0.7, 1.0));
+            let scale = text_scale(crate::control::get_font_size(tree, node_id));
+            let th = GLYPH_H * scale as f32;
+            for (i, (x, w)) in crate::control::tab_rects(tree, node_id)
+                .into_iter()
+                .enumerate()
+            {
+                if x >= rect.size.x {
+                    break;
+                }
+                let selected = i == current;
+                if selected {
+                    out.push(DrawCommand::DrawRect {
+                        rect: Rect2::new(
+                            Vector2::new(rect.position.x + x, rect.position.y),
+                            Vector2::new(w.min(rect.size.x - x), tab_bar_h),
+                        ),
+                        color: selected_bg,
+                        filled: true,
+                    });
+                }
+                let title = crate::control::get_tab_title(tree, node_id, i);
+                if !title.is_empty() {
+                    out.push(DrawCommand::DrawString {
+                        text: title,
+                        position: Vector2::new(
+                            rect.position.x + x + crate::control::TAB_H_PADDING,
+                            rect.position.y + (tab_bar_h - th) * 0.5,
+                        ),
+                        color: if selected { font_color } else { font_color_off },
+                        font_size: scale,
+                    });
+                }
+            }
         }
         _ => {}
     }

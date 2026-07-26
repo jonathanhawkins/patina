@@ -428,6 +428,15 @@ pub struct EditorState {
     pub mouse_buttons: HashSet<u8>,
     /// Input action map: action name -> list of key names.
     pub input_map: HashMap<String, Vec<String>>,
+    /// Last polled browser gamepad frame per device: `(buttons, axes)`
+    /// (pat-0q2kx.88).
+    ///
+    /// The browser reports the *whole* pad state on every
+    /// `navigator.getGamepads()` poll, but `_input` must only see an event when
+    /// something actually changed — Godot's web layer emits a JoypadButton /
+    /// JoypadMotion event per transition, not per poll. Keeping the previous
+    /// frame here is what turns a level report into edge-triggered events.
+    pub gamepad_prev: HashMap<u32, (Vec<bool>, Vec<f32>)>,
     pub tile_grid_store: gdscene::tilemap::TileGridStore,
     /// Per-cell alternative-tile ids (Godot's flip/rotate transform bits).
     ///
@@ -871,6 +880,7 @@ impl EditorState {
             mouse_position: (0.0, 0.0),
             mouse_buttons: HashSet::new(),
             input_map: Self::default_input_map(),
+            gamepad_prev: HashMap::new(),
             tile_grid_store: gdscene::tilemap::TileGridStore::new_with_defaults(),
             tile_alternatives: HashMap::new(),
             editor_mode: "2d".to_string(),
@@ -1031,6 +1041,10 @@ impl EditorState {
             input_map: self.input_map.clone(),
             mouse_position: Default::default(),
             mouse_buttons_pressed: Default::default(),
+            // This editor-side snapshot is keyboard-only; the engine-resolved
+            // action and gamepad state reaches scripts through MainLoop's own
+            // bridge (pat-0q2kx.88).
+            ..Default::default()
         }
     }
 
@@ -2473,7 +2487,11 @@ fn handle_connection(
         ("POST", "/api/runtime/input/mouse_up") => {
             api_input_mouse_up(state, &req.body, &mut stream)
         }
+        ("POST", "/api/runtime/input/gamepad") => api_input_gamepad(state, &req.body, &mut stream),
         ("POST", "/api/runtime/input/clear_frame") => api_input_clear_frame(state, &mut stream),
+        ("POST", "/api/runtime/input/mouse_mode") => {
+            api_input_mouse_mode(state, &req.body, &mut stream)
+        }
         ("GET", "/api/runtime/input/state") => api_input_state(state, &mut stream),
         // Scene instancing + collision shape editing
         ("POST", "/api/scene/instance") => api_instance_scene(state, &req.body, &mut stream),
@@ -13245,28 +13263,64 @@ fn api_input_mouse_move(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
             return;
         }
     };
-    let x = match v["x"].as_f64() {
-        Some(x) => x,
-        None => {
-            send_error(stream, 400, "missing x");
-            return;
+    // While the pointer is locked the browser reports only `movementX/movementY`
+    // — `clientX/clientY` freeze — so the client posts `{dx, dy}` instead of
+    // `{x, y}` (pat-0q2kx.90). Godot's captured semantics are the same: the
+    // event carries `relative` and `position` does not move
+    // (platform/web/display_server_web.cpp, MOUSE_MODE_CAPTURED).
+    let captured = matches!(
+        state
+            .run_main_loop
+            .as_ref()
+            .map(|m| m.input_state().mouse_mode()),
+        Some(gdplatform::input::MouseMode::Captured)
+    );
+    let relative_only = v["dx"].is_number() || v["dy"].is_number();
+
+    let (x, y, rel_x, rel_y) = if relative_only {
+        let dx = v["dx"].as_f64().unwrap_or(0.0);
+        let dy = v["dy"].as_f64().unwrap_or(0.0);
+        let (px, py) = state.mouse_position;
+        if captured {
+            // Position stays frozen where it was when the lock was taken.
+            (px, py, dx, dy)
+        } else {
+            // A relative post outside capture still moves the pointer, so a
+            // client that keeps posting deltas through an unlock is not stuck.
+            (px + dx, py + dy, dx, dy)
+        }
+    } else {
+        let x = match v["x"].as_f64() {
+            Some(x) => x,
+            None => {
+                send_error(stream, 400, "missing x");
+                return;
+            }
+        };
+        let y = match v["y"].as_f64() {
+            Some(y) => y,
+            None => {
+                send_error(stream, 400, "missing y");
+                return;
+            }
+        };
+        let prev = state.mouse_position;
+        if captured {
+            // An absolute post that slipped in while captured must not teleport
+            // the frozen position; only its delta is meaningful.
+            (prev.0, prev.1, x - prev.0, y - prev.1)
+        } else {
+            (x, y, x - prev.0, y - prev.1)
         }
     };
-    let y = match v["y"].as_f64() {
-        Some(y) => y,
-        None => {
-            send_error(stream, 400, "missing y");
-            return;
-        }
-    };
-    let prev = state.mouse_position;
+
     state.mouse_position = (x, y);
     // Motion carries the frame-to-frame delta, as Godot's
     // InputEventMouseMotion.relative does (pat-0q2kx.23).
     if let Some(ref mut main_loop) = state.run_main_loop {
         main_loop.push_event(gdplatform::InputEvent::MouseMotion {
             position: gdcore::math::Vector2::new(x as f32, y as f32),
-            relative: gdcore::math::Vector2::new((x - prev.0) as f32, (y - prev.1) as f32),
+            relative: gdcore::math::Vector2::new(rel_x as f32, rel_y as f32),
         });
     }
     send_json(stream, r#"{"ok":true}"#);
@@ -13355,6 +13409,159 @@ fn api_input_clear_frame(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream
     send_json(stream, r#"{"ok":true}"#);
 }
 
+/// Smallest axis movement that counts as a change worth emitting an event for.
+///
+/// Browser sticks jitter by tiny amounts at rest; without a floor every poll
+/// would push a JoypadMotion event and drown `_input`. Godot's web layer
+/// compares against the previous reported value the same way.
+const GAMEPAD_AXIS_EPSILON: f32 = 0.001;
+
+/// `POST /api/runtime/input/gamepad` — applies one browser gamepad poll
+/// (pat-0q2kx.88).
+///
+/// Body: `{"device":0,"buttons":[bool,…],"axes":[f32,…],"connected":true}` —
+/// one `navigator.getGamepads()` entry in W3C standard-mapping order.
+///
+/// This is the producer that `InputState::apply_standard_gamepad_frame` was
+/// written for and never had: the normalizer and its tests existed, but nothing
+/// outside `#[cfg(test)]` ever called it, so a browser controller could not
+/// reach a running scene at all.
+///
+/// The browser reports absolute state every poll while Godot's web layer emits
+/// one event per *transition*, so this diffs against the previous poll
+/// (`EditorState::gamepad_prev`) and pushes a `GamepadButton` / `GamepadAxis`
+/// event only where something changed. Those go through
+/// [`MainLoop::push_event`], which both updates `InputState` (so
+/// `just_pressed` and any bound action fire) and queues the event for `_input`
+/// dispatch on the next step. The full frame then goes through
+/// `apply_standard_gamepad_frame`, which marks the pad connected and levels the
+/// remaining button/axis state.
+fn api_input_gamepad(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.is_running {
+        send_error(stream, 400, "not running");
+        return;
+    }
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => {
+            send_error(stream, 400, "invalid json");
+            return;
+        }
+    };
+    let device = v["device"].as_u64().unwrap_or(0) as u32;
+    // A poll with no `connected` key is a connected pad; the client only sends
+    // `connected:false` on a `gamepaddisconnected` event.
+    let connected = v["connected"].as_bool().unwrap_or(true);
+
+    if !connected {
+        state.gamepad_prev.remove(&device);
+        if let Some(ref mut main_loop) = state.run_main_loop {
+            main_loop.input_state_mut().disconnect_joypad(device);
+        }
+        send_json(stream, r#"{"ok":true,"connected":false}"#);
+        return;
+    }
+
+    let buttons: Vec<bool> = v["buttons"]
+        .as_array()
+        .map(|a| a.iter().map(|b| b.as_bool().unwrap_or(false)).collect())
+        .unwrap_or_default();
+    let axes: Vec<f32> = v["axes"]
+        .as_array()
+        .map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect())
+        .unwrap_or_default();
+
+    // Cloned so the immutable borrow of `state` ends before `run_main_loop` is
+    // borrowed mutably below.
+    let prev = state.gamepad_prev.get(&device).cloned();
+    let mut events = 0usize;
+
+    if let Some(ref mut main_loop) = state.run_main_loop {
+        for (index, &pressed) in buttons.iter().enumerate() {
+            let was = prev
+                .as_ref()
+                .and_then(|(b, _)| b.get(index).copied())
+                .unwrap_or(false);
+            if was == pressed {
+                continue;
+            }
+            if let Some(button) = gdplatform::input::GamepadButton::from_standard(index) {
+                main_loop.push_event(gdplatform::InputEvent::GamepadButton {
+                    button,
+                    pressed,
+                    gamepad_id: device,
+                });
+                events += 1;
+            }
+        }
+        for (index, &value) in axes.iter().enumerate() {
+            let was = prev
+                .as_ref()
+                .and_then(|(_, a)| a.get(index).copied())
+                .unwrap_or(0.0);
+            if (was - value).abs() < GAMEPAD_AXIS_EPSILON {
+                continue;
+            }
+            if let Some(axis) = gdplatform::input::GamepadAxis::from_standard(index) {
+                main_loop.push_event(gdplatform::InputEvent::GamepadAxis {
+                    axis,
+                    value,
+                    gamepad_id: device,
+                });
+                events += 1;
+            }
+        }
+        // Marks the pad connected and levels the whole frame through the same
+        // normalizer physical devices use.
+        main_loop
+            .input_state_mut()
+            .apply_standard_gamepad_frame(device, &buttons, &axes);
+    }
+
+    state.gamepad_prev.insert(device, (buttons, axes));
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"connected":true,"events":{events}}}"#),
+    );
+}
+
+/// `POST /api/runtime/input/mouse_mode` — the client reporting the **actual**
+/// pointer-lock state back to the engine (pat-0q2kx.90).
+///
+/// Body: `{"mouse_mode": 0}` using Godot's `MOUSE_MODE_*` values.
+///
+/// This exists because a `requestPointerLock()` can be refused (no user gesture)
+/// or dropped by the browser (Esc, tab switch) without the engine hearing about
+/// it. Without this the engine would keep believing it held a lock it had lost,
+/// and every subsequent motion event would be treated as captured — freezing the
+/// pointer for good. Godot's web build has the same round trip via its
+/// `pointerlockchange` callback.
+fn api_input_mouse_mode(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let v = parse_json_body(body).unwrap_or(serde_json::Value::Null);
+    let Some(mode) = v
+        .get("mouse_mode")
+        .and_then(|m| m.as_i64())
+        .and_then(gdplatform::input::MouseMode::from_godot)
+    else {
+        send_error(stream, 400, "invalid mouse_mode");
+        return;
+    };
+    let mut state = state.lock().unwrap();
+    if let Some(ref mut main_loop) = state.run_main_loop {
+        main_loop.input_state_mut().set_mouse_mode(mode);
+        // Mirror onto the tree so a script's `Input.get_mouse_mode()` agrees
+        // with what the browser is actually doing.
+        main_loop
+            .tree_mut()
+            .set_input_mouse_mode_mirror(mode.to_godot());
+    }
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"mouse_mode":{}}}"#, mode.to_godot()),
+    );
+}
+
 fn api_input_state(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let state = state.lock().unwrap();
     let mut pressed: Vec<&String> = state.pressed_keys.iter().collect();
@@ -13379,8 +13586,67 @@ fn api_input_state(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     }
     actions.push('}');
 
+    // Joypads + pending rumble (pat-0q2kx.88). The client polls this while Play
+    // runs and forwards each entry to that pad's
+    // `vibrationActuator.playEffect('dual-rumble')` — the only way engine-side
+    // `Input.start_joy_vibration` can reach real hardware in a browser.
+    let (joypads, vibration) = match state.run_main_loop.as_ref() {
+        Some(main_loop) => {
+            let input = main_loop.input_state();
+            let ids = input.connected_joypads();
+            let entries: Vec<String> = ids
+                .iter()
+                .filter_map(|&d| {
+                    input.joy_vibration(d).map(|(weak, strong, duration)| {
+                        format!(
+                            r#""{d}":{{"weak":{weak},"strong":{strong},"duration":{duration}}}"#
+                        )
+                    })
+                })
+                .collect();
+            (
+                ids.iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                entries.join(","),
+            )
+        }
+        None => (String::new(), String::new()),
+    };
+
+    // Mouse mode + cursor shape (pat-0q2kx.90). This is the client contract that
+    // makes `Input.set_mouse_mode(MOUSE_MODE_CAPTURED)` reach the browser: the
+    // game view polls this payload and calls `requestPointerLock()` /
+    // `exitPointerLock()` and sets the CSS `cursor` from it. Nothing carried the
+    // mode out of the engine before, so pointer lock could never be requested.
+    let (mouse_mode, cursor_shape, cursor_css, cursor_url) = match state.run_main_loop.as_ref() {
+        Some(main_loop) => {
+            let shape = main_loop.cursor().current_shape();
+            let custom = main_loop
+                .cursor()
+                .active_custom_cursor_path()
+                .map(|(path, hx, hy)| format!(r#"{{"path":"{path}","hotspot":[{hx},{hy}]}}"#))
+                .unwrap_or_else(|| "null".to_string());
+            (
+                main_loop.input_state().mouse_mode().to_godot(),
+                shape as i64,
+                shape.css_name(),
+                custom,
+            )
+        }
+        // Not running: report Godot's defaults rather than omitting the keys, so
+        // the client's parse path is the same either way.
+        None => (
+            0,
+            0,
+            gdplatform::cursor::CursorShape::Arrow.css_name(),
+            "null".to_string(),
+        ),
+    };
+
     let json = format!(
-        r#"{{"pressed_keys":[{}],"just_pressed":[{}],"mouse_position":[{},{}],"mouse_buttons":[{}],"actions":{}}}"#,
+        r#"{{"pressed_keys":[{}],"just_pressed":[{}],"mouse_position":[{},{}],"mouse_buttons":[{}],"actions":{},"joypads":[{joypads}],"vibration":{{{vibration}}},"mouse_mode":{mouse_mode},"cursor_shape":{cursor_shape},"cursor_css":"{cursor_css}","custom_cursor":{cursor_url}}}"#,
         pressed
             .iter()
             .map(|k| format!(r#""{}""#, k))
@@ -22931,6 +23197,152 @@ position = Vector2(10, 20)
         let resp = http_post(port, "/api/runtime/input/key_down", r#"{"key":"a"}"#);
         assert!(resp.contains("400"), "should reject when not running");
         handle.stop();
+    }
+
+    // -- pat-0q2kx.88: browser gamepad producer route --------------------
+
+    /// The route `InputState::apply_standard_gamepad_frame` was written for did
+    /// not exist, so its only callers were its own unit tests. Posting a
+    /// standard-mapping poll must now mark the pad connected and land in the
+    /// engine's joypad list.
+    #[test]
+    fn test_input_gamepad_connects_and_lists_joypad() {
+        let (handle, port) = make_server();
+        start_runtime(port);
+
+        let resp = http_post(
+            port,
+            "/api/runtime/input/gamepad",
+            r#"{"device":0,"buttons":[true,false],"axes":[0.0,0.0]}"#,
+        );
+        assert!(resp.contains("200 OK"), "gamepad poll accepted: {resp}");
+
+        // `extract_body` borrows its argument, so the response must outlive it.
+        let state_resp = http_get(port, "/api/runtime/input/state");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&state_resp)).unwrap();
+        let pads = v["joypads"].as_array().expect("joypads array");
+        assert!(
+            pads.iter().any(|d| d == &serde_json::json!(0)),
+            "device 0 must be listed as connected: {v}"
+        );
+        handle.stop();
+    }
+
+    /// The browser reports the whole pad every poll; only *transitions* may
+    /// produce events, or `_input` would see one JoypadButton per poll forever.
+    #[test]
+    fn test_input_gamepad_only_emits_on_transition() {
+        let (handle, port) = make_server();
+        start_runtime(port);
+
+        let press = r#"{"device":0,"buttons":[true],"axes":[]}"#;
+        let first = http_post(port, "/api/runtime/input/gamepad", press);
+        let v: serde_json::Value = serde_json::from_str(extract_body(&first)).unwrap();
+        assert_eq!(v["events"], 1, "first poll is a false->true transition");
+
+        // Same state again: nothing changed, so no event.
+        let second = http_post(port, "/api/runtime/input/gamepad", press);
+        let v: serde_json::Value = serde_json::from_str(extract_body(&second)).unwrap();
+        assert_eq!(v["events"], 0, "an unchanged poll must emit nothing");
+
+        // Release is a transition again.
+        let release = r#"{"device":0,"buttons":[false],"axes":[]}"#;
+        let third = http_post(port, "/api/runtime/input/gamepad", release);
+        let v: serde_json::Value = serde_json::from_str(extract_body(&third)).unwrap();
+        assert_eq!(v["events"], 1, "true->false is a transition");
+        handle.stop();
+    }
+
+    /// Axis movement past the jitter floor emits a motion event; movement below
+    /// it does not.
+    #[test]
+    fn test_input_gamepad_axis_ignores_jitter() {
+        let (handle, port) = make_server();
+        start_runtime(port);
+
+        let moved = http_post(
+            port,
+            "/api/runtime/input/gamepad",
+            r#"{"device":0,"buttons":[],"axes":[0.8,0.0]}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(extract_body(&moved)).unwrap();
+        assert_eq!(v["events"], 1, "0 -> 0.8 is a real stick movement");
+
+        // A sub-epsilon wobble is not a movement.
+        let jitter = http_post(
+            port,
+            "/api/runtime/input/gamepad",
+            r#"{"device":0,"buttons":[],"axes":[0.8000001,0.0]}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(extract_body(&jitter)).unwrap();
+        assert_eq!(v["events"], 0, "jitter below the floor emits nothing");
+        handle.stop();
+    }
+
+    /// A `connected:false` poll (the client's `gamepaddisconnected` handler)
+    /// drops the pad from the engine's joypad list.
+    #[test]
+    fn test_input_gamepad_disconnect_removes_joypad() {
+        let (handle, port) = make_server();
+        start_runtime(port);
+
+        http_post(
+            port,
+            "/api/runtime/input/gamepad",
+            r#"{"device":0,"buttons":[false],"axes":[]}"#,
+        );
+        let before = http_get(port, "/api/runtime/input/state");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&before)).unwrap();
+        assert!(!v["joypads"].as_array().unwrap().is_empty(), "connected");
+
+        http_post(
+            port,
+            "/api/runtime/input/gamepad",
+            r#"{"device":0,"connected":false}"#,
+        );
+        let after = http_get(port, "/api/runtime/input/state");
+        let v: serde_json::Value = serde_json::from_str(extract_body(&after)).unwrap();
+        assert!(
+            v["joypads"].as_array().unwrap().is_empty(),
+            "disconnect must clear the pad: {v}"
+        );
+        handle.stop();
+    }
+
+    #[test]
+    fn test_input_gamepad_requires_running() {
+        let (handle, port) = make_server();
+        let resp = http_post(
+            port,
+            "/api/runtime/input/gamepad",
+            r#"{"device":0,"buttons":[true],"axes":[]}"#,
+        );
+        assert!(resp.contains("400"), "should reject when not running");
+        handle.stop();
+    }
+
+    /// The served client must actually poll `navigator.getGamepads()` and post
+    /// to the producer route — the audit's finding was that `getGamepads` had
+    /// zero occurrences in the served HTML.
+    #[test]
+    fn test_editor_html_polls_gamepads() {
+        let html = crate::editor_ui::EDITOR_HTML;
+        assert!(
+            html.contains("navigator.getGamepads"),
+            "the served client must read the browser gamepad list"
+        );
+        assert!(
+            html.contains("/api/runtime/input/gamepad"),
+            "the client must post polls to the producer route"
+        );
+        assert!(
+            html.contains("vibrationActuator"),
+            "engine-side rumble must reach the pad's actuator"
+        );
+        assert!(
+            html.contains("startGamepadPolling") && html.contains("stopGamepadPolling"),
+            "polling must start with Play and stop with it"
+        );
     }
 
     #[test]

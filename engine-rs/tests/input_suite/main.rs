@@ -5,5 +5,6 @@
 mod input_action_binding_parity_test;
 mod input_action_coverage_test;
 mod input_edge_transition_fixed_idle_test;
+mod input_map_action_semantics_parity;
 mod input_map_loading_test;
 mod input_snapshot_routing_parity_test;

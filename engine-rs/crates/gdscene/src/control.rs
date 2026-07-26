@@ -44,37 +44,87 @@ pub enum AnchorPreset {
     RightWide,
 }
 
-/// Size flags matching Godot's `Control.SizeFlags`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SizeFlags {
-    /// Fill the available space (default).
-    Fill,
-    /// Expand to take remaining space.
-    Expand,
-    /// Shrink to minimum size, centered.
-    ShrinkCenter,
-    /// Shrink to minimum size, aligned to end.
-    ShrinkEnd,
-}
+/// Size flags matching Godot's `Control.SizeFlags` — a **bitmask**, not an
+/// exclusive enum (upstream/godot/scene/gui/control.h `SizeFlags`).
+///
+/// Godot tests individual bits (`get_h_size_flags().has_flag(SIZE_EXPAND)`), so
+/// combinations like `EXPAND` alone (2), `EXPAND | SHRINK_CENTER` (6) or the
+/// `0` default (`SHRINK_BEGIN`) all carry meaning. Modelling this as an
+/// exclusive enum collapsed every un-listed combination onto `Fill`, so an
+/// `EXPAND`-only child never expanded (pat-0q2kx.83).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PartialOrd, Ord, Hash)]
+pub struct SizeFlags(i64);
 
 impl SizeFlags {
-    /// Returns the Godot integer representation for this flag.
-    fn to_int(self) -> i64 {
+    /// No bits set — Godot's `SIZE_SHRINK_BEGIN`: minimum size, packed at the
+    /// start of the cell.
+    pub const SHRINK_BEGIN: SizeFlags = SizeFlags(0);
+    /// `SIZE_FILL` (1): stretch to fill the cell the container allotted.
+    pub const FILL: SizeFlags = SizeFlags(1);
+    /// `SIZE_EXPAND` (2): claim a share of the container's leftover space.
+    pub const EXPAND: SizeFlags = SizeFlags(2);
+    /// `SIZE_EXPAND_FILL` (3) — the editor's "Expand Fill", i.e. `EXPAND|FILL`.
+    pub const EXPAND_FILL: SizeFlags = SizeFlags(3);
+    /// `SIZE_SHRINK_CENTER` (4): minimum size, centered in the cell.
+    pub const SHRINK_CENTER: SizeFlags = SizeFlags(4);
+    /// `SIZE_SHRINK_END` (8): minimum size, pushed to the end of the cell.
+    pub const SHRINK_END: SizeFlags = SizeFlags(8);
+
+    /// Returns the Godot integer representation for this mask.
+    pub const fn to_int(self) -> i64 {
+        self.0
+    }
+
+    /// Converts from Godot's integer representation, preserving every bit.
+    pub const fn from_int(v: i64) -> Self {
+        SizeFlags(v)
+    }
+
+    /// Whether every bit of `flag` is set, mirroring Godot's
+    /// `BitField::has_flag`. Always `false` for the empty mask.
+    pub const fn has_flag(self, flag: SizeFlags) -> bool {
+        flag.0 != 0 && (self.0 & flag.0) == flag.0
+    }
+}
+
+impl std::ops::BitOr for SizeFlags {
+    type Output = SizeFlags;
+
+    fn bitor(self, rhs: SizeFlags) -> SizeFlags {
+        SizeFlags(self.0 | rhs.0)
+    }
+}
+
+/// `BoxContainer.alignment` — where the child run is packed when the container
+/// has leftover space and nothing stretched
+/// (upstream/godot/scene/gui/box_container.cpp `_resort`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BoxAlignment {
+    /// Pack at the start of the axis (Godot default).
+    #[default]
+    Begin,
+    /// Center the run within the container.
+    Center,
+    /// Pack at the end of the axis.
+    End,
+}
+
+impl BoxAlignment {
+    /// Returns the Godot integer representation.
+    pub const fn to_int(self) -> i64 {
         match self {
-            SizeFlags::Fill => 1,
-            SizeFlags::Expand => 3, // FILL | EXPAND
-            SizeFlags::ShrinkCenter => 4,
-            SizeFlags::ShrinkEnd => 8,
+            BoxAlignment::Begin => 0,
+            BoxAlignment::Center => 1,
+            BoxAlignment::End => 2,
         }
     }
 
-    /// Converts from Godot integer representation.
-    fn from_int(v: i64) -> Self {
+    /// Converts from Godot integer representation (unknown values → `Begin`).
+    pub const fn from_int(v: i64) -> Self {
         match v {
-            3 => SizeFlags::Expand,
-            4 => SizeFlags::ShrinkCenter,
-            8 => SizeFlags::ShrinkEnd,
-            _ => SizeFlags::Fill,
+            1 => BoxAlignment::Center,
+            2 => BoxAlignment::End,
+            _ => BoxAlignment::Begin,
         }
     }
 }
@@ -484,6 +534,38 @@ pub fn control_has_point(tree: &SceneTree, node_id: NodeId, point: Vector2) -> b
     rect_has_point(get_position(tree, node_id), get_size(tree, node_id), point)
 }
 
+/// Whether `node_id` participates in Control layout — a real `Control` subclass
+/// per ClassDB, or one of the known Control classes when the ClassDB chain is
+/// unavailable (the same fallback the hit test uses).
+pub fn node_is_control(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .map(|n| n.is_class("Control") || CONTROL_HIT_CLASSES.contains(&n.class_name()))
+        .unwrap_or(false)
+}
+
+/// The control's position in viewport (global) space — its own `position` plus
+/// every Control ancestor's, which is exactly what [`hit_test_control`]
+/// accumulates on the way down. Non-control ancestors contribute nothing, so a
+/// Control parented under a plain `Node` keeps its own coordinates.
+pub fn get_global_position(tree: &SceneTree, node_id: NodeId) -> Vector2 {
+    let mut pos = Vector2::ZERO;
+    let mut cursor = Some(node_id);
+    while let Some(id) = cursor {
+        if node_is_control(tree, id) {
+            pos = pos + get_position(tree, id);
+        }
+        cursor = tree.get_node(id).and_then(|n| n.parent());
+    }
+    pos
+}
+
+/// The control's rect in viewport (global) space. This is the rect a click is
+/// tested against, so anything mapping a click onto sub-parts of a control
+/// (rows, tabs) must measure from here.
+pub fn get_global_rect(tree: &SceneTree, node_id: NodeId) -> gdcore::math::Rect2 {
+    gdcore::math::Rect2::new(get_global_position(tree, node_id), get_size(tree, node_id))
+}
+
 /// Recursively finds the topmost (front-most, last-drawn) Control whose global
 /// rect contains `point` and whose `mouse_filter` is not [`MouseFilter::Ignore`].
 ///
@@ -613,6 +695,18 @@ pub fn click_at_point(tree: &mut SceneTree, point: Vector2) -> Option<NodeId> {
     if node_is_base_button(tree, hit) {
         tree.emit_signal(hit, "pressed", &[]);
     }
+    // An item view resolves the click further, onto the row or tab under the
+    // point (pat-0q2kx.85).
+    crate::item_views::item_view_click(tree, hit, point, false);
+    Some(hit)
+}
+
+/// [`click_at_point`] as a double-click: on an `ItemList` row this is Godot's
+/// `item_activated` action (`item_list.cpp` `gui_input`), which a single click
+/// never fires.
+pub fn double_click_at_point(tree: &mut SceneTree, point: Vector2) -> Option<NodeId> {
+    let hit = control_at_point(tree, point)?;
+    crate::item_views::item_view_click(tree, hit, point, true);
     Some(hit)
 }
 
@@ -687,7 +781,7 @@ pub fn set_h_size_flags(tree: &mut SceneTree, node_id: NodeId, flags: SizeFlags)
     }
 }
 
-/// Gets the horizontal size flags, defaulting to [`SizeFlags::Fill`].
+/// Gets the horizontal size flags, defaulting to [`SizeFlags::FILL`].
 /// A Control's layout direction, mirroring Godot's
 /// `Control.LayoutDirection` (pat-nzgdu.142).
 ///
@@ -772,9 +866,9 @@ pub fn get_h_size_flags(tree: &SceneTree, node_id: NodeId) -> SizeFlags {
     tree.get_node(node_id)
         .map(|n| match n.get_property("size_flags_horizontal") {
             Variant::Int(i) => SizeFlags::from_int(i),
-            _ => SizeFlags::Fill,
+            _ => SizeFlags::FILL,
         })
-        .unwrap_or(SizeFlags::Fill)
+        .unwrap_or(SizeFlags::FILL)
 }
 
 /// Sets the vertical size flags on a Control node.
@@ -784,14 +878,14 @@ pub fn set_v_size_flags(tree: &mut SceneTree, node_id: NodeId, flags: SizeFlags)
     }
 }
 
-/// Gets the vertical size flags, defaulting to [`SizeFlags::Fill`].
+/// Gets the vertical size flags, defaulting to [`SizeFlags::FILL`].
 pub fn get_v_size_flags(tree: &SceneTree, node_id: NodeId) -> SizeFlags {
     tree.get_node(node_id)
         .map(|n| match n.get_property("size_flags_vertical") {
             Variant::Int(i) => SizeFlags::from_int(i),
-            _ => SizeFlags::Fill,
+            _ => SizeFlags::FILL,
         })
-        .unwrap_or(SizeFlags::Fill)
+        .unwrap_or(SizeFlags::FILL)
 }
 
 /// Sets a control's `size_flags_stretch_ratio` — the weight with which it
@@ -834,6 +928,70 @@ pub fn get_separation(tree: &SceneTree, node_id: NodeId) -> i64 {
             },
         )
         .unwrap_or(0)
+}
+
+/// Gets the GridContainer horizontal cell gap: the
+/// `theme_override_constants/h_separation` override when present, otherwise the
+/// generic `separation` override. Mirrors Godot's split
+/// `h_separation`/`v_separation` GridContainer theme constants.
+pub fn get_h_separation(tree: &SceneTree, node_id: NodeId) -> i64 {
+    tree.get_node(node_id)
+        .and_then(
+            |n| match n.get_property("theme_override_constants/h_separation") {
+                Variant::Int(i) => Some(i),
+                _ => None,
+            },
+        )
+        .unwrap_or_else(|| get_separation(tree, node_id))
+}
+
+/// Gets the GridContainer vertical cell gap — see [`get_h_separation`].
+pub fn get_v_separation(tree: &SceneTree, node_id: NodeId) -> i64 {
+    tree.get_node(node_id)
+        .and_then(
+            |n| match n.get_property("theme_override_constants/v_separation") {
+                Variant::Int(i) => Some(i),
+                _ => None,
+            },
+        )
+        .unwrap_or_else(|| get_separation(tree, node_id))
+}
+
+/// Sets a BoxContainer's `"alignment"` property.
+pub fn set_box_alignment(tree: &mut SceneTree, node_id: NodeId, alignment: BoxAlignment) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("alignment", Variant::Int(alignment.to_int()));
+    }
+}
+
+/// Gets a BoxContainer's `"alignment"`, defaulting to [`BoxAlignment::Begin`].
+pub fn get_box_alignment(tree: &SceneTree, node_id: NodeId) -> BoxAlignment {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("alignment") {
+            Variant::Int(i) => BoxAlignment::from_int(i),
+            _ => BoxAlignment::Begin,
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a box container lays out along the vertical axis.
+///
+/// `VBoxContainer` is always vertical and `HBoxContainer` always horizontal
+/// (Godot's subclasses pin the flag in their constructors); a bare
+/// `BoxContainer` reads its `vertical` property, which defaults to `false`.
+pub fn is_box_vertical(tree: &SceneTree, node_id: NodeId) -> bool {
+    let class = tree
+        .get_node(node_id)
+        .map(|n| n.class_name().to_string())
+        .unwrap_or_default();
+    match class.as_str() {
+        "VBoxContainer" => true,
+        "HBoxContainer" => false,
+        _ => tree
+            .get_node(node_id)
+            .map(|n| matches!(n.get_property("vertical"), Variant::Bool(true)))
+            .unwrap_or(false),
+    }
 }
 
 /// Sets the `"columns"` property on a GridContainer.
@@ -923,94 +1081,198 @@ fn effective_min(tree: &SceneTree, node_id: NodeId) -> Vector2 {
     Vector2::new(cm.x.max(mm.x), cm.y.max(mm.y))
 }
 
-fn arrange_vbox(tree: &mut SceneTree, children: &[NodeId], total: Vector2, sep: f32) {
-    let n = children.len();
-    if n == 0 {
-        return;
-    }
-    let mins: Vec<f32> = children.iter().map(|&c| effective_min(tree, c).y).collect();
-    let sum_min: f32 = mins.iter().sum();
-    let total_sep = sep * (n as f32 - 1.0).max(0.0);
-    let extra = (total.y - sum_min - total_sep).max(0.0);
+/// Places `child` inside the cell `(cell_pos, cell_size)` its container just
+/// allotted it, honouring the per-axis size-flag bits.
+///
+/// Ports Godot's `Container::fit_child_in_rect`
+/// (upstream/godot/scene/gui/container.cpp): an axis **without** the `FILL` bit
+/// collapses the child to its minimum size on that axis and then aligns it —
+/// `SHRINK_END` to the far edge, `SHRINK_CENTER` to the middle (floored, as in
+/// Godot), otherwise to the near edge. Under RTL the horizontal near/far edges
+/// swap, matching upstream.
+fn fit_child_in_rect(
+    tree: &mut SceneTree,
+    child: NodeId,
+    cell_pos: Vector2,
+    cell_size: Vector2,
+    rtl: bool,
+) {
+    let minsize = effective_min(tree, child);
+    let mut pos = cell_pos;
+    let mut size = cell_size;
 
-    let expands: Vec<bool> = children
-        .iter()
-        .map(|&c| get_v_size_flags(tree, c) == SizeFlags::Expand)
-        .collect();
-    // Expand space is shared in proportion to each expanding child's
-    // `size_flags_stretch_ratio` (Godot default 1.0), matching Godot's
-    // BoxContainer. With all ratios equal this reduces to an even split.
-    let ratios: Vec<f32> = children
-        .iter()
-        .map(|&c| get_stretch_ratio(tree, c).max(0.0))
-        .collect();
-    let total_ratio: f32 = expands
-        .iter()
-        .zip(ratios.iter())
-        .filter_map(|(&e, &r)| if e { Some(r) } else { None })
-        .sum();
-
-    let mut y = 0.0;
-    for (i, &c) in children.iter().enumerate() {
-        let grow = if expands[i] && total_ratio > 0.0 {
-            extra * (ratios[i] / total_ratio)
-        } else {
-            0.0
-        };
-        let h = mins[i] + grow;
-        set_position(tree, c, Vector2::new(0.0, y));
-        set_size(tree, c, Vector2::new(total.x, h));
-        y += h + sep;
+    let h = get_h_size_flags(tree, child);
+    if !h.has_flag(SizeFlags::FILL) {
+        size.x = minsize.x;
+        if h.has_flag(SizeFlags::SHRINK_END) {
+            pos.x += if rtl { 0.0 } else { cell_size.x - minsize.x };
+        } else if h.has_flag(SizeFlags::SHRINK_CENTER) {
+            pos.x += ((cell_size.x - minsize.x) / 2.0).floor();
+        } else if rtl {
+            pos.x += cell_size.x - minsize.x;
+        }
     }
+
+    let v = get_v_size_flags(tree, child);
+    if !v.has_flag(SizeFlags::FILL) {
+        size.y = minsize.y;
+        if v.has_flag(SizeFlags::SHRINK_END) {
+            pos.y += cell_size.y - minsize.y;
+        } else if v.has_flag(SizeFlags::SHRINK_CENTER) {
+            pos.y += ((cell_size.y - minsize.y) / 2.0).floor();
+        }
+    }
+
+    set_position(tree, child, pos);
+    set_size(tree, child, size);
 }
 
-/// Arranges `children` along the container's main axis.
+/// Arranges `children` along a BoxContainer's main axis.
 ///
-/// When `rtl` is set the laid-out row is mirrored horizontally — the first
-/// child ends up at the right edge — matching Godot's BoxContainer under
-/// `layout_direction = RTL` (pat-nzgdu.142). Sizes are unaffected; only the x
-/// positions flip.
-fn arrange_hbox(tree: &mut SceneTree, children: &[NodeId], total: Vector2, sep: f32, rtl: bool) {
+/// Ports Godot's `BoxContainer::_resort`
+/// (upstream/godot/scene/gui/box_container.cpp) rather than approximating it:
+///
+/// * a child stretches only when its **main-axis** flags carry the `EXPAND`
+///   bit — including `EXPAND` alone (2), which the old exclusive-enum model
+///   mapped onto `Fill` and never grew (pat-0q2kx.83);
+/// * leftover space is split by `size_flags_stretch_ratio`, and the refit loop
+///   drops any stretcher whose share falls below its minimum size, re-splitting
+///   among the rest;
+/// * when nothing stretched, `alignment` packs the whole run at the begin,
+///   center, or end of the axis;
+/// * each child is then placed with [`fit_child_in_rect`], so the cross axis
+///   (and a main axis without `FILL`) honours `FILL`/`SHRINK_CENTER`/`SHRINK_END`;
+/// * under RTL a horizontal box lays its children out from the last to the
+///   first, so the logically-first child ends up at the right edge
+///   (pat-nzgdu.142).
+fn arrange_box(
+    tree: &mut SceneTree,
+    children: &[NodeId],
+    total: Vector2,
+    sep: f32,
+    vertical: bool,
+    alignment: BoxAlignment,
+    rtl: bool,
+) {
     let n = children.len();
     if n == 0 {
         return;
     }
-    let mins: Vec<f32> = children.iter().map(|&c| effective_min(tree, c).x).collect();
-    let sum_min: f32 = mins.iter().sum();
-    let total_sep = sep * (n as f32 - 1.0).max(0.0);
-    let extra = (total.x - sum_min - total_sep).max(0.0);
 
-    let expands: Vec<bool> = children
+    let axis_of = |v: Vector2| if vertical { v.y } else { v.x };
+    let mins: Vec<f32> = children
         .iter()
-        .map(|&c| get_h_size_flags(tree, c) == SizeFlags::Expand)
+        .map(|&c| axis_of(effective_min(tree, c)))
         .collect();
-    // Expand space is shared in proportion to each expanding child's
-    // `size_flags_stretch_ratio` (Godot default 1.0), matching Godot's
-    // BoxContainer. With all ratios equal this reduces to an even split.
     let ratios: Vec<f32> = children
         .iter()
         .map(|&c| get_stretch_ratio(tree, c).max(0.0))
         .collect();
-    let total_ratio: f32 = expands
+    // The EXPAND *bit* on the main axis — not an equality test against a single
+    // enum value.
+    let mut will_stretch: Vec<bool> = children
+        .iter()
+        .map(|&c| {
+            let flags = if vertical {
+                get_v_size_flags(tree, c)
+            } else {
+                get_h_size_flags(tree, c)
+            };
+            flags.has_flag(SizeFlags::EXPAND)
+        })
+        .collect();
+
+    let stretch_min: f32 = mins.iter().sum();
+    let mut stretch_avail: f32 = will_stretch
+        .iter()
+        .zip(mins.iter())
+        .filter_map(|(&s, &m)| if s { Some(m) } else { None })
+        .sum();
+    let mut stretch_ratio_total: f32 = will_stretch
         .iter()
         .zip(ratios.iter())
-        .filter_map(|(&e, &r)| if e { Some(r) } else { None })
+        .filter_map(|(&s, &r)| if s { Some(r) } else { None })
         .sum();
+    let mut final_size = mins.clone();
 
-    let mut x = 0.0;
-    for (i, &c) in children.iter().enumerate() {
-        let grow = if expands[i] && total_ratio > 0.0 {
-            extra * (ratios[i] / total_ratio)
-        } else {
-            0.0
+    let stretch_max = axis_of(total) - (n as f32 - 1.0) * sep;
+    let stretch_diff = (stretch_max - stretch_min).max(0.0);
+    stretch_avail += stretch_diff;
+
+    // Successively discard stretchers that cannot even reach their minimum,
+    // re-dividing the pool among the survivors (upstream's second pass).
+    let mut has_stretched = false;
+    while stretch_ratio_total > 0.0 {
+        has_stretched = true;
+        let mut refit_successful = true;
+        let mut error = 0.0f32;
+        for i in 0..n {
+            if !will_stretch[i] {
+                continue;
+            }
+            let desired = stretch_avail * ratios[i] / stretch_ratio_total;
+            error += desired - desired.floor();
+            if desired < mins[i] {
+                will_stretch[i] = false;
+                stretch_ratio_total -= ratios[i];
+                stretch_avail -= mins[i];
+                final_size[i] = mins[i];
+                refit_successful = false;
+                break;
+            }
+            final_size[i] = desired.floor();
+            if error >= 1.0 {
+                final_size[i] += 1.0;
+                error -= 1.0;
+            }
+        }
+        if refit_successful {
+            break;
+        }
+    }
+
+    // With nothing stretching, `alignment` decides where the run sits.
+    let mut ofs = 0.0f32;
+    if !has_stretched {
+        ofs = match (alignment, vertical, rtl) {
+            (BoxAlignment::Begin, false, true) => stretch_diff,
+            (BoxAlignment::Begin, _, _) => 0.0,
+            (BoxAlignment::Center, _, _) => (stretch_diff / 2.0).floor(),
+            (BoxAlignment::End, false, true) => 0.0,
+            (BoxAlignment::End, _, _) => stretch_diff,
         };
-        let w = mins[i] + grow;
-        // RTL mirrors the row: a child occupying [x, x+w] from the left
-        // instead occupies the same span measured from the right edge.
-        let px = if rtl { total.x - x - w } else { x };
-        set_position(tree, c, Vector2::new(px, 0.0));
-        set_size(tree, c, Vector2::new(w, total.y));
-        x += w + sep;
+    }
+
+    // RTL horizontal boxes walk the child list backwards while the cursor still
+    // advances left-to-right, so the first child lands on the right.
+    let order: Vec<usize> = if rtl && !vertical {
+        (0..n).rev().collect()
+    } else {
+        (0..n).collect()
+    };
+
+    let mut first = true;
+    for (idx, &i) in order.iter().enumerate() {
+        if first {
+            first = false;
+        } else {
+            ofs += sep;
+        }
+        let from = ofs;
+        let mut to = ofs + final_size[i];
+        // The last stretching child absorbs the rounding residue so the run
+        // ends exactly on the container edge.
+        if will_stretch[i] && idx == n - 1 {
+            to = axis_of(total);
+        }
+        let size = to - from;
+        let (cell_pos, cell_size) = if vertical {
+            (Vector2::new(0.0, from), Vector2::new(total.x, size))
+        } else {
+            (Vector2::new(from, 0.0), Vector2::new(size, total.y))
+        };
+        fit_child_in_rect(tree, children[i], cell_pos, cell_size, rtl);
+        ofs = to;
     }
 }
 
@@ -1075,40 +1337,160 @@ fn arrange_flow(
     }
 }
 
-fn arrange_grid(tree: &mut SceneTree, children: &[NodeId], sep: f32, cols: usize) {
+/// Arranges a GridContainer's children, distributing leftover space to the
+/// columns and rows that contain an `EXPAND` child.
+///
+/// Ports Godot's `GridContainer::_notification(NOTIFICATION_SORT_CHILDREN)`
+/// (upstream/godot/scene/gui/grid_container.cpp): a column is expandable when
+/// **any** of its children carries the horizontal `EXPAND` bit (rows likewise
+/// for the vertical bit); the leftover width is then split evenly among the
+/// expanding columns, dropping the widest one whenever the even share would
+/// fall under its minimum width. Each cell finally goes through
+/// [`fit_child_in_rect`], so a non-`FILL` child shrinks and aligns inside its
+/// cell instead of being stretched (pat-0q2kx.83).
+fn arrange_grid(
+    tree: &mut SceneTree,
+    children: &[NodeId],
+    total: Vector2,
+    h_sep: f32,
+    v_sep: f32,
+    cols: usize,
+    rtl: bool,
+) {
     if children.is_empty() || cols == 0 {
         return;
     }
     let rows = children.len().div_ceil(cols);
     let mins: Vec<Vector2> = children.iter().map(|&c| effective_min(tree, c)).collect();
 
-    let mut col_widths = vec![0f32; cols];
-    let mut row_heights = vec![0f32; rows];
+    let mut col_minw = vec![0f32; cols];
+    let mut row_minh = vec![0f32; rows];
+    let mut col_expanded = vec![false; cols];
+    let mut row_expanded = vec![false; rows];
     for (i, m) in mins.iter().enumerate() {
         let col = i % cols;
         let row = i / cols;
-        if m.x > col_widths[col] {
-            col_widths[col] = m.x;
+        if m.x > col_minw[col] {
+            col_minw[col] = m.x;
         }
-        if m.y > row_heights[row] {
-            row_heights[row] = m.y;
+        if m.y > row_minh[row] {
+            row_minh[row] = m.y;
+        }
+        if get_h_size_flags(tree, children[i]).has_flag(SizeFlags::EXPAND) {
+            col_expanded[col] = true;
+        }
+        if get_v_size_flags(tree, children[i]).has_flag(SizeFlags::EXPAND) {
+            row_expanded[row] = true;
         }
     }
+    // Godot treats trailing columns with no child at all as expanded.
+    for c in children.len()..cols {
+        col_expanded[c] = true;
+    }
+
+    let max_col = children.len().min(cols);
+    let max_row = rows;
+
+    // Space left for the expanding tracks once the fixed ones and the gaps are
+    // paid for.
+    let mut remaining_w = total.x;
+    for c in 0..cols {
+        if !col_expanded[c] {
+            remaining_w -= col_minw[c];
+        }
+    }
+    let mut remaining_h = total.y;
+    for r in 0..rows {
+        if !row_expanded[r] {
+            remaining_h -= row_minh[r];
+        }
+    }
+    remaining_w -= h_sep * (max_col as f32 - 1.0).max(0.0);
+    remaining_h -= v_sep * (max_row as f32 - 1.0).max(0.0);
+
+    // Drop the widest expanding column while an even share would starve one of
+    // them, exactly as upstream does.
+    loop {
+        let live: Vec<usize> = (0..cols).filter(|&c| col_expanded[c]).collect();
+        if live.is_empty() {
+            break;
+        }
+        let share = remaining_w / live.len() as f32;
+        if live.iter().all(|&c| share >= col_minw[c]) {
+            break;
+        }
+        let widest = *live
+            .iter()
+            .max_by(|&&a, &&b| col_minw[a].total_cmp(&col_minw[b]))
+            .expect("live is non-empty");
+        col_expanded[widest] = false;
+        remaining_w -= col_minw[widest];
+    }
+    loop {
+        let live: Vec<usize> = (0..rows).filter(|&r| row_expanded[r]).collect();
+        if live.is_empty() {
+            break;
+        }
+        let share = remaining_h / live.len() as f32;
+        if live.iter().all(|&r| share >= row_minh[r]) {
+            break;
+        }
+        let tallest = *live
+            .iter()
+            .max_by(|&&a, &&b| row_minh[a].total_cmp(&row_minh[b]))
+            .expect("live is non-empty");
+        row_expanded[tallest] = false;
+        remaining_h -= row_minh[tallest];
+    }
+
+    let col_expand_count = col_expanded.iter().filter(|&&e| e).count();
+    let row_expand_count = row_expanded.iter().filter(|&&e| e).count();
+    let col_expand = if col_expand_count > 0 {
+        (remaining_w / col_expand_count as f32).floor()
+    } else {
+        0.0
+    };
+    let row_expand = if row_expand_count > 0 {
+        (remaining_h / row_expand_count as f32).floor()
+    } else {
+        0.0
+    };
+
+    let col_size = |c: usize| {
+        if col_expanded[c] {
+            col_expand
+        } else {
+            col_minw[c]
+        }
+    };
+    let row_size = |r: usize| {
+        if row_expanded[r] {
+            row_expand
+        } else {
+            row_minh[r]
+        }
+    };
 
     let mut x_offsets = vec![0f32; cols];
     for c in 1..cols {
-        x_offsets[c] = x_offsets[c - 1] + col_widths[c - 1] + sep;
+        x_offsets[c] = x_offsets[c - 1] + col_size(c - 1) + h_sep;
     }
     let mut y_offsets = vec![0f32; rows];
     for r in 1..rows {
-        y_offsets[r] = y_offsets[r - 1] + row_heights[r - 1] + sep;
+        y_offsets[r] = y_offsets[r - 1] + row_size(r - 1) + v_sep;
     }
 
     for (i, &c) in children.iter().enumerate() {
         let col = i % cols;
         let row = i / cols;
-        set_position(tree, c, Vector2::new(x_offsets[col], y_offsets[row]));
-        set_size(tree, c, Vector2::new(col_widths[col], row_heights[row]));
+        let size = Vector2::new(col_size(col), row_size(row));
+        // Under RTL the columns are mirrored so column 0 sits on the right.
+        let x = if rtl {
+            total.x - x_offsets[col] - size.x
+        } else {
+            x_offsets[col]
+        };
+        fit_child_in_rect(tree, c, Vector2::new(x, y_offsets[row]), size, rtl);
     }
 }
 
@@ -1134,10 +1516,11 @@ pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vect
     let sep = get_separation(tree, container_id) as f32;
 
     match class.as_str() {
-        "VBoxContainer" => arrange_vbox(tree, &children, total, sep),
-        "HBoxContainer" | "BoxContainer" => {
+        "VBoxContainer" | "HBoxContainer" | "BoxContainer" => {
             let rtl = is_layout_rtl(tree, container_id);
-            arrange_hbox(tree, &children, total, sep, rtl)
+            let vertical = is_box_vertical(tree, container_id);
+            let alignment = get_box_alignment(tree, container_id);
+            arrange_box(tree, &children, total, sep, vertical, alignment, rtl)
         }
         // FlowContainer defaults to horizontal flow (Godot's `vertical` property
         // is false by default); H/VFlowContainer force the direction.
@@ -1145,7 +1528,10 @@ pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vect
         "VFlowContainer" => arrange_flow(tree, &children, total, sep, true),
         "GridContainer" => {
             let cols = get_columns(tree, container_id).max(1) as usize;
-            arrange_grid(tree, &children, sep, cols);
+            let h_sep = get_h_separation(tree, container_id) as f32;
+            let v_sep = get_v_separation(tree, container_id) as f32;
+            let rtl = is_layout_rtl(tree, container_id);
+            arrange_grid(tree, &children, total, h_sep, v_sep, cols, rtl);
         }
         "MarginContainer" => {
             let m = get_margins(tree, container_id);
@@ -1154,11 +1540,12 @@ pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vect
         "CenterContainer" => arrange_center(tree, &children, total),
         "ScrollContainer" => {
             let scroll = get_scroll(tree, container_id);
-            arrange_scroll(tree, &children, total, scroll);
+            arrange_scroll(tree, container_id, &children, total, scroll);
         }
         "TabContainer" => {
             let current = get_current_tab(tree, container_id);
-            arrange_tabs(tree, &children, total, current);
+            let strip_h = get_tab_bar_height(tree, container_id);
+            arrange_tabs(tree, &children, total, current, strip_h);
         }
         // Split containers place their first two children on either side of a
         // draggable divider positioned by `split_offset` (pat-nzgdu.158).
@@ -1223,11 +1610,119 @@ pub fn get_split_offset(tree: &SceneTree, node_id: NodeId) -> f32 {
         .unwrap_or(0.0)
 }
 
+/// The `[lo, hi]` range the divider of a two-child SplitContainer may occupy,
+/// in pixels along the split axis.
+///
+/// Ports Godot's `SplitContainer::_get_valid_range`
+/// (upstream/godot/scene/gui/split_container.cpp) for the single-dragger case:
+/// the divider cannot move closer to the start than the first child's minimum
+/// size, nor closer to the end than the separation plus the second child's
+/// minimum size. When the container is too small to honour both minimums the
+/// lower bound wins, matching Godot's `CLAMP`.
+fn split_valid_range(
+    tree: &SceneTree,
+    children: &[NodeId],
+    total: Vector2,
+    sep: f32,
+    vertical: bool,
+) -> (f32, f32) {
+    let axis = if vertical { total.y } else { total.x };
+    let min_of = |c: NodeId| {
+        let m = effective_min(tree, c);
+        if vertical {
+            m.y
+        } else {
+            m.x
+        }
+    };
+    let lo = children.first().map(|&c| min_of(c)).unwrap_or(0.0);
+    let hi = axis - sep - children.get(1).map(|&c| min_of(c)).unwrap_or(0.0);
+    (lo, hi)
+}
+
+/// Clamps `offset` so the divider stays inside [`split_valid_range`], returning
+/// the clamped **offset** (not the absolute divider position).
+fn clamp_split_offset_value(
+    tree: &SceneTree,
+    children: &[NodeId],
+    total: Vector2,
+    sep: f32,
+    offset: f32,
+    vertical: bool,
+) -> f32 {
+    let axis = if vertical { total.y } else { total.x };
+    let default_pos = ((axis - sep) * 0.5).max(0.0);
+    let (lo, hi) = split_valid_range(tree, children, total, sep, vertical);
+    // `.min(hi).max(lo)` reproduces Godot's CLAMP, where the lower bound wins
+    // when the two bounds cross.
+    let pos = (default_pos + offset).min(hi).max(lo);
+    pos - default_pos
+}
+
+/// Clamps a SplitContainer's stored `split_offset` against its children's
+/// minimum sizes for the given container size — Godot's
+/// `SplitContainer::clamp_split_offset()`.
+///
+/// Returns `true` when the stored value actually changed.
+pub fn clamp_split_offset(tree: &mut SceneTree, container_id: NodeId, total: Vector2) -> bool {
+    let children: Vec<NodeId> = tree
+        .get_node(container_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+    let vertical = tree
+        .get_node(container_id)
+        .map(|n| n.class_name() == "VSplitContainer")
+        .unwrap_or(false);
+    let sep = get_separation(tree, container_id) as f32;
+    let current = get_split_offset(tree, container_id);
+    let clamped = clamp_split_offset_value(tree, &children, total, sep, current, vertical);
+    if (clamped - current).abs() < f32::EPSILON {
+        return false;
+    }
+    set_split_offset(tree, container_id, clamped);
+    true
+}
+
+/// Applies a divider drag to a SplitContainer: clamps `new_offset` against both
+/// children's minimum sizes and, when the stored `split_offset` actually
+/// changes, emits Godot's `dragged(offset)` signal.
+///
+/// Returns `true` when the offset changed. `total` is the container's current
+/// size, which the clamp needs to know where the end of the axis is.
+pub fn drag_split(
+    tree: &mut SceneTree,
+    container_id: NodeId,
+    new_offset: f32,
+    total: Vector2,
+) -> bool {
+    let children: Vec<NodeId> = tree
+        .get_node(container_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+    let vertical = tree
+        .get_node(container_id)
+        .map(|n| n.class_name() == "VSplitContainer")
+        .unwrap_or(false);
+    let sep = get_separation(tree, container_id) as f32;
+    let current = get_split_offset(tree, container_id);
+    let clamped = clamp_split_offset_value(tree, &children, total, sep, new_offset, vertical);
+    if (clamped - current).abs() < f32::EPSILON {
+        return false;
+    }
+    set_split_offset(tree, container_id, clamped);
+    tree.emit_signal(container_id, "dragged", &[Variant::Float(clamped as f64)]);
+    true
+}
+
 /// Lays out a SplitContainer's first two children on either side of a divider.
-/// The divider sits at the container's midpoint along the split axis, shifted by
-/// `split_offset` and clamped so both panes stay non-negative; `sep` is the
-/// divider gap. `vertical` splits top/bottom, otherwise left/right. Children past
-/// the first two are left unpositioned (Godot only lays out the first two).
+///
+/// The divider sits at the container's midpoint along the split axis, shifted
+/// by `split_offset` and **clamped by both children's minimum sizes** so a
+/// dragged divider can never crush a pane below its minimum
+/// (upstream/godot/scene/gui/split_container.cpp `_get_valid_range`,
+/// pat-0q2kx.83). `sep` is the divider gap. `vertical` splits top/bottom,
+/// otherwise left/right. Children past the first two are left unpositioned
+/// (Godot only lays out the first two).
 fn arrange_split(
     tree: &mut SceneTree,
     children: &[NodeId],
@@ -1241,7 +1736,14 @@ fn arrange_split(
     }
     let axis = if vertical { total.y } else { total.x };
     let usable = (axis - sep).max(0.0);
-    let first = (usable * 0.5 + split_offset).clamp(0.0, usable);
+    let default_pos = usable * 0.5;
+    let (lo, hi) = split_valid_range(tree, children, total, sep, vertical);
+    // Clamp to the minimum-size range first, then to the container itself so a
+    // pane never goes negative when the minimums cannot be satisfied at all.
+    let first = (default_pos + split_offset)
+        .min(hi)
+        .max(lo)
+        .clamp(0.0, usable);
     let second = (usable - first).max(0.0);
 
     let c0 = children[0];
@@ -1382,9 +1884,155 @@ pub fn get_scroll(tree: &SceneTree, node_id: NodeId) -> Vector2 {
     Vector2::new(read("scroll_horizontal"), read("scroll_vertical"))
 }
 
+/// Writes a ScrollContainer's scroll offsets (pat-0q2kx.86).
+///
+/// Stored as `Float` so a clamped fractional wheel step survives; `get_scroll`
+/// accepts either numeric variant.
+pub fn set_scroll(tree: &mut SceneTree, node_id: NodeId, scroll: Vector2) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("scroll_horizontal", Variant::Float(scroll.x as f64));
+        node.set_property("scroll_vertical", Variant::Float(scroll.y as f64));
+    }
+}
+
+/// The extent a ScrollContainer's content occupies — the size
+/// [`arrange_scroll`] gives the content child, i.e. its minimum size expanded
+/// to at least the viewport (pat-0q2kx.86).
+///
+/// Returns the container's own size when it has no children, so a childless
+/// container reports nothing to scroll rather than a bogus overflow.
+pub fn scroll_content_size(tree: &SceneTree, container_id: NodeId, view: Vector2) -> Vector2 {
+    let children = tree
+        .get_node(container_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+    let mut content = view;
+    for c in children {
+        let min = effective_min(tree, c);
+        content = Vector2::new(content.x.max(min.x), content.y.max(min.y));
+    }
+    content
+}
+
+/// How far a ScrollContainer can scroll before the content's far edge reaches
+/// the viewport's — Godot clamps `scroll_*` to this, which is why scrolling
+/// past the end parks at the bottom instead of running off into blank space
+/// (`ScrollContainer::_update_scrollbar_position`).
+pub fn max_scroll(tree: &SceneTree, container_id: NodeId, view: Vector2) -> Vector2 {
+    let content = scroll_content_size(tree, container_id, view);
+    Vector2::new((content.x - view.x).max(0.0), (content.y - view.y).max(0.0))
+}
+
 /// Height of a TabContainer's tab-header strip, in pixels. Godot's default
 /// theme tab height is ~32px for the built-in font.
 pub const TAB_BAR_HEIGHT: f32 = 32.0;
+
+/// Horizontal padding applied on each side of a tab title, in pixels — the
+/// stand-in for Godot's `tab_selected`/`tab_unselected` StyleBox content
+/// margins.
+pub const TAB_H_PADDING: f32 = 8.0;
+
+/// Height of a TabContainer's tab strip.
+///
+/// Godot derives this from the theme (`TabContainer::_get_tab_height` sums the
+/// tab StyleBox margins and the font height); Patina reads the
+/// `theme_override_constants/tab_height` override when the scene provides one
+/// and otherwise falls back to [`TAB_BAR_HEIGHT`] (pat-0q2kx.83). A tabs-hidden
+/// container (`tabs_visible = false`) has no strip at all.
+pub fn get_tab_bar_height(tree: &SceneTree, node_id: NodeId) -> f32 {
+    let Some(node) = tree.get_node(node_id) else {
+        return TAB_BAR_HEIGHT;
+    };
+    if matches!(node.get_property("tabs_visible"), Variant::Bool(false)) {
+        return 0.0;
+    }
+    match node.get_property("theme_override_constants/tab_height") {
+        Variant::Int(i) => i.max(0) as f32,
+        Variant::Float(f) => (f as f32).max(0.0),
+        _ => TAB_BAR_HEIGHT,
+    }
+}
+
+/// The title shown on tab `index` of a TabContainer.
+///
+/// Godot titles a tab after its child node's name unless `set_tab_title()`
+/// overrode it, which it stores on the child; Patina reads that override from
+/// the child's `_tab_name` property.
+pub fn get_tab_title(tree: &SceneTree, container_id: NodeId, index: usize) -> String {
+    let Some(&child) = tree
+        .get_node(container_id)
+        .and_then(|n| n.children().get(index))
+    else {
+        return String::new();
+    };
+    tree.get_node(child)
+        .map(|n| match n.get_property("_tab_name") {
+            Variant::String(s) if !s.is_empty() => s,
+            _ => n.name().to_string(),
+        })
+        .unwrap_or_default()
+}
+
+/// The font scale the tab strip draws its titles at, shared by the renderer and
+/// the click hit-test so the two never disagree.
+fn tab_font_scale(tree: &SceneTree, container_id: NodeId) -> u32 {
+    crate::control_render::text_scale(get_font_size(tree, container_id))
+}
+
+/// The tab strip's per-tab `(x, width)` spans, in container-local pixels.
+///
+/// Each tab is as wide as its title plus [`TAB_H_PADDING`] on both sides, laid
+/// out left to right from the container's origin — the geometry both
+/// [`crate::control_render`] and [`tab_at_point`] use.
+pub fn tab_rects(tree: &SceneTree, container_id: NodeId) -> Vec<(f32, f32)> {
+    let count = tree
+        .get_node(container_id)
+        .map(|n| n.children().len())
+        .unwrap_or(0);
+    let scale = tab_font_scale(tree, container_id);
+    let mut out = Vec::with_capacity(count);
+    let mut x = 0.0f32;
+    for i in 0..count {
+        let title = get_tab_title(tree, container_id, i);
+        let w = crate::control_render::text_width(&title, scale) + TAB_H_PADDING * 2.0;
+        out.push((x, w));
+        x += w;
+    }
+    out
+}
+
+/// The viewport-global origin of `node_id`, summing the positions of it and its
+/// Control ancestors — the same accumulation [`control_at_point`] performs on
+/// the way down.
+fn control_global_origin(tree: &SceneTree, node_id: NodeId) -> Vector2 {
+    let mut origin = Vector2::ZERO;
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        let is_ctrl = tree
+            .get_node(id)
+            .map(|n| n.is_class("Control") || CONTROL_HIT_CLASSES.contains(&n.class_name()))
+            .unwrap_or(false);
+        if is_ctrl {
+            origin = origin + get_position(tree, id);
+        }
+        current = tree.get_node(id).and_then(|n| n.parent());
+    }
+    origin
+}
+
+/// The index of the tab whose header the viewport-global `point` falls on, or
+/// `None` when the point misses the strip.
+pub fn tab_at_point(tree: &SceneTree, container_id: NodeId, point: Vector2) -> Option<usize> {
+    let origin = control_global_origin(tree, container_id);
+    let local = Vector2::new(point.x - origin.x, point.y - origin.y);
+    let strip_h = get_tab_bar_height(tree, container_id);
+    if local.y < 0.0 || local.y >= strip_h || local.x < 0.0 {
+        return None;
+    }
+    tab_rects(tree, container_id)
+        .into_iter()
+        .position(|(x, w)| local.x >= x && local.x < x + w)
+}
 
 /// MarginContainer: every child fills the container rect inset by the margins.
 fn arrange_margin(tree: &mut SceneTree, children: &[NodeId], total: Vector2, m: Margins) {
@@ -1415,22 +2063,46 @@ fn arrange_center(tree: &mut SceneTree, children: &[NodeId], total: Vector2) {
 /// ScrollContainer: the (single) content child is sized to the larger of its
 /// minimum size and the viewport, then shifted by the negative scroll offset so
 /// content scrolls under the clip rect.
-fn arrange_scroll(tree: &mut SceneTree, children: &[NodeId], total: Vector2, scroll: Vector2) {
+///
+/// The offset is clamped to `content - viewport` and written back to the
+/// container (pat-0q2kx.86). Godot clamps in the scrollbars themselves — a
+/// `scroll_vertical` past the end parks the content's bottom edge at the
+/// viewport's bottom rather than scrolling into blank space — and a script that
+/// assigned the out-of-range value reads the clamped one back.
+fn arrange_scroll(
+    tree: &mut SceneTree,
+    container_id: NodeId,
+    children: &[NodeId],
+    total: Vector2,
+    scroll: Vector2,
+) {
+    let limit = max_scroll(tree, container_id, total);
+    let clamped = Vector2::new(scroll.x.clamp(0.0, limit.x), scroll.y.clamp(0.0, limit.y));
+    if clamped != scroll {
+        set_scroll(tree, container_id, clamped);
+    }
     for &c in children {
         let min = effective_min(tree, c);
         let size = Vector2::new(min.x.max(total.x), min.y.max(total.y));
-        set_position(tree, c, Vector2::new(-scroll.x, -scroll.y));
+        set_position(tree, c, Vector2::new(-clamped.x, -clamped.y));
         set_size(tree, c, size);
     }
 }
 
 /// TabContainer: only the child at `current` is visible, filling the area below
-/// the tab-header strip. Non-current children are collapsed to zero size.
-fn arrange_tabs(tree: &mut SceneTree, children: &[NodeId], total: Vector2, current: usize) {
-    let content = Vector2::new(total.x, (total.y - TAB_BAR_HEIGHT).max(0.0));
+/// the tab-header strip (whose height comes from the theme, see
+/// [`get_tab_bar_height`]). Non-current children are collapsed to zero size.
+fn arrange_tabs(
+    tree: &mut SceneTree,
+    children: &[NodeId],
+    total: Vector2,
+    current: usize,
+    strip_h: f32,
+) {
+    let content = Vector2::new(total.x, (total.y - strip_h).max(0.0));
     for (i, &c) in children.iter().enumerate() {
         if i == current {
-            set_position(tree, c, Vector2::new(0.0, TAB_BAR_HEIGHT));
+            set_position(tree, c, Vector2::new(0.0, strip_h));
             set_size(tree, c, content);
         } else {
             set_position(tree, c, Vector2::ZERO);
@@ -1802,6 +2474,271 @@ pub fn get_focus_previous(tree: &SceneTree, node_id: NodeId) -> Option<String> {
         })
 }
 
+// ---------------------------------------------------------------------------
+// Focus traversal (pat-0q2kx.84)
+//
+// Godot resolves the *effective* focus mode from `focus_mode`, then walks the
+// Control tree to answer Tab / Shift-Tab (`find_next_valid_focus` /
+// `find_prev_valid_focus`) and the arrow keys
+// (`find_valid_focus_neighbor`) — upstream/godot/scene/gui/control.cpp.
+// Patina stored the three focus properties but had none of the walks, so Tab
+// did nothing and `focus_next` was inert data.
+// ---------------------------------------------------------------------------
+
+/// Control classes that default to `FOCUS_ALL` in Godot when a scene does not
+/// serialize an explicit `focus_mode` (the interactive families). A `.tscn`
+/// Button never writes its default `focus_mode`, so without this fallback no
+/// authored Button would ever be reachable by click or by Tab.
+const FOCUSABLE_BY_DEFAULT: &[&str] = &[
+    "LineEdit",
+    "TextEdit",
+    "CodeEdit",
+    "SpinBox",
+    "OptionButton",
+    "MenuButton",
+    "CheckBox",
+    "CheckButton",
+    "Button",
+    "LinkButton",
+    "TextureButton",
+    "BaseButton",
+    "HSlider",
+    "VSlider",
+    "ItemList",
+    "Tree",
+    "TabBar",
+];
+
+/// The effective [`FocusMode`] for `node_id`: the explicit `focus_mode`
+/// property when present, otherwise the Godot class default.
+///
+/// Unlike [`get_focus_mode`], which reports only what the property literally
+/// holds, this is what the runtime acts on. Any non-zero stored value that is
+/// not `FOCUS_CLICK` is treated as `FOCUS_ALL`, so an unknown future mode stays
+/// focusable rather than silently dropping out of the tab ring.
+pub fn resolved_focus_mode(tree: &SceneTree, node_id: NodeId) -> FocusMode {
+    let Some(node) = tree.get_node(node_id) else {
+        return FocusMode::None;
+    };
+    match node.get_property("focus_mode") {
+        Variant::Int(0) => FocusMode::None,
+        Variant::Int(1) => FocusMode::Click,
+        Variant::Int(_) => FocusMode::All,
+        _ => {
+            if node.is_class("BaseButton") || FOCUSABLE_BY_DEFAULT.contains(&node.class_name()) {
+                FocusMode::All
+            } else {
+                FocusMode::None
+            }
+        }
+    }
+}
+
+/// Whether keyboard navigation (Tab, arrows) may land on `node_id`.
+///
+/// Godot requires `FOCUS_ALL` *and* visibility in tree — a `FOCUS_CLICK`
+/// control can be clicked into but is skipped by Tab
+/// (`Control::find_next_valid_focus`).
+pub fn is_keyboard_focusable(tree: &SceneTree, node_id: NodeId) -> bool {
+    resolved_focus_mode(tree, node_id) == FocusMode::All
+        && crate::node2d::is_visible_in_tree(tree, node_id)
+}
+
+/// Whether `node_id` can hold focus at all — `FOCUS_CLICK` or `FOCUS_ALL`, and
+/// visible. This is Godot's `Control::_is_focusable`, which is what an explicit
+/// `focus_next`/`focus_neighbor_*` override is validated against.
+pub fn is_focusable(tree: &SceneTree, node_id: NodeId) -> bool {
+    resolved_focus_mode(tree, node_id) != FocusMode::None
+        && crate::node2d::is_visible_in_tree(tree, node_id)
+}
+
+/// The four sides used by `focus_neighbor_*`, in Godot's `Side` order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusSide {
+    /// `SIDE_LEFT` — arrow-left / `ui_left`.
+    Left,
+    /// `SIDE_TOP` — arrow-up / `ui_up`.
+    Top,
+    /// `SIDE_RIGHT` — arrow-right / `ui_right`.
+    Right,
+    /// `SIDE_BOTTOM` — arrow-down / `ui_down`.
+    Bottom,
+}
+
+impl FocusSide {
+    /// The property name Godot serializes this side's override under.
+    pub fn property(self) -> &'static str {
+        match self {
+            FocusSide::Left => "focus_neighbor_left",
+            FocusSide::Top => "focus_neighbor_top",
+            FocusSide::Right => "focus_neighbor_right",
+            FocusSide::Bottom => "focus_neighbor_bottom",
+        }
+    }
+
+    /// The unit vector pointing away from the control along this side.
+    fn direction(self) -> Vector2 {
+        match self {
+            FocusSide::Left => Vector2::new(-1.0, 0.0),
+            FocusSide::Top => Vector2::new(0.0, -1.0),
+            FocusSide::Right => Vector2::new(1.0, 0.0),
+            FocusSide::Bottom => Vector2::new(0.0, 1.0),
+        }
+    }
+}
+
+/// Sets a `focus_neighbor_*` node path override for arrow-key navigation.
+pub fn set_focus_neighbor(tree: &mut SceneTree, node_id: NodeId, side: FocusSide, path: &str) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(side.property(), Variant::String(path.to_owned()));
+    }
+}
+
+/// Gets a `focus_neighbor_*` path override, if set.
+pub fn get_focus_neighbor(tree: &SceneTree, node_id: NodeId, side: FocusSide) -> Option<String> {
+    tree.get_node(node_id)
+        .and_then(|n| match n.get_property(side.property()) {
+            Variant::String(s) if !s.is_empty() => Some(s),
+            Variant::NodePath(p) if !p.to_string().is_empty() => Some(p.to_string()),
+            _ => None,
+        })
+}
+
+/// Resolves a focus-override NodePath, accepting both the absolute form
+/// (`/root/Main/Next`) and the relative form (`../Next`) a scene author writes.
+fn resolve_focus_path(tree: &SceneTree, from: NodeId, path: &str) -> Option<NodeId> {
+    if path.starts_with('/') {
+        tree.get_node_by_path(path)
+    } else {
+        tree.get_node_relative(from, path)
+    }
+}
+
+/// Every Control in the tree, in Godot's focus-walk order (depth-first,
+/// top-down). `find_next_valid_focus` steps forward through this sequence and
+/// `find_prev_valid_focus` steps backward — Godot's `_next_control` /
+/// `_prev_control` are exactly the successor and predecessor of a preorder
+/// walk.
+fn controls_in_focus_order(tree: &SceneTree) -> Vec<NodeId> {
+    tree.all_nodes_in_tree_order()
+        .into_iter()
+        .filter(|&id| node_is_control(tree, id))
+        .collect()
+}
+
+/// Shared body of [`find_next_valid_focus`] and [`find_prev_valid_focus`]:
+/// honor the explicit override, else scan the focus order in `step` direction
+/// from `from`, wrapping around, for the first keyboard-focusable Control.
+fn find_valid_focus(
+    tree: &SceneTree,
+    from: NodeId,
+    override_path: Option<String>,
+    forward: bool,
+) -> Option<NodeId> {
+    // Godot tries the manual override first and only falls through to the walk
+    // when the target is not focusable (control.cpp:2419-2428).
+    if let Some(path) = override_path {
+        if let Some(target) = resolve_focus_path(tree, from, &path) {
+            if is_focusable(tree, target) {
+                return Some(target);
+            }
+        }
+    }
+
+    let order = controls_in_focus_order(tree);
+    let start = order.iter().position(|&id| id == from)?;
+    let len = order.len();
+    // Start at the neighbor and wrap all the way back to `from`, so a ring of
+    // one focusable control returns itself rather than nothing.
+    (1..=len)
+        .map(|i| {
+            let offset = if forward { i } else { len - i };
+            order[(start + offset) % len]
+        })
+        .find(|&id| id != from && is_keyboard_focusable(tree, id))
+}
+
+/// The Control that Tab should move focus to, or `None` when nothing else can
+/// take keyboard focus (Godot `Control.find_next_valid_focus`).
+pub fn find_next_valid_focus(tree: &SceneTree, from: NodeId) -> Option<NodeId> {
+    find_valid_focus(tree, from, get_focus_next(tree, from), true)
+}
+
+/// The Control that Shift-Tab should move focus to (Godot
+/// `Control.find_prev_valid_focus`).
+pub fn find_prev_valid_focus(tree: &SceneTree, from: NodeId) -> Option<NodeId> {
+    find_valid_focus(tree, from, get_focus_previous(tree, from), false)
+}
+
+/// The first keyboard-focusable Control in the tree — where Tab lands when
+/// nothing holds focus yet.
+pub fn first_keyboard_focusable(tree: &SceneTree) -> Option<NodeId> {
+    controls_in_focus_order(tree)
+        .into_iter()
+        .find(|&id| is_keyboard_focusable(tree, id))
+}
+
+/// The Control an arrow key should move focus to (Godot
+/// `Control.find_valid_focus_neighbor`).
+///
+/// An explicit `focus_neighbor_<side>` wins. Otherwise this is Godot's
+/// geometric search (control.cpp `_get_focus_neighbor` /
+/// `_window_find_focus_neighbor`): among the keyboard-focusable Controls that
+/// extend past `from`'s far edge along the side's direction, pick the one with
+/// the smallest squared gap between the two rects.
+pub fn find_valid_focus_neighbor(
+    tree: &SceneTree,
+    from: NodeId,
+    side: FocusSide,
+) -> Option<NodeId> {
+    if let Some(path) = get_focus_neighbor(tree, from, side) {
+        if let Some(target) = resolve_focus_path(tree, from, &path) {
+            if is_focusable(tree, target) {
+                return Some(target);
+            }
+        }
+    }
+
+    let dir = side.direction();
+    let from_pos = get_global_position(tree, from);
+    let from_size = get_size(tree, from);
+    let from_center = from_pos + from_size * 0.5;
+    // How far `from` itself reaches along the direction — a candidate must beat
+    // this to count as "on that side" (control.cpp:2676-2678).
+    let min_d = dir.dot(from_pos).max(dir.dot(from_pos + from_size));
+
+    let mut best: Option<(f32, NodeId)> = None;
+    for id in controls_in_focus_order(tree) {
+        if id == from || !is_keyboard_focusable(tree, id) {
+            continue;
+        }
+        let pos = get_global_position(tree, id);
+        let size = get_size(tree, id);
+        let reach = dir.dot(pos).max(dir.dot(pos + size));
+        if reach <= min_d + f32::EPSILON {
+            continue;
+        }
+
+        // Godot's shortest rect-to-rect distance: mirror the candidate into the
+        // first quadrant, then measure the gap left after removing both
+        // half-extents. Overlapping axes contribute nothing.
+        let center_delta = (pos + size * 0.5) - from_center;
+        let abs = Vector2::new(center_delta.x.abs(), center_delta.y.abs());
+        let gap = abs - size * 0.5 - from_size * 0.5;
+        let dist_sq = if gap.x > 0.0 { gap.x * gap.x } else { 0.0 }
+            + if gap.y > 0.0 { gap.y * gap.y } else { 0.0 };
+
+        let better = match best {
+            Some((best_dist, _)) => dist_sq < best_dist,
+            None => true,
+        };
+        if better {
+            best = Some((dist_sq, id));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
 // ===========================================================================
 // Range value model (Slider / ProgressBar / SpinBox / ScrollBar) — pat-u3l8c.72
 // ===========================================================================
@@ -2170,8 +3107,8 @@ mod tests {
     #[test]
     fn size_flags_default_is_fill() {
         let tree = make_tree();
-        assert_eq!(get_h_size_flags(&tree, tree.root_id()), SizeFlags::Fill);
-        assert_eq!(get_v_size_flags(&tree, tree.root_id()), SizeFlags::Fill);
+        assert_eq!(get_h_size_flags(&tree, tree.root_id()), SizeFlags::FILL);
+        assert_eq!(get_v_size_flags(&tree, tree.root_id()), SizeFlags::FILL);
     }
 
     #[test]
@@ -2179,11 +3116,11 @@ mod tests {
         let mut tree = make_tree();
         let id = add_control(&mut tree, "Ctrl", "Control");
 
-        set_h_size_flags(&mut tree, id, SizeFlags::Expand);
-        set_v_size_flags(&mut tree, id, SizeFlags::ShrinkCenter);
+        set_h_size_flags(&mut tree, id, SizeFlags::EXPAND_FILL);
+        set_v_size_flags(&mut tree, id, SizeFlags::SHRINK_CENTER);
 
-        assert_eq!(get_h_size_flags(&tree, id), SizeFlags::Expand);
-        assert_eq!(get_v_size_flags(&tree, id), SizeFlags::ShrinkCenter);
+        assert_eq!(get_h_size_flags(&tree, id), SizeFlags::EXPAND_FILL);
+        assert_eq!(get_v_size_flags(&tree, id), SizeFlags::SHRINK_CENTER);
     }
 
     // -- Container separation -----------------------------------------------
@@ -2706,8 +3643,8 @@ func _on_pressed():
     fn rtl_layout_mirrors_hbox_child_positions() {
         // Two Expand children split 200px evenly -> 100px each.
         let (mut tree, cid, kids) = container_with_children("HBoxContainer", 2);
-        set_h_size_flags(&mut tree, kids[0], SizeFlags::Expand);
-        set_h_size_flags(&mut tree, kids[1], SizeFlags::Expand);
+        set_h_size_flags(&mut tree, kids[0], SizeFlags::EXPAND_FILL);
+        set_h_size_flags(&mut tree, kids[1], SizeFlags::EXPAND_FILL);
         set_layout_direction(&mut tree, cid, LayoutDirection::Rtl);
         assert!(is_layout_rtl(&tree, cid));
 
@@ -2729,8 +3666,8 @@ func _on_pressed():
     #[test]
     fn ltr_is_the_default_and_unmirrored() {
         let (mut tree, cid, kids) = container_with_children("HBoxContainer", 2);
-        set_h_size_flags(&mut tree, kids[0], SizeFlags::Expand);
-        set_h_size_flags(&mut tree, kids[1], SizeFlags::Expand);
+        set_h_size_flags(&mut tree, kids[0], SizeFlags::EXPAND_FILL);
+        set_h_size_flags(&mut tree, kids[1], SizeFlags::EXPAND_FILL);
         assert_eq!(get_layout_direction(&tree, cid), LayoutDirection::Inherited);
         assert!(!is_layout_rtl(&tree, cid), "unset layout is LTR");
 
@@ -2783,8 +3720,8 @@ func _on_pressed():
         // Two Expand children with stretch ratios 1 and 3 share the container's
         // 200px width 1:3 (no min sizes, no separation) -> 50 / 150.
         let (mut tree, cid, kids) = container_with_children("HBoxContainer", 2);
-        set_h_size_flags(&mut tree, kids[0], SizeFlags::Expand);
-        set_h_size_flags(&mut tree, kids[1], SizeFlags::Expand);
+        set_h_size_flags(&mut tree, kids[0], SizeFlags::EXPAND_FILL);
+        set_h_size_flags(&mut tree, kids[1], SizeFlags::EXPAND_FILL);
         set_stretch_ratio(&mut tree, kids[0], 1.0);
         set_stretch_ratio(&mut tree, kids[1], 3.0);
 
@@ -2798,8 +3735,8 @@ func _on_pressed():
 
         // No regression: equal (default) ratios still split expand space evenly.
         let (mut tree2, cid2, kids2) = container_with_children("HBoxContainer", 2);
-        set_h_size_flags(&mut tree2, kids2[0], SizeFlags::Expand);
-        set_h_size_flags(&mut tree2, kids2[1], SizeFlags::Expand);
+        set_h_size_flags(&mut tree2, kids2[0], SizeFlags::EXPAND_FILL);
+        set_h_size_flags(&mut tree2, kids2[1], SizeFlags::EXPAND_FILL);
         arrange_container(&mut tree2, cid2, Vector2::new(200.0, 100.0));
         assert_eq!(get_size(&tree2, kids2[0]).x, 100.0);
         assert_eq!(get_size(&tree2, kids2[1]).x, 100.0);

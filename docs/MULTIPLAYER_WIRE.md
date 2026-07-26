@@ -19,9 +19,36 @@ Then: version u8, flags u8, channel u8, sender u32 BE, seq u32 BE, payload_len u
 | HELLO / WELCOME | Client handshake; server assigns peer id |
 | ACK | Clears pending reliable |
 
-## RPC framing (`PRPC`)
+## Packet framing (Godot `NETWORK_COMMAND`)
 
-Magic `PRPC` + node_path u64 + method utf8 + argc + Variant subset (Nil/Bool/Int/Float/String).
+Every multiplayer packet starts with Godot's command byte
+(`upstream/godot/modules/multiplayer/scene_multiplayer.h`, `enum NetworkCommands`),
+exposed as `gdplatform::network::NetworkCommand`:
+
+| Byte | Command | Status |
+|------|---------|--------|
+| 0 | `REMOTE_CALL` | implemented |
+| 1 | `SIMPLIFY_PATH` | reserved — path cache not yet implemented |
+| 2 | `CONFIRM_PATH` | reserved — path cache not yet implemented |
+| 3 | `RAW` | implemented (`send_bytes`) |
+| 4 | `SPAWN` | reserved |
+| 5 | `DESPAWN` | reserved |
+| 6 | `SYNC` | reserved |
+| 7 | `SYS` | reserved |
+
+A `REMOTE_CALL` packet is: command byte + node_path u64 + method utf8 + argc +
+args encoded with `gdvariant::binary::encode_variant` — the same marshalls port
+Godot uses, so `Vector2` / `Array` / `Dictionary` round-trip exactly. The
+previous `PRPC` / `PRAW` magics and the private 5-type codec (which stringified
+anything outside Nil/Bool/Int/Float/String) are gone (pat-0q2kx.95).
+
+Object arguments are refused unless the caller opts in via
+`decode_rpc_packet_with(.., ObjectDecoding::Allow)`, mirroring Godot's
+`allow_object_decoding`.
+
+**Not yet implemented:** the path-id cache (`SIMPLIFY_PATH`/`CONFIRM_PATH`), so
+every call still carries the u64 path hash and the receiver still resolves it
+with an O(n) node scan.
 
 See `encode_rpc_packet` / `decode_rpc_packet` in `gdplatform::network`.
 

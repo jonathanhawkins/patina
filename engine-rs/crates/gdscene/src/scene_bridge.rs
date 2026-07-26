@@ -189,13 +189,22 @@ fn draw_commands_for(
         return Vec::new();
     };
     let modulate = canvas_order::effective_modulate(tree, node_id);
-    match class.as_str() {
+    let mut commands = match class.as_str() {
         "Sprite2D" | "AnimatedSprite2D" => sprite_commands(tree, node_id, modulate, texture_size),
         "ColorRect" => color_rect_commands(tree, node_id, modulate),
         "TextureRect" => texture_rect_commands(tree, node_id, modulate, texture_size),
         "GPUParticles2D" | "CPUParticles2D" => particle_commands(tree, node_id, modulate),
         _ => Vec::new(),
-    }
+    };
+    // Whatever the node's own `_draw` override emitted on its last redraw
+    // (pat-0q2kx.82). Godot paints these *after* the item's built-in drawing —
+    // `_draw` commands are appended to the same CanvasItem command list — which
+    // is why a `_draw` on a Sprite2D overlays the sprite rather than replacing
+    // it. Appending here is also what lets a bare `Node2D` whose only output is
+    // `_draw` produce a CanvasItem at all: without it the class match returns
+    // empty and `visit` skips the node entirely.
+    commands.extend(tree.custom_draw_commands(node_id).iter().cloned());
+    commands
 }
 
 /// `Sprite2D`: a textured rect placed at the sprite origin. Godot centers the

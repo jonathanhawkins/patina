@@ -103,12 +103,9 @@ impl StreamPeerTCP {
                     rx: Vec::new(),
                 })
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                Err(StreamPeerTcpError::Io(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "no pending connection",
-                )))
-            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(StreamPeerTcpError::Io(
+                io::Error::new(io::ErrorKind::WouldBlock, "no pending connection"),
+            )),
             Err(e) => Err(StreamPeerTcpError::Io(e)),
         }
     }

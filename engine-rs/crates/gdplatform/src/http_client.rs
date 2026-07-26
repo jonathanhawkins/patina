@@ -463,7 +463,8 @@ impl HttpClient {
             if let Err(code) = client.connect_to_host(&parsed.host, parsed.port) {
                 return error_response(code);
             }
-            if let Err(code) = client.request(config.method, &parsed.path, &config.headers, &config.body)
+            if let Err(code) =
+                client.request(config.method, &parsed.path, &config.headers, &config.body)
             {
                 return error_response(code);
             }
@@ -529,8 +530,8 @@ fn decode_chunked(data: &[u8]) -> Result<Vec<u8>, HttpResultCode> {
         };
         let size_str = String::from_utf8_lossy(&data[i..line_end]);
         let size_str = size_str.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_str, 16)
-            .map_err(|_| HttpResultCode::ConnectionError)?;
+        let size =
+            usize::from_str_radix(size_str, 16).map_err(|_| HttpResultCode::ConnectionError)?;
         i = line_end + 2;
         if size == 0 {
             break;

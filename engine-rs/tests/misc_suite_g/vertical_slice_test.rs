@@ -115,6 +115,9 @@ fn make_input(actions: &[&str], input_map: &HashMap<String, Vec<String>>) -> Inp
         input_map: input_map.clone(),
         mouse_position: Default::default(),
         mouse_buttons_pressed: Default::default(),
+        // Keyboard-only fixture: the action/gamepad sets stay empty and
+        // `is_action_pressed` falls back to the key map (pat-0q2kx.88).
+        ..Default::default()
     }
 }
 

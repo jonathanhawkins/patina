@@ -17,6 +17,9 @@ pub fn capture_frame(renderer: &mut SoftwareRenderer, viewport: &Viewport) -> Fr
         width: frame.width,
         height: frame.height,
         pixels: frame.pixels,
+        // A captured frame is finished pixels; per-item scissors were already
+        // applied and unwound during `render_frame` (pat-0q2kx.86).
+        scissor: None,
     }
 }
 
@@ -72,6 +75,7 @@ pub fn frame_data_to_buffer(frame: &FrameData) -> FrameBuffer {
         width: frame.width,
         height: frame.height,
         pixels: frame.pixels.clone(),
+        scissor: None,
     }
 }
 

@@ -212,7 +212,11 @@ impl NetworkPeer for TcpMultiplayerPeer {
         if self.status != ConnectionStatus::Connected {
             return Err(NetworkError::Transport("not connected".into()));
         }
-        let target = if self.is_server_role { to } else { PeerId::SERVER };
+        let target = if self.is_server_role {
+            to
+        } else {
+            PeerId::SERVER
+        };
         let stream = self
             .peers
             .get(&target)

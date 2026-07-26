@@ -22,3 +22,4 @@ mod editor_misc_panel_test;
 mod editor_mode_e2e_test;
 mod editor_modified_flag_undo_test;
 mod editor_monitors_live_test;
+mod mouse_mode_pointer_lock_pipeline_test;

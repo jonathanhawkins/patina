@@ -547,18 +547,35 @@ jump={
     );
 }
 
+/// Counts the actions a project declared itself — everything that is not one of
+/// Godot's builtin `ui_*` actions.
+///
+/// `load_from_project_godot` mirrors `InputMap::load_from_project_settings`,
+/// which installs the builtin set *before* reading `[input]`. So "this project
+/// declared nothing" is a statement about the non-builtin actions, not about
+/// the map being empty — these two tests asserted a bare zero, which the
+/// builtin install already contradicted before the table grew to Godot's full
+/// ~70 (pat-0q2kx.89).
+fn project_action_count(map: &InputMap) -> usize {
+    map.actions().filter(|a| !a.starts_with("ui_")).count()
+}
+
 #[test]
 fn load_from_project_godot_empty_input_section() {
     let content = "[input]\n\n[rendering]\n";
     let map = InputMap::load_from_project_godot(content);
-    assert_eq!(map.actions().count(), 0);
+    assert_eq!(project_action_count(&map), 0);
+    assert!(
+        map.has_action("ui_accept"),
+        "the builtin ui_* actions are installed regardless"
+    );
 }
 
 #[test]
 fn load_from_project_godot_no_input_section() {
     let content = "[rendering]\nfoo=bar\n";
     let map = InputMap::load_from_project_godot(content);
-    assert_eq!(map.actions().count(), 0);
+    assert_eq!(project_action_count(&map), 0);
 }
 
 // ===========================================================================

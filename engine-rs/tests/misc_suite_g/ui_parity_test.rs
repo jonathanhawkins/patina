@@ -76,7 +76,7 @@ fn container_arrangement_vbox_expand_distributes_extra_height() {
     let b = add_child(&mut tree, vbox, "B", "Control");
     set_custom_minimum_size(&mut tree, a, Vector2::new(10.0, 20.0));
     set_custom_minimum_size(&mut tree, b, Vector2::new(10.0, 30.0));
-    set_v_size_flags(&mut tree, b, SizeFlags::Expand);
+    set_v_size_flags(&mut tree, b, SizeFlags::EXPAND_FILL);
 
     arrange_container(&mut tree, vbox, Vector2::new(100.0, 200.0));
 
@@ -175,7 +175,10 @@ fn control_layout_default_anchors_use_offsets_directly() {
 
     resolve_control_layout(&mut tree, ctrl, Vector2::new(800.0, 600.0));
 
-    assert!(approx_vec(get_position(&tree, ctrl), Vector2::new(10.0, 20.0)));
+    assert!(approx_vec(
+        get_position(&tree, ctrl),
+        Vector2::new(10.0, 20.0)
+    ));
     assert!(approx_vec(get_size(&tree, ctrl), Vector2::new(100.0, 50.0)));
 }
 
@@ -191,7 +194,10 @@ fn control_layout_full_rect_preset_fills_parent() {
     resolve_control_layout(&mut tree, ctrl, Vector2::new(400.0, 300.0));
 
     assert!(approx_vec(get_position(&tree, ctrl), Vector2::ZERO));
-    assert!(approx_vec(get_size(&tree, ctrl), Vector2::new(400.0, 300.0)));
+    assert!(approx_vec(
+        get_size(&tree, ctrl),
+        Vector2::new(400.0, 300.0)
+    ));
 }
 
 /// Oracle: center-anchored rect (all anchors 0.5) with symmetric offsets is
@@ -210,7 +216,10 @@ fn control_layout_center_preset_with_offsets() {
     resolve_control_layout(&mut tree, ctrl, Vector2::new(200.0, 100.0));
 
     // Parent center = (100, 50); half-extents (40, 25) → top-left (60, 25).
-    assert!(approx_vec(get_position(&tree, ctrl), Vector2::new(60.0, 25.0)));
+    assert!(approx_vec(
+        get_position(&tree, ctrl),
+        Vector2::new(60.0, 25.0)
+    ));
     assert!(approx_vec(get_size(&tree, ctrl), Vector2::new(80.0, 50.0)));
 }
 
@@ -322,7 +331,10 @@ fn control_layout_asymmetric_anchors_with_margins() {
 
     // x1 = 400 * 0.0 + 10 = 10,  x2 = 400 * 0.5 - 10 = 190  → pos.x=10, w=180
     // y1 = 200 * 0.25 + 5 = 55, y2 = 200 * 0.75 - 5 = 145   → pos.y=55, h=90
-    assert!(approx_vec(get_position(&tree, ctrl), Vector2::new(10.0, 55.0)));
+    assert!(approx_vec(
+        get_position(&tree, ctrl),
+        Vector2::new(10.0, 55.0)
+    ));
     assert!(approx_vec(get_size(&tree, ctrl), Vector2::new(180.0, 90.0)));
 }
 
@@ -343,7 +355,10 @@ fn control_layout_grow_direction_no_op_when_rect_exceeds_min() {
     resolve_control_layout(&mut tree, ctrl, Vector2::new(300.0, 200.0));
 
     assert!(approx_vec(get_position(&tree, ctrl), Vector2::ZERO));
-    assert!(approx_vec(get_size(&tree, ctrl), Vector2::new(300.0, 200.0)));
+    assert!(approx_vec(
+        get_size(&tree, ctrl),
+        Vector2::new(300.0, 200.0)
+    ));
 }
 
 /// Oracle: when only one axis is below its minimum, grow direction is
@@ -455,12 +470,7 @@ fn theme_property_lookup() {
 
     // --- Generic Variant items roundtrip for Font and Stylebox -------------
     let font_ref = Variant::String("res://fonts/mono.ttf".into());
-    mutable.set_item(
-        ThemePropertyType::Font,
-        "Label",
-        "font",
-        font_ref.clone(),
-    );
+    mutable.set_item(ThemePropertyType::Font, "Label", "font", font_ref.clone());
     assert_eq!(
         mutable.get_item(ThemePropertyType::Font, "Label", "font"),
         Some(&font_ref)
@@ -569,7 +579,10 @@ fn control_layout() {
         get_position(&tree, ctrl2),
         Vector2::new(100.0, 150.0)
     ));
-    assert!(approx_vec(get_size(&tree, ctrl2), Vector2::new(200.0, 150.0)));
+    assert!(approx_vec(
+        get_size(&tree, ctrl2),
+        Vector2::new(200.0, 150.0)
+    ));
 
     // ---- 3. Minimum-size grow direction takes effect when offsets imply
     //        a rect smaller than `custom_minimum_size` --------------------
@@ -604,8 +617,8 @@ fn control_layout() {
     let grower = add_child(&mut tree, vbox, "Expand", "Control");
     set_custom_minimum_size(&mut tree, filler, Vector2::new(10.0, 20.0));
     set_custom_minimum_size(&mut tree, grower, Vector2::new(10.0, 30.0));
-    set_v_size_flags(&mut tree, filler, SizeFlags::Fill);
-    set_v_size_flags(&mut tree, grower, SizeFlags::Expand);
+    set_v_size_flags(&mut tree, filler, SizeFlags::FILL);
+    set_v_size_flags(&mut tree, grower, SizeFlags::EXPAND_FILL);
 
     arrange_container(&mut tree, vbox, Vector2::new(100.0, 200.0));
 
@@ -632,9 +645,9 @@ fn control_layout() {
     set_custom_minimum_size(&mut tree, a, Vector2::new(20.0, 10.0));
     set_custom_minimum_size(&mut tree, b, Vector2::new(20.0, 10.0));
     set_custom_minimum_size(&mut tree, c, Vector2::new(20.0, 10.0));
-    set_h_size_flags(&mut tree, a, SizeFlags::Expand);
-    set_h_size_flags(&mut tree, b, SizeFlags::Fill);
-    set_h_size_flags(&mut tree, c, SizeFlags::Expand);
+    set_h_size_flags(&mut tree, a, SizeFlags::EXPAND_FILL);
+    set_h_size_flags(&mut tree, b, SizeFlags::FILL);
+    set_h_size_flags(&mut tree, c, SizeFlags::EXPAND_FILL);
 
     arrange_container(&mut tree, hbox, Vector2::new(300.0, 40.0));
 
@@ -674,8 +687,14 @@ fn container_nodes() {
 
     // Children stack vertically with 4px separation.
     assert!(approx_vec(get_position(&tree, v_a), Vector2::new(0.0, 0.0)));
-    assert!(approx_vec(get_position(&tree, v_b), Vector2::new(0.0, 24.0)));
-    assert!(approx_vec(get_position(&tree, v_c), Vector2::new(0.0, 58.0)));
+    assert!(approx_vec(
+        get_position(&tree, v_b),
+        Vector2::new(0.0, 24.0)
+    ));
+    assert!(approx_vec(
+        get_position(&tree, v_c),
+        Vector2::new(0.0, 58.0)
+    ));
     // Cross-axis fills the container width.
     assert!(approx(get_size(&tree, v_a).x, 100.0));
     assert!(approx(get_size(&tree, v_b).x, 100.0));
@@ -693,7 +712,7 @@ fn container_nodes() {
     let h_b = add_child(&mut tree, hbox, "HB", "Control");
     set_custom_minimum_size(&mut tree, h_a, Vector2::new(50.0, 40.0));
     set_custom_minimum_size(&mut tree, h_b, Vector2::new(30.0, 40.0));
-    set_h_size_flags(&mut tree, h_b, SizeFlags::Expand);
+    set_h_size_flags(&mut tree, h_b, SizeFlags::EXPAND_FILL);
 
     arrange_container(&mut tree, hbox, Vector2::new(200.0, 80.0));
 
@@ -701,7 +720,10 @@ fn container_nodes() {
     assert!(approx(get_size(&tree, h_a).x, 50.0));
     assert!(approx(get_size(&tree, h_b).x, 150.0));
     assert!(approx_vec(get_position(&tree, h_a), Vector2::new(0.0, 0.0)));
-    assert!(approx_vec(get_position(&tree, h_b), Vector2::new(50.0, 0.0)));
+    assert!(approx_vec(
+        get_position(&tree, h_b),
+        Vector2::new(50.0, 0.0)
+    ));
     // Cross-axis (height) fills the container.
     assert!(approx(get_size(&tree, h_a).y, 80.0));
     assert!(approx(get_size(&tree, h_b).y, 80.0));
@@ -725,8 +747,14 @@ fn container_nodes() {
     // Row heights:   row0 = max(40, 20) = 40, row1 = max(60)    = 60.
     // Separation 5px between columns and rows.
     assert!(approx_vec(get_position(&tree, g_a), Vector2::new(0.0, 0.0)));
-    assert!(approx_vec(get_position(&tree, g_b), Vector2::new(35.0, 0.0)));
-    assert!(approx_vec(get_position(&tree, g_c), Vector2::new(0.0, 45.0)));
+    assert!(approx_vec(
+        get_position(&tree, g_b),
+        Vector2::new(35.0, 0.0)
+    ));
+    assert!(approx_vec(
+        get_position(&tree, g_c),
+        Vector2::new(0.0, 45.0)
+    ));
     // Each cell sizes to its column width × row height.
     assert!(approx_vec(get_size(&tree, g_a), Vector2::new(30.0, 40.0)));
     assert!(approx_vec(get_size(&tree, g_b), Vector2::new(50.0, 40.0)));
@@ -815,7 +843,7 @@ fn control_property_binding() {
 
     let mut inspector = InspectorPanel::new();
     inspector.inspect(b);
-    // SizeFlags::Expand serializes to int 3 (FILL | EXPAND) per the
+    // SizeFlags::EXPAND_FILL serializes to int 3 (FILL | EXPAND) per the
     // representation gdscene::control uses internally.
     set_control_property_with_layout(
         &inspector,

@@ -441,8 +441,8 @@ fn r6sku_ui_control_hierarchy_properties() {
     control::set_focus_mode(&mut tree, button, FocusMode::All);
 
     // Set size flags on vbox children.
-    control::set_h_size_flags(&mut tree, label, SizeFlags::Expand);
-    control::set_v_size_flags(&mut tree, label, SizeFlags::Fill);
+    control::set_h_size_flags(&mut tree, label, SizeFlags::EXPAND_FILL);
+    control::set_v_size_flags(&mut tree, label, SizeFlags::FILL);
 
     // Verify all properties persisted.
     assert_eq!(control::get_label_text(&tree, label), "Welcome to Patina");
@@ -451,7 +451,10 @@ fn r6sku_ui_control_hierarchy_properties() {
     assert_eq!(control::get_button_text(&tree, button), "Start Game");
     assert!(!control::is_disabled(&tree, button));
     assert_eq!(control::get_focus_mode(&tree, button), FocusMode::All);
-    assert_eq!(control::get_h_size_flags(&tree, label), SizeFlags::Expand);
+    assert_eq!(
+        control::get_h_size_flags(&tree, label),
+        SizeFlags::EXPAND_FILL
+    );
 
     // Verify anchor preset was applied (FullRect = anchors 0,0,1,1).
     assert!(approx_eq(control::get_anchor_left(&tree, panel), 0.0));
@@ -739,14 +742,17 @@ fn r6sku_ui_vbox_container_children_properties() {
     for i in 0..5 {
         let lbl = add_control(&mut tree, vbox, &format!("Label{i}"), "Label");
         control::set_label_text(&mut tree, lbl, &format!("Item {i}"));
-        control::set_h_size_flags(&mut tree, lbl, SizeFlags::Expand);
+        control::set_h_size_flags(&mut tree, lbl, SizeFlags::EXPAND_FILL);
         labels.push(lbl);
     }
 
     // Verify all labels have correct text and flags.
     for (i, &lbl) in labels.iter().enumerate() {
         assert_eq!(control::get_label_text(&tree, lbl), format!("Item {i}"));
-        assert_eq!(control::get_h_size_flags(&tree, lbl), SizeFlags::Expand);
+        assert_eq!(
+            control::get_h_size_flags(&tree, lbl),
+            SizeFlags::EXPAND_FILL
+        );
     }
 
     // Verify the container's separation.

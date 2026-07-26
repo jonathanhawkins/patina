@@ -307,6 +307,63 @@ pub enum GamepadButton {
 }
 
 impl GamepadButton {
+    /// The Godot `JoyButton` integer for this button — the value a script
+    /// passes to `Input.is_joy_button_pressed()` as `JOY_BUTTON_*`
+    /// (upstream/godot/core/input/input_enums.h `enum class JoyButton`).
+    ///
+    /// This is **not** the W3C standard-mapping index: the browser reports the
+    /// shoulder buttons at 4/5 and the D-pad at 12..15, while Godot numbers
+    /// BACK=4, GUIDE=5, START=6, the sticks 7/8, the shoulders 9/10 and the
+    /// D-pad 11..14. Confusing the two silently binds the wrong button, so the
+    /// conversion lives here rather than at each call site (pat-0q2kx.88).
+    ///
+    /// `LeftTrigger`/`RightTrigger` have no `JoyButton` at all in Godot — they
+    /// are the analog axes `JOY_AXIS_TRIGGER_LEFT`/`_RIGHT` — so they map to
+    /// `None`.
+    pub fn to_godot_index(self) -> Option<i64> {
+        Some(match self {
+            GamepadButton::FaceA => 0,
+            GamepadButton::FaceB => 1,
+            GamepadButton::FaceX => 2,
+            GamepadButton::FaceY => 3,
+            GamepadButton::Select => 4, // BACK
+            GamepadButton::Guide => 5,
+            GamepadButton::Start => 6,
+            GamepadButton::LeftStick => 7,
+            GamepadButton::RightStick => 8,
+            GamepadButton::LeftShoulder => 9,
+            GamepadButton::RightShoulder => 10,
+            GamepadButton::DPadUp => 11,
+            GamepadButton::DPadDown => 12,
+            GamepadButton::DPadLeft => 13,
+            GamepadButton::DPadRight => 14,
+            // Analog triggers are axes in Godot, not buttons.
+            GamepadButton::LeftTrigger | GamepadButton::RightTrigger => return None,
+        })
+    }
+
+    /// Inverse of [`to_godot_index`](Self::to_godot_index).
+    pub fn from_godot_index(index: i64) -> Option<GamepadButton> {
+        Some(match index {
+            0 => GamepadButton::FaceA,
+            1 => GamepadButton::FaceB,
+            2 => GamepadButton::FaceX,
+            3 => GamepadButton::FaceY,
+            4 => GamepadButton::Select,
+            5 => GamepadButton::Guide,
+            6 => GamepadButton::Start,
+            7 => GamepadButton::LeftStick,
+            8 => GamepadButton::RightStick,
+            9 => GamepadButton::LeftShoulder,
+            10 => GamepadButton::RightShoulder,
+            11 => GamepadButton::DPadUp,
+            12 => GamepadButton::DPadDown,
+            13 => GamepadButton::DPadLeft,
+            14 => GamepadButton::DPadRight,
+            _ => return None,
+        })
+    }
+
     /// Maps a W3C "standard gamepad" button index — the position in the
     /// `buttons[]` array reported by the browser `navigator.getGamepads()` — to
     /// a semantic [`GamepadButton`]. Returns `None` for indices outside the
@@ -353,6 +410,37 @@ pub enum GamepadAxis {
 }
 
 impl GamepadAxis {
+    /// The Godot `JoyAxis` integer for this axis — what a script passes to
+    /// `Input.get_joy_axis()` as `JOY_AXIS_*`
+    /// (upstream/godot/core/input/input_enums.h `enum class JoyAxis`).
+    ///
+    /// Here the standard-mapping index and Godot's value happen to agree for
+    /// the four thumbstick axes; the analog triggers differ, being buttons in
+    /// the browser layout and axes 4/5 in Godot (pat-0q2kx.88).
+    pub fn to_godot_index(self) -> i64 {
+        match self {
+            GamepadAxis::LeftStickX => 0,
+            GamepadAxis::LeftStickY => 1,
+            GamepadAxis::RightStickX => 2,
+            GamepadAxis::RightStickY => 3,
+            GamepadAxis::LeftTriggerAnalog => 4,
+            GamepadAxis::RightTriggerAnalog => 5,
+        }
+    }
+
+    /// Inverse of [`to_godot_index`](Self::to_godot_index).
+    pub fn from_godot_index(index: i64) -> Option<GamepadAxis> {
+        Some(match index {
+            0 => GamepadAxis::LeftStickX,
+            1 => GamepadAxis::LeftStickY,
+            2 => GamepadAxis::RightStickX,
+            3 => GamepadAxis::RightStickY,
+            4 => GamepadAxis::LeftTriggerAnalog,
+            5 => GamepadAxis::RightTriggerAnalog,
+            _ => return None,
+        })
+    }
+
     /// Maps a W3C "standard gamepad" axis index — the position in the `axes[]`
     /// array reported by the browser `navigator.getGamepads()` — to a semantic
     /// [`GamepadAxis`]. Returns `None` for indices outside the standard layout
@@ -407,18 +495,30 @@ pub enum InputEvent {
         value: f32,
         gamepad_id: u32,
     },
-    /// A screen touch event.
+    /// A screen touch event (Godot `InputEventScreenTouch`).
     ScreenTouch {
+        /// Finger index; the browser's `Touch.identifier`.
         index: u32,
         position: Vector2,
         pressed: bool,
+        /// Second tap of a double tap (`InputEventScreenTouch.double_tap`).
+        /// Computed by [`InputState`] — see [`DOUBLE_TAP_FRAMES`].
+        double_tap: bool,
+        /// The touch was interrupted rather than lifted — a `touchcancel`
+        /// (`InputEventScreenTouch.canceled`).
+        canceled: bool,
     },
-    /// A screen drag event.
+    /// A screen drag event (Godot `InputEventScreenDrag`).
     ScreenDrag {
         index: u32,
         position: Vector2,
         relative: Vector2,
         velocity: Vector2,
+        /// Pen pressure in `0.0..=1.0` (`InputEventScreenDrag.pressure`); `0.0`
+        /// for a plain finger.
+        pressure: f32,
+        /// Pen tilt in `-1.0..=1.0` per axis (`InputEventScreenDrag.tilt`).
+        tilt: Vector2,
     },
     /// A named action event (e.g. from `InputMap`).
     Action {
@@ -432,17 +532,166 @@ pub enum InputEvent {
 // ActionBinding
 // ---------------------------------------------------------------------------
 
+/// A key plus the modifier keys a binding requires (Godot's `InputEventKey`
+/// carrying a `KeyModifierMask`), e.g. Shift+Tab for `ui_focus_prev`.
+///
+/// Godot's non-exact action matching is a **subset** test: the binding's
+/// modifiers must all be held, but the event may hold others
+/// (`core/input/input_event.cpp` `InputEventKey::action_match`:
+/// `(action_mask & key_mask) == action_mask`). So a plain `Tab` binding also
+/// matches Shift+Tab, while a Shift+Tab binding does not match a bare Tab.
+///
+/// Patina's [`InputEvent::Key`] carries no Meta/Command bit, so Godot's
+/// `CMD_OR_CTRL` resolves to [`ctrl`](Self::ctrl) — its non-macOS meaning — and
+/// the `.macos` builtin variants are not installed. See
+/// [`InputMap::install_builtin_ui_actions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KeyCombo {
+    /// The key itself.
+    pub key: Key,
+    /// Shift must be held.
+    pub shift: bool,
+    /// Control must be held.
+    pub ctrl: bool,
+    /// Alt must be held.
+    pub alt: bool,
+}
+
+impl KeyCombo {
+    /// A binding on `key` with no modifier requirement.
+    pub fn new(key: Key) -> Self {
+        Self {
+            key,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        }
+    }
+
+    /// Requires Shift in addition to any modifiers already set.
+    pub fn shift(mut self) -> Self {
+        self.shift = true;
+        self
+    }
+
+    /// Requires Control (also Godot's `CMD_OR_CTRL` off macOS).
+    pub fn ctrl(mut self) -> Self {
+        self.ctrl = true;
+        self
+    }
+
+    /// Requires Alt.
+    pub fn alt(mut self) -> Self {
+        self.alt = true;
+        self
+    }
+
+    /// Whether an event holding `(shift, ctrl, alt)` satisfies this binding's
+    /// modifier requirement — the subset rule quoted on [`KeyCombo`].
+    fn modifiers_satisfied_by(&self, shift: bool, ctrl: bool, alt: bool) -> bool {
+        (!self.shift || shift) && (!self.ctrl || ctrl) && (!self.alt || alt)
+    }
+}
+
 /// What physical input is bound to an action.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActionBinding {
-    /// A keyboard key binding.
+    /// A keyboard key binding with no modifier requirement.
     KeyBinding(Key),
+    /// A keyboard binding that also requires modifier keys (pat-0q2kx.89).
+    KeyWithModifiers(KeyCombo),
     /// A mouse button binding.
     MouseBinding(MouseButton),
     /// A gamepad button binding.
     GamepadButtonBinding(GamepadButton),
     /// A gamepad axis binding (positive direction).
     GamepadAxisBinding(GamepadAxis),
+    /// A gamepad axis binding with an explicit direction — Godot's
+    /// `InputEventJoypadMotion` carries a signed `axis_value`, and a binding
+    /// only *presses* on deflection with the same sign (pat-0q2kx.89). This is
+    /// what makes left-stick left and right separate actions.
+    GamepadAxisDirection {
+        /// The axis.
+        axis: GamepadAxis,
+        /// `true` binds positive deflection, `false` negative.
+        positive: bool,
+    },
+}
+
+impl ActionBinding {
+    /// A key binding requiring `Shift`.
+    pub fn shift_key(key: Key) -> Self {
+        ActionBinding::KeyWithModifiers(KeyCombo::new(key).shift())
+    }
+
+    /// A key binding requiring `Ctrl` (Godot's `CMD_OR_CTRL` off macOS).
+    pub fn ctrl_key(key: Key) -> Self {
+        ActionBinding::KeyWithModifiers(KeyCombo::new(key).ctrl())
+    }
+
+    /// The negative-direction binding of `axis`.
+    pub fn axis_negative(axis: GamepadAxis) -> Self {
+        ActionBinding::GamepadAxisDirection {
+            axis,
+            positive: false,
+        }
+    }
+
+    /// The positive-direction binding of `axis`.
+    pub fn axis_positive(axis: GamepadAxis) -> Self {
+        ActionBinding::GamepadAxisDirection {
+            axis,
+            positive: true,
+        }
+    }
+}
+
+/// Godot's `InputEventJoypadMotion::action_match` for a binding on
+/// `positive` deflection receiving `value` (`core/input/input_event.cpp`).
+///
+/// The binding matches the axis regardless of direction; what direction decides
+/// is whether it *presses*. A value of exactly zero counts as the same
+/// direction, so returning to centre releases rather than leaving the action
+/// stuck. The deadzone is a floor on pressing **and** the low end of the
+/// strength remap, so strength rises from 0 at the deadzone to 1 at full
+/// deflection instead of jumping to the deadzone's value.
+fn axis_match(value: f32, positive: bool, deadzone: f32) -> ActionMatch {
+    let abs = value.abs();
+    let same_direction = value == 0.0 || (value < 0.0) != positive;
+    let pressed = same_direction && abs >= deadzone;
+    let strength = if !pressed {
+        0.0
+    } else if deadzone >= 1.0 {
+        // Godot special-cases this: inverse_lerp would divide by zero.
+        1.0
+    } else {
+        ((abs - deadzone) / (1.0 - deadzone)).clamp(0.0, 1.0)
+    };
+    ActionMatch {
+        pressed,
+        strength,
+        // Raw strength deliberately ignores the deadzone, but not the
+        // direction — the opposite stick half reads 0, not |v|.
+        raw_strength: if same_direction { abs } else { 0.0 },
+    }
+}
+
+/// The outcome of testing one event against one action, mirroring the
+/// out-parameters of Godot's `InputEvent::action_match`
+/// (`core/input/input_event.cpp`).
+///
+/// A *match* means the event is bound to the action at all; `pressed` is a
+/// separate question. An axis event on a bound axis matches even when deflected
+/// the wrong way — it just reports `pressed = false`, which is how Godot
+/// releases the opposite action as the stick crosses centre.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActionMatch {
+    /// Whether the action is pressed by this event.
+    pub pressed: bool,
+    /// Deadzone-remapped strength in `0.0..=1.0` (Godot `get_action_strength`).
+    pub strength: f32,
+    /// Strength ignoring the deadzone (Godot `get_action_raw_strength`).
+    pub raw_strength: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -488,66 +737,169 @@ impl InputMap {
     }
 
     /// Registers Godot's built-in `ui_*` actions with their default key/gamepad
-    /// events (deadzone 0.5), mirroring `InputMap::load_from_project_settings`.
-    /// Project-declared actions override these — see [`load_from_project_godot`].
+    /// events (deadzone 0.5), mirroring `InputMap::get_builtins`
+    /// (`upstream/godot/core/input/input_map.cpp`) as installed by
+    /// `load_from_project_settings`. Project-declared actions override these —
+    /// see [`load_from_project_godot`].
     ///
-    /// Note: modifier combos (e.g. Shift+Tab for `ui_focus_prev`) and keys not
-    /// in [`Key`] (Home/End/PageUp/PageDown, the text-editing set) aren't yet
-    /// expressible; the common navigation/accept/cancel/select set is covered.
+    /// Two deliberate departures from the upstream table, both because
+    /// [`InputEvent::Key`] carries no Meta/Command bit:
+    ///
+    /// * Godot's `CMD_OR_CTRL` is installed as Ctrl — its meaning on every
+    ///   platform except macOS.
+    /// * The `.macos` action variants (`ui_close_dialog.macos`,
+    ///   `ui_text_caret_line_start.macos`, …) are **not** installed, since they
+    ///   exist only to swap Ctrl for Command. Feature-tagged overrides are
+    ///   Godot's `get_builtins_with_feature_overrides_applied`, a separate
+    ///   mechanism from this table.
+    ///
+    /// Keys absent from [`Key`] are skipped: `KP_ENTER` drops from the actions
+    /// that also bind `ENTER`, and `ui_menu` / `ui_swap_input_direction` — whose
+    /// only bindings are `MENU` and `QUOTELEFT` — are not installed at all,
+    /// since an action with no reachable binding can never fire.
     ///
     /// [`load_from_project_godot`]: InputMap::load_from_project_godot
     pub fn install_builtin_ui_actions(&mut self) {
+        use ActionBinding as B;
+        // Shorthands matching the upstream spelling, so this table can be diffed
+        // against `input_map.cpp` line by line.
+        let k = B::KeyBinding;
+        let shift = B::shift_key;
+        // Godot `CMD_OR_CTRL` and `CTRL` both land on Ctrl here (see above).
+        let ctrl = B::ctrl_key;
+        let ctrl_shift = |key: Key| B::KeyWithModifiers(KeyCombo::new(key).ctrl().shift());
+        let ctrl_alt = |key: Key| B::KeyWithModifiers(KeyCombo::new(key).ctrl().alt());
+        let alt = |key: Key| B::KeyWithModifiers(KeyCombo::new(key).alt());
+        let pad = B::GamepadButtonBinding;
+
         let builtins: Vec<(&str, Vec<ActionBinding>)> = vec![
-            (
-                "ui_accept",
-                vec![
-                    ActionBinding::KeyBinding(Key::Enter),
-                    ActionBinding::KeyBinding(Key::Space),
-                    ActionBinding::GamepadButtonBinding(GamepadButton::FaceA),
-                ],
-            ),
-            ("ui_select", vec![ActionBinding::KeyBinding(Key::Space)]),
-            (
-                "ui_cancel",
-                vec![
-                    ActionBinding::KeyBinding(Key::Escape),
-                    ActionBinding::GamepadButtonBinding(GamepadButton::FaceB),
-                ],
-            ),
-            ("ui_focus_next", vec![ActionBinding::KeyBinding(Key::Tab)]),
-            (
-                "ui_focus_prev",
-                vec![ActionBinding::GamepadButtonBinding(
-                    GamepadButton::LeftShoulder,
-                )],
-            ),
+            // ----- UI navigation -----
+            // Godot binds no joypad button to accept/cancel — only `ui_select`
+            // carries one (JoyButton::Y). Patina previously added FaceA/FaceB
+            // here; they are gone because this table's whole job is to be the
+            // upstream one (pat-0q2kx.89). A project wanting them declares them
+            // in `project.godot`, which overrides the builtin.
+            ("ui_accept", vec![k(Key::Enter), k(Key::Space)]),
+            ("ui_select", vec![k(Key::Space), pad(GamepadButton::FaceY)]),
+            ("ui_cancel", vec![k(Key::Escape)]),
+            ("ui_close_dialog", vec![k(Key::Escape)]),
+            ("ui_focus_next", vec![k(Key::Tab)]),
+            // The headline modifier binding: Shift+Tab, not a shoulder button.
+            ("ui_focus_prev", vec![shift(Key::Tab)]),
             (
                 "ui_left",
                 vec![
-                    ActionBinding::KeyBinding(Key::Left),
-                    ActionBinding::GamepadButtonBinding(GamepadButton::DPadLeft),
+                    k(Key::Left),
+                    pad(GamepadButton::DPadLeft),
+                    B::axis_negative(GamepadAxis::LeftStickX),
                 ],
             ),
             (
                 "ui_right",
                 vec![
-                    ActionBinding::KeyBinding(Key::Right),
-                    ActionBinding::GamepadButtonBinding(GamepadButton::DPadRight),
+                    k(Key::Right),
+                    pad(GamepadButton::DPadRight),
+                    B::axis_positive(GamepadAxis::LeftStickX),
                 ],
             ),
             (
                 "ui_up",
                 vec![
-                    ActionBinding::KeyBinding(Key::Up),
-                    ActionBinding::GamepadButtonBinding(GamepadButton::DPadUp),
+                    k(Key::Up),
+                    pad(GamepadButton::DPadUp),
+                    B::axis_negative(GamepadAxis::LeftStickY),
                 ],
             ),
             (
                 "ui_down",
                 vec![
-                    ActionBinding::KeyBinding(Key::Down),
-                    ActionBinding::GamepadButtonBinding(GamepadButton::DPadDown),
+                    k(Key::Down),
+                    pad(GamepadButton::DPadDown),
+                    B::axis_positive(GamepadAxis::LeftStickY),
                 ],
+            ),
+            ("ui_page_up", vec![k(Key::PageUp)]),
+            ("ui_page_down", vec![k(Key::PageDown)]),
+            ("ui_home", vec![k(Key::Home)]),
+            ("ui_end", vec![k(Key::End)]),
+            // ----- UI basic shortcuts -----
+            ("ui_cut", vec![ctrl(Key::X), shift(Key::Delete)]),
+            ("ui_copy", vec![ctrl(Key::C), ctrl(Key::Insert)]),
+            ("ui_focus_mode", vec![ctrl(Key::M)]),
+            ("ui_paste", vec![ctrl(Key::V), shift(Key::Insert)]),
+            ("ui_undo", vec![ctrl(Key::Z)]),
+            ("ui_redo", vec![ctrl_shift(Key::Z), ctrl(Key::Y)]),
+            // ----- UI text input shortcuts -----
+            ("ui_text_completion_query", vec![ctrl(Key::Space)]),
+            (
+                "ui_text_completion_accept",
+                vec![shift(Key::Tab), shift(Key::Enter)],
+            ),
+            (
+                "ui_text_completion_replace",
+                vec![k(Key::Tab), k(Key::Enter)],
+            ),
+            ("ui_text_newline", vec![k(Key::Enter)]),
+            ("ui_text_newline_blank", vec![ctrl(Key::Enter)]),
+            ("ui_text_newline_above", vec![ctrl_shift(Key::Enter)]),
+            ("ui_text_indent", vec![k(Key::Tab)]),
+            ("ui_text_dedent", vec![shift(Key::Tab)]),
+            (
+                "ui_text_backspace",
+                vec![k(Key::Backspace), shift(Key::Backspace)],
+            ),
+            ("ui_text_backspace_word", vec![ctrl(Key::Backspace)]),
+            ("ui_text_backspace_all_to_left", vec![]),
+            ("ui_text_delete", vec![k(Key::Delete)]),
+            ("ui_text_delete_word", vec![ctrl(Key::Delete)]),
+            ("ui_text_delete_all_to_right", vec![]),
+            ("ui_text_caret_left", vec![k(Key::Left)]),
+            ("ui_text_caret_word_left", vec![ctrl(Key::Left)]),
+            ("ui_text_caret_right", vec![k(Key::Right)]),
+            ("ui_text_caret_word_right", vec![ctrl(Key::Right)]),
+            ("ui_text_caret_up", vec![k(Key::Up)]),
+            ("ui_text_caret_down", vec![k(Key::Down)]),
+            ("ui_text_caret_line_start", vec![k(Key::Home)]),
+            ("ui_text_caret_line_end", vec![k(Key::End)]),
+            ("ui_text_caret_page_up", vec![k(Key::PageUp)]),
+            ("ui_text_caret_page_down", vec![k(Key::PageDown)]),
+            ("ui_text_caret_document_start", vec![ctrl(Key::Home)]),
+            ("ui_text_caret_document_end", vec![ctrl(Key::End)]),
+            ("ui_text_caret_add_below", vec![ctrl_shift(Key::Down)]),
+            ("ui_text_caret_add_above", vec![ctrl_shift(Key::Up)]),
+            ("ui_text_scroll_up", vec![ctrl(Key::Up)]),
+            ("ui_text_scroll_down", vec![ctrl(Key::Down)]),
+            ("ui_text_select_all", vec![ctrl(Key::A)]),
+            ("ui_text_select_word_under_caret", vec![alt(Key::G)]),
+            (
+                "ui_text_add_selection_for_next_occurrence",
+                vec![ctrl(Key::D)],
+            ),
+            (
+                "ui_text_skip_selection_for_next_occurrence",
+                vec![ctrl_alt(Key::D)],
+            ),
+            ("ui_text_clear_carets_and_selection", vec![k(Key::Escape)]),
+            ("ui_text_toggle_insert_mode", vec![k(Key::Insert)]),
+            ("ui_text_submit", vec![k(Key::Enter)]),
+            ("ui_unicode_start", vec![ctrl_shift(Key::U)]),
+            // ----- GraphEdit -----
+            ("ui_graph_duplicate", vec![ctrl(Key::D)]),
+            ("ui_graph_delete", vec![k(Key::Delete)]),
+            ("ui_graph_follow_left", vec![ctrl(Key::Left)]),
+            ("ui_graph_follow_right", vec![ctrl(Key::Right)]),
+            // ----- FileDialog -----
+            ("ui_filedialog_delete", vec![k(Key::Delete)]),
+            ("ui_filedialog_up_one_level", vec![k(Key::Backspace)]),
+            ("ui_filedialog_refresh", vec![k(Key::F5)]),
+            ("ui_filedialog_show_hidden", vec![k(Key::H)]),
+            ("ui_filedialog_find", vec![ctrl(Key::F)]),
+            ("ui_filedialog_focus_path", vec![ctrl(Key::L)]),
+            // ----- Misc -----
+            ("ui_accessibility_drag_and_drop", vec![]),
+            (
+                "ui_colorpicker_delete_preset",
+                vec![pad(GamepadButton::FaceX), k(Key::Delete)],
             ),
         ];
         for (name, bindings) in builtins {
@@ -563,40 +915,108 @@ impl InputMap {
         self.deadzones.get(action).copied().unwrap_or(0.0)
     }
 
-    /// Returns `true` when `event` matches any binding for `action`.
+    /// Tests `event` against every binding of `action`, returning Godot's
+    /// `action_match` triple for the first binding that matches (pat-0q2kx.89).
     ///
-    /// For gamepad axis events, the axis value must exceed the action's deadzone.
-    pub fn event_matches_action(&self, event: &InputEvent, action: &str) -> bool {
-        let Some(binds) = self.bindings.get(action) else {
-            return false;
-        };
+    /// `None` means the event is not bound to this action at all. `Some` with
+    /// `pressed = false` means it *is* bound but does not press — an axis
+    /// deflected below the deadzone or in the opposite direction, or any
+    /// release event.
+    ///
+    /// Godot: `core/input/input_event.cpp` `InputEventKey::action_match`
+    /// (modifier subset test), `InputEventJoypadMotion::action_match`
+    /// (same-direction test, `|v| >= deadzone`, and
+    /// `CLAMP(inverse_lerp(deadzone, 1, |v|), 0, 1)` strength).
+    pub fn action_match(&self, event: &InputEvent, action: &str) -> Option<ActionMatch> {
+        let binds = self.bindings.get(action)?;
         let deadzone = self.get_deadzone(action);
+        // A digital binding is fully described by its pressed flag.
+        let digital = |pressed: bool| {
+            Some(ActionMatch {
+                pressed,
+                strength: if pressed { 1.0 } else { 0.0 },
+                raw_strength: if pressed { 1.0 } else { 0.0 },
+            })
+        };
         for bind in binds {
             match (event, bind) {
-                (InputEvent::Key { key, .. }, ActionBinding::KeyBinding(k)) if key == k => {
-                    return true;
-                }
-                (InputEvent::MouseButton { button, .. }, ActionBinding::MouseBinding(b))
-                    if button == b =>
+                // A bare binding has no modifier requirement, so the subset test
+                // is vacuously satisfied whatever the event holds — Ctrl+C still
+                // fires an action bound to plain C.
+                (InputEvent::Key { key, pressed, .. }, ActionBinding::KeyBinding(k))
+                    if key == k =>
                 {
-                    return true;
+                    return digital(*pressed);
                 }
                 (
-                    InputEvent::GamepadButton { button, .. },
+                    InputEvent::Key {
+                        key,
+                        pressed,
+                        shift,
+                        ctrl,
+                        alt,
+                    },
+                    ActionBinding::KeyWithModifiers(combo),
+                ) if key == &combo.key => {
+                    // Godot only applies the modifier test to a press; a release
+                    // matches so the action can drop even if the user let go of
+                    // the modifier first.
+                    if *pressed && !combo.modifiers_satisfied_by(*shift, *ctrl, *alt) {
+                        continue;
+                    }
+                    return digital(*pressed);
+                }
+                (
+                    InputEvent::MouseButton {
+                        button, pressed, ..
+                    },
+                    ActionBinding::MouseBinding(b),
+                ) if button == b => {
+                    return digital(*pressed);
+                }
+                (
+                    InputEvent::GamepadButton {
+                        button, pressed, ..
+                    },
                     ActionBinding::GamepadButtonBinding(b),
                 ) if button == b => {
-                    return true;
+                    return digital(*pressed);
                 }
                 (
                     InputEvent::GamepadAxis { axis, value, .. },
                     ActionBinding::GamepadAxisBinding(a),
                 ) if axis == a => {
-                    return value.abs() > deadzone;
+                    // The legacy binding form means "positive direction".
+                    return Some(axis_match(*value, true, deadzone));
+                }
+                (
+                    InputEvent::GamepadAxis { axis, value, .. },
+                    ActionBinding::GamepadAxisDirection { axis: a, positive },
+                ) if axis == a => {
+                    return Some(axis_match(*value, *positive, deadzone));
                 }
                 _ => {}
             }
         }
-        false
+        None
+    }
+
+    /// Returns `true` when `event` presses `action`.
+    ///
+    /// This is the "does this event fire the action" question, so an axis event
+    /// below the deadzone or deflected the wrong way answers `false` even though
+    /// it is bound. Use [`action_match`](Self::action_match) to tell "not bound"
+    /// from "bound but not pressed" — the release path needs that distinction.
+    pub fn event_matches_action(&self, event: &InputEvent, action: &str) -> bool {
+        match self.action_match(event, action) {
+            // Releases still count as a match here: callers that only ask this
+            // question treat a key-up on a bound key as belonging to the action.
+            Some(m) => match event {
+                InputEvent::GamepadAxis { .. } => m.pressed,
+                _ => true,
+            },
+            None => false,
+        }
     }
 
     /// Returns all action names.
@@ -607,6 +1027,55 @@ impl InputMap {
     /// Returns bindings for an action.
     pub fn get_bindings(&self, action: &str) -> Option<&[ActionBinding]> {
         self.bindings.get(action).map(|v| v.as_slice())
+    }
+
+    // -- Script-facing InputMap API (pat-0q2kx.89) --------------------------
+    //
+    // Godot exposes InputMap as a singleton scripts mutate at runtime; these
+    // are the methods behind `InputMap.has_action(...)` and friends.
+
+    /// Whether `action` exists (Godot `InputMap.has_action`).
+    pub fn has_action(&self, action: &str) -> bool {
+        self.deadzones.contains_key(action)
+    }
+
+    /// Removes `action` and all of its bindings (Godot `InputMap.erase_action`).
+    pub fn erase_action(&mut self, action: &str) {
+        self.deadzones.remove(action);
+        self.bindings.remove(action);
+    }
+
+    /// Sets an existing action's deadzone (Godot
+    /// `InputMap.action_set_deadzone`). Unknown actions are ignored.
+    pub fn action_set_deadzone(&mut self, action: &str, deadzone: f32) {
+        if let Some(slot) = self.deadzones.get_mut(action) {
+            *slot = deadzone;
+        }
+    }
+
+    /// Removes one binding from `action` (Godot `InputMap.action_erase_event`).
+    pub fn action_erase_event(&mut self, action: &str, binding: &ActionBinding) {
+        if let Some(list) = self.bindings.get_mut(action) {
+            list.retain(|b| b != binding);
+        }
+    }
+
+    /// Removes every binding from `action`, keeping the action itself (Godot
+    /// `InputMap.action_erase_events`).
+    pub fn action_erase_events(&mut self, action: &str) {
+        if let Some(list) = self.bindings.get_mut(action) {
+            list.clear();
+        }
+    }
+
+    /// Sorted action names (Godot `InputMap.get_actions`).
+    ///
+    /// Sorted because the backing map is a `HashMap`, and a script iterating
+    /// actions must not see a different order run to run.
+    pub fn get_actions(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.deadzones.keys().cloned().collect();
+        names.sort();
+        names
     }
 }
 
@@ -689,8 +1158,13 @@ pub struct InputState {
     actions_just_pressed: HashSet<String>,
     /// Actions that were released this frame.
     actions_just_released: HashSet<String>,
-    /// Action strength values (for analog inputs like gamepad axes).
+    /// Action strength values (for analog inputs like gamepad axes), with the
+    /// deadzone remapped away — Godot `Input.get_action_strength`.
     action_strengths: HashMap<String, f32>,
+    /// Action strength ignoring the deadzone — Godot
+    /// `Input.get_action_raw_strength` (pat-0q2kx.89). Kept separate because a
+    /// stick at 0.6 with a 0.1 deadzone reads 0.56 strength but 0.6 raw.
+    action_raw_strengths: HashMap<String, f32>,
     /// Optional input map for action resolution.
     input_map: Option<InputMap>,
     /// Current mouse capture/visibility mode (`Input.set_mouse_mode`).
@@ -699,7 +1173,35 @@ pub struct InputState {
     connected_joypads: HashSet<u32>,
     /// Active joypad vibration per device: `(weak, strong, duration_seconds)`.
     joy_vibration: HashMap<u32, (f32, f32, f32)>,
+    /// Mouse motion accumulated since the last `flush_frame`, in pixels — the
+    /// numerator of Godot's `get_last_mouse_velocity` (pat-0q2kx.92).
+    mouse_motion_this_frame: Vector2,
+    // -- Touch (pat-0q2kx.93) ----------------------------------------------
+    /// Last known position of each finger currently down.
+    touch_positions: HashMap<u32, Vector2>,
+    /// Frame number at which each finger last went down, for double-tap.
+    touch_last_press_frame: HashMap<u32, u64>,
+    /// Monotonic frame counter, advanced by [`flush_frame`](Self::flush_frame).
+    /// Double-tap is measured in frames because `InputState` has no clock.
+    frame_counter: u64,
+    /// The finger currently driving the emulated mouse, if any. Godot's
+    /// `mouse_from_touch_index`: only the **first** finger down translates, and
+    /// only its release ends the emulated press (core/input/input.cpp).
+    mouse_from_touch_index: Option<u32>,
+    /// `input_devices/pointing/emulate_mouse_from_touch` — ON by default in
+    /// Godot, which is what lets a touch press a Button.
+    emulate_mouse_from_touch: bool,
+    /// `input_devices/pointing/emulate_touch_from_mouse` — OFF by default.
+    emulate_touch_from_mouse: bool,
 }
+
+/// How many frames after a finger's last press a second press still counts as a
+/// double tap.
+///
+/// Godot's platform layers flag `double_tap` using a 0.25 s window; `InputState`
+/// has no clock, so this is that window at 60 Hz. Frame-based keeps it
+/// deterministic under test (pat-0q2kx.93).
+pub const DOUBLE_TAP_FRAMES: u64 = 15;
 
 impl InputState {
     /// Creates a new, empty input state.
@@ -720,11 +1222,28 @@ impl InputState {
             actions_just_pressed: HashSet::new(),
             actions_just_released: HashSet::new(),
             action_strengths: HashMap::new(),
+            action_raw_strengths: HashMap::new(),
             input_map: None,
             mouse_mode: MouseMode::Visible,
             connected_joypads: HashSet::new(),
             joy_vibration: HashMap::new(),
+            mouse_motion_this_frame: Vector2::ZERO,
+            touch_positions: HashMap::new(),
+            touch_last_press_frame: HashMap::new(),
+            frame_counter: 0,
+            mouse_from_touch_index: None,
+            // Godot's project-settings default is ON, which is why a touch can
+            // press a Button without the game doing anything.
+            emulate_mouse_from_touch: true,
+            emulate_touch_from_mouse: false,
         }
+    }
+
+    /// Mouse motion accumulated since the last [`flush_frame`](Self::flush_frame),
+    /// in pixels. Divide by the frame delta for Godot's
+    /// `Input.get_last_mouse_velocity` (pat-0q2kx.92).
+    pub fn mouse_motion_this_frame(&self) -> Vector2 {
+        self.mouse_motion_this_frame
     }
 
     /// Attaches an `InputMap` so that physical events automatically resolve to actions.
@@ -732,39 +1251,70 @@ impl InputState {
         self.input_map = Some(map);
     }
 
+    /// The attached `InputMap`, if any.
+    pub fn input_map(&self) -> Option<&InputMap> {
+        self.input_map.as_ref()
+    }
+
+    /// The attached `InputMap` for mutation, creating an empty one if the state
+    /// has none yet (pat-0q2kx.89).
+    ///
+    /// Runtime rebinding through `InputMap.add_action` has to work on a state
+    /// nobody handed a map to, so this makes one rather than dropping the call.
+    pub fn input_map_mut(&mut self) -> &mut InputMap {
+        self.input_map.get_or_insert_with(InputMap::new)
+    }
+
+    /// Action name → bound-event count, the read mirror a script phase needs for
+    /// `InputMap.has_action` / `get_actions` / `action_has_event`.
+    pub fn input_map_action_event_counts(&self) -> HashMap<String, usize> {
+        match &self.input_map {
+            Some(map) => map
+                .get_actions()
+                .into_iter()
+                .map(|a| {
+                    let count = map.get_bindings(&a).map(|b| b.len()).unwrap_or(0);
+                    (a, count)
+                })
+                .collect(),
+            None => HashMap::new(),
+        }
+    }
+
     /// Processes a single input event, updating internal state.
     pub fn process_event(&mut self, event: InputEvent) {
         // Resolve actions via InputMap before processing the raw event.
+        //
+        // `action_match` answers Godot's three questions at once — bound?
+        // pressed? how strongly? — so an axis crossing centre releases the
+        // action it was driving instead of leaving it stuck pressed
+        // (pat-0q2kx.89).
         if let Some(map) = &self.input_map {
             let map = map.clone();
             for action in map.actions() {
-                if map.event_matches_action(&event, action) {
-                    let pressed = match &event {
-                        InputEvent::Key { pressed, .. } => *pressed,
-                        InputEvent::MouseButton { pressed, .. } => *pressed,
-                        InputEvent::GamepadButton { pressed, .. } => *pressed,
-                        InputEvent::GamepadAxis { value, .. } => {
-                            // Axis is "pressed" when value exceeds deadzone
-                            let dz = map.get_deadzone(action);
-                            value.abs() > dz
-                        }
-                        _ => continue,
-                    };
-                    // For axis events, also store the strength.
-                    if let InputEvent::GamepadAxis { value, .. } = &event {
-                        self.action_strengths.insert(action.clone(), value.abs());
-                    } else if pressed {
-                        self.action_strengths.insert(action.clone(), 1.0);
-                    } else {
-                        self.action_strengths.insert(action.clone(), 0.0);
+                let Some(m) = map.action_match(&event, action) else {
+                    continue;
+                };
+                // Events with no press semantics (motion, touch) never reach a
+                // binding, but guard anyway so they cannot clear action state.
+                if matches!(
+                    event,
+                    InputEvent::MouseMotion { .. }
+                        | InputEvent::ScreenTouch { .. }
+                        | InputEvent::ScreenDrag { .. }
+                        | InputEvent::Action { .. }
+                ) {
+                    continue;
+                }
+                self.action_strengths.insert(action.clone(), m.strength);
+                self.action_raw_strengths
+                    .insert(action.clone(), m.raw_strength);
+                if m.pressed {
+                    if self.actions_pressed.insert(action.clone()) {
+                        self.actions_just_pressed.insert(action.clone());
                     }
-                    if pressed {
-                        if self.actions_pressed.insert(action.clone()) {
-                            self.actions_just_pressed.insert(action.clone());
-                        }
-                    } else if self.actions_pressed.remove(action) {
-                        self.actions_just_released.insert(action.clone());
-                    }
+                } else if self.actions_pressed.remove(action) {
+                    self.actions_just_released.insert(action.clone());
                 }
             }
         }
@@ -792,9 +1342,19 @@ impl InputState {
                 } else if self.mouse_pressed.remove(&button) {
                     self.mouse_just_released.insert(button);
                 }
+                // The reverse of the touch path: with the setting on, a left
+                // click also lands as finger 0 (pat-0q2kx.93).
+                self.emulate_touch_from_mouse_event(button, position, pressed);
             }
-            InputEvent::MouseMotion { position, .. } => {
+            InputEvent::MouseMotion {
+                position, relative, ..
+            } => {
                 self.mouse_position = position;
+                // Accumulated so several motion events inside one frame add up
+                // (a fast drag produces many); the frame owner divides by the
+                // delta to get Godot's velocity and clears it in `flush_frame`
+                // (pat-0q2kx.92).
+                self.mouse_motion_this_frame = self.mouse_motion_this_frame + relative;
             }
             InputEvent::GamepadButton {
                 button,
@@ -817,9 +1377,31 @@ impl InputState {
             } => {
                 self.gamepad_axis_values.insert((gamepad_id, axis), value);
             }
-            InputEvent::ScreenTouch { .. } | InputEvent::ScreenDrag { .. } => {
-                // Touch events are forwarded to the action system but don't
-                // have dedicated state tracking beyond that.
+            InputEvent::ScreenTouch {
+                index,
+                position,
+                pressed,
+                ..
+            } => {
+                if pressed {
+                    self.touch_positions.insert(index, position);
+                    self.touch_last_press_frame
+                        .insert(index, self.frame_counter);
+                } else {
+                    // Godot erases the entry rather than keeping a fossil, since
+                    // an OS may never reuse the pointer index.
+                    self.touch_positions.remove(&index);
+                }
+                self.emulate_mouse_from_touch_event(index, position, pressed);
+            }
+            InputEvent::ScreenDrag {
+                index, position, ..
+            } => {
+                self.touch_positions.insert(index, position);
+                // Only the finger driving the emulated mouse moves the cursor.
+                if self.emulate_mouse_from_touch && self.mouse_from_touch_index == Some(index) {
+                    self.mouse_position = position;
+                }
             }
             InputEvent::Action {
                 ref action,
@@ -827,6 +1409,7 @@ impl InputState {
                 strength,
             } => {
                 self.action_strengths.insert(action.clone(), strength);
+                self.action_raw_strengths.insert(action.clone(), strength);
                 if pressed {
                     if self.actions_pressed.insert(action.clone()) {
                         self.actions_just_pressed.insert(action.clone());
@@ -893,6 +1476,24 @@ impl InputState {
         }
     }
 
+    /// The action's strength **ignoring its deadzone** — Godot
+    /// `Input.get_action_raw_strength` (pat-0q2kx.89).
+    ///
+    /// Differs from [`get_action_strength`](Self::get_action_strength) only for
+    /// analog bindings: a stick at 0.6 under a 0.1 deadzone reads 0.56 there and
+    /// 0.6 here. Digital bindings report the same 1.0 / 0.0 from both.
+    pub fn get_action_raw_strength(&self, name: &str) -> f32 {
+        if self.actions_pressed.contains(name) {
+            self.action_raw_strengths
+                .get(name)
+                .copied()
+                .or_else(|| self.action_strengths.get(name).copied())
+                .unwrap_or(1.0)
+        } else {
+            0.0
+        }
+    }
+
     /// Returns a value between -1.0 and 1.0 based on two actions.
     ///
     /// Mirrors Godot's `Input.get_axis(negative_action, positive_action)`.
@@ -953,6 +1554,123 @@ impl InputState {
         self.gamepad_buttons_just_released.clear();
         self.actions_just_pressed.clear();
         self.actions_just_released.clear();
+        self.mouse_motion_this_frame = Vector2::ZERO;
+        // Advances the clock double-tap detection measures against.
+        self.frame_counter = self.frame_counter.wrapping_add(1);
+    }
+
+    // -- Touch + pointer emulation (pat-0q2kx.93) ---------------------------
+
+    /// Godot's `Input.set_emulate_mouse_from_touch`. ON by default, matching
+    /// the `input_devices/pointing/emulate_mouse_from_touch` project setting.
+    pub fn set_emulate_mouse_from_touch(&mut self, enable: bool) {
+        self.emulate_mouse_from_touch = enable;
+    }
+
+    /// Whether touch synthesizes mouse events
+    /// (`Input.is_emulating_mouse_from_touch`).
+    pub fn is_emulating_mouse_from_touch(&self) -> bool {
+        self.emulate_mouse_from_touch
+    }
+
+    /// Godot's `Input.set_emulate_touch_from_mouse`. OFF by default.
+    pub fn set_emulate_touch_from_mouse(&mut self, enable: bool) {
+        self.emulate_touch_from_mouse = enable;
+    }
+
+    /// Whether the mouse synthesizes touch events
+    /// (`Input.is_emulating_touch_from_mouse`).
+    pub fn is_emulating_touch_from_mouse(&self) -> bool {
+        self.emulate_touch_from_mouse
+    }
+
+    /// Whether finger `index` is currently down.
+    pub fn is_touch_pressed(&self, index: u32) -> bool {
+        self.touch_positions.contains_key(&index)
+    }
+
+    /// The last known position of finger `index`, if it is down.
+    pub fn touch_position(&self, index: u32) -> Option<Vector2> {
+        self.touch_positions.get(&index).copied()
+    }
+
+    /// How many fingers are currently down.
+    pub fn touch_count(&self) -> usize {
+        self.touch_positions.len()
+    }
+
+    /// Whether a press of finger `index` on the current frame would be the
+    /// second tap of a double tap — i.e. it last went down within
+    /// [`DOUBLE_TAP_FRAMES`].
+    ///
+    /// The producer calls this to fill `ScreenTouch::double_tap` before pushing
+    /// the event, mirroring how Godot's platform layers flag it (pat-0q2kx.93).
+    pub fn would_be_double_tap(&self, index: u32) -> bool {
+        match self.touch_last_press_frame.get(&index) {
+            Some(&last) => self.frame_counter.saturating_sub(last) <= DOUBLE_TAP_FRAMES,
+            None => false,
+        }
+    }
+
+    /// Synthesizes the left mouse button from a touch, mirroring Godot's
+    /// `emulate_mouse_from_touch` block in `core/input/input.cpp`.
+    ///
+    /// Only the **first** finger down translates (`mouse_from_touch_index`), and
+    /// only that finger's release ends the emulated press — so a second finger
+    /// landing while the first is held does not click again, and lifting the
+    /// second does not release the button.
+    fn emulate_mouse_from_touch_event(&mut self, index: u32, position: Vector2, pressed: bool) {
+        if !self.emulate_mouse_from_touch {
+            return;
+        }
+        let translate = if pressed {
+            if self.mouse_from_touch_index.is_none() {
+                self.mouse_from_touch_index = Some(index);
+                true
+            } else {
+                false
+            }
+        } else if self.mouse_from_touch_index == Some(index) {
+            self.mouse_from_touch_index = None;
+            true
+        } else {
+            false
+        };
+        if !translate {
+            return;
+        }
+        // Applied directly rather than re-entering `process_event`, so an
+        // emulated event can never bounce back through `emulate_touch_from_mouse`
+        // and loop.
+        self.mouse_position = position;
+        if pressed {
+            if self.mouse_pressed.insert(MouseButton::Left) {
+                self.mouse_just_pressed.insert(MouseButton::Left);
+            }
+        } else if self.mouse_pressed.remove(&MouseButton::Left) {
+            self.mouse_just_released.insert(MouseButton::Left);
+        }
+    }
+
+    /// Synthesizes finger 0 from a left mouse button, mirroring Godot's
+    /// `emulate_touch_from_mouse`. The inverse of
+    /// [`emulate_mouse_from_touch_event`](Self::emulate_mouse_from_touch_event),
+    /// and likewise applied directly to avoid a feedback loop.
+    fn emulate_touch_from_mouse_event(
+        &mut self,
+        button: MouseButton,
+        position: Vector2,
+        pressed: bool,
+    ) {
+        if !self.emulate_touch_from_mouse || button != MouseButton::Left {
+            return;
+        }
+        if pressed {
+            self.touch_positions.insert(0, position);
+            self.touch_last_press_frame.insert(0, self.frame_counter);
+        } else {
+            self.touch_positions.remove(&0);
+        }
     }
 
     // -- Mouse mode (Input.set_mouse_mode / get_mouse_mode) -----------------
@@ -985,6 +1703,11 @@ impl InputState {
     /// `is_action_just_pressed` reports it for this frame.
     pub fn action_press(&mut self, action: &str, strength: f32) {
         self.action_strengths.insert(action.to_string(), strength);
+        // A scripted press has no physical deflection behind it, so raw and
+        // remapped strength are the same value (Godot's `Input::action_press`
+        // sets both from `p_strength`).
+        self.action_raw_strengths
+            .insert(action.to_string(), strength);
         if self.actions_pressed.insert(action.to_string()) {
             self.actions_just_pressed.insert(action.to_string());
         }
@@ -994,6 +1717,7 @@ impl InputState {
     /// updating just-released edge state.
     pub fn action_release(&mut self, action: &str) {
         self.action_strengths.insert(action.to_string(), 0.0);
+        self.action_raw_strengths.insert(action.to_string(), 0.0);
         if self.actions_pressed.remove(action) {
             self.actions_just_released.insert(action.to_string());
         }
@@ -1105,6 +1829,9 @@ impl InputState {
             actions_just_pressed: self.actions_just_pressed.clone(),
             actions_just_released: self.actions_just_released.clone(),
             action_strengths: self.action_strengths.clone(),
+            action_raw_strengths: self.action_raw_strengths.clone(),
+            gamepad_buttons_pressed: self.gamepad_buttons_pressed.clone(),
+            gamepad_axis_values: self.gamepad_axis_values.clone(),
         }
     }
 }
@@ -1137,12 +1864,48 @@ pub struct InputSnapshot {
     actions_just_pressed: HashSet<String>,
     actions_just_released: HashSet<String>,
     action_strengths: HashMap<String, f32>,
+    action_raw_strengths: HashMap<String, f32>,
+    /// Gamepad buttons held, keyed by `(device, button)` (pat-0q2kx.88).
+    gamepad_buttons_pressed: HashSet<(u32, GamepadButton)>,
+    /// Latest value per `(device, axis)` (pat-0q2kx.88).
+    gamepad_axis_values: HashMap<(u32, GamepadAxis), f32>,
 }
 
 impl InputSnapshot {
     /// Returns `true` if the given key is held down.
     pub fn is_key_pressed(&self, key: Key) -> bool {
         self.keys_pressed.contains(&key)
+    }
+
+    /// Returns `true` if `button` is held on joypad `device`
+    /// (`Input.is_joy_button_pressed`).
+    ///
+    /// Carried on the snapshot rather than read live so a script sees the same
+    /// pad state for the whole frame, exactly as it does for keys and actions
+    /// (pat-0q2kx.88).
+    pub fn is_gamepad_button_pressed(&self, device: u32, button: GamepadButton) -> bool {
+        self.gamepad_buttons_pressed.contains(&(device, button))
+    }
+
+    /// The value of `axis` on joypad `device`, `0.0` when untouched
+    /// (`Input.get_joy_axis`).
+    pub fn get_gamepad_axis_value(&self, device: u32, axis: GamepadAxis) -> f32 {
+        self.gamepad_axis_values
+            .get(&(device, axis))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// Every `(device, button)` pair currently held, for mirroring into a
+    /// script-facing snapshot.
+    pub fn pressed_gamepad_buttons(&self) -> impl Iterator<Item = (u32, GamepadButton)> + '_ {
+        self.gamepad_buttons_pressed.iter().copied()
+    }
+
+    /// Every `(device, axis)` value, for mirroring into a script-facing
+    /// snapshot.
+    pub fn gamepad_axis_values(&self) -> impl Iterator<Item = ((u32, GamepadAxis), f32)> + '_ {
+        self.gamepad_axis_values.iter().map(|(k, v)| (*k, *v))
     }
 
     /// Returns `true` if the given key became pressed this frame.
@@ -1199,6 +1962,24 @@ impl InputSnapshot {
         }
     }
 
+    /// The action's strength **ignoring its deadzone** — Godot
+    /// `Input.get_action_raw_strength` (pat-0q2kx.89).
+    ///
+    /// Differs from [`get_action_strength`](Self::get_action_strength) only for
+    /// analog bindings: a stick at 0.6 under a 0.1 deadzone reads 0.56 there and
+    /// 0.6 here. Digital bindings report the same 1.0 / 0.0 from both.
+    pub fn get_action_raw_strength(&self, name: &str) -> f32 {
+        if self.actions_pressed.contains(name) {
+            self.action_raw_strengths
+                .get(name)
+                .copied()
+                .or_else(|| self.action_strengths.get(name).copied())
+                .unwrap_or(1.0)
+        } else {
+            0.0
+        }
+    }
+
     /// Returns a value between -1.0 and 1.0 based on two actions.
     pub fn get_axis(&self, negative: &str, positive: &str) -> f32 {
         let neg = self.get_action_strength(negative);
@@ -1221,6 +2002,24 @@ impl InputSnapshot {
     }
 
     // -- Bridge methods for script-facing InputSnapshot conversion -----------
+
+    /// The engine-resolved set of actions currently pressed (pat-0q2kx.88).
+    ///
+    /// Mirrored into the script-facing snapshot so an action bound to a
+    /// gamepad button resolves; a key-name map cannot express such a binding.
+    pub fn pressed_actions(&self) -> HashSet<String> {
+        self.actions_pressed.clone()
+    }
+
+    /// The actions that became pressed this frame (pat-0q2kx.88).
+    pub fn just_pressed_actions(&self) -> HashSet<String> {
+        self.actions_just_pressed.clone()
+    }
+
+    /// The actions released this frame (pat-0q2kx.88).
+    pub fn just_released_actions(&self) -> HashSet<String> {
+        self.actions_just_released.clone()
+    }
 
     /// Returns the string names of all currently pressed keys.
     ///
@@ -1355,7 +2154,26 @@ impl InputMap {
             if let Some(end) = find_matching_paren(&rest[6..]).map(|e| e + 6) {
                 let obj_str = std::str::from_utf8(&rest[..end + 1]).unwrap_or("");
                 if let Some(key) = Self::extract_keycode(obj_str) {
-                    map.action_add_event(action, ActionBinding::KeyBinding(key));
+                    // Godot serializes the modifier mask as separate
+                    // `*_pressed` fields; a binding that carries none stays the
+                    // plain `KeyBinding` form (pat-0q2kx.89).
+                    let combo = KeyCombo {
+                        key,
+                        shift: Self::extract_bool(obj_str, "\"shift_pressed\""),
+                        // Godot's `meta_pressed` is Command on macOS and the
+                        // Windows/Super key elsewhere; Patina's key event has no
+                        // Meta bit, so it folds into Ctrl the same way the
+                        // builtin `CMD_OR_CTRL` bindings do.
+                        ctrl: Self::extract_bool(obj_str, "\"ctrl_pressed\"")
+                            || Self::extract_bool(obj_str, "\"meta_pressed\""),
+                        alt: Self::extract_bool(obj_str, "\"alt_pressed\""),
+                    };
+                    let binding = if combo.shift || combo.ctrl || combo.alt {
+                        ActionBinding::KeyWithModifiers(combo)
+                    } else {
+                        ActionBinding::KeyBinding(key)
+                    };
+                    map.action_add_event(action, binding);
                 }
                 search = &rest[end + 1..];
             } else {
@@ -1377,6 +2195,64 @@ impl InputMap {
                 break;
             }
         }
+
+        // Extract gamepad bindings (pat-0q2kx.89). Godot serializes these as
+        // `Object(InputEventJoypadButton,…,"button_index":0,…)` and
+        // `Object(InputEventJoypadMotion,…,"axis":0,"axis_value":-1.0,…)`; the
+        // parser previously dropped both, so a controller-bound project action
+        // silently had no gamepad binding at all.
+        let mut search = block.as_bytes();
+        while let Some(pos) = find_substr(search, b"Object(InputEventJoypadButton") {
+            let rest = &search[pos..];
+            if let Some(end) = find_matching_paren(&rest[6..]).map(|e| e + 6) {
+                let obj_str = std::str::from_utf8(&rest[..end + 1]).unwrap_or("");
+                if let Some(button) = Self::extract_int(obj_str, "\"button_index\"")
+                    .and_then(GamepadButton::from_godot_index)
+                {
+                    map.action_add_event(action, ActionBinding::GamepadButtonBinding(button));
+                }
+                search = &rest[end + 1..];
+            } else {
+                break;
+            }
+        }
+
+        let mut search = block.as_bytes();
+        while let Some(pos) = find_substr(search, b"Object(InputEventJoypadMotion") {
+            let rest = &search[pos..];
+            if let Some(end) = find_matching_paren(&rest[6..]).map(|e| e + 6) {
+                let obj_str = std::str::from_utf8(&rest[..end + 1]).unwrap_or("");
+                if let Some(axis) =
+                    Self::extract_int(obj_str, "\"axis\"").and_then(GamepadAxis::from_godot_index)
+                {
+                    // The sign of `axis_value` is the direction the binding
+                    // presses on; Godot writes -1.0 / 1.0.
+                    let positive = Self::extract_float(obj_str, "\"axis_value\"")
+                        .map(|v| v >= 0.0)
+                        .unwrap_or(true);
+                    map.action_add_event(
+                        action,
+                        ActionBinding::GamepadAxisDirection { axis, positive },
+                    );
+                }
+                search = &rest[end + 1..];
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Reads a `"label":true` flag from a serialized event object, defaulting to
+    /// `false` for an absent or `false` field.
+    fn extract_bool(s: &str, key: &str) -> bool {
+        let Some(pos) = s.find(key) else {
+            return false;
+        };
+        let rest = &s[pos + key.len()..];
+        rest.trim_start()
+            .trim_start_matches(':')
+            .trim_start()
+            .starts_with("true")
     }
 
     /// Extracts a float value after a given key label.
@@ -1392,11 +2268,22 @@ impl InputMap {
         rest[..end].parse().ok()
     }
 
-    /// Extracts a Godot keycode and maps it to our Key enum.
+    /// Extracts a Godot keycode and maps it to our [`Key`] enum.
+    ///
+    /// Godot serializes **both** `keycode` and `physical_keycode` on every
+    /// `InputEventKey` and leaves the unused one at `0` (`KEY_NONE`) — a plain
+    /// key binding writes `"keycode":65,"physical_keycode":0`, a physical one
+    /// the reverse. So a zero means "not this kind of binding" and must not win.
+    ///
+    /// This previously read `physical_keycode` first *without* the zero check,
+    /// so it took the `0` and dropped the binding: every keyboard action in a
+    /// real `project.godot` silently vanished (pat-0q2kx.89). Preferring
+    /// `keycode` also matches `InputEventKey::action_match`, which tests
+    /// `keycode` first and only falls back to `physical_keycode` when the
+    /// logical key is `NONE` (`core/input/input_event.cpp`).
     fn extract_keycode(obj_str: &str) -> Option<Key> {
-        // Look for "keycode":VALUE or "physical_keycode":VALUE
-        let code = Self::extract_int(obj_str, "\"physical_keycode\"")
-            .or_else(|| Self::extract_int(obj_str, "\"keycode\""))?;
+        let non_zero = |label: &str| Self::extract_int(obj_str, label).filter(|c| *c != 0);
+        let code = non_zero("\"keycode\"").or_else(|| non_zero("\"physical_keycode\""))?;
         godot_keycode_to_key(code)
     }
 
@@ -1447,6 +2334,40 @@ fn find_matching_paren(s: &[u8]) -> Option<usize> {
         }
     }
     None
+}
+
+// -- Public Godot-code mappers (pat-0q2kx.89) ------------------------------
+//
+// Runtime rebinding from GDScript names controls the way `project.godot` does —
+// by Godot's integer codes — so the same mappings the `[input]` parser uses are
+// exposed for callers outside this module.
+
+/// Maps a Godot keycode (`@GlobalScope.KEY_*`) to a [`Key`], or `None` for a key
+/// Patina does not model.
+pub fn key_from_godot_keycode(code: i64) -> Option<Key> {
+    godot_keycode_to_key(code)
+}
+
+/// Maps a Godot `MouseButton` index to a [`MouseButton`].
+pub fn mouse_button_from_godot(index: i64) -> Option<MouseButton> {
+    Some(match index {
+        1 => MouseButton::Left,
+        2 => MouseButton::Right,
+        3 => MouseButton::Middle,
+        4 => MouseButton::WheelUp,
+        5 => MouseButton::WheelDown,
+        _ => return None,
+    })
+}
+
+/// Maps a Godot `JoyButton` index to a [`GamepadButton`].
+pub fn gamepad_button_from_godot(index: i64) -> Option<GamepadButton> {
+    GamepadButton::from_godot_index(index)
+}
+
+/// Maps a Godot `JoyAxis` index to a [`GamepadAxis`].
+pub fn gamepad_axis_from_godot(index: i64) -> Option<GamepadAxis> {
+    GamepadAxis::from_godot_index(index)
 }
 
 /// Maps a Godot keycode integer to our [`Key`] enum.
@@ -2125,11 +3046,14 @@ mod tests {
             index: 0,
             position: Vector2::new(100.0, 200.0),
             pressed: true,
+            double_tap: false,
+            canceled: false,
         };
         if let InputEvent::ScreenTouch {
             index,
             position,
             pressed,
+            ..
         } = evt
         {
             assert_eq!(index, 0);
@@ -2147,12 +3071,15 @@ mod tests {
             position: Vector2::new(50.0, 60.0),
             relative: Vector2::new(5.0, 6.0),
             velocity: Vector2::new(100.0, 120.0),
+            pressure: 0.0,
+            tilt: Vector2::ZERO,
         };
         if let InputEvent::ScreenDrag {
             index,
             position,
             relative,
             velocity,
+            ..
         } = evt
         {
             assert_eq!(index, 1);
@@ -2162,6 +3089,232 @@ mod tests {
         } else {
             panic!("expected ScreenDrag event");
         }
+    }
+
+    // -- pat-0q2kx.93: touch pipeline + pointer emulation -------------------
+
+    fn touch(index: u32, x: f32, y: f32, pressed: bool) -> InputEvent {
+        InputEvent::ScreenTouch {
+            index,
+            position: Vector2::new(x, y),
+            pressed,
+            double_tap: false,
+            canceled: false,
+        }
+    }
+
+    fn drag(index: u32, x: f32, y: f32) -> InputEvent {
+        InputEvent::ScreenDrag {
+            index,
+            position: Vector2::new(x, y),
+            relative: Vector2::new(1.0, 1.0),
+            velocity: Vector2::ZERO,
+            pressure: 0.0,
+            tilt: Vector2::ZERO,
+        }
+    }
+
+    /// `process_event` used to explicitly no-op both touch variants, so no
+    /// finger state existed anywhere in the engine.
+    #[test]
+    fn touch_press_release_tracks_finger_state() {
+        let mut state = InputState::new();
+        assert_eq!(state.touch_count(), 0);
+
+        state.process_event(touch(0, 10.0, 20.0, true));
+        assert!(state.is_touch_pressed(0));
+        assert_eq!(state.touch_position(0), Some(Vector2::new(10.0, 20.0)));
+        assert_eq!(state.touch_count(), 1);
+
+        // A drag moves the finger without changing its pressed state.
+        state.process_event(drag(0, 30.0, 40.0));
+        assert_eq!(state.touch_position(0), Some(Vector2::new(30.0, 40.0)));
+        assert!(state.is_touch_pressed(0));
+
+        state.process_event(touch(0, 30.0, 40.0, false));
+        assert!(!state.is_touch_pressed(0));
+        assert_eq!(state.touch_position(0), None, "released fingers are erased");
+        assert_eq!(state.touch_count(), 0);
+    }
+
+    /// Multiple fingers are tracked independently.
+    #[test]
+    fn multiple_fingers_tracked_independently() {
+        let mut state = InputState::new();
+        state.process_event(touch(0, 1.0, 1.0, true));
+        state.process_event(touch(1, 2.0, 2.0, true));
+        assert_eq!(state.touch_count(), 2);
+
+        state.process_event(touch(0, 1.0, 1.0, false));
+        assert!(!state.is_touch_pressed(0));
+        assert!(state.is_touch_pressed(1), "finger 1 is unaffected");
+        assert_eq!(state.touch_count(), 1);
+    }
+
+    /// The headline emulation clause: with `emulate_mouse_from_touch` ON (the
+    /// Godot default) a touch presses the left mouse button, which is what lets
+    /// a touch operate a Button.
+    #[test]
+    fn touch_emulates_left_mouse_button_by_default() {
+        let mut state = InputState::new();
+        assert!(
+            state.is_emulating_mouse_from_touch(),
+            "Godot's project default is ON"
+        );
+
+        state.process_event(touch(0, 100.0, 50.0, true));
+        assert!(
+            state.is_mouse_button_pressed(MouseButton::Left),
+            "a touch must synthesize a left mouse press"
+        );
+        assert!(state.is_mouse_button_just_pressed(MouseButton::Left));
+        assert_eq!(state.get_mouse_position(), Vector2::new(100.0, 50.0));
+
+        state.process_event(touch(0, 100.0, 50.0, false));
+        assert!(!state.is_mouse_button_pressed(MouseButton::Left));
+        assert!(state.is_mouse_button_just_released(MouseButton::Left));
+    }
+
+    /// Only the *first* finger drives the emulated mouse
+    /// (Godot's `mouse_from_touch_index`): a second finger must not re-click,
+    /// and lifting it must not release the button.
+    #[test]
+    fn only_the_first_finger_drives_the_emulated_mouse() {
+        let mut state = InputState::new();
+        state.process_event(touch(0, 10.0, 10.0, true));
+        state.flush_frame();
+
+        state.process_event(touch(1, 90.0, 90.0, true));
+        assert!(
+            !state.is_mouse_button_just_pressed(MouseButton::Left),
+            "a second finger must not press the mouse again"
+        );
+        assert_eq!(
+            state.get_mouse_position(),
+            Vector2::new(10.0, 10.0),
+            "the cursor stays with the first finger"
+        );
+
+        state.process_event(touch(1, 90.0, 90.0, false));
+        assert!(
+            state.is_mouse_button_pressed(MouseButton::Left),
+            "lifting the second finger must not release the button"
+        );
+
+        state.process_event(touch(0, 10.0, 10.0, false));
+        assert!(
+            !state.is_mouse_button_pressed(MouseButton::Left),
+            "lifting the driving finger releases it"
+        );
+    }
+
+    /// A drag of the driving finger moves the emulated cursor; a drag of any
+    /// other finger does not.
+    #[test]
+    fn drag_moves_the_emulated_cursor_only_for_the_driving_finger() {
+        let mut state = InputState::new();
+        state.process_event(touch(0, 10.0, 10.0, true));
+        state.process_event(touch(1, 50.0, 50.0, true));
+
+        state.process_event(drag(1, 70.0, 70.0));
+        assert_eq!(
+            state.get_mouse_position(),
+            Vector2::new(10.0, 10.0),
+            "a non-driving finger must not move the cursor"
+        );
+
+        state.process_event(drag(0, 25.0, 25.0));
+        assert_eq!(state.get_mouse_position(), Vector2::new(25.0, 25.0));
+    }
+
+    /// Turning the setting off suppresses the synthesis entirely.
+    #[test]
+    fn emulate_mouse_from_touch_can_be_disabled() {
+        let mut state = InputState::new();
+        state.set_emulate_mouse_from_touch(false);
+
+        state.process_event(touch(0, 10.0, 10.0, true));
+        assert!(!state.is_mouse_button_pressed(MouseButton::Left));
+        assert!(
+            state.is_touch_pressed(0),
+            "the touch itself still registers"
+        );
+    }
+
+    /// The reverse direction, off by default.
+    #[test]
+    fn mouse_emulates_touch_only_when_enabled() {
+        let mut state = InputState::new();
+        assert!(!state.is_emulating_touch_from_mouse(), "OFF by default");
+
+        state.process_event(InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+            position: Vector2::new(5.0, 5.0),
+        });
+        assert!(!state.is_touch_pressed(0), "no touch without the setting");
+
+        let mut state = InputState::new();
+        state.set_emulate_touch_from_mouse(true);
+        state.process_event(InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+            position: Vector2::new(5.0, 5.0),
+        });
+        assert!(state.is_touch_pressed(0), "left click lands as finger 0");
+        assert_eq!(state.touch_position(0), Some(Vector2::new(5.0, 5.0)));
+
+        // Right button is not a finger.
+        state.process_event(InputEvent::MouseButton {
+            button: MouseButton::Right,
+            pressed: true,
+            position: Vector2::new(6.0, 6.0),
+        });
+        assert_eq!(
+            state.touch_count(),
+            1,
+            "only the left button emulates touch"
+        );
+    }
+
+    /// Emulation must not feed back on itself: with **both** directions on, one
+    /// touch produces one mouse press and one finger, not an unbounded bounce.
+    #[test]
+    fn emulation_does_not_loop_when_both_directions_are_on() {
+        let mut state = InputState::new();
+        state.set_emulate_mouse_from_touch(true);
+        state.set_emulate_touch_from_mouse(true);
+
+        state.process_event(touch(0, 10.0, 10.0, true));
+        assert!(state.is_mouse_button_pressed(MouseButton::Left));
+        assert_eq!(state.touch_count(), 1);
+    }
+
+    /// A quick second tap of the same finger is a double tap; a slow one is not.
+    #[test]
+    fn double_tap_window_is_frame_bounded() {
+        let mut state = InputState::new();
+        assert!(
+            !state.would_be_double_tap(0),
+            "a first-ever tap cannot be a double tap"
+        );
+
+        state.process_event(touch(0, 10.0, 10.0, true));
+        state.process_event(touch(0, 10.0, 10.0, false));
+        state.flush_frame();
+        assert!(
+            state.would_be_double_tap(0),
+            "a tap one frame later is within the window"
+        );
+
+        // Walk past the window.
+        for _ in 0..=DOUBLE_TAP_FRAMES {
+            state.flush_frame();
+        }
+        assert!(
+            !state.would_be_double_tap(0),
+            "past DOUBLE_TAP_FRAMES it is a fresh tap"
+        );
     }
 
     #[test]
@@ -2232,12 +3385,21 @@ mod tests {
         // W3C standard button/axis indices map to the right semantic enums.
         assert_eq!(GamepadButton::from_standard(0), Some(GamepadButton::FaceA));
         assert_eq!(GamepadButton::from_standard(1), Some(GamepadButton::FaceB));
-        assert_eq!(GamepadButton::from_standard(12), Some(GamepadButton::DPadUp));
-        assert_eq!(GamepadButton::from_standard(15), Some(GamepadButton::DPadRight));
+        assert_eq!(
+            GamepadButton::from_standard(12),
+            Some(GamepadButton::DPadUp)
+        );
+        assert_eq!(
+            GamepadButton::from_standard(15),
+            Some(GamepadButton::DPadRight)
+        );
         assert_eq!(GamepadButton::from_standard(16), Some(GamepadButton::Guide));
         assert_eq!(GamepadButton::from_standard(17), None);
         assert_eq!(GamepadAxis::from_standard(0), Some(GamepadAxis::LeftStickX));
-        assert_eq!(GamepadAxis::from_standard(3), Some(GamepadAxis::RightStickY));
+        assert_eq!(
+            GamepadAxis::from_standard(3),
+            Some(GamepadAxis::RightStickY)
+        );
         assert_eq!(GamepadAxis::from_standard(4), None);
 
         // Simulate one getGamepads() frame for device 0: face-button A down,
@@ -2483,7 +3645,10 @@ mod tests {
         }
         let v = state.get_vector("left", "right", "up", "down");
         let len = (v.x * v.x + v.y * v.y).sqrt();
-        assert!((len - 1.0).abs() < 0.001, "diagonal normalized, got len={len}");
+        assert!(
+            (len - 1.0).abs() < 0.001,
+            "diagonal normalized, got len={len}"
+        );
         assert!(v.x > 0.0 && v.y > 0.0);
     }
 
@@ -3007,8 +4172,22 @@ quality/filters/msaa=2
 "#;
         let map = InputMap::load_from_project_godot(content);
         assert!(map.get_bindings("jump").is_some());
-        // Should only have the one action.
-        assert_eq!(map.actions().count(), 1);
+        // `load_from_project_godot` mirrors Godot's
+        // `InputMap::load_from_project_settings`, which installs the builtin
+        // `ui_*` set *before* applying the project's `[input]` section — so the
+        // map is never just the project's own actions. What the project
+        // declares is the only NON-builtin action (pat-0q2kx.89; this used to
+        // assert a bare count of 1, which the builtin install already broke).
+        let project_actions: Vec<String> = map
+            .actions()
+            .filter(|a| !a.starts_with("ui_"))
+            .cloned()
+            .collect();
+        assert_eq!(project_actions, vec!["jump".to_string()]);
+        assert!(
+            map.has_action("ui_accept"),
+            "the Godot builtins come along with any project load"
+        );
     }
 
     #[test]

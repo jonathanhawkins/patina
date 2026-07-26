@@ -49,15 +49,80 @@ pub fn sprite_source_rect(
     )
 }
 
+/// One frame of a [`SpriteAnimation`] — a texture plus how long it is held
+/// (pat-0q2kx.100).
+///
+/// Godot's `SpriteFrames` stores a `Texture2D` and a **relative** `duration`
+/// per frame: the frame is shown for `duration / speed` seconds, so a duration
+/// of `2.0` holds twice as long as its neighbours without changing the
+/// animation's fps (`scene/resources/2d/sprite_frames.cpp`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpriteFrameEntry {
+    /// Resource path of the frame's texture (`res://…`), empty when the frame
+    /// carries no texture.
+    pub texture: String,
+    /// Relative hold time, `1.0` being one whole frame at the animation's speed.
+    pub duration: f32,
+}
+
+impl SpriteFrameEntry {
+    /// A frame showing `texture` for the standard single-frame duration.
+    pub fn new(texture: impl Into<String>) -> Self {
+        Self {
+            texture: texture.into(),
+            duration: 1.0,
+        }
+    }
+
+    /// A frame showing `texture` held for `duration` frame-times.
+    pub fn with_duration(texture: impl Into<String>, duration: f32) -> Self {
+        Self {
+            texture: texture.into(),
+            duration: duration.max(0.0),
+        }
+    }
+}
+
 /// A single named animation within a [`SpriteFrames`] resource.
 #[derive(Debug, Clone)]
 pub struct SpriteAnimation {
-    /// Number of frames in the animation.
-    pub frame_count: usize,
+    /// The animation's frames, in play order.
+    ///
+    /// Replaces the bare frame *count* this carried before pat-0q2kx.100: the
+    /// count alone could drive playback state but never say which texture to
+    /// draw, which is why `AnimatedSprite2D` rendered as an invisible marker.
+    pub frames: Vec<SpriteFrameEntry>,
     /// Playback rate in frames per second.
     pub speed: f32,
     /// Whether the animation loops back to frame 0 at the end.
     pub loops: bool,
+}
+
+impl SpriteAnimation {
+    /// Number of frames in the animation.
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// The texture path of frame `index`, if it has one.
+    pub fn texture(&self, index: usize) -> Option<&str> {
+        self.frames
+            .get(index)
+            .map(|f| f.texture.as_str())
+            .filter(|t| !t.is_empty())
+    }
+
+    /// How long frame `index` is held, in seconds, at this animation's speed.
+    ///
+    /// Zero when the animation has no speed, which the caller treats as
+    /// "never advances" rather than dividing by zero.
+    pub fn frame_seconds(&self, index: usize) -> f32 {
+        if self.speed <= 0.0 {
+            return 0.0;
+        }
+        let duration = self.frames.get(index).map(|f| f.duration).unwrap_or(1.0);
+        duration.max(0.0) / self.speed
+    }
 }
 
 /// A set of named animations, mirroring Godot's `SpriteFrames` resource.
@@ -74,16 +139,50 @@ impl SpriteFrames {
         }
     }
 
-    /// Adds (or replaces) an animation.
+    /// Adds (or replaces) an animation of `frame_count` textureless frames.
+    ///
+    /// Kept for playback-only callers that care about timing rather than
+    /// pixels; [`add_animation_frames`](Self::add_animation_frames) is the form
+    /// a real `SpriteFrames` resource loads into.
     pub fn add_animation(&mut self, name: &str, frame_count: usize, speed: f32, loops: bool) {
+        let frames = (0..frame_count)
+            .map(|_| SpriteFrameEntry::new(""))
+            .collect();
+        self.add_animation_frames(name, frames, speed, loops);
+    }
+
+    /// Adds (or replaces) an animation from its real frames.
+    pub fn add_animation_frames(
+        &mut self,
+        name: &str,
+        frames: Vec<SpriteFrameEntry>,
+        speed: f32,
+        loops: bool,
+    ) {
         self.animations.insert(
             name.to_string(),
             SpriteAnimation {
-                frame_count,
+                frames,
                 speed,
                 loops,
             },
         );
+    }
+
+    /// The texture path of frame `index` of `name`, if any.
+    ///
+    /// This is what the renderer asks for: the node's `frame` property indexes
+    /// into the animation, and the answer is the texture to draw this tick.
+    pub fn frame_texture(&self, name: &str, index: usize) -> Option<&str> {
+        self.animations.get(name)?.texture(index)
+    }
+
+    /// Names of every animation, sorted — the backing map is a `HashMap`, so an
+    /// unsorted iteration would differ run to run.
+    pub fn animation_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.animations.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Returns the animation, if present.
@@ -95,7 +194,7 @@ impl SpriteFrames {
     pub fn frame_count(&self, name: &str) -> usize {
         self.animations
             .get(name)
-            .map(|a| a.frame_count)
+            .map(|a| a.frame_count())
             .unwrap_or(0)
     }
 

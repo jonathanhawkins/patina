@@ -218,6 +218,81 @@ pub trait ScriptInstance {
     fn notification(&mut self, _what: i64) {}
 }
 
+/// A physical input event described the way `project.godot` serializes one, so
+/// `InputMap` rebinding crosses the host boundary without this crate depending
+/// on `gdplatform`'s typed `ActionBinding` (pat-0q2kx.89).
+///
+/// Godot's `InputMap.action_add_event` takes a real `InputEvent` object; Patina
+/// has no `InputEvent` class family yet, so a script names the event with a
+/// keycode (`InputMap.action_add_event("dash", KEY_Q)`) or a dictionary
+/// (`{"class": "InputEventJoypadMotion", "axis": 0, "axis_value": -1.0}`) —
+/// the same fields the `[input]` parser reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputEventSpec {
+    /// Godot event class: `InputEventKey`, `InputEventMouseButton`,
+    /// `InputEventJoypadButton` or `InputEventJoypadMotion`.
+    pub class: String,
+    /// Keycode, mouse button index, joypad button index, or joypad axis index,
+    /// per `class`.
+    pub code: i64,
+    /// For `InputEventJoypadMotion`, the signed deflection the binding presses
+    /// on; ignored otherwise.
+    pub axis_value: f32,
+    /// Shift must be held (`InputEventKey` only).
+    pub shift: bool,
+    /// Ctrl must be held (`InputEventKey` only).
+    pub ctrl: bool,
+    /// Alt must be held (`InputEventKey` only).
+    pub alt: bool,
+}
+
+impl InputEventSpec {
+    /// A bare key event for `keycode`, the form
+    /// `InputMap.action_add_event(action, KEY_Q)` produces.
+    pub fn key(keycode: i64) -> Self {
+        Self {
+            class: "InputEventKey".to_string(),
+            code: keycode,
+            axis_value: 0.0,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        }
+    }
+
+    /// Reads the dictionary form, defaulting `class` to `InputEventKey` and
+    /// accepting either `keycode`/`button_index`/`axis` for the code.
+    pub fn from_dictionary(dict: &gdvariant::Dictionary) -> Option<Self> {
+        let get = |k: &str| dict.get(Variant::String(k.to_string())).cloned();
+        let as_int = |v: Option<Variant>| match v {
+            Some(Variant::Int(i)) => Some(i),
+            Some(Variant::Float(f)) => Some(f as i64),
+            _ => None,
+        };
+        let as_bool = |v: Option<Variant>| matches!(v, Some(Variant::Bool(true)));
+        let class = match get("class") {
+            Some(Variant::String(s)) => s,
+            _ => "InputEventKey".to_string(),
+        };
+        let code = as_int(get("keycode"))
+            .or_else(|| as_int(get("button_index")))
+            .or_else(|| as_int(get("axis")))?;
+        let axis_value = match get("axis_value") {
+            Some(Variant::Float(f)) => f as f32,
+            Some(Variant::Int(i)) => i as f32,
+            _ => 1.0,
+        };
+        Some(Self {
+            class,
+            code,
+            axis_value,
+            shift: as_bool(get("shift_pressed")),
+            ctrl: as_bool(get("ctrl_pressed")) || as_bool(get("meta_pressed")),
+            alt: as_bool(get("alt_pressed")),
+        })
+    }
+}
+
 /// Trait providing scene-tree operations to a running script.
 ///
 /// The engine crate (`gdscene`) implements this trait on an accessor that wraps
@@ -284,6 +359,44 @@ pub trait SceneAccess {
     }
     /// Return the name of `node`, if it exists.
     fn get_node_name(&self, node: u64) -> Option<String>;
+
+    /// The text `node`'s script returns from `_to_string()`, if it overrides it
+    /// (Godot `Object::to_string`, core/object/object.cpp) — what `str(obj)`
+    /// and `print(obj)` must show instead of the engine's default
+    /// `<Class#id>` form (pat-0q2kx.82).
+    ///
+    /// `None` means "no override, use the default", which is also what a
+    /// backend that does not model scripts reports. Godot ignores an override
+    /// that returns a non-String and falls back to the default, so implementors
+    /// should return `None` in that case rather than stringifying the value.
+    fn object_to_string(&mut self, _node: u64) -> Option<String> {
+        None
+    }
+
+    /// The value `node`'s script returns from its `_get(property)` virtual —
+    /// Godot's dynamic-property read fallback, consulted only after the real
+    /// property lookup misses (core/object/object.cpp `Object::get`).
+    ///
+    /// `None` (or a `Nil` return from the script) means "not handled", which is
+    /// how Godot distinguishes an unimplemented property from one whose value
+    /// genuinely is null.
+    fn object_get_virtual(&mut self, _node: u64, _property: &str) -> Option<Variant> {
+        None
+    }
+
+    /// Offers `property = value` to `node`'s `_set(property, value)` virtual.
+    /// Returns `true` when the script reports it consumed the write, which
+    /// stops the engine from also storing the value (Godot `Object::set`).
+    fn object_set_virtual(&mut self, _node: u64, _property: &str, _value: &Variant) -> bool {
+        false
+    }
+
+    /// The extra property entries `node`'s script contributes through
+    /// `_get_property_list()`, appended to the ones the engine knows about
+    /// (Godot `Object::get_property_list`).
+    fn object_property_list_virtual(&mut self, _node: u64) -> Vec<Variant> {
+        Vec::new()
+    }
 
     // -- Runtime node creation/deletion ------------------------------------
 
@@ -711,6 +824,16 @@ pub trait SceneAccess {
     /// Defaults to a no-op for hosts that do not dispatch input events.
     fn set_input_as_handled(&mut self) {}
 
+    /// Whether the in-flight input event has already been marked handled
+    /// (Godot: `Viewport.is_input_handled()`).
+    ///
+    /// Lets a later stage check whether an earlier one consumed the event
+    /// instead of only being able to set the flag. Defaults to `false` for
+    /// hosts that do not dispatch input events (pat-0q2kx.91).
+    fn is_input_handled(&self) -> bool {
+        false
+    }
+
     /// Returns `true` if any key mapped to `action` is currently held.
     fn is_input_action_pressed(&self, _action: &str) -> bool {
         false
@@ -722,6 +845,28 @@ pub trait SceneAccess {
     }
 
     /// Returns `true` if the raw key `key` is currently held.
+    /// Whether the key with Godot keycode `keycode` (`@GlobalScope.KEY_*`) is
+    /// held — `Input.is_key_pressed(KEY_A)` (pat-0q2kx.92).
+    ///
+    /// Separate from [`is_input_key_pressed`](Self::is_input_key_pressed)
+    /// because the host owns the keycode↔key mapping; this crate has no
+    /// `gdplatform` dependency to do the lookup itself.
+    fn is_input_keycode_pressed(&self, _keycode: i64) -> bool {
+        false
+    }
+
+    /// Whether any key, mouse button or action is currently held
+    /// (`Input.is_anything_pressed`).
+    fn is_anything_pressed(&self) -> bool {
+        false
+    }
+
+    /// The last mouse motion's velocity in pixels/second, as `(x, y)`
+    /// (`Input.get_last_mouse_velocity`).
+    fn get_last_mouse_velocity(&self) -> (f32, f32) {
+        (0.0, 0.0)
+    }
+
     fn is_input_key_pressed(&self, _key: &str) -> bool {
         false
     }
@@ -801,6 +946,83 @@ pub trait SceneAccess {
         0
     }
 
+    // -- cursor shape (pat-0q2kx.90) ----------------------------------------
+
+    /// Sets the default cursor shape (`Input.set_default_cursor_shape`).
+    /// `shape` uses Godot's `CURSOR_*` integer values.
+    fn set_default_cursor_shape(&mut self, _shape: i64) {}
+
+    /// The active cursor shape as a Godot `CURSOR_*` integer
+    /// (`Input.get_current_cursor_shape`); defaults to `CURSOR_ARROW` (0).
+    fn get_current_cursor_shape(&self) -> i64 {
+        0
+    }
+
+    /// Overrides the image drawn for `shape` (`Input.set_custom_mouse_cursor`).
+    /// An empty `image_path` clears the override, as passing `null` does in
+    /// Godot.
+    fn set_custom_mouse_cursor(
+        &mut self,
+        _image_path: &str,
+        _shape: i64,
+        _hotspot_x: f32,
+        _hotspot_y: f32,
+    ) {
+    }
+
+    // -- SceneMultiplayer surface (pat-0q2kx.94) ----------------------------
+    //
+    // Reached from a script as `multiplayer.*`. The defaults are Godot's
+    // no-peer answers, not errors: asking before a peer exists is ordinary.
+
+    /// `multiplayer.is_server()`.
+    fn multiplayer_is_server(&self) -> bool {
+        false
+    }
+
+    /// `multiplayer.get_unique_id()`; `0` when there is no peer.
+    fn multiplayer_unique_id(&self) -> i64 {
+        0
+    }
+
+    /// `multiplayer.has_multiplayer_peer()`.
+    fn multiplayer_has_peer(&self) -> bool {
+        false
+    }
+
+    /// `multiplayer.get_peers()`.
+    fn multiplayer_peers(&self) -> Vec<i64> {
+        Vec::new()
+    }
+
+    /// `multiplayer.get_remote_sender_id()` — valid inside an RPC handler.
+    fn multiplayer_remote_sender_id(&self) -> i64 {
+        0
+    }
+
+    /// `multiplayer.get_authenticating_peers()`.
+    fn multiplayer_authenticating_peers(&self) -> Vec<i64> {
+        Vec::new()
+    }
+
+    /// `multiplayer.send_bytes(bytes, id, mode, channel)`; `true` when sent.
+    fn multiplayer_send_bytes(&mut self, _bytes: &[u8], _target: i64, _channel: i64) -> bool {
+        false
+    }
+
+    /// `multiplayer.complete_auth(id)`; `true` when the peer was awaiting auth.
+    fn multiplayer_complete_auth(&mut self, _id: i64, _accepted: bool) -> bool {
+        false
+    }
+
+    /// `multiplayer.refuse_new_connections = value`.
+    fn multiplayer_set_refuse_new_connections(&mut self, _refuse: bool) {}
+
+    /// Reads back `multiplayer.refuse_new_connections`.
+    fn multiplayer_refuses_new_connections(&self) -> bool {
+        false
+    }
+
     /// Warps the mouse cursor to `(x, y)` in window coordinates
     /// (`Input.warp_mouse`).
     fn warp_mouse(&mut self, _x: f32, _y: f32) {}
@@ -812,10 +1034,65 @@ pub trait SceneAccess {
     /// Programmatically releases `action` (`Input.action_release`).
     fn action_release(&mut self, _action: &str) {}
 
+    // -- InputMap singleton (pat-0q2kx.89) ---------------------------------
+    //
+    // Godot's `InputMap` is a script-mutable singleton, so a game can add
+    // actions and rebind keys at runtime. The map itself lives in the host (the
+    // frame loop owns it, like `InputState`), so these are hooks rather than
+    // logic. Mutations must be visible to the *next* `Input.is_action_pressed`
+    // query, which is what makes a runtime rebind actually take effect.
+
+    /// Whether the map has `action` (`InputMap.has_action`).
+    fn input_map_has_action(&self, _action: &str) -> bool {
+        false
+    }
+
+    /// Every action name, sorted (`InputMap.get_actions`).
+    fn input_map_get_actions(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Adds an action with `deadzone` (`InputMap.add_action`).
+    fn input_map_add_action(&mut self, _action: &str, _deadzone: f32) {}
+
+    /// Removes an action and its events (`InputMap.erase_action`).
+    fn input_map_erase_action(&mut self, _action: &str) {}
+
+    /// Sets an existing action's deadzone (`InputMap.action_set_deadzone`).
+    fn input_map_action_set_deadzone(&mut self, _action: &str, _deadzone: f32) {}
+
+    /// Binds `event` to `action` (`InputMap.action_add_event`).
+    fn input_map_action_add_event(&mut self, _action: &str, _event: InputEventSpec) {}
+
+    /// Unbinds `event` from `action` (`InputMap.action_erase_event`).
+    fn input_map_action_erase_event(&mut self, _action: &str, _event: InputEventSpec) {}
+
+    /// Unbinds every event from `action` (`InputMap.action_erase_events`).
+    fn input_map_action_erase_events(&mut self, _action: &str) {}
+
+    /// How many events are bound to `action`. Backs `InputMap.action_get_events`,
+    /// which cannot return real `InputEvent` objects until Patina has that class
+    /// family; the count is what a script can meaningfully act on today.
+    fn input_map_action_event_count(&self, _action: &str) -> usize {
+        0
+    }
+
     /// Returns the device ids of connected joypads
     /// (`Input.get_connected_joypads`).
     fn get_connected_joypads(&self) -> Vec<i64> {
         Vec::new()
+    }
+
+    /// Whether the Godot `JOY_BUTTON_*` `button` is held on joypad `device`
+    /// (`Input.is_joy_button_pressed`, pat-0q2kx.88).
+    fn is_joy_button_pressed(&self, _device: i64, _button: i64) -> bool {
+        false
+    }
+
+    /// The value of the Godot `JOY_AXIS_*` `axis` on joypad `device`, `0.0`
+    /// when untouched (`Input.get_joy_axis`, pat-0q2kx.88).
+    fn get_joy_axis(&self, _device: i64, _axis: i64) -> f32 {
+        0.0
     }
 
     /// Starts a vibration on joypad `device` with `weak`/`strong` motor

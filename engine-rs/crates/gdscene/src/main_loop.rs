@@ -225,6 +225,115 @@ impl AvoidanceNodeParams {
     }
 }
 
+/// The `NavigationAgent3D` avoidance property surface (pat-0q2kx.97).
+///
+/// Separate from [`AvoidanceNodeParams`] rather than generic over the vector
+/// type, because the 3D node carries three properties the 2D one has no
+/// counterpart for — `height`, `use_3d_avoidance` and `keep_y_velocity` — and
+/// they are exactly the ones that decide which solve runs.
+struct AvoidanceNodeParams3D {
+    velocity: gdcore::math::Vector3,
+    radius: Option<f32>,
+    height: Option<f32>,
+    max_speed: Option<f32>,
+    neighbor_distance: Option<f32>,
+    max_neighbors: Option<usize>,
+    time_horizon_agents: Option<f32>,
+    time_horizon_obstacles: Option<f32>,
+    avoidance_layers: Option<u32>,
+    avoidance_mask: Option<u32>,
+    avoidance_priority: Option<f32>,
+    use_3d_avoidance: Option<bool>,
+    keep_y_velocity: Option<bool>,
+}
+
+impl AvoidanceNodeParams3D {
+    fn read(node: &crate::node::Node) -> Self {
+        fn number(node: &crate::node::Node, name: &str) -> Option<f32> {
+            match node.get_property(name) {
+                Variant::Float(f) => Some(f as f32),
+                Variant::Int(i) => Some(i as f32),
+                _ => None,
+            }
+        }
+        fn integer(node: &crate::node::Node, name: &str) -> Option<i64> {
+            match node.get_property(name) {
+                Variant::Int(i) => Some(i),
+                Variant::Float(f) => Some(f as i64),
+                _ => None,
+            }
+        }
+        fn boolean(node: &crate::node::Node, name: &str) -> Option<bool> {
+            match node.get_property(name) {
+                Variant::Bool(b) => Some(b),
+                _ => None,
+            }
+        }
+
+        Self {
+            velocity: match node.get_property("velocity") {
+                Variant::Vector3(v) => v,
+                _ => gdcore::math::Vector3::ZERO,
+            },
+            radius: number(node, "radius"),
+            height: number(node, "height"),
+            max_speed: number(node, "max_speed"),
+            neighbor_distance: number(node, "neighbor_distance"),
+            max_neighbors: integer(node, "max_neighbors").map(|i| i.max(0) as usize),
+            time_horizon_agents: number(node, "time_horizon_agents"),
+            time_horizon_obstacles: number(node, "time_horizon_obstacles"),
+            avoidance_layers: integer(node, "avoidance_layers").map(|i| i as u32),
+            avoidance_mask: integer(node, "avoidance_mask").map(|i| i as u32),
+            avoidance_priority: number(node, "avoidance_priority"),
+            use_3d_avoidance: boolean(node, "use_3d_avoidance"),
+            keep_y_velocity: boolean(node, "keep_y_velocity"),
+        }
+    }
+
+    fn apply(&self, agent: &mut NavigationAgent3D) {
+        // Gathering already filtered on `avoidance_enabled`; the backing agent
+        // must agree or the solve passes the velocity straight through.
+        agent.avoidance_enabled = true;
+        agent.velocity = self.velocity;
+        if let Some(v) = self.radius {
+            agent.radius = v;
+        }
+        if let Some(v) = self.height {
+            agent.height = v;
+        }
+        if let Some(v) = self.max_speed {
+            agent.max_speed = v;
+        }
+        if let Some(v) = self.neighbor_distance {
+            agent.neighbor_distance = v;
+        }
+        if let Some(v) = self.max_neighbors {
+            agent.max_neighbors = v;
+        }
+        if let Some(v) = self.time_horizon_agents {
+            agent.time_horizon_agents = v;
+        }
+        if let Some(v) = self.time_horizon_obstacles {
+            agent.time_horizon_obstacles = v;
+        }
+        if let Some(v) = self.avoidance_layers {
+            agent.avoidance_layers = v;
+        }
+        if let Some(v) = self.avoidance_mask {
+            agent.avoidance_mask = v;
+        }
+        if let Some(v) = self.avoidance_priority {
+            agent.avoidance_priority = v;
+        }
+        if let Some(v) = self.use_3d_avoidance {
+            agent.use_3d_avoidance = v;
+        }
+        if let Some(v) = self.keep_y_velocity {
+            agent.keep_y_velocity = v;
+        }
+    }
+}
+
 /// Drives a [`SceneTree`] through a deterministic frame loop.
 ///
 /// # Example
@@ -266,6 +375,13 @@ pub struct MainLoop {
     /// Engine-owned input state. Receives events via [`push_event`](Self::push_event)
     /// and produces the script-facing [`InputSnapshot`] each frame.
     input_state: InputState,
+    /// Engine-owned cursor state (pat-0q2kx.90). `gdplatform::cursor` had the
+    /// full shape/custom-cursor model with green unit tests but **no owner** —
+    /// nothing in the engine or the editor ever constructed one, so a script's
+    /// cursor change had nowhere to land and the browser view had nothing to
+    /// read. It lives here beside `input_state` because both are applied from
+    /// the same drained command queue.
+    cursor: gdplatform::cursor::CursorManager,
     /// Events pushed since the last [`step`](Self::step), awaiting dispatch
     /// through `SceneTree::push_input` (pat-nzgdu.83). Distinct from
     /// `input_state`, which only accumulates pollable state.
@@ -346,6 +462,7 @@ impl MainLoop {
             physics_accumulator: 0.0,
             paused: false,
             input_state: InputState::new(),
+            cursor: gdplatform::cursor::CursorManager::new(),
             pending_input: Vec::new(),
             particles: HashMap::new(),
             nav_agents_2d: HashMap::new(),
@@ -710,6 +827,12 @@ impl MainLoop {
     pub fn process_navigation_avoidance(&mut self, dt: f32) {
         use gdcore::math::Vector2;
 
+        // The 3D pass runs first because the 2D gather below returns early when
+        // there are no 2D agents — and a 3D-only scene is exactly that case, so
+        // hanging the 3D call off the end of this function would skip it in the
+        // one situation it matters most (pat-0q2kx.97).
+        self.process_navigation_avoidance_3d(dt);
+
         // -- gather (immutable tree read) --
         let mut agent_nodes: Vec<(NodeId, AvoidanceNodeParams)> = Vec::new();
         let mut obstacles: Vec<OrcaAgent> = Vec::new();
@@ -808,6 +931,121 @@ impl MainLoop {
         }
     }
 
+    /// The 3D half of the avoidance tick (pat-0q2kx.97).
+    ///
+    /// Godot runs RVO for 3D agents every physics frame in one of two modes
+    /// (`doc/classes/NavigationAgent3D.xml`): the default 2D-layered solve on
+    /// the XZ plane, where cylinders interact only when their vertical extents
+    /// overlap, and full 3D spheres under `use_3d_avoidance`. Patina had both
+    /// solvers but no caller — `process_navigation_avoidance` matched only the
+    /// 2D classes, so every 3D agent path-stepped with an empty neighbour list
+    /// and `velocity_computed` never fired for one.
+    ///
+    /// Structured exactly like the 2D pass above: gather, snapshot every view
+    /// *before* any solve, then publish. Snapshotting first is what keeps the
+    /// result independent of tree order — an agent must negotiate against its
+    /// neighbours' state at the top of the tick, not against whatever the
+    /// earlier agents were just assigned.
+    fn process_navigation_avoidance_3d(&mut self, dt: f32) {
+        use crate::navigation::NavigationObstacle3D;
+        use gdcore::math::Vector3;
+
+        // -- gather (immutable tree read) --
+        let mut agent_nodes: Vec<(NodeId, AvoidanceNodeParams3D)> = Vec::new();
+        let mut obstacles: Vec<NavigationObstacle3D> = Vec::new();
+
+        for id in self.tree.all_nodes_in_tree_order() {
+            let Some(node) = self.tree.get_node(id) else {
+                continue;
+            };
+            match node.class_name() {
+                "NavigationAgent3D" => {
+                    if !matches!(node.get_property("avoidance_enabled"), Variant::Bool(true)) {
+                        continue;
+                    }
+                    agent_nodes.push((id, AvoidanceNodeParams3D::read(node)));
+                }
+                "NavigationObstacle3D" => {
+                    let radius = match node.get_property("radius") {
+                        Variant::Float(f) => f as f32,
+                        Variant::Int(i) => i as f32,
+                        _ => 0.0,
+                    };
+                    if radius <= 0.0 {
+                        continue;
+                    }
+                    let height = match node.get_property("height") {
+                        Variant::Float(f) => f as f32,
+                        Variant::Int(i) => i as f32,
+                        // Godot's obstacle height defaults to 1.0.
+                        _ => 1.0,
+                    };
+                    let position = crate::node3d::get_position(&self.tree, id);
+                    let mut obstacle = NavigationObstacle3D::new(position, radius, height);
+                    if let Variant::Vector3(v) = node.get_property("velocity") {
+                        obstacle.velocity = v;
+                    }
+                    if let Variant::Int(layers) = node.get_property("avoidance_layers") {
+                        obstacle.avoidance_layers = layers as u32;
+                    }
+                    obstacles.push(obstacle);
+                }
+                _ => {}
+            }
+        }
+
+        if agent_nodes.is_empty() {
+            return;
+        }
+
+        let positions: Vec<Vector3> = agent_nodes
+            .iter()
+            .map(|(id, _)| crate::node3d::get_position(&self.tree, *id))
+            .collect();
+
+        // -- sync node properties onto the agents, then snapshot solver views --
+        // Each view carries the position and height the layered mode needs to
+        // decide whether this pair overlaps vertically at all.
+        let mut views: Vec<(Vector3, f32, crate::navigation::OrcaAgent)> =
+            Vec::with_capacity(agent_nodes.len());
+        for ((id, params), position) in agent_nodes.iter().zip(&positions) {
+            let agent = self
+                .nav_agents_3d
+                .entry(*id)
+                .or_insert_with(NavigationAgent3D::new);
+            params.apply(agent);
+            views.push((*position, agent.height, agent.orca_agent_xz(*position)));
+        }
+
+        // -- solve --
+        let mut results: Vec<(NodeId, Vector3)> = Vec::with_capacity(agent_nodes.len());
+        for (index, (id, _)) in agent_nodes.iter().enumerate() {
+            let neighbors: Vec<(Vector3, f32, crate::navigation::OrcaAgent)> = views
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .map(|(_, view)| *view)
+                .collect();
+            let Some(agent) = self.nav_agents_3d.get(id) else {
+                continue;
+            };
+            let safe = agent.solve_safe_velocity(positions[index], &neighbors, &obstacles, dt);
+            results.push((*id, safe));
+        }
+
+        // -- publish + signal --
+        for (id, safe) in results {
+            if let Some(agent) = self.nav_agents_3d.get_mut(&id) {
+                agent.safe_velocity = safe;
+            }
+            if let Some(node) = self.tree.get_node_mut(id) {
+                node.set_property("safe_velocity", Variant::Vector3(safe));
+            }
+            self.tree
+                .emit_signal(id, "velocity_computed", &[Variant::Vector3(safe)]);
+        }
+    }
+
     /// Drives `NavigationAgent2D`/`NavigationAgent3D` nodes along their computed
     /// paths each frame (pat-u3l8c.5).
     ///
@@ -830,6 +1068,12 @@ impl MainLoop {
         let mut polys3: Vec<NavPolygon3D> = Vec::new();
         let mut agents2: Vec<(NodeId, Vector2, Vector2)> = Vec::new();
         let mut agents3: Vec<(NodeId, Vector3, Vector3)> = Vec::new();
+        // Off-mesh connections gathered from NavigationLink2D/3D nodes
+        // (pat-0q2kx.98). The link-aware search already existed on both servers
+        // but nothing ever filled these, so `links` was permanently empty and a
+        // scene whose regions are joined only by a link could not path at all.
+        let mut links2: Vec<crate::navigation::NavigationLink2D> = Vec::new();
+        let mut links3: Vec<crate::navigation::NavigationLink3D> = Vec::new();
 
         // Gather navmesh regions + agent nodes (immutable tree read).
         for id in self.tree.all_nodes_in_tree_order() {
@@ -862,6 +1106,50 @@ impl MainLoop {
                         }
                     }
                 }
+                // Every painted, navigation-enabled cell of a tile layer is its
+                // own region (pat-0q2kx.99), exactly as Godot's
+                // `TileMapLayer::_navigation_update` emits one region RID per
+                // tile. `tilemap.rs` had zero navigation references, so
+                // TileSet-authored navigation — a standard 2D Godot pattern —
+                // produced nothing at runtime.
+                "TileMapLayer" | "TileMap" => {
+                    if !region_enabled(node) {
+                        continue;
+                    }
+                    let nav_sources = match node.get_property(crate::tilemap::TILE_NAV_SOURCES) {
+                        Variant::PackedInt32Array(ids) => ids,
+                        _ => Vec::new(),
+                    };
+                    if nav_sources.is_empty() {
+                        continue;
+                    }
+                    let tile_local = match node.get_property(crate::tilemap::TILE_NAV_POLYGON) {
+                        Variant::PackedVector2Array(v) => v,
+                        _ => Vec::new(),
+                    };
+                    let tile_size = match node.get_property("tile_size") {
+                        Variant::Vector2i(v) => v,
+                        Variant::Vector2(v) => gdcore::math::Vector2i::new(v.x as i32, v.y as i32),
+                        // Godot's TileSet default.
+                        _ => gdcore::math::Vector2i::new(16, 16),
+                    };
+                    let cells = match node.get_property("tile_map_data") {
+                        Variant::PackedByteArray(bytes) => {
+                            crate::tilemap::decode_tile_map_data(&bytes)
+                        }
+                        _ => Default::default(),
+                    };
+                    let origin = crate::node2d::get_global_position(&self.tree, id);
+                    for poly in crate::tilemap::tile_navigation_polygons(
+                        &cells,
+                        tile_size,
+                        &nav_sources,
+                        &tile_local,
+                        origin,
+                    ) {
+                        polys2.push(NavPolygon::new(poly));
+                    }
+                }
                 "NavigationRegion3D" => {
                     if !region_enabled(node) {
                         continue;
@@ -877,6 +1165,43 @@ impl MainLoop {
                                 polys3.push(NavPolygon3D::new(poly));
                             }
                         }
+                    }
+                }
+                // A link is an off-mesh connection between two points on the map
+                // (pat-0q2kx.98). Godot's `get_global_start_position()` is the
+                // node's global transform applied to `start_position`, so the
+                // endpoints are read relative to the node rather than as world
+                // coordinates — moving the link node moves both ends.
+                "NavigationLink2D" => {
+                    if !matches!(node.get_property("enabled"), Variant::Bool(false)) {
+                        let origin = crate::node2d::get_global_position(&self.tree, id);
+                        let read = |key: &str| match node.get_property(key) {
+                            Variant::Vector2(v) => v,
+                            _ => Vector2::ZERO,
+                        };
+                        let mut link = crate::navigation::NavigationLink2D::new(
+                            origin + read("start_position"),
+                            origin + read("end_position"),
+                        );
+                        link.bidirectional =
+                            !matches!(node.get_property("bidirectional"), Variant::Bool(false));
+                        links2.push(link);
+                    }
+                }
+                "NavigationLink3D" => {
+                    if !matches!(node.get_property("enabled"), Variant::Bool(false)) {
+                        let xform = crate::node3d::get_global_transform(&self.tree, id);
+                        let read = |key: &str| match node.get_property(key) {
+                            Variant::Vector3(v) => v,
+                            _ => Vector3::ZERO,
+                        };
+                        let mut link = crate::navigation::NavigationLink3D::new(
+                            xform.xform(read("start_position")),
+                            xform.xform(read("end_position")),
+                        );
+                        link.bidirectional =
+                            !matches!(node.get_property("bidirectional"), Variant::Bool(false));
+                        links3.push(link);
                     }
                 }
                 "NavigationAgent2D" => {
@@ -907,6 +1232,15 @@ impl MainLoop {
         if !polys3.is_empty() {
             let conns = Self::nav3d_connections(&polys3, 0.5);
             server3.add_region(NavMesh3D::new(polys3, conns));
+        }
+        // Links go on after the regions: both servers resolve a link's endpoints
+        // to the nearest polygon of the already-registered geometry
+        // (pat-0q2kx.98).
+        for link in links2 {
+            server2.add_link(link);
+        }
+        for link in links3 {
+            server3.add_link(link);
         }
 
         // Drop agents whose node vanished.
@@ -1383,6 +1717,74 @@ impl MainLoop {
                         self.input_state.stop_joy_vibration(device as u32);
                     }
                 }
+                // Cursor shape (pat-0q2kx.90). An out-of-range shape is ignored
+                // rather than clamped: Godot's `set_default_cursor_shape` is
+                // `ERR_FAIL_INDEX`-guarded (display_server_web.cpp:500), so a
+                // bad value leaves the cursor alone instead of snapping it to
+                // ARROW.
+                InputCommand::SetDefaultCursorShape(shape) => {
+                    if let Some(shape) = u8::try_from(shape)
+                        .ok()
+                        .and_then(gdplatform::cursor::CursorShape::from_u8)
+                    {
+                        self.cursor.set_cursor_shape(shape);
+                        self.tree.set_cursor_shape_mirror(shape as i64);
+                    }
+                }
+                InputCommand::SetCustomMouseCursor {
+                    image_path,
+                    shape,
+                    hotspot_x,
+                    hotspot_y,
+                } => {
+                    if let Some(shape) = u8::try_from(shape)
+                        .ok()
+                        .and_then(gdplatform::cursor::CursorShape::from_u8)
+                    {
+                        if image_path.is_empty() {
+                            // Godot clears the override when passed a null image.
+                            self.cursor.clear_custom_cursor(shape);
+                        } else {
+                            self.cursor.set_custom_cursor_path(
+                                shape,
+                                image_path,
+                                hotspot_x.max(0.0) as u32,
+                                hotspot_y.max(0.0) as u32,
+                            );
+                        }
+                    }
+                }
+                // InputMap rebinding (pat-0q2kx.89). These land on the engine
+                // map before the next event is pushed, so an action a script
+                // created this frame resolves from the very next input.
+                InputCommand::InputMapAddAction { action, deadzone } => {
+                    self.input_state
+                        .input_map_mut()
+                        .add_action(action, deadzone);
+                }
+                InputCommand::InputMapEraseAction { action } => {
+                    self.input_state.input_map_mut().erase_action(&action);
+                }
+                InputCommand::InputMapSetDeadzone { action, deadzone } => {
+                    self.input_state
+                        .input_map_mut()
+                        .action_set_deadzone(&action, deadzone);
+                }
+                InputCommand::InputMapAddEvent { action, binding } => {
+                    self.input_state
+                        .input_map_mut()
+                        .action_add_event(action, binding);
+                }
+                InputCommand::InputMapEraseEvent { action, binding } => {
+                    self.input_state
+                        .input_map_mut()
+                        .action_erase_event(&action, &binding);
+                }
+                InputCommand::InputMapEraseEvents { action } => {
+                    self.input_state
+                        .input_map_mut()
+                        .action_erase_events(&action);
+                }
             }
         }
 
@@ -1402,6 +1804,8 @@ impl MainLoop {
             .map(|d| d as i64)
             .collect();
         self.tree.set_input_connected_joypads_mirror(joypads);
+        self.tree
+            .set_input_map_mirror(self.input_state.input_map_action_event_counts());
     }
 
     /// Returns a reference to the engine-owned [`InputState`].
@@ -1412,6 +1816,19 @@ impl MainLoop {
     /// Returns a mutable reference to the engine-owned [`InputState`].
     pub fn input_state_mut(&mut self) -> &mut InputState {
         &mut self.input_state
+    }
+
+    /// The engine-owned [`CursorManager`](gdplatform::cursor::CursorManager)
+    /// (pat-0q2kx.90). The editor server reads the active shape out of this to
+    /// put it in the input-state payload the browser game view polls.
+    pub fn cursor(&self) -> &gdplatform::cursor::CursorManager {
+        &self.cursor
+    }
+
+    /// Mutable access to the cursor state, for a host applying a change that
+    /// did not come from a script.
+    pub fn cursor_mut(&mut self) -> &mut gdplatform::cursor::CursorManager {
+        &mut self.cursor
     }
 
     /// Advances one frame by `delta_secs` seconds.
@@ -1443,6 +1860,21 @@ impl MainLoop {
             }
             let mouse_pos = platform_snap.get_mouse_position();
 
+            // Gamepad state, keyed by Godot's JoyButton/JoyAxis numbering so a
+            // script's `JOY_BUTTON_*` / `JOY_AXIS_*` constant matches
+            // (pat-0q2kx.88). Buttons Godot models as axes (the analog
+            // triggers) have no JoyButton and are dropped here.
+            let mut gamepad_buttons_pressed = std::collections::HashSet::new();
+            for (device, button) in platform_snap.pressed_gamepad_buttons() {
+                if let Some(index) = button.to_godot_index() {
+                    gamepad_buttons_pressed.insert((device as i64, index));
+                }
+            }
+            let mut gamepad_axis_values = std::collections::HashMap::new();
+            for ((device, axis), value) in platform_snap.gamepad_axis_values() {
+                gamepad_axis_values.insert((device as i64, axis.to_godot_index()), value);
+            }
+
             let script_snap = InputSnapshot {
                 pressed_keys: platform_snap.pressed_key_names().into_iter().collect(),
                 just_pressed_keys: platform_snap.just_pressed_key_names().into_iter().collect(),
@@ -1452,11 +1884,39 @@ impl MainLoop {
                     .collect(),
                 input_map: platform_snap.action_pressed_key_map(),
                 mouse_position: mouse_pos,
+                // Godot reports mouse velocity in pixels/second, and the delta
+                // is only known here — `InputState` just accumulates the motion
+                // (pat-0q2kx.92).
+                mouse_velocity: if delta_secs > 0.0 {
+                    let motion = self.input_state.mouse_motion_this_frame();
+                    gdcore::math::Vector2::new(
+                        motion.x / delta_secs as f32,
+                        motion.y / delta_secs as f32,
+                    )
+                } else {
+                    gdcore::math::Vector2::ZERO
+                },
                 mouse_buttons_pressed,
+                // The engine's own action state, so an action bound to a
+                // gamepad button reaches scripts — the key-name `input_map`
+                // above can only ever answer for keyboard bindings.
+                actions_pressed: platform_snap.pressed_actions(),
+                actions_just_pressed: platform_snap.just_pressed_actions(),
+                actions_just_released: platform_snap.just_released_actions(),
+                gamepad_buttons_pressed,
+                gamepad_axis_values,
             };
+            // A gamepad-only frame used to produce NO snapshot at all, so a pad
+            // could never be seen from a script however well the transport
+            // worked (pat-0q2kx.88).
             let has_input = !script_snap.pressed_keys.is_empty()
                 || !script_snap.just_pressed_keys.is_empty()
                 || !script_snap.mouse_buttons_pressed.is_empty()
+                || !script_snap.actions_pressed.is_empty()
+                || !script_snap.actions_just_pressed.is_empty()
+                || !script_snap.actions_just_released.is_empty()
+                || !script_snap.gamepad_buttons_pressed.is_empty()
+                || !script_snap.gamepad_axis_values.is_empty()
                 || mouse_pos != gdcore::math::Vector2::ZERO;
             if has_input {
                 self.tree.set_input_snapshot(script_snap);
@@ -1612,7 +2072,10 @@ impl MainLoop {
         // -- multiplayer poll (pat-u3l8c.75) --
         // Decode inbound RPCs and dispatch them to node scripts before the
         // process phase, so `_process` sees RPC-driven state this frame.
-        self.tree.poll_multiplayer();
+        // The delta is passed so SceneMultiplayer's authentication timers age
+        // with the frame (pat-0q2kx.94) — without a real delta here, an
+        // unauthenticated peer would never time out.
+        self.tree.poll_multiplayer_with_delta(delta_secs as f32);
 
         // -- process phase --
         // Godot per-frame order: INTERNAL_PROCESS -> PROCESS
@@ -1655,6 +2118,15 @@ impl MainLoop {
         // -- deferred deletion phase --
         // Remove nodes that called queue_free() during this frame.
         self.tree.process_deletions();
+
+        // -- draw phase (pat-0q2kx.82) --
+        // Godot's redraw pass: every CanvasItem whose `queue_redraw()` was
+        // called runs `_draw` and refills its command list, which the render
+        // bridge then folds into the frame. It runs after deletions so a node
+        // freed this frame is never asked to draw, and after the script phase so
+        // a `queue_redraw()` issued from `_process` is honored this same frame
+        // rather than one frame late.
+        self.tree.flush_pending_redraws();
 
         // -- deferred scene change (pat-nzgdu.85) --
         // Godot applies change_scene_to_file() at the frame boundary (after

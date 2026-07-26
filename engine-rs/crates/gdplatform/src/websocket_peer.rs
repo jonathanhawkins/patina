@@ -256,7 +256,14 @@ pub fn decode_frame(buf: &[u8]) -> Result<Option<(Frame, usize)>, WebSocketError
     }
     idx += len;
 
-    Ok(Some((Frame { fin, opcode, payload }, idx)))
+    Ok(Some((
+        Frame {
+            fin,
+            opcode,
+            payload,
+        },
+        idx,
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -287,13 +294,62 @@ pub fn parse_handshake_key(request: &str) -> Option<String> {
 
 /// Builds the full HTTP 101 handshake response for a given client key.
 pub fn websocket_handshake_response(client_key: &str) -> String {
+    websocket_handshake_response_with_protocol(client_key, None)
+}
+
+/// [`websocket_handshake_response`] plus an accepted subprotocol echoed back in
+/// `Sec-WebSocket-Protocol` (pat-0q2kx.96).
+///
+/// RFC 6455 §4.2.2: a server that accepts a subprotocol must name exactly one,
+/// and must omit the header entirely when it accepts none — sending an empty
+/// header value is a protocol violation, which is why this takes an `Option`
+/// rather than a string that might be blank.
+pub fn websocket_handshake_response_with_protocol(
+    client_key: &str,
+    selected_protocol: Option<&str>,
+) -> String {
     let accept = compute_accept_key(client_key);
+    let protocol_line = match selected_protocol {
+        Some(p) if !p.is_empty() => format!("Sec-WebSocket-Protocol: {p}\r\n"),
+        _ => String::new(),
+    };
     format!(
         "HTTP/1.1 101 Switching Protocols\r\n\
          Upgrade: websocket\r\n\
          Connection: Upgrade\r\n\
-         Sec-WebSocket-Accept: {accept}\r\n\r\n"
+         Sec-WebSocket-Accept: {accept}\r\n\
+         {protocol_line}\r\n"
     )
+}
+
+/// The subprotocols a client offered in its `Sec-WebSocket-Protocol` request
+/// header, in preference order (pat-0q2kx.96).
+///
+/// Returns empty when the header is absent. Values are comma-separated with
+/// optional whitespace, per RFC 6455 §4.1.
+pub fn parse_handshake_protocols(request: &str) -> Vec<String> {
+    for line in request.split("\r\n") {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("sec-websocket-protocol") {
+                return v
+                    .split(',')
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect();
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Picks the first client-offered protocol the server also supports, or `None`
+/// when they share none — RFC 6455 gives the server the choice, and Godot's
+/// server side follows the client's preference order.
+pub fn select_handshake_protocol(offered: &[String], supported: &[String]) -> Option<String> {
+    offered
+        .iter()
+        .find(|p| supported.iter().any(|s| s == *p))
+        .cloned()
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +372,15 @@ pub struct WebSocketPeer {
     frag_opcode: Option<Opcode>,
     frag_payload: Vec<u8>,
     connect_timeout: Duration,
+    /// Subprotocols offered in `Sec-WebSocket-Protocol` on the opening
+    /// handshake (Godot `WebSocketPeer.supported_protocols`, pat-0q2kx.96).
+    supported_protocols: Vec<String>,
+    /// The one the server picked, echoed back in its 101 response. Empty when
+    /// none was offered or the server declined to choose.
+    selected_protocol: String,
+    /// Extra `Key: Value` lines added to the opening handshake (Godot
+    /// `WebSocketPeer.handshake_headers`).
+    handshake_headers: Vec<String>,
 }
 
 impl Default for WebSocketPeer {
@@ -341,12 +406,50 @@ impl WebSocketPeer {
             frag_opcode: None,
             frag_payload: Vec::new(),
             connect_timeout: Duration::from_secs(30),
+            supported_protocols: Vec::new(),
+            selected_protocol: String::new(),
+            handshake_headers: Vec::new(),
         }
     }
 
     /// Sets the connection-establishment timeout.
     pub fn set_connect_timeout(&mut self, timeout: Duration) {
         self.connect_timeout = timeout;
+    }
+
+    /// Sets the subprotocols offered on the next handshake (Godot
+    /// `WebSocketPeer.supported_protocols`, pat-0q2kx.96).
+    ///
+    /// Must be set *before* [`connect_to_url`](Self::connect_to_url) — the list
+    /// is serialized into that request's `Sec-WebSocket-Protocol` header, as in
+    /// Godot, where the property is read at connect time.
+    pub fn set_supported_protocols(&mut self, protocols: &[String]) {
+        self.supported_protocols = protocols.to_vec();
+    }
+
+    /// The subprotocols this peer offers.
+    pub fn get_supported_protocols(&self) -> &[String] {
+        &self.supported_protocols
+    }
+
+    /// The subprotocol the server selected, or `""` when none was negotiated
+    /// (Godot `WebSocketPeer.get_selected_protocol`).
+    ///
+    /// Only meaningful once the peer reaches [`WebSocketState::Open`]; the value
+    /// comes from the server's `Sec-WebSocket-Protocol` response header.
+    pub fn get_selected_protocol(&self) -> &str {
+        &self.selected_protocol
+    }
+
+    /// Sets extra header lines sent with the opening handshake, each `"Key: Value"`
+    /// (Godot `WebSocketPeer.handshake_headers`).
+    pub fn set_handshake_headers(&mut self, headers: &[String]) {
+        self.handshake_headers = headers.to_vec();
+    }
+
+    /// The extra handshake headers configured on this peer.
+    pub fn get_handshake_headers(&self) -> &[String] {
+        &self.handshake_headers
     }
 
     /// Connects to a `ws://` URL and begins the opening handshake.
@@ -381,14 +484,33 @@ impl WebSocketPeer {
         } else {
             format!("{}:{}", parsed.host, parsed.port)
         };
+        // Offered subprotocols and any caller-supplied headers ride along on the
+        // opening handshake, as they do in Godot (pat-0q2kx.96). Both are folded
+        // in before the terminating blank line rather than appended after it —
+        // an extra header past `\r\n\r\n` would land in the message stream.
+        let mut extra = String::new();
+        if !self.supported_protocols.is_empty() {
+            extra.push_str(&format!(
+                "Sec-WebSocket-Protocol: {}\r\n",
+                self.supported_protocols.join(", ")
+            ));
+        }
+        for header in &self.handshake_headers {
+            let line = header.trim();
+            if !line.is_empty() {
+                extra.push_str(line);
+                extra.push_str("\r\n");
+            }
+        }
         let request = format!(
             "GET {} HTTP/1.1\r\n\
              Host: {}\r\n\
              Upgrade: websocket\r\n\
              Connection: Upgrade\r\n\
              Sec-WebSocket-Key: {}\r\n\
-             Sec-WebSocket-Version: 13\r\n\r\n",
-            parsed.path, host_header, key
+             Sec-WebSocket-Version: 13\r\n\
+             {}\r\n",
+            parsed.path, host_header, key, extra
         );
         // Send the handshake while still blocking, then switch to non-blocking
         // so poll() never stalls the caller.
@@ -411,6 +533,9 @@ impl WebSocketPeer {
         self.close_reason.clear();
         self.frag_opcode = None;
         self.frag_payload.clear();
+        // A reconnect renegotiates from scratch; the previous connection's
+        // choice must not leak into the new one (pat-0q2kx.96).
+        self.selected_protocol.clear();
         Ok(())
     }
 
@@ -576,21 +701,44 @@ impl WebSocketPeer {
         }
     }
 
-    fn verify_handshake(&self, head: &str) -> bool {
+    /// Validates the server's 101 response and records the negotiated
+    /// subprotocol.
+    ///
+    /// Takes `&mut self` so the accepted `Sec-WebSocket-Protocol` can be stored
+    /// (pat-0q2kx.96); the whole header block is scanned rather than returning
+    /// at the accept-key line, because the protocol header may follow it.
+    fn verify_handshake(&mut self, head: &str) -> bool {
         let mut lines = head.split("\r\n");
         let status = lines.next().unwrap_or("");
         if !status.contains(" 101") {
             return false;
         }
         let expected = compute_accept_key(&self.sent_key);
+        let mut key_ok = false;
+        let mut selected = String::new();
         for line in lines {
             if let Some((k, v)) = line.split_once(':') {
-                if k.trim().eq_ignore_ascii_case("sec-websocket-accept") {
-                    return v.trim() == expected;
+                let k = k.trim();
+                if k.eq_ignore_ascii_case("sec-websocket-accept") {
+                    key_ok = v.trim() == expected;
+                } else if k.eq_ignore_ascii_case("sec-websocket-protocol") {
+                    selected = v.trim().to_string();
                 }
             }
         }
-        false
+        if key_ok {
+            // Godot reports only what the server actually chose. A server that
+            // echoes a protocol we never offered is out of spec, so it is
+            // ignored rather than reported as negotiated.
+            self.selected_protocol = if self.supported_protocols.is_empty()
+                || self.supported_protocols.iter().any(|p| p == &selected)
+            {
+                selected
+            } else {
+                String::new()
+            };
+        }
+        key_ok
     }
 
     fn handle_frame(&mut self, frame: Frame) {
@@ -753,7 +901,13 @@ fn base64_encode(data: &[u8]) -> String {
 
 /// Minimal SHA-1 implementation (RFC 3174) — used only for the WS accept key.
 fn sha1(data: &[u8]) -> [u8; 20] {
-    let mut h: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
+    let mut h: [u32; 5] = [
+        0x6745_2301,
+        0xEFCD_AB89,
+        0x98BA_DCFE,
+        0x1032_5476,
+        0xC3D2_E1F0,
+    ];
     let bit_len = (data.len() as u64) * 8;
 
     let mut message = data.to_vec();
@@ -809,6 +963,71 @@ fn sha1(data: &[u8]) -> [u8; 20] {
         out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// RefCounted handle table (pat-0q2kx.96)
+//
+// Godot's `WebSocketPeer` is constructed from GDScript with `WebSocketPeer.new()`
+// and is RefCounted, not a Node — so it cannot live in the scene tree. It gets
+// the same treatment as ConfigFile / FileAccess / CameraFeed: the object lives
+// in a process-wide table and scripts hold a tagged `ObjectId` into it.
+// ---------------------------------------------------------------------------
+
+/// Tags an `ObjectId` issued by [`new_websocket_peer_handle`]. `0x57` is ASCII
+/// `'W'`; it sits alongside the ConfigFile / FileAccess / DirAccess / CameraFeed
+/// / UndoRedo tags (`0xCF` / `0xFA` / `0xDA` / `0xCA` / `0xED`).
+const WEBSOCKET_HANDLE_TAG: u64 = 0x5700_0000_0000_0000;
+static NEXT_WEBSOCKET_HANDLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static WEBSOCKET_HANDLES: std::sync::Mutex<Option<std::collections::HashMap<u64, WebSocketPeer>>> =
+    std::sync::Mutex::new(None);
+
+fn websocket_handles(
+) -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<u64, WebSocketPeer>>> {
+    // A poisoned lock still holds a usable table: a panic in one script's
+    // handler must not make every later WebSocket call fail.
+    WEBSOCKET_HANDLES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Returns `true` when `id` was issued by [`new_websocket_peer_handle`].
+pub fn is_websocket_peer_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == WEBSOCKET_HANDLE_TAG
+}
+
+/// Allocates a fresh, unconnected [`WebSocketPeer`] in the process-wide handle
+/// table and returns its script-visible id (Godot `WebSocketPeer.new()`).
+pub fn new_websocket_peer_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_WEBSOCKET_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let raw = WEBSOCKET_HANDLE_TAG | seq;
+    websocket_handles()
+        .get_or_insert_with(std::collections::HashMap::new)
+        .insert(raw, WebSocketPeer::new());
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Runs `f` against the live peer behind `id`, or returns `None` when the
+/// handle was never issued or has already been released.
+pub fn with_websocket_peer<R>(
+    id: gdcore::id::ObjectId,
+    f: impl FnOnce(&mut WebSocketPeer) -> R,
+) -> Option<R> {
+    let mut guard = websocket_handles();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    map.get_mut(&id.raw()).map(f)
+}
+
+/// Drops a handle, closing the socket if it is still open. Idempotent.
+pub fn release_websocket_peer_handle(id: gdcore::id::ObjectId) {
+    let mut guard = websocket_handles();
+    if let Some(map) = guard.as_mut() {
+        if let Some(mut peer) = map.remove(&id.raw()) {
+            if peer.get_ready_state() != WebSocketState::Closed {
+                peer.close(1001, "going away");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -892,7 +1111,8 @@ mod tests {
 
     #[test]
     fn handshake_helpers_round_trip() {
-        let request = "GET /chat HTTP/1.1\r\nHost: x\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+        let request =
+            "GET /chat HTTP/1.1\r\nHost: x\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
         let key = parse_handshake_key(request).unwrap();
         assert_eq!(key, "dGhlIHNhbXBsZSBub25jZQ==");
         let response = websocket_handshake_response(&key);

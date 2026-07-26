@@ -31,8 +31,8 @@ use gdrender2d::SoftwareRenderer;
 use gdscene::lifecycle::LifecycleManager;
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::SceneTree;
-use gdvariant::Variant;
 use gdserver2d::viewport::Viewport;
+use gdvariant::Variant;
 
 const DEFAULT_SCENE: &str = "fixtures/scenes/demo_2d.tscn";
 const DEFAULT_PORT: u16 = 8080;
@@ -222,7 +222,10 @@ fn main() {
                 // Render at the panel's real size (reported by the browser via
                 // /api/viewport/resize) so the frame fills the viewport instead
                 // of letterboxing a fixed 640x480 box into a centered square.
-                let (rw, rh) = (state.render_width.clamp(64, 2048), state.render_height.clamp(64, 2048));
+                let (rw, rh) = (
+                    state.render_width.clamp(64, 2048),
+                    state.render_height.clamp(64, 2048),
+                );
                 // Render the running scene the way its game would: a 3D scene
                 // (Node3D) through the GPU spatial path (pat-ism62 #3 — the same
                 // persistent GPU renderer the editor viewport uses), a 2D scene
@@ -325,12 +328,25 @@ fn main() {
                     ) {
                         gdeditor::viewport_2d_render::apply_camera2d_view(&mut items, view);
                     }
-                    let fb = gdeditor::viewport_2d_render::rasterize_render_list(
+                    let mut fb = gdeditor::viewport_2d_render::rasterize_render_list(
                         &items,
                         rw,
                         rh,
                         gdeditor::viewport_2d_render::RUNTIME_CLEAR_COLOR,
                         Some(&mut state.texture_cache),
+                    );
+                    // 2D lights / occluders / CanvasModulate (pat-0q2kx.103).
+                    // This path builds its own item list (it folds in the Control
+                    // pass and the Camera2D transform), so it cannot go through
+                    // `render_runtime_canvas` and needs the shading pass named
+                    // explicitly — otherwise the Play tab draws lit scenes unlit.
+                    gdeditor::viewport_2d_render::shade_runtime_canvas(
+                        state
+                            .run_main_loop
+                            .as_ref()
+                            .map(|ml| ml.tree())
+                            .unwrap_or(&state.scene_tree),
+                        &mut fb,
                     );
                     RenderJob::Cpu(fb)
                 }
@@ -339,7 +355,8 @@ fn main() {
                 // Running 3D scene: GPU-render off the lock, then publish BMP (the
                 // Game view streams BMP, like the editor viewport).
                 RenderJob::Gpu { vp, inputs } => {
-                    let img = gdeditor::viewport_3d_render::render_editor_3d_frame_gpu(&vp, &inputs);
+                    let img =
+                        gdeditor::viewport_3d_render::render_editor_3d_frame_gpu(&vp, &inputs);
                     let bmp = gdrender2d::encode_bmp_bgra(&img);
                     handle.update_frame_bmp(bmp, img.width, img.height);
                 }
@@ -395,11 +412,15 @@ fn main() {
                     // via /api/viewport/resize) so the frame fills the viewport
                     // edge-to-edge like Godot, instead of letterboxing a fixed
                     // 640x480 box into a centered square.
-                    let (rw, rh) = (state.render_width.clamp(64, 2048), state.render_height.clamp(64, 2048));
+                    let (rw, rh) = (
+                        state.render_width.clamp(64, 2048),
+                        state.render_height.clamp(64, 2048),
+                    );
                     // Interactive render scale is a live perf knob (0.1..1.0×).
                     let scale = if camera_lowres {
                         (gdeditor::editor_server::PERF_SCALE_X1000
-                            .load(std::sync::atomic::Ordering::Relaxed) as f32)
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            as f32)
                             / 1000.0
                     } else {
                         1.0
@@ -483,7 +504,8 @@ fn main() {
                     // pass) and publish. Only BMP is streamed live, so PNG is skipped.
                     RenderJob::Gpu { vp, inputs } => {
                         let raster_t = std::time::Instant::now();
-                        let img = gdeditor::viewport_3d_render::render_editor_3d_frame_gpu(&vp, &inputs);
+                        let img =
+                            gdeditor::viewport_3d_render::render_editor_3d_frame_gpu(&vp, &inputs);
                         gdeditor::editor_server::PERF_LAST_RASTER_US.store(
                             raster_t.elapsed().as_micros().min(u32::MAX as u128) as u32,
                             std::sync::atomic::Ordering::Relaxed,

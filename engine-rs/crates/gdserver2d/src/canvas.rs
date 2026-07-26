@@ -106,6 +106,19 @@ pub struct CanvasItem {
     /// render path — `COLOR` starts as the sampled texel × modulate, `UV` spans
     /// 0..1 across the destination rect, `TIME` is elapsed seconds (pat-u3l8c.45).
     pub material: Option<ShaderMaterial>,
+    /// Optional clip rectangle in this item's local space — Godot's
+    /// `RenderingServer::canvas_item_set_clip` / `Control.clip_contents`
+    /// (pat-0q2kx.86).
+    ///
+    /// When set, the renderer scissors every one of this item's draw commands
+    /// to the rect, so content larger than its container (a ScrollContainer's
+    /// child, a clipped Panel) is cut off instead of overflowing. `None` means
+    /// unclipped, which is every item's default.
+    ///
+    /// This is a per-item rect rather than a push/pop command pair because the
+    /// renderer walks items flat and resolves each one's transform
+    /// independently — there is no draw-order stack for a pop to unwind.
+    pub clip_rect: Option<Rect2>,
 }
 
 impl CanvasItem {
@@ -121,7 +134,14 @@ impl CanvasItem {
             parent: None,
             layer_id: None,
             material: None,
+            clip_rect: None,
         }
+    }
+
+    /// Clips this item's draw commands to `rect` (in the item's local space) —
+    /// Godot's `canvas_item_set_clip` (pat-0q2kx.86).
+    pub fn set_clip_rect(&mut self, rect: Rect2) {
+        self.clip_rect = Some(rect);
     }
 
     /// Attaches a shader material so this item's textured draws run the

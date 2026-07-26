@@ -11,6 +11,7 @@ use gdrender2d::draw;
 use gdrender2d::renderer::FrameBuffer;
 use gdscene::node::NodeId;
 use gdscene::SceneTree;
+use gdscene::{canvas_order, node2d};
 use gdvariant::Variant;
 
 use crate::texture_cache::TextureCache;
@@ -248,15 +249,32 @@ fn render_scene_inner(
     // Draw origin crosshair (X=red horizontal, Y=green vertical).
     draw_origin_crosshair(&mut fb, offset_x, offset_y);
 
-    // Walk all nodes in tree order and draw them.
-    let node_ids = tree.all_nodes_in_tree_order();
+    // Walk all nodes in draw order and draw them (pat-0q2kx.102).
+    //
+    // Godot's 2D editor draws each CanvasItem at its composed GLOBAL transform,
+    // skips hidden subtrees, and honours draw order
+    // (editor/plugins/canvas_item_editor_plugin.cpp). This walked raw tree order
+    // using each node's *local* `position`, so any scene with parent transforms
+    // looked wrong in edit mode while Play rendered it correctly.
+    //
+    // ⚠️ The sort must be STABLE: within one z_index, Godot keeps tree order,
+    // and `sort_by_key` preserves it. An unstable sort would reshuffle same-z
+    // siblings and make the edit view flicker between renders.
+    let mut node_ids = tree.all_nodes_in_tree_order();
+    node_ids.sort_by_key(|&id| canvas_order::effective_z_index(tree, id));
     for &node_id in &node_ids {
         let node = match tree.get_node(node_id) {
             Some(n) => n,
             None => continue,
         };
 
-        let world_pos = extract_position(node);
+        // A hidden node hides its whole subtree, so this tests visibility up the
+        // parent chain rather than the node's own `visible` flag.
+        if !node2d::is_visible_in_tree(tree, node_id) {
+            continue;
+        }
+
+        let world_pos = node2d::get_global_position(tree, node_id);
         let pos = Vector2::new(world_pos.x * z + offset_x, world_pos.y * z + offset_y);
         let class = node.class_name();
         let is_selected = selected == Some(node_id);
@@ -344,10 +362,19 @@ pub fn compute_scene_bounds(tree: &SceneTree) -> Rect2 {
             None => continue,
         };
 
-        let pos = extract_position(node);
-        if pos.x == 0.0 && pos.y == 0.0 && !node.has_property("position") {
+        // Global, to match what the render pass actually draws (pat-0q2kx.102).
+        // Bounding local positions while drawing global ones would centre the
+        // editor camera on a point no pixel occupies, so a scene built out of
+        // parent transforms would open off-screen.
+        //
+        // The "has no position property" skip still consults the node's OWN
+        // property: a node that never declares one is a non-visual node that
+        // should not stretch the bounds, even though its parent chain would
+        // give it a non-zero global position.
+        if !node.has_property("position") && extract_position(node) == Vector2::ZERO {
             continue;
         }
+        let pos = node2d::get_global_position(tree, node_id);
 
         found = true;
         min_x = min_x.min(pos.x);
@@ -1613,8 +1640,16 @@ pub fn hit_test_with_zoom_pan(
             continue;
         }
 
+        // Hit-testing must use the SAME transform the render pass draws with,
+        // or clicking a child of a moved/rotated parent would select nothing
+        // where its pixels actually are (pat-0q2kx.102). A hidden node is not
+        // pickable, matching Godot's editor.
+        if !node2d::is_visible_in_tree(tree, node_id) {
+            continue;
+        }
+
         let class = node.class_name();
-        let node_pos = extract_position(node);
+        let node_pos = node2d::get_global_position(tree, node_id);
 
         if matches!(class, "Control" | "Label" | "Button") {
             let size = extract_size(node);
@@ -1686,8 +1721,16 @@ pub fn hit_test(
             continue;
         }
 
+        // Hit-testing must use the SAME transform the render pass draws with,
+        // or clicking a child of a moved/rotated parent would select nothing
+        // where its pixels actually are (pat-0q2kx.102). A hidden node is not
+        // pickable, matching Godot's editor.
+        if !node2d::is_visible_in_tree(tree, node_id) {
+            continue;
+        }
+
         let class = node.class_name();
-        let node_pos = extract_position(node);
+        let node_pos = node2d::get_global_position(tree, node_id);
 
         // For Control nodes, use bounding rect hit test.
         if matches!(class, "Control" | "Label" | "Button") {

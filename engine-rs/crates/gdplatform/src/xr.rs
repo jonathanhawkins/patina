@@ -258,7 +258,10 @@ impl WebXrInterface {
             return self.fail(msg);
         }
         if !self.stub.supported_modes.contains(&self.session_mode) {
-            let msg = format!("session mode '{}' is not supported", self.session_mode.as_str());
+            let msg = format!(
+                "session mode '{}' is not supported",
+                self.session_mode.as_str()
+            );
             return self.fail(msg);
         }
         // WebXR rejects the request if any required feature is unavailable.
@@ -421,8 +424,7 @@ mod tests {
         xr.required_features = vec!["local-floor".to_string()];
         // 'bounded-floor' is NOT available — optional, so it must not be fatal.
         xr.optional_features = vec!["hand-tracking".to_string(), "bounded-floor".to_string()];
-        xr.requested_reference_space_types =
-            vec!["local-floor".to_string(), "viewer".to_string()];
+        xr.requested_reference_space_types = vec!["local-floor".to_string(), "viewer".to_string()];
 
         assert!(xr.initialize());
         assert_eq!(xr.take_signals(), vec![WebXrSignal::SessionStarted]);

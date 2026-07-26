@@ -9,6 +9,10 @@ use std::sync::{Arc, Mutex};
 use gdvariant::Variant;
 use thiserror::Error;
 
+use crate::multiplayer_peer_state::{
+    MultiplayerPeerSignal, MultiplayerPeerState, TARGET_PEER_BROADCAST,
+};
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -167,7 +171,133 @@ pub struct MultiplayerAPI {
     authority_map: HashMap<u64, PeerId>,
     /// Decoded inbound RPC calls (filled by [`Self::poll`]).
     inbound_rpcs: Vec<DecodedRPC>,
+    // -- SceneMultiplayer surface (pat-0q2kx.94) --------------------------
+    /// Connected peers + target-peer routing, shared with the transports.
+    peers: MultiplayerPeerState,
+    /// Script-visible events awaiting [`take_events`](Self::take_events).
+    events: Vec<MultiplayerEvent>,
+    /// Last observed transport status, so [`poll`](Self::poll) can turn a
+    /// *transition* into `connected_to_server` / `connection_failed` /
+    /// `server_disconnected`. Godot emits those once on the edge, not per frame.
+    last_status: ConnectionStatus,
+    /// Godot `SceneMultiplayer.refuse_new_connections`.
+    refuse_new_connections: bool,
+    /// Sender of the packet/RPC currently being delivered
+    /// (`MultiplayerAPI.get_remote_sender_id`).
+    remote_sender_id: PeerId,
+    /// Whether peers must authenticate before counting as connected.
+    auth_required: bool,
+    /// Peers mid-authentication, with the seconds each has been waiting.
+    pending_auth: HashMap<i32, f32>,
+    /// Seconds before an unauthenticated peer is dropped (Godot
+    /// `auth_timeout`, default 3s). `0` disables the timeout.
+    auth_timeout: f32,
 }
+
+/// A script-visible multiplayer event — the signal set Godot's
+/// `SceneMultiplayer` emits (pat-0q2kx.94).
+///
+/// Queued by [`MultiplayerAPI::poll`] and drained by the scene tree, which
+/// re-emits each as the correspondingly-named signal. Modelled as data rather
+/// than emitted directly because `gdplatform` has no scene tree to emit on —
+/// the same split `MultiplayerPeerSignal` already uses one layer down.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MultiplayerEvent {
+    /// `peer_connected(id)` — a peer finished connecting (and authenticating,
+    /// when an auth callback is set).
+    PeerConnected(i32),
+    /// `peer_disconnected(id)`.
+    PeerDisconnected(i32),
+    /// `connected_to_server()` — client-side, on reaching the server.
+    ConnectedToServer,
+    /// `connection_failed()` — client-side, when the attempt gave up.
+    ConnectionFailed,
+    /// `server_disconnected()` — client-side, when an established server drops.
+    ServerDisconnected,
+    /// `peer_packet(id, packet)` — raw bytes from [`send_bytes`](MultiplayerAPI::send_bytes).
+    PeerPacket {
+        /// Sending peer.
+        id: i32,
+        /// Payload as sent.
+        packet: Vec<u8>,
+    },
+    /// `peer_authenticating(id)` — a peer is connected but not yet authorised.
+    PeerAuthenticating(i32),
+    /// `peer_authentication_failed(id)` — auth was rejected or timed out.
+    PeerAuthenticationFailed(i32),
+}
+
+/// Godot's multiplayer packet command byte — the first byte of **every**
+/// multiplayer packet (upstream/godot/modules/multiplayer/scene_multiplayer.h
+/// `enum NetworkCommands`).
+///
+/// Patina previously framed RPCs with a bespoke `PRPC` magic and raw payloads
+/// with `PRAW`, which meant no shared header, no room for the replication
+/// commands, and no way to reject a packet of the wrong kind before parsing it
+/// (pat-0q2kx.95). The discriminants are Godot's, so the values are wire
+/// meaning, not an implementation detail — do not renumber them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NetworkCommand {
+    /// An RPC to a node (`NETWORK_COMMAND_REMOTE_CALL`).
+    RemoteCall = 0,
+    /// Sender announces `path -> id` so later calls can omit the path.
+    SimplifyPath = 1,
+    /// Receiver acknowledges a `SimplifyPath`.
+    ConfirmPath = 2,
+    /// An opaque `send_bytes` payload (`NETWORK_COMMAND_RAW`).
+    Raw = 3,
+    /// MultiplayerSpawner spawn notification.
+    Spawn = 4,
+    /// MultiplayerSpawner despawn notification.
+    Despawn = 5,
+    /// MultiplayerSynchronizer state update.
+    Sync = 6,
+    /// System command (auth / relay bookkeeping).
+    Sys = 7,
+}
+
+impl NetworkCommand {
+    /// The wire byte for this command.
+    pub const fn to_byte(self) -> u8 {
+        self as u8
+    }
+
+    /// Parses a wire byte, or `None` when it is not a known command — an
+    /// unknown leading byte must not be guessed at.
+    pub const fn from_byte(byte: u8) -> Option<NetworkCommand> {
+        Some(match byte {
+            0 => NetworkCommand::RemoteCall,
+            1 => NetworkCommand::SimplifyPath,
+            2 => NetworkCommand::ConfirmPath,
+            3 => NetworkCommand::Raw,
+            4 => NetworkCommand::Spawn,
+            5 => NetworkCommand::Despawn,
+            6 => NetworkCommand::Sync,
+            7 => NetworkCommand::Sys,
+            _ => return None,
+        })
+    }
+}
+
+/// Whether a decoder may materialize `Object` variants from the wire.
+///
+/// Godot gates this behind `allow_object_decoding` because decoding an object
+/// from an untrusted peer is remote code execution
+/// (core/io/marshalls.cpp). Patina's RPC path had no such gate because it could
+/// not encode objects at all; now that it uses the real codec, the gate has to
+/// exist (pat-0q2kx.95). Default is **deny**.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ObjectDecoding {
+    /// Reject packets containing an encoded object.
+    #[default]
+    Deny,
+    /// Allow objects — only for peers the host already trusts.
+    Allow,
+}
+
+/// Godot's default `SceneMultiplayer.auth_timeout`, in seconds.
+pub const DEFAULT_AUTH_TIMEOUT: f32 = 3.0;
 
 /// An inbound RPC decoded from the binary wire format (pat-p0s82.4).
 #[derive(Debug, Clone, PartialEq)]
@@ -182,9 +312,6 @@ pub struct DecodedRPC {
     pub args: Vec<Variant>,
 }
 
-/// Magic prefix for binary RPC packets (`PRPC`).
-pub const RPC_MAGIC: &[u8; 4] = b"PRPC";
-
 impl MultiplayerAPI {
     /// Create a new, peer-less [`MultiplayerAPI`].
     pub fn new() -> Self {
@@ -193,6 +320,14 @@ impl MultiplayerAPI {
             rpc_configs: HashMap::new(),
             authority_map: HashMap::new(),
             inbound_rpcs: Vec::new(),
+            peers: MultiplayerPeerState::new(),
+            events: Vec::new(),
+            last_status: ConnectionStatus::Disconnected,
+            refuse_new_connections: false,
+            remote_sender_id: PeerId(0),
+            auth_required: false,
+            pending_auth: HashMap::new(),
+            auth_timeout: DEFAULT_AUTH_TIMEOUT,
         }
     }
 
@@ -285,10 +420,15 @@ impl MultiplayerAPI {
     /// Returns non-RPC packets (spawn/sync/etc.) for higher layers. Decoded
     /// RPCs are available via [`Self::take_inbound_rpcs`].
     pub fn poll(&mut self) -> Vec<Packet> {
+        // Status transitions first: a client that just reached the server must
+        // see `connected_to_server` before any packet that arrived with it.
+        self.poll_status();
+
         let Some(peer) = self.peer.as_mut() else {
             return Vec::new();
         };
         let mut other = Vec::new();
+        let mut raw = Vec::new();
         for packet in peer.poll() {
             if let Some(rpc) = decode_rpc_packet(&packet.data) {
                 self.inbound_rpcs.push(DecodedRPC {
@@ -297,11 +437,270 @@ impl MultiplayerAPI {
                     sender_id: packet.sender,
                     args: rpc.2,
                 });
+            } else if let Some(bytes) = decode_raw_packet(&packet.data) {
+                raw.push((packet.sender.0 as i32, bytes));
             } else {
                 other.push(packet);
             }
         }
+        for (id, packet) in raw {
+            self.remote_sender_id = PeerId(id.unsigned_abs());
+            self.events
+                .push(MultiplayerEvent::PeerPacket { id, packet });
+        }
+
+        // Peer roster changes the transport recorded, promoted to API events.
+        // An unauthenticated peer is held back as `peer_authenticating` — Godot
+        // does not consider it connected until `complete_auth`.
+        let mut refused: Vec<i32> = Vec::new();
+        for signal in self.peers.drain_signals() {
+            match signal {
+                MultiplayerPeerSignal::PeerConnected(id) => {
+                    if self.refuse_new_connections {
+                        // Godot's `refuse_new_connections` drops the peer
+                        // outright — no `peer_connected`, and no
+                        // `peer_disconnected` either, because from the script's
+                        // point of view it never joined. Storing the flag
+                        // without acting on it here would make the property a
+                        // lie (pat-0q2kx.94).
+                        refused.push(id);
+                        continue;
+                    }
+                    if self.auth_required {
+                        self.pending_auth.insert(id, 0.0);
+                        self.events.push(MultiplayerEvent::PeerAuthenticating(id));
+                    } else {
+                        self.events.push(MultiplayerEvent::PeerConnected(id));
+                    }
+                }
+                MultiplayerPeerSignal::PeerDisconnected(id) => {
+                    self.pending_auth.remove(&id);
+                    self.events.push(MultiplayerEvent::PeerDisconnected(id));
+                }
+            }
+        }
+        // Evicting refused peers is deferred out of the loop above so it does
+        // not mutate the roster mid-drain; the disconnect signals it queues are
+        // discarded for the same reason no connect was emitted.
+        if !refused.is_empty() {
+            for id in refused {
+                self.peers.remove_peer(id);
+            }
+            self.peers.drain_signals();
+        }
         other
+    }
+
+    /// Turns a transport status *transition* into the matching client-side
+    /// event. Godot emits these once on the edge, which is why the previous
+    /// status is remembered rather than recomputed each frame.
+    fn poll_status(&mut self) {
+        let status = self
+            .peer
+            .as_ref()
+            .map(|p| p.get_connection_status())
+            .unwrap_or(ConnectionStatus::Disconnected);
+        if status == self.last_status {
+            return;
+        }
+        let previous = self.last_status;
+        self.last_status = status;
+        // The server never reports these — they describe a client's view of the
+        // server it dialled.
+        if self.peer.as_ref().map(|p| p.is_server()).unwrap_or(false) {
+            return;
+        }
+        match (previous, status) {
+            (_, ConnectionStatus::Connected) => {
+                self.events.push(MultiplayerEvent::ConnectedToServer);
+            }
+            // Giving up mid-handshake is a failure; losing an established
+            // connection is a disconnect. Godot distinguishes the two, and a
+            // game reacts differently to each ("retry" vs "back to menu").
+            (ConnectionStatus::Connecting, ConnectionStatus::Disconnected) => {
+                self.events.push(MultiplayerEvent::ConnectionFailed);
+            }
+            (ConnectionStatus::Connected, ConnectionStatus::Disconnected) => {
+                self.events.push(MultiplayerEvent::ServerDisconnected);
+            }
+            _ => {}
+        }
+    }
+
+    // -- SceneMultiplayer surface (pat-0q2kx.94) --------------------------
+
+    /// Drains the queued script-visible events. The scene tree calls this each
+    /// frame and re-emits each as its Godot signal.
+    pub fn take_events(&mut self) -> Vec<MultiplayerEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// The connected peer ids (Godot `MultiplayerAPI.get_peers`).
+    pub fn get_peers(&self) -> Vec<i32> {
+        self.peers.get_peers()
+    }
+
+    /// This end's own id (`MultiplayerAPI.get_unique_id`), or `None` with no
+    /// peer assigned. Godot answers `0` in that case; `None` is kept here so a
+    /// caller can tell "no peer" from a genuine id, and the script binding maps
+    /// it back to `0`.
+    pub fn unique_id(&self) -> Option<PeerId> {
+        self.peer.as_ref().map(|p| p.get_unique_id())
+    }
+
+    /// Mutable access to the peer roster, for a transport publishing its
+    /// connects/disconnects into the API.
+    pub fn peer_state_mut(&mut self) -> &mut MultiplayerPeerState {
+        &mut self.peers
+    }
+
+    /// The sender of the packet or RPC currently being delivered
+    /// (`MultiplayerAPI.get_remote_sender_id`); `0` when not inside one.
+    pub fn get_remote_sender_id(&self) -> PeerId {
+        self.remote_sender_id
+    }
+
+    /// Records the sender of the RPC about to be dispatched, so a handler can
+    /// ask who called it.
+    pub fn set_remote_sender_id(&mut self, id: PeerId) {
+        self.remote_sender_id = id;
+    }
+
+    /// Godot `SceneMultiplayer.refuse_new_connections`.
+    pub fn refuse_new_connections(&self) -> bool {
+        self.refuse_new_connections
+    }
+
+    /// Sets whether further connections are refused.
+    pub fn set_refuse_new_connections(&mut self, refuse: bool) {
+        self.refuse_new_connections = refuse;
+    }
+
+    /// Sends raw bytes to `target` (Godot `SceneMultiplayer.send_bytes`), which
+    /// arrive on the far side as a `peer_packet` signal.
+    ///
+    /// `target` follows Godot's peer addressing: `0` broadcasts, a positive id
+    /// addresses one peer, and a negative id means "everyone except `-id`".
+    pub fn send_bytes(
+        &mut self,
+        bytes: &[u8],
+        target: i32,
+        transfer_mode: TransferMode,
+        channel: u8,
+    ) -> Result<()> {
+        let Some(peer) = self.peer.as_mut() else {
+            return Err(NetworkError::NoPeer);
+        };
+        let data = encode_raw_packet(bytes);
+        let from = peer.get_unique_id();
+        // Broadcast and except-one both fan out over the roster; only a single
+        // positive id is a direct send.
+        let targets: Vec<i32> = if target > 0 {
+            vec![target]
+        } else {
+            self.peers
+                .get_peers()
+                .into_iter()
+                .filter(|p| target == TARGET_PEER_BROADCAST || *p != -target)
+                .collect()
+        };
+        for to in targets {
+            peer.send_packet(
+                PeerId(to.unsigned_abs()),
+                Packet {
+                    sender: from,
+                    channel,
+                    data: data.clone(),
+                    transfer_mode,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    // -- authentication (Godot's SYS auth handshake) ----------------------
+
+    /// Requires peers to authenticate before they count as connected. With this
+    /// set, a connecting peer surfaces as `peer_authenticating` and only becomes
+    /// `peer_connected` once [`complete_auth`](Self::complete_auth) accepts it.
+    pub fn set_auth_required(&mut self, required: bool) {
+        self.auth_required = required;
+    }
+
+    /// Whether an auth handshake gates new peers.
+    pub fn is_auth_required(&self) -> bool {
+        self.auth_required
+    }
+
+    /// Seconds an unauthenticated peer may wait before being dropped
+    /// (`SceneMultiplayer.auth_timeout`). `0` disables the timeout.
+    pub fn set_auth_timeout(&mut self, seconds: f32) {
+        self.auth_timeout = seconds.max(0.0);
+    }
+
+    /// The current auth timeout in seconds.
+    pub fn auth_timeout(&self) -> f32 {
+        self.auth_timeout
+    }
+
+    /// Peers currently mid-authentication.
+    pub fn pending_auth_peers(&self) -> Vec<i32> {
+        let mut ids: Vec<i32> = self.pending_auth.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Whether `id` is connected but not yet authorised.
+    pub fn is_peer_authenticating(&self, id: i32) -> bool {
+        self.pending_auth.contains_key(&id)
+    }
+
+    /// Completes the handshake for `id` (Godot `complete_auth`).
+    ///
+    /// Accepting promotes the peer to `peer_connected`; rejecting emits
+    /// `peer_authentication_failed`. Returns `false` when the peer was not
+    /// authenticating, so a double-complete cannot fire a second signal.
+    pub fn complete_auth(&mut self, id: i32, accepted: bool) -> bool {
+        if self.pending_auth.remove(&id).is_none() {
+            return false;
+        }
+        self.events.push(if accepted {
+            MultiplayerEvent::PeerConnected(id)
+        } else {
+            MultiplayerEvent::PeerAuthenticationFailed(id)
+        });
+        if !accepted {
+            self.peers.remove_peer(id);
+            // The removal queues a transport-level disconnect signal that would
+            // otherwise surface as a spurious `peer_disconnected` for a peer the
+            // script was never told had connected.
+            self.peers.drain_signals();
+        }
+        true
+    }
+
+    /// Advances the auth timers by `delta` seconds, failing any peer that has
+    /// waited longer than [`auth_timeout`](Self::auth_timeout).
+    ///
+    /// Driven from the frame loop alongside [`poll`](Self::poll); without it a
+    /// peer that never answers the handshake would occupy a slot forever, which
+    /// is exactly what Godot's timeout exists to prevent.
+    pub fn poll_auth(&mut self, delta: f32) {
+        if self.auth_timeout <= 0.0 || self.pending_auth.is_empty() {
+            return;
+        }
+        let timeout = self.auth_timeout;
+        let mut timed_out: Vec<i32> = Vec::new();
+        for (id, waited) in self.pending_auth.iter_mut() {
+            *waited += delta;
+            if *waited >= timeout {
+                timed_out.push(*id);
+            }
+        }
+        timed_out.sort_unstable();
+        for id in timed_out {
+            self.complete_auth(id, false);
+        }
     }
 
     /// Drain decoded inbound RPCs.
@@ -337,31 +736,147 @@ impl MultiplayerAPI {
 // Binary RPC framing (Variant subset) — pat-p0s82.4
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Raw byte framing — Godot's NETWORK_COMMAND_RAW (pat-0q2kx.94)
+// ---------------------------------------------------------------------------
+
+/// Frames `bytes` as a raw `send_bytes` payload: `PRAW | bytes…`.
+pub fn encode_raw_packet(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + bytes.len());
+    out.push(NetworkCommand::Raw.to_byte());
+    out.extend_from_slice(bytes);
+    out
+}
+
+/// Unwraps a raw payload, or `None` when `data` is not one.
+///
+/// An empty `send_bytes` still round-trips as `Some(vec![])` — the magic alone
+/// is a valid frame, and treating it as "not raw" would silently reclassify it
+/// as an unknown packet.
+pub fn decode_raw_packet(data: &[u8]) -> Option<Vec<u8>> {
+    if data.first().copied().and_then(NetworkCommand::from_byte) != Some(NetworkCommand::Raw) {
+        return None;
+    }
+    Some(data[1..].to_vec())
+}
+
+// ---------------------------------------------------------------------------
+// OfflineMultiplayerPeer (pat-0q2kx.94)
+// ---------------------------------------------------------------------------
+
+/// Godot's `OfflineMultiplayerPeer` (scene/main/multiplayer_peer.cpp): the
+/// always-connected loopback peer a single-player game runs with.
+///
+/// It reports `unique_id == 1` and `is_server() == true` so the *same* scripts
+/// that branch on `multiplayer.is_server()` work unchanged with no sockets —
+/// which is the entire point of the class, and why `is_server()` must be true
+/// rather than "no peer, so false".
+///
+/// Packets sent to it loop straight back, so a `send_bytes` in single-player
+/// still produces a `peer_packet` rather than vanishing.
+#[derive(Debug, Default)]
+pub struct OfflineMultiplayerPeer {
+    loopback: Vec<Packet>,
+    closed: bool,
+}
+
+impl OfflineMultiplayerPeer {
+    /// Creates the offline peer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl NetworkPeer for OfflineMultiplayerPeer {
+    fn send_packet(&mut self, _to: PeerId, packet: Packet) -> Result<()> {
+        if self.closed {
+            return Err(NetworkError::NoPeer);
+        }
+        // Loop back with ourselves as the sender, as a local peer must.
+        self.loopback.push(Packet {
+            sender: PeerId::SERVER,
+            ..packet
+        });
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Vec<Packet> {
+        std::mem::take(&mut self.loopback)
+    }
+
+    fn get_unique_id(&self) -> PeerId {
+        PeerId::SERVER
+    }
+
+    fn is_server(&self) -> bool {
+        true
+    }
+
+    fn get_connection_status(&self) -> ConnectionStatus {
+        if self.closed {
+            ConnectionStatus::Disconnected
+        } else {
+            // Never "connecting": an offline peer is usable the instant it
+            // exists, which is what lets `_ready` branch on it.
+            ConnectionStatus::Connected
+        }
+    }
+
+    fn close(&mut self) {
+        self.closed = true;
+        self.loopback.clear();
+    }
+}
+
 /// Encode an RPC into the binary wire format:
 /// `PRPC | node_path:u64 | method_len:u16 | method | argc:u16 | args…`
 pub fn encode_rpc_packet(node_path: u64, method: &str, args: &[Variant]) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(RPC_MAGIC);
+    out.push(NetworkCommand::RemoteCall.to_byte());
     out.extend_from_slice(&node_path.to_be_bytes());
     let mb = method.as_bytes();
     out.extend_from_slice(&(mb.len() as u16).to_be_bytes());
     out.extend_from_slice(mb);
     out.extend_from_slice(&(args.len() as u16).to_be_bytes());
     for a in args {
-        encode_variant(a, &mut out);
+        // The faithful marshalls port, rather than the old private 5-type codec
+        // whose fallback arm stringified Vector2/Array/Dictionary and lost them
+        // (pat-0q2kx.95). An arg that cannot be encoded is skipped rather than
+        // silently downgraded to a String — the receiver's arg count check then
+        // rejects the call instead of running it with a wrong value.
+        if let Ok(bytes) = gdvariant::binary::encode_variant(a) {
+            out.extend_from_slice(&bytes);
+        }
     }
     out
 }
 
 /// Decode a binary RPC packet. Returns `(node_path, method, args)`.
+///
+/// Returns `None` for any packet whose command byte is not
+/// [`NetworkCommand::RemoteCall`], so a RAW / SPAWN / SYNC packet can never
+/// enter RPC dispatch (pat-0q2kx.95).
 pub fn decode_rpc_packet(data: &[u8]) -> Option<(u64, String, Vec<Variant>)> {
-    if data.len() < 4 + 8 + 2 {
+    decode_rpc_packet_with(data, ObjectDecoding::Deny)
+}
+
+/// [`decode_rpc_packet`] with an explicit object-decoding policy.
+///
+/// With [`ObjectDecoding::Deny`] (the default) a packet carrying an encoded
+/// `Object` is rejected outright rather than materialized, mirroring Godot's
+/// `allow_object_decoding` guard.
+pub fn decode_rpc_packet_with(
+    data: &[u8],
+    objects: ObjectDecoding,
+) -> Option<(u64, String, Vec<Variant>)> {
+    // 1 command byte + 8 path + 2 method len + 2 argc
+    if data.len() < 1 + 8 + 2 + 2 {
         return None;
     }
-    if &data[0..4] != RPC_MAGIC {
+    if NetworkCommand::from_byte(data[0])? != NetworkCommand::RemoteCall {
         return None;
     }
-    let mut i = 4;
+    let mut i = 1;
     let node_path = u64::from_be_bytes(data[i..i + 8].try_into().ok()?);
     i += 8;
     let mlen = u16::from_be_bytes(data[i..i + 2].try_into().ok()?) as usize;
@@ -378,84 +893,16 @@ pub fn decode_rpc_packet(data: &[u8]) -> Option<(u64, String, Vec<Variant>)> {
     i += 2;
     let mut args = Vec::with_capacity(argc);
     for _ in 0..argc {
-        let (v, n) = decode_variant(&data[i..])?;
+        let (v, n) = gdvariant::binary::decode_variant(data.get(i..)?).ok()?;
+        // `ObjectId` is this Variant's object reference — decoding one from an
+        // untrusted peer is what Godot's `allow_object_decoding` guards.
+        if objects == ObjectDecoding::Deny && matches!(v, Variant::ObjectId(_)) {
+            return None;
+        }
         args.push(v);
         i += n;
     }
     Some((node_path, method, args))
-}
-
-fn encode_variant(v: &Variant, out: &mut Vec<u8>) {
-    match v {
-        Variant::Nil => out.push(0),
-        Variant::Bool(b) => {
-            out.push(1);
-            out.push(if *b { 1 } else { 0 });
-        }
-        Variant::Int(i) => {
-            out.push(2);
-            out.extend_from_slice(&i.to_be_bytes());
-        }
-        Variant::Float(f) => {
-            out.push(3);
-            out.extend_from_slice(&f.to_bits().to_be_bytes());
-        }
-        Variant::String(s) => {
-            out.push(4);
-            let b = s.as_bytes();
-            out.extend_from_slice(&(b.len() as u32).to_be_bytes());
-            out.extend_from_slice(b);
-        }
-        // Fallback: stringify unknown types
-        other => {
-            out.push(4);
-            let s = format!("{other}");
-            let b = s.as_bytes();
-            out.extend_from_slice(&(b.len() as u32).to_be_bytes());
-            out.extend_from_slice(b);
-        }
-    }
-}
-
-fn decode_variant(data: &[u8]) -> Option<(Variant, usize)> {
-    if data.is_empty() {
-        return None;
-    }
-    match data[0] {
-        0 => Some((Variant::Nil, 1)),
-        1 => {
-            if data.len() < 2 {
-                return None;
-            }
-            Some((Variant::Bool(data[1] != 0), 2))
-        }
-        2 => {
-            if data.len() < 9 {
-                return None;
-            }
-            let i = i64::from_be_bytes(data[1..9].try_into().ok()?);
-            Some((Variant::Int(i), 9))
-        }
-        3 => {
-            if data.len() < 9 {
-                return None;
-            }
-            let bits = u64::from_be_bytes(data[1..9].try_into().ok()?);
-            Some((Variant::Float(f64::from_bits(bits)), 9))
-        }
-        4 => {
-            if data.len() < 5 {
-                return None;
-            }
-            let len = u32::from_be_bytes(data[1..5].try_into().ok()?) as usize;
-            if data.len() < 5 + len {
-                return None;
-            }
-            let s = String::from_utf8(data[5..5 + len].to_vec()).ok()?;
-            Some((Variant::String(s), 5 + len))
-        }
-        _ => None,
-    }
 }
 
 impl Default for MultiplayerAPI {
@@ -490,6 +937,16 @@ impl MockNetworkPeer {
             inbox: Arc::new(Mutex::new(Vec::new())),
             remote_inbox: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Drives the mock's connection status (pat-0q2kx.94).
+    ///
+    /// `connected_to_server` / `connection_failed` / `server_disconnected` are
+    /// emitted on a status **transition**, so testing them needs a peer that can
+    /// start `Connecting` and change — a double pinned at `Connected` can only
+    /// ever prove the steady state.
+    pub fn set_status(&mut self, status: ConnectionStatus) {
+        self.status = status;
     }
 }
 
@@ -558,10 +1015,20 @@ impl MockNetwork {
 // MultiplayerSpawner / MultiplayerSynchronizer (pat-ikq04)
 // ---------------------------------------------------------------------------
 
-/// Magic byte for a spawn replication packet.
-pub const REPLICATION_KIND_SPAWN: u8 = 0x01;
-/// Magic byte for a property-sync replication packet.
-pub const REPLICATION_KIND_SYNC: u8 = 0x02;
+/// Command byte for a spawn replication packet — Godot's
+/// `NETWORK_COMMAND_SPAWN`.
+///
+/// These used to be `0x01`/`0x02`, a private numbering that predated the shared
+/// header. Once every packet leads with a [`NetworkCommand`] those values
+/// **collide** with `SIMPLIFY_PATH` (1) and `CONFIRM_PATH` (2): nothing
+/// misroutes today, because the RPC and RAW decoders only accept their own
+/// bytes, but the moment the path cache lands a spawn packet and a
+/// simplify-path packet would be indistinguishable. Aliasing them onto the real
+/// commands keeps one namespace (pat-0q2kx.95).
+pub const REPLICATION_KIND_SPAWN: u8 = NetworkCommand::Spawn.to_byte();
+/// Command byte for a property-sync replication packet — Godot's
+/// `NETWORK_COMMAND_SYNC`. See [`REPLICATION_KIND_SPAWN`].
+pub const REPLICATION_KIND_SYNC: u8 = NetworkCommand::Sync.to_byte();
 
 /// A recorded spawn request that was (or will be) advertised to peers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1227,7 +1694,10 @@ mod tests {
         assert!(sync.is_visible_to(PeerId(2)), "override cleared");
 
         sync.set_visibility_public(false);
-        assert!(!sync.is_visible_to(PeerId(3)), "private hides un-overridden peers");
+        assert!(
+            !sync.is_visible_to(PeerId(3)),
+            "private hides un-overridden peers"
+        );
         sync.set_visibility_for(PeerId(3), true);
         assert!(sync.is_visible_to(PeerId(3)), "explicit override wins");
     }
@@ -1239,11 +1709,15 @@ mod tests {
         let mut peer = MockNetworkPeer::new(PeerId::SERVER);
 
         // Visible → a forced poll sends a packet.
-        assert!(sync.poll_outbound(&mut peer, PeerId(2), 1000, true).unwrap());
+        assert!(sync
+            .poll_outbound(&mut peer, PeerId(2), 1000, true)
+            .unwrap());
 
         // Hidden from that peer → no packet even when forced.
         sync.set_visibility_for(PeerId(2), false);
-        assert!(!sync.poll_outbound(&mut peer, PeerId(2), 2000, true).unwrap());
+        assert!(!sync
+            .poll_outbound(&mut peer, PeerId(2), 2000, true)
+            .unwrap());
     }
 
     #[test]
@@ -1473,16 +1947,170 @@ mod tests {
         api.rpc(42, "sync_pos", vec![Variant::Int(10)]).unwrap();
     }
 
+    // -- pat-0q2kx.95: Godot NETWORK_COMMAND framing + real Variant codec ----
+
+    /// The acceptance's first clause: structured args must survive the wire
+    /// **as Variants**. The old private codec's fallback arm was
+    /// `format!("{other}")`, so a Vector2 arrived as the String "(1, 2)".
+    #[test]
+    fn rpc_args_roundtrip_structured_variants_not_strings() {
+        let args = vec![
+            Variant::Vector2(gdcore::math::Vector2::new(1.5, -2.5)),
+            Variant::Array(vec![Variant::Int(7), Variant::Bool(true)]),
+            Variant::Dictionary(
+                vec![(Variant::String("hp".into()), Variant::Int(42))]
+                    .into_iter()
+                    .collect(),
+            ),
+        ];
+        let data = encode_rpc_packet(0x1234, "take_damage", &args);
+        let (path, method, decoded) = decode_rpc_packet(&data).expect("decode");
+
+        assert_eq!(path, 0x1234);
+        assert_eq!(method, "take_damage");
+        assert_eq!(
+            decoded, args,
+            "every arg must round-trip as the same Variant, not a stringified one"
+        );
+        for arg in &decoded {
+            assert!(
+                !matches!(arg, Variant::String(_)),
+                "no structured arg may degrade to a String: {arg:?}"
+            );
+        }
+    }
+
+    /// The acceptance's third clause: a RAW packet must never enter RPC
+    /// dispatch. With one shared header this is a command-byte check rather
+    /// than two unrelated magics that could both miss.
+    #[test]
+    fn raw_packet_does_not_enter_rpc_dispatch() {
+        let raw = encode_raw_packet(b"hello");
+        assert_eq!(raw[0], NetworkCommand::Raw.to_byte());
+        assert!(
+            decode_rpc_packet(&raw).is_none(),
+            "a RAW packet must not decode as an RPC"
+        );
+        assert_eq!(decode_raw_packet(&raw), Some(b"hello".to_vec()));
+
+        // ...and the reverse: an RPC must not be consumed as a raw payload.
+        let rpc = encode_rpc_packet(1, "ping", &[]);
+        assert!(decode_raw_packet(&rpc).is_none());
+    }
+
+    /// Every other command byte is reserved for the replication/sys traffic and
+    /// must also stay out of RPC dispatch.
+    #[test]
+    fn non_remote_call_commands_are_rejected_by_the_rpc_decoder() {
+        let mut packet = encode_rpc_packet(9, "m", &[]);
+        for cmd in [
+            NetworkCommand::SimplifyPath,
+            NetworkCommand::ConfirmPath,
+            NetworkCommand::Spawn,
+            NetworkCommand::Despawn,
+            NetworkCommand::Sync,
+            NetworkCommand::Sys,
+        ] {
+            packet[0] = cmd.to_byte();
+            assert!(
+                decode_rpc_packet(&packet).is_none(),
+                "{cmd:?} must not decode as an RPC"
+            );
+        }
+        // An unknown byte is rejected rather than guessed at.
+        packet[0] = 0xFE;
+        assert!(decode_rpc_packet(&packet).is_none());
+    }
+
+    /// Command bytes are Godot's wire values
+    /// (scene_multiplayer.h `enum NetworkCommands`) and must not be renumbered.
+    #[test]
+    fn network_command_bytes_match_godot() {
+        for (cmd, byte) in [
+            (NetworkCommand::RemoteCall, 0u8),
+            (NetworkCommand::SimplifyPath, 1),
+            (NetworkCommand::ConfirmPath, 2),
+            (NetworkCommand::Raw, 3),
+            (NetworkCommand::Spawn, 4),
+            (NetworkCommand::Despawn, 5),
+            (NetworkCommand::Sync, 6),
+            (NetworkCommand::Sys, 7),
+        ] {
+            assert_eq!(cmd.to_byte(), byte);
+            assert_eq!(NetworkCommand::from_byte(byte), Some(cmd));
+        }
+        assert_eq!(NetworkCommand::from_byte(8), None);
+    }
+
+    /// Every packet kind must occupy a **distinct** command byte.
+    ///
+    /// The replication packets carried a private `0x01`/`0x02` numbering from
+    /// before the shared header, which collides with `SIMPLIFY_PATH` (1) and
+    /// `CONFIRM_PATH` (2). Nothing misrouted, because the RPC and RAW decoders
+    /// only accept their own byte — but the collision would have become a real
+    /// ambiguity the moment the path cache landed. This pins the namespace so a
+    /// future kind cannot quietly reuse a taken byte (pat-0q2kx.95).
+    #[test]
+    fn packet_kinds_do_not_share_command_bytes() {
+        assert_eq!(REPLICATION_KIND_SPAWN, NetworkCommand::Spawn.to_byte());
+        assert_eq!(REPLICATION_KIND_SYNC, NetworkCommand::Sync.to_byte());
+        assert_ne!(
+            REPLICATION_KIND_SPAWN,
+            NetworkCommand::SimplifyPath.to_byte()
+        );
+        assert_ne!(REPLICATION_KIND_SYNC, NetworkCommand::ConfirmPath.to_byte());
+
+        // A spawn packet must not be mistaken for an RPC or a raw payload.
+        let spawn = encode_spawn_packet(&SpawnRequest {
+            net_id: 1,
+            scene_index: 0,
+            scene_path: "res://a.tscn".into(),
+            data: String::new(),
+        });
+        assert!(decode_rpc_packet(&spawn).is_none(), "spawn is not an RPC");
+        assert!(decode_raw_packet(&spawn).is_none(), "spawn is not raw");
+        assert!(decode_spawn_packet(&spawn).is_some(), "spawn still decodes");
+
+        let sync = encode_sync_packet(1, &[("hp".into(), "5".into())]);
+        assert!(decode_rpc_packet(&sync).is_none(), "sync is not an RPC");
+        assert!(decode_raw_packet(&sync).is_none(), "sync is not raw");
+        assert!(decode_sync_packet(&sync).is_some(), "sync still decodes");
+    }
+
+    /// Object decoding is denied by default, as Godot's
+    /// `allow_object_decoding` is — decoding an object from an untrusted peer
+    /// is remote code execution.
+    #[test]
+    fn object_args_are_denied_unless_explicitly_allowed() {
+        let args = vec![Variant::ObjectId(gdcore::id::ObjectId::from_raw(7))];
+        let data = encode_rpc_packet(1, "grab", &args);
+
+        assert!(
+            decode_rpc_packet(&data).is_none(),
+            "the default policy must reject an encoded object"
+        );
+        let allowed = decode_rpc_packet_with(&data, ObjectDecoding::Allow);
+        assert!(
+            allowed.is_some(),
+            "an explicitly trusting caller can still decode it"
+        );
+    }
+
     #[test]
     fn binary_rpc_roundtrip_not_text_toy() {
         let data = encode_rpc_packet(
             0xABCD,
             "set_hp",
-            &[Variant::Int(100), Variant::String("ok".into()), Variant::Bool(true)],
+            &[
+                Variant::Int(100),
+                Variant::String("ok".into()),
+                Variant::Bool(true),
+            ],
         );
-        // Must be binary PRPC, not "rpc:…"
-        assert_eq!(&data[0..4], RPC_MAGIC);
+        // Godot's command byte leads the packet, not a bespoke magic.
+        assert_eq!(data[0], NetworkCommand::RemoteCall.to_byte());
         assert!(!data.starts_with(b"rpc:"));
+        assert!(!data.starts_with(b"PRPC"), "the PRPC magic is gone");
         let (path, method, args) = decode_rpc_packet(&data).expect("decode");
         assert_eq!(path, 0xABCD);
         assert_eq!(method, "set_hp");

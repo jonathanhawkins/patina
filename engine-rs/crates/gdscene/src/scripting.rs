@@ -11,14 +11,53 @@
 
 use std::collections::HashMap;
 
+use gdcore::math::{Color, Rect2, Vector2};
 use gdscript_interop::bindings::{
     MethodFlags, MethodInfo, SceneAccess, ScriptError, ScriptInstance, ScriptPropertyInfo,
 };
 use gdscript_interop::interpreter::{ClassInstance, Interpreter, RuntimeError};
+use gdserver2d::canvas::DrawCommand;
 use gdvariant::variant::VariantType;
 use gdvariant::Variant;
 
 use crate::node::NodeId;
+
+// -- `draw_*` argument coercion (pat-0q2kx.82) ------------------------------
+//
+// GDScript is dynamically typed, so a literal `2` reaches a float parameter as
+// `Variant::Int`. These accept either numeric form the way Godot's Variant
+// argument conversion does, and return `None` for a genuinely wrong type so the
+// caller falls through to "not a native method" instead of drawing garbage.
+
+fn arg_f32(args: &[Variant], index: usize) -> Option<f32> {
+    match args.get(index)? {
+        Variant::Float(f) => Some(*f as f32),
+        Variant::Int(i) => Some(*i as f32),
+        _ => None,
+    }
+}
+
+fn arg_vec2(args: &[Variant], index: usize) -> Option<Vector2> {
+    match args.get(index)? {
+        Variant::Vector2(v) => Some(*v),
+        Variant::Vector2i(v) => Some(Vector2::new(v.x as f32, v.y as f32)),
+        _ => None,
+    }
+}
+
+fn arg_color(args: &[Variant], index: usize) -> Option<Color> {
+    match args.get(index)? {
+        Variant::Color(c) => Some(*c),
+        _ => None,
+    }
+}
+
+fn arg_rect2(args: &[Variant], index: usize) -> Option<Rect2> {
+    match args.get(index)? {
+        Variant::Rect2(r) => Some(*r),
+        _ => None,
+    }
+}
 
 /// Per-node script storage.
 pub type ScriptStore = HashMap<NodeId, Box<dyn ScriptInstance>>;
@@ -330,6 +369,107 @@ pub enum InputCommand {
         /// Joypad device id.
         device: i64,
     },
+    // -- cursor shape (pat-0q2kx.90) --------------------------------------
+    //
+    // The `CursorManager` lives on the frame loop beside `InputState`, so a
+    // script's cursor change is queued here and applied in the same drain. The
+    // browser game view then reads the resulting shape out of the input-state
+    // payload and applies it as a CSS `cursor`.
+    /// `Input.set_default_cursor_shape(shape)` — Godot `CURSOR_*` as an int.
+    SetDefaultCursorShape(i64),
+    /// `Input.set_custom_mouse_cursor(image, shape, hotspot)`.
+    SetCustomMouseCursor {
+        /// Resource path of the cursor image, or empty to clear the override.
+        image_path: String,
+        /// Which `CURSOR_*` shape this image replaces.
+        shape: i64,
+        /// Hotspot x within the image.
+        hotspot_x: f32,
+        /// Hotspot y within the image.
+        hotspot_y: f32,
+    },
+    // -- InputMap singleton (pat-0q2kx.89) --------------------------------
+    //
+    // Runtime rebinding. The engine `InputMap` lives beside `InputState` in the
+    // frame loop, so a script's mutation is queued here and applied in the same
+    // drain — which is what makes the rebind live before the next event is
+    // resolved against the map.
+    /// `InputMap.add_action(action, deadzone)`.
+    InputMapAddAction {
+        /// Action name.
+        action: String,
+        /// Deadzone for analog bindings.
+        deadzone: f32,
+    },
+    /// `InputMap.erase_action(action)`.
+    InputMapEraseAction {
+        /// Action name.
+        action: String,
+    },
+    /// `InputMap.action_set_deadzone(action, deadzone)`.
+    InputMapSetDeadzone {
+        /// Action name.
+        action: String,
+        /// New deadzone.
+        deadzone: f32,
+    },
+    /// `InputMap.action_add_event(action, event)`.
+    InputMapAddEvent {
+        /// Action name.
+        action: String,
+        /// The binding to add.
+        binding: gdplatform::input::ActionBinding,
+    },
+    /// `InputMap.action_erase_event(action, event)`.
+    InputMapEraseEvent {
+        /// Action name.
+        action: String,
+        /// The binding to remove.
+        binding: gdplatform::input::ActionBinding,
+    },
+    /// `InputMap.action_erase_events(action)`.
+    InputMapEraseEvents {
+        /// Action name.
+        action: String,
+    },
+}
+
+/// Converts a script-described input event into the engine's typed binding
+/// (pat-0q2kx.89).
+///
+/// `None` for a class or code the engine does not model, so an unrecognized
+/// rebind is dropped rather than silently bound to the wrong control.
+pub fn binding_from_event_spec(
+    spec: &gdscript_interop::bindings::InputEventSpec,
+) -> Option<gdplatform::input::ActionBinding> {
+    use gdplatform::input::{ActionBinding, KeyCombo};
+
+    match spec.class.as_str() {
+        "InputEventKey" => {
+            let key = gdplatform::input::key_from_godot_keycode(spec.code)?;
+            if spec.shift || spec.ctrl || spec.alt {
+                Some(ActionBinding::KeyWithModifiers(KeyCombo {
+                    key,
+                    shift: spec.shift,
+                    ctrl: spec.ctrl,
+                    alt: spec.alt,
+                }))
+            } else {
+                Some(ActionBinding::KeyBinding(key))
+            }
+        }
+        "InputEventMouseButton" => Some(ActionBinding::MouseBinding(
+            gdplatform::input::mouse_button_from_godot(spec.code)?,
+        )),
+        "InputEventJoypadButton" => Some(ActionBinding::GamepadButtonBinding(
+            gdplatform::input::gamepad_button_from_godot(spec.code)?,
+        )),
+        "InputEventJoypadMotion" => Some(ActionBinding::GamepadAxisDirection {
+            axis: gdplatform::input::gamepad_axis_from_godot(spec.code)?,
+            positive: spec.axis_value >= 0.0,
+        }),
+        _ => None,
+    }
 }
 
 /// A snapshot of input state at a single frame, passed to scripts via
@@ -346,13 +486,45 @@ pub struct InputSnapshot {
     pub input_map: std::collections::HashMap<String, Vec<String>>,
     /// Current mouse position in screen coordinates.
     pub mouse_position: gdcore::math::Vector2,
+    /// Motion of the last frame in pixels per second — Godot
+    /// `Input.get_last_mouse_velocity` (pat-0q2kx.92).
+    ///
+    /// Velocity rather than raw displacement because that is what Godot
+    /// reports and what drag-inertia code integrates; the frame owner divides
+    /// the accumulated motion by the frame delta, which is where the delta is
+    /// known.
+    pub mouse_velocity: gdcore::math::Vector2,
     /// Mouse buttons currently held (button index strings: "1"=Left, "2"=Right, "3"=Middle).
     pub mouse_buttons_pressed: HashSet<String>,
+    /// Actions currently pressed, as the engine resolved them (pat-0q2kx.88).
+    ///
+    /// [`input_map`](Self::input_map) only relates actions to **key names**, so
+    /// an action bound to a gamepad button or a mouse button could never report
+    /// pressed through it. These carry the engine's own action state, which
+    /// `InputState::process_event` resolves for every device.
+    pub actions_pressed: HashSet<String>,
+    /// Actions that became pressed this frame (pat-0q2kx.88).
+    pub actions_just_pressed: HashSet<String>,
+    /// Actions released this frame (pat-0q2kx.88).
+    pub actions_just_released: HashSet<String>,
+    /// Gamepad buttons held, keyed by `(device, Godot JoyButton index)`
+    /// (pat-0q2kx.88). Godot's numbering, not the browser's — see
+    /// `GamepadButton::to_godot_index`.
+    pub gamepad_buttons_pressed: HashSet<(i64, i64)>,
+    /// Latest value per `(device, Godot JoyAxis index)` (pat-0q2kx.88).
+    pub gamepad_axis_values: std::collections::HashMap<(i64, i64), f32>,
 }
 
 impl InputSnapshot {
-    /// Returns `true` if any key mapped to `action` is held.
+    /// Returns `true` if `action` is held.
+    ///
+    /// Consults the engine-resolved action set first so a gamepad- or
+    /// mouse-bound action reports correctly, then falls back to the key-name
+    /// map for snapshots built by hand from keys alone (pat-0q2kx.88).
     pub fn is_action_pressed(&self, action: &str) -> bool {
+        if self.actions_pressed.contains(action) {
+            return true;
+        }
         if let Some(keys) = self.input_map.get(action) {
             keys.iter().any(|k| self.pressed_keys.contains(k))
         } else {
@@ -360,8 +532,12 @@ impl InputSnapshot {
         }
     }
 
-    /// Returns `true` if any key mapped to `action` was just pressed.
+    /// Returns `true` if `action` became pressed this frame — see
+    /// [`is_action_pressed`](Self::is_action_pressed) for how it resolves.
     pub fn is_action_just_pressed(&self, action: &str) -> bool {
+        if self.actions_just_pressed.contains(action) {
+            return true;
+        }
         if let Some(keys) = self.input_map.get(action) {
             keys.iter().any(|k| self.just_pressed_keys.contains(k))
         } else {
@@ -369,14 +545,31 @@ impl InputSnapshot {
         }
     }
 
-    /// Returns `true` if any key mapped to `action` was released this frame
-    /// (pat-nzgdu.9).
+    /// Returns `true` if `action` was released this frame (pat-nzgdu.9).
     pub fn is_action_just_released(&self, action: &str) -> bool {
+        if self.actions_just_released.contains(action) {
+            return true;
+        }
         if let Some(keys) = self.input_map.get(action) {
             keys.iter().any(|k| self.just_released_keys.contains(k))
         } else {
             false
         }
+    }
+
+    /// Returns `true` if the Godot `JOY_BUTTON_*` `button` is held on joypad
+    /// `device` (`Input.is_joy_button_pressed`, pat-0q2kx.88).
+    pub fn is_joy_button_pressed(&self, device: i64, button: i64) -> bool {
+        self.gamepad_buttons_pressed.contains(&(device, button))
+    }
+
+    /// The value of the Godot `JOY_AXIS_*` `axis` on joypad `device`, `0.0`
+    /// when untouched (`Input.get_joy_axis`, pat-0q2kx.88).
+    pub fn get_joy_axis(&self, device: i64, axis: i64) -> f32 {
+        self.gamepad_axis_values
+            .get(&(device, axis))
+            .copied()
+            .unwrap_or(0.0)
     }
 
     /// Returns `true` if the raw key is held.
@@ -843,6 +1036,57 @@ impl SceneAccess for SceneTreeAccessor {
         }
     }
 
+    // -- Object virtual chain (pat-0q2kx.82) --------------------------------
+
+    fn object_to_string(&mut self, node: u64) -> Option<String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self.tree_mut().call_script_method(nid, "_to_string", &[])? {
+            Variant::String(s) => Some(s),
+            Variant::StringName(s) => Some(s.as_str().to_string()),
+            // Godot logs "Wrong type for _to_string, must be a String" and uses
+            // the default representation; silently falling back matches the
+            // observable behaviour.
+            _ => None,
+        }
+    }
+
+    fn object_get_virtual(&mut self, node: u64, property: &str) -> Option<Variant> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self.tree_mut().call_script_method(
+            nid,
+            "_get",
+            &[Variant::String(property.to_string())],
+        )? {
+            // Godot treats a `null` return as "this property is not mine",
+            // which is why a script must `return` nothing for names it does not
+            // handle rather than falling off the end with a value.
+            Variant::Nil => None,
+            value => Some(value),
+        }
+    }
+
+    fn object_set_virtual(&mut self, node: u64, property: &str, value: &Variant) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let args = [Variant::String(property.to_string()), value.clone()];
+        // `_set` reports whether it consumed the write; only an explicit `true`
+        // stops the engine from storing the value itself.
+        matches!(
+            self.tree_mut().call_script_method(nid, "_set", &args),
+            Some(Variant::Bool(true))
+        )
+    }
+
+    fn object_property_list_virtual(&mut self, node: u64) -> Vec<Variant> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        match self
+            .tree_mut()
+            .call_script_method(nid, "_get_property_list", &[])
+        {
+            Some(Variant::Array(entries)) => entries,
+            _ => Vec::new(),
+        }
+    }
+
     // -- Cross-object script calls (pat-0q2kx.8) ----------------------------
 
     fn call_script_method(&mut self, node: u64, method: &str, args: &[Variant]) -> Option<Variant> {
@@ -1018,6 +1262,25 @@ impl SceneAccess for SceneTreeAccessor {
                 Some(Variant::Bool(count > 0))
             }
 
+            // -- Control keyboard focus (pat-0q2kx.84) ------------------------
+            // The viewport owns focus, so these are the only way a script can
+            // ask "am I focused?" or move focus itself — a UI script that calls
+            // `grab_focus()` in `_ready` is the standard Godot idiom.
+            "has_focus" => Some(Variant::Bool(self.tree().has_focus(nid))),
+            "grab_focus" => {
+                self.tree_mut().grab_focus(nid);
+                Some(Variant::Nil)
+            }
+            // Godot's `Control.release_focus` only drops focus when the caller
+            // is the one holding it; releasing from an unfocused control must
+            // not steal focus away from whoever has it.
+            "release_focus" => {
+                if self.tree().has_focus(nid) {
+                    self.tree_mut().release_focus();
+                }
+                Some(Variant::Nil)
+            }
+
             // -- Node groups --------------------------------------------------
             "add_to_group" => {
                 let group = arg_str(0)?;
@@ -1092,7 +1355,159 @@ impl SceneAccess for SceneTreeAccessor {
                 Some(Variant::Int(0))
             }
 
-            _ => None,
+            // -- CanvasItem custom drawing (pat-0q2kx.82) --------------------
+            //
+            // Godot's `_draw` contract: `queue_redraw()` marks the item dirty,
+            // and the `draw_*` calls are only meaningful inside the `_draw` body
+            // that the resulting redraw invokes (canvas_item.cpp). The commands
+            // land in the tree's capture buffer, which
+            // `SceneTree::flush_pending_redraws` opens around each `_draw` — a
+            // `draw_rect` from `_process` is dropped, exactly as Godot drops it.
+            "queue_redraw" => {
+                self.tree_mut().queue_redraw(nid);
+                Some(Variant::Nil)
+            }
+            "is_queued_for_redraw" => Some(Variant::Bool(self.tree().is_queued_for_redraw(nid))),
+            // draw_rect(rect, color, filled = true, width = -1.0)
+            "draw_rect" => {
+                let rect = arg_rect2(args, 0)?;
+                let color = arg_color(args, 1).unwrap_or(Color::WHITE);
+                let filled = !matches!(args.get(2), Some(Variant::Bool(false)));
+                self.tree_mut().push_draw_command(DrawCommand::DrawRect {
+                    rect,
+                    color,
+                    filled,
+                });
+                Some(Variant::Nil)
+            }
+            // draw_line(from, to, color, width = -1.0)
+            "draw_line" => {
+                let from = arg_vec2(args, 0)?;
+                let to = arg_vec2(args, 1)?;
+                let color = arg_color(args, 2).unwrap_or(Color::WHITE);
+                // Godot's -1 width means "thinnest line"; the rasterizer wants a
+                // positive pixel width, so a negative/absent width becomes 1.
+                let width = match arg_f32(args, 3) {
+                    Some(w) if w > 0.0 => w,
+                    _ => 1.0,
+                };
+                self.tree_mut().push_draw_command(DrawCommand::DrawLine {
+                    from,
+                    to,
+                    color,
+                    width,
+                });
+                Some(Variant::Nil)
+            }
+            // draw_circle(position, radius, color, filled = true)
+            "draw_circle" => {
+                let center = arg_vec2(args, 0)?;
+                let radius = arg_f32(args, 1)?;
+                let color = arg_color(args, 2).unwrap_or(Color::WHITE);
+                self.tree_mut().push_draw_command(DrawCommand::DrawCircle {
+                    center,
+                    radius,
+                    color,
+                });
+                Some(Variant::Nil)
+            }
+            // draw_texture(texture, position, modulate = WHITE). Patina's
+            // DrawCommand addresses textures by path, so the `texture` argument
+            // is the resource path a script would `preload`; the destination
+            // rect is the texture's own size, which the renderer resolves, so a
+            // zero-size rect at `position` stands for "natural size".
+            "draw_texture" => {
+                let path = arg_str(0)?;
+                let position = arg_vec2(args, 1)?;
+                let modulate = arg_color(args, 2).unwrap_or(Color::WHITE);
+                self.tree_mut()
+                    .push_draw_command(DrawCommand::DrawTextureRect {
+                        texture_path: path,
+                        rect: Rect2::new(position, Vector2::ZERO),
+                        modulate,
+                    });
+                Some(Variant::Nil)
+            }
+            // draw_texture_rect(texture, rect, tile, modulate = WHITE)
+            "draw_texture_rect" => {
+                let path = arg_str(0)?;
+                let rect = arg_rect2(args, 1)?;
+                let modulate = arg_color(args, 3).unwrap_or(Color::WHITE);
+                self.tree_mut()
+                    .push_draw_command(DrawCommand::DrawTextureRect {
+                        texture_path: path,
+                        rect,
+                        modulate,
+                    });
+                Some(Variant::Nil)
+            }
+            // draw_string(font, pos, text, alignment, width, font_size, modulate)
+            // — the positional signature from Godot's CanvasItem. `font` and the
+            // alignment/width layout arguments have no representation in
+            // `DrawCommand::DrawString`, so they are accepted and ignored rather
+            // than making the call fail.
+            "draw_string" => {
+                let position = arg_vec2(args, 1)?;
+                let text = match args.get(2) {
+                    Some(Variant::String(s)) => s.clone(),
+                    Some(Variant::StringName(s)) => s.as_str().to_string(),
+                    _ => return Some(Variant::Nil),
+                };
+                let font_size = match args.get(5) {
+                    Some(Variant::Int(n)) if *n > 0 => *n as u32,
+                    // Godot's default `font_size` is 16.
+                    _ => 16,
+                };
+                let color = arg_color(args, 6).unwrap_or(Color::WHITE);
+                self.tree_mut().push_draw_command(DrawCommand::DrawString {
+                    text,
+                    position,
+                    color,
+                    font_size,
+                });
+                Some(Variant::Nil)
+            }
+
+            // -- LineEdit / TextEdit editing (pat-0q2kx.87) ------------------
+            //
+            // Registered in ClassDB, so without these arms `node_has_method`
+            // would answer true and the call would return the Nil placeholder —
+            // a method that exists and does nothing.
+            "select_all" if crate::line_edit::is_text_input(self.tree(), nid) => {
+                crate::line_edit::select_all(self.tree_mut(), nid);
+                Some(Variant::Nil)
+            }
+            "deselect" if crate::line_edit::is_text_input(self.tree(), nid) => {
+                crate::line_edit::deselect(self.tree_mut(), nid);
+                Some(Variant::Nil)
+            }
+            "has_selection" if crate::line_edit::is_text_input(self.tree(), nid) => Some(
+                Variant::Bool(crate::line_edit::has_selection(self.tree(), nid)),
+            ),
+            "get_selected_text" if crate::line_edit::is_text_input(self.tree(), nid) => Some(
+                Variant::String(crate::line_edit::selected_text(self.tree(), nid)),
+            ),
+            "insert_text_at_caret" if crate::line_edit::is_text_input(self.tree(), nid) => {
+                let insert = arg_str(0)?;
+                crate::line_edit::insert_text_at_caret(self.tree_mut(), nid, &insert);
+                Some(Variant::Nil)
+            }
+
+            // `Control.accept_event()` — Godot's shorthand for
+            // `get_viewport().set_input_as_handled()` (scene/gui/control.cpp),
+            // and the documented way a `_gui_input` handler stops an event from
+            // bubbling to ancestor Controls and the later input stages.
+            "accept_event" => {
+                self.tree_mut().set_input_as_handled();
+                Some(Variant::Nil)
+            }
+
+            // The item-view Controls (pat-0q2kx.85). Their methods are
+            // class-specific — `select` means one thing on an ItemList and
+            // another on an OptionButton — so they dispatch on the node's class
+            // inside `item_views` rather than adding a dozen arms here. Last,
+            // so a method named above keeps its meaning for every class.
+            _ => crate::item_views::call_item_view_method(self.tree_mut(), nid, method, args),
         }
     }
 
@@ -1100,6 +1515,10 @@ impl SceneAccess for SceneTreeAccessor {
 
     fn set_input_as_handled(&mut self) {
         self.tree_mut().set_input_as_handled();
+    }
+
+    fn is_input_handled(&self) -> bool {
+        self.tree().is_input_handled()
     }
 
     // -- Per-node process toggles (pat-nzgdu.137) ---------------------------
@@ -1314,6 +1733,107 @@ impl SceneAccess for SceneTreeAccessor {
         self.tree().input_mouse_mode()
     }
 
+    // -- SceneMultiplayer surface (pat-0q2kx.94) ----------------------------
+
+    fn multiplayer_is_server(&self) -> bool {
+        self.tree().get_multiplayer().is_server()
+    }
+
+    fn multiplayer_unique_id(&self) -> i64 {
+        self.tree()
+            .get_multiplayer()
+            .unique_id()
+            .map(|id| id.0 as i64)
+            .unwrap_or(0)
+    }
+
+    fn multiplayer_has_peer(&self) -> bool {
+        self.tree().get_multiplayer().unique_id().is_some()
+    }
+
+    fn multiplayer_peers(&self) -> Vec<i64> {
+        self.tree()
+            .get_multiplayer()
+            .get_peers()
+            .into_iter()
+            .map(|id| id as i64)
+            .collect()
+    }
+
+    fn multiplayer_remote_sender_id(&self) -> i64 {
+        self.tree().get_multiplayer().get_remote_sender_id().0 as i64
+    }
+
+    fn multiplayer_authenticating_peers(&self) -> Vec<i64> {
+        self.tree()
+            .get_multiplayer()
+            .pending_auth_peers()
+            .into_iter()
+            .map(|id| id as i64)
+            .collect()
+    }
+
+    fn multiplayer_send_bytes(&mut self, bytes: &[u8], target: i64, channel: i64) -> bool {
+        self.tree_mut()
+            .get_multiplayer_mut()
+            .send_bytes(
+                bytes,
+                target as i32,
+                gdplatform::network::TransferMode::Reliable,
+                channel.clamp(0, u8::MAX as i64) as u8,
+            )
+            .is_ok()
+    }
+
+    fn multiplayer_complete_auth(&mut self, id: i64, accepted: bool) -> bool {
+        self.tree_mut()
+            .get_multiplayer_mut()
+            .complete_auth(id as i32, accepted)
+    }
+
+    fn multiplayer_set_refuse_new_connections(&mut self, refuse: bool) {
+        self.tree_mut()
+            .get_multiplayer_mut()
+            .set_refuse_new_connections(refuse);
+    }
+
+    fn multiplayer_refuses_new_connections(&self) -> bool {
+        self.tree().get_multiplayer().refuse_new_connections()
+    }
+
+    // -- cursor shape (pat-0q2kx.90) ----------------------------------------
+    //
+    // Mirrored on the tree as well as queued, for the same reason
+    // `set_mouse_mode` is: the command is applied by the frame loop, but Godot's
+    // `Input.get_current_cursor_shape()` answers immediately, so a script that
+    // sets and reads back within one frame must see its own write.
+
+    fn set_default_cursor_shape(&mut self, shape: i64) {
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::SetDefaultCursorShape(shape));
+        tree.set_cursor_shape_mirror(shape);
+    }
+
+    fn get_current_cursor_shape(&self) -> i64 {
+        self.tree().cursor_shape()
+    }
+
+    fn set_custom_mouse_cursor(
+        &mut self,
+        image_path: &str,
+        shape: i64,
+        hotspot_x: f32,
+        hotspot_y: f32,
+    ) {
+        self.tree_mut()
+            .queue_input_command(InputCommand::SetCustomMouseCursor {
+                image_path: image_path.to_string(),
+                shape,
+                hotspot_x,
+                hotspot_y,
+            });
+    }
+
     fn warp_mouse(&mut self, x: f32, y: f32) {
         self.tree_mut()
             .queue_input_command(InputCommand::WarpMouse { x, y });
@@ -1336,8 +1856,108 @@ impl SceneAccess for SceneTreeAccessor {
         tree.inject_action_release(action);
     }
 
+    // -- InputMap singleton (pat-0q2kx.89) ---------------------------------
+    //
+    // Mutations are queued for the frame loop (which owns the engine map) and
+    // ALSO applied to the tree's mirror right away, so a script that does
+    // `add_action` then `has_action` in the same frame sees its own write —
+    // the same eager-mirror rule `set_mouse_mode` follows.
+
+    fn input_map_has_action(&self, action: &str) -> bool {
+        self.tree().input_map_has_action(action)
+    }
+
+    fn input_map_get_actions(&self) -> Vec<String> {
+        self.tree().input_map_actions()
+    }
+
+    fn input_map_add_action(&mut self, action: &str, deadzone: f32) {
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::InputMapAddAction {
+            action: action.to_string(),
+            deadzone,
+        });
+        tree.input_map_mirror_add_action(action);
+    }
+
+    fn input_map_erase_action(&mut self, action: &str) {
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::InputMapEraseAction {
+            action: action.to_string(),
+        });
+        tree.input_map_mirror_erase_action(action);
+    }
+
+    fn input_map_action_set_deadzone(&mut self, action: &str, deadzone: f32) {
+        self.tree_mut()
+            .queue_input_command(InputCommand::InputMapSetDeadzone {
+                action: action.to_string(),
+                deadzone,
+            });
+    }
+
+    fn input_map_action_add_event(
+        &mut self,
+        action: &str,
+        event: gdscript_interop::bindings::InputEventSpec,
+    ) {
+        // An event the engine cannot model is dropped here rather than queued,
+        // so the mirror's event count stays truthful about what will bind.
+        let Some(binding) = binding_from_event_spec(&event) else {
+            return;
+        };
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::InputMapAddEvent {
+            action: action.to_string(),
+            binding,
+        });
+        tree.input_map_mirror_add_event(action);
+    }
+
+    fn input_map_action_erase_event(
+        &mut self,
+        action: &str,
+        event: gdscript_interop::bindings::InputEventSpec,
+    ) {
+        let Some(binding) = binding_from_event_spec(&event) else {
+            return;
+        };
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::InputMapEraseEvent {
+            action: action.to_string(),
+            binding,
+        });
+        tree.input_map_mirror_erase_event(action);
+    }
+
+    fn input_map_action_erase_events(&mut self, action: &str) {
+        let tree = self.tree_mut();
+        tree.queue_input_command(InputCommand::InputMapEraseEvents {
+            action: action.to_string(),
+        });
+        tree.input_map_mirror_erase_events(action);
+    }
+
+    fn input_map_action_event_count(&self, action: &str) -> usize {
+        self.tree().input_map_action_event_count(action)
+    }
+
     fn get_connected_joypads(&self) -> Vec<i64> {
         self.tree().input_connected_joypads().to_vec()
+    }
+
+    fn is_joy_button_pressed(&self, device: i64, button: i64) -> bool {
+        self.input
+            .as_ref()
+            .map(|i| i.is_joy_button_pressed(device, button))
+            .unwrap_or(false)
+    }
+
+    fn get_joy_axis(&self, device: i64, axis: i64) -> f32 {
+        self.input
+            .as_ref()
+            .map(|i| i.get_joy_axis(device, axis))
+            .unwrap_or(0.0)
     }
 
     fn start_joy_vibration(&mut self, device: i64, weak: f32, strong: f32, duration: f32) {
@@ -1367,6 +1987,35 @@ impl SceneAccess for SceneTreeAccessor {
             .as_ref()
             .map(|i| i.is_key_pressed(key))
             .unwrap_or(false)
+    }
+
+    /// `Input.is_key_pressed(KEY_A)` (pat-0q2kx.92). The snapshot keys pressed
+    /// keys by Patina's own key names, so the Godot keycode is resolved through
+    /// the platform mapping and then asked by name — the same state the string
+    /// form reads, not a parallel one that could disagree.
+    fn is_input_keycode_pressed(&self, keycode: i64) -> bool {
+        let Some(key) = gdplatform::input::key_from_godot_keycode(keycode) else {
+            return false;
+        };
+        self.is_input_key_pressed(key.name())
+    }
+
+    fn is_anything_pressed(&self) -> bool {
+        self.input
+            .as_ref()
+            .map(|i| {
+                !i.pressed_keys.is_empty()
+                    || !i.mouse_buttons_pressed.is_empty()
+                    || !i.actions_pressed.is_empty()
+            })
+            .unwrap_or(false)
+    }
+
+    fn get_last_mouse_velocity(&self) -> (f32, f32) {
+        self.input
+            .as_ref()
+            .map(|i| (i.mouse_velocity.x, i.mouse_velocity.y))
+            .unwrap_or((0.0, 0.0))
     }
 
     fn get_global_mouse_position(&self) -> (f32, f32) {

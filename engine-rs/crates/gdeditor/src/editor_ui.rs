@@ -10369,6 +10369,15 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   var gameInputMousedownHandler = null;
   var gameInputMouseupHandler = null;
   var GAME_KEYS = new Set(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' ','Tab']);
+  // pat-0q2kx.88 — browser gamepad poll state.
+  var gamepadPollTimer = null;
+  var gamepadPrevSignatures = {};
+  var gamepadPrevRumble = {};
+  // ~60Hz, matching the frame cadence Godot's web build polls pads at.
+  var GAMEPAD_POLL_MS = 16;
+  // Read engine-side rumble every 8th pad poll (~8Hz) instead of every frame.
+  var GAMEPAD_RUMBLE_EVERY = 8;
+  var gamepadRumbleTick = 0;
 
   function startGameInput() {
     if (gameInputActive) return;
@@ -10392,6 +10401,14 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     if (vp) {
       gameInputMousemoveHandler = function(e) {
         if (!runtimeRunning) return;
+        // pat-0q2kx.90: while the pointer is locked the browser freezes
+        // clientX/clientY and reports movementX/movementY instead, so posting
+        // absolute coords would send the same frozen point forever. Godot's web
+        // build reads the same fields for MOUSE_MODE_CAPTURED.
+        if (document.pointerLockElement === vp) {
+          api('POST', '/api/runtime/input/mouse_move', { dx: e.movementX || 0, dy: e.movementY || 0 });
+          return;
+        }
         var rect = vp.getBoundingClientRect();
         api('POST', '/api/runtime/input/mouse_move', { x: e.clientX - rect.left, y: e.clientY - rect.top });
       };
@@ -10406,8 +10423,158 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       vp.addEventListener('mousemove', gameInputMousemoveHandler);
       vp.addEventListener('mousedown', gameInputMousedownHandler);
       vp.addEventListener('mouseup', gameInputMouseupHandler);
+      // pat-0q2kx.90: the browser can drop the lock on its own (Esc, tab
+      // switch). Tell the server the ACTUAL state rather than assuming our
+      // request stuck, so the engine's mouse mode cannot drift out of sync with
+      // what the user is actually looking at.
+      document.addEventListener('pointerlockchange', function() {
+        if (!runtimeRunning) return;
+        pointerLockActive = (document.pointerLockElement === vp);
+        if (!pointerLockActive && lastMouseMode === 2) {
+          api('POST', '/api/runtime/input/mouse_mode', { mouse_mode: 0 });
+          lastMouseMode = 0;
+        }
+      });
     }
+    startGamepadPolling();
     showGameInputIndicator(true);
+  }
+
+  // pat-0q2kx.88: browser gamepads. Godot's web build polls
+  // navigator.getGamepads() every frame and turns standard-mapping state into
+  // Joypad events (platform/web/js/libs/library_godot_input.js). Nothing here
+  // read getGamepads() at all, so a controller could not reach a running scene.
+  // We poll on an interval and POST only pads whose state changed, letting the
+  // server diff button/axis transitions.
+  function gamepadSignature(pad) {
+    return pad.buttons.map(function(b) { return b.pressed ? '1' : '0'; }).join('') +
+      '|' + pad.axes.map(function(a) { return a.toFixed(3); }).join(',');
+  }
+
+  // pat-0q2kx.90: apply the engine's mouse mode and cursor shape to the game
+  // view. Godot's web build does exactly this in
+  // platform/web/display_server_web.cpp — MOUSE_MODE_CAPTURED is
+  // canvas.requestPointerLock(), MOUSE_MODE_HIDDEN is CSS `cursor: none`, and
+  // the cursor shape is a CSS `cursor` keyword (or a url() for a custom image).
+  //
+  // MOUSE_MODE_* : 0 VISIBLE, 1 HIDDEN, 2 CAPTURED, 3 CONFINED, 4 CONFINED_HIDDEN.
+  var lastMouseMode = 0;
+  var lastCursorCss = '';
+  var pointerLockActive = false;
+
+  function applyMouseModeAndCursor(st) {
+    var vp = document.getElementById('viewport-container');
+    if (!vp) return;
+
+    var mode = (typeof st.mouse_mode === 'number') ? st.mouse_mode : 0;
+    if (mode !== lastMouseMode) {
+      lastMouseMode = mode;
+      if (mode === 2) {
+        // requestPointerLock needs a user gesture in some browsers; if it is
+        // refused the pointerlockchange handler reports the real state back, so
+        // the engine is never told a lock it does not have.
+        if (vp.requestPointerLock) { try { vp.requestPointerLock(); } catch (err) {} }
+      } else if (pointerLockActive && document.exitPointerLock) {
+        try { document.exitPointerLock(); } catch (err) {}
+      }
+    }
+
+    // CAPTURED and the two HIDDEN modes all hide the cursor.
+    var hidden = (mode === 1 || mode === 2 || mode === 4);
+    var css;
+    if (hidden) {
+      css = 'none';
+    } else if (st.custom_cursor && st.custom_cursor.path) {
+      var hs = st.custom_cursor.hotspot || [0, 0];
+      css = 'url("' + st.custom_cursor.path + '") ' + hs[0] + ' ' + hs[1] + ', ' +
+        (st.cursor_css || 'default');
+    } else {
+      css = st.cursor_css || 'default';
+    }
+    if (css !== lastCursorCss) {
+      lastCursorCss = css;
+      vp.style.cursor = css;
+    }
+  }
+
+  async function pollGamepadsOnce() {
+    if (!runtimeRunning) return;
+    // Rumble, mouse mode and cursor shape are all engine-driven, so they need a
+    // read rather than a write. Reading the whole input state at the 60Hz pad
+    // cadence would be wasteful, so it rides a slower sub-tick.
+    //
+    // This read sits ABOVE the getGamepads() guard on purpose (pat-0q2kx.90):
+    // pointer lock and the CSS cursor must work on a machine with no gamepad,
+    // and leaving it below would have silently tied them to controller support.
+    gamepadRumbleTick = (gamepadRumbleTick + 1) % GAMEPAD_RUMBLE_EVERY;
+    if (gamepadRumbleTick === 0) {
+      var st = await api('GET', '/api/runtime/input/state');
+      if (st && st.vibration) applyGamepadVibration(st.vibration);
+      if (st) applyMouseModeAndCursor(st);
+    }
+    if (!navigator.getGamepads) return;
+    var pads = navigator.getGamepads();
+    for (var i = 0; i < pads.length; i++) {
+      var pad = pads[i];
+      if (!pad) {
+        // A slot that had a pad and no longer does is a disconnect.
+        if (gamepadPrevSignatures[i] !== undefined) {
+          delete gamepadPrevSignatures[i];
+          api('POST', '/api/runtime/input/gamepad', { device: i, connected: false });
+        }
+        continue;
+      }
+      // Only standard-mapped pads are trustworthy, matching Godot's web build.
+      if (pad.mapping && pad.mapping !== 'standard') continue;
+      var sig = gamepadSignature(pad);
+      if (gamepadPrevSignatures[i] === sig) continue;
+      gamepadPrevSignatures[i] = sig;
+      api('POST', '/api/runtime/input/gamepad', {
+        device: i,
+        connected: true,
+        buttons: pad.buttons.map(function(b) { return !!b.pressed; }),
+        axes: pad.axes.map(function(a) { return a; })
+      });
+    }
+  }
+
+  // Engine-side Input.start_joy_vibration surfaces in the polled input state;
+  // replay it onto the real pad's actuator.
+  function applyGamepadVibration(vibration) {
+    if (!vibration || !navigator.getGamepads) return;
+    var pads = navigator.getGamepads();
+    Object.keys(vibration).forEach(function(key) {
+      var pad = pads[parseInt(key, 10)];
+      if (!pad || !pad.vibrationActuator) return;
+      var v = vibration[key];
+      var sig = v.weak + ':' + v.strong + ':' + v.duration;
+      if (gamepadPrevRumble[key] === sig) return;
+      gamepadPrevRumble[key] = sig;
+      try {
+        pad.vibrationActuator.playEffect('dual-rumble', {
+          startDelay: 0,
+          // duration 0 means "until stopped" in Godot; the Gamepad API needs a
+          // finite ms value, so hold it for one poll window and let the next
+          // poll renew it.
+          duration: v.duration > 0 ? v.duration * 1000 : GAMEPAD_POLL_MS,
+          weakMagnitude: v.weak,
+          strongMagnitude: v.strong
+        });
+      } catch (e) { /* actuator not supported on this pad */ }
+    });
+  }
+
+  function startGamepadPolling() {
+    if (gamepadPollTimer) return;
+    gamepadPrevSignatures = {};
+    gamepadPrevRumble = {};
+    gamepadPollTimer = setInterval(pollGamepadsOnce, GAMEPAD_POLL_MS);
+  }
+
+  function stopGamepadPolling() {
+    if (gamepadPollTimer) { clearInterval(gamepadPollTimer); gamepadPollTimer = null; }
+    gamepadPrevSignatures = {};
+    gamepadPrevRumble = {};
   }
 
   function stopGameInput() {
@@ -10421,6 +10588,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       if (gameInputMousedownHandler) { vp.removeEventListener('mousedown', gameInputMousedownHandler); gameInputMousedownHandler = null; }
       if (gameInputMouseupHandler) { vp.removeEventListener('mouseup', gameInputMouseupHandler); gameInputMouseupHandler = null; }
     }
+    stopGamepadPolling();
     showGameInputIndicator(false);
   }
 

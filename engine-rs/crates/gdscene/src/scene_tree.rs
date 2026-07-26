@@ -19,9 +19,9 @@ use gdvariant::Variant;
 
 use crate::animation::{AnimationCallbackMode, AnimationPlayer, AnimationPlayerSignal};
 use crate::animation_tree::AnimationTree;
-use crate::sprite_frames::{AnimatedSpritePlayback, SpriteFrames};
 use crate::lifecycle::LifecycleManager;
 use crate::node::{Node, NodeId};
+use crate::sprite_frames::{AnimatedSpritePlayback, SpriteFrames};
 use crate::trace::{EventTrace, TraceEvent, TraceEventType};
 use crate::tween::{Tween, TweenId};
 
@@ -164,8 +164,17 @@ pub struct SceneTree {
     /// frame by the owner and updated eagerly when a script sets it, so a
     /// set-then-get in one frame is consistent.
     input_mouse_mode: i64,
+    /// Mirrored default cursor shape (Godot `CURSOR_*`; 0 = `CURSOR_ARROW`),
+    /// the cursor counterpart of `input_mouse_mode` (pat-0q2kx.90).
+    cursor_shape: i64,
     /// Last-known connected joypad ids, mirrored for `Input.get_connected_joypads`.
     input_connected_joypads: Vec<i64>,
+    /// Mirror of the engine `InputMap`: action name → number of bound events
+    /// (pat-0q2kx.89). Enough to answer `InputMap.has_action` / `get_actions` /
+    /// `action_has_event` from the script phase, which cannot reach the real
+    /// map; the frame owner refreshes it, and a script's own mutation updates
+    /// it eagerly so add-then-query in one frame is consistent.
+    input_map_events: std::collections::HashMap<String, usize>,
     /// The packed scene that was used to load the current scene (if any).
     /// Stored for `reload_current_scene()`.
     current_packed_scene: Option<crate::packed_scene::PackedScene>,
@@ -209,6 +218,17 @@ pub struct SceneTree {
     /// [`push_input`](Self::push_input) has been marked handled. Reset at the
     /// start of each event; set via `set_input_as_handled()` from a script.
     input_handled: bool,
+    /// CanvasItems whose `_draw` must re-run before the next frame is built —
+    /// Godot's `CanvasItem::queue_redraw` pending set (pat-0q2kx.82).
+    redraw_queued: HashSet<NodeId>,
+    /// The last command list each scripted `_draw` produced. Godot keeps a
+    /// CanvasItem's commands alive until the item is redrawn, which is why this
+    /// survives frames instead of being rebuilt by the render walk.
+    custom_draw_commands: HashMap<NodeId, Vec<gdserver2d::canvas::DrawCommand>>,
+    /// Set only while a `_draw` body is running: the `draw_*` builtins append
+    /// here, standing in for Godot's "drawing is only valid inside `_draw`"
+    /// rule (a `draw_rect` outside `_draw` is silently dropped, as it is there).
+    draw_capture: Option<Vec<gdserver2d::canvas::DrawCommand>>,
 }
 
 impl std::fmt::Debug for SceneTree {
@@ -259,7 +279,9 @@ impl SceneTree {
             input_snapshot: None,
             pending_input_commands: Vec::new(),
             input_mouse_mode: 0,
+            cursor_shape: 0,
             input_connected_joypads: Vec::new(),
+            input_map_events: std::collections::HashMap::new(),
             current_packed_scene: None,
             current_scene_id: None,
             pending_deletions: Vec::new(),
@@ -276,6 +298,9 @@ impl SceneTree {
             exit_code: 0,
             input_handled: false,
             root_window: crate::viewport::RootWindow::default(),
+            redraw_queued: HashSet::new(),
+            custom_draw_commands: HashMap::new(),
+            draw_capture: None,
         }
     }
 
@@ -316,12 +341,62 @@ impl SceneTree {
     /// live node's path, so a peer that invokes `rpc(rpc_path_hash(path), …)`
     /// reaches the node at that path on the receiver.
     pub fn poll_multiplayer(&mut self) {
-        // Non-RPC packets (spawn/sync/etc.) are left for higher layers.
+        self.poll_multiplayer_with_delta(0.0);
+    }
+
+    /// [`poll_multiplayer`](Self::poll_multiplayer) with the frame delta, which
+    /// additionally ages the authentication timers (pat-0q2kx.94).
+    ///
+    /// Re-emits every queued [`MultiplayerEvent`](gdplatform::network::MultiplayerEvent)
+    /// as the identically-named Godot signal on the scene root, which is where
+    /// `multiplayer.peer_connected.connect(...)` binds. Before this, the API
+    /// tracked peers with no signal mechanism at all, so a script could not
+    /// learn that anyone had joined.
+    pub fn poll_multiplayer_with_delta(&mut self, delta: f32) {
+        use gdplatform::network::MultiplayerEvent;
+
+        // Age the auth timers before polling, so a peer that ran out this frame
+        // fails in the same drain rather than one frame late.
+        self.multiplayer.poll_auth(delta);
+        // Non-RPC, non-raw packets (spawn/sync/etc.) are left for higher layers.
         let _other = self.multiplayer.poll();
+
+        let root = self.root_id;
+        for event in self.multiplayer.take_events() {
+            let (signal, args): (&str, Vec<Variant>) = match event {
+                MultiplayerEvent::PeerConnected(id) => {
+                    ("peer_connected", vec![Variant::Int(id as i64)])
+                }
+                MultiplayerEvent::PeerDisconnected(id) => {
+                    ("peer_disconnected", vec![Variant::Int(id as i64)])
+                }
+                MultiplayerEvent::ConnectedToServer => ("connected_to_server", Vec::new()),
+                MultiplayerEvent::ConnectionFailed => ("connection_failed", Vec::new()),
+                MultiplayerEvent::ServerDisconnected => ("server_disconnected", Vec::new()),
+                MultiplayerEvent::PeerPacket { id, packet } => (
+                    "peer_packet",
+                    vec![Variant::Int(id as i64), Variant::PackedByteArray(packet)],
+                ),
+                MultiplayerEvent::PeerAuthenticating(id) => {
+                    ("peer_authenticating", vec![Variant::Int(id as i64)])
+                }
+                MultiplayerEvent::PeerAuthenticationFailed(id) => {
+                    ("peer_authentication_failed", vec![Variant::Int(id as i64)])
+                }
+            };
+            self.emit_signal(root, signal, &args);
+        }
+
         let inbound = self.multiplayer.take_inbound_rpcs();
         for rpc in inbound {
             if let Some(node_id) = self.node_for_rpc_hash(rpc.node_path) {
+                // Godot's `get_remote_sender_id()` answers for the duration of
+                // the handler, which is the only window in which "who called
+                // me?" has an answer.
+                self.multiplayer.set_remote_sender_id(rpc.sender_id);
                 self.call_script_with_access(node_id, &rpc.method_name, &rpc.args);
+                self.multiplayer
+                    .set_remote_sender_id(gdplatform::network::PeerId(0));
             }
         }
     }
@@ -634,6 +709,21 @@ impl SceneTree {
         self.input_mouse_mode
     }
 
+    /// Mirrored default cursor shape, as Godot's
+    /// `Input.get_current_cursor_shape()` reports it (pat-0q2kx.90). `0` is
+    /// `CURSOR_ARROW`, Godot's default.
+    pub fn cursor_shape(&self) -> i64 {
+        self.cursor_shape
+    }
+
+    /// Updates the mirrored cursor shape — the cursor counterpart of
+    /// [`set_input_mouse_mode_mirror`](Self::set_input_mouse_mode_mirror), and
+    /// mirrored for the same reason: the command is applied by the frame owner,
+    /// but a script reads the shape back immediately.
+    pub fn set_cursor_shape_mirror(&mut self, shape: i64) {
+        self.cursor_shape = shape;
+    }
+
     /// Updates the mirrored mouse mode. Called by the frame owner after applying
     /// commands, and eagerly by a script's `set_mouse_mode` so a set-then-get in
     /// the same frame is consistent.
@@ -649,6 +739,64 @@ impl SceneTree {
     /// Updates the mirrored joypad list from the engine `InputState`.
     pub fn set_input_connected_joypads_mirror(&mut self, devices: Vec<i64>) {
         self.input_connected_joypads = devices;
+    }
+
+    // -- InputMap mirror (pat-0q2kx.89) -------------------------------------
+
+    /// Whether the mirrored `InputMap` has `action` (`InputMap.has_action`).
+    pub fn input_map_has_action(&self, action: &str) -> bool {
+        self.input_map_events.contains_key(action)
+    }
+
+    /// Mirrored action names, sorted (`InputMap.get_actions`).
+    pub fn input_map_actions(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.input_map_events.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// How many events the mirror records for `action`.
+    pub fn input_map_action_event_count(&self, action: &str) -> usize {
+        self.input_map_events.get(action).copied().unwrap_or(0)
+    }
+
+    /// Replaces the whole mirror from the engine map. Called by the frame owner
+    /// after applying queued commands.
+    pub fn set_input_map_mirror(&mut self, actions: std::collections::HashMap<String, usize>) {
+        self.input_map_events = actions;
+    }
+
+    /// Records a script's `InputMap.add_action`. An existing action keeps its
+    /// event count, matching Godot: re-adding a live action is a no-op there.
+    pub fn input_map_mirror_add_action(&mut self, action: &str) {
+        self.input_map_events.entry(action.to_string()).or_insert(0);
+    }
+
+    /// Records a script's `InputMap.erase_action`.
+    pub fn input_map_mirror_erase_action(&mut self, action: &str) {
+        self.input_map_events.remove(action);
+    }
+
+    /// Records a script's `InputMap.action_add_event`. Only counts against an
+    /// action that exists, mirroring `InputMap::action_add_event`'s guard.
+    pub fn input_map_mirror_add_event(&mut self, action: &str) {
+        if let Some(count) = self.input_map_events.get_mut(action) {
+            *count += 1;
+        }
+    }
+
+    /// Records a script's `InputMap.action_erase_event`.
+    pub fn input_map_mirror_erase_event(&mut self, action: &str) {
+        if let Some(count) = self.input_map_events.get_mut(action) {
+            *count = count.saturating_sub(1);
+        }
+    }
+
+    /// Records a script's `InputMap.action_erase_events`.
+    pub fn input_map_mirror_erase_events(&mut self, action: &str) {
+        if let Some(count) = self.input_map_events.get_mut(action) {
+            *count = 0;
+        }
     }
 
     /// Applies a script's `Input.action_press` to the *current* frame's snapshot,
@@ -2023,7 +2171,19 @@ impl SceneTree {
                 _ => 1.0,
             };
 
+            let previous_frame = playback.frame;
             let finished = playback.advance(delta as f32, &frames);
+            let frame_changed = playback.frame != previous_frame;
+            // The texture the current frame shows. Publishing it as the node's
+            // own `texture` is what makes an AnimatedSprite2D actually draw
+            // (pat-0q2kx.100): both 2D render paths — the editor viewport's
+            // `render_kind_for` and `scene_bridge`'s `sprite_commands` — resolve
+            // a sprite's pixels from that property, so the animation reaches the
+            // canvas through the same route a plain Sprite2D does rather than a
+            // second, parallel one.
+            let frame_texture = frames
+                .frame_texture(&playback.animation, playback.frame)
+                .map(str::to_string);
 
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 if let Some(a) = autostart {
@@ -2032,9 +2192,29 @@ impl SceneTree {
                 }
                 node.set_property("frame", Variant::Int(playback.frame as i64));
                 node.set_property("__sf_time", Variant::Float(playback.time as f64));
+                // Godot exposes the sub-frame position as `frame_progress`, a
+                // 0..1 fraction of the current frame rather than raw seconds.
+                let progress = match frames.animation(&playback.animation) {
+                    Some(a) => {
+                        let hold = a.frame_seconds(playback.frame);
+                        if hold > 0.0 {
+                            (playback.time / hold).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        }
+                    }
+                    None => 0.0,
+                };
+                node.set_property("frame_progress", Variant::Float(progress as f64));
+                if let Some(texture) = frame_texture {
+                    node.set_property("texture", Variant::String(texture));
+                }
                 // A non-looping animation stops on its last frame; Godot leaves
                 // `playing` false so a later `play()` is what restarts it.
                 node.set_property("playing", Variant::Bool(playback.playing));
+            }
+            if frame_changed {
+                self.emit_signal(node_id, "frame_changed", &[]);
             }
             if finished {
                 self.emit_signal(node_id, "animation_finished", &[]);
@@ -2288,6 +2468,14 @@ impl SceneTree {
         let rpcs = script.rpc_methods();
         if !rpcs.is_empty() {
             self.register_script_rpcs(&rpcs);
+        }
+        // A CanvasItem that overrides `_draw` is drawn once without anyone
+        // calling `queue_redraw()`: Godot queues the first redraw when the item
+        // enters the canvas (canvas_item.cpp NOTIFICATION_ENTER_CANVAS). Without
+        // this, a script whose `_draw` is its whole visual output would render
+        // nothing until something happened to invalidate it (pat-0q2kx.82).
+        if script.has_method("_draw") {
+            self.redraw_queued.insert(node_id);
         }
         self.scripts.insert(node_id, script);
     }
@@ -2608,6 +2796,77 @@ impl SceneTree {
         self.call_script_with_access(node_id, "_physics_process", &[Variant::Float(delta)]);
     }
 
+    // -- custom drawing: `queue_redraw` / `_draw` (pat-0q2kx.82) ------------
+
+    /// Marks `node_id` as needing its `_draw` re-run, Godot's
+    /// `CanvasItem::queue_redraw` (upstream/godot/scene/main/canvas_item.cpp).
+    ///
+    /// Queuing is idempotent within a frame and never runs `_draw` inline:
+    /// Godot defers the redraw to the next draw pass so a script may call
+    /// `queue_redraw()` from `_ready`, from `_process`, or from inside `_draw`
+    /// itself without recursing.
+    pub fn queue_redraw(&mut self, node_id: NodeId) {
+        self.redraw_queued.insert(node_id);
+    }
+
+    /// Whether `node_id` has a redraw pending (Godot
+    /// `CanvasItem.is_queued_for_redraw`).
+    pub fn is_queued_for_redraw(&self, node_id: NodeId) -> bool {
+        self.redraw_queued.contains(&node_id)
+    }
+
+    /// Runs `_draw` on every node with a pending redraw and stores the commands
+    /// it emitted — the NOTIFICATION_DRAW half of Godot's redraw cycle.
+    ///
+    /// Call this before building a frame; [`crate::scene_bridge`] folds the
+    /// stored commands into each node's `CanvasItem`. A node whose script has no
+    /// `_draw` still clears its pending flag (and its old commands), matching
+    /// Godot where a redraw with no `_draw` override empties the item.
+    pub fn flush_pending_redraws(&mut self) {
+        if self.redraw_queued.is_empty() {
+            return;
+        }
+        // Drain rather than iterate: `_draw` may call `queue_redraw()` again
+        // (Godot's animation idiom), and that must land on the *next* pass, not
+        // spin here forever.
+        let pending: Vec<NodeId> = self.redraw_queued.drain().collect();
+        for node_id in pending {
+            if !self.nodes.contains_key(&node_id) {
+                self.custom_draw_commands.remove(&node_id);
+                continue;
+            }
+            // A nested flush would clobber the outer capture; `_draw` bodies do
+            // not re-enter this, but a script reaching into the tree could.
+            let outer = self.draw_capture.take();
+            self.draw_capture = Some(Vec::new());
+            self.call_script_with_access(node_id, "_draw", &[]);
+            let commands = self.draw_capture.take().unwrap_or_default();
+            self.draw_capture = outer;
+            if commands.is_empty() {
+                self.custom_draw_commands.remove(&node_id);
+            } else {
+                self.custom_draw_commands.insert(node_id, commands);
+            }
+        }
+    }
+
+    /// The draw commands `node_id`'s `_draw` produced on its last redraw.
+    pub fn custom_draw_commands(&self, node_id: NodeId) -> &[gdserver2d::canvas::DrawCommand] {
+        self.custom_draw_commands
+            .get(&node_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Appends a command from a `draw_*` builtin. Outside a `_draw` body there
+    /// is no capture buffer and the command is dropped, as Godot drops draw
+    /// calls made outside `_draw`.
+    pub(crate) fn push_draw_command(&mut self, command: gdserver2d::canvas::DrawCommand) {
+        if let Some(buffer) = self.draw_capture.as_mut() {
+            buffer.push(command);
+        }
+    }
+
     // -- input propagation (pat-nzgdu.83) -----------------------------------
 
     /// Returns whether the input event currently being dispatched has been
@@ -2645,49 +2904,73 @@ impl SceneTree {
     /// Scripts that do not define a stage's method are skipped by
     /// [`call_script_with_access`], so no opt-in flag is required for them.
     pub fn push_input(&mut self, event: &gdplatform::input::InputEvent) {
+        use gdplatform::input::InputEvent as Ev;
         let payload = input_event_to_variant(event);
-        let is_key = matches!(event, gdplatform::input::InputEvent::Key { .. });
         // Each event starts unhandled; `set_input_as_handled()` sets the flag.
         self.input_handled = false;
 
-        let stages: &[&str] = if is_key {
-            &[
-                "_input",
-                "_shortcut_input",
-                "_unhandled_key_input",
-                "_unhandled_input",
-            ]
-        } else {
-            &["_input", "_shortcut_input", "_unhandled_input"]
-        };
+        self.call_input_stage("_input", &payload);
+        if self.input_handled {
+            return;
+        }
 
         // Godot's `Viewport::push_input` runs a GUI stage between `_input` and
         // the shortcut/unhandled stages (upstream/godot/scene/main/viewport.cpp
         // `_gui_input_event`). Patina had the hit-test math but no runtime call
         // path, so `_gui_input`, `gui_input`, `mouse_entered`/`mouse_exited` and
         // button presses never fired from a real event (pat-0q2kx.18).
-        for node_id in self.all_nodes_in_tree_order() {
-            if self.input_handled {
-                return;
-            }
-            self.call_script_with_access(node_id, "_input", std::slice::from_ref(&payload));
-        }
-        if self.input_handled {
-            return;
-        }
-
         self.gui_input_stage(event, &payload);
         if self.input_handled {
             return;
         }
 
-        for &stage in &stages[1..] {
-            for node_id in self.all_nodes_in_tree_order() {
-                if self.input_handled {
-                    return;
-                }
-                self.call_script_with_access(node_id, stage, std::slice::from_ref(&payload));
+        // The remaining stages are gated by event type, not run for everything
+        // (pat-0q2kx.91). Godot's `Viewport::_push_unhandled_input_internal`
+        // (viewport.cpp:3558-3576) admits only Key/Shortcut/JoypadButton to
+        // `_shortcut_input`, and only Key to `_unhandled_key_input` — the latter
+        // explicitly so mouse motion, the highest-frequency event there is,
+        // never walks the tree for a keyboard handler. Running `_shortcut_input`
+        // for every event made a shortcut handler fire on mouse movement.
+        if matches!(event, Ev::Key { .. } | Ev::GamepadButton { .. }) {
+            self.call_input_stage("_shortcut_input", &payload);
+            if self.input_handled {
+                return;
             }
+        }
+        if matches!(event, Ev::Key { .. }) {
+            self.call_input_stage("_unhandled_key_input", &payload);
+            if self.input_handled {
+                return;
+            }
+        }
+        self.call_input_stage("_unhandled_input", &payload);
+    }
+
+    /// Runs one input stage over the tree, in Godot's order and with Godot's
+    /// filtering (pat-0q2kx.91).
+    ///
+    /// Mirrors `SceneTree::_call_input_pause`
+    /// (upstream/godot/scene/main/scene_tree.cpp:1435-1447):
+    /// * **Reverse order.** Godot walks the stage's node group backwards, so the
+    ///   node added last — the deepest, most recently entered — sees the event
+    ///   first and can consume it before its ancestors. Patina's group analogue
+    ///   is tree order, so this reverses that. Forward iteration gave a parent
+    ///   first refusal over its own children, the opposite of Godot.
+    /// * **`can_process` gating.** A node whose `process_mode` disables it under
+    ///   the tree's current pause state is skipped, which is what stops a paused
+    ///   scene from reacting to input.
+    /// * **Early out.** The handled flag is re-checked before every node, so
+    ///   `set_input_as_handled()` stops the walk mid-stage rather than only
+    ///   between stages.
+    fn call_input_stage(&mut self, stage: &str, payload: &Variant) {
+        for node_id in self.all_nodes_in_tree_order().into_iter().rev() {
+            if self.input_handled {
+                return;
+            }
+            if !self.should_process_node(node_id) {
+                continue;
+            }
+            self.call_script_with_access(node_id, stage, std::slice::from_ref(payload));
         }
     }
 
@@ -2703,13 +2986,19 @@ impl SceneTree {
     ///   `mouse_entered` on the new one;
     /// - a press followed by a release **inside the same control** is a click,
     ///   which emits `button_down` / `pressed` / `button_up` on a BaseButton;
-    /// - a disabled button consumes the event without emitting anything.
+    /// - a disabled button consumes the event without emitting anything;
+    /// - key events skip the hit test entirely and go to the focus owner
+    ///   ([`gui_key_stage`](Self::gui_key_stage), pat-0q2kx.84).
     fn gui_input_stage(&mut self, event: &gdplatform::input::InputEvent, payload: &Variant) {
         use gdplatform::input::InputEvent as Ev;
         let position = match event {
             Ev::MouseButton { position, .. } | Ev::MouseMotion { position, .. } => *position,
-            // Only mouse events participate in the GUI stage; keyboard input
-            // reaches Controls through focus, which Patina does not model yet.
+            // Godot's GUI stage routes key events by focus, not by position
+            // (`Viewport::gui.key_focus`), so they take the other branch.
+            Ev::Key { .. } => {
+                self.gui_key_stage(event, payload);
+                return;
+            }
             _ => return,
         };
 
@@ -2758,7 +3047,50 @@ impl SceneTree {
             }
         }
 
+        // A press on a TabContainer's header strip switches tabs and emits
+        // `tab_changed(idx)`, as Godot's TabBar does on click (pat-0q2kx.83).
+        // The strip is only reachable when no child covers it, which is exactly
+        // the region `arrange_container` reserves above the current page.
+        if matches!(event, Ev::MouseButton { pressed: true, .. }) {
+            let is_tab_container = self
+                .get_node(hit)
+                .map(|n| n.class_name() == "TabContainer")
+                .unwrap_or(false);
+            if is_tab_container {
+                if let Some(idx) = crate::control::tab_at_point(self, hit, position) {
+                    if crate::control::get_current_tab(self, hit) != idx {
+                        crate::control::set_current_tab(self, hit, idx as i64);
+                        self.emit_signal(hit, "tab_changed", &[Variant::Int(idx as i64)]);
+                    }
+                }
+            }
+        }
+
         // Button press/release semantics on the originally hit control.
+        // Wheel events scroll the nearest enclosing ScrollContainer rather than
+        // acting as a click (pat-0q2kx.86). Godot routes them to the container's
+        // internal scrollbars via `ScrollContainer::gui_input`, so the wheel
+        // works anywhere over the container, not just over the bar itself.
+        if let Ev::MouseButton {
+            button:
+                gdplatform::input::MouseButton::WheelUp | gdplatform::input::MouseButton::WheelDown,
+            pressed: true,
+            ..
+        } = event
+        {
+            let down = matches!(
+                event,
+                Ev::MouseButton {
+                    button: gdplatform::input::MouseButton::WheelDown,
+                    ..
+                }
+            );
+            if self.scroll_under_cursor(hit, down) {
+                self.input_handled = true;
+            }
+            return;
+        }
+
         if let Ev::MouseButton { pressed, .. } = event {
             let is_button = crate::control::node_is_base_button(self, hit);
             let disabled = crate::control::is_disabled(self, hit);
@@ -2775,6 +3107,12 @@ impl SceneTree {
                 if is_button && !disabled {
                     self.emit_signal(hit, "button_down", &[]);
                 }
+                // Item views act on the press, not the release: Godot's
+                // ItemList/TabBar `gui_input` handlers run under
+                // `mb->is_pressed()` (pat-0q2kx.85).
+                if !disabled {
+                    crate::item_views::item_view_click(self, hit, position, false);
+                }
             } else {
                 // A click only counts when press and release land on the same
                 // control, as in Godot — dragging off a button cancels it.
@@ -2785,6 +3123,146 @@ impl SceneTree {
                     self.emit_signal(hit, "pressed", &[]);
                 }
             }
+        }
+    }
+
+    /// Scrolls the nearest ScrollContainer at or above `from` by one wheel step
+    /// (pat-0q2kx.86). Returns whether anything actually scrolled, so a wheel
+    /// over non-scrolling content still reaches gameplay code.
+    ///
+    /// The offset is clamped to the container's scrollable range, matching
+    /// Godot's scrollbars — wheeling past the end parks at the last band
+    /// instead of scrolling the content out of sight.
+    fn scroll_under_cursor(&mut self, from: NodeId, down: bool) -> bool {
+        let mut cursor = Some(from);
+        while let Some(id) = cursor {
+            let is_scroll = self
+                .nodes
+                .get(&id)
+                .map(|n| n.class_name() == "ScrollContainer")
+                .unwrap_or(false);
+            if is_scroll {
+                let view = crate::control::get_size(self, id);
+                let limit = crate::control::max_scroll(self, id, view);
+                let current = crate::control::get_scroll(self, id);
+                // Godot: one wheel notch moves `page / PAGE_DIVISOR`, floored at
+                // the range's `step` of 1 — `ScrollBar::gui_input`, with
+                // PAGE_DIVISOR = 8 (upstream/godot/scene/gui/scroll_bar.cpp:84).
+                // `page` is the viewport extent, so a taller container scrolls
+                // proportionally further per notch.
+                let magnitude = (view.y / 8.0).max(1.0);
+                let step = if down { magnitude } else { -magnitude };
+                let next = (current.y + step).clamp(0.0, limit.y);
+                if next == current.y {
+                    return false;
+                }
+                crate::control::set_scroll(self, id, gdcore::math::Vector2::new(current.x, next));
+                // Re-run the container's sort so the content child's offset
+                // reflects the new value before the next frame is drawn.
+                crate::control::arrange_container(self, id, view);
+                return true;
+            }
+            cursor = self.nodes.get(&id).and_then(|n| n.parent());
+        }
+        false
+    }
+
+    /// The keyboard half of the GUI stage (pat-0q2kx.84): key events reach the
+    /// focus owner, not whatever the mouse happens to be over.
+    ///
+    /// Mirrors Godot's `Viewport::_gui_input_event` for keys:
+    /// 1. the focus owner gets `_gui_input` / `gui_input` first, and a script
+    ///    calling `set_input_as_handled()` there consumes the event;
+    /// 2. otherwise the built-in UI actions run — Tab / Shift-Tab walk the focus
+    ///    ring, the arrows walk `focus_neighbor_*`, and `ui_accept` operates the
+    ///    focused BaseButton.
+    ///
+    /// The `SceneTree` holds no `InputMap` (that lives on `MainLoop`), so the
+    /// action names are matched through the default bindings
+    /// `InputMap::install_builtin_ui_actions` installs: Tab = `ui_focus_next`,
+    /// Shift-Tab = `ui_focus_prev`, arrows = `ui_left`/`ui_up`/`ui_right`/
+    /// `ui_down`, Enter and Space = `ui_accept`.
+    fn gui_key_stage(&mut self, event: &gdplatform::input::InputEvent, payload: &Variant) {
+        use gdplatform::input::{InputEvent as Ev, Key};
+        let Ev::Key {
+            key,
+            pressed,
+            shift,
+            ctrl,
+            ..
+        } = event
+        else {
+            return;
+        };
+
+        // A control with focus sees every key event, press and release alike,
+        // before the viewport interprets any of them as navigation.
+        if let Some(owner) = self.focus_owner {
+            if self.nodes.contains_key(&owner) {
+                self.call_script_with_access(owner, "_gui_input", std::slice::from_ref(payload));
+                self.emit_signal(owner, "gui_input", std::slice::from_ref(payload));
+                if self.input_handled {
+                    return;
+                }
+            }
+        }
+
+        // A focused LineEdit/TextEdit turns key events into text edits
+        // (pat-0q2kx.87). This runs BEFORE the button and navigation arms
+        // below, mirroring Godot, where `LineEdit::gui_input` handles the event
+        // inside the focused control and calls `accept_event()`: while a text
+        // field has focus, Left/Right move the caret rather than walking the
+        // focus ring, and Enter submits rather than activating a button.
+        if let Some(owner) = self.focus_owner {
+            if crate::line_edit::handle_key(self, owner, *key, *pressed, *shift, *ctrl) {
+                self.input_handled = true;
+                return;
+            }
+        }
+
+        // `ui_accept` is the one action a BaseButton consumes itself, and like a
+        // mouse click it fires `pressed` on RELEASE — Godot's default
+        // `ACTION_MODE_BUTTON_RELEASE` (upstream/godot/scene/gui/base_button.cpp
+        // `on_action_event`). Handle it before the press-only navigation keys so
+        // the release half is not dropped.
+        if matches!(key, Key::Enter | Key::Space) {
+            if let Some(owner) = self.focus_owner {
+                if crate::control::node_is_base_button(self, owner)
+                    && !crate::control::is_disabled(self, owner)
+                {
+                    if *pressed {
+                        self.emit_signal(owner, "button_down", &[]);
+                    } else {
+                        self.emit_signal(owner, "button_up", &[]);
+                        self.emit_signal(owner, "pressed", &[]);
+                    }
+                    self.input_handled = true;
+                }
+            }
+            return;
+        }
+
+        // Navigation acts on the press; the matching release is not a second
+        // move.
+        if !*pressed {
+            return;
+        }
+
+        let moved = match key {
+            Key::Tab if *shift => self.focus_prev(),
+            Key::Tab => self.focus_next(),
+            Key::Left => self.focus_neighbor(crate::control::FocusSide::Left),
+            Key::Up => self.focus_neighbor(crate::control::FocusSide::Top),
+            Key::Right => self.focus_neighbor(crate::control::FocusSide::Right),
+            Key::Down => self.focus_neighbor(crate::control::FocusSide::Bottom),
+            _ => return,
+        };
+
+        // Tab is always consumed by the GUI stage in Godot even when the ring
+        // has nowhere to go; an arrow key with no neighbor falls through to
+        // `_unhandled_input` so gameplay can still read it.
+        if moved || matches!(key, Key::Tab) {
+            self.input_handled = true;
         }
     }
 
@@ -2841,39 +3319,62 @@ impl SceneTree {
     /// `Control.focus_mode` (`FOCUS_NONE = 0`, `FOCUS_CLICK = 1`,
     /// `FOCUS_ALL = 2`).
     ///
-    /// When the property is absent Patina falls back to class: the interactive
-    /// Control families default to `FOCUS_ALL` in Godot, everything else to
-    /// `FOCUS_NONE`. Without that fallback a plain `.tscn` Button — which never
-    /// serializes the default `focus_mode` — would never take focus.
+    /// Both `FOCUS_CLICK` and `FOCUS_ALL` take click focus; only `FOCUS_ALL`
+    /// joins the Tab ring. The class-default fallback (a `.tscn` Button never
+    /// serializes its default `focus_mode`) lives in
+    /// [`control::resolved_focus_mode`](crate::control::resolved_focus_mode) so
+    /// click focus and keyboard traversal cannot drift apart.
     fn control_takes_click_focus(&self, node_id: NodeId) -> bool {
-        let Some(node) = self.nodes.get(&node_id) else {
+        crate::control::resolved_focus_mode(self, node_id) != crate::control::FocusMode::None
+    }
+
+    // -- focus traversal: Tab / Shift-Tab / arrows (pat-0q2kx.84) -----------
+
+    /// Moves focus to [`find_next_valid_focus`](crate::control::find_next_valid_focus)
+    /// — Godot's `ui_focus_next` (Tab). With nothing focused yet, focus lands on
+    /// the first keyboard-focusable Control, as pressing Tab into a fresh window
+    /// does in Godot.
+    ///
+    /// Returns whether focus actually moved, so the caller can decide if the
+    /// event was consumed.
+    pub fn focus_next(&mut self) -> bool {
+        let target = match self.focus_owner {
+            Some(current) => crate::control::find_next_valid_focus(self, current),
+            None => crate::control::first_keyboard_focusable(self),
+        };
+        self.move_focus_to(target)
+    }
+
+    /// Moves focus to [`find_prev_valid_focus`](crate::control::find_prev_valid_focus)
+    /// — Godot's `ui_focus_prev` (Shift-Tab).
+    pub fn focus_prev(&mut self) -> bool {
+        let target = match self.focus_owner {
+            Some(current) => crate::control::find_prev_valid_focus(self, current),
+            None => crate::control::first_keyboard_focusable(self),
+        };
+        self.move_focus_to(target)
+    }
+
+    /// Moves focus to the neighbor on `side` — Godot's
+    /// `ui_left`/`ui_up`/`ui_right`/`ui_down` arrow navigation. Does nothing
+    /// (and reports `false`) when nothing holds focus or no neighbor exists.
+    pub fn focus_neighbor(&mut self, side: crate::control::FocusSide) -> bool {
+        let Some(current) = self.focus_owner else {
             return false;
         };
-        match node.get_property("focus_mode") {
-            Variant::Int(0) => false,
-            Variant::Int(_) => true,
-            _ => {
-                const FOCUSABLE_BY_DEFAULT: &[&str] = &[
-                    "LineEdit",
-                    "TextEdit",
-                    "CodeEdit",
-                    "SpinBox",
-                    "OptionButton",
-                    "MenuButton",
-                    "CheckBox",
-                    "CheckButton",
-                    "Button",
-                    "LinkButton",
-                    "TextureButton",
-                    "BaseButton",
-                    "HSlider",
-                    "VSlider",
-                    "ItemList",
-                    "Tree",
-                    "TabBar",
-                ];
-                node.is_class("BaseButton") || FOCUSABLE_BY_DEFAULT.contains(&node.class_name())
+        let target = crate::control::find_valid_focus_neighbor(self, current, side);
+        self.move_focus_to(target)
+    }
+
+    /// Grabs focus for `target` when the walk found one, reporting whether
+    /// focus actually changed hands.
+    fn move_focus_to(&mut self, target: Option<NodeId>) -> bool {
+        match target {
+            Some(next) if self.focus_owner != Some(next) => {
+                self.grab_focus(next);
+                true
             }
+            _ => false,
         }
     }
 
@@ -3456,10 +3957,19 @@ fn sprite_frames_from_node(node: &Node) -> Option<SpriteFrames> {
     };
     let mut frames = SpriteFrames::new();
     for name in &names {
-        let count = match node.get_property(&format!("__sf_{name}_frames")) {
-            Variant::PackedStringArray(f) => f.len(),
-            _ => 0,
-        };
+        // `__sf_<name>_frames` holds the resolved texture path of each frame, in
+        // play order. This used to be read for its *length* only and rebuilt as
+        // that many textureless frames — which is why playback could advance
+        // `frame` correctly while the node never had a texture to draw
+        // (pat-0q2kx.100). The paths are the whole point of the array.
+        let entries: Vec<crate::sprite_frames::SpriteFrameEntry> =
+            match node.get_property(&format!("__sf_{name}_frames")) {
+                Variant::PackedStringArray(paths) => paths
+                    .iter()
+                    .map(|p| crate::sprite_frames::SpriteFrameEntry::new(p.as_str()))
+                    .collect(),
+                _ => Vec::new(),
+            };
         let speed = match node.get_property(&format!("__sf_{name}_speed")) {
             Variant::Float(f) => f as f32,
             Variant::Int(i) => i as f32,
@@ -3471,7 +3981,7 @@ fn sprite_frames_from_node(node: &Node) -> Option<SpriteFrames> {
             node.get_property(&format!("__sf_{name}_loop")),
             Variant::Bool(false)
         );
-        frames.add_animation(name, count, speed, loops);
+        frames.add_animation_frames(name, entries, speed, loops);
     }
     Some(frames)
 }
@@ -3573,23 +4083,33 @@ fn input_event_to_variant(event: &gdplatform::input::InputEvent) -> Variant {
             index,
             position,
             pressed,
+            double_tap,
+            canceled,
         } => {
             d.insert("type", "screen_touch");
             d.insert("index", *index as i64);
             d.insert("position", *position);
             d.insert("pressed", *pressed);
+            // Godot's InputEventScreenTouch exposes both (pat-0q2kx.93).
+            d.insert("double_tap", *double_tap);
+            d.insert("canceled", *canceled);
         }
         Ev::ScreenDrag {
             index,
             position,
             relative,
             velocity,
+            pressure,
+            tilt,
         } => {
             d.insert("type", "screen_drag");
             d.insert("index", *index as i64);
             d.insert("position", *position);
             d.insert("relative", *relative);
             d.insert("velocity", *velocity);
+            // Pen fields from InputEventScreenDrag (pat-0q2kx.93).
+            d.insert("pressure", *pressure);
+            d.insert("tilt", *tilt);
         }
         Ev::Action {
             action,

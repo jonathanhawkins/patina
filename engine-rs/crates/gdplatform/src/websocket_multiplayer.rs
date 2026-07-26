@@ -28,7 +28,8 @@ use crate::network::{
     ConnectionStatus, NetworkError, NetworkPeer, Packet, PeerId, Result, TransferMode,
 };
 use crate::websocket_peer::{
-    decode_frame, encode_frame, parse_handshake_key, websocket_handshake_response, Frame, Opcode,
+    decode_frame, encode_frame, parse_handshake_key, parse_handshake_protocols,
+    select_handshake_protocol, websocket_handshake_response_with_protocol, Frame, Opcode,
     WebSocketPeer, WebSocketState, WriteMode,
 };
 
@@ -89,7 +90,10 @@ fn write_all_nonblocking(mut stream: &TcpStream, mut data: &[u8]) -> std::io::Re
     while !data.is_empty() {
         match stream.write(data) {
             Ok(0) => {
-                return Err(std::io::Error::new(ErrorKind::WriteZero, "write returned 0"));
+                return Err(std::io::Error::new(
+                    ErrorKind::WriteZero,
+                    "write returned 0",
+                ));
             }
             Ok(n) => data = &data[n..],
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
@@ -156,6 +160,10 @@ pub struct WebSocketMultiplayerPeer {
     client: Option<WebSocketPeer>,
     is_server_role: bool,
     peer_state: MultiplayerPeerState,
+    /// Subprotocols this server will accept from a connecting client
+    /// (pat-0q2kx.96). Empty — the default — means the server names none, so
+    /// the handshake omits `Sec-WebSocket-Protocol` entirely, exactly as before.
+    supported_protocols: Vec<String>,
 }
 
 impl WebSocketMultiplayerPeer {
@@ -172,7 +180,22 @@ impl WebSocketMultiplayerPeer {
             client: None,
             is_server_role: false,
             peer_state: MultiplayerPeerState::new(),
+            supported_protocols: Vec::new(),
         }
+    }
+
+    /// Sets the subprotocols this server accepts, in the server's own order of
+    /// support (pat-0q2kx.96).
+    ///
+    /// The client's preference order wins when both name several, per RFC 6455
+    /// §4.2.2 — see [`select_handshake_protocol`].
+    pub fn set_supported_protocols(&mut self, protocols: &[String]) {
+        self.supported_protocols = protocols.to_vec();
+    }
+
+    /// The subprotocols this server accepts.
+    pub fn get_supported_protocols(&self) -> &[String] {
+        &self.supported_protocols
     }
 
     /// Listens on `addr` (e.g. `"127.0.0.1:0"`) and returns the bound address.
@@ -274,9 +297,14 @@ impl WebSocketMultiplayerPeer {
             let Some(key) = parse_handshake_key(&head) else {
                 continue;
             };
-            if write_all_nonblocking(&conn.stream, websocket_handshake_response(&key).as_bytes())
-                .is_err()
-            {
+            // Echo back whichever subprotocol both sides name, so the client's
+            // `get_selected_protocol()` reports something real (pat-0q2kx.96).
+            // With no configured protocols this selects `None` and the response
+            // is byte-identical to the pre-negotiation one.
+            let offered = parse_handshake_protocols(&head);
+            let selected = select_handshake_protocol(&offered, &self.supported_protocols);
+            let response = websocket_handshake_response_with_protocol(&key, selected.as_deref());
+            if write_all_nonblocking(&conn.stream, response.as_bytes()).is_err() {
                 continue;
             }
 
@@ -408,7 +436,10 @@ impl NetworkPeer for WebSocketMultiplayerPeer {
         }
         let body = encode_data(packet.sender, packet.channel, &packet.data);
         if self.is_server_role {
-            let conn = self.conns.get(&to).ok_or(NetworkError::PeerUnreachable(to))?;
+            let conn = self
+                .conns
+                .get(&to)
+                .ok_or(NetworkError::PeerUnreachable(to))?;
             let bytes = encode_frame(&Frame::new(Opcode::Binary, body), None);
             write_all_nonblocking(&conn.stream, &bytes)
                 .map_err(|e| NetworkError::Transport(e.to_string()))
@@ -470,7 +501,10 @@ mod tests {
     fn set_id_envelope_roundtrips() {
         let bytes = encode_set_id(7);
         assert_eq!(bytes[0], TAG_SET_ID);
-        assert_eq!(u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]), 7);
+        assert_eq!(
+            u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]),
+            7
+        );
     }
 
     #[test]

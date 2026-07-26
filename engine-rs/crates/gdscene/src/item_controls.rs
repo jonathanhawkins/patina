@@ -82,6 +82,29 @@ impl ItemList {
         self.items.get(idx)
     }
 
+    /// Sets the text of the item at `idx` (Godot `set_item_text`).
+    pub fn set_item_text(&mut self, idx: usize, text: impl Into<String>) {
+        if let Some(it) = self.items.get_mut(idx) {
+            it.text = text.into();
+        }
+    }
+
+    /// Marks the item at `idx` selectable or not (Godot `set_item_selectable`).
+    /// A non-selectable item also loses any selection it held.
+    pub fn set_item_selectable(&mut self, idx: usize, selectable: bool) {
+        if let Some(it) = self.items.get_mut(idx) {
+            it.selectable = selectable;
+            if !selectable {
+                it.selected = false;
+            }
+        }
+    }
+
+    /// Removes every item (Godot `clear`).
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+
     /// Marks the item at `idx` disabled (also clears its selection).
     pub fn set_item_disabled(&mut self, idx: usize, disabled: bool) {
         if let Some(it) = self.items.get_mut(idx) {
@@ -224,6 +247,31 @@ impl OptionButton {
         }
     }
 
+    /// Sets the selected index, accepting Godot's `-1` ("nothing selected").
+    /// Out-of-range positive indices are ignored, as [`select`](Self::select)
+    /// ignores them. Needed to restore a persisted `selected = -1` that
+    /// [`add_item`](Self::add_item)'s auto-select would otherwise overwrite.
+    pub fn set_selected_index(&mut self, idx: i64) {
+        if idx < 0 {
+            self.selected = -1;
+        } else if (idx as usize) < self.items.len() {
+            self.selected = idx;
+        }
+    }
+
+    /// Sets the text of the item at `idx` (Godot `set_item_text`).
+    pub fn set_item_text(&mut self, idx: usize, text: impl Into<String>) {
+        if let Some(it) = self.items.get_mut(idx) {
+            it.text = text.into();
+        }
+    }
+
+    /// Removes every item and clears the selection (Godot `clear`).
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.selected = -1;
+    }
+
     /// The selected item index, or `-1`.
     pub fn get_selected(&self) -> i64 {
         self.selected
@@ -315,6 +363,30 @@ impl TabBar {
     /// The title of the tab at `idx`, if it exists.
     pub fn get_tab_title(&self, idx: usize) -> Option<&str> {
         self.tabs.get(idx).map(|t| t.title.as_str())
+    }
+
+    /// Renames the tab at `idx` (Godot `set_tab_title`).
+    pub fn set_tab_title(&mut self, idx: usize, title: impl Into<String>) {
+        if let Some(t) = self.tabs.get_mut(idx) {
+            t.title = title.into();
+        }
+    }
+
+    /// Sets the current tab **without** reporting a change — the restore path
+    /// for a persisted index, including Godot's `-1` ("no current tab") that
+    /// [`add_tab`](Self::add_tab)'s auto-select would otherwise overwrite.
+    pub fn set_current_index(&mut self, idx: i64) {
+        if idx < 0 {
+            self.current = -1;
+        } else if (idx as usize) < self.tabs.len() {
+            self.current = idx;
+        }
+    }
+
+    /// Removes every tab (Godot `clear_tabs`).
+    pub fn clear_tabs(&mut self) {
+        self.tabs.clear();
+        self.current = -1;
     }
 
     /// Sets the current tab to `idx` when in range. Returns `true` when the

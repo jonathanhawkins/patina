@@ -78,6 +78,38 @@ impl CursorShape {
         }
     }
 
+    /// The CSS `cursor` keyword a browser game view must apply for this shape
+    /// (pat-0q2kx.90).
+    ///
+    /// A 1:1 port of Godot's `DisplayServerWeb::godot2dom_cursor`
+    /// (upstream/godot/platform/web/display_server_web.cpp:346-385). Several
+    /// pairings are **not** what the shape name suggests and must not be
+    /// "corrected": `Busy` is `progress` (not `wait`), `Drag`/`CanDrop` are
+    /// `grab`/`grabbing` (not `move`/`copy`), `Forbidden` is `no-drop` (not
+    /// `not-allowed`), and the split shapes are `row-resize`/`col-resize` — note
+    /// `Vsplit` is `row-resize`, which reads backwards but matches Godot.
+    pub fn css_name(&self) -> &'static str {
+        match self {
+            CursorShape::Arrow => "default",
+            CursorShape::Ibeam => "text",
+            CursorShape::PointingHand => "pointer",
+            CursorShape::Cross => "crosshair",
+            CursorShape::Wait => "wait",
+            CursorShape::Busy => "progress",
+            CursorShape::Drag => "grab",
+            CursorShape::CanDrop => "grabbing",
+            CursorShape::Forbidden => "no-drop",
+            CursorShape::Vsize => "ns-resize",
+            CursorShape::Hsize => "ew-resize",
+            CursorShape::Bdiagsize => "nesw-resize",
+            CursorShape::Fdiagsize => "nwse-resize",
+            CursorShape::Move => "move",
+            CursorShape::Vsplit => "row-resize",
+            CursorShape::Hsplit => "col-resize",
+            CursorShape::Help => "help",
+        }
+    }
+
     /// Converts from a u8 value, returning `None` for out-of-range values.
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
@@ -157,6 +189,15 @@ pub struct CursorManager {
     current_shape: CursorShape,
     /// Custom cursor overrides indexed by CursorShape discriminant.
     custom_cursors: [Option<CustomCursor>; CursorShape::COUNT],
+    /// Custom cursor overrides expressed as a **resource path** rather than
+    /// decoded pixels, indexed the same way (pat-0q2kx.90).
+    ///
+    /// A browser game view needs a URL for `cursor: url(...)`, not a pixel
+    /// buffer, and a script's `Input.set_custom_mouse_cursor(preload("res://…"))`
+    /// names a resource — so decoding it here would throw away the only form the
+    /// web target can use. Kept beside [`custom_cursors`](Self::custom_cursors)
+    /// rather than replacing it: a native backend still wants the pixels.
+    custom_cursor_paths: [Option<(String, u32, u32)>; CursorShape::COUNT],
     /// Whether the cursor is visible.
     visible: bool,
     /// Whether the cursor is confined to the window.
@@ -171,6 +212,7 @@ impl CursorManager {
         Self {
             current_shape: CursorShape::Arrow,
             custom_cursors: Default::default(),
+            custom_cursor_paths: Default::default(),
             visible: true,
             confined: false,
             position: (0.0, 0.0),
@@ -202,6 +244,33 @@ impl CursorManager {
     /// Clears the custom cursor for the given shape, reverting to default.
     pub fn clear_custom_cursor(&mut self, shape: CursorShape) {
         self.custom_cursors[shape as usize] = None;
+        self.custom_cursor_paths[shape as usize] = None;
+    }
+
+    /// Overrides `shape` with an image named by **resource path**, with the
+    /// hotspot in image pixels (pat-0q2kx.90). This is the form a browser game
+    /// view can use directly as `cursor: url(<path>) <hx> <hy>, <fallback>`.
+    pub fn set_custom_cursor_path(
+        &mut self,
+        shape: CursorShape,
+        path: impl Into<String>,
+        hotspot_x: u32,
+        hotspot_y: u32,
+    ) {
+        self.custom_cursor_paths[shape as usize] = Some((path.into(), hotspot_x, hotspot_y));
+    }
+
+    /// The path-based override for `shape` as `(path, hotspot_x, hotspot_y)`.
+    pub fn custom_cursor_path(&self, shape: CursorShape) -> Option<(&str, u32, u32)> {
+        self.custom_cursor_paths[shape as usize]
+            .as_ref()
+            .map(|(p, x, y)| (p.as_str(), *x, *y))
+    }
+
+    /// The path-based override for the **currently active** shape, if any — what
+    /// the game view applies right now.
+    pub fn active_custom_cursor_path(&self) -> Option<(&str, u32, u32)> {
+        self.custom_cursor_path(self.current_shape)
     }
 
     /// Returns the custom cursor for the given shape, if one is set.

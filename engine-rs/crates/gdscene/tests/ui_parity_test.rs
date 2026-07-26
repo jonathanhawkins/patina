@@ -106,12 +106,7 @@ fn theme_property_lookup() {
 
     // --- Generic Variant items roundtrip for Font and Stylebox -------------
     let font_ref = Variant::String("res://fonts/mono.ttf".into());
-    mutable.set_item(
-        ThemePropertyType::Font,
-        "Label",
-        "font",
-        font_ref.clone(),
-    );
+    mutable.set_item(ThemePropertyType::Font, "Label", "font", font_ref.clone());
     assert_eq!(
         mutable.get_item(ThemePropertyType::Font, "Label", "font"),
         Some(&font_ref)
@@ -168,7 +163,10 @@ fn theme_property_lookup() {
         Some(Color::rgb(1.0, 0.5, 0.0)),
     );
     // After replacement, keys from the previous default are gone.
-    assert!(db.default_theme().get_font_size("Label", "font_size").is_none());
+    assert!(db
+        .default_theme()
+        .get_font_size("Label", "font_size")
+        .is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -256,11 +254,11 @@ fn control_anchor_layout() {
         set_offset_bottom(&mut tree, id, 160.0);
         resolve_control_layout(&mut tree, id, parent);
 
-        assert!(approx_vec(get_position(&tree, id), Vector2::new(50.0, 60.0)));
         assert!(approx_vec(
-            get_size(&tree, id),
-            Vector2::new(200.0, 100.0)
+            get_position(&tree, id),
+            Vector2::new(50.0, 60.0)
         ));
+        assert!(approx_vec(get_size(&tree, id), Vector2::new(200.0, 100.0)));
     }
 
     // --- Center preset with symmetric offsets -> centered panel -----------
@@ -279,10 +277,7 @@ fn control_anchor_layout() {
             get_position(&tree, id),
             Vector2::new(300.0, 250.0)
         ));
-        assert!(approx_vec(
-            get_size(&tree, id),
-            Vector2::new(200.0, 100.0)
-        ));
+        assert!(approx_vec(get_size(&tree, id), Vector2::new(200.0, 100.0)));
     }
 
     // --- Partial anchors evaluate as mixed fractions of parent ------------
@@ -301,10 +296,7 @@ fn control_anchor_layout() {
             get_position(&tree, id),
             Vector2::new(200.0, 60.0)
         ));
-        assert!(approx_vec(
-            get_size(&tree, id),
-            Vector2::new(400.0, 480.0)
-        ));
+        assert!(approx_vec(get_size(&tree, id), Vector2::new(400.0, 480.0)));
     }
 
     // --- Minimum size enforcement with GrowDirection::End ------------------
@@ -373,10 +365,7 @@ fn control_anchor_layout() {
             get_position(&tree, id),
             Vector2::new(350.0, 280.0)
         ));
-        assert!(approx_vec(
-            get_size(&tree, id),
-            Vector2::new(100.0, 40.0)
-        ));
+        assert!(approx_vec(get_size(&tree, id), Vector2::new(100.0, 40.0)));
     }
 
     // --- Effective minimum size uses the max of custom and inner min ------
@@ -401,21 +390,15 @@ fn control_anchor_layout() {
         let vbox = tree
             .add_child(root, Node::new("VBox", "VBoxContainer"))
             .expect("vbox");
-        let a = tree
-            .add_child(vbox, Node::new("A", "Control"))
-            .expect("a");
-        let b = tree
-            .add_child(vbox, Node::new("B", "Control"))
-            .expect("b");
-        let c = tree
-            .add_child(vbox, Node::new("C", "Control"))
-            .expect("c");
+        let a = tree.add_child(vbox, Node::new("A", "Control")).expect("a");
+        let b = tree.add_child(vbox, Node::new("B", "Control")).expect("b");
+        let c = tree.add_child(vbox, Node::new("C", "Control")).expect("c");
 
         set_custom_minimum_size(&mut tree, a, Vector2::new(0.0, 20.0));
         set_custom_minimum_size(&mut tree, b, Vector2::new(0.0, 30.0));
         set_custom_minimum_size(&mut tree, c, Vector2::new(0.0, 40.0));
         // B takes the remaining space.
-        set_v_size_flags(&mut tree, b, SizeFlags::Expand);
+        set_v_size_flags(&mut tree, b, SizeFlags::EXPAND_FILL);
         set_separation(&mut tree, vbox, 10);
 
         let total = Vector2::new(200.0, 200.0);
@@ -430,10 +413,7 @@ fn control_anchor_layout() {
         assert!(approx_vec(get_size(&tree, b), Vector2::new(200.0, 120.0)));
 
         // C starts after B plus separation: 30 + 120 + 10 = 160.
-        assert!(approx_vec(
-            get_position(&tree, c),
-            Vector2::new(0.0, 160.0)
-        ));
+        assert!(approx_vec(get_position(&tree, c), Vector2::new(0.0, 160.0)));
         assert!(approx_vec(get_size(&tree, c), Vector2::new(200.0, 40.0)));
     }
 
@@ -444,21 +424,15 @@ fn control_anchor_layout() {
         let hbox = tree
             .add_child(root, Node::new("HBox", "HBoxContainer"))
             .expect("hbox");
-        let a = tree
-            .add_child(hbox, Node::new("A", "Control"))
-            .expect("a");
-        let b = tree
-            .add_child(hbox, Node::new("B", "Control"))
-            .expect("b");
-        let c = tree
-            .add_child(hbox, Node::new("C", "Control"))
-            .expect("c");
+        let a = tree.add_child(hbox, Node::new("A", "Control")).expect("a");
+        let b = tree.add_child(hbox, Node::new("B", "Control")).expect("b");
+        let c = tree.add_child(hbox, Node::new("C", "Control")).expect("c");
 
         set_custom_minimum_size(&mut tree, a, Vector2::new(40.0, 0.0));
         set_custom_minimum_size(&mut tree, b, Vector2::new(40.0, 0.0));
         set_custom_minimum_size(&mut tree, c, Vector2::new(40.0, 0.0));
-        set_h_size_flags(&mut tree, a, SizeFlags::Expand);
-        set_h_size_flags(&mut tree, c, SizeFlags::Expand);
+        set_h_size_flags(&mut tree, a, SizeFlags::EXPAND_FILL);
+        set_h_size_flags(&mut tree, c, SizeFlags::EXPAND_FILL);
         set_separation(&mut tree, hbox, 8);
 
         let total = Vector2::new(300.0, 50.0);
@@ -470,17 +444,11 @@ fn control_anchor_layout() {
         assert!(approx_vec(get_size(&tree, a), Vector2::new(122.0, 50.0)));
 
         // b follows a + separation.
-        assert!(approx_vec(
-            get_position(&tree, b),
-            Vector2::new(130.0, 0.0)
-        ));
+        assert!(approx_vec(get_position(&tree, b), Vector2::new(130.0, 0.0)));
         assert!(approx_vec(get_size(&tree, b), Vector2::new(40.0, 50.0)));
 
         // c follows b + separation.
-        assert!(approx_vec(
-            get_position(&tree, c),
-            Vector2::new(178.0, 0.0)
-        ));
+        assert!(approx_vec(get_position(&tree, c), Vector2::new(178.0, 0.0)));
         assert!(approx_vec(get_size(&tree, c), Vector2::new(122.0, 50.0)));
     }
 
@@ -589,9 +557,6 @@ fn control_anchor_layout() {
             get_position(&tree, id),
             Vector2::new(680.0, 540.0)
         ));
-        assert!(approx_vec(
-            get_size(&tree, id),
-            Vector2::new(100.0, 50.0)
-        ));
+        assert!(approx_vec(get_size(&tree, id), Vector2::new(100.0, 50.0)));
     }
 }

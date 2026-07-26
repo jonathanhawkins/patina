@@ -596,7 +596,10 @@ impl PackageExecutor {
 
         // 5. index.html shell (canvas + progress + error/status overlay).
         let index_path = self.output_dir.join("index.html");
-        write_file(&index_path, web_index_html(&app_name, &js_name, &web).as_bytes())?;
+        write_file(
+            &index_path,
+            web_index_html(&app_name, &js_name, &web).as_bytes(),
+        )?;
 
         // 6. PWA: service worker + offline fallback page.
         if web.pwa_enabled {
@@ -703,10 +706,7 @@ impl PackageExecutor {
 
         for dir in [&usr_bin, &usr_share_apps, &usr_share_icons, &usr_share_app] {
             std::fs::create_dir_all(dir).map_err(|e| {
-                PackageError::BundleFailed(format!(
-                    "create {}: {e}",
-                    dir.display()
-                ))
+                PackageError::BundleFailed(format!("create {}: {e}", dir.display()))
             })?;
         }
 
@@ -734,10 +734,7 @@ impl PackageExecutor {
             let icon_source = resolve_resource_path(&self.project_dir, &self.config.icon_path);
             if icon_source.exists() {
                 let icon_bytes = std::fs::read(&icon_source).map_err(|e| {
-                    PackageError::BundleFailed(format!(
-                        "read icon {}: {e}",
-                        icon_source.display()
-                    ))
+                    PackageError::BundleFailed(format!("read icon {}: {e}", icon_source.display()))
                 })?;
                 let icon_name = crate::linux::linux_icon_filename(&app_name);
                 write_file(&appdir.join(&icon_name), &icon_bytes)?;
@@ -751,10 +748,7 @@ impl PackageExecutor {
         match binary {
             Some(path) => {
                 let bytes = std::fs::read(path).map_err(|e| {
-                    PackageError::BundleFailed(format!(
-                        "read binary {}: {e}",
-                        path.display()
-                    ))
+                    PackageError::BundleFailed(format!("read binary {}: {e}", path.display()))
                 })?;
                 write_file(&binary_target, &bytes)?;
             }
@@ -776,10 +770,7 @@ impl PackageExecutor {
             let dst = usr_share_app.join(rel);
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| {
-                    PackageError::BundleFailed(format!(
-                        "create {}: {e}",
-                        parent.display()
-                    ))
+                    PackageError::BundleFailed(format!("create {}: {e}", parent.display()))
                 })?;
             }
             std::fs::copy(&entry.source_path, &dst).map_err(|e| {
@@ -868,10 +859,7 @@ impl PackageExecutor {
                 .unwrap_or_else(|| self.config.icon_path.clone());
             if icon_source.exists() {
                 let bytes = std::fs::read(&icon_source).map_err(|e| {
-                    PackageError::BundleFailed(format!(
-                        "read icon {}: {e}",
-                        icon_source.display()
-                    ))
+                    PackageError::BundleFailed(format!("read icon {}: {e}", icon_source.display()))
                 })?;
                 write_file(&resources.join(&basename), &bytes)?;
             }
@@ -889,10 +877,7 @@ impl PackageExecutor {
         match binary {
             Some(path) => {
                 let bytes = std::fs::read(path).map_err(|e| {
-                    PackageError::BundleFailed(format!(
-                        "read binary {}: {e}",
-                        path.display()
-                    ))
+                    PackageError::BundleFailed(format!("read binary {}: {e}", path.display()))
                 })?;
                 write_file(&binary_target, &bytes)?;
             }
@@ -945,10 +930,7 @@ impl PackageExecutor {
     ///
     /// Returns `PackageError::BundleFailed` when invoked with a non-`windows`
     /// target platform.
-    pub fn generate_windows_exe(
-        &mut self,
-        binary: Option<&Path>,
-    ) -> Result<PathBuf, PackageError> {
+    pub fn generate_windows_exe(&mut self, binary: Option<&Path>) -> Result<PathBuf, PackageError> {
         let platform = self.config.target_platform.as_str();
         if platform != "windows" {
             return Err(PackageError::BundleFailed(format!(
@@ -997,10 +979,7 @@ impl PackageExecutor {
             let icon_source = resolve_resource_path(&self.project_dir, &self.config.icon_path);
             if icon_source.exists() {
                 let icon_bytes = std::fs::read(&icon_source).map_err(|e| {
-                    PackageError::BundleFailed(format!(
-                        "read icon {}: {e}",
-                        icon_source.display()
-                    ))
+                    PackageError::BundleFailed(format!("read icon {}: {e}", icon_source.display()))
                 })?;
                 let icon_path = self
                     .output_dir
@@ -1428,12 +1407,8 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "patina_test_{}_{}_{}",
-            tag,
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("patina_test_{}_{}_{}", tag, std::process::id(), n));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1815,11 +1790,7 @@ mod tests {
         // explanation, and a bare `assert!(result.success)` prints nothing about
         // the pipeline that produced it (pat-jtlwy). `messages` carries the
         // per-step trace and the error text on the failure paths.
-        assert!(
-            result.success,
-            "pipeline failed: {:?}",
-            result.messages
-        );
+        assert!(result.success, "pipeline failed: {:?}", result.messages);
         assert!(
             result.output_path.contains("CoolGame.windows.debug"),
             "output_path should be the <app>.<platform>.<profile> marker, got {:?}",
@@ -1895,9 +1866,15 @@ mod tests {
 
         // Engine loader JS exposing the required API surface.
         let loader = std::fs::read_to_string(out_dir.join("web_game.js")).unwrap();
-        assert!(loader.contains("PatinaEngine"), "loader defines PatinaEngine");
+        assert!(
+            loader.contains("PatinaEngine"),
+            "loader defines PatinaEngine"
+        );
         assert!(loader.contains("start"), "loader exposes start()");
-        assert!(loader.contains("preloadFile"), "loader exposes preloadFile()");
+        assert!(
+            loader.contains("preloadFile"),
+            "loader exposes preloadFile()"
+        );
         assert!(loader.contains("onProgress"), "loader exposes onProgress");
 
         // Web manifest + packed resources + the real wasm asset (embedded verbatim).

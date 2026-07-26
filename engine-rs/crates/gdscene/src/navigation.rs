@@ -702,6 +702,15 @@ impl NavigationServer2D {
         self.links.len() - 1
     }
 
+    /// Whether any registered link is enabled (pat-0q2kx.98).
+    ///
+    /// [`find_path`](Self::find_path) already threads enabled links into its
+    /// stitched graph, so 2D needs this only to let callers tell "no links" from
+    /// "links that are all switched off".
+    pub fn has_enabled_links(&self) -> bool {
+        self.links.iter().any(|l| l.enabled)
+    }
+
     /// Finds a path from `from` to `to` across *all* registered regions, using
     /// A\* on the stitched polygon graph and portal-edge **funnel smoothing**
     /// (the "simple stupid funnel" algorithm) for a taut, corner-hugging result.
@@ -1348,6 +1357,87 @@ pub struct NavigationAgent3D {
     /// Whether `navigation_finished` has already been emitted for the current
     /// target (see [`NavigationAgent2D::finished_emitted`]). (pat-nzgdu.10)
     pub finished_emitted: bool,
+
+    // -- 3D avoidance parameters (pat-0q2kx.97) ----------------------------
+    //
+    // Godot runs 3D avoidance in two modes (doc/classes/NavigationAgent3D.xml).
+    // The default is **2D-layered**: agents are cylinders, the ORCA solve runs
+    // on the XZ plane, and two agents interact only when their vertical extents
+    // overlap — which is what lets a bridge and the ground beneath it hold
+    // independent crowds. `use_3d_avoidance` switches to full 3D spheres.
+    /// Vertical extent of the agent's cylinder in layered mode (Godot default 1.0).
+    pub height: f32,
+    /// `true` selects full 3D sphere RVO instead of the layered XZ solve.
+    pub use_3d_avoidance: bool,
+    /// Whether the solved velocity keeps the agent's own Y component rather
+    /// than the one avoidance produced — Godot's `keep_y_velocity`, which stops
+    /// the layered solve from flattening a jump or a fall.
+    pub keep_y_velocity: bool,
+    /// Neighbors beyond this distance are ignored (Godot default 50.0).
+    pub neighbor_distance: f32,
+    /// At most this many nearest neighbors constrain the solve.
+    pub max_neighbors: usize,
+    /// Seconds of lookahead for agent-agent collisions.
+    pub time_horizon_agents: f32,
+    /// Seconds of lookahead for obstacle collisions.
+    pub time_horizon_obstacles: f32,
+    /// Bitmask this agent is visible on.
+    pub avoidance_layers: u32,
+    /// Bitmask of layers this agent avoids.
+    pub avoidance_mask: u32,
+    /// Share of avoidance effort; higher yields less.
+    pub avoidance_priority: f32,
+    /// The desired velocity the solve starts from (Godot `velocity`).
+    pub velocity: Vector3,
+    /// The most recent solved velocity (Godot publishes this via
+    /// `velocity_computed`).
+    pub safe_velocity: Vector3,
+}
+
+/// A 3D avoidance obstacle — Godot `NavigationObstacle3D` (pat-0q2kx.97).
+///
+/// Godot's obstacle contributes two things: a moving radius(+height) cylinder
+/// that agents steer around, and a static vertex outline. Only the cylinder is
+/// modelled here, which is the part that participates in the RVO solve; the
+/// static outline belongs with the navmesh-baking path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NavigationObstacle3D {
+    /// World position of the obstacle.
+    pub position: Vector3,
+    /// Avoidance radius.
+    pub radius: f32,
+    /// Vertical extent, used for the same height-overlap test as agents.
+    pub height: f32,
+    /// Velocity, so a moving platform pushes rather than merely blocks.
+    pub velocity: Vector3,
+    /// Bitmask this obstacle is visible on.
+    pub avoidance_layers: u32,
+}
+
+impl NavigationObstacle3D {
+    /// Creates an obstacle at `position` with `radius` and `height`.
+    pub fn new(position: Vector3, radius: f32, height: f32) -> Self {
+        Self {
+            position,
+            radius,
+            height,
+            velocity: Vector3::ZERO,
+            avoidance_layers: 1,
+        }
+    }
+}
+
+/// Whether two vertical extents overlap, given each one's origin and height.
+///
+/// Godot's layered mode treats an agent as a cylinder whose base is at its
+/// origin, so two agents interact only when `[y, y + height)` ranges intersect
+/// (`modules/navigation_3d`). Touching exactly at a boundary does not count as
+/// overlap, which is what keeps an agent standing precisely on a platform from
+/// negotiating with whatever is under it.
+pub fn height_ranges_overlap(y_a: f32, height_a: f32, y_b: f32, height_b: f32) -> bool {
+    let (a_lo, a_hi) = (y_a, y_a + height_a.max(0.0));
+    let (b_lo, b_hi) = (y_b, y_b + height_b.max(0.0));
+    a_lo < b_hi && b_lo < a_hi
 }
 
 impl NavigationAgent3D {
@@ -1363,7 +1453,115 @@ impl NavigationAgent3D {
             radius: 0.5,
             max_speed: 10.0,
             finished_emitted: false,
+            // Godot `NavigationAgent3D` defaults (doc/classes/NavigationAgent3D.xml).
+            height: 1.0,
+            use_3d_avoidance: false,
+            keep_y_velocity: true,
+            neighbor_distance: 50.0,
+            max_neighbors: 10,
+            time_horizon_agents: 1.0,
+            time_horizon_obstacles: 0.0,
+            avoidance_layers: 1,
+            avoidance_mask: 1,
+            avoidance_priority: 1.0,
+            velocity: Vector3::ZERO,
+            safe_velocity: Vector3::ZERO,
         }
+    }
+
+    /// The layered-2D view of this agent for the shared ORCA solver
+    /// (pat-0q2kx.97).
+    ///
+    /// Godot's default 3D avoidance *is* the 2D solve run on the XZ plane, so
+    /// this projects onto XZ and hands the exact same [`OrcaAgent`] the 2D path
+    /// uses — one solver, one set of semantics, rather than a second
+    /// implementation that could drift.
+    pub fn orca_agent_xz(&self, position: Vector3) -> OrcaAgent {
+        let mut agent = OrcaAgent::new(
+            Vector2::new(position.x, position.z),
+            self.radius,
+            self.max_speed,
+        );
+        agent.velocity = Vector2::new(self.velocity.x, self.velocity.z);
+        agent.time_horizon_agents = self.time_horizon_agents;
+        agent.time_horizon_obstacles = self.time_horizon_obstacles;
+        agent.neighbor_distance = self.neighbor_distance;
+        agent.max_neighbors = self.max_neighbors;
+        agent.avoidance_layers = self.avoidance_layers;
+        agent.avoidance_mask = self.avoidance_mask;
+        agent.avoidance_priority = self.avoidance_priority;
+        agent
+    }
+
+    /// Solves this agent's safe velocity against 3D neighbours and obstacles,
+    /// in whichever mode `use_3d_avoidance` selects (pat-0q2kx.97).
+    ///
+    /// `neighbors` carries each other agent's `(position, height, orca view)` so
+    /// the layered mode can reject the ones whose vertical extent does not
+    /// overlap this agent's before the XZ solve ever sees them.
+    pub fn solve_safe_velocity(
+        &self,
+        position: Vector3,
+        neighbors: &[(Vector3, f32, OrcaAgent)],
+        obstacles: &[NavigationObstacle3D],
+        dt: f32,
+    ) -> Vector3 {
+        if !self.avoidance_enabled {
+            return self.velocity;
+        }
+
+        if self.use_3d_avoidance {
+            // Full 3D: spheres, no height filtering — vertical separation is
+            // just distance like any other axis.
+            let others: Vec<(Vector3, f32)> = neighbors
+                .iter()
+                .map(|(p, _, view)| (*p, view.radius))
+                .chain(obstacles.iter().map(|o| (o.position, o.radius)))
+                .collect();
+            return rvo_avoidance_velocity_3d(
+                position,
+                self.velocity,
+                &others,
+                self.radius,
+                self.max_speed,
+            );
+        }
+
+        // Layered 2D: only cylinders whose vertical extents overlap interact.
+        let planar_neighbors: Vec<OrcaAgent> = neighbors
+            .iter()
+            .filter(|(p, h, _)| height_ranges_overlap(position.y, self.height, p.y, *h))
+            .map(|(_, _, view)| *view)
+            .collect();
+        let planar_obstacles: Vec<OrcaAgent> = obstacles
+            .iter()
+            .filter(|o| height_ranges_overlap(position.y, self.height, o.position.y, o.height))
+            .map(|o| {
+                let mut view =
+                    OrcaAgent::new(Vector2::new(o.position.x, o.position.z), o.radius, 0.0);
+                view.velocity = Vector2::new(o.velocity.x, o.velocity.z);
+                view.avoidance_layers = o.avoidance_layers;
+                view
+            })
+            .collect();
+
+        let planar = self.orca_agent_xz(position);
+        let safe = orca_safe_velocity(
+            &planar,
+            Vector2::new(self.velocity.x, self.velocity.z),
+            &planar_neighbors,
+            &planar_obstacles,
+            dt,
+        );
+        // `keep_y_velocity` preserves the agent's own vertical motion, so a
+        // layered solve cannot cancel a jump or a fall — the XZ plane is the
+        // only thing it is entitled to steer.
+        let y = if self.keep_y_velocity {
+            self.velocity.y
+        } else {
+            0.0
+        };
+        Vector3::new(safe.x, y, safe.y)
     }
 
     /// Sets the target and computes a path via the 3D navigation server.
@@ -1374,7 +1572,16 @@ impl NavigationAgent3D {
         server: &NavigationServer3D,
     ) {
         self.target_position = target;
-        self.path = server.find_path(current, target);
+        // The 3D `find_path` searches one region at a time and never looks at
+        // links, so a scene whose regions are bridged only by a NavigationLink3D
+        // needs the flattened search instead (pat-0q2kx.98). Gated on links
+        // actually being present so link-free scenes keep the region-local
+        // search — and its existing paths — untouched.
+        self.path = if server.has_enabled_links() {
+            server.find_path_linked(current, target)
+        } else {
+            server.find_path(current, target)
+        };
         self.path_index = if self.path.len() > 1 { 1 } else { 0 };
         self.finished_emitted = false;
     }
@@ -1543,6 +1750,15 @@ impl NavigationServer3D {
     pub fn add_link(&mut self, link: NavigationLink3D) -> usize {
         self.links.push(link);
         self.links.len() - 1
+    }
+
+    /// Whether any registered link is enabled (pat-0q2kx.98).
+    ///
+    /// Unlike the 2D server, [`find_path`](Self::find_path) here searches each
+    /// region in isolation and never consults links, so an agent has to pick
+    /// [`find_path_linked`](Self::find_path_linked) instead when this is true.
+    pub fn has_enabled_links(&self) -> bool {
+        self.links.iter().any(|l| l.enabled)
     }
 
     /// Finds a path from `from` to `to`, bridging otherwise-disjoint regions
