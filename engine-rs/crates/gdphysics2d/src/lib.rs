@@ -37,6 +37,7 @@ pub mod contact_monitor;
 pub mod joint;
 pub mod obb_sat;
 pub mod shape;
+pub mod solver;
 pub mod test_harness;
 pub mod tilemap_collision;
 pub mod world;
@@ -54,9 +55,9 @@ pub use softbody3d::{SoftBody3D, SoftBodyId3D};
 // Re-export key types for convenience.
 pub use area2d::{Area2D, AreaId, AreaStore, OverlapEvent, OverlapState};
 pub use body::{BodyId, BodyType, PhysicsBody2D};
-pub use contact_monitor::{ContactChanges, ContactMonitor};
 pub use character::{CharacterBody2D, KinematicCollision2D};
 pub use collision::CollisionResult;
+pub use contact_monitor::{ContactChanges, ContactMonitor};
 pub use joint::{
     apply_joint_constraints, DampedSpringJoint2D, GrooveJoint2D, Joint2D, Joint2DBase, JointId,
     PinJoint2D,

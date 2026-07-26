@@ -12,6 +12,7 @@ use crate::body::{BodyId, PhysicsBody2D};
 use crate::collision;
 use crate::joint::{self, Joint2D, JointId};
 use crate::shape::Shape2D;
+use crate::solver::{self, ContactConstraint2D, ContactSolver2D};
 
 /// Result of a raycast query.
 #[derive(Debug, Clone, Copy)]
@@ -163,6 +164,45 @@ pub struct PhysicsWorld2D {
     previous_contacts: HashSet<(BodyId, BodyId)>,
     /// Global gravity vector (px/s²) applied to dynamic bodies each step.
     gravity: Vector2,
+    /// The iterated contact solver run between the two halves of integration
+    /// (pat-0q2kx.116). Its knobs come from `physics/2d/solver/*`.
+    contact_solver: ContactSolver2D,
+    /// Space-wide defaults from `physics/2d/*` (pat-0q2kx.116).
+    space: SpaceParams2D,
+}
+
+/// The `physics/2d/*` project settings a Godot space holds and stamps onto its
+/// bodies (`godot_space_2d.cpp:1219-1227`) — pat-0q2kx.116.
+///
+/// Damping here is *added* to each body's own coefficient, matching Godot's
+/// default `DAMP_MODE_COMBINE`. Patina's defaults are all zero-effect rather
+/// than Godot's (`default_linear_damp = 0.1`), so a world that was never handed
+/// a `project.godot` behaves exactly as it did before this existed; a project
+/// that states a value gets it.
+#[derive(Debug, Clone, Copy)]
+pub struct SpaceParams2D {
+    /// `physics/2d/default_linear_damp`, added to each body's `linear_damp`.
+    pub default_linear_damp: f32,
+    /// `physics/2d/default_angular_damp`, added to each body's `angular_damp`.
+    pub default_angular_damp: f32,
+    /// `physics/2d/sleep_threshold_linear`, stamped onto every body.
+    pub sleep_threshold_linear: f32,
+    /// `physics/2d/sleep_threshold_angular`, stamped onto every body.
+    pub sleep_threshold_angular: f32,
+    /// `physics/2d/time_before_sleep`, stamped onto every body.
+    pub time_before_sleep: f32,
+}
+
+impl Default for SpaceParams2D {
+    fn default() -> Self {
+        Self {
+            default_linear_damp: 0.0,
+            default_angular_damp: 0.0,
+            sleep_threshold_linear: crate::body::DEFAULT_SLEEP_THRESHOLD_LINEAR,
+            sleep_threshold_angular: crate::body::DEFAULT_SLEEP_THRESHOLD_ANGULAR,
+            time_before_sleep: crate::body::DEFAULT_TIME_BEFORE_SLEEP,
+        }
+    }
 }
 
 /// Godot's default 2D gravity vector: `physics/2d/default_gravity` (980.0)
@@ -180,6 +220,39 @@ impl PhysicsWorld2D {
             constraint_iterations: 10,
             previous_contacts: HashSet::new(),
             gravity: DEFAULT_GRAVITY_2D,
+            contact_solver: ContactSolver2D::default(),
+            space: SpaceParams2D::default(),
+        }
+    }
+
+    /// The contact solver's tunables, so a project's `physics/2d/solver/*`
+    /// settings can be applied (pat-0q2kx.116).
+    pub fn contact_solver_mut(&mut self) -> &mut ContactSolver2D {
+        &mut self.contact_solver
+    }
+
+    /// Read-only view of the contact solver's tunables.
+    pub fn contact_solver(&self) -> &ContactSolver2D {
+        &self.contact_solver
+    }
+
+    /// Read-only view of the space-wide `physics/2d/*` parameters.
+    pub fn space_params(&self) -> &SpaceParams2D {
+        &self.space
+    }
+
+    /// Applies space-wide `physics/2d/*` parameters (pat-0q2kx.116).
+    ///
+    /// The sleep settings are stamped onto every body already in the world as
+    /// well as onto later arrivals, because Godot's space owns them and its
+    /// bodies read them off it every step — a body registered before boot
+    /// finished would otherwise keep the built-in defaults forever.
+    pub fn set_space_params(&mut self, params: SpaceParams2D) {
+        self.space = params;
+        for body in self.bodies.values_mut() {
+            body.sleep_threshold_linear = params.sleep_threshold_linear;
+            body.sleep_threshold_angular = params.sleep_threshold_angular;
+            body.time_before_sleep = params.time_before_sleep;
         }
     }
 
@@ -209,6 +282,11 @@ impl PhysicsWorld2D {
         let id = BodyId(self.next_id);
         self.next_id += 1;
         body.id = id;
+        // The space owns the sleep settings; a body joining it adopts them
+        // (pat-0q2kx.116).
+        body.sleep_threshold_linear = self.space.sleep_threshold_linear;
+        body.sleep_threshold_angular = self.space.sleep_threshold_angular;
+        body.time_before_sleep = self.space.time_before_sleep;
         self.bodies.insert(id, body);
         id
     }
@@ -269,7 +347,7 @@ impl PhysicsWorld2D {
     ///
     /// Returns collision events for this frame (entered, persisting, exited).
     pub fn step(&mut self, dt: f32) -> Vec<CollisionEvent> {
-        self.step_inner(dt, None, None)
+        self.step_inner(dt, None, None, None)
     }
 
     /// Steps the simulation applying per-body area gravity/damp overrides.
@@ -292,8 +370,14 @@ impl PhysicsWorld2D {
         dt: f32,
         gravity_overrides: &HashMap<BodyId, Vector2>,
         damp_overrides: &HashMap<BodyId, f32>,
+        angular_damp_overrides: &HashMap<BodyId, f32>,
     ) -> Vec<CollisionEvent> {
-        self.step_inner(dt, Some(gravity_overrides), Some(damp_overrides))
+        self.step_inner(
+            dt,
+            Some(gravity_overrides),
+            Some(damp_overrides),
+            Some(angular_damp_overrides),
+        )
     }
 
     /// Shared implementation of [`step`](Self::step) and
@@ -303,52 +387,58 @@ impl PhysicsWorld2D {
         dt: f32,
         gravity_overrides: Option<&HashMap<BodyId, Vector2>>,
         damp_overrides: Option<&HashMap<BodyId, f32>>,
+        angular_damp_overrides: Option<&HashMap<BodyId, f32>>,
     ) -> Vec<CollisionEvent> {
-        // Phase 1: Integrate (apply world gravity + per-body damping, replacing
-        // either with a per-body area override when one is supplied).
+        // Phase 1: `integrate_forces` — world gravity + per-body damping go into
+        // the **velocity** only (a per-body area override replaces either when
+        // one is supplied). The transform is advanced in phase 4, after the
+        // contact solver has had its say, mirroring Godot's
+        // `integrate_forces → solve → integrate_velocities` order
+        // (`godot_step_2d.cpp:150,100,278`). Advancing it here instead is what
+        // made a resting stack sink a full tick of gravity every frame
+        // (pat-0q2kx.116).
         let gravity = self.gravity;
+        let space = self.space;
         for body in self.bodies.values_mut() {
             let g = gravity_overrides
                 .and_then(|m| m.get(&body.id).copied())
                 .unwrap_or(gravity);
-            match damp_overrides.and_then(|m| m.get(&body.id).copied()) {
-                Some(d) => {
-                    // Temporarily swap in the effective damp so `integrate`
-                    // (which reads `body.linear_damp`) uses it, then restore.
-                    let saved = body.linear_damp;
-                    body.linear_damp = d;
-                    body.integrate(dt, g);
-                    body.linear_damp = saved;
-                }
-                None => body.integrate(dt, g),
+            // Both damp overrides work the same way: `integrate` reads the
+            // body's own coefficients, so the effective value is swapped in
+            // around the call and restored afterwards. Angular is the pat-0q2kx.112
+            // half — an area could previously slow a body's travel but never
+            // its spin.
+            let saved_linear = body.linear_damp;
+            let saved_angular = body.angular_damp;
+            // An *area* override replaces the value outright; the space default
+            // is instead *added* to the body's own, which is Godot's
+            // `DAMP_MODE_COMBINE` and the mode every body starts in
+            // (pat-0q2kx.116).
+            if let Some(d) = damp_overrides.and_then(|m| m.get(&body.id).copied()) {
+                body.linear_damp = d;
+            } else {
+                body.linear_damp += space.default_linear_damp;
             }
+            if let Some(d) = angular_damp_overrides.and_then(|m| m.get(&body.id).copied()) {
+                body.angular_damp = d;
+            } else {
+                body.angular_damp += space.default_angular_damp;
+            }
+            body.integrate_forces(dt, g);
+            body.linear_damp = saved_linear;
+            body.angular_damp = saved_angular;
         }
 
-        // Phase 1.5: Apply joint constraints (iterated for convergence)
-        let joint_ids: Vec<JointId> = self.joints.keys().copied().collect();
-        for _iter in 0..self.constraint_iterations {
-            for &jid in &joint_ids {
-                let jt = &self.joints[&jid];
-                let body_a_id = jt.base().body_a;
-                let body_b_id = jt.base().body_b;
-                if body_a_id == body_b_id {
-                    continue;
-                }
-                if !self.bodies.contains_key(&body_a_id) || !self.bodies.contains_key(&body_b_id) {
-                    continue;
-                }
-                // SAFETY: body_a_id != body_b_id, so these are disjoint map entries.
-                let ptr = &mut self.bodies as *mut HashMap<BodyId, PhysicsBody2D>;
-                let ba = unsafe { &mut *ptr }.get_mut(&body_a_id).unwrap();
-                let bb = unsafe { &mut *ptr }.get_mut(&body_b_id).unwrap();
-                joint::apply_joint_constraints(jt, ba, bb, dt);
-            }
-        }
-
-        // Build set of jointed body pairs to skip collision between them
+        // Build the set of jointed pairs that skip collision with each other.
+        //
+        // Only joints that actually ask for it: `Joint2D.disable_collision`
+        // defaults to true in Godot, but authoring it false must let the pair
+        // collide normally. Every jointed pair used to be excluded
+        // unconditionally, so `disable_collision = false` did nothing
+        // (pat-0q2kx.114).
         let mut jointed_pairs: HashSet<(BodyId, BodyId)> = HashSet::new();
         for jt in self.joints.values() {
-            if jt.is_enabled() {
+            if jt.is_enabled() && jt.base().disable_collision {
                 let a = jt.base().body_a;
                 let b = jt.base().body_b;
                 let pair = if a.0 < b.0 { (a, b) } else { (b, a) };
@@ -356,10 +446,14 @@ impl PhysicsWorld2D {
             }
         }
 
-        // Phase 2 & 3: Collision detection and resolution
+        // Phase 2: Collision detection. Contacts are collected as constraints
+        // rather than resolved on the spot — resolving pair-by-pair means the
+        // second pair undoes the first, which is exactly why a stack of boxes
+        // could never settle (pat-0q2kx.116).
         let ids: Vec<BodyId> = self.bodies.keys().copied().collect();
         let mut current_contacts = HashSet::new();
         let mut events = Vec::new();
+        let mut constraints: Vec<ContactConstraint2D> = Vec::new();
 
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
@@ -459,14 +553,86 @@ impl PhysicsWorld2D {
                             state,
                         });
 
-                        // SAFETY: id_a != id_b because i != j and IDs are unique.
-                        let ptr = &mut self.bodies as *mut HashMap<BodyId, PhysicsBody2D>;
-                        // SAFETY: We guarantee id_a != id_b, so these are disjoint entries.
-                        let body_a = unsafe { &mut *ptr }.get_mut(&id_a).unwrap();
-                        let body_b = unsafe { &mut *ptr }.get_mut(&id_b).unwrap();
-                        collision::separate_bodies(body_a, body_b, &result);
+                        // A box on a floor touches along an edge; the narrow
+                        // phase only reports its midpoint. Recovering the second
+                        // point is what stops a stacked box rocking corner to
+                        // corner.
+                        let manifold =
+                            solver::build_manifold(&shape_a, &tf_a, &shape_b, &tf_b, &result);
+                        let (Some(body_a), Some(body_b)) =
+                            (self.bodies.get(&id_a), self.bodies.get(&id_b))
+                        else {
+                            continue;
+                        };
+                        if let Some(constraint) = ContactConstraint2D::new(
+                            body_a,
+                            body_b,
+                            &manifold,
+                            dt,
+                            self.contact_solver.contact_bias,
+                            self.contact_solver.max_penetration,
+                        ) {
+                            constraints.push(constraint);
+                        }
                     }
                 }
+            }
+        }
+
+        // Phase 3: solve every contact together, iteratively.
+        let contact_solver = self.contact_solver;
+        let bias_velocities = contact_solver.solve(&mut self.bodies, &mut constraints);
+
+        // A *newly entered* contact wakes both bodies — a sleeping box struck by
+        // another must resume simulating.
+        //
+        // ⚠️ Only a new one. Waking on every live contact means a box resting on
+        // the floor is woken every single tick and could never fall asleep,
+        // which defeats the point: the bodies that most deserve to sleep are
+        // exactly the ones in a permanent resting contact (pat-0q2kx.116).
+        for event in &events {
+            if event.state != ContactState::Entered {
+                continue;
+            }
+            for id in [event.body_a, event.body_b] {
+                if let Some(body) = self.bodies.get_mut(&id) {
+                    body.wake();
+                }
+            }
+        }
+
+        // Phase 4: `integrate_velocities` — now that the solver has produced the
+        // final velocities, advance the transforms. The depenetration
+        // pseudo-velocity moves the transform here and is then dropped, so
+        // pushing an overlap apart never becomes kinetic energy.
+        for body in self.bodies.values_mut() {
+            let (bias_linear, bias_angular) = bias_velocities
+                .get(&body.id)
+                .copied()
+                .unwrap_or((Vector2::ZERO, 0.0));
+            body.integrate_velocities_biased(dt, bias_linear, bias_angular);
+        }
+
+        // Phase 5: joint constraints (iterated for convergence), on the
+        // integrated transforms — the same state they saw before the solver
+        // rework, since `apply_joint_constraints` corrects positions.
+        let joint_ids: Vec<JointId> = self.joints.keys().copied().collect();
+        for _iter in 0..self.constraint_iterations {
+            for &jid in &joint_ids {
+                let jt = &self.joints[&jid];
+                let body_a_id = jt.base().body_a;
+                let body_b_id = jt.base().body_b;
+                if body_a_id == body_b_id {
+                    continue;
+                }
+                if !self.bodies.contains_key(&body_a_id) || !self.bodies.contains_key(&body_b_id) {
+                    continue;
+                }
+                // SAFETY: body_a_id != body_b_id, so these are disjoint map entries.
+                let ptr = &mut self.bodies as *mut HashMap<BodyId, PhysicsBody2D>;
+                let ba = unsafe { &mut *ptr }.get_mut(&body_a_id).unwrap();
+                let bb = unsafe { &mut *ptr }.get_mut(&body_b_id).unwrap();
+                joint::apply_joint_constraints(jt, ba, bb, dt);
             }
         }
 
@@ -687,7 +853,8 @@ impl PhysicsWorld2D {
                 continue;
             }
             let body_tf = body_transform(body.position, body.rotation);
-            if let Some(result) = collision::test_collision(shape, &transform, &body.shape, &body_tf)
+            if let Some(result) =
+                collision::test_collision(shape, &transform, &body.shape, &body_tf)
             {
                 if result.colliding {
                     hits.push(ShapeCastHit {
@@ -916,7 +1083,11 @@ fn ray_capsule(
     let mut best: Option<RaycastHit> = None;
     for c in [c1, c2] {
         if let Some(h) = ray_circle(origin, dir, max_dist, c, radius, body_id) {
-            if best.as_ref().map(|b| h.distance < b.distance).unwrap_or(true) {
+            if best
+                .as_ref()
+                .map(|b| h.distance < b.distance)
+                .unwrap_or(true)
+            {
                 best = Some(h);
             }
         }
@@ -924,7 +1095,11 @@ fn ray_capsule(
     // Cylinder body as AABB
     let half_ext = Vector2::new(radius, half.max(0.0));
     if let Some(h) = ray_aabb(origin, dir, max_dist, center, half_ext, body_id) {
-        if best.as_ref().map(|b| h.distance < b.distance).unwrap_or(true) {
+        if best
+            .as_ref()
+            .map(|b| h.distance < b.distance)
+            .unwrap_or(true)
+        {
             best = Some(h);
         }
     }
@@ -1227,7 +1402,10 @@ mod tests {
 
         let ya = world.get_body(id_a).unwrap().position.y;
         let yb = world.get_body(id_b).unwrap().position.y;
-        assert!(ya.abs() < 1e-5, "override to zero gravity must not fall, got {ya}");
+        assert!(
+            ya.abs() < 1e-5,
+            "override to zero gravity must not fall, got {ya}"
+        );
         assert!(yb > 0.0, "body without override must fall, got {yb}");
 
         // A damp override replaces the body's own damping during integration and
@@ -1359,7 +1537,10 @@ mod tests {
         let mut at_wall = Transform2D::IDENTITY;
         at_wall.origin = Vector2::new(5.0, 0.0);
         let cast = world.shape_cast(&Shape2D::Circle { radius: 1.0 }, at_wall, &[], 0);
-        assert!(!cast.is_empty(), "collision_count must be > 0 against the wall");
+        assert!(
+            !cast.is_empty(),
+            "collision_count must be > 0 against the wall"
+        );
         assert!(
             cast.iter().any(|h| h.body_id == wall_id),
             "shape_cast must report the overlapping wall; got {cast:?}"
@@ -1432,8 +1613,7 @@ mod tests {
 
         let ray = |mask: u32| {
             world.intersect_ray(
-                &RayQuery2D::new(Vector2::ZERO, Vector2::new(10.0, 0.0))
-                    .with_collision_mask(mask),
+                &RayQuery2D::new(Vector2::ZERO, Vector2::new(10.0, 0.0)).with_collision_mask(mask),
             )
         };
 
@@ -1557,7 +1737,10 @@ mod tests {
         let id = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 5.0));
         // A world point well outside the radius-5 circle.
         let hits = world.point_query(Vector2::new(100.0, 100.0));
-        assert!(!hits.contains(&id), "point outside circle must not hit the body");
+        assert!(
+            !hits.contains(&id),
+            "point outside circle must not hit the body"
+        );
         assert!(hits.is_empty(), "no bodies should match, got {hits:?}");
     }
 
@@ -1585,7 +1768,10 @@ mod tests {
         // incrementally, so id_a.0 < id_b.0.
         let id_a = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 5.0));
         let id_b = world.add_body(make_static_rect(Vector2::new(0.0, 0.0), 5.0));
-        assert!(id_a.0 < id_b.0, "ids must be incremental for this assertion");
+        assert!(
+            id_a.0 < id_b.0,
+            "ids must be incremental for this assertion"
+        );
 
         let hits = world.point_query(Vector2::new(0.0, 0.0));
         assert_eq!(

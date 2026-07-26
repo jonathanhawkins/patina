@@ -413,7 +413,7 @@ mod tests {
     fn poll_moves_timer_to_ready() {
         let mut host = CoroutineHost::new();
         host.suspend(SuspendedCoroutine {
-                frames: Vec::new(),
+            frames: Vec::new(),
             id: CoroutineId(0),
             remaining: vec![],
             locals: HashMap::new(),
@@ -437,7 +437,7 @@ mod tests {
     fn signal_notify_resumes() {
         let mut host = CoroutineHost::new();
         host.suspend(SuspendedCoroutine {
-                frames: Vec::new(),
+            frames: Vec::new(),
             id: CoroutineId(0),
             remaining: vec![],
             locals: HashMap::new(),

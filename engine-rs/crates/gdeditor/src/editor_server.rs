@@ -2390,9 +2390,7 @@ fn handle_connection(
         ("POST", "/api/polygon2d/vertex/move") => api_point_move(state, &req.body, &mut stream),
         ("POST", "/api/polygon2d/vertex/remove") => api_point_remove(state, &req.body, &mut stream),
         ("GET", "/api/viewport/points") => api_get_points(state, &req.query, &mut stream),
-        ("GET", "/api/viewport/shape_handles") => {
-            api_shape_handles(state, &req.query, &mut stream)
-        }
+        ("GET", "/api/viewport/shape_handles") => api_shape_handles(state, &req.query, &mut stream),
         ("GET", "/api/keybindings") => api_get_keybindings(state, &mut stream),
         ("POST", "/api/keybindings") => api_set_keybinding(state, &req.body, &mut stream),
         ("POST", "/api/viewport/box_select") => api_box_select(state, &req.body, &mut stream),
@@ -3908,10 +3906,7 @@ fn api_spriteframes_frame_add(state: &Arc<Mutex<EditorState>>, body: &str, strea
         &mut state,
         node_id,
         "Add Frame",
-        vec![(
-            sf_key(&name, "frames"),
-            Variant::PackedStringArray(frames),
-        )],
+        vec![(sf_key(&name, "frames"), Variant::PackedStringArray(frames))],
     ) {
         send_error(stream, 500, "failed to add frame");
         return;
@@ -3950,10 +3945,7 @@ fn api_spriteframes_frame_remove(
         &mut state,
         node_id,
         "Remove Frame",
-        vec![(
-            sf_key(&name, "frames"),
-            Variant::PackedStringArray(frames),
-        )],
+        vec![(sf_key(&name, "frames"), Variant::PackedStringArray(frames))],
     ) {
         send_error(stream, 500, "failed to remove frame");
         return;
@@ -13825,7 +13817,12 @@ fn tile_line_cells(x1: i32, y1: i32, x2: i32, y2: i32) -> Vec<(i32, i32)> {
 /// ⚠️ Returns empty when the target tile already equals `tile_id`; without that
 /// guard the flood would still enqueue every neighbour and walk the whole grid
 /// to paint nothing.
-fn tile_bucket_cells(grid: &gdscene::tilemap::TileGrid, x: i32, y: i32, tile_id: i32) -> Vec<(i32, i32)> {
+fn tile_bucket_cells(
+    grid: &gdscene::tilemap::TileGrid,
+    x: i32,
+    y: i32,
+    tile_id: i32,
+) -> Vec<(i32, i32)> {
     let Some(target) = grid.get(x, y) else {
         return Vec::new();
     };
@@ -14462,6 +14459,11 @@ fn sync_plugins_from_project(state: &mut EditorState) {
 /// script WITHOUT the annotation stays inert while editing, which is why this
 /// filters on `is_tool()` rather than attaching everything.
 fn sync_tool_scripts_from_scene(state: &mut EditorState) {
+    // A `@tool` script running here is running *in the editor*, which is
+    // exactly what `Engine.is_editor_hint()` reports. Nothing set this flag
+    // before, so every tool script saw `false` and took its runtime branch
+    // (pat-0q2kx.121).
+    gdscript_interop::set_engine_editor_hint(true);
     // Dropping the previous scene's instances is what stops a closed scene's
     // tool script from continuing to tick against a tree it no longer belongs
     // to.
@@ -14512,6 +14514,9 @@ fn sync_tool_scripts_from_scene(state: &mut EditorState) {
 /// Godot drives tool scripts from the editor's idle frame, which is what lets an
 /// `@tool` `_process` animate something in the edit viewport.
 pub fn process_tool_scripts(state: &mut EditorState, delta: f64) {
+    // Same as the `_ready` path: an editor idle tick is editor context, so
+    // `Engine.is_editor_hint()` must be true inside `_process` (pat-0q2kx.121).
+    gdscript_interop::set_engine_editor_hint(true);
     let ids: Vec<NodeId> = state.tool_scripts.keys().copied().collect();
     let mut output: Vec<String> = Vec::new();
     for id in ids {

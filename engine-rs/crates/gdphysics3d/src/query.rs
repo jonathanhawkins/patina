@@ -16,7 +16,7 @@ use crate::area3d::{Area3D, AreaId3D};
 use crate::body::{BodyId3D, PhysicsBody3D};
 use crate::collision;
 use crate::collision::CollisionResult3D;
-use crate::shape::Shape3D;
+use crate::shape::{convex_face_planes, Shape3D};
 use crate::world::RaycastHit3D;
 
 // ===========================================================================
@@ -42,9 +42,11 @@ pub struct PhysicsRayQuery3D {
     pub collide_with_bodies: bool,
     /// Whether to collide with areas (default false).
     pub collide_with_areas: bool,
-    /// Whether to report back-face collisions (default false).
+    /// Whether to report back-face collisions on concave shapes (default
+    /// `true`, matching `PhysicsRayQueryParameters3D.hit_back_faces`).
     pub hit_back_faces: bool,
-    /// Whether to hit from inside shapes (default false).
+    /// Whether a ray starting inside a shape reports a hit at its own origin
+    /// with a zero normal, instead of ignoring that shape (default `false`).
     pub hit_from_inside: bool,
 }
 
@@ -58,7 +60,9 @@ impl PhysicsRayQuery3D {
             exclude: HashSet::new(),
             collide_with_bodies: true,
             collide_with_areas: false,
-            hit_back_faces: false,
+            // Godot's `PhysicsRayQueryParameters3D.hit_back_faces` defaults to
+            // true; `hit_from_inside` to false.
+            hit_back_faces: true,
             hit_from_inside: false,
         }
     }
@@ -99,7 +103,13 @@ impl PhysicsRayQuery3D {
                 continue;
             }
 
-            if let Some(hit) = ray_test_body(self.from, dir, body) {
+            if let Some(hit) = ray_test_body(
+                self.from,
+                dir,
+                body,
+                self.hit_from_inside,
+                self.hit_back_faces,
+            ) {
                 if hit.distance > max_dist {
                     continue;
                 }
@@ -117,38 +127,101 @@ impl PhysicsRayQuery3D {
     }
 }
 
-/// Tests a ray against a single body. Returns a hit if the ray intersects.
-fn ray_test_body(origin: Vector3, dir: Vector3, body: &PhysicsBody3D) -> Option<RaycastHit3D> {
-    match body.shape {
-        Shape3D::Sphere { radius } => ray_sphere(origin, dir, body.position, radius, body.id),
-        Shape3D::BoxShape { half_extents } => {
-            ray_aabb(origin, dir, body.position, half_extents, body.id)
-        }
-        Shape3D::CapsuleShape { radius, height } => {
-            ray_capsule(origin, dir, body.position, body.rotation, radius, height, body.id)
-        }
-        // For other shapes, approximate with their bounding sphere
-        _ => {
-            let aabb = body.shape.bounding_aabb();
-            let half = aabb.size * 0.5;
-            let eff_radius = half.x.max(half.y).max(half.z);
-            ray_sphere(origin, dir, body.position, eff_radius, body.id)
-        }
-    }
-}
-
-/// Ray-sphere intersection.
-fn ray_sphere(
+/// Tests a ray against a single body, exactly, for every shape kind.
+///
+/// Mirrors Godot's `GodotPhysicsDirectSpaceState3D::intersect_ray`, which
+/// transforms the segment into each shape's local frame and dispatches to that
+/// shape's `intersect_segment` (godot_shape_3d.cpp). Because `body.rotation` is
+/// a pure rotation, the ray parameter `t` is identical in both frames, so the
+/// world-space distance is the local-space one and only the normal has to be
+/// rotated back.
+///
+/// `hit_from_inside` / `hit_back_faces` mirror the same-named
+/// `PhysicsRayQueryParameters3D` flags.
+fn ray_test_body(
     origin: Vector3,
     dir: Vector3,
-    center: Vector3,
-    radius: f32,
-    body_id: BodyId3D,
+    body: &PhysicsBody3D,
+    hit_from_inside: bool,
+    hit_back_faces: bool,
 ) -> Option<RaycastHit3D> {
-    let oc = origin - center;
+    let inv_rot = body.rotation.inverse();
+    let local_origin = inv_rot.xform(origin - body.position);
+    let local_dir = inv_rot.xform(dir);
+
+    // Godot: a ray whose origin is already inside a shape either reports a
+    // zero-normal hit at the origin (`hit_from_inside`) or skips that shape
+    // entirely — it never reports the far surface.
+    if body.shape.contains_point(local_origin) {
+        return if hit_from_inside {
+            Some(RaycastHit3D {
+                body_id: body.id,
+                point: origin,
+                normal: Vector3::ZERO,
+                distance: 0.0,
+            })
+        } else {
+            None
+        };
+    }
+
+    let (t, local_normal) = match body.shape {
+        Shape3D::Sphere { radius } => ray_sphere_local(local_origin, local_dir, radius)?,
+        Shape3D::BoxShape { half_extents } => ray_obb_local(local_origin, local_dir, half_extents)?,
+        Shape3D::CapsuleShape { radius, height } => {
+            ray_capsule_local(local_origin, local_dir, radius, height)?
+        }
+        Shape3D::CylinderShape { radius, height } => {
+            ray_cylinder_local(local_origin, local_dir, radius, height)?
+        }
+        Shape3D::ConvexPolygonShape { ref points } => {
+            ray_convex_local(local_origin, local_dir, points)?
+        }
+        // The ray's own `hit_back_faces` governs here, not the shape's
+        // `backface_collision` — Godot passes the query flag straight into
+        // `GodotConcavePolygonShape3D::intersect_segment`, while the shape
+        // property only steers body-vs-body contacts.
+        Shape3D::ConcavePolygonShape { ref faces, .. } => {
+            ray_trimesh_local(local_origin, local_dir, faces, hit_back_faces)?
+        }
+        // A heightmap is a triangle surface too, so it gets the same segment
+        // test once its grid is expanded (pat-0q2kx.119).
+        Shape3D::HeightMapShape {
+            map_width,
+            map_depth,
+            ref map_data,
+        } => {
+            let faces = crate::shape::heightmap_faces(map_width, map_depth, map_data, None);
+            ray_trimesh_local(local_origin, local_dir, &faces, hit_back_faces)?
+        }
+        Shape3D::WorldBoundaryShape { normal, distance } => {
+            ray_plane_local(local_origin, local_dir, normal, distance)?
+        }
+        // Any shape without a dedicated segment test yet: clip against its
+        // local bounding box. Still oriented (the ray is already in the
+        // shape's frame) and, unlike the old bounding-sphere fallback, never
+        // reports a hit outside the shape's own extents.
+        ref other => {
+            let aabb = other.bounding_aabb();
+            let half = aabb.size * 0.5;
+            let center = aabb.position + half;
+            ray_obb_local(local_origin - center, local_dir, half)?
+        }
+    };
+
+    Some(RaycastHit3D {
+        body_id: body.id,
+        point: origin + dir * t,
+        normal: body.rotation.xform(local_normal),
+        distance: t,
+    })
+}
+
+/// Ray vs sphere centered at the local origin. Returns `(t, normal)`.
+fn ray_sphere_local(origin: Vector3, dir: Vector3, radius: f32) -> Option<(f32, Vector3)> {
     let a = dir.dot(dir);
-    let b = 2.0 * oc.dot(dir);
-    let c = oc.dot(oc) - radius * radius;
+    let b = 2.0 * origin.dot(dir);
+    let c = origin.dot(origin) - radius * radius;
     let discriminant = b * b - 4.0 * a * c;
 
     if discriminant < 0.0 {
@@ -163,48 +236,36 @@ fn ray_sphere(
         return None;
     }
 
-    let point = origin + dir * t;
-    let normal = (point - center).normalized();
-
-    Some(RaycastHit3D {
-        body_id,
-        point,
-        normal,
-        distance: t,
-    })
+    let normal = (origin + dir * t).normalized();
+    Some((t, normal))
 }
 
-/// Ray vs (rotated) capsule intersection.
+/// Ray vs capsule in the capsule's local frame (axis = local `+Y`).
 ///
-/// The capsule's axis is local `+Y` and `height` is the *total* height
-/// including the two hemispherical caps (matching [`Shape3D::CapsuleShape`] and
-/// the collision helpers). `cap_rot` orients the axis in world space.
+/// `height` is the *total* height including the two hemispherical caps
+/// (matching [`Shape3D::CapsuleShape`] and the collision helpers).
 ///
 /// Analytic port of Inigo Quilez's "capsule - intersection": solve the ray
 /// against the infinite cylinder around the core segment, and if the hit falls
 /// off the ends, fall back to the two end-cap spheres. `dir` must be
-/// normalized, so the returned `distance` is in world units.
-#[allow(clippy::too_many_arguments)]
-fn ray_capsule(
+/// normalized, so the returned `t` is in world units.
+fn ray_capsule_local(
     origin: Vector3,
     dir: Vector3,
-    cap_pos: Vector3,
-    cap_rot: Quaternion,
     radius: f32,
     height: f32,
-    body_id: BodyId3D,
-) -> Option<RaycastHit3D> {
-    // Core-segment endpoints in world space.
+) -> Option<(f32, Vector3)> {
+    // Core-segment endpoints in the capsule's local frame.
     let hs = (height * 0.5 - radius).max(0.0);
-    let pa = cap_pos + cap_rot.xform(Vector3::new(0.0, -hs, 0.0));
-    let pb = cap_pos + cap_rot.xform(Vector3::new(0.0, hs, 0.0));
+    let pa = Vector3::new(0.0, -hs, 0.0);
+    let pb = Vector3::new(0.0, hs, 0.0);
 
     let ba = pb - pa;
     let baba = ba.dot(ba);
 
     // Degenerate segment (height <= 2*radius) — the capsule is a sphere.
     if baba < 1e-12 {
-        return ray_sphere(origin, dir, cap_pos, radius, body_id);
+        return ray_sphere_local(origin, dir, radius);
     }
 
     let oa = origin - pa;
@@ -253,22 +314,17 @@ fn ray_capsule(
     let axis_point = pa + ba * seg_t;
     let normal = (point - axis_point).normalized();
 
-    Some(RaycastHit3D {
-        body_id,
-        point,
-        normal,
-        distance: t,
-    })
+    Some((t, normal))
 }
 
-/// Ray-AABB intersection.
-fn ray_aabb(
-    origin: Vector3,
-    dir: Vector3,
-    center: Vector3,
-    half_extents: Vector3,
-    body_id: BodyId3D,
-) -> Option<RaycastHit3D> {
+/// Ray vs oriented box in the box's local frame — the classic slab test.
+///
+/// The caller has already rotated the ray into the box's frame, which is what
+/// makes this an *oriented*-box test: a 45°-rotated box is hit on its true
+/// rotated face rather than on its world-axis-aligned bounding box.
+/// Returns `(t, normal)` with the normal in the box's local frame.
+fn ray_obb_local(origin: Vector3, dir: Vector3, half_extents: Vector3) -> Option<(f32, Vector3)> {
+    let center = Vector3::ZERO;
     let min = center - half_extents;
     let max = center + half_extents;
 
@@ -340,14 +396,206 @@ fn ray_aabb(
         return None;
     }
 
-    let point = origin + dir * tmin;
+    Some((tmin, hit_normal))
+}
 
-    Some(RaycastHit3D {
-        body_id,
-        point,
-        normal: hit_normal,
-        distance: tmin,
-    })
+/// Ray vs cylinder in the cylinder's local frame (axis = local `+Y`).
+///
+/// Mirrors `GodotCylinderShape3D::intersect_segment`: the infinite-cylinder
+/// quadratic gives the side hits, and the two end-cap discs are tested
+/// separately. Returns the nearest non-negative `(t, normal)`.
+fn ray_cylinder_local(
+    origin: Vector3,
+    dir: Vector3,
+    radius: f32,
+    height: f32,
+) -> Option<(f32, Vector3)> {
+    let half_h = height * 0.5;
+    let mut best: Option<(f32, Vector3)> = None;
+    let mut keep = |t: f32, n: Vector3| {
+        if t >= 0.0 && best.map_or(true, |(bt, _)| t < bt) {
+            best = Some((t, n));
+        }
+    };
+
+    // Side surface: x^2 + z^2 = radius^2, restricted to |y| <= half_h.
+    let a = dir.x * dir.x + dir.z * dir.z;
+    if a > 1e-12 {
+        let b = 2.0 * (origin.x * dir.x + origin.z * dir.z);
+        let c = origin.x * origin.x + origin.z * origin.z - radius * radius;
+        let disc = b * b - 4.0 * a * c;
+        if disc >= 0.0 {
+            let sqrt_d = disc.sqrt();
+            for t in [(-b - sqrt_d) / (2.0 * a), (-b + sqrt_d) / (2.0 * a)] {
+                let p = origin + dir * t;
+                if p.y.abs() <= half_h {
+                    let n = Vector3::new(p.x, 0.0, p.z).normalized();
+                    keep(t, n);
+                }
+            }
+        }
+    }
+
+    // End caps: the two discs at y = +/-half_h.
+    if dir.y.abs() > 1e-12 {
+        for (cap_y, n) in [
+            (half_h, Vector3::new(0.0, 1.0, 0.0)),
+            (-half_h, Vector3::new(0.0, -1.0, 0.0)),
+        ] {
+            let t = (cap_y - origin.y) / dir.y;
+            let p = origin + dir * t;
+            if p.x * p.x + p.z * p.z <= radius * radius {
+                keep(t, n);
+            }
+        }
+    }
+
+    best
+}
+
+/// Ray vs convex hull in the hull's local frame.
+///
+/// Mirrors `GodotConvexPolygonShape3D::intersect_segment`, which clips the
+/// segment against the hull's face planes. [`Shape3D::ConvexPolygonShape`]
+/// stores only the point cloud, so the face planes are derived from it by
+/// [`convex_face_planes`]. Returns the entry `(t, normal)`.
+fn ray_convex_local(origin: Vector3, dir: Vector3, points: &[Vector3]) -> Option<(f32, Vector3)> {
+    let planes = convex_face_planes(points);
+    if planes.is_empty() {
+        // Degenerate (< 4 points) or oversized hull — clip against the point
+        // cloud's own box instead.
+        let first = *points.first()?;
+        let (mut min, mut max) = (first, first);
+        for p in points {
+            min = Vector3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z));
+            max = Vector3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
+        }
+        let half = (max - min) * 0.5;
+        let center = min + half;
+        return ray_obb_local(origin - center, dir, half);
+    }
+
+    // Clip the ray against every half-space; the last plane the ray *enters*
+    // through is the surface it hits.
+    let mut t_near = 0.0_f32;
+    let mut t_far = f32::INFINITY;
+    let mut normal = Vector3::ZERO;
+
+    for (n, d) in &planes {
+        let denom = n.dot(dir);
+        // Signed room left before crossing the plane; negative == outside.
+        let dist = d - n.dot(origin);
+        if denom.abs() < 1e-9 {
+            // Parallel to the plane: either always inside or always outside.
+            if dist < 0.0 {
+                return None;
+            }
+        } else if denom > 0.0 {
+            // Ray is heading out through this plane.
+            t_far = t_far.min(dist / denom);
+        } else {
+            // Ray is heading in through this plane.
+            let t = dist / denom;
+            if t > t_near {
+                t_near = t;
+                normal = *n;
+            }
+        }
+        if t_near > t_far {
+            return None;
+        }
+    }
+
+    if normal == Vector3::ZERO {
+        return None;
+    }
+    Some((t_near, normal))
+}
+
+/// Ray vs triangle soup in the mesh's local frame.
+///
+/// Mirrors `GodotConcavePolygonShape3D::intersect_segment`: every triangle is
+/// tested and the nearest hit wins. Front faces are the counter-clockwise
+/// winding `(b - a) × (c - a)` used by `collision::triangle_normal`; back-face
+/// hits are reported only when `hit_back_faces` is set, matching the
+/// `RayCast3D.hit_back_faces` / `PhysicsRayQueryParameters3D.hit_back_faces`
+/// flag. Returned normals always face back along the ray.
+fn ray_trimesh_local(
+    origin: Vector3,
+    dir: Vector3,
+    faces: &[Vector3],
+    hit_back_faces: bool,
+) -> Option<(f32, Vector3)> {
+    let mut best: Option<(f32, Vector3)> = None;
+
+    for tri in faces.chunks_exact(3) {
+        let (v0, v1, v2) = (tri[0], tri[1], tri[2]);
+        // Möller–Trumbore.
+        let e1 = v1 - v0;
+        let e2 = v2 - v0;
+        let pv = dir.cross(e2);
+        let det = e1.dot(pv);
+
+        // det < 0 means the ray hits this triangle from behind.
+        let back_face = det < 0.0;
+        if back_face && !hit_back_faces {
+            continue;
+        }
+        if det.abs() < 1e-9 {
+            continue; // ray parallel to the triangle plane
+        }
+
+        let inv_det = 1.0 / det;
+        let tv = origin - v0;
+        let u = tv.dot(pv) * inv_det;
+        if !(0.0..=1.0).contains(&u) {
+            continue;
+        }
+        let qv = tv.cross(e1);
+        let v = dir.dot(qv) * inv_det;
+        if v < 0.0 || u + v > 1.0 {
+            continue;
+        }
+        let t = e2.dot(qv) * inv_det;
+        if t < 0.0 {
+            continue;
+        }
+
+        if best.map_or(true, |(bt, _)| t < bt) {
+            let raw = e1.cross(e2);
+            let mut normal = raw.normalized();
+            if back_face {
+                normal = normal * -1.0;
+            }
+            best = Some((t, normal));
+        }
+    }
+
+    best
+}
+
+/// Ray vs infinite plane in the plane's local frame.
+///
+/// Mirrors `GodotWorldBoundaryShape3D::intersect_segment`: the solid half-space
+/// is `normal · p <= distance`, so only a ray travelling *into* the plane
+/// (`normal · dir < 0`) from outside it registers a hit.
+fn ray_plane_local(
+    origin: Vector3,
+    dir: Vector3,
+    normal: Vector3,
+    distance: f32,
+) -> Option<(f32, Vector3)> {
+    let n = normal.normalized();
+    let denom = n.dot(dir);
+    if denom >= -1e-9 {
+        // Parallel to, or receding from, the plane.
+        return None;
+    }
+    let t = (distance - n.dot(origin)) / denom;
+    if t < 0.0 {
+        return None;
+    }
+    Some((t, n))
 }
 
 // ===========================================================================
@@ -666,12 +914,8 @@ impl PhysicsShapeQuery3D {
             if (self.collision_mask & area.collision_layer) == 0 {
                 continue;
             }
-            let cr = collision::test_collision(
-                self.position,
-                &self.shape,
-                area.position,
-                &area.shape,
-            );
+            let cr =
+                collision::test_collision(self.position, &self.shape, area.position, &area.shape);
             if cr.colliding {
                 out.push(area.id);
                 if self.max_results > 0 && out.len() >= self.max_results {
@@ -840,8 +1084,12 @@ impl PhysicsPointQuery3D {
             if (self.collision_mask & area.collision_layer) == 0 {
                 continue;
             }
-            if shape_contains_point(&area.shape, area.position, Quaternion::IDENTITY, self.position)
-            {
+            if shape_contains_point(
+                &area.shape,
+                area.position,
+                Quaternion::IDENTITY,
+                self.position,
+            ) {
                 out.push(area.id);
                 if self.max_results > 0 && out.len() >= self.max_results {
                     break;
@@ -996,9 +1244,15 @@ mod tests {
         // used eff radius 2.0 and would have reported 8.0).
         let bodies = vec![capsule_body(1, Vector3::new(0.0, 0.0, 10.0), 1.0, 4.0)];
         let query = PhysicsRayQuery3D::new(Vector3::ZERO, Vector3::new(0.0, 0.0, 20.0));
-        let hit = query.intersect(bodies.iter()).expect("ray should hit capsule body");
+        let hit = query
+            .intersect(bodies.iter())
+            .expect("ray should hit capsule body");
         assert_eq!(hit.body_id, BodyId3D(1));
-        assert!((hit.distance - 9.0).abs() < 0.01, "distance {}", hit.distance);
+        assert!(
+            (hit.distance - 9.0).abs() < 0.01,
+            "distance {}",
+            hit.distance
+        );
         assert!((hit.normal.z + 1.0).abs() < 0.01, "normal {:?}", hit.normal);
     }
 
@@ -1009,7 +1263,9 @@ mod tests {
         let bodies = vec![capsule_body(1, Vector3::new(0.0, 0.0, 10.0), 1.0, 4.0)];
         let query =
             PhysicsRayQuery3D::new(Vector3::new(0.0, 5.0, 10.0), Vector3::new(0.0, -5.0, 10.0));
-        let hit = query.intersect(bodies.iter()).expect("ray should hit top cap");
+        let hit = query
+            .intersect(bodies.iter())
+            .expect("ray should hit top cap");
         assert!((hit.point.y - 2.0).abs() < 0.02, "point {:?}", hit.point);
         assert!((hit.normal.y - 1.0).abs() < 0.02, "normal {:?}", hit.normal);
     }
@@ -1040,7 +1296,11 @@ mod tests {
         let hit = query
             .intersect(bodies.iter())
             .expect("ray should hit rotated capsule side");
-        assert!((hit.distance - 9.5).abs() < 0.02, "distance {}", hit.distance);
+        assert!(
+            (hit.distance - 9.5).abs() < 0.02,
+            "distance {}",
+            hit.distance
+        );
     }
 
     #[test]
@@ -1049,8 +1309,14 @@ mod tests {
         // a sphere of the given radius.
         let bodies = vec![capsule_body(1, Vector3::new(0.0, 0.0, 10.0), 2.0, 2.0)];
         let query = PhysicsRayQuery3D::new(Vector3::ZERO, Vector3::new(0.0, 0.0, 20.0));
-        let hit = query.intersect(bodies.iter()).expect("degenerate capsule hits");
-        assert!((hit.distance - 8.0).abs() < 0.01, "distance {}", hit.distance);
+        let hit = query
+            .intersect(bodies.iter())
+            .expect("degenerate capsule hits");
+        assert!(
+            (hit.distance - 8.0).abs() < 0.01,
+            "distance {}",
+            hit.distance
+        );
     }
 
     // -- PhysicsShapeQuery3D --------------------------------------------------
@@ -1166,7 +1432,12 @@ mod tests {
         let (safe, unsafe_) = sweeping_capsule().cast_motion(bodies.iter());
         assert!((safe - 0.85).abs() < 0.01, "safe {}", safe);
         assert!(unsafe_ >= safe, "unsafe {} < safe {}", unsafe_, safe);
-        assert!(unsafe_ - safe < 0.01, "bracket too wide: {}..{}", safe, unsafe_);
+        assert!(
+            unsafe_ - safe < 0.01,
+            "bracket too wide: {}..{}",
+            safe,
+            unsafe_
+        );
     }
 
     #[test]
@@ -1221,7 +1492,11 @@ mod tests {
         assert_eq!(contacts.len(), 1);
         let [on_self, on_collider] = contacts[0];
         assert!((on_self.x - 2.0).abs() < 0.01, "self {:?}", on_self);
-        assert!((on_collider.x - 1.5).abs() < 0.01, "collider {:?}", on_collider);
+        assert!(
+            (on_collider.x - 1.5).abs() < 0.01,
+            "collider {:?}",
+            on_collider
+        );
     }
 
     #[test]
@@ -1262,9 +1537,15 @@ mod tests {
         let bodies = vec![shallow, deep];
 
         let query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 2.0 }, Vector3::ZERO);
-        let info = query.get_rest_info(bodies.iter()).expect("overlap should yield rest info");
+        let info = query
+            .get_rest_info(bodies.iter())
+            .expect("overlap should yield rest info");
         assert_eq!(info.collider, BodyId3D(2));
-        assert!((info.normal.x - 1.0).abs() < 0.01, "normal {:?}", info.normal);
+        assert!(
+            (info.normal.x - 1.0).abs() < 0.01,
+            "normal {:?}",
+            info.normal
+        );
         assert!((info.linear_velocity.y - 3.0).abs() < 1e-6);
         // Collider surface point: x = 2.0 - 1.0 = 1.0.
         assert!((info.point.x - 1.0).abs() < 0.01, "point {:?}", info.point);
@@ -1287,7 +1568,7 @@ mod tests {
     #[test]
     fn shape_query_scans_areas_when_enabled() {
         let areas = vec![
-            sphere_area(1, Vector3::new(1.0, 0.0, 0.0), 1.0),   // overlapping
+            sphere_area(1, Vector3::new(1.0, 0.0, 0.0), 1.0), // overlapping
             sphere_area(2, Vector3::new(100.0, 0.0, 0.0), 1.0), // far
         ];
         let mut query = PhysicsShapeQuery3D::new(Shape3D::Sphere { radius: 2.0 }, Vector3::ZERO);

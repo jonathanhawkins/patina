@@ -26,6 +26,7 @@ fn static_floor() -> PhysicsBody3D {
         Vector3::ZERO,
         Shape3D::ConcavePolygonShape {
             faces: floor_faces(),
+            backface_collision: false,
         },
         0.0,
     )

@@ -498,7 +498,11 @@ fn collect_spriteframes_tables(tree: &SceneTree, node_ids: &[NodeId]) -> SpriteF
             ));
         }
 
-        writeln!(text, "\n[sub_resource type=\"SpriteFrames\" id=\"{sub_id}\"]").unwrap();
+        writeln!(
+            text,
+            "\n[sub_resource type=\"SpriteFrames\" id=\"{sub_id}\"]"
+        )
+        .unwrap();
         writeln!(text, "animations = [{}]", anim_blocks.join(", ")).unwrap();
         nodes.insert(nid, sub_id);
     }
@@ -855,6 +859,15 @@ fn is_internal_prop(key: &str) -> bool {
         // a real `SpriteFrames` sub-resource, so emitting the raw keys too would
         // both duplicate the data and invent properties Godot cannot parse.
         || key.starts_with("__sf_")
+        // `__tile_set__*` caches the resolved TileSet — its cell size and each
+        // atlas source's texture and region grid — so the renderer can turn a
+        // `tile_map_data` cell into a texture region without the `PackedScene`
+        // (pat-0q2kx.108). The node's `tile_set` property still carries the
+        // `SubResource` reference that round-trips; the cache itself is not a
+        // property Godot has ever heard of. `tile_map_data` is NOT a companion
+        // and is written back verbatim, which is what makes a painted layer
+        // survive a save.
+        || key.starts_with("__tile_set__")
         || key == "_instance"
         || key == "_instance_path"
         || key == "_script_path"

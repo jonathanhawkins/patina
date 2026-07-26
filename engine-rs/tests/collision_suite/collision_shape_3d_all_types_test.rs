@@ -116,6 +116,7 @@ fn concave_polygon_aabb() {
             Vector3::new(3.0, 0.0, 0.0),
             Vector3::new(0.0, 3.0, 0.0),
         ],
+        backface_collision: false,
     };
     let aabb = shape.bounding_aabb();
     assert!((aabb.size.x - 3.0).abs() < 1e-5);

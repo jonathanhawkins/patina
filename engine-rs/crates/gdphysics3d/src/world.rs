@@ -1,6 +1,6 @@
 //! 3D physics world state and simulation stepping.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gdcore::math::Vector3;
 use gdcore::math3d::{Aabb, Quaternion};
@@ -82,6 +82,294 @@ pub struct RaycastHit3D {
     pub distance: f32,
 }
 
+// ---------------------------------------------------------------------------
+// Joint solving (pat-0q2kx.118)
+// ---------------------------------------------------------------------------
+
+/// Gauss-Seidel sweeps of the velocity-level joint constraints per step. Eight
+/// is enough for a short chain to hold without visible stretch and cheap enough
+/// that a scene full of joints still steps in well under a frame.
+const JOINT_VELOCITY_ITERATIONS: usize = 8;
+
+/// Baumgarte factor for the *limit* constraints — how much of a limit
+/// overshoot is pushed back per step. The point constraints do not use it: they
+/// are corrected by projection instead (see [`PhysicsWorld3D::solve_joints`]).
+const JOINT_LIMIT_BIAS: f32 = 0.2;
+
+/// Orders a body pair so one entry covers it regardless of which side asks.
+fn exception_key(a: BodyId3D, b: BodyId3D) -> (BodyId3D, BodyId3D) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// The `i`-th local unit axis (0 = X, 1 = Y, anything else = Z).
+fn local_unit_axis(i: usize) -> Vector3 {
+    match i {
+        0 => Vector3::new(1.0, 0.0, 0.0),
+        1 => Vector3::new(0.0, 1.0, 0.0),
+        _ => Vector3::new(0.0, 0.0, 1.0),
+    }
+}
+
+/// Two unit vectors completing an orthonormal basis with `axis`.
+fn perpendicular_basis(axis: Vector3) -> [Vector3; 2] {
+    // Pick the seed that is *least* parallel to `axis`, or the cross product
+    // collapses and the basis comes back as zeros.
+    let seed = if axis.x.abs() < 0.9 {
+        Vector3::new(1.0, 0.0, 0.0)
+    } else {
+        Vector3::new(0.0, 1.0, 0.0)
+    };
+    let u = axis.cross(seed).normalized();
+    let v = axis.cross(u).normalized();
+    [u, v]
+}
+
+/// Signed distance `value` lies outside `[lower, upper]`: negative below the
+/// lower bound, positive above the upper, `0.0` when in range.
+fn limit_violation(value: f32, lower: f32, upper: f32) -> f32 {
+    if value > upper {
+        value - upper
+    } else if value < lower {
+        value - lower
+    } else {
+        0.0
+    }
+}
+
+/// Impulse bounds for a one-sided limit: a violation past the *upper* bound may
+/// only be pushed back (negative impulse), and vice versa. Without this a limit
+/// would also stop a body that is already returning into range.
+fn one_sided_bounds(violation: f32) -> (f32, f32) {
+    if violation > 0.0 {
+        (f32::NEG_INFINITY, 0.0)
+    } else {
+        (0.0, f32::INFINITY)
+    }
+}
+
+/// The rotation angle of `q` about `axis`, in radians on `(-π, π]`.
+///
+/// Swing-twist decomposition: project the quaternion's vector part onto the
+/// axis, renormalise, and read the angle back off the resulting twist
+/// quaternion. `q` and `axis` must be expressed in the same frame — the callers
+/// pass `a⁻¹ · b` together with an axis in A's local frame.
+fn twist_angle_about(q: Quaternion, axis: Vector3) -> f32 {
+    let vector = Vector3::new(q.x, q.y, q.z);
+    let projected = axis * vector.dot(axis);
+    let (mut x, mut y, mut z, mut w) = (projected.x, projected.y, projected.z, q.w);
+    let len = (x * x + y * y + z * z + w * w).sqrt();
+    if len < 1e-9 {
+        return 0.0;
+    }
+    x /= len;
+    y /= len;
+    z /= len;
+    w /= len;
+    // Both `q` and `-q` name the same rotation; pin the sign so the angle comes
+    // back on (-π, π] instead of jumping by a full turn.
+    if w < 0.0 {
+        x = -x;
+        y = -y;
+        z = -z;
+        w = -w;
+    }
+    let sine = Vector3::new(x, y, z).dot(axis);
+    2.0 * sine.atan2(w)
+}
+
+/// A body's solver-relevant state, snapshotted so both ends of a joint can be
+/// read and written without ever holding two `&mut` into the body map.
+#[derive(Clone, Copy)]
+struct JointBody {
+    position: Vector3,
+    rotation: Quaternion,
+    linear_velocity: Vector3,
+    angular_velocity: Vector3,
+    inv_mass: f32,
+    inv_inertia: Vector3,
+}
+
+impl JointBody {
+    fn of(body: &PhysicsBody3D) -> Self {
+        Self {
+            position: body.position,
+            rotation: body.rotation,
+            linear_velocity: body.linear_velocity,
+            angular_velocity: body.angular_velocity,
+            inv_mass: body.inverse_mass(),
+            inv_inertia: body.inverse_inertia_diagonal(),
+        }
+    }
+
+    /// `R · I_local⁻¹ · Rᵀ · v` — the world-space inverse inertia applied to an
+    /// angular impulse. Mirrors [`PhysicsBody3D::apply_inverse_inertia`], on the
+    /// snapshot rather than the live body.
+    fn inv_inertia_mul(&self, world_vec: Vector3) -> Vector3 {
+        let local = self.rotation.inverse().xform(world_vec);
+        self.rotation.xform(Vector3::new(
+            local.x * self.inv_inertia.x,
+            local.y * self.inv_inertia.y,
+            local.z * self.inv_inertia.z,
+        ))
+    }
+
+    /// World velocity of the material point at body-relative offset `r`.
+    fn velocity_at(&self, r: Vector3) -> Vector3 {
+        self.linear_velocity + self.angular_velocity.cross(r)
+    }
+}
+
+/// Effective mass of the pair along `n` for an impulse applied at the offsets
+/// `ra`/`rb`: `1/mₐ + 1/m_b` plus each body's angular contribution.
+fn point_effective_mass(a: &JointBody, b: &JointBody, ra: Vector3, rb: Vector3, n: Vector3) -> f32 {
+    a.inv_mass
+        + b.inv_mass
+        + a.inv_inertia_mul(ra.cross(n)).cross(ra).dot(n)
+        + b.inv_inertia_mul(rb.cross(n)).cross(rb).dot(n)
+}
+
+/// Applies `+p` to B and `-p` to A at their respective offsets.
+fn apply_pair_impulse(a: &mut JointBody, b: &mut JointBody, ra: Vector3, rb: Vector3, p: Vector3) {
+    a.linear_velocity = a.linear_velocity - p * a.inv_mass;
+    a.angular_velocity = a.angular_velocity - a.inv_inertia_mul(ra.cross(p));
+    b.linear_velocity = b.linear_velocity + p * b.inv_mass;
+    b.angular_velocity = b.angular_velocity + b.inv_inertia_mul(rb.cross(p));
+}
+
+/// Drives the relative velocity of the two anchor points along `n` to zero,
+/// optionally offset by `bias` and clamped to `[min, max]`.
+///
+/// Wide by design: the two bodies, their two anchor offsets, the axis and the
+/// three scalars are all independent per call site, and bundling them into a
+/// struct would only move the same eight values one line up.
+#[allow(clippy::too_many_arguments)]
+fn solve_linear_axis(
+    a: &mut JointBody,
+    b: &mut JointBody,
+    ra: Vector3,
+    rb: Vector3,
+    n: Vector3,
+    bias: f32,
+    min: f32,
+    max: f32,
+) {
+    let k = point_effective_mass(a, b, ra, rb, n);
+    if k <= 1e-9 {
+        return;
+    }
+    let relative = (b.velocity_at(rb) - a.velocity_at(ra)).dot(n);
+    let lambda = ((-relative - bias) / k).clamp(min, max);
+    if lambda == 0.0 {
+        return;
+    }
+    apply_pair_impulse(a, b, ra, rb, n * lambda);
+}
+
+/// Cancels all relative velocity between the two anchor points — the shared
+/// core of the pin, hinge and cone-twist constraints.
+///
+/// `max_impulse` mirrors Godot's `params/impulse_clamp`: `0.0` means unlimited.
+fn solve_point_velocity(
+    a: &mut JointBody,
+    b: &mut JointBody,
+    local_a: Vector3,
+    local_b: Vector3,
+    max_impulse: f32,
+) {
+    let ra = a.rotation.xform(local_a);
+    let rb = b.rotation.xform(local_b);
+    let (min, max) = if max_impulse > 0.0 {
+        (-max_impulse, max_impulse)
+    } else {
+        (f32::NEG_INFINITY, f32::INFINITY)
+    };
+    // One world axis at a time, Gauss-Seidel: each solve sees the velocity the
+    // previous one just produced, so three passes approximate the full 3×3
+    // constraint without building and inverting the matrix.
+    for n in [
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+    ] {
+        solve_linear_axis(a, b, ra, rb, n, 0.0, min, max);
+    }
+}
+
+/// Angular effective mass of the pair about `n`.
+fn angular_effective_mass(a: &JointBody, b: &JointBody, n: Vector3) -> f32 {
+    n.dot(a.inv_inertia_mul(n)) + n.dot(b.inv_inertia_mul(n))
+}
+
+/// Drives the relative angular velocity about `n` toward `target`, offset by
+/// `bias` and clamped to `[min, max]`.
+fn solve_angular_axis(
+    a: &mut JointBody,
+    b: &mut JointBody,
+    n: Vector3,
+    target: f32,
+    bias: f32,
+    min: f32,
+    max: f32,
+) {
+    let k = angular_effective_mass(a, b, n);
+    if k <= 1e-9 {
+        return;
+    }
+    let relative = (b.angular_velocity - a.angular_velocity).dot(n);
+    let lambda = ((target - relative - bias) / k).clamp(min, max);
+    if lambda == 0.0 {
+        return;
+    }
+    let p = n * lambda;
+    a.angular_velocity = a.angular_velocity - a.inv_inertia_mul(p);
+    b.angular_velocity = b.angular_velocity + b.inv_inertia_mul(p);
+}
+
+/// Splits a relative angular-velocity step between the two bodies in proportion
+/// to their inverse inertia about `axis`. A static anchor contributes nothing,
+/// so the whole step lands on the moving body.
+fn distribute_angular_velocity(a: &mut JointBody, b: &mut JointBody, axis: Vector3, delta: f32) {
+    let ia = axis.dot(a.inv_inertia_mul(axis));
+    let ib = axis.dot(b.inv_inertia_mul(axis));
+    let total = ia + ib;
+    if total <= 1e-9 {
+        return;
+    }
+    a.angular_velocity = a.angular_velocity - axis * (delta * ia / total);
+    b.angular_velocity = b.angular_velocity + axis * (delta * ib / total);
+}
+
+/// Moves the pair by `error` (pointing from A's anchor to B's anchor), split by
+/// inverse mass so the heavier body moves less and a static body not at all.
+fn distribute_position_correction(a: &mut JointBody, b: &mut JointBody, error: Vector3) {
+    let total = a.inv_mass + b.inv_mass;
+    if total <= 0.0 {
+        return;
+    }
+    a.position = a.position + error * (a.inv_mass / total);
+    b.position = b.position - error * (b.inv_mass / total);
+}
+
+/// Places the two anchor points exactly coincident.
+///
+/// Full correction, not a fraction of it: a pendulum's bob then sits at exactly
+/// `|local_b|` from the pivot every step, which is what makes the radius hold
+/// to a hair over hundreds of ticks instead of creeping.
+fn project_point_constraint(
+    a: &mut JointBody,
+    b: &mut JointBody,
+    local_a: Vector3,
+    local_b: Vector3,
+) {
+    let world_a = a.position + a.rotation.xform(local_a);
+    let world_b = b.position + b.rotation.xform(local_b);
+    distribute_position_correction(a, b, world_b - world_a);
+}
+
 /// A 3D physics world that owns bodies and steps the simulation.
 pub struct PhysicsWorld3D {
     bodies: BTreeMap<BodyId3D, PhysicsBody3D>,
@@ -94,6 +382,11 @@ pub struct PhysicsWorld3D {
     area_store: AreaStore3D,
     /// Joints solved after integration each step (pat-u3l8c.57).
     joints: Vec<Joint3D>,
+    /// Body pairs the narrow phase must ignore, keyed with the lower id first
+    /// (pat-0q2kx.118). A joint whose `exclude_nodes_from_collision` is set —
+    /// Godot's default — adds its pair here, because a pin that holds two
+    /// bodies coincident would otherwise fight the contact solver forever.
+    collision_exceptions: HashSet<(BodyId3D, BodyId3D)>,
 }
 
 impl PhysicsWorld3D {
@@ -106,6 +399,7 @@ impl PhysicsWorld3D {
             soft_bodies: Vec::new(),
             area_store: AreaStore3D::new(),
             joints: Vec::new(),
+            collision_exceptions: HashSet::new(),
         }
     }
 
@@ -113,10 +407,40 @@ impl PhysicsWorld3D {
 
     /// Adds a joint to be solved each step. Returns its [`JointId3D`] (the id
     /// the joint was created with).
+    ///
+    /// A joint carrying `exclude_nodes_from_collision` (Godot's default) also
+    /// registers a collision exception for its pair, so the two jointed bodies
+    /// stop colliding with each other (pat-0q2kx.118).
     pub fn add_joint(&mut self, joint: Joint3D) -> JointId3D {
         let id = joint.id();
+        let base = joint.base();
+        if base.exclude_nodes_from_collision {
+            self.collision_exceptions
+                .insert(exception_key(base.body_a, base.body_b));
+        }
         self.joints.push(joint);
         id
+    }
+
+    /// Removes a joint by id, releasing any collision exception it added.
+    ///
+    /// Returns the joint when one was registered. Freeing the constraint is
+    /// what lets a bob fall once its joint node leaves the tree
+    /// (pat-0q2kx.118).
+    pub fn remove_joint(&mut self, id: JointId3D) -> Option<Joint3D> {
+        let index = self.joints.iter().position(|j| j.id() == id)?;
+        let joint = self.joints.remove(index);
+        let (a, b) = joint.bodies();
+        let key = exception_key(a, b);
+        // Only drop the exception when no *other* joint still wants it.
+        let still_wanted = self.joints.iter().any(|j| {
+            let base = j.base();
+            base.exclude_nodes_from_collision && exception_key(base.body_a, base.body_b) == key
+        });
+        if !still_wanted {
+            self.collision_exceptions.remove(&key);
+        }
+        Some(joint)
     }
 
     /// Number of joints registered in the world.
@@ -127,6 +451,19 @@ impl PhysicsWorld3D {
     /// Returns a reference to a joint by id.
     pub fn get_joint(&self, id: JointId3D) -> Option<&Joint3D> {
         self.joints.iter().find(|j| j.id() == id)
+    }
+
+    /// Returns a mutable reference to a joint by id, so an authored parameter
+    /// change (a motor speed, a limit) reaches the solver without rebuilding
+    /// the joint.
+    pub fn get_joint_mut(&mut self, id: JointId3D) -> Option<&mut Joint3D> {
+        self.joints.iter_mut().find(|j| j.id() == id)
+    }
+
+    /// Returns `true` when the two bodies are excluded from colliding with each
+    /// other by a joint.
+    pub fn has_collision_exception(&self, a: BodyId3D, b: BodyId3D) -> bool {
+        self.collision_exceptions.contains(&exception_key(a, b))
     }
 
     // -- Area management ---------------------------------------------------
@@ -301,6 +638,14 @@ impl PhysicsWorld3D {
                 continue;
             }
 
+            // A joint with `exclude_nodes_from_collision` set takes the pair out
+            // of the narrow phase entirely (pat-0q2kx.118) — a pin holds the two
+            // anchors coincident, which the contact solver would otherwise read
+            // as a permanent deep overlap and fight every step.
+            if self.has_collision_exception(id_a, id_b) {
+                continue;
+            }
+
             let result =
                 collision::test_collision_rot(pos_a, rot_a, &shape_a, pos_b, rot_b, &shape_b);
             if result.colliding {
@@ -447,72 +792,299 @@ impl PhysicsWorld3D {
         self.solve_joints(dt);
     }
 
-    /// Applies the registered joints to their bodies for this step.
+    /// Applies the registered joints to their bodies for this step
+    /// (pat-0q2kx.118).
     ///
-    /// Two-phase to satisfy the borrow checker: gather per-body directives from
-    /// the joints (immutable borrows), then apply them to the bodies (mutable).
-    /// Covers PinJoint3D (position correction toward the shared pivot, weighted
-    /// by inverse mass) and the HingeJoint3D motor (drives body B's angular
-    /// velocity about the hinge axis toward the target). Limits, sliders, and
-    /// ConeTwist/6DOF are not yet solved.
+    /// Three passes, in Godot's order: motors first (they set the velocity the
+    /// constraints then have to respect), then `JOINT_VELOCITY_ITERATIONS`
+    /// Gauss-Seidel sweeps of the velocity-level constraints, then one
+    /// positional projection sweep.
+    ///
+    /// Splitting velocity from position ("split impulse") is what keeps a
+    /// pendulum tight: the velocity pass never sees the accumulated drift, so it
+    /// injects no energy, and the projection pass then places the anchors
+    /// exactly coincident — leaving the bob at a fixed radius from the pivot
+    /// instead of the slow spiral a bias-only correction gives.
+    ///
+    /// The joint list is moved out for the duration so each pass can take `&mut
+    /// self` to reach the bodies; it is put back before returning.
     fn solve_joints(&mut self, dt: f32) {
-        let mut ang_deltas: Vec<(BodyId3D, Vector3)> = Vec::new();
-        let mut pin_moves: Vec<(BodyId3D, Vector3)> = Vec::new();
+        if self.joints.is_empty() {
+            return;
+        }
+        let joints = std::mem::take(&mut self.joints);
 
-        for j in &self.joints {
-            if !j.is_enabled() {
-                continue;
+        for j in &joints {
+            if j.is_enabled() {
+                self.apply_joint_motor(j, dt);
             }
-            match j {
-                Joint3D::Hinge(h) if h.motor_enabled => {
-                    let (_a, b_id) = j.bodies();
-                    if let Some(body) = self.bodies.get(&b_id) {
-                        if body.body_type != BodyType3D::Rigid {
-                            continue;
-                        }
-                        let world_axis = body.rotation.xform(h.axis).normalized();
-                        let current = body.angular_velocity.dot(world_axis);
-                        let impulse = h.compute_motor_impulse(current, dt);
-                        ang_deltas.push((b_id, world_axis * impulse));
-                    }
+        }
+        for _ in 0..JOINT_VELOCITY_ITERATIONS {
+            for j in &joints {
+                if j.is_enabled() {
+                    self.solve_joint_velocity(j, dt);
                 }
-                Joint3D::Pin(p) => {
-                    let (a_id, b_id) = j.bodies();
-                    if let (Some(ba), Some(bb)) = (self.bodies.get(&a_id), self.bodies.get(&b_id)) {
-                        let world_a = ba.position + ba.rotation.xform(p.local_a);
-                        let world_b = bb.position + bb.rotation.xform(p.local_b);
-                        // `error` points from A's pivot to B's pivot.
-                        let error = p.compute_error(world_a, world_b);
-                        let inv_a = ba.inverse_mass();
-                        let inv_b = bb.inverse_mass();
-                        let total = inv_a + inv_b;
-                        if total > 0.0 {
-                            let corr = error * p.bias;
-                            if inv_a > 0.0 {
-                                // A moves toward B.
-                                pin_moves.push((a_id, corr * (inv_a / total)));
-                            }
-                            if inv_b > 0.0 {
-                                // B moves toward A.
-                                pin_moves.push((b_id, corr * (-(inv_b / total))));
-                            }
-                        }
-                    }
-                }
-                _ => {}
+            }
+        }
+        for j in &joints {
+            if j.is_enabled() {
+                self.project_joint_position(j);
             }
         }
 
-        for (id, dw) in ang_deltas {
-            if let Some(body) = self.bodies.get_mut(&id) {
-                body.angular_velocity = body.angular_velocity + dw;
+        self.joints = joints;
+    }
+
+    /// Snapshots both of a joint's bodies, or `None` when either is missing or
+    /// the joint names the same body twice (which would double-apply every
+    /// write-back).
+    fn joint_bodies(&self, joint: &Joint3D) -> Option<(BodyId3D, JointBody, BodyId3D, JointBody)> {
+        let (id_a, id_b) = joint.bodies();
+        if id_a == id_b {
+            return None;
+        }
+        match (self.bodies.get(&id_a), self.bodies.get(&id_b)) {
+            (Some(a), Some(b)) => Some((id_a, JointBody::of(a), id_b, JointBody::of(b))),
+            _ => None,
+        }
+    }
+
+    /// Writes a solved snapshot's velocities back. Static and kinematic bodies
+    /// are scene-driven, so a joint may never push them around.
+    fn write_joint_velocity(&mut self, id: BodyId3D, state: &JointBody) {
+        if let Some(body) = self.bodies.get_mut(&id) {
+            if body.body_type == BodyType3D::Rigid {
+                body.linear_velocity = state.linear_velocity;
+                body.angular_velocity = state.angular_velocity;
             }
         }
-        for (id, dp) in pin_moves {
-            if let Some(body) = self.bodies.get_mut(&id) {
-                body.position = body.position + dp;
+    }
+
+    /// Writes a projected snapshot's position back, under the same rule.
+    fn write_joint_position(&mut self, id: BodyId3D, state: &JointBody) {
+        if let Some(body) = self.bodies.get_mut(&id) {
+            if body.body_type == BodyType3D::Rigid {
+                body.position = state.position;
             }
         }
+    }
+
+    /// Runs a hinge motor for one step: drives the *relative* angular velocity
+    /// about the hinge axis toward the target, splitting the step between the
+    /// two bodies by their inverse inertia. Against a static anchor the whole
+    /// step lands on body B, which is the case a scene actually authors.
+    ///
+    /// Once per step rather than once per iteration — `compute_motor_impulse`
+    /// already scales by `dt`, so running it inside the Gauss-Seidel loop would
+    /// multiply the motor's authority by the iteration count.
+    fn apply_joint_motor(&mut self, joint: &Joint3D, dt: f32) {
+        let Joint3D::Hinge(h) = joint else {
+            return;
+        };
+        if !h.motor_enabled {
+            return;
+        }
+        let Some((id_a, mut a, id_b, mut b)) = self.joint_bodies(joint) else {
+            return;
+        };
+        let axis = a.rotation.xform(h.axis).normalized();
+        if axis.length_squared() < 0.5 {
+            return; // degenerate axis
+        }
+        let relative = (b.angular_velocity - a.angular_velocity).dot(axis);
+        let delta = h.compute_motor_impulse(relative, dt);
+        distribute_angular_velocity(&mut a, &mut b, axis, delta);
+        self.write_joint_velocity(id_a, &a);
+        self.write_joint_velocity(id_b, &b);
+    }
+
+    /// One Gauss-Seidel sweep of a joint's velocity-level constraints.
+    fn solve_joint_velocity(&mut self, joint: &Joint3D, dt: f32) {
+        let Some((id_a, mut a, id_b, mut b)) = self.joint_bodies(joint) else {
+            return;
+        };
+        let inv_dt = if dt > 1e-6 { 1.0 / dt } else { 0.0 };
+
+        match joint {
+            Joint3D::Pin(p) => {
+                solve_point_velocity(&mut a, &mut b, p.local_a, p.local_b, p.impulse_clamp);
+            }
+            Joint3D::Hinge(h) => {
+                solve_point_velocity(&mut a, &mut b, h.anchor_a, h.anchor_b, 0.0);
+                // Axis alignment: the hinge axis as carried by A and as carried
+                // by B must stay parallel, so only rotation *about* it survives.
+                let axis_a = a.rotation.xform(h.axis).normalized();
+                let axis_b = b.rotation.xform(h.axis).normalized();
+                let misalignment = axis_a.cross(axis_b);
+                for n in perpendicular_basis(axis_a) {
+                    let bias = JOINT_LIMIT_BIAS * misalignment.dot(n) * inv_dt;
+                    solve_angular_axis(
+                        &mut a,
+                        &mut b,
+                        n,
+                        0.0,
+                        bias,
+                        f32::NEG_INFINITY,
+                        f32::INFINITY,
+                    );
+                }
+                if h.use_limit {
+                    let angle =
+                        twist_angle_about(a.rotation.inverse() * b.rotation, h.axis.normalized());
+                    let violation = limit_violation(angle, h.lower_limit, h.upper_limit);
+                    if violation != 0.0 {
+                        let (min, max) = one_sided_bounds(violation);
+                        let bias = h.limit_bias * violation * inv_dt;
+                        solve_angular_axis(&mut a, &mut b, axis_a, 0.0, bias, min, max);
+                    }
+                }
+            }
+            Joint3D::Slider(s) => {
+                let axis = a.rotation.xform(s.axis).normalized();
+                let ra = a.rotation.xform(s.local_a);
+                let rb = b.rotation.xform(s.local_b);
+                let offset = ((b.position + rb) - (a.position + ra)).dot(axis);
+                // Off-axis translation is fully constrained; sliding along the
+                // axis is the one free linear degree of freedom.
+                for n in perpendicular_basis(axis) {
+                    solve_linear_axis(
+                        &mut a,
+                        &mut b,
+                        ra,
+                        rb,
+                        n,
+                        0.0,
+                        f32::NEG_INFINITY,
+                        f32::INFINITY,
+                    );
+                }
+                if s.use_linear_limit {
+                    let violation =
+                        limit_violation(offset, s.linear_limit_lower, s.linear_limit_upper);
+                    if violation != 0.0 {
+                        let (min, max) = one_sided_bounds(violation);
+                        let bias = JOINT_LIMIT_BIAS * violation * inv_dt;
+                        solve_linear_axis(&mut a, &mut b, ra, rb, axis, bias, min, max);
+                    }
+                }
+                // Rotation off the slide axis is constrained the same way the
+                // hinge does it; rotation about the axis is limited, not locked.
+                let axis_b = b.rotation.xform(s.axis).normalized();
+                let misalignment = axis.cross(axis_b);
+                for n in perpendicular_basis(axis) {
+                    let bias = JOINT_LIMIT_BIAS * misalignment.dot(n) * inv_dt;
+                    solve_angular_axis(
+                        &mut a,
+                        &mut b,
+                        n,
+                        0.0,
+                        bias,
+                        f32::NEG_INFINITY,
+                        f32::INFINITY,
+                    );
+                }
+                if s.use_angular_limit {
+                    let angle =
+                        twist_angle_about(a.rotation.inverse() * b.rotation, s.axis.normalized());
+                    let violation =
+                        limit_violation(angle, s.angular_limit_lower, s.angular_limit_upper);
+                    if violation != 0.0 {
+                        let (min, max) = one_sided_bounds(violation);
+                        let bias = JOINT_LIMIT_BIAS * violation * inv_dt;
+                        solve_angular_axis(&mut a, &mut b, axis, 0.0, bias, min, max);
+                    }
+                }
+            }
+            Joint3D::ConeTwist(c) => {
+                solve_point_velocity(&mut a, &mut b, c.local_a, c.local_b, 0.0);
+                let axis_a = a.rotation.xform(c.twist_axis).normalized();
+                let axis_b = b.rotation.xform(c.twist_axis).normalized();
+                // Swing: the angle between the two twist axes, clamped to the
+                // cone half-angle.
+                let swing = axis_a.dot(axis_b).clamp(-1.0, 1.0).acos();
+                let excess = c.swing_violation(swing);
+                if excess > 0.0 {
+                    let swing_axis = axis_a.cross(axis_b).normalized();
+                    if swing_axis.length_squared() > 0.5 {
+                        let bias = c.bias * excess * inv_dt;
+                        solve_angular_axis(
+                            &mut a,
+                            &mut b,
+                            swing_axis,
+                            0.0,
+                            bias,
+                            f32::NEG_INFINITY,
+                            0.0,
+                        );
+                    }
+                }
+                let twist =
+                    twist_angle_about(a.rotation.inverse() * b.rotation, c.twist_axis.normalized());
+                let violation = limit_violation(twist, -c.twist_span, c.twist_span);
+                if violation != 0.0 {
+                    let (min, max) = one_sided_bounds(violation);
+                    let bias = c.bias * violation * inv_dt;
+                    solve_angular_axis(&mut a, &mut b, axis_a, 0.0, bias, min, max);
+                }
+            }
+            Joint3D::Generic6Dof(g) => {
+                let ra = a.rotation.xform(g.local_a);
+                let rb = b.rotation.xform(g.local_b);
+                let offset = (b.position + rb) - (a.position + ra);
+                let relative = a.rotation.inverse() * b.rotation;
+                for axis in 0..3 {
+                    let local = local_unit_axis(axis);
+                    let n = a.rotation.xform(local).normalized();
+
+                    let violation = g.linear_violation(axis, offset.dot(n));
+                    if violation != 0.0 {
+                        let (min, max) = one_sided_bounds(violation);
+                        let bias = JOINT_LIMIT_BIAS * violation * inv_dt;
+                        solve_linear_axis(&mut a, &mut b, ra, rb, n, bias, min, max);
+                    }
+
+                    let angle = twist_angle_about(relative, local);
+                    let violation = g.angular_violation(axis, angle);
+                    if violation != 0.0 {
+                        let (min, max) = one_sided_bounds(violation);
+                        let bias = JOINT_LIMIT_BIAS * violation * inv_dt;
+                        solve_angular_axis(&mut a, &mut b, n, 0.0, bias, min, max);
+                    }
+                }
+            }
+        }
+
+        self.write_joint_velocity(id_a, &a);
+        self.write_joint_velocity(id_b, &b);
+    }
+
+    /// Places a joint's anchors back where the constraint says they belong,
+    /// after the velocity pass has run.
+    fn project_joint_position(&mut self, joint: &Joint3D) {
+        let Some((id_a, mut a, id_b, mut b)) = self.joint_bodies(joint) else {
+            return;
+        };
+        match joint {
+            Joint3D::Pin(p) => project_point_constraint(&mut a, &mut b, p.local_a, p.local_b),
+            Joint3D::Hinge(h) => project_point_constraint(&mut a, &mut b, h.anchor_a, h.anchor_b),
+            Joint3D::ConeTwist(c) => project_point_constraint(&mut a, &mut b, c.local_a, c.local_b),
+            Joint3D::Slider(s) => {
+                // Only the off-axis drift is projected out — the whole point of a
+                // slider is that motion along the axis is free.
+                let axis = a.rotation.xform(s.axis).normalized();
+                let ra = a.rotation.xform(s.local_a);
+                let rb = b.rotation.xform(s.local_b);
+                let error = (b.position + rb) - (a.position + ra);
+                let perpendicular = error - axis * error.dot(axis);
+                distribute_position_correction(&mut a, &mut b, perpendicular);
+            }
+            // 6-DOF limits are corrected by their velocity bias alone: with six
+            // independent one-sided limits there is no single point to project
+            // onto, and projecting each axis in turn would fight the others.
+            Joint3D::Generic6Dof(_) => return,
+        }
+        self.write_joint_position(id_a, &a);
+        self.write_joint_position(id_b, &b);
     }
 
     /// Computes the effective space parameters for a body this step by folding
@@ -798,6 +1370,66 @@ mod tests {
             x1 < 1.0,
             "pin should substantially close the 2.0 gap, got {x1}"
         );
+    }
+
+    #[test]
+    fn pin_joint_holds_a_swinging_bob_at_a_fixed_radius() {
+        // The pin's real job is not "pull them together" but "keep this offset
+        // point coincident while everything else moves" — a bias-only nudge
+        // satisfies the first and fails the second (pat-0q2kx.118).
+        let mut world = PhysicsWorld3D::new();
+        let anchor = world.add_body(small_sphere(Vector3::ZERO, BodyType3D::Static, 0.0));
+        let bob = world.add_body(small_sphere(
+            Vector3::new(2.0, 0.0, 0.0),
+            BodyType3D::Rigid,
+            1.0,
+        ));
+        if let Some(b) = world.get_body_mut(bob) {
+            b.can_sleep = false;
+        }
+        // Pivot at the anchor: 2 m out along the bob's local -X.
+        let pin = crate::joint::PinJoint3D::new(JointId3D(1), anchor, bob)
+            .with_pivots(Vector3::ZERO, Vector3::new(-2.0, 0.0, 0.0));
+        world.add_joint(Joint3D::Pin(pin));
+
+        let mut swung = false;
+        for tick in 0..300 {
+            world.step(1.0 / 60.0);
+            let pos = world.get_body(bob).unwrap().position;
+            let radius = pos.length();
+            assert!(
+                (radius - 2.0).abs() < 1e-2,
+                "tick {tick}: radius drifted to {radius}"
+            );
+            if pos.y < -0.5 {
+                swung = true;
+            }
+        }
+        assert!(swung, "the bob must swing down, not hang rigid");
+    }
+
+    #[test]
+    fn joint_excludes_its_pair_from_collision_and_releases_it_on_removal() {
+        let mut world = PhysicsWorld3D::new();
+        let a = world.add_body(sphere_body(Vector3::ZERO));
+        let b = world.add_body(sphere_body(Vector3::ZERO));
+        let jid = JointId3D(3);
+        world.add_joint(Joint3D::Pin(crate::joint::PinJoint3D::new(jid, a, b)));
+        assert!(
+            world.has_collision_exception(a, b),
+            "exclude_nodes_from_collision defaults to true, so the pair must be \
+             excluded"
+        );
+        // The key is order-independent.
+        assert!(world.has_collision_exception(b, a));
+
+        assert!(world.remove_joint(jid).is_some());
+        assert_eq!(world.joint_count(), 0);
+        assert!(
+            !world.has_collision_exception(a, b),
+            "removing the joint must release its exception"
+        );
+        assert!(world.remove_joint(jid).is_none(), "removal is idempotent");
     }
 
     #[test]

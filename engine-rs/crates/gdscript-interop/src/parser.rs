@@ -876,8 +876,8 @@ impl Parser {
 
     fn parse_enum_decl(&mut self) -> Result<Stmt, ParseError> {
         self.advance(); // consume `enum`
-        // The name is optional: an anonymous `enum { .. }` declares its variants
-        // as script constants (Godot semantics) rather than a named enum.
+                        // The name is optional: an anonymous `enum { .. }` declares its variants
+                        // as script constants (Godot semantics) rather than a named enum.
         let name = if self.check(&Token::LBrace) {
             None
         } else {
@@ -2075,7 +2075,10 @@ mod tests {
             assert_eq!(name.as_deref(), Some("State"));
             let names: Vec<&str> = variants.iter().map(|(n, _)| n.as_str()).collect();
             assert_eq!(names, ["IDLE", "RUNNING", "JUMPING"]);
-            assert!(variants.iter().all(|(_, v)| v.is_none()), "no explicit values");
+            assert!(
+                variants.iter().all(|(_, v)| v.is_none()),
+                "no explicit values"
+            );
         } else {
             panic!("expected EnumDecl");
         }
@@ -2232,7 +2235,11 @@ mod tests {
         // `a + b is int` == `a + (b is int)`
         let e = parse_expr_str("a + b is int");
         match e {
-            Expr::BinaryOp { op: BinOp::Add, right, .. } => {
+            Expr::BinaryOp {
+                op: BinOp::Add,
+                right,
+                ..
+            } => {
                 assert!(matches!(*right, Expr::TypeTest { .. }));
             }
             other => panic!("expected add, got {other:?}"),
@@ -2244,8 +2251,18 @@ mod tests {
         // `a | b & c` == `a | (b & c)` since `&` binds tighter than `|`.
         let e = parse_expr_str("a | b & c");
         match e {
-            Expr::BinaryOp { op: BinOp::BitOr, right, .. } => {
-                assert!(matches!(*right, Expr::BinaryOp { op: BinOp::BitAnd, .. }));
+            Expr::BinaryOp {
+                op: BinOp::BitOr,
+                right,
+                ..
+            } => {
+                assert!(matches!(
+                    *right,
+                    Expr::BinaryOp {
+                        op: BinOp::BitAnd,
+                        ..
+                    }
+                ));
             }
             other => panic!("expected bitor, got {other:?}"),
         }
@@ -2256,7 +2273,11 @@ mod tests {
         // `a & b << c` == `a & (b << c)`
         let e = parse_expr_str("a & b << c");
         match e {
-            Expr::BinaryOp { op: BinOp::BitAnd, right, .. } => {
+            Expr::BinaryOp {
+                op: BinOp::BitAnd,
+                right,
+                ..
+            } => {
                 assert!(matches!(*right, Expr::BinaryOp { op: BinOp::Shl, .. }));
             }
             other => panic!("expected bitand, got {other:?}"),
@@ -2268,7 +2289,10 @@ mod tests {
         // `-2 ** 2` == `-(2 ** 2)`
         let e = parse_expr_str("-2 ** 2");
         match e {
-            Expr::UnaryOp { op: UnaryOp::Neg, expr } => {
+            Expr::UnaryOp {
+                op: UnaryOp::Neg,
+                expr,
+            } => {
                 assert!(matches!(*expr, Expr::BinaryOp { op: BinOp::Pow, .. }));
             }
             other => panic!("expected negation, got {other:?}"),
@@ -2278,7 +2302,13 @@ mod tests {
     #[test]
     fn parse_tilde_unary() {
         let e = parse_expr_str("~x");
-        assert!(matches!(e, Expr::UnaryOp { op: UnaryOp::BitNot, .. }));
+        assert!(matches!(
+            e,
+            Expr::UnaryOp {
+                op: UnaryOp::BitNot,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -14,6 +14,8 @@
 //! All results follow the convention that `normal` points **from A toward B**
 //! and `depth` is the positive penetration distance along that normal.
 
+use std::borrow::Cow;
+
 use gdcore::math::Vector3;
 use gdcore::math3d::Quaternion;
 
@@ -302,32 +304,95 @@ pub fn test_collision_rot(
         _ => {}
     }
 
+    // --- Separation ray vs convex (pat-0q2kx.119). The ray has a bounded
+    //     convex support function, so GJK/EPA handles the intersection; the
+    //     `slide_on_slope` flag then decides whether the recovery follows the
+    //     contact normal or is forced back along the ray's own axis, exactly as
+    //     `GodotSeparationRayShape3D` does in the body recovery pass.
+    match (shape_a, shape_b) {
+        (
+            SeparationRayShape {
+                length,
+                slide_on_slope,
+            },
+            other,
+        ) if is_bounded_convex(other) && !matches!(other, SeparationRayShape { .. }) => {
+            return separation_ray_convex(
+                pos_a,
+                rot_a,
+                *length,
+                *slide_on_slope,
+                pos_b,
+                rot_b,
+                shape_b,
+            );
+        }
+        (
+            other,
+            SeparationRayShape {
+                length,
+                slide_on_slope,
+            },
+        ) if is_bounded_convex(other) => {
+            return separation_ray_convex(
+                pos_b,
+                rot_b,
+                *length,
+                *slide_on_slope,
+                pos_a,
+                rot_a,
+                shape_a,
+            )
+            .flipped();
+        }
+        _ => {}
+    }
+
     // --- General convex solver for the remaining rotation-aware pairs. -------
     if is_bounded_convex(shape_a) && is_bounded_convex(shape_b) {
         return gjk_epa(pos_a, rot_a, shape_a, pos_b, rot_b, shape_b);
     }
 
-    // --- Concave trimesh vs sphere / capsule (pat-u3l8c.56). A concave
-    //     polygon soup is not a single convex body, so it is tested triangle
-    //     by triangle against the (convex) sphere or capsule. The reported
-    //     normal points from the trimesh (A) toward the other shape (B).
-    match (shape_a, shape_b) {
-        (ConcavePolygonShape { faces }, Sphere { radius }) => {
-            return trimesh_sphere(pos_a, rot_a, faces, pos_b, *radius);
+    // --- Concave (trimesh / heightmap) vs convex. A concave surface is not a
+    //     single convex body, so it is tested triangle by triangle. Sphere and
+    //     capsule keep their closest-point solvers (stable across triangle
+    //     edges); every other convex shape — box, cylinder, convex hull, and
+    //     separation ray — goes through the general per-triangle path
+    //     (pat-0q2kx.119). The reported normal points from the surface (A)
+    //     toward the other shape (B).
+    match (
+        concave_faces_for(shape_a, shape_b, pos_a, rot_a, pos_b, rot_b),
+        concave_faces_for(shape_b, shape_a, pos_b, rot_b, pos_a, rot_a),
+    ) {
+        // Concave vs concave stays unsupported, as in Godot.
+        (Some(_), Some(_)) => return CollisionResult3D::NONE,
+        (Some((faces, backface)), None) if is_bounded_convex(shape_b) => {
+            return concave_convex(
+                faces.as_ref(),
+                backface,
+                pos_a,
+                rot_a,
+                pos_b,
+                rot_b,
+                shape_b,
+            );
         }
-        (Sphere { radius }, ConcavePolygonShape { faces }) => {
-            return trimesh_sphere(pos_b, rot_b, faces, pos_a, *radius).flipped();
-        }
-        (ConcavePolygonShape { faces }, CapsuleShape { radius, height }) => {
-            return trimesh_capsule(pos_a, rot_a, faces, pos_b, rot_b, *radius, *height);
-        }
-        (CapsuleShape { radius, height }, ConcavePolygonShape { faces }) => {
-            return trimesh_capsule(pos_b, rot_b, faces, pos_a, rot_a, *radius, *height).flipped();
+        (None, Some((faces, backface))) if is_bounded_convex(shape_a) => {
+            return concave_convex(
+                faces.as_ref(),
+                backface,
+                pos_b,
+                rot_b,
+                pos_a,
+                rot_a,
+                shape_a,
+            )
+            .flipped();
         }
         _ => {}
     }
 
-    // Other unsupported combinations (e.g. trimesh vs trimesh).
+    // Other unsupported combinations (e.g. trimesh vs world boundary).
     CollisionResult3D::NONE
 }
 
@@ -340,7 +405,96 @@ fn is_bounded_convex(shape: &Shape3D) -> bool {
             | Shape3D::CapsuleShape { .. }
             | Shape3D::CylinderShape { .. }
             | Shape3D::ConvexPolygonShape { .. }
+            | Shape3D::SeparationRayShape { .. }
     )
+}
+
+/// Triangle soup (in `shape`'s local frame) and backface flag for a concave
+/// shape, or `None` when `shape` is not concave.
+///
+/// A [`Shape3D::HeightMapShape`] materialises only the cells overlapping
+/// `other`'s world AABB — the "sample triangles on demand" path, so a large
+/// terrain never expands its whole grid for a single narrow-phase query.
+fn concave_faces_for<'a>(
+    shape: &'a Shape3D,
+    other: &Shape3D,
+    pos: Vector3,
+    rot: Quaternion,
+    other_pos: Vector3,
+    other_rot: Quaternion,
+) -> Option<(Cow<'a, [Vector3]>, bool)> {
+    match shape {
+        Shape3D::ConcavePolygonShape {
+            faces,
+            backface_collision,
+            // Borrowed: an authored soup is already in the right form, and
+            // cloning it per narrow-phase pair would scale with level size.
+        } => Some((Cow::Borrowed(faces.as_slice()), *backface_collision)),
+        Shape3D::HeightMapShape {
+            map_width,
+            map_depth,
+            map_data,
+        } => {
+            let bounds = local_xz_window(other, other_pos, other_rot, pos, rot);
+            Some((
+                Cow::Owned(crate::shape::heightmap_faces(
+                    *map_width,
+                    *map_depth,
+                    map_data,
+                    Some(bounds),
+                )),
+                // Godot's heightmap faces are front-facing only.
+                false,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The X/Z window (`min_x, max_x, min_z, max_z`) that `other` occupies when
+/// expressed in the concave shape's local frame. Conservative: the other
+/// shape's local AABB is inflated to a sphere so any rotation is covered.
+fn local_xz_window(
+    other: &Shape3D,
+    other_pos: Vector3,
+    _other_rot: Quaternion,
+    mesh_pos: Vector3,
+    mesh_rot: Quaternion,
+) -> (f32, f32, f32, f32) {
+    let aabb = other.bounding_aabb();
+    let half = aabb.size * 0.5;
+    let center_local = aabb.position + half;
+    // Radius of the sphere enclosing the other shape about its own origin.
+    let radius = center_local.length() + half.length();
+    let center = mesh_rot.inverse().xform(other_pos - mesh_pos);
+    (
+        center.x - radius,
+        center.x + radius,
+        center.z - radius,
+        center.z + radius,
+    )
+}
+
+/// Dispatches a concave triangle soup against a bounded convex shape.
+#[allow(clippy::too_many_arguments)]
+fn concave_convex(
+    faces: &[Vector3],
+    backface: bool,
+    mesh_pos: Vector3,
+    mesh_rot: Quaternion,
+    pos_b: Vector3,
+    rot_b: Quaternion,
+    shape_b: &Shape3D,
+) -> CollisionResult3D {
+    match shape_b {
+        Shape3D::Sphere { radius } => {
+            trimesh_sphere(mesh_pos, mesh_rot, faces, backface, pos_b, *radius)
+        }
+        Shape3D::CapsuleShape { radius, height } => trimesh_capsule(
+            mesh_pos, mesh_rot, faces, backface, pos_b, rot_b, *radius, *height,
+        ),
+        _ => trimesh_convex(mesh_pos, mesh_rot, faces, backface, pos_b, rot_b, shape_b),
+    }
 }
 
 /// Returns `true` if the quaternion is (numerically) the identity rotation.
@@ -601,7 +755,11 @@ fn plane_world(
 ) -> (Vector3, f32) {
     let n = plane_rot.xform(local_normal);
     let len = n.length();
-    let n_w = if len > 1e-9 { n * (1.0 / len) } else { local_normal };
+    let n_w = if len > 1e-9 {
+        n * (1.0 / len)
+    } else {
+        local_normal
+    };
     let d_w = local_distance + n_w.dot(plane_pos);
     (n_w, d_w)
 }
@@ -747,6 +905,44 @@ fn triangle_normal(a: Vector3, b: Vector3, c: Vector3) -> Vector3 {
     }
 }
 
+/// Winding-aware face normal using Godot's convention, `Plane(a, b, c)` with
+/// `CLOCKWISE` direction: `normal = (a - c) × (a - b)`. This is the *front*
+/// face direction that `ConcavePolygonShape3D.backface_collision` is measured
+/// against, and it is the opposite sign from [`triangle_normal`]. Returns
+/// `None` for a degenerate (zero-area) triangle.
+#[inline]
+fn godot_face_normal(a: Vector3, b: Vector3, c: Vector3) -> Option<Vector3> {
+    let n = (a - c).cross(a - b);
+    let len = n.length();
+    if len > 1e-9 {
+        Some(n * (1.0 / len))
+    } else {
+        None
+    }
+}
+
+/// Whether a triangle may collide with a shape whose centre is `center`, given
+/// the soup's `backface_collision` flag. Returns the *outward* push direction
+/// (the face normal oriented toward the shape) when the contact is allowed.
+///
+/// Mirrors `godot_collision_solver_3d_sat.cpp`: with `backface_collision` off,
+/// a contact whose push-out direction opposes the face normal is discarded.
+#[inline]
+fn face_out_normal(
+    a: Vector3,
+    b: Vector3,
+    c: Vector3,
+    center: Vector3,
+    backface: bool,
+) -> Option<Vector3> {
+    let n = godot_face_normal(a, b, c)?;
+    let side = (center - a).dot(n);
+    if !backface && side < 0.0 {
+        return None;
+    }
+    Some(if side >= 0.0 { n } else { n * -1.0 })
+}
+
 /// Concave trimesh vs sphere. The trimesh `faces` are a flat triangle soup
 /// (every three vertices form one triangle) in the mesh's local frame; the
 /// sphere is at `sphere_pos` with `radius`. Returns the deepest-penetrating
@@ -755,12 +951,16 @@ fn trimesh_sphere(
     mesh_pos: Vector3,
     mesh_rot: Quaternion,
     faces: &[Vector3],
+    backface: bool,
     sphere_pos: Vector3,
     radius: f32,
 ) -> CollisionResult3D {
     let mut best = CollisionResult3D::NONE;
     for tri in faces.chunks_exact(3) {
         let (a, b, c) = world_triangle(mesh_pos, mesh_rot, tri);
+        if face_out_normal(a, b, c, sphere_pos, backface).is_none() {
+            continue;
+        }
         let cp = closest_point_on_triangle(sphere_pos, a, b, c);
         let diff = sphere_pos - cp;
         let dist_sq = diff.length_squared();
@@ -802,6 +1002,7 @@ fn trimesh_capsule(
     mesh_pos: Vector3,
     mesh_rot: Quaternion,
     faces: &[Vector3],
+    backface: bool,
     cap_pos: Vector3,
     cap_rot: Quaternion,
     cap_radius: f32,
@@ -815,6 +1016,9 @@ fn trimesh_capsule(
     let mut best = CollisionResult3D::NONE;
     for tri in faces.chunks_exact(3) {
         let (a, b, c) = world_triangle(mesh_pos, mesh_rot, tri);
+        if face_out_normal(a, b, c, cap_pos, backface).is_none() {
+            continue;
+        }
         let (seg_pt, tri_pt) = closest_segment_triangle(p0, p1, a, b, c);
         let diff = seg_pt - tri_pt;
         let dist_sq = diff.length_squared();
@@ -845,6 +1049,124 @@ fn trimesh_capsule(
         };
     }
     best
+}
+
+/// Concave surface vs any bounded convex shape — box, cylinder, convex hull, or
+/// separation ray (pat-0q2kx.119).
+///
+/// Each candidate triangle is fed to GJK as a three-point convex hull to decide
+/// whether the shape actually overlaps *that* triangle rather than merely the
+/// infinite plane through it. The contact normal is then taken from the
+/// triangle's own face normal (oriented toward the shape) and the depth from the
+/// shape's support point along it.
+///
+/// Deriving the normal from the face rather than from EPA is deliberate: a
+/// triangle has zero thickness, so "push the body out of the front" and "push
+/// the body out through the back" are the same minimal penetration depth and EPA
+/// picks between them arbitrarily — half the time sinking the body through the
+/// floor. Godot sidesteps this the same way, by testing the face axis in its SAT
+/// solver and rejecting contacts that oppose the face normal.
+#[allow(clippy::too_many_arguments)]
+fn trimesh_convex(
+    mesh_pos: Vector3,
+    mesh_rot: Quaternion,
+    faces: &[Vector3],
+    backface: bool,
+    pos_b: Vector3,
+    rot_b: Quaternion,
+    shape_b: &Shape3D,
+) -> CollisionResult3D {
+    let mut best = CollisionResult3D::NONE;
+    for tri in faces.chunks_exact(3) {
+        let (a, b, c) = world_triangle(mesh_pos, mesh_rot, tri);
+        let Some(out) = face_out_normal(a, b, c, pos_b, backface) else {
+            continue;
+        };
+
+        // Penetration of B through the triangle's plane, along the face normal.
+        let deepest = world_support(shape_b, pos_b, rot_b, out * -1.0);
+        let depth = (a - deepest).dot(out);
+        if depth <= 0.0 || depth <= best.depth {
+            continue;
+        }
+
+        // Confirm the overlap is over *this* triangle, not just its plane.
+        // The hull is centred on the triangle's centroid so GJK gets a sane
+        // initial search direction (`centroid - pos_b`) regardless of how far
+        // the soup sits from the world origin.
+        let centroid = (a + b + c) * (1.0 / 3.0);
+        let tri_hull = Shape3D::ConvexPolygonShape {
+            points: vec![a - centroid, b - centroid, c - centroid],
+        };
+        if !gjk_intersects(
+            centroid,
+            Quaternion::IDENTITY,
+            &tri_hull,
+            pos_b,
+            rot_b,
+            shape_b,
+        ) {
+            continue;
+        }
+
+        best = CollisionResult3D {
+            colliding: true,
+            normal: out,
+            depth,
+        };
+    }
+    best
+}
+
+// ===========================================================================
+// Separation ray (pat-0q2kx.119)
+// ===========================================================================
+
+/// Separation ray vs a bounded convex shape. `ray_*` describes the ray body
+/// (A); the returned normal points from the ray toward `shape_b` (B).
+///
+/// With `slide_on_slope` the contact normal comes straight from EPA, so the
+/// recovery follows the surface and the body slides along it. Without it the
+/// recovery is forced back along the ray's own axis — Godot's behaviour for a
+/// `SeparationRayShape3D` that must not creep down a slope.
+#[allow(clippy::too_many_arguments)]
+fn separation_ray_convex(
+    ray_pos: Vector3,
+    ray_rot: Quaternion,
+    length: f32,
+    slide_on_slope: bool,
+    pos_b: Vector3,
+    rot_b: Quaternion,
+    shape_b: &Shape3D,
+) -> CollisionResult3D {
+    let ray = Shape3D::SeparationRayShape {
+        length,
+        slide_on_slope,
+    };
+    let hit = gjk_epa(ray_pos, ray_rot, &ray, pos_b, rot_b, shape_b);
+    if !hit.colliding || slide_on_slope {
+        return hit;
+    }
+
+    // Forced axis recovery: measure how far the ray tip has sunk past the
+    // shape's near surface, along the ray's own direction.
+    let dir = ray_rot.xform(Vector3::new(0.0, 0.0, 1.0));
+    let len = dir.length();
+    if len < 1e-9 {
+        return hit;
+    }
+    let dir = dir * (1.0 / len);
+    let tip = ray_pos + dir * length;
+    let entry = world_support(shape_b, pos_b, rot_b, dir * -1.0);
+    let depth = (tip - entry).dot(dir);
+    if depth <= 0.0 {
+        return hit;
+    }
+    CollisionResult3D {
+        colliding: true,
+        normal: dir,
+        depth,
+    }
 }
 
 // ===========================================================================
@@ -895,7 +1217,11 @@ fn local_support(shape: &Shape3D, dir: Vector3) -> Vector3 {
             let y = if dir.y >= 0.0 { hy } else { -hy };
             let radial_len = (dir.x * dir.x + dir.z * dir.z).sqrt();
             if radial_len > 1e-9 {
-                Vector3::new(dir.x * *radius / radial_len, y, dir.z * *radius / radial_len)
+                Vector3::new(
+                    dir.x * *radius / radial_len,
+                    y,
+                    dir.z * *radius / radial_len,
+                )
             } else {
                 Vector3::new(0.0, y, 0.0)
             }
@@ -912,8 +1238,20 @@ fn local_support(shape: &Shape3D, dir: Vector3) -> Vector3 {
             }
             best
         }
-        // Not fed through GJK.
-        Shape3D::ConcavePolygonShape { .. } | Shape3D::WorldBoundaryShape { .. } => Vector3::ZERO,
+        // Mirrors `GodotSeparationRayShape3D::get_support`: the ray runs from
+        // the origin along local +Z.
+        Shape3D::SeparationRayShape { length, .. } => {
+            if dir.z > 0.0 {
+                Vector3::new(0.0, 0.0, *length)
+            } else {
+                Vector3::ZERO
+            }
+        }
+        // Not fed through GJK: concave surfaces are decomposed into triangles
+        // by the callers above, and a half-space is unbounded.
+        Shape3D::ConcavePolygonShape { .. }
+        | Shape3D::HeightMapShape { .. }
+        | Shape3D::WorldBoundaryShape { .. } => Vector3::ZERO,
     }
 }
 
@@ -921,6 +1259,34 @@ fn local_support(shape: &Shape3D, dir: Vector3) -> Vector3 {
 fn world_support(shape: &Shape3D, center: Vector3, rot: Quaternion, dir: Vector3) -> Vector3 {
     let local_dir = rot.inverse().xform(dir);
     center + rot.xform(local_support(shape, local_dir))
+}
+
+/// GJK phase only: evolves a simplex over the Minkowski difference and returns
+/// the enclosing tetrahedron when the two shapes overlap.
+fn gjk_simplex<F: Fn(Vector3) -> Vector3>(support: &F, seed: Vector3) -> Option<Vec<Vector3>> {
+    let mut simplex: Vec<Vector3> = Vec::with_capacity(4);
+    let mut dir = seed;
+    if dir.length_squared() < 1e-12 {
+        dir = Vector3::new(1.0, 0.0, 0.0);
+    }
+    let first = support(dir);
+    simplex.push(first);
+    dir = first * -1.0;
+
+    for _ in 0..64 {
+        if dir.length_squared() < 1e-24 {
+            dir = Vector3::new(1.0, 0.0, 0.0);
+        }
+        let a = support(dir);
+        if a.dot(dir) < 0.0 {
+            return None; // origin unreachable ⇒ separated
+        }
+        simplex.insert(0, a);
+        if do_simplex(&mut simplex, &mut dir) {
+            return (simplex.len() >= 4).then_some(simplex);
+        }
+    }
+    None
 }
 
 /// GJK intersection test + EPA penetration for two bounded convex shapes.
@@ -936,37 +1302,26 @@ fn gjk_epa(
         world_support(shape_a, pos_a, rot_a, dir) - world_support(shape_b, pos_b, rot_b, dir * -1.0)
     };
 
-    // --- GJK -----------------------------------------------------------------
-    let mut simplex: Vec<Vector3> = Vec::with_capacity(4);
-    let mut dir = pos_a - pos_b;
-    if dir.length_squared() < 1e-12 {
-        dir = Vector3::new(1.0, 0.0, 0.0);
+    match gjk_simplex(&support, pos_a - pos_b) {
+        Some(simplex) => epa(&support, &simplex),
+        None => CollisionResult3D::NONE,
     }
-    let first = support(dir);
-    simplex.push(first);
-    dir = first * -1.0;
+}
 
-    let mut enclosed = false;
-    for _ in 0..64 {
-        if dir.length_squared() < 1e-24 {
-            dir = Vector3::new(1.0, 0.0, 0.0);
-        }
-        let a = support(dir);
-        if a.dot(dir) < 0.0 {
-            return CollisionResult3D::NONE; // origin unreachable ⇒ separated
-        }
-        simplex.insert(0, a);
-        if do_simplex(&mut simplex, &mut dir) {
-            enclosed = true;
-            break;
-        }
-    }
-
-    if !enclosed || simplex.len() < 4 {
-        return CollisionResult3D::NONE;
-    }
-
-    epa(&support, &simplex)
+/// Boolean overlap test for two bounded convex shapes — the GJK half of
+/// [`gjk_epa`], without the EPA expansion.
+fn gjk_intersects(
+    pos_a: Vector3,
+    rot_a: Quaternion,
+    shape_a: &Shape3D,
+    pos_b: Vector3,
+    rot_b: Quaternion,
+    shape_b: &Shape3D,
+) -> bool {
+    let support = |dir: Vector3| -> Vector3 {
+        world_support(shape_a, pos_a, rot_a, dir) - world_support(shape_b, pos_b, rot_b, dir * -1.0)
+    };
+    gjk_simplex(&support, pos_a - pos_b).is_some()
 }
 
 #[inline]
@@ -1294,10 +1649,21 @@ mod tests {
         };
         let sphere = Shape3D::Sphere { radius: 0.5 };
         let res = test_collision(Vector3::ZERO, &cap, Vector3::new(0.8, 0.0, 0.0), &sphere);
-        assert!(res.colliding, "sphere overlapping capsule side should collide");
+        assert!(
+            res.colliding,
+            "sphere overlapping capsule side should collide"
+        );
         // Normal A(capsule)→B(sphere) points +x.
-        assert!(res.normal.x > 0.9, "normal should point toward sphere, got {:?}", res.normal);
-        assert!((res.depth - 0.2).abs() < 1e-4, "depth ~0.2, got {}", res.depth);
+        assert!(
+            res.normal.x > 0.9,
+            "normal should point toward sphere, got {:?}",
+            res.normal
+        );
+        assert!(
+            (res.depth - 0.2).abs() < 1e-4,
+            "depth ~0.2, got {}",
+            res.depth
+        );
     }
 
     #[test]
@@ -1390,7 +1756,11 @@ mod tests {
         assert!(res.colliding, "rotated box corner should poke into box A");
         assert!(res.depth > 0.0);
         // Separating normal should be essentially along X.
-        assert!(res.normal.x.abs() > 0.8, "normal mostly X, got {:?}", res.normal);
+        assert!(
+            res.normal.x.abs() > 0.8,
+            "normal mostly X, got {:?}",
+            res.normal
+        );
     }
 
     #[test]
@@ -1428,16 +1798,19 @@ mod tests {
         // Place capsule so its bottom sphere overlaps the floor top by ~0.1.
         // cap_y - (0.5) - 0.5(radius) = 0.4  ⇒ cap_y = 1.4 gives bottom at 0.4,
         // overlapping the y=0.5 top by 0.1.
-        let res = test_collision(
-            Vector3::ZERO,
-            &floor,
-            Vector3::new(0.0, 1.4, 0.0),
-            &capsule,
-        );
+        let res = test_collision(Vector3::ZERO, &floor, Vector3::new(0.0, 1.4, 0.0), &capsule);
         assert!(res.colliding, "capsule should rest on the box floor");
         // Normal A(floor)→B(capsule) should push the capsule up.
-        assert!(res.normal.y > 0.8, "floor→capsule normal should be +Y, got {:?}", res.normal);
-        assert!(res.depth > 0.0 && res.depth < 0.3, "shallow rest depth, got {}", res.depth);
+        assert!(
+            res.normal.y > 0.8,
+            "floor→capsule normal should be +Y, got {:?}",
+            res.normal
+        );
+        assert!(
+            res.depth > 0.0 && res.depth < 0.3,
+            "shallow rest depth, got {}",
+            res.depth
+        );
     }
 
     #[test]
@@ -1450,9 +1823,20 @@ mod tests {
         let sphere = Shape3D::Sphere { radius: 1.0 };
         // Sphere center at y=0.5 ⇒ dips 0.5 below the plane.
         let hit = test_collision(Vector3::ZERO, &plane, Vector3::new(0.0, 0.5, 0.0), &sphere);
-        assert!(hit.colliding, "sphere crossing the ground plane should collide");
-        assert!(hit.normal.y > 0.9, "plane→sphere normal is +Y, got {:?}", hit.normal);
-        assert!((hit.depth - 0.5).abs() < 1e-4, "depth ~0.5, got {}", hit.depth);
+        assert!(
+            hit.colliding,
+            "sphere crossing the ground plane should collide"
+        );
+        assert!(
+            hit.normal.y > 0.9,
+            "plane→sphere normal is +Y, got {:?}",
+            hit.normal
+        );
+        assert!(
+            (hit.depth - 0.5).abs() < 1e-4,
+            "depth ~0.5, got {}",
+            hit.depth
+        );
 
         // Sphere well above the plane does not collide.
         let miss = test_collision(Vector3::ZERO, &plane, Vector3::new(0.0, 5.0, 0.0), &sphere);
@@ -1469,7 +1853,11 @@ mod tests {
         // Convex as A, plane as B: normal A→B points from sphere toward plane (−Y).
         let hit = test_collision(Vector3::new(0.0, 0.5, 0.0), &sphere, Vector3::ZERO, &plane);
         assert!(hit.colliding);
-        assert!(hit.normal.y < -0.9, "sphere→plane normal is −Y, got {:?}", hit.normal);
+        assert!(
+            hit.normal.y < -0.9,
+            "sphere→plane normal is −Y, got {:?}",
+            hit.normal
+        );
     }
 
     #[test]
@@ -1485,8 +1873,16 @@ mod tests {
         // Capsule center at x=1.3: its radius 0.5 reaches x=0.8, box face at x=1.
         let res = test_collision(Vector3::ZERO, &b, Vector3::new(1.3, 0.0, 0.0), &cap);
         assert!(res.colliding, "box and capsule side should collide");
-        assert!(res.normal.x > 0.8, "box→capsule normal +X, got {:?}", res.normal);
-        assert!((res.depth - 0.2).abs() < 0.05, "depth ~0.2, got {}", res.depth);
+        assert!(
+            res.normal.x > 0.8,
+            "box→capsule normal +X, got {:?}",
+            res.normal
+        );
+        assert!(
+            (res.depth - 0.2).abs() < 0.05,
+            "depth ~0.2, got {}",
+            res.depth
+        );
     }
 
     #[test]
@@ -1499,7 +1895,11 @@ mod tests {
         let hit = test_collision(Vector3::ZERO, &cyl, Vector3::new(1.5, 0.0, 0.0), &cyl);
         assert!(hit.colliding, "overlapping cylinders should collide");
         assert!(hit.normal.x.abs() > 0.8);
-        assert!((hit.depth - 0.5).abs() < 0.1, "depth ~0.5, got {}", hit.depth);
+        assert!(
+            (hit.depth - 0.5).abs() < 0.1,
+            "depth ~0.5, got {}",
+            hit.depth
+        );
 
         let miss = test_collision(Vector3::ZERO, &cyl, Vector3::new(2.5, 0.0, 0.0), &cyl);
         assert!(!miss.colliding);
@@ -1524,8 +1924,16 @@ mod tests {
             &b,
         );
         assert!(res.colliding);
-        assert!((res.depth - 0.5).abs() < 0.05, "gjk depth ~0.5, got {}", res.depth);
-        assert!(res.normal.x.abs() > 0.9, "gjk normal ~X, got {:?}", res.normal);
+        assert!(
+            (res.depth - 0.5).abs() < 0.05,
+            "gjk depth ~0.5, got {}",
+            res.depth
+        );
+        assert!(
+            res.normal.x.abs() > 0.9,
+            "gjk normal ~X, got {:?}",
+            res.normal
+        );
     }
 
     // -- Convex hull geometry + concave trimesh (pat-u3l8c.56) ---------------
@@ -1560,7 +1968,10 @@ mod tests {
         let sphere = Shape3D::Sphere { radius: 1.0 };
         // Sphere centre at x=1.5 overlaps the hull face at x=1 by 0.5.
         let res = test_collision(Vector3::ZERO, &cube, Vector3::new(1.5, 0.0, 0.0), &sphere);
-        assert!(res.colliding, "populated convex hull should collide with sphere");
+        assert!(
+            res.colliding,
+            "populated convex hull should collide with sphere"
+        );
         assert!(res.depth > 0.0);
     }
 
@@ -1579,19 +1990,29 @@ mod tests {
     fn trimesh_vs_sphere_collides() {
         let floor = Shape3D::ConcavePolygonShape {
             faces: floor_faces(),
+            backface_collision: false,
         };
         let sphere = Shape3D::Sphere { radius: 0.5 };
         // Sphere centre at y=0.4 dips 0.1 into the floor.
         let res = test_collision(Vector3::ZERO, &floor, Vector3::new(0.0, 0.4, 0.0), &sphere);
         assert!(res.colliding, "sphere resting on trimesh should collide");
-        assert!((res.depth - 0.1).abs() < 1e-4, "depth ~0.1, got {}", res.depth);
-        assert!(res.normal.y > 0.9, "normal up toward sphere, got {:?}", res.normal);
+        assert!(
+            (res.depth - 0.1).abs() < 1e-4,
+            "depth ~0.1, got {}",
+            res.depth
+        );
+        assert!(
+            res.normal.y > 0.9,
+            "normal up toward sphere, got {:?}",
+            res.normal
+        );
     }
 
     #[test]
     fn trimesh_vs_sphere_misses_when_above() {
         let floor = Shape3D::ConcavePolygonShape {
             faces: floor_faces(),
+            backface_collision: false,
         };
         let sphere = Shape3D::Sphere { radius: 0.5 };
         let res = test_collision(Vector3::ZERO, &floor, Vector3::new(0.0, 2.0, 0.0), &sphere);
@@ -1603,6 +2024,7 @@ mod tests {
         // Sphere as shape A, trimesh as B: normal must follow the A→B convention.
         let floor = Shape3D::ConcavePolygonShape {
             faces: floor_faces(),
+            backface_collision: false,
         };
         let sphere = Shape3D::Sphere { radius: 0.5 };
         let res = test_collision(Vector3::new(0.0, 0.4, 0.0), &sphere, Vector3::ZERO, &floor);
@@ -1618,6 +2040,7 @@ mod tests {
     fn trimesh_vs_capsule_collides() {
         let floor = Shape3D::ConcavePolygonShape {
             faces: floor_faces(),
+            backface_collision: false,
         };
         let capsule = Shape3D::CapsuleShape {
             radius: 0.5,
@@ -1633,6 +2056,7 @@ mod tests {
     fn trimesh_vs_capsule_misses_when_above() {
         let floor = Shape3D::ConcavePolygonShape {
             faces: floor_faces(),
+            backface_collision: false,
         };
         let capsule = Shape3D::CapsuleShape {
             radius: 0.5,
@@ -1641,6 +2065,241 @@ mod tests {
         // Capsule high above: its lowest core point is y=2.5, well clear.
         let res = test_collision(Vector3::ZERO, &floor, Vector3::new(0.0, 3.0, 0.0), &capsule);
         assert!(!res.colliding);
+    }
+
+    // --- pat-0q2kx.119: concave vs every convex shape, heightmap, ray. ------
+
+    fn trimesh_floor(backface: bool) -> Shape3D {
+        Shape3D::ConcavePolygonShape {
+            faces: floor_faces(),
+            backface_collision: backface,
+        }
+    }
+
+    #[test]
+    fn godot_face_normal_matches_plane_winding() {
+        // `floor_faces()` is wound so Godot's `Plane(a, b, c)` normal points up,
+        // the opposite sign from the raw (b-a)×(c-a) cross product.
+        let f = floor_faces();
+        let n = godot_face_normal(f[0], f[1], f[2]).expect("non-degenerate");
+        assert!(n.y > 0.99, "front face must point up, got {n:?}");
+        let raw = triangle_normal(f[0], f[1], f[2]);
+        assert!(raw.y < -0.99, "raw cross product points the other way");
+        // Degenerate triangles are rejected rather than yielding a bogus axis.
+        let p = Vector3::new(1.0, 2.0, 3.0);
+        assert!(godot_face_normal(p, p, p).is_none());
+    }
+
+    #[test]
+    fn trimesh_vs_box_collides() {
+        let floor = trimesh_floor(false);
+        let cube = Shape3D::BoxShape {
+            half_extents: Vector3::new(0.5, 0.5, 0.5),
+        };
+        // Box centre at y=0.4 ⇒ its underside dips 0.1 below the floor.
+        let res = test_collision(Vector3::ZERO, &floor, Vector3::new(0.0, 0.4, 0.0), &cube);
+        assert!(res.colliding, "box resting on trimesh must collide");
+        assert!(
+            (res.depth - 0.1).abs() < 1e-4,
+            "depth ~0.1, got {}",
+            res.depth
+        );
+        assert!(
+            res.normal.y > 0.99,
+            "normal must push the box up, got {:?}",
+            res.normal
+        );
+    }
+
+    #[test]
+    fn trimesh_vs_box_misses_beyond_the_soup() {
+        let floor = trimesh_floor(false);
+        let cube = Shape3D::BoxShape {
+            half_extents: Vector3::new(0.5, 0.5, 0.5),
+        };
+        // Below the plane's height but far outside the triangles' extent: the
+        // plane test alone would report a hit, the per-triangle test must not.
+        let res = test_collision(Vector3::ZERO, &floor, Vector3::new(20.0, 0.4, 0.0), &cube);
+        assert!(!res.colliding, "a box off the end of the soup must not hit");
+    }
+
+    #[test]
+    fn trimesh_vs_cylinder_and_convex_collide() {
+        let floor = trimesh_floor(false);
+        let cylinder = Shape3D::CylinderShape {
+            radius: 0.5,
+            height: 1.0,
+        };
+        let res = test_collision(
+            Vector3::ZERO,
+            &floor,
+            Vector3::new(0.0, 0.4, 0.0),
+            &cylinder,
+        );
+        assert!(res.colliding, "cylinder on trimesh must collide");
+        assert!(res.normal.y > 0.99, "got {:?}", res.normal);
+
+        let hull = Shape3D::ConvexPolygonShape {
+            points: vec![
+                Vector3::new(-0.5, -0.5, -0.5),
+                Vector3::new(0.5, -0.5, -0.5),
+                Vector3::new(0.5, -0.5, 0.5),
+                Vector3::new(-0.5, -0.5, 0.5),
+                Vector3::new(0.0, 0.5, 0.0),
+            ],
+        };
+        let res = test_collision(Vector3::ZERO, &floor, Vector3::new(0.0, 0.4, 0.0), &hull);
+        assert!(res.colliding, "convex hull on trimesh must collide");
+        assert!(res.normal.y > 0.99, "got {:?}", res.normal);
+    }
+
+    #[test]
+    fn trimesh_backface_flag_gates_contacts_from_behind() {
+        let cube = Shape3D::BoxShape {
+            half_extents: Vector3::new(0.5, 0.5, 0.5),
+        };
+        // Box centre below the floor ⇒ approaching the face from behind.
+        let below = Vector3::new(0.0, -0.4, 0.0);
+        let front_only = test_collision(Vector3::ZERO, &trimesh_floor(false), below, &cube);
+        assert!(
+            !front_only.colliding,
+            "backface_collision=false must ignore a contact from behind"
+        );
+
+        let two_sided = test_collision(Vector3::ZERO, &trimesh_floor(true), below, &cube);
+        assert!(
+            two_sided.colliding,
+            "backface_collision=true must report the same contact"
+        );
+        assert!(
+            two_sided.normal.y < -0.99,
+            "the rear contact pushes the box down, got {:?}",
+            two_sided.normal
+        );
+    }
+
+    #[test]
+    fn heightmap_vs_box_rests_at_the_sampled_height() {
+        // 4x4 grid, flat at y=2, spanning x,z ∈ [-1.5, 1.5].
+        let terrain = Shape3D::HeightMapShape {
+            map_width: 4,
+            map_depth: 4,
+            map_data: vec![2.0; 16],
+        };
+        let cube = Shape3D::BoxShape {
+            half_extents: Vector3::new(0.5, 0.5, 0.5),
+        };
+        // Centre at 2.4 ⇒ underside 1.9, i.e. 0.1 into the surface.
+        let res = test_collision(Vector3::ZERO, &terrain, Vector3::new(0.0, 2.4, 0.0), &cube);
+        assert!(res.colliding, "box must rest on the heightmap surface");
+        assert!(
+            (res.depth - 0.1).abs() < 1e-4,
+            "depth ~0.1, got {}",
+            res.depth
+        );
+        assert!(res.normal.y > 0.99, "got {:?}", res.normal);
+
+        // Well above the surface: no contact.
+        let clear = test_collision(Vector3::ZERO, &terrain, Vector3::new(0.0, 5.0, 0.0), &cube);
+        assert!(!clear.colliding);
+        // Off the edge of the grid: no contact either.
+        let outside = test_collision(Vector3::ZERO, &terrain, Vector3::new(9.0, 2.4, 0.0), &cube);
+        assert!(!outside.colliding);
+    }
+
+    #[test]
+    fn heightmap_contact_follows_its_height_data() {
+        // Two identical grids that differ only in `map_data`: the contact must
+        // move with the sampled heights, not sit at y=0 or at the AABB.
+        let low = Shape3D::HeightMapShape {
+            map_width: 4,
+            map_depth: 4,
+            map_data: vec![0.0; 16],
+        };
+        let high = Shape3D::HeightMapShape {
+            map_width: 4,
+            map_depth: 4,
+            map_data: vec![3.0; 16],
+        };
+        let cube = Shape3D::BoxShape {
+            half_extents: Vector3::new(0.5, 0.5, 0.5),
+        };
+        let at = Vector3::new(0.0, 0.4, 0.0);
+
+        let res = test_collision(Vector3::ZERO, &low, at, &cube);
+        assert!(res.colliding, "box must rest on the y=0 grid");
+        assert!((res.depth - 0.1).abs() < 1e-4, "got {}", res.depth);
+
+        // The same box is entirely *under* the 3.0-high grid, i.e. behind its
+        // (upward) front faces — which the heightmap ignores, as Godot does.
+        let res = test_collision(Vector3::ZERO, &high, at, &cube);
+        assert!(
+            !res.colliding,
+            "a box beneath the raised grid must not be caught by it"
+        );
+
+        // Raised to match, it rests on the high grid instead.
+        let res = test_collision(Vector3::ZERO, &high, Vector3::new(0.0, 3.4, 0.0), &cube);
+        assert!(res.colliding, "box must rest on the y=3 grid");
+        assert!((res.depth - 0.1).abs() < 1e-4, "got {}", res.depth);
+    }
+
+    #[test]
+    fn separation_ray_hits_and_respects_slide_on_slope() {
+        // Ray runs along local +Z (Godot's axis) for 2 units, into a box.
+        let ray_at = Vector3::new(0.0, 0.0, -1.0);
+        let target = Shape3D::BoxShape {
+            half_extents: Vector3::new(1.0, 1.0, 1.0),
+        };
+
+        let forced = Shape3D::SeparationRayShape {
+            length: 2.0,
+            slide_on_slope: false,
+        };
+        let res = test_collision(ray_at, &forced, Vector3::ZERO, &target);
+        assert!(res.colliding, "a ray reaching into the box must collide");
+        assert!(
+            res.normal.z > 0.99,
+            "without slide_on_slope the recovery follows the ray axis, got {:?}",
+            res.normal
+        );
+        // Tip at z=1.0, box near face at z=-1.0 ⇒ 2.0 units of penetration.
+        assert!((res.depth - 2.0).abs() < 1e-4, "got {}", res.depth);
+
+        let sliding = Shape3D::SeparationRayShape {
+            length: 2.0,
+            slide_on_slope: true,
+        };
+        let res = test_collision(ray_at, &sliding, Vector3::ZERO, &target);
+        assert!(res.colliding);
+
+        // A ray that stops short of the box does not collide either way.
+        let short = Shape3D::SeparationRayShape {
+            length: 0.1,
+            slide_on_slope: false,
+        };
+        let res = test_collision(Vector3::new(0.0, 0.0, -3.0), &short, Vector3::ZERO, &target);
+        assert!(!res.colliding, "a short ray must not reach the box");
+    }
+
+    #[test]
+    fn separation_ray_normal_flips_with_argument_order() {
+        let ray = Shape3D::SeparationRayShape {
+            length: 2.0,
+            slide_on_slope: false,
+        };
+        let target = Shape3D::BoxShape {
+            half_extents: Vector3::new(1.0, 1.0, 1.0),
+        };
+        let ab = test_collision(Vector3::new(0.0, 0.0, -1.0), &ray, Vector3::ZERO, &target);
+        let ba = test_collision(Vector3::ZERO, &target, Vector3::new(0.0, 0.0, -1.0), &ray);
+        assert!(ab.colliding && ba.colliding);
+        assert!(
+            (ab.normal + ba.normal).length() < 1e-4,
+            "A→B convention: {:?} vs {:?}",
+            ab.normal,
+            ba.normal
+        );
     }
 
     #[test]

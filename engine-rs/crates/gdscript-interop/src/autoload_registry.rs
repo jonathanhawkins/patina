@@ -74,7 +74,10 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_autoloads();
 
-        assert!(!is_autoload("Global"), "unregistered name is not an autoload");
+        assert!(
+            !is_autoload("Global"),
+            "unregistered name is not an autoload"
+        );
 
         register_autoload("Global");
         assert!(is_autoload("Global"));
@@ -95,7 +98,10 @@ mod tests {
         register_autoload("Global");
         register_autoload("Global");
 
-        assert_eq!(autoload_names(), vec!["Global".to_string(), "Music".to_string()]);
+        assert_eq!(
+            autoload_names(),
+            vec!["Global".to_string(), "Music".to_string()]
+        );
 
         clear_autoloads();
         assert!(autoload_names().is_empty(), "clear empties the table");

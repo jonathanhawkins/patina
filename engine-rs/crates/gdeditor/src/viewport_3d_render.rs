@@ -502,6 +502,13 @@ pub struct SceneLight3D {
     /// sets this false: the light draws its sky sun disc but adds no surface
     /// lighting (the complement of [`sky`](Self::sky)).
     pub affects_scene: bool,
+    /// Godot `Light3D.editor_only`: the light shades the **editor viewport**
+    /// but contributes nothing to a running game (pat-0q2kx.110).
+    ///
+    /// Kept as a flag rather than filtered at collection time because the same
+    /// snapshot feeds both paths — the editor keeps these lights and only
+    /// [`strip_editor_only_items`] (the Play path) drops them.
+    pub editor_only: bool,
 }
 
 /// Collects the scene's `DirectionalLight3D` nodes in tree order (capped at 4,
@@ -592,6 +599,7 @@ fn scene_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
             // Only directional lights draw a sky sun disc.
             sky: false,
             affects_scene: true,
+            editor_only: bool_prop_3d_render(tree, nid, "editor_only"),
         });
         positional += 1;
     }
@@ -649,6 +657,7 @@ fn scene_directional_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
             // draws the disc but does not shade the scene; LIGHT_AND_SKY (0) both.
             sky: sky_mode != 1,
             affects_scene: sky_mode != 2,
+            editor_only: bool_prop_3d_render(tree, nid, "editor_only"),
         });
         if lights.len() >= 4 {
             break;
@@ -1686,6 +1695,10 @@ fn is_editor_only_marker(item: &Render3DItem) -> bool {
 /// [`render_game_3d_frame`].
 pub fn strip_editor_only_items(inputs: &mut Editor3DRenderInputs) {
     inputs.items.retain(|item| !is_editor_only_marker(item));
+    // `Light3D.editor_only` lights light the editor viewport but must not reach
+    // a game frame (pat-0q2kx.110). Dropping them here rather than at collection
+    // is what lets one snapshot serve both paths.
+    inputs.scene_lights.retain(|light| !light.editor_only);
 }
 
 /// The render layers a spatial node is drawn on — `VisualInstance3D.layers`,

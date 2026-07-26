@@ -24,6 +24,14 @@ pub enum BodyType {
     Rigid,
 }
 
+/// Godot's default `physics/2d/time_before_sleep`.
+pub const DEFAULT_TIME_BEFORE_SLEEP: f32 = 0.5;
+/// Godot's default `physics/2d/sleep_threshold_linear`, in pixels per second.
+pub const DEFAULT_SLEEP_THRESHOLD_LINEAR: f32 = 2.0;
+/// Godot's default `physics/2d/sleep_threshold_angular`: 8° per second in
+/// radians (`servers/physics_2d/physics_server_2d.cpp:912`).
+pub const DEFAULT_SLEEP_THRESHOLD_ANGULAR: f32 = 8.0 * std::f32::consts::PI / 180.0;
+
 /// A 2D physics body with position, velocity, shape, and material properties.
 #[derive(Debug, Clone)]
 pub struct PhysicsBody2D {
@@ -90,6 +98,21 @@ pub struct PhysicsBody2D {
     pub sleeping: bool,
     /// Whether the body may auto-sleep when at rest (Godot `can_sleep`).
     pub can_sleep: bool,
+    /// Seconds a body must stay below the sleep thresholds before it falls
+    /// asleep (Godot's `ProjectSettings physics/2d/time_before_sleep`, default
+    /// 0.5 s) — pat-0q2kx.116.
+    pub time_before_sleep: f32,
+    /// Linear speed under which the body counts as still, in units per second
+    /// (`physics/2d/sleep_threshold_linear`, default 2.0). Per-body rather than
+    /// a module constant because the space reads it from ProjectSettings and
+    /// stamps it onto its bodies (`godot_space_2d.cpp:1220`).
+    pub sleep_threshold_linear: f32,
+    /// Angular speed under which the body counts as still, in radians per
+    /// second (`physics/2d/sleep_threshold_angular`, default 8°/s).
+    pub sleep_threshold_angular: f32,
+    /// How long this body has been continuously below the sleep thresholds.
+    /// Reset by any wake.
+    sleep_timer: f32,
     /// Constant surface linear velocity this body imparts to contacts (Godot
     /// `StaticBody2D.constant_linear_velocity` — conveyor belts). Does not move
     /// the body itself; drags contacting bodies via friction.
@@ -132,6 +155,10 @@ impl PhysicsBody2D {
             freeze: false,
             lock_rotation: false,
             sleeping: false,
+            time_before_sleep: DEFAULT_TIME_BEFORE_SLEEP,
+            sleep_threshold_linear: DEFAULT_SLEEP_THRESHOLD_LINEAR,
+            sleep_threshold_angular: DEFAULT_SLEEP_THRESHOLD_ANGULAR,
+            sleep_timer: 0.0,
             can_sleep: true,
             constant_linear_velocity: Vector2::ZERO,
             constant_angular_velocity: 0.0,
@@ -149,8 +176,7 @@ impl PhysicsBody2D {
         let r = world_point - self.position;
         // In 2D the angular velocity ω about the center gives a tangential
         // velocity ω × r = ω · (−r.y, r.x).
-        self.constant_linear_velocity
-            + Vector2::new(-r.y, r.x) * self.constant_angular_velocity
+        self.constant_linear_velocity + Vector2::new(-r.y, r.x) * self.constant_angular_velocity
     }
 
     /// Sets the gravity scale multiplier (Godot `gravity_scale`) for this body.
@@ -171,7 +197,46 @@ impl PhysicsBody2D {
     /// Applies a continuous force (acceleration = force / mass) for the current step.
     ///
     /// Has no effect on static or kinematic bodies.
+    /// Wakes the body and restarts its sleep countdown (Godot's implicit wake
+    /// on any impulse, force, or contact) — pat-0q2kx.116.
+    ///
+    /// Every mutation that adds energy must call this. Before this existed
+    /// nothing in the engine ever cleared `sleeping`, so a body that fell
+    /// asleep could never be woken by gameplay again.
+    pub fn wake(&mut self) {
+        self.sleeping = false;
+        self.sleep_timer = 0.0;
+    }
+
+    /// Advances the sleep countdown by `dt` and puts the body to sleep once it
+    /// has been below both thresholds for `time_before_sleep`.
+    ///
+    /// ⚠️ The countdown is what makes this correct. Sleeping the instant the
+    /// speed dips below the threshold freezes a ball at the apex of its arc —
+    /// where velocity legitimately passes through zero — and it hangs in the
+    /// air forever. Only *sustained* stillness may sleep a body.
+    fn update_sleep(&mut self, dt: f32) {
+        if !self.can_sleep {
+            self.sleep_timer = 0.0;
+            return;
+        }
+        let linear_limit = self.sleep_threshold_linear;
+        let still = self.linear_velocity.length_squared() < linear_limit * linear_limit
+            && self.angular_velocity.abs() < self.sleep_threshold_angular;
+        if still {
+            self.sleep_timer += dt;
+            if self.sleep_timer >= self.time_before_sleep {
+                self.sleeping = true;
+                self.linear_velocity = Vector2::ZERO;
+                self.angular_velocity = 0.0;
+            }
+        } else {
+            self.sleep_timer = 0.0;
+        }
+    }
+
     pub fn apply_force(&mut self, force: Vector2) {
+        self.wake();
         if self.body_type == BodyType::Rigid {
             self.accumulated_force = self.accumulated_force + force;
         }
@@ -181,9 +246,22 @@ impl PhysicsBody2D {
     ///
     /// Has no effect on static or kinematic bodies.
     pub fn apply_impulse(&mut self, impulse: Vector2) {
+        self.wake();
         if self.body_type == BodyType::Rigid && self.mass > 0.0 {
             self.linear_velocity = self.linear_velocity + impulse * (1.0 / self.mass);
         }
+    }
+
+    /// Godot's `RigidBody2D.apply_central_impulse` — an impulse through the
+    /// centre of mass, imparting no spin.
+    ///
+    /// The same thing [`apply_impulse`](Self::apply_impulse) already did, under
+    /// the name Godot (and [`crate::body3d`]'s 3D twin) uses. Scripts and tests
+    /// reaching for the documented API name were hitting a missing method
+    /// (pat-0q2kx.116); the off-centre form is
+    /// [`apply_impulse_at_point`](Self::apply_impulse_at_point).
+    pub fn apply_central_impulse(&mut self, impulse: Vector2) {
+        self.apply_impulse(impulse);
     }
 
     /// Returns the body's moment of inertia about its center of mass, derived
@@ -263,6 +341,7 @@ impl PhysicsBody2D {
     ///
     /// `point` is relative to the body's position (its origin).
     pub fn apply_impulse_at_point(&mut self, impulse: Vector2, point: Vector2) {
+        self.wake();
         if self.body_type != BodyType::Rigid {
             return;
         }
@@ -304,19 +383,30 @@ impl PhysicsBody2D {
     ///
     /// [`gravity_scale`]: Self::gravity_scale
     pub fn integrate(&mut self, dt: f32, gravity: Vector2) {
-        // A frozen or sleeping body does not simulate (Godot `RigidBody2D.freeze`
-        // / `sleeping`): it holds its position and velocity until unfrozen/woken.
+        self.integrate_forces(dt, gravity);
+        self.integrate_velocities(dt);
+    }
+
+    /// Godot's `integrate_forces`: damping, gravity and the accumulated
+    /// force/torque go into the **velocity**. The transform is not touched.
+    ///
+    /// Split out from [`integrate`](Self::integrate) so the world can run the
+    /// contact solver *between* the two halves, exactly as Godot does
+    /// (`godot_step_2d.cpp`: `integrate_forces` → `setup` → `solve` →
+    /// `integrate_velocities`). Ordering is not cosmetic here: advancing the
+    /// transform before the solver hands every resting body a full tick of
+    /// gravity displacement that the solver can then only cancel *next* tick,
+    /// which is precisely the sink a box stack shows (pat-0q2kx.116).
+    pub fn integrate_forces(&mut self, dt: f32, gravity: Vector2) {
         if self.freeze || self.sleeping {
             return;
         }
         match self.body_type {
             BodyType::Static => {}
             BodyType::Kinematic => {
-                self.position = self.position + self.linear_velocity * dt;
                 if self.lock_rotation {
                     self.angular_velocity = 0.0;
                 }
-                self.rotation += self.angular_velocity * dt;
             }
             BodyType::Rigid => {
                 // Apply damping to the existing velocity before integrating
@@ -341,12 +431,60 @@ impl PhysicsBody2D {
                 if self.lock_rotation {
                     self.angular_velocity = 0.0;
                 }
-                self.position = self.position + self.linear_velocity * dt;
-                self.rotation += self.angular_velocity * dt;
                 self.accumulated_force = Vector2::ZERO;
                 self.accumulated_torque = 0.0;
             }
         }
+    }
+
+    /// Godot's `integrate_velocities`: advances the transform by the (already
+    /// solved) velocity, plus any depenetration pseudo-velocity the contact
+    /// solver produced, then runs the sleep countdown.
+    ///
+    /// `bias_linear`/`bias_angular` move the transform and are then discarded by
+    /// the caller — that is what lets an overlap be pushed apart without the
+    /// push showing up as kinetic energy next tick.
+    pub fn integrate_velocities_biased(
+        &mut self,
+        dt: f32,
+        bias_linear: Vector2,
+        bias_angular: f32,
+    ) {
+        if self.freeze || self.sleeping {
+            return;
+        }
+        match self.body_type {
+            BodyType::Static => {}
+            BodyType::Kinematic => {
+                self.position = self.position + self.linear_velocity * dt;
+                self.rotation += self.angular_velocity * dt;
+            }
+            BodyType::Rigid => {
+                // `lock_rotation` is re-applied here, not only in
+                // `integrate_forces`: the contact solver now runs *between* the
+                // two halves and will happily hand a locked body angular
+                // velocity, which the old single-pass `integrate` never had to
+                // guard against (pat-0q2kx.116).
+                let angular = if self.lock_rotation {
+                    self.angular_velocity = 0.0;
+                    0.0
+                } else {
+                    self.angular_velocity + bias_angular
+                };
+                self.position = self.position + (self.linear_velocity + bias_linear) * dt;
+                self.rotation += angular * dt;
+                // Only a DYNAMIC body sleeps: static bodies never move and a
+                // kinematic one is driven by its owner, so neither has a
+                // meaningful idle state (pat-0q2kx.116).
+                self.update_sleep(dt);
+            }
+        }
+    }
+
+    /// [`integrate_velocities_biased`](Self::integrate_velocities_biased) with
+    /// no depenetration term — the plain second half of [`integrate`].
+    pub fn integrate_velocities(&mut self, dt: f32) {
+        self.integrate_velocities_biased(dt, Vector2::ZERO, 0.0);
     }
 }
 
@@ -381,7 +519,11 @@ mod tests {
         let mut asleep = make();
         asleep.sleeping = true;
         asleep.integrate(1.0, gravity);
-        assert_eq!(asleep.position, Vector2::ZERO, "sleeping body must not move");
+        assert_eq!(
+            asleep.position,
+            Vector2::ZERO,
+            "sleeping body must not move"
+        );
 
         // lock_rotation: angular velocity is zeroed and rotation stays fixed,
         // but linear integration still runs.
@@ -390,9 +532,15 @@ mod tests {
         locked.angular_velocity = 3.0;
         locked.linear_velocity = Vector2::new(2.0, 0.0);
         locked.integrate(1.0, Vector2::ZERO);
-        assert_eq!(locked.angular_velocity, 0.0, "lock_rotation zeroes angular velocity");
+        assert_eq!(
+            locked.angular_velocity, 0.0,
+            "lock_rotation zeroes angular velocity"
+        );
         assert_eq!(locked.rotation, 0.0, "lock_rotation keeps rotation fixed");
-        assert_eq!(locked.position.x, 2.0, "linear motion still runs when rotation is locked");
+        assert_eq!(
+            locked.position.x, 2.0,
+            "linear motion still runs when rotation is locked"
+        );
 
         // A normal awake, unlocked body still rotates and falls.
         let mut normal = make();
@@ -446,7 +594,10 @@ mod tests {
         );
         both.constant_linear_velocity = Vector2::new(0.0, 4.0);
         both.constant_angular_velocity = 2.0;
-        assert_eq!(both.surface_velocity_at(both.position), Vector2::new(0.0, 4.0));
+        assert_eq!(
+            both.surface_velocity_at(both.position),
+            Vector2::new(0.0, 4.0)
+        );
 
         // Defaults impart no surface motion.
         let still = make();
@@ -590,7 +741,10 @@ mod tests {
         for _ in 0..10 {
             body.integrate(1.0 / 60.0, g);
         }
-        assert!(body.position.y.abs() < 1e-6, "gravity_scale=0 must not fall");
+        assert!(
+            body.position.y.abs() < 1e-6,
+            "gravity_scale=0 must not fall"
+        );
         assert!(body.linear_velocity.y.abs() < 1e-6);
     }
 

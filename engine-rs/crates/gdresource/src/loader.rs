@@ -757,12 +757,23 @@ fn parse_dictionary(s: &str) -> EngineResult<Variant> {
     Ok(Variant::Dictionary(map))
 }
 
-/// Parses a `PackedByteArray` body (e.g. `"1, 2, 3"` or `""`) — elements must
-/// be in `0..=255`.
+/// Parses a `PackedByteArray` body in either form Godot writes.
+///
+/// Godot 4 serializes a byte array as `PackedByteArray("<base64>")`
+/// (`core/variant/variant_parser.cpp` `VariantWriter::write`, the non-`p_compat`
+/// branch) and only falls back to `PackedByteArray(1, 2, 3)` in compatibility
+/// mode. Patina understood the compat form only, which meant any real
+/// Godot-authored byte array — `TileMapLayer.tile_map_data` above all — failed
+/// to parse (pat-0q2kx.108). Both are accepted here; the quoted form is base64.
 fn parse_packed_byte_array(s: &str) -> EngineResult<Variant> {
     let s = s.trim();
     if s.is_empty() {
         return Ok(Variant::PackedByteArray(Vec::new()));
+    }
+    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        return base64_decode(&s[1..s.len() - 1])
+            .map(Variant::PackedByteArray)
+            .ok_or_else(|| EngineError::Parse(format!("invalid base64 in PackedByteArray: {s}")));
     }
     let parts = split_args(s);
     let mut result = Vec::with_capacity(parts.len());
@@ -775,6 +786,52 @@ fn parse_packed_byte_array(s: &str) -> EngineResult<Variant> {
         result.push(b);
     }
     Ok(Variant::PackedByteArray(result))
+}
+
+/// Decodes standard base64 (RFC 4648, `+/` alphabet, optional `=` padding).
+///
+/// Returns `None` on any character outside the alphabet or a length that cannot
+/// form whole bytes. Whitespace is skipped, since a long `tile_map_data` line
+/// can be wrapped by an editor.
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    const INVALID: u8 = 0xFF;
+    fn sextet(c: u8) -> u8 {
+        match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => INVALID,
+        }
+    }
+
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for c in s.bytes() {
+        if c.is_ascii_whitespace() || c == b'=' {
+            continue;
+        }
+        let v = sextet(c);
+        if v == INVALID {
+            return None;
+        }
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            // Drop the consumed bits so `acc` can never overflow on a long
+            // payload — a debug build would panic on the shift otherwise.
+            acc &= (1u32 << bits) - 1;
+        }
+    }
+    // Leftover bits must be zero padding, never a truncated byte.
+    if bits >= 6 || (acc & ((1 << bits) - 1)) != 0 {
+        return None;
+    }
+    Some(out)
 }
 
 /// Parses a `PackedInt32Array` body into `Variant::PackedInt32Array`.
@@ -1112,6 +1169,53 @@ mod tests {
         let typed = parse_variant_value("Array[int]([1, 2, 3])").unwrap();
         let plain = parse_variant_value("[1, 2, 3]").unwrap();
         assert_eq!(typed, plain);
+    }
+
+    /// pat-0q2kx.108 — a `PackedByteArray` parses in *both* forms Godot writes.
+    ///
+    /// Godot 4's text writer emits `PackedByteArray("<base64>")` and only falls
+    /// back to the comma-separated byte list in compatibility mode. Patina read
+    /// the compat form only, so every real Godot byte array — a
+    /// `TileMapLayer.tile_map_data` above all — was dropped as unparseable.
+    #[test]
+    fn tscn_parses_packed_byte_array_in_both_forms() {
+        // "Hi!" — 3 bytes, so the base64 carries one '=' of padding.
+        assert_eq!(
+            parse_variant_value(r#"PackedByteArray("SGkh")"#).unwrap(),
+            Variant::PackedByteArray(vec![72, 105, 33])
+        );
+        // The compat form still works, and both agree on the same bytes.
+        assert_eq!(
+            parse_variant_value("PackedByteArray(72, 105, 33)").unwrap(),
+            Variant::PackedByteArray(vec![72, 105, 33])
+        );
+        // Every padding length round-trips: 1, 2 and 3 bytes exercise the
+        // "==", "=" and no-padding cases.
+        for (encoded, bytes) in [
+            (r#"PackedByteArray("AA==")"#, vec![0u8]),
+            (r#"PackedByteArray("//8=")"#, vec![255, 255]),
+            (r#"PackedByteArray("AAEC")"#, vec![0, 1, 2]),
+        ] {
+            assert_eq!(
+                parse_variant_value(encoded).unwrap(),
+                Variant::PackedByteArray(bytes),
+                "failed on {encoded}"
+            );
+        }
+        // Empty stays empty in both spellings.
+        assert_eq!(
+            parse_variant_value("PackedByteArray()").unwrap(),
+            Variant::PackedByteArray(Vec::new())
+        );
+        assert_eq!(
+            parse_variant_value(r#"PackedByteArray("")"#).unwrap(),
+            Variant::PackedByteArray(Vec::new())
+        );
+        // A character outside the alphabet is an error, not silently-dropped
+        // data — a truncated `tile_map_data` would lose cells invisibly.
+        assert!(parse_variant_value(r#"PackedByteArray("AA*A")"#).is_err());
+        // A lone leftover sextet cannot form a byte.
+        assert!(parse_variant_value(r#"PackedByteArray("A")"#).is_err());
     }
 
     /// pat-nzgdu.78 — an int-vector literal keeps its INTEGER type.

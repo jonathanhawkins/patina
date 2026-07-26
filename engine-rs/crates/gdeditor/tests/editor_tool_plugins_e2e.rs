@@ -287,11 +287,7 @@ fn toggle_accepts_name_folder_or_cfg_path() {
     let dir = fixture_project();
     let (handle, port) = serve(dir.path());
 
-    for ident in [
-        "hello",
-        "res://addons/hello/plugin.cfg",
-        "Hello",
-    ] {
+    for ident in ["hello", "res://addons/hello/plugin.cfg", "Hello"] {
         let on = json_of(&http_post(
             port,
             "/api/plugins/toggle",
@@ -361,6 +357,58 @@ func _process(delta):
         seen,
         "the editor idle frame must tick a @tool _process:\n{}",
         logs(port)
+    );
+    handle.stop();
+}
+
+/// pat-0q2kx.121 — a `@tool` script running in the editor sees
+/// `Engine.is_editor_hint() == true`.
+///
+/// `set_engine_editor_hint` existed with zero real callers, so the flag was
+/// stuck at its `false` initialiser and every `@tool` script took its *runtime*
+/// branch while editing — the exact opposite of what the annotation means.
+#[test]
+fn tool_script_sees_editor_hint_in_edit_mode() {
+    let dir = fixture_project();
+    let root = dir.path();
+    std::fs::write(
+        root.join("tool_node.gd"),
+        r#"@tool
+extends Node2D
+
+func _ready():
+    if Engine.is_editor_hint():
+        print("tool node sees editor hint")
+    else:
+        print("tool node sees runtime hint")
+"#,
+    )
+    .unwrap();
+
+    let (handle, port) = serve(root);
+    let loaded = json_of(&http_post(
+        port,
+        "/api/scene/load",
+        &format!(r#"{{"path":"{}"}}"#, json_path(&root.join("main.tscn"))),
+    ));
+    assert_eq!(loaded["ok"], true, "scene load failed: {loaded}");
+
+    let mut seen = false;
+    for _ in 0..40 {
+        if logs(port).contains("tool node sees editor hint") {
+            seen = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let out = logs(port);
+    assert!(
+        seen,
+        "a @tool script in the editor must see Engine.is_editor_hint() == true:\n{out}"
+    );
+    assert!(
+        !out.contains("tool node sees runtime hint"),
+        "the editor must not run a @tool script with the runtime hint:\n{out}"
     );
     handle.stop();
 }

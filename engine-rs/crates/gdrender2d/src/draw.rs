@@ -327,6 +327,62 @@ pub fn draw_texture_region(
     }
 }
 
+/// [`draw_texture_region`] with alpha blending (source-over).
+///
+/// The plain region draw **overwrites** each covered pixel, which is right for
+/// an opaque blit but wrong for a sprite: a transparent texel would punch a hole
+/// in whatever is already there rather than letting it show through. This is the
+/// variant a sprite needs once it samples a sub-rect — the region equivalent of
+/// [`draw_texture_rect_blended`] (pat-0q2kx.107).
+pub fn draw_texture_region_blended(
+    fb: &mut FrameBuffer,
+    texture: &Texture2D,
+    rect: Rect2,
+    source_rect: Rect2,
+    modulate: Color,
+) {
+    if texture.width == 0 || texture.height == 0 {
+        return;
+    }
+    if source_rect.size.x <= 0.0 || source_rect.size.y <= 0.0 {
+        return;
+    }
+    if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+        return;
+    }
+
+    let x_min = (rect.position.x as i32).max(0) as u32;
+    let y_min = (rect.position.y as i32).max(0) as u32;
+    let x_max = ((rect.position.x + rect.size.x) as i32)
+        .max(0)
+        .min(fb.width as i32) as u32;
+    let y_max = ((rect.position.y + rect.size.y) as i32)
+        .max(0)
+        .min(fb.height as i32) as u32;
+
+    for py in y_min..y_max {
+        for px in x_min..x_max {
+            let u = (px as f32 - rect.position.x) / rect.size.x;
+            let v = (py as f32 - rect.position.y) / rect.size.y;
+            let tx =
+                ((source_rect.position.x + u * source_rect.size.x) as u32).min(texture.width - 1);
+            let ty =
+                ((source_rect.position.y + v * source_rect.size.y) as u32).min(texture.height - 1);
+
+            let texel = texture.get_pixel(tx, ty);
+            let final_color = Color::new(
+                texel.r * modulate.r,
+                texel.g * modulate.g,
+                texel.b * modulate.b,
+                texel.a * modulate.a,
+            );
+            if final_color.a > 0.001 {
+                fb.blend_pixel(px, py, final_color);
+            }
+        }
+    }
+}
+
 /// Fills a rectangular region with alpha blending (source-over).
 pub fn fill_rect_blended(fb: &mut FrameBuffer, rect: Rect2, color: Color) {
     let x_min = (rect.position.x as i32).max(0) as u32;

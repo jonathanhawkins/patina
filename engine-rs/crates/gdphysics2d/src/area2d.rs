@@ -122,6 +122,28 @@ pub struct Area2D {
     /// Processing priority: higher-priority areas are applied first when
     /// combining overrides (Godot `priority`). Defaults to `0`.
     pub priority: i32,
+
+    // -- pat-0q2kx.112 -----------------------------------------------------
+    /// This area's own rotation, in radians.
+    ///
+    /// Overlap tests previously built a translation-only transform, so a
+    /// rotated area was tested as though it were axis-aligned — a 45° box
+    /// caught bodies it should have missed and missed ones it should have
+    /// caught.
+    pub rotation: f32,
+    /// Whether OTHER areas can detect this one (Godot `monitorable`).
+    ///
+    /// Distinct from [`monitoring`](Self::monitoring), which is whether *this*
+    /// area detects others. Godot gates area-vs-area overlap on the target
+    /// being monitorable.
+    pub monitorable: bool,
+    /// How this area overrides angular damping (Godot
+    /// `angular_damp_space_override`) — the rotational twin of
+    /// [`linear_damp_space_override`](Self::linear_damp_space_override).
+    pub angular_damp_space_override: AreaSpaceOverride,
+    /// Angular damping coefficient applied to bodies in this area
+    /// (Godot `angular_damp`). Defaults to `1.0`.
+    pub angular_damp: f32,
 }
 
 impl Area2D {
@@ -143,7 +165,17 @@ impl Area2D {
             linear_damp_space_override: AreaSpaceOverride::Disabled,
             linear_damp: 0.1,
             priority: 0,
+            rotation: 0.0,
+            // Godot's Area2D is monitorable by default.
+            monitorable: true,
+            angular_damp_space_override: AreaSpaceOverride::Disabled,
+            angular_damp: 1.0,
         }
+    }
+
+    /// This area's world transform, honouring its rotation (pat-0q2kx.112).
+    pub fn transform(&self) -> Transform2D {
+        Transform2D::from_rotation_origin(self.rotation, self.position)
     }
 
     /// Returns this area's gravity contribution at `body_pos`.
@@ -255,7 +287,7 @@ impl AreaStore {
                 continue;
             }
 
-            let tf_area = Transform2D::translated(area.position);
+            let tf_area = area.transform();
 
             for body in bodies.values() {
                 // Layer/mask filtering
@@ -263,7 +295,7 @@ impl AreaStore {
                     continue;
                 }
 
-                let tf_body = Transform2D::translated(body.position);
+                let tf_body = Transform2D::from_rotation_origin(body.rotation, body.position);
 
                 if let Some(result) =
                     collision::test_collision(&area.shape, &tf_area, &body.shape, &tf_body)
@@ -313,7 +345,7 @@ impl AreaStore {
     /// (`colliding && depth > 0`) so gravity/damp overrides and enter/exit
     /// events agree on what "inside" means.
     fn overlapping_areas_sorted(&self, body: &PhysicsBody2D) -> Vec<&Area2D> {
-        let tf_body = Transform2D::translated(body.position);
+        let tf_body = Transform2D::from_rotation_origin(body.rotation, body.position);
         let mut overlapping: Vec<&Area2D> = self
             .areas
             .values()
@@ -324,7 +356,7 @@ impl AreaStore {
                 if (area.collision_mask & body.collision_layer) == 0 {
                     return false;
                 }
-                let tf_area = Transform2D::translated(area.position);
+                let tf_area = area.transform();
                 matches!(
                     collision::test_collision(&area.shape, &tf_area, &body.shape, &tf_body),
                     Some(r) if r.colliding && r.depth > 0.0
@@ -385,6 +417,46 @@ impl AreaStore {
     ///
     /// `default_damp` is the baseline damping (typically the body's own
     /// `linear_damp`) added when no area stops the override chain.
+    /// The angular-damp equivalent of
+    /// [`compute_body_damp`](Self::compute_body_damp) (pat-0q2kx.112).
+    ///
+    /// Godot's `angular_damp_space_override` combines exactly as the linear one
+    /// does — same priority order, same Combine / CombineReplace / Replace /
+    /// ReplaceCombine semantics — it just feeds the body's *rotational* damping.
+    /// Patina had the linear half only, so an area could slow a body's travel
+    /// but never its spin.
+    pub fn compute_body_angular_damp(&self, body: &PhysicsBody2D, default_damp: f32) -> f32 {
+        let overlapping = self.overlapping_areas_sorted(body);
+        let mut damp = 0.0_f32;
+        let mut stopped = false;
+        for area in overlapping.iter().rev() {
+            match area.angular_damp_space_override {
+                AreaSpaceOverride::Disabled => continue,
+                AreaSpaceOverride::Combine => {
+                    damp += area.angular_damp;
+                }
+                AreaSpaceOverride::CombineReplace => {
+                    damp += area.angular_damp;
+                    stopped = true;
+                }
+                AreaSpaceOverride::Replace => {
+                    damp = area.angular_damp;
+                    stopped = true;
+                }
+                AreaSpaceOverride::ReplaceCombine => {
+                    damp = area.angular_damp;
+                }
+            }
+            if stopped {
+                break;
+            }
+        }
+        if !stopped {
+            damp += default_damp;
+        }
+        damp
+    }
+
     pub fn compute_body_damp(&self, body: &PhysicsBody2D, default_damp: f32) -> f32 {
         let overlapping = self.overlapping_areas_sorted(body);
         let mut damp = 0.0_f32;
@@ -423,6 +495,11 @@ impl AreaStore {
         self.areas.values().any(|a| {
             a.gravity_space_override != AreaSpaceOverride::Disabled
                 || a.linear_damp_space_override != AreaSpaceOverride::Disabled
+                // Angular counts too (pat-0q2kx.112). This gate short-circuits
+                // the whole override path, so omitting it would leave an area
+                // that declares ONLY an angular override doing nothing at all —
+                // the override would be computed correctly and never reached.
+                || a.angular_damp_space_override != AreaSpaceOverride::Disabled
         })
     }
 
@@ -436,6 +513,25 @@ impl AreaStore {
     /// [`detect_overlaps`](Self::detect_overlaps), pairs whose monitoring area
     /// stopped monitoring silently drop their previous state instead of firing
     /// an exit.
+    /// The bodies currently overlapping `area`, as of the last
+    /// [`detect_overlaps`](Self::detect_overlaps) (pat-0q2kx.112).
+    ///
+    /// Godot's `Area2D.get_overlapping_bodies()` answers from the space's live
+    /// overlap set rather than recomputing, so this reads the same set the
+    /// enter/exit signals were derived from — a script cannot see a different
+    /// answer from the one the signals just reported.
+    pub fn overlapping_bodies(&self, area: AreaId) -> Vec<BodyId> {
+        let mut ids: Vec<BodyId> = self
+            .previous_overlaps
+            .iter()
+            .filter(|(a, _)| *a == area)
+            .map(|(_, b)| *b)
+            .collect();
+        // The backing set is unordered; sort so a script sees a stable order.
+        ids.sort_by_key(|b| b.0);
+        ids
+    }
+
     pub fn detect_area_overlaps(&mut self) -> Vec<AreaOverlapEvent> {
         let mut current: HashSet<(AreaId, AreaId)> = HashSet::new();
         let mut events = Vec::new();
@@ -451,18 +547,24 @@ impl AreaStore {
             if !a.monitoring {
                 continue;
             }
-            let tf_a = Transform2D::translated(a.position);
+            let tf_a = a.transform();
             for b in self.areas.values() {
                 if a.id == b.id {
+                    continue;
+                }
+                // Godot gates area-vs-area detection on the TARGET being
+                // monitorable: `monitoring` is whether `a` looks, `monitorable`
+                // is whether `b` can be seen (`area_2d.cpp`). Without this an
+                // area opted out of detection by other areas was still found by
+                // every one of them (pat-0q2kx.112).
+                if !b.monitorable {
                     continue;
                 }
                 if (a.collision_mask & b.collision_layer) == 0 {
                     continue;
                 }
-                let tf_b = Transform2D::translated(b.position);
-                if let Some(result) =
-                    collision::test_collision(&a.shape, &tf_a, &b.shape, &tf_b)
-                {
+                let tf_b = b.transform();
+                if let Some(result) = collision::test_collision(&a.shape, &tf_a, &b.shape, &tf_b) {
                     if result.colliding && result.depth > 0.0 {
                         current.insert((a.id, b.id));
                     }
@@ -676,7 +778,10 @@ mod tests {
         area.gravity_point_unit_distance = 10.0;
         let near = area.compute_gravity(Vector2::new(5.0, 0.0)).length();
         let far = area.compute_gravity(Vector2::new(20.0, 0.0)).length();
-        assert!(near > far, "closer must be stronger: near={near}, far={far}");
+        assert!(
+            near > far,
+            "closer must be stronger: near={near}, far={far}"
+        );
     }
 
     #[test]
@@ -695,7 +800,11 @@ mod tests {
         let g = store.compute_body_gravity(&body, default_gravity);
         // Combine ⇒ area gravity + default: (0,200) + (0,980) = (0,1180).
         assert!(g.x.abs() < 1e-4);
-        assert!((g.y - 1180.0).abs() < 1e-3, "expected (0,1180), got {:?}", g);
+        assert!(
+            (g.y - 1180.0).abs() < 1e-3,
+            "expected (0,1180), got {:?}",
+            g
+        );
     }
 
     #[test]
@@ -747,7 +856,10 @@ mod tests {
         // Combine ⇒ area damp + default.
         store.get_area_mut(aid).unwrap().linear_damp_space_override = AreaSpaceOverride::Combine;
         let d2 = store.compute_body_damp(&body, 0.1);
-        assert!((d2 - 5.1).abs() < 1e-4, "Combine: 5.0 + 0.1 = 5.1, got {d2}");
+        assert!(
+            (d2 - 5.1).abs() < 1e-4,
+            "Combine: 5.0 + 0.1 = 5.1, got {d2}"
+        );
     }
 
     #[test]

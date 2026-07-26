@@ -59,6 +59,11 @@ pub struct CharacterBody2D {
     /// frame (Godot `get_platform_velocity`).
     pub platform_velocity: Vector2,
 
+    /// Grounded vs floating surface interpretation (pat-0q2kx.113).
+    pub motion_mode: MotionMode,
+    /// What to inherit when stepping off a moving platform (pat-0q2kx.113).
+    pub platform_on_leave: PlatformOnLeave,
+
     on_floor: bool,
     on_wall: bool,
     on_ceiling: bool,
@@ -66,6 +71,36 @@ pub struct CharacterBody2D {
     wall_normal: Vector2,
 
     slide_collisions: Vec<KinematicCollision2D>,
+}
+
+/// How `move_and_slide` interprets surfaces (Godot `CharacterBody2D.motion_mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MotionMode {
+    /// Godot `MOTION_MODE_GROUNDED` (default): surfaces are classified into
+    /// floor / wall / ceiling against `up_direction`, enabling snapping,
+    /// slope handling and `is_on_floor`.
+    #[default]
+    Grounded,
+    /// Godot `MOTION_MODE_FLOATING`: no up direction is privileged, so the body
+    /// slides along every surface alike and never reports floor/wall/ceiling.
+    /// This is the top-down / space-game mode.
+    Floating,
+}
+
+/// What happens to inherited platform velocity when the body leaves a moving
+/// platform (Godot `CharacterBody2D.platform_on_leave`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlatformOnLeave {
+    /// Godot `PLATFORM_ON_LEAVE_ADD_VELOCITY` (default): the platform's velocity
+    /// is added to the body when it steps off, so walking off a moving train
+    /// carries its momentum.
+    #[default]
+    AddVelocity,
+    /// `PLATFORM_ON_LEAVE_ADD_UPWARD_VELOCITY`: only the component along
+    /// `up_direction` is inherited.
+    AddUpwardVelocity,
+    /// `PLATFORM_ON_LEAVE_DO_NOTHING`: no velocity is inherited at all.
+    DoNothing,
 }
 
 /// Default maximum number of slide iterations per `move_and_slide` call.
@@ -77,6 +112,89 @@ const DEFAULT_FLOOR_MAX_ANGLE: f32 = std::f32::consts::FRAC_PI_4;
 /// Lateral-velocity threshold under which `floor_stop_on_slope` treats the body
 /// as having no player input (px/s).
 const STOP_ON_SLOPE_LATERAL_EPS: f32 = 1e-3;
+
+/// Whether a one-way platform should be ignored for a body travelling `motion`
+/// (pat-0q2kx.113).
+///
+/// Godot's `one_way_collision` blocks only contacts arriving from the platform's
+/// **front** side: you jump up *through* it and land *on* it. `one_way_direction`
+/// is the outward normal of the blocking face, so the platform is solid when the
+/// body approaches against that normal and passthrough when it travels with it.
+///
+/// ⚠️ A body with zero motion is never passed through — otherwise a character
+/// resting on a one-way platform would fall out of it the moment it stopped.
+fn one_way_passthrough(body: &PhysicsBody2D, motion: Vector2) -> bool {
+    if !body.one_way_collision {
+        return false;
+    }
+    let normal = body.one_way_direction.normalized();
+    if normal.length_squared() < 1e-8 || motion.length_squared() < 1e-8 {
+        return false;
+    }
+    // Moving *along* the outward normal means leaving through the back face —
+    // e.g. jumping upward through a platform whose normal points up.
+    motion.dot(normal) > 0.0
+}
+
+/// The obstacle's world transform, **including its rotation** (pat-0q2kx.113).
+///
+/// ⚠️ This used to be `Transform2D::translated(body.position)`, which silently
+/// discarded `PhysicsBody2D::rotation`. Every obstacle was therefore collided
+/// against as if axis-aligned, so a rotated slope behaved like a flat box: the
+/// contact normal came back axis-aligned and a 30° ramp was classified as a
+/// wall instead of a floor. The rotation is available on the body and the
+/// narrow phase already handles oriented shapes — only this conversion was
+/// dropping it.
+fn body_transform(body: &PhysicsBody2D) -> Transform2D {
+    Transform2D::from_rotation_origin(body.rotation, body.position)
+}
+
+/// Splits `motion` into steps small enough that a moving body cannot pass
+/// through a thin obstacle between two discrete overlap tests (pat-0q2kx.113).
+///
+/// The slide loop tests for overlap **at the target position**. That is exact
+/// for slow motion and wrong for fast motion: at 600 px/s over a 1/60 s frame
+/// the body advances 10 px per step, so a 4 px-thick platform can sit entirely
+/// between the start and target positions and register no overlap at all — the
+/// body tunnels straight through.
+///
+/// Substepping by a fraction of the *smallest* shape extent is the cheap,
+/// correct-enough sweep: no step can exceed the thinnest thing it could hit.
+/// The count is clamped so a pathological velocity cannot make the loop
+/// unbounded.
+fn sweep_steps(motion: Vector2, shape: &Shape2D) -> usize {
+    const MAX_SUBSTEPS: usize = 16;
+    let extent = shape_min_extent(shape);
+    let distance = motion.length();
+    if extent <= 0.0 || distance <= extent {
+        return 1;
+    }
+    ((distance / extent).ceil() as usize).clamp(1, MAX_SUBSTEPS)
+}
+
+/// The smallest half-extent of a shape — the dimension a sweep must not skip.
+fn shape_min_extent(shape: &Shape2D) -> f32 {
+    match shape {
+        Shape2D::Circle { radius } => *radius,
+        Shape2D::Rectangle { half_extents } => half_extents.x.min(half_extents.y),
+        Shape2D::Capsule { radius, .. } => *radius,
+        // Shapes with no meaningful "thinnest dimension" return 0.0, which
+        // `sweep_steps` reads as "do not substep" — the conservative choice:
+        // they keep the previous single-target behaviour rather than getting a
+        // sweep derived from a made-up extent.
+        //
+        // ⚠️ Deliberately exhaustive rather than a `_ =>` catch-all: a new
+        // Shape2D variant should fail to compile here so someone decides
+        // whether it can be tunnelled through, instead of silently inheriting
+        // "never sweep".
+        Shape2D::Segment { .. }
+        | Shape2D::ConvexPolygon { .. }
+        | Shape2D::ConcavePolygon { .. }
+        | Shape2D::WorldBoundary { .. }
+        | Shape2D::SeparationRay { .. } => 0.0,
+    }
+    .max(0.0)
+}
 
 impl CharacterBody2D {
     /// Creates a new character body at the given position.
@@ -96,6 +214,8 @@ impl CharacterBody2D {
             slide_on_ceiling: true,
             max_slides: DEFAULT_MAX_SLIDES,
             platform_velocity: Vector2::ZERO,
+            motion_mode: MotionMode::default(),
+            platform_on_leave: PlatformOnLeave::default(),
             on_floor: false,
             on_wall: false,
             on_ceiling: false,
@@ -155,8 +275,21 @@ impl CharacterBody2D {
         let vel_dir_facing_up = self.velocity.dot(up) > 0.0;
 
         // (1) Carry the body with the platform it stood on last frame.
-        if incoming_platform_vel.length_squared() > 1e-8 {
-            self.position = self.position + incoming_platform_vel * dt;
+        // Godot applies `platform_on_leave` to the velocity inherited from the
+        // platform the body was standing on (pat-0q2kx.113). DO_NOTHING must
+        // drop it entirely — carrying it regardless is what made a character
+        // keep drifting after stepping off a moving platform.
+        let carried = match self.platform_on_leave {
+            PlatformOnLeave::AddVelocity => incoming_platform_vel,
+            PlatformOnLeave::AddUpwardVelocity => {
+                // Keep only the component along `up_direction`.
+                let up = self.up_direction.normalized();
+                up * incoming_platform_vel.dot(up)
+            }
+            PlatformOnLeave::DoNothing => Vector2::ZERO,
+        };
+        if carried.length_squared() > 1e-8 {
+            self.position = self.position + carried * dt;
         }
 
         // Platform velocity captured from the floor body this frame.
@@ -171,15 +304,68 @@ impl CharacterBody2D {
                 break;
             }
 
+            // Advance in sub-steps no longer than the thinnest shape dimension,
+            // so a fast body cannot tunnel between two discrete overlap tests
+            // (pat-0q2kx.113). Each sub-step commits its own free movement; the
+            // first one that collides falls through to the slide response below
+            // with `motion` reduced to the remainder.
+            let steps = sweep_steps(motion, &self.shape);
+            if steps > 1 {
+                let step = motion / steps as f32;
+                let mut advanced = 0usize;
+                let mut blocked = false;
+                for _ in 0..steps {
+                    let probe = self.position + step;
+                    let tf_probe = Transform2D::translated(probe);
+                    let hit = bodies.iter().any(|body| {
+                        (self.collision_mask & body.collision_layer) != 0
+                            && !one_way_passthrough(body, step)
+                            && collision::test_collision(
+                                &self.shape,
+                                &tf_probe,
+                                &body.shape,
+                                &body_transform(body),
+                            )
+                            .map(|r| r.colliding && r.depth > 0.0)
+                            .unwrap_or(false)
+                    });
+                    if hit {
+                        blocked = true;
+                        break;
+                    }
+                    self.position = probe;
+                    advanced += 1;
+                }
+                if !blocked {
+                    // The whole motion cleared without touching anything.
+                    break;
+                }
+                // Hand the resolve path exactly the ONE sub-step that collided,
+                // not the whole unconsumed remainder.
+                //
+                // ⚠️ This is the subtle half of substepping. The resolve path
+                // below overlap-tests at `position + motion`; if that were the
+                // full remainder it would test far past the obstacle the sweep
+                // just found, detect nothing, and move there — tunnelling in the
+                // exact case the sweep exists to prevent. Narrowing to `step`
+                // makes the target equal the probe that actually hit, so the
+                // collision is found and slid against. Any distance beyond the
+                // contact is dropped, as it is whenever `move_and_slide` hits
+                // something.
+                motion = step;
+            }
+
             let target = self.position + motion;
             let tf_target = Transform2D::translated(target);
             let mut deepest: Option<(collision::CollisionResult, usize)> = None;
 
             for (idx, body) in bodies.iter().enumerate() {
-                if (self.collision_mask & body.collision_layer) == 0 {
+                if (self.collision_mask & body.collision_layer) == 0
+                    || one_way_passthrough(body, motion)
+                {
                     continue;
                 }
-                let tf_body = Transform2D::translated(body.position);
+                let tf_body = body_transform(body);
                 if let Some(result) =
                     collision::test_collision(&self.shape, &tf_target, &body.shape, &tf_body)
                 {
@@ -299,7 +485,7 @@ impl CharacterBody2D {
             if (self.collision_mask & body.collision_layer) == 0 {
                 continue;
             }
-            let tf_body = Transform2D::translated(body.position);
+            let tf_body = body_transform(body);
             if let Some(result) =
                 collision::test_collision(&self.shape, &tf_target, &body.shape, &tf_body)
             {
@@ -351,6 +537,13 @@ impl CharacterBody2D {
 
     /// Classifies a collision normal as floor, wall, or ceiling.
     fn classify_surface(&mut self, normal: Vector2, up: Vector2, floor_cos: f32) {
+        // MOTION_MODE_FLOATING privileges no direction, so nothing is floor,
+        // wall or ceiling — the body just slides along whatever it touches
+        // (pat-0q2kx.113). Returning early here rather than filtering at the
+        // call sites keeps every caller (slide loop, snap, wall probe) honest.
+        if self.motion_mode == MotionMode::Floating {
+            return;
+        }
         let dot = normal.dot(up);
         if dot > floor_cos {
             self.on_floor = true;
@@ -408,7 +601,7 @@ impl CharacterBody2D {
                 continue;
             }
 
-            let tf_body = Transform2D::translated(body.position);
+            let tf_body = body_transform(body);
             if let Some(result) =
                 collision::test_collision(&self.shape, &tf_target, &body.shape, &tf_body)
             {

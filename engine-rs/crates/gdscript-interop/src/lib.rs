@@ -28,7 +28,13 @@ pub use bindings::{
 };
 pub use bridge::{NativeScript, NativeScriptBuilder, ScriptBridge};
 pub use interpreter::{
-    set_engine_editor_hint, set_engine_frames_per_second, RuntimeError, RuntimeErrorKind,
+    engine_max_fps, engine_max_physics_steps_per_frame, engine_physics_frames,
+    engine_physics_jitter_fix, engine_physics_ticks_per_second,
+    engine_physics_ticks_per_second_generation, engine_process_frames, engine_time_scale,
+    publish_engine_physics_ticks_per_second, reset_engine_singleton_state, set_engine_editor_hint,
+    set_engine_frame_counters, set_engine_frames_per_second, set_engine_in_physics_frame,
+    set_engine_max_fps, set_engine_max_physics_steps_per_frame, set_engine_physics_jitter_fix,
+    set_engine_physics_ticks_per_second, set_engine_time_scale, RuntimeError, RuntimeErrorKind,
     ScriptWarning, SourceLocation, StackFrame,
 };
 pub use parser::{

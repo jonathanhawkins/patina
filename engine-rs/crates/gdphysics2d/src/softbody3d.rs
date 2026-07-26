@@ -84,11 +84,7 @@ pub struct SoftBody3D {
 
 impl SoftBody3D {
     /// Creates a new soft body with the given vertices and edges.
-    pub fn new(
-        id: SoftBodyId3D,
-        positions: &[Vector3],
-        edges: &[(usize, usize)],
-    ) -> Self {
+    pub fn new(id: SoftBodyId3D, positions: &[Vector3], edges: &[(usize, usize)]) -> Self {
         let vertices: Vec<SoftBodyVertex> = positions
             .iter()
             .map(|&p| SoftBodyVertex::new(p, 1.0))
@@ -256,13 +252,11 @@ impl SoftBody3D {
 
             if !self.vertices[edge.v0].pinned {
                 let w = v0_inv / total_inv;
-                self.vertices[edge.v0].position =
-                    self.vertices[edge.v0].position + correction * w;
+                self.vertices[edge.v0].position = self.vertices[edge.v0].position + correction * w;
             }
             if !self.vertices[edge.v1].pinned {
                 let w = v1_inv / total_inv;
-                self.vertices[edge.v1].position =
-                    self.vertices[edge.v1].position - correction * w;
+                self.vertices[edge.v1].position = self.vertices[edge.v1].position - correction * w;
             }
         }
     }
@@ -293,28 +287,18 @@ mod tests {
     /// Creates a simple 4-vertex tetrahedron soft body for testing.
     fn make_tetrahedron() -> SoftBody3D {
         let positions = vec![
-            Vector3::new(0.0, 1.0, 0.0),  // top
+            Vector3::new(0.0, 1.0, 0.0),   // top
             Vector3::new(-1.0, 0.0, -1.0), // front-left
             Vector3::new(1.0, 0.0, -1.0),  // front-right
             Vector3::new(0.0, 0.0, 1.0),   // back
         ];
-        let edges = vec![
-            (0, 1),
-            (0, 2),
-            (0, 3),
-            (1, 2),
-            (1, 3),
-            (2, 3),
-        ];
+        let edges = vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
         SoftBody3D::new(SoftBodyId3D(1), &positions, &edges)
     }
 
     /// Creates a simple 2-vertex spring for basic tests.
     fn make_spring() -> SoftBody3D {
-        let positions = vec![
-            Vector3::new(0.0, 5.0, 0.0),
-            Vector3::new(0.0, 3.0, 0.0),
-        ];
+        let positions = vec![Vector3::new(0.0, 5.0, 0.0), Vector3::new(0.0, 3.0, 0.0)];
         let edges = vec![(0, 1)];
         SoftBody3D::new(SoftBodyId3D(1), &positions, &edges)
     }
@@ -425,8 +409,7 @@ mod tests {
 
         // Check all edges are near rest length
         for edge in &body.edges {
-            let len =
-                (body.vertices[edge.v1].position - body.vertices[edge.v0].position).length();
+            let len = (body.vertices[edge.v1].position - body.vertices[edge.v0].position).length();
             assert!(
                 (len - edge.rest_length).abs() < 0.01,
                 "edge ({},{}) length {} should be near rest {}",
@@ -463,9 +446,8 @@ mod tests {
             body.edges
                 .iter()
                 .map(|e| {
-                    let len = (body.vertices[e.v1].position
-                        - body.vertices[e.v0].position)
-                        .length();
+                    let len =
+                        (body.vertices[e.v1].position - body.vertices[e.v0].position).length();
                     (len - e.rest_length).abs()
                 })
                 .sum::<f32>()
@@ -505,8 +487,7 @@ mod tests {
     #[test]
     fn soft_body_zero_dt_is_noop() {
         let mut body = make_tetrahedron();
-        let positions_before: Vec<Vector3> =
-            body.vertices.iter().map(|v| v.position).collect();
+        let positions_before: Vec<Vector3> = body.vertices.iter().map(|v| v.position).collect();
 
         body.step(0.0, Vector3::new(0.0, -9.8, 0.0));
 
@@ -527,10 +508,7 @@ mod tests {
             for _ in 0..100 {
                 body.step(1.0 / 60.0, gravity);
             }
-            body.vertices
-                .iter()
-                .map(|v| v.position)
-                .collect::<Vec<_>>()
+            body.vertices.iter().map(|v| v.position).collect::<Vec<_>>()
         };
 
         let a = run();
@@ -609,11 +587,7 @@ mod tests {
 
     #[test]
     fn soft_body_single_vertex() {
-        let mut body = SoftBody3D::new(
-            SoftBodyId3D(0),
-            &[Vector3::new(0.0, 10.0, 0.0)],
-            &[],
-        );
+        let mut body = SoftBody3D::new(SoftBodyId3D(0), &[Vector3::new(0.0, 10.0, 0.0)], &[]);
         let gravity = Vector3::new(0.0, -9.8, 0.0);
         body.step(1.0, gravity);
         assert!(

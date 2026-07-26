@@ -11,18 +11,111 @@
 //! It lives in its own module (over the public `viewport_2d` API) to compose
 //! with the viewport without growing the already-large `viewport_2d.rs`.
 
-use gdcore::math::{Color, Rect2, Transform2D, Vector2};
+use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector2i};
 use gdrender2d::draw;
 use gdrender2d::font::{draw_string, BitmapFont};
 use gdrender2d::renderer::FrameBuffer;
 use gdscene::control::TextAlign;
 use gdscene::control_render::ControlDrawItem;
 use gdscene::node::NodeId;
+use gdscene::tilemap::{self, TILE_SET_PREFIX};
 use gdscene::{canvas_order, control, node2d, SceneTree};
 use gdvariant::Variant;
 
 use crate::texture_cache::TextureCache;
 use crate::viewport_2d::Viewport2D;
+
+/// How a `Sprite2D` samples and places its texture (pat-0q2kx.107).
+///
+/// Godot's `Sprite2D` draws a *sub-rectangle* of its texture — an explicit
+/// `region_rect`, or cell `frame` of an `hframes × vframes` sheet — positioned
+/// by `centered`/`offset` (`scene/2d/sprite_2d.cpp` `_get_rects`). Patina had
+/// that maths in `gdscene::sprite_frames::sprite_source_rect` with no renderer
+/// calling it, so every sprite drew its whole texture, always centred.
+///
+/// These are the *inputs*, not a resolved rect: the sheet-cell calculation
+/// needs the texture's pixel size, which is only known once the texture is
+/// loaded at draw time. Resolving early would mean guessing it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpriteSheet {
+    /// Godot `centered` — the texture's origin sits at its centre (default) or
+    /// at its top-left.
+    pub centered: bool,
+    /// Godot `region_enabled`: sample `region_rect` instead of the sheet grid.
+    pub region_enabled: bool,
+    /// The explicit sub-rectangle used when `region_enabled`.
+    pub region_rect: Rect2,
+    /// Sheet columns (Godot `hframes`, default 1).
+    pub hframes: i32,
+    /// Sheet rows (Godot `vframes`, default 1).
+    pub vframes: i32,
+    /// Which cell of the sheet to draw (Godot `frame`).
+    pub frame: i32,
+}
+
+impl Default for SpriteSheet {
+    fn default() -> Self {
+        Self {
+            // Godot's Sprite2D is centred by default.
+            centered: true,
+            region_enabled: false,
+            region_rect: Rect2::new(Vector2::ZERO, Vector2::ZERO),
+            hframes: 1,
+            vframes: 1,
+            frame: 0,
+        }
+    }
+}
+
+/// Reads a `Sprite2D`'s sheet/region properties off the node (pat-0q2kx.107).
+///
+/// Every default matches Godot's, so a `.tscn` that serializes none of them —
+/// the common case — samples the whole texture centred, exactly as before.
+pub fn sprite_sheet_for(tree: &SceneTree, id: NodeId) -> SpriteSheet {
+    match tree.get_node(id) {
+        Some(node) => sprite_sheet_for_node(node),
+        None => SpriteSheet::default(),
+    }
+}
+
+/// [`sprite_sheet_for`] against a node directly, for callers that hold a `&Node`
+/// rather than a tree id (the editor's edit-view draw).
+pub fn sprite_sheet_for_node(node: &gdscene::node::Node) -> SpriteSheet {
+    let d = SpriteSheet::default();
+    let int = |key: &str, fallback: i32| -> i32 {
+        match node.get_property(key) {
+            Variant::Int(i) => i as i32,
+            Variant::Float(f) => f as i32,
+            _ => fallback,
+        }
+    };
+    let flag = |key: &str, fallback: bool| -> bool {
+        match node.get_property(key) {
+            Variant::Bool(b) => b,
+            _ => fallback,
+        }
+    };
+    // Godot exposes the cell as either `frame` or `frame_coords` (a
+    // column/row Vector2i); `frame_coords` wins when present, since that is the
+    // one the inspector writes for a sheet.
+    let hframes = int("hframes", d.hframes).max(1);
+    let frame = match node.get_property("frame_coords") {
+        Variant::Vector2i(c) => c.y * hframes + c.x,
+        Variant::Vector2(c) => c.y as i32 * hframes + c.x as i32,
+        _ => int("frame", d.frame),
+    };
+    SpriteSheet {
+        centered: flag("centered", d.centered),
+        region_enabled: flag("region_enabled", d.region_enabled),
+        region_rect: match node.get_property("region_rect") {
+            Variant::Rect2(r) => r,
+            _ => d.region_rect,
+        },
+        hframes,
+        vframes: int("vframes", d.vframes).max(1),
+        frame,
+    }
+}
 
 /// The kind of content drawn for a 2D canvas node.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +130,9 @@ pub enum Render2DKind {
         flip_h: bool,
         /// Whether the texture is mirrored vertically.
         flip_v: bool,
+        /// Which part of the texture to sample, and how to place it
+        /// (pat-0q2kx.107).
+        sheet: SpriteSheet,
     },
     /// A `Polygon2D`'s filled polygon: its vertices (local space) and fill color.
     Polygon {
@@ -80,6 +176,12 @@ pub enum Render2DKind {
         /// `draw_order`.
         particles: Vec<ParticleQuad>,
     },
+    /// A `TileMapLayer`/`TileMap`'s painted cells: one textured quad per used
+    /// cell, in the layer's local space (pat-0q2kx.108).
+    TileMap {
+        /// The cells to draw, in a stable (row, column) order.
+        cells: Vec<TileQuad>,
+    },
     /// A position marker drawn for a 2D node with no own visual yet (cameras,
     /// empty `Node2D`s, and text nodes that later sub-tasks render) so it stays
     /// visible and pickable in the editor.
@@ -87,6 +189,18 @@ pub enum Render2DKind {
         /// The node's class name (drives the marker glyph).
         class: String,
     },
+}
+
+/// One painted tile cell, resolved from `tile_map_data` plus the layer's
+/// `TileSet` atlas sources (pat-0q2kx.108).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TileQuad {
+    /// The atlas texture this cell samples.
+    pub texture: String,
+    /// Where the tile lands, in the layer's local space.
+    pub dest: Rect2,
+    /// The sub-rectangle of `texture` the cell's atlas coordinates select.
+    pub src: Rect2,
 }
 
 /// One live particle to draw, as published by the runtime particle phase
@@ -268,6 +382,65 @@ fn canvas_layer_for(tree: &SceneTree, id: gdscene::NodeId) -> i64 {
 /// Chooses the draw kind for a visible canvas node: a sprite for a textured
 /// `Sprite2D`, a polygon/line/color-rect for the shape nodes, otherwise a
 /// class-tagged marker.
+/// Resolves a `TileMapLayer`'s painted cells into drawable quads.
+///
+/// Reads the node's `tile_map_data` (Godot's packed cell records) and the
+/// `__tile_set__*` companions `packed_scene` wrote when it resolved
+/// `tile_set = SubResource(...)`, then maps every cell's `(source_id,
+/// atlas_coords)` to a texture sub-rectangle.
+///
+/// Placement follows `TileMapLayer::_rendering_update`: the tile's region is
+/// centred on the cell centre, so a tile the size of a cell lands exactly on the
+/// cell's top-left and an oversized one overhangs evenly.
+///
+/// Returns an empty vec when the layer is disabled, carries no tile set, or has
+/// no cells — the caller then falls through to a marker.
+pub fn tilemap_quads(tree: &SceneTree, id: gdscene::NodeId) -> Vec<TileQuad> {
+    let Some(node) = tree.get_node(id) else {
+        return Vec::new();
+    };
+    // Godot's `TileMapLayer.enabled` defaults to true; a disabled layer draws
+    // nothing at all.
+    if let Variant::Bool(false) = node.get_property("enabled") {
+        return Vec::new();
+    }
+    let Variant::PackedByteArray(data) = node.get_property("tile_map_data") else {
+        return Vec::new();
+    };
+
+    let source_ids =
+        tilemap::tile_set_source_ids(&node.get_property(&format!("{}source_ids", TILE_SET_PREFIX)));
+    let Some(tile_set) =
+        tilemap::tile_set_from_properties(|key| node.get_property(key), &source_ids)
+    else {
+        return Vec::new();
+    };
+
+    let cells = tilemap::decode_tile_map_data(&data);
+    // Sorted so the draw order (and any golden test) is stable rather than
+    // following `HashMap` iteration.
+    let mut coords: Vec<&Vector2i> = cells.keys().collect();
+    coords.sort_by_key(|c| (c.y, c.x));
+
+    let mut quads = Vec::with_capacity(coords.len());
+    for coord in coords {
+        let tile = &cells[coord];
+        let Some((texture, src)) = tile_set.tile_texture_region(tile) else {
+            continue;
+        };
+        let centre = tilemap::map_to_local(tile_set.tile_size, *coord);
+        quads.push(TileQuad {
+            texture: texture.to_string(),
+            dest: Rect2::new(
+                Vector2::new(centre.x - src.size.x / 2.0, centre.y - src.size.y / 2.0),
+                src.size,
+            ),
+            src,
+        });
+    }
+    quads
+}
+
 fn render_kind_for(tree: &SceneTree, id: gdscene::NodeId, class: &str) -> Render2DKind {
     match class {
         // An AnimatedSprite2D draws exactly like a Sprite2D — the difference is
@@ -281,6 +454,7 @@ fn render_kind_for(tree: &SceneTree, id: gdscene::NodeId, class: &str) -> Render
                     offset: read_vector2(tree, id, "offset"),
                     flip_h: read_bool(tree, id, "flip_h"),
                     flip_v: read_bool(tree, id, "flip_v"),
+                    sheet: sprite_sheet_for(tree, id),
                 };
             }
         }
@@ -310,6 +484,17 @@ fn render_kind_for(tree: &SceneTree, id: gdscene::NodeId, class: &str) -> Render
                     width: read_f32(tree, id, "__curve__width", 2.0),
                     color: Color::new(1.0, 0.8, 0.2, 1.0),
                 };
+            }
+        }
+        // pat-0q2kx.108: a TileMapLayer's cells live in its `tile_map_data`
+        // PackedByteArray, and the atlas regions they index come from the
+        // `tile_set` sub-resource that `packed_scene` flattened onto the node
+        // under `__tile_set__*`. Without this arm the node fell through to
+        // `Marker` and a painted level was invisible.
+        "TileMapLayer" | "TileMap" => {
+            let cells = tilemap_quads(tree, id);
+            if !cells.is_empty() {
+                return Render2DKind::TileMap { cells };
             }
         }
         "ColorRect" => {
@@ -608,6 +793,12 @@ pub fn build_control_render_items(
                     offset: Vector2::ZERO,
                     flip_h: false,
                     flip_v: false,
+                    // A Control's texture is placed by its own rect, not by
+                    // Sprite2D's centred/sheet rules.
+                    sheet: SpriteSheet {
+                        centered: false,
+                        ..SpriteSheet::default()
+                    },
                 },
             ),
         };
@@ -807,19 +998,39 @@ pub fn rasterize_render_list(
                 offset,
                 flip_h,
                 flip_v,
+                sheet,
             } => {
                 let mut drawn = false;
                 if let Some(cache) = texture_cache.as_deref_mut() {
                     if let Some(tex) = cache.get(texture) {
                         let (tw, th) = (tex.width as f32, tex.height as f32);
                         if tw > 0.0 && th > 0.0 {
-                            // Sprite2D is centered by default: the texture's
-                            // top-left sits at `offset - size/2` in node-local
-                            // space. Flip mirrors the basis about that center.
-                            let rect = Rect2::new(
-                                Vector2::new(offset.x - tw / 2.0, offset.y - th / 2.0),
+                            // Which pixels of the texture this sprite samples:
+                            // an explicit region, or cell `frame` of the
+                            // hframes x vframes sheet. The whole texture when
+                            // neither is configured (pat-0q2kx.107).
+                            let src = gdscene::sprite_frames::sprite_source_rect(
                                 Vector2::new(tw, th),
+                                sheet.region_enabled,
+                                sheet.region_rect,
+                                sheet.hframes,
+                                sheet.vframes,
+                                sheet.frame,
                             );
+                            // The drawn size is the SOURCE size, not the whole
+                            // texture: a 4-cell sheet draws one cell.
+                            let (dw, dh) = (src.size.x, src.size.y);
+                            // `centered` (Godot's default) puts the sub-rect's
+                            // centre at the node origin; otherwise its top-left
+                            // sits there. Flip mirrors the basis about that point.
+                            let rect = if sheet.centered {
+                                Rect2::new(
+                                    Vector2::new(offset.x - dw / 2.0, offset.y - dh / 2.0),
+                                    Vector2::new(dw, dh),
+                                )
+                            } else {
+                                Rect2::new(*offset, Vector2::new(dw, dh))
+                            };
                             let flip = Transform2D::scaled(Vector2::new(
                                 if *flip_h { -1.0 } else { 1.0 },
                                 if *flip_v { -1.0 } else { 1.0 },
@@ -829,7 +1040,7 @@ pub fn rasterize_render_list(
                                 tex,
                                 xform * flip,
                                 rect,
-                                None,
+                                Some(src),
                                 item.modulate,
                             );
                             drawn = true;
@@ -844,6 +1055,27 @@ pub fn rasterize_render_list(
                         Vector2::new(32.0, 32.0),
                     );
                     draw::fill_rect_transformed(&mut fb, xform, rect, item.modulate);
+                }
+            }
+            // pat-0q2kx.108: one textured quad per painted cell. A cell whose
+            // atlas texture is missing from the cache is skipped rather than
+            // drawn as a placeholder — a level is hundreds of cells, and
+            // stand-in squares would bury the tiles that did load.
+            Render2DKind::TileMap { cells } => {
+                if let Some(cache) = texture_cache.as_deref_mut() {
+                    for cell in cells {
+                        let Some(tex) = cache.get(&cell.texture) else {
+                            continue;
+                        };
+                        draw::draw_texture_rect_transformed(
+                            &mut fb,
+                            tex,
+                            xform,
+                            cell.dest,
+                            Some(cell.src),
+                            item.modulate,
+                        );
+                    }
                 }
             }
             Render2DKind::ColorRect { size, color } => {
@@ -1137,6 +1369,7 @@ mod tests {
                 offset,
                 flip_h,
                 flip_v,
+                ..
             } => {
                 assert_eq!(texture, "res://hero.png");
                 assert_eq!(*offset, Vector2::new(-16.0, -32.0));

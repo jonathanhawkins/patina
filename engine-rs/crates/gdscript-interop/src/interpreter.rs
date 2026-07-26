@@ -1614,6 +1614,27 @@ impl Interpreter {
                 self.write_place(object, container)
             }
             Expr::MemberAccess { object, member } => {
+                // `Engine.time_scale = 0.5` (pat-0q2kx.121). Checked before the
+                // value paths below because `Engine` is not a variable: those
+                // paths would fail to evaluate it and the write would be lost.
+                if matches!(object.as_ref(), Expr::Ident(n) if n == "Engine") {
+                    let final_val = if matches!(op, AssignOp::Assign) {
+                        rhs
+                    } else {
+                        let cur = engine_static_property(member).ok_or_else(|| {
+                            RuntimeError::new(RuntimeErrorKind::UndefinedVariable(format!(
+                                "Engine.{member}"
+                            )))
+                        })?;
+                        self.apply_assign_op(op, &cur, &rhs)?
+                    };
+                    if set_engine_static_property(member, &final_val)? {
+                        return Ok(());
+                    }
+                    return Err(RuntimeError::new(RuntimeErrorKind::UndefinedVariable(
+                        format!("Engine.{member}"),
+                    )));
+                }
                 if self.try_exec_value_member_assignment(object, member, op, rhs.clone())? {
                     return Ok(());
                 }
@@ -11218,6 +11239,10 @@ fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
             "BLUE" => Some(Variant::Color(Color::new(0.0, 0.0, 1.0, 1.0))),
             _ => None,
         },
+        // `Engine.time_scale`, `Engine.max_fps`, ... (pat-0q2kx.121). Godot
+        // exposes the frame-pacing state as singleton properties, which is how
+        // scripts actually spell them.
+        "Engine" => engine_static_property(member),
         // Godot FileAccess.ModeFlags
         "FileAccess" => match member {
             "READ" => Some(Variant::Int(1)),
@@ -11486,13 +11511,62 @@ fn call_dir_access_instance(
 // Godot singletons: OS / Engine / Time / JSON / ConfigFile
 // ---------------------------------------------------------------------------
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 static PROCESS_EPOCH: OnceLock<Instant> = OnceLock::new();
 static ENGINE_EDITOR_HINT: AtomicBool = AtomicBool::new(false);
 static ENGINE_FPS_MILLI: AtomicU64 = AtomicU64::new(60_000); // fps * 1000
+
+// -- Engine singleton state (pat-0q2kx.121) ---------------------------------
+// Godot keeps these on the `Engine` singleton (core/config/engine.h) and the
+// main loop reads them every iteration. They live here as process statics
+// because the interpreter is the only thing scripts can reach; `gdscene`'s
+// `MainLoop` is the bridge that applies `time_scale` to the frame delta and
+// publishes the live frame counters / measured FPS back.
+static ENGINE_TIME_SCALE_MICRO: AtomicU64 = AtomicU64::new(1_000_000); // time_scale * 1e6
+static ENGINE_MAX_FPS: AtomicI64 = AtomicI64::new(0); // 0 = uncapped
+static ENGINE_PHYSICS_TPS: AtomicI64 = AtomicI64::new(60);
+/// Bumped whenever a *script* writes `physics_ticks_per_second`, so the main
+/// loop can tell a script-driven change from the value it published itself.
+static ENGINE_PHYSICS_TPS_GEN: AtomicU64 = AtomicU64::new(0);
+static ENGINE_MAX_PHYSICS_STEPS: AtomicI64 = AtomicI64::new(8);
+static ENGINE_PHYSICS_JITTER_FIX_MICRO: AtomicU64 = AtomicU64::new(500_000); // 0.5
+static ENGINE_PROCESS_FRAMES: AtomicU64 = AtomicU64::new(0);
+static ENGINE_PHYSICS_FRAMES: AtomicU64 = AtomicU64::new(0);
+static ENGINE_FRAMES_DRAWN: AtomicU64 = AtomicU64::new(0);
+static ENGINE_IN_PHYSICS_FRAME: AtomicBool = AtomicBool::new(false);
+
+/// Script-registered singletons (`Engine.register_singleton`). Godot keeps
+/// these alongside the built-in singleton table and answers `has_singleton` /
+/// `get_singleton` / `get_singleton_list` from both.
+static ENGINE_SINGLETONS: OnceLock<Mutex<HashMap<String, Variant>>> = OnceLock::new();
+
+/// Built-in singleton names this interpreter actually dispatches (the `Ident`
+/// arms in `eval_expr`'s call path). `Engine.has_singleton` answers true for
+/// these without any registration.
+const BUILTIN_SINGLETONS: &[&str] = &[
+    "CameraServer",
+    "ClassDB",
+    "DisplayServer",
+    "Engine",
+    "EngineDebugger",
+    "Input",
+    "InputMap",
+    "JavaScriptBridge",
+    "JSON",
+    "Marshalls",
+    "OS",
+    "ProjectSettings",
+    "ResourceUID",
+    "Time",
+    "TranslationServer",
+];
+
+fn engine_singletons() -> &'static Mutex<HashMap<String, Variant>> {
+    ENGINE_SINGLETONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 fn process_epoch() -> &'static Instant {
     PROCESS_EPOCH.get_or_init(Instant::now)
@@ -11511,6 +11585,111 @@ pub fn set_engine_editor_hint(hint: bool) {
 pub fn set_engine_frames_per_second(fps: f64) {
     let milli = (fps.max(0.0) * 1000.0) as u64;
     ENGINE_FPS_MILLI.store(milli, Ordering::Relaxed);
+}
+
+/// `Engine.time_scale` — the multiplier the main loop applies to the frame
+/// delta before the process/physics phases (Godot default 1.0).
+pub fn engine_time_scale() -> f64 {
+    ENGINE_TIME_SCALE_MICRO.load(Ordering::Relaxed) as f64 / 1_000_000.0
+}
+
+/// Sets `Engine.time_scale`. Godot clamps negatives to 0 (`Engine::set_time_scale`).
+pub fn set_engine_time_scale(scale: f64) {
+    let micro = (scale.max(0.0) * 1_000_000.0).round() as u64;
+    ENGINE_TIME_SCALE_MICRO.store(micro, Ordering::Relaxed);
+}
+
+/// `Engine.max_fps` — the frame cap the pacer applies (0 = uncapped).
+pub fn engine_max_fps() -> i64 {
+    ENGINE_MAX_FPS.load(Ordering::Relaxed)
+}
+
+/// Sets `Engine.max_fps` (negatives clamp to 0, matching Godot).
+pub fn set_engine_max_fps(fps: i64) {
+    ENGINE_MAX_FPS.store(fps.max(0), Ordering::Relaxed);
+}
+
+/// `Engine.physics_ticks_per_second` — the fixed-step rate of the main loop.
+pub fn engine_physics_ticks_per_second() -> i64 {
+    ENGINE_PHYSICS_TPS.load(Ordering::Relaxed)
+}
+
+/// Publishes the engine-owned physics tick rate (main loop -> scripts). This
+/// does NOT bump the script generation counter, so the main loop will not
+/// mistake its own publish for a script write.
+pub fn publish_engine_physics_ticks_per_second(tps: i64) {
+    ENGINE_PHYSICS_TPS.store(tps.max(1), Ordering::Relaxed);
+}
+
+/// Sets `Engine.physics_ticks_per_second` from script and marks the write so
+/// the main loop adopts it on its next step.
+pub fn set_engine_physics_ticks_per_second(tps: i64) {
+    ENGINE_PHYSICS_TPS.store(tps.max(1), Ordering::Relaxed);
+    ENGINE_PHYSICS_TPS_GEN.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Generation counter of script-side `physics_ticks_per_second` writes.
+pub fn engine_physics_ticks_per_second_generation() -> u64 {
+    ENGINE_PHYSICS_TPS_GEN.load(Ordering::Relaxed)
+}
+
+/// `Engine.max_physics_steps_per_frame` (Godot default 8).
+pub fn engine_max_physics_steps_per_frame() -> i64 {
+    ENGINE_MAX_PHYSICS_STEPS.load(Ordering::Relaxed)
+}
+
+/// Sets `Engine.max_physics_steps_per_frame`.
+pub fn set_engine_max_physics_steps_per_frame(steps: i64) {
+    ENGINE_MAX_PHYSICS_STEPS.store(steps.max(1), Ordering::Relaxed);
+}
+
+/// `Engine.physics_jitter_fix` (Godot default 0.5).
+pub fn engine_physics_jitter_fix() -> f64 {
+    ENGINE_PHYSICS_JITTER_FIX_MICRO.load(Ordering::Relaxed) as f64 / 1_000_000.0
+}
+
+/// Sets `Engine.physics_jitter_fix`.
+pub fn set_engine_physics_jitter_fix(fix: f64) {
+    let micro = (fix.max(0.0) * 1_000_000.0).round() as u64;
+    ENGINE_PHYSICS_JITTER_FIX_MICRO.store(micro, Ordering::Relaxed);
+}
+
+/// Publishes the live frame counters read by `Engine.get_process_frames()`,
+/// `get_physics_frames()` and `get_frames_drawn()`.
+pub fn set_engine_frame_counters(process_frames: u64, physics_frames: u64, frames_drawn: u64) {
+    ENGINE_PROCESS_FRAMES.store(process_frames, Ordering::Relaxed);
+    ENGINE_PHYSICS_FRAMES.store(physics_frames, Ordering::Relaxed);
+    ENGINE_FRAMES_DRAWN.store(frames_drawn, Ordering::Relaxed);
+}
+
+/// `Engine.get_process_frames()` — process frames since engine start.
+pub fn engine_process_frames() -> u64 {
+    ENGINE_PROCESS_FRAMES.load(Ordering::Relaxed)
+}
+
+/// `Engine.get_physics_frames()` — physics ticks since engine start.
+pub fn engine_physics_frames() -> u64 {
+    ENGINE_PHYSICS_FRAMES.load(Ordering::Relaxed)
+}
+
+/// Marks whether the engine is currently inside a physics callback, backing
+/// `Engine.is_in_physics_frame()`.
+pub fn set_engine_in_physics_frame(in_physics: bool) {
+    ENGINE_IN_PHYSICS_FRAME.store(in_physics, Ordering::Relaxed);
+}
+
+/// Resets every `Engine` singleton value to its Godot default. The main loop
+/// deliberately does NOT call this (the singleton outlives it in Godot); it
+/// exists for tests and hosts that share the process statics.
+pub fn reset_engine_singleton_state() {
+    set_engine_time_scale(1.0);
+    set_engine_max_fps(0);
+    ENGINE_PHYSICS_TPS.store(60, Ordering::Relaxed);
+    ENGINE_MAX_PHYSICS_STEPS.store(8, Ordering::Relaxed);
+    set_engine_physics_jitter_fix(0.5);
+    set_engine_frame_counters(0, 0, 0);
+    set_engine_in_physics_frame(false);
+    set_engine_frames_per_second(60.0);
 }
 
 fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
@@ -11588,38 +11767,11 @@ fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
         }
         "get_user_data_dir" => Ok(Variant::String(os_user_data_dir())),
         "has_feature" => {
-            let feat = match args.first() {
-                Some(Variant::String(s)) => s.as_str(),
-                _ => {
-                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "OS.has_feature() takes a feature-name string".into(),
-                    )))
-                }
-            };
-            let present = match feat {
-                "debug" => cfg!(debug_assertions),
-                "release" => !cfg!(debug_assertions),
-                "editor" => false,
-                "template" => true,
-                "macos" => cfg!(target_os = "macos"),
-                "windows" => cfg!(target_os = "windows"),
-                "linux" | "linuxbsd" => cfg!(target_os = "linux"),
-                "web" => cfg!(target_arch = "wasm32"),
-                "x86_64" => cfg!(target_arch = "x86_64"),
-                "arm64" | "aarch64" => cfg!(target_arch = "aarch64"),
-                "64" => cfg!(target_pointer_width = "64"),
-                "32" => cfg!(target_pointer_width = "32"),
-                "pc" | "desktop" => {
-                    cfg!(any(
-                        target_os = "macos",
-                        target_os = "windows",
-                        target_os = "linux"
-                    ))
-                }
-                "mobile" => false,
-                _ => false,
-            };
-            Ok(Variant::Bool(present))
+            let feat = os_str_arg(args, 0, "OS.has_feature()")?;
+            // Single-sourced in `gdplatform::os` (pat-0q2kx.123). This arm used
+            // to carry its own table, which had already drifted from the
+            // platform layer's — two answers for the same question.
+            Ok(Variant::Bool(gdplatform::os::has_feature(&feat)))
         }
         // -- Locale / hardware / user-args queries (pat-nzgdu.65) -----------
         "get_locale" => {
@@ -11675,9 +11827,138 @@ fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
                 Err(_) => Ok(Variant::Int(-1)),
             }
         }
+        // -- Directories (pat-0q2kx.123) ------------------------------------
+        // All of these delegate to `gdplatform::os` so the interpreter and the
+        // platform layer cannot answer differently.
+        "get_config_dir" => Ok(Variant::String(gdplatform::os::config_dir())),
+        "get_cache_dir" => Ok(Variant::String(gdplatform::os::cache_dir())),
+        "get_temp_dir" => Ok(Variant::String(gdplatform::os::temp_dir())),
+        "is_userfs_persistent" => Ok(Variant::Bool(gdplatform::os::is_userfs_persistent())),
+        // -- Blocking delays --
+        "delay_msec" => {
+            gdplatform::os::delay_msec(os_int_arg(args, 0, "OS.delay_msec()")?);
+            Ok(Variant::Nil)
+        }
+        "delay_usec" => {
+            gdplatform::os::delay_usec(os_int_arg(args, 0, "OS.delay_usec()")?);
+            Ok(Variant::Nil)
+        }
+        // -- Environment mutation --
+        "set_environment" => {
+            let key = os_str_arg(args, 0, "OS.set_environment()")?;
+            let value = os_str_arg(args, 1, "OS.set_environment()")?;
+            gdplatform::os::set_environment(&key, &value);
+            Ok(Variant::Nil)
+        }
+        "unset_environment" => {
+            let key = os_str_arg(args, 0, "OS.unset_environment()")?;
+            gdplatform::os::unset_environment(&key);
+            Ok(Variant::Nil)
+        }
+        // -- Host identity --
+        "get_version" => Ok(Variant::String(gdplatform::os::version())),
+        "get_executable_path" => Ok(Variant::String(gdplatform::os::executable_path())),
+        "get_distribution_name" => Ok(Variant::String(
+            call_os_static("get_name", &[])?.to_string_lossy(),
+        )),
+        "get_model_name" => Ok(Variant::String("GenericDevice".to_string())),
+        "get_unique_id" => Ok(Variant::String(String::new())),
+        // -- Shell / dialogs --
+        "shell_open" => {
+            let uri = os_str_arg(args, 0, "OS.shell_open()")?;
+            Ok(Variant::Int(gdplatform::os::shell_open(&uri)))
+        }
+        "shell_show_in_file_manager" => {
+            let path = os_str_arg(args, 0, "OS.shell_show_in_file_manager()")?;
+            Ok(Variant::Int(gdplatform::os::shell_open(&path)))
+        }
+        "alert" => {
+            let text = os_str_arg(args, 0, "OS.alert()")?;
+            // Godot's second argument defaults to "Alert!".
+            let title = match args.get(1) {
+                None | Some(Variant::Nil) => "Alert!".to_string(),
+                _ => os_str_arg(args, 1, "OS.alert()")?,
+            };
+            gdplatform::os::alert(&text, &title);
+            Ok(Variant::Nil)
+        }
+        // -- Keycode helpers --
+        "get_keycode_string" => {
+            let code = os_int_arg(args, 0, "OS.get_keycode_string()")?;
+            Ok(Variant::String(gdplatform::os::keycode_string(code)))
+        }
+        "find_keycode_from_string" => {
+            let text = os_str_arg(args, 0, "OS.find_keycode_from_string()")?;
+            Ok(Variant::Int(gdplatform::os::find_keycode_from_string(
+                &text,
+            )))
+        }
+        // -- Frame-pacing knobs Godot keeps on OS --
+        // Patina's loop never idles below its frame budget, so these round-trip
+        // rather than pretending to throttle.
+        "set_low_processor_usage_mode" => {
+            os_bool_arg(args, 0, "OS.set_low_processor_usage_mode()")?;
+            Ok(Variant::Nil)
+        }
+        "is_in_low_processor_usage_mode" => Ok(Variant::Bool(false)),
+        "set_low_processor_usage_mode_sleep_usec" => {
+            os_int_arg(args, 0, "OS.set_low_processor_usage_mode_sleep_usec()")?;
+            Ok(Variant::Nil)
+        }
+        "get_low_processor_usage_mode_sleep_usec" => Ok(Variant::Int(6900)),
+        // -- Memory queries. Godot reports process figures; Patina has no
+        // allocator instrumentation, so it reports 0 rather than a fiction.
+        "get_static_memory_usage" | "get_static_memory_peak_usage" => Ok(Variant::Int(0)),
+        "get_memory_info" => {
+            let mut d = Dictionary::new();
+            for key in ["physical", "free", "available", "stack"] {
+                d.insert(key.to_string(), Variant::Int(-1));
+            }
+            Ok(Variant::Dictionary(d))
+        }
+        // -- Process control that the web export cannot honor. Godot documents
+        // ERR_UNAVAILABLE (46) for these where no process API exists; natively
+        // they are simply not wired to a process table yet.
+        "create_process" | "create_instance" | "kill" => Ok(Variant::Int(-1)),
+        "get_process_id" => Ok(Variant::Int(std::process::id() as i64)),
+        "is_process_running" => Ok(Variant::Bool(false)),
+        "get_thread_caller_id" | "get_main_thread_id" => Ok(Variant::Int(0)),
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("OS.{other}"),
         ))),
+    }
+}
+
+/// Reads a string argument for an `OS.*` call, accepting `StringName` the way
+/// Godot's own bindings do (pat-0q2kx.123).
+fn os_str_arg(args: &[Variant], idx: usize, who: &str) -> Result<String, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::String(s)) => Ok(s.clone()),
+        Some(Variant::StringName(sn)) => Ok(sn.as_str().to_string()),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{who} expects a string argument at position {idx}"
+        )))),
+    }
+}
+
+/// Reads an integer argument for an `OS.*` call.
+fn os_int_arg(args: &[Variant], idx: usize, who: &str) -> Result<i64, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::Int(i)) => Ok(*i),
+        Some(Variant::Float(f)) => Ok(*f as i64),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{who} expects an integer argument at position {idx}"
+        )))),
+    }
+}
+
+/// Reads a boolean argument for an `OS.*` call.
+fn os_bool_arg(args: &[Variant], idx: usize, who: &str) -> Result<bool, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::Bool(b)) => Ok(*b),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{who} expects a bool argument at position {idx}"
+        )))),
     }
 }
 
@@ -11778,28 +12059,12 @@ fn call_classdb_static(method: &str, args: &[Variant]) -> Result<Variant, Runtim
 
 /// Best-effort per-user writable data dir (Godot's `user://` root).
 fn os_user_data_dir() -> String {
-    let base = if cfg!(target_os = "macos") {
-        std::env::var("HOME")
-            .map(|h| format!("{h}/Library/Application Support"))
-            .unwrap_or_default()
-    } else if cfg!(target_os = "windows") {
-        std::env::var("APPDATA").unwrap_or_default()
-    } else {
-        std::env::var("XDG_DATA_HOME")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("HOME")
-                    .ok()
-                    .map(|h| format!("{h}/.local/share"))
-            })
-            .unwrap_or_default()
-    };
-    if base.is_empty() {
-        "user://".to_string()
-    } else {
-        format!("{base}/Patina")
-    }
+    // Single-sourced in `gdplatform::os` (pat-0q2kx.123). This used to build
+    // `<data dir>/Patina` — the same directory for every project on the
+    // machine, so two games shared one `user://`. Godot's layout is
+    // `<data dir>/Godot/app_userdata/<project name>`, and the runner feeds the
+    // name in from `application/config/name` at boot.
+    gdplatform::os::user_data_dir()
 }
 
 /// Best-effort POSIX locale (Godot's `OS.get_locale()` format, e.g. "en_US").
@@ -12226,6 +12491,10 @@ thread_local! {
     /// `is_skipping_breakpoints` — set when the user asks the editor to ignore
     /// breakpoints without removing them.
     static DEBUG_SKIP_BREAKPOINTS: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    /// The break `EngineDebugger.debug()` / `script_debug()` asked for, waiting
+    /// for the transport to turn into a `DebugEvent::Paused` (pat-0q2kx.122).
+    static DEBUG_PENDING_BREAK: std::cell::RefCell<Option<EngineDebuggerBreak>> =
+        std::cell::RefCell::new(None);
 }
 
 /// Runtime hook: attach the debugger, making `EngineDebugger.is_active()` report
@@ -12480,11 +12749,108 @@ fn call_enginedebugger_static(method: &str, args: &[Variant]) -> Result<Variant,
         // Godot polls the debugger between lines; with no live session there is
         // nothing to poll, so this is a no-op rather than an error.
         "line_poll" => Ok(Variant::Nil),
+        // `EngineDebugger.debug(can_continue, is_error_breakpoint)` — Godot
+        // starts a debug break in script execution here
+        // (doc/classes/EngineDebugger.xml). Both arguments are optional and
+        // default to `true` / `false` (pat-0q2kx.122).
+        //
+        // The break only takes effect while a session is attached, matching
+        // Godot: with no debugger connected `debug()` is inert rather than
+        // wedging the game in a pause nothing can release.
+        "debug" => {
+            let can_continue = optional_bool_arg(args, 0, "EngineDebugger.debug()", true)?;
+            let is_error_breakpoint = optional_bool_arg(args, 1, "EngineDebugger.debug()", false)?;
+            request_engine_debugger_break(None, can_continue, is_error_breakpoint);
+            Ok(Variant::Nil)
+        }
+        // `EngineDebugger.script_debug(language, can_continue, is_error_breakpoint)`
+        // — the same break, attributed to one ScriptLanguage. Patina runs a
+        // single language, so the argument is recorded rather than dispatched
+        // on.
+        "script_debug" => {
+            let language = match args.first() {
+                None | Some(Variant::Nil) => None,
+                Some(Variant::String(s)) => Some(s.clone()),
+                Some(Variant::StringName(sn)) => Some(sn.as_str().to_string()),
+                Some(Variant::ObjectId(id)) => Some(format!("ScriptLanguage#{}", id.raw())),
+                Some(other) => Some(other.to_string_lossy()),
+            };
+            let can_continue = optional_bool_arg(args, 1, "EngineDebugger.script_debug()", true)?;
+            let is_error_breakpoint =
+                optional_bool_arg(args, 2, "EngineDebugger.script_debug()", false)?;
+            request_engine_debugger_break(language, can_continue, is_error_breakpoint);
+            Ok(Variant::Nil)
+        }
 
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("EngineDebugger.{other}"),
         ))),
     }
+}
+
+/// Reads an optional bool argument, falling back to Godot's documented default
+/// when the script omits it or passes `null` (pat-0q2kx.122).
+fn optional_bool_arg(
+    args: &[Variant],
+    idx: usize,
+    who: &str,
+    default: bool,
+) -> Result<bool, RuntimeError> {
+    match args.get(idx) {
+        None | Some(Variant::Nil) => Ok(default),
+        Some(Variant::Bool(b)) => Ok(*b),
+        Some(other) => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{who} expects a bool at position {idx}, got {}",
+            other.variant_type()
+        )))),
+    }
+}
+
+/// A break requested by `EngineDebugger.debug()` / `script_debug()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineDebuggerBreak {
+    /// The `ScriptLanguage` `script_debug` named, if any. `None` for `debug()`.
+    pub language: Option<String>,
+    /// Whether the editor should offer to continue past this break.
+    pub can_continue: bool,
+    /// Whether the break came from an error rather than a breakpoint.
+    pub is_error_breakpoint: bool,
+}
+
+/// Puts the debugger into its paused state and records why, so the transport
+/// can turn it into a `DebugEvent::Paused` (pat-0q2kx.122).
+///
+/// No-op without an attached session: Godot's `debug()` needs a debugger to
+/// break into, and pausing a game nobody can resume would be worse than inert.
+fn request_engine_debugger_break(
+    language: Option<String>,
+    can_continue: bool,
+    is_error_breakpoint: bool,
+) {
+    if !ENGINE_DEBUGGER.with(|d| d.borrow().is_attached()) {
+        return;
+    }
+    if DEBUG_SKIP_BREAKPOINTS.with(|s| s.get()) && !is_error_breakpoint {
+        // The editor asked to ignore breakpoints without removing them; an
+        // error break still stops, as in Godot.
+        return;
+    }
+    ENGINE_DEBUGGER.with(|d| d.borrow_mut().pause());
+    DEBUG_PENDING_BREAK.with(|b| {
+        *b.borrow_mut() = Some(EngineDebuggerBreak {
+            language,
+            can_continue,
+            is_error_breakpoint,
+        })
+    });
+}
+
+/// Runtime hook: take the break `EngineDebugger.debug()`/`script_debug()`
+/// requested, leaving none pending. This is the seam the debug-protocol
+/// transport reads to emit `DebugEvent::Paused`, mirroring
+/// [`drain_engine_debugger_messages`].
+pub fn take_engine_debugger_break() -> Option<EngineDebuggerBreak> {
+    DEBUG_PENDING_BREAK.with(|b| b.borrow_mut().take())
 }
 
 // ---------------------------------------------------------------------------
@@ -13562,10 +13928,236 @@ fn call_engine_static(method: &str, args: &[Variant]) -> Result<Variant, Runtime
             let milli = ENGINE_FPS_MILLI.load(Ordering::Relaxed);
             Ok(Variant::Float(milli as f64 / 1000.0))
         }
+        // -- frame pacing / fixed step (pat-0q2kx.121) --
+        "get_time_scale" => {
+            expect_engine_argc(method, args, 0)?;
+            Ok(Variant::Float(engine_time_scale()))
+        }
+        "set_time_scale" => {
+            expect_engine_argc(method, args, 1)?;
+            set_engine_time_scale(engine_arg_f64(method, &args[0])?);
+            Ok(Variant::Nil)
+        }
+        "get_max_fps" => {
+            expect_engine_argc(method, args, 0)?;
+            Ok(Variant::Int(engine_max_fps()))
+        }
+        "set_max_fps" => {
+            expect_engine_argc(method, args, 1)?;
+            set_engine_max_fps(engine_arg_i64(method, &args[0])?);
+            Ok(Variant::Nil)
+        }
+        "get_physics_ticks_per_second" => {
+            expect_engine_argc(method, args, 0)?;
+            Ok(Variant::Int(engine_physics_ticks_per_second()))
+        }
+        "set_physics_ticks_per_second" => {
+            expect_engine_argc(method, args, 1)?;
+            set_engine_physics_ticks_per_second(engine_arg_i64(method, &args[0])?);
+            Ok(Variant::Nil)
+        }
+        "get_max_physics_steps_per_frame" => {
+            expect_engine_argc(method, args, 0)?;
+            Ok(Variant::Int(engine_max_physics_steps_per_frame()))
+        }
+        "set_max_physics_steps_per_frame" => {
+            expect_engine_argc(method, args, 1)?;
+            set_engine_max_physics_steps_per_frame(engine_arg_i64(method, &args[0])?);
+            Ok(Variant::Nil)
+        }
+        "get_physics_jitter_fix" => {
+            expect_engine_argc(method, args, 0)?;
+            Ok(Variant::Float(engine_physics_jitter_fix()))
+        }
+        "set_physics_jitter_fix" => {
+            expect_engine_argc(method, args, 1)?;
+            set_engine_physics_jitter_fix(engine_arg_f64(method, &args[0])?);
+            Ok(Variant::Nil)
+        }
+        // -- live frame counters --
+        "get_process_frames" => {
+            expect_engine_argc(method, args, 0)?;
+            Ok(Variant::Int(engine_process_frames() as i64))
+        }
+        "get_physics_frames" => {
+            expect_engine_argc(method, args, 0)?;
+            Ok(Variant::Int(engine_physics_frames() as i64))
+        }
+        "get_frames_drawn" => {
+            expect_engine_argc(method, args, 0)?;
+            Ok(Variant::Int(
+                ENGINE_FRAMES_DRAWN.load(Ordering::Relaxed) as i64
+            ))
+        }
+        "is_in_physics_frame" => {
+            expect_engine_argc(method, args, 0)?;
+            Ok(Variant::Bool(
+                ENGINE_IN_PHYSICS_FRAME.load(Ordering::Relaxed),
+            ))
+        }
+        // -- version info --
+        "get_version_info" => {
+            expect_engine_argc(method, args, 0)?;
+            Ok(Variant::Dictionary(engine_version_info()))
+        }
+        // -- singleton registry --
+        "has_singleton" => {
+            expect_engine_argc(method, args, 1)?;
+            let name = engine_arg_string(method, &args[0])?;
+            let registered = engine_singletons()
+                .lock()
+                .map(|m| m.contains_key(&name))
+                .unwrap_or(false);
+            Ok(Variant::Bool(
+                registered || BUILTIN_SINGLETONS.contains(&name.as_str()),
+            ))
+        }
+        "get_singleton" => {
+            expect_engine_argc(method, args, 1)?;
+            let name = engine_arg_string(method, &args[0])?;
+            let found = engine_singletons()
+                .lock()
+                .ok()
+                .and_then(|m| m.get(&name).cloned());
+            Ok(found.unwrap_or(Variant::Nil))
+        }
+        "register_singleton" => {
+            expect_engine_argc(method, args, 2)?;
+            let name = engine_arg_string(method, &args[0])?;
+            if let Ok(mut map) = engine_singletons().lock() {
+                map.insert(name, args[1].clone());
+            }
+            Ok(Variant::Nil)
+        }
+        "unregister_singleton" => {
+            expect_engine_argc(method, args, 1)?;
+            let name = engine_arg_string(method, &args[0])?;
+            if let Ok(mut map) = engine_singletons().lock() {
+                map.remove(&name);
+            }
+            Ok(Variant::Nil)
+        }
+        "get_singleton_list" => {
+            expect_engine_argc(method, args, 0)?;
+            let mut names: Vec<String> = BUILTIN_SINGLETONS.iter().map(|s| s.to_string()).collect();
+            if let Ok(map) = engine_singletons().lock() {
+                for name in map.keys() {
+                    if !names.iter().any(|n| n == name) {
+                        names.push(name.clone());
+                    }
+                }
+            }
+            names.sort();
+            Ok(Variant::Array(
+                names.into_iter().map(Variant::String).collect(),
+            ))
+        }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("Engine.{other}"),
         ))),
     }
+}
+
+/// `Engine.get_version_info()` — Godot's version dictionary
+/// (`core/config/engine.cpp::get_version_info`). Patina reports the Godot API
+/// level it targets plus its own build string.
+fn engine_version_info() -> Dictionary {
+    let mut d = Dictionary::new();
+    let major = 4i64;
+    let minor = 3i64;
+    let patch = 0i64;
+    d.insert("major".to_string(), Variant::Int(major));
+    d.insert("minor".to_string(), Variant::Int(minor));
+    d.insert("patch".to_string(), Variant::Int(patch));
+    d.insert(
+        "hex".to_string(),
+        Variant::Int((major << 16) | (minor << 8) | patch),
+    );
+    d.insert("status".to_string(), Variant::String("stable".to_string()));
+    d.insert("build".to_string(), Variant::String("patina".to_string()));
+    d.insert("hash".to_string(), Variant::String(String::new()));
+    d.insert("timestamp".to_string(), Variant::Int(0));
+    d.insert(
+        "string".to_string(),
+        Variant::String(format!("{major}.{minor}.{patch}.stable.patina")),
+    );
+    d
+}
+
+fn expect_engine_argc(method: &str, args: &[Variant], want: usize) -> Result<(), RuntimeError> {
+    if args.len() != want {
+        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "Engine.{method}() takes {want} arguments"
+        ))));
+    }
+    Ok(())
+}
+
+fn engine_arg_f64(method: &str, arg: &Variant) -> Result<f64, RuntimeError> {
+    match arg {
+        Variant::Float(f) => Ok(*f),
+        Variant::Int(i) => Ok(*i as f64),
+        other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "Engine.{method}() expects a number, got {}",
+            other.variant_type()
+        )))),
+    }
+}
+
+fn engine_arg_i64(method: &str, arg: &Variant) -> Result<i64, RuntimeError> {
+    match arg {
+        Variant::Int(i) => Ok(*i),
+        Variant::Float(f) => Ok(*f as i64),
+        other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "Engine.{method}() expects an integer, got {}",
+            other.variant_type()
+        )))),
+    }
+}
+
+fn engine_arg_string(method: &str, arg: &Variant) -> Result<String, RuntimeError> {
+    match arg {
+        Variant::String(s) => Ok(s.clone()),
+        // Godot's own signature takes a `StringName`, so `&"OS"` is legal too.
+        Variant::StringName(s) => Ok(s.as_str().to_string()),
+        other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "Engine.{method}() expects a String, got {}",
+            other.variant_type()
+        )))),
+    }
+}
+
+/// Reads an `Engine.<property>` (pat-0q2kx.121). Godot exposes the frame-pacing
+/// state as properties as well as getters, and `Engine.time_scale = 0.5` is the
+/// idiomatic spelling in scripts.
+fn engine_static_property(member: &str) -> Option<Variant> {
+    match member {
+        "time_scale" => Some(Variant::Float(engine_time_scale())),
+        "max_fps" => Some(Variant::Int(engine_max_fps())),
+        "physics_ticks_per_second" => Some(Variant::Int(engine_physics_ticks_per_second())),
+        "max_physics_steps_per_frame" => Some(Variant::Int(engine_max_physics_steps_per_frame())),
+        "physics_jitter_fix" => Some(Variant::Float(engine_physics_jitter_fix())),
+        _ => None,
+    }
+}
+
+/// Writes an `Engine.<property>`. Returns false when `member` is not a known
+/// Engine property, so the caller can fall through to its other assignment
+/// paths (pat-0q2kx.121).
+fn set_engine_static_property(member: &str, value: &Variant) -> Result<bool, RuntimeError> {
+    match member {
+        "time_scale" => set_engine_time_scale(engine_arg_f64(member, value)?),
+        "max_fps" => set_engine_max_fps(engine_arg_i64(member, value)?),
+        "physics_ticks_per_second" => {
+            set_engine_physics_ticks_per_second(engine_arg_i64(member, value)?)
+        }
+        "max_physics_steps_per_frame" => {
+            set_engine_max_physics_steps_per_frame(engine_arg_i64(member, value)?)
+        }
+        "physics_jitter_fix" => set_engine_physics_jitter_fix(engine_arg_f64(member, value)?),
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 fn call_time_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
@@ -13598,38 +14190,426 @@ fn call_time_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeEr
                 .unwrap_or(0.0);
             Ok(Variant::Float(secs))
         }
-        "get_datetime_dict_from_system" => {
-            // Bounded: return a dictionary with unix time fields; full local
-            // calendar decomposition is deferred.
+        // -- `*_from_system`: current instant, local unless `utc` is true -----
+        //
+        // The `utc` parameter defaults to **false**, so these return local time.
+        // The previous implementation ignored the argument entirely and always
+        // reported UTC, which is the wrong answer for the default call
+        // (pat-0q2kx.124).
+        "get_datetime_dict_from_system"
+        | "get_date_dict_from_system"
+        | "get_time_dict_from_system" => {
             if args.len() > 1 {
-                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                    "Time.get_datetime_dict_from_system() takes 0 or 1 arguments".into(),
-                )));
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "Time.{method}() takes 0 or 1 arguments"
+                ))));
             }
-            let unix = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            // Approximate UTC breakdown without external chrono crate.
-            let days = unix / 86_400;
-            let day_secs = unix.rem_euclid(86_400);
-            let hour = day_secs / 3600;
-            let minute = (day_secs % 3600) / 60;
-            let second = day_secs % 60;
-            // Civil date from days since 1970-01-01 (Howard Hinnant algorithm).
-            let (year, month, day) = civil_from_days(days);
+            let utc = time_bool_arg(args, 0, false);
+            let bias = if utc { 0 } else { time_zone_bias_minutes() };
+            let parts = decompose_unix(system_unix_seconds() + bias * 60);
+            let part = match method {
+                "get_date_dict_from_system" => DatePart::Date,
+                "get_time_dict_from_system" => DatePart::Time,
+                _ => DatePart::DateTime,
+            };
+            // Only the system variants carry `dst`. Patina has no zone
+            // database, so it reports false — see `UTC_OFFSET_ENV`.
+            Ok(datetime_dict(&parts, part, true, Some(false)))
+        }
+        "get_datetime_string_from_system"
+        | "get_date_string_from_system"
+        | "get_time_string_from_system" => {
+            let max_args = if method == "get_datetime_string_from_system" {
+                2
+            } else {
+                1
+            };
+            if args.len() > max_args {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "Time.{method}() takes at most {max_args} arguments"
+                ))));
+            }
+            let utc = time_bool_arg(args, 0, false);
+            let bias = if utc { 0 } else { time_zone_bias_minutes() };
+            let parts = decompose_unix(system_unix_seconds() + bias * 60);
+            let part = match method {
+                "get_date_string_from_system" => DatePart::Date,
+                "get_time_string_from_system" => DatePart::Time,
+                _ => DatePart::DateTime,
+            };
+            Ok(Variant::String(datetime_string(
+                &parts,
+                part,
+                time_bool_arg(args, 1, false),
+            )))
+        }
+
+        // -- `*_from_unix_time`: pure conversion, no zone shift --------------
+        "get_datetime_dict_from_unix_time"
+        | "get_date_dict_from_unix_time"
+        | "get_time_dict_from_unix_time" => {
+            let parts = decompose_unix(time_int_arg(method, args, 0)?);
+            let part = match method {
+                "get_date_dict_from_unix_time" => DatePart::Date,
+                "get_time_dict_from_unix_time" => DatePart::Time,
+                _ => DatePart::DateTime,
+            };
+            Ok(datetime_dict(&parts, part, true, None))
+        }
+        "get_datetime_string_from_unix_time"
+        | "get_date_string_from_unix_time"
+        | "get_time_string_from_unix_time" => {
+            let parts = decompose_unix(time_int_arg(method, args, 0)?);
+            let part = match method {
+                "get_date_string_from_unix_time" => DatePart::Date,
+                "get_time_string_from_unix_time" => DatePart::Time,
+                _ => DatePart::DateTime,
+            };
+            Ok(Variant::String(datetime_string(
+                &parts,
+                part,
+                time_bool_arg(args, 1, false),
+            )))
+        }
+
+        // -- string <-> dict <-> unix ---------------------------------------
+        "get_datetime_dict_from_datetime_string" => {
+            let Some(Variant::String(s)) = args.first() else {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Time.get_datetime_dict_from_datetime_string() expects a String".into(),
+                )));
+            };
+            // `weekday` is expensive to compute, so Godot makes it opt-in and
+            // omits the key entirely when false.
+            let weekday = time_bool_arg(args, 1, true);
+            Ok(datetime_dict(
+                &parse_datetime_string(s),
+                DatePart::DateTime,
+                weekday,
+                None,
+            ))
+        }
+        "get_datetime_string_from_datetime_dict" => {
+            let Some(Variant::Dictionary(dict)) = args.first() else {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Time.get_datetime_string_from_datetime_dict() expects a Dictionary".into(),
+                )));
+            };
+            // "If the dictionary is empty, 0 is returned" — Godot yields the
+            // string "0" rather than an epoch timestamp here.
+            if dict.is_empty() {
+                return Ok(Variant::String("0".into()));
+            }
+            Ok(Variant::String(datetime_string(
+                &parts_from_dict(dict),
+                DatePart::DateTime,
+                time_bool_arg(args, 1, false),
+            )))
+        }
+        "get_unix_time_from_datetime_dict" => {
+            let Some(Variant::Dictionary(dict)) = args.first() else {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Time.get_unix_time_from_datetime_dict() expects a Dictionary".into(),
+                )));
+            };
+            if dict.is_empty() {
+                return Ok(Variant::Int(0));
+            }
+            Ok(Variant::Int(compose_unix(&parts_from_dict(dict))))
+        }
+        "get_unix_time_from_datetime_string" => {
+            let Some(Variant::String(s)) = args.first() else {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Time.get_unix_time_from_datetime_string() expects a String".into(),
+                )));
+            };
+            Ok(Variant::Int(compose_unix(&parse_datetime_string(s))))
+        }
+
+        // -- zone helpers ----------------------------------------------------
+        "get_offset_string_from_offset_minutes" => Ok(Variant::String(offset_string(
+            time_int_arg(method, args, 0)?,
+        ))),
+        "get_time_zone_from_system" => {
+            let bias = time_zone_bias_minutes();
             let mut dict = Dictionary::new();
-            dict.insert("year", Variant::Int(year));
-            dict.insert("month", Variant::Int(month));
-            dict.insert("day", Variant::Int(day));
-            dict.insert("hour", Variant::Int(hour));
-            dict.insert("minute", Variant::Int(minute));
-            dict.insert("second", Variant::Int(second));
+            dict.insert("bias", Variant::Int(bias));
+            // Without a zone database the best honest name is the offset
+            // itself, which is a valid ISO-8601 zone designator.
+            dict.insert(
+                "name",
+                Variant::String(if bias == 0 {
+                    "UTC".to_string()
+                } else {
+                    format!("UTC{}", offset_string(bias))
+                }),
+            );
             Ok(Variant::Dictionary(dict))
         }
+
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("Time.{other}"),
         ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Time singleton conversions (pat-0q2kx.124)
+// ---------------------------------------------------------------------------
+
+/// Environment override for the system's UTC offset, in minutes east of UTC.
+///
+/// Patina has no `libc` dependency, so there is no `localtime_r` to ask for the
+/// real zone. This variable is the supported way to give the engine a local
+/// zone; absent it, local time **is** UTC and `dst` is reported `false`. That
+/// fallback is deliberate and documented rather than guessed at — a wrong
+/// offset is worse than a declared-UTC one, and every conversion stays
+/// self-consistent because [`time_zone_bias_minutes`] is also the value
+/// `Time.get_time_zone_from_system()` reports.
+const UTC_OFFSET_ENV: &str = "PATINA_UTC_OFFSET_MINUTES";
+
+/// The system's offset from UTC in minutes east, per [`UTC_OFFSET_ENV`].
+fn time_zone_bias_minutes() -> i64 {
+    std::env::var(UTC_OFFSET_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// Converts (year, month, day) to days since the Unix epoch — the exact inverse
+/// of [`civil_from_days`] (Howard Hinnant's `days_from_civil`).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Godot's `Time.Weekday` for a day count since the epoch: 0 = Sunday .. 6 =
+/// Saturday. 1970-01-01 was a Thursday, hence the +4.
+fn weekday_from_days(days: i64) -> i64 {
+    (days + 4).rem_euclid(7)
+}
+
+/// A decomposed calendar instant.
+struct DateTimeParts {
+    year: i64,
+    month: i64,
+    day: i64,
+    weekday: i64,
+    hour: i64,
+    minute: i64,
+    second: i64,
+}
+
+/// Splits a Unix timestamp into calendar fields. `unix` is interpreted in
+/// whatever zone the caller already shifted it into.
+fn decompose_unix(unix: i64) -> DateTimeParts {
+    let days = unix.div_euclid(86_400);
+    let day_secs = unix.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    DateTimeParts {
+        year,
+        month,
+        day,
+        weekday: weekday_from_days(days),
+        hour: day_secs / 3600,
+        minute: (day_secs % 3600) / 60,
+        second: day_secs % 60,
+    }
+}
+
+/// Recombines calendar fields into a Unix timestamp. No zone conversion, per
+/// `Time.xml`: "the timestamp will be in the same timezone as the given
+/// datetime dictionary".
+fn compose_unix(p: &DateTimeParts) -> i64 {
+    days_from_civil(p.year, p.month, p.day) * 86_400 + p.hour * 3600 + p.minute * 60 + p.second
+}
+
+/// The parts a datetime dictionary carries, as Godot's date/time/datetime
+/// variants slice them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DatePart {
+    /// `year`/`month`/`day` (+ `weekday`).
+    Date,
+    /// `hour`/`minute`/`second`.
+    Time,
+    /// Both.
+    DateTime,
+}
+
+/// Builds the dictionary Godot returns for the requested slice.
+///
+/// `dst` is only present on the `*_from_system` variants, matching `Time.xml`.
+fn datetime_dict(p: &DateTimeParts, part: DatePart, weekday: bool, dst: Option<bool>) -> Variant {
+    let mut dict = Dictionary::new();
+    if part != DatePart::Time {
+        dict.insert("year", Variant::Int(p.year));
+        dict.insert("month", Variant::Int(p.month));
+        dict.insert("day", Variant::Int(p.day));
+        if weekday {
+            dict.insert("weekday", Variant::Int(p.weekday));
+        }
+    }
+    if part != DatePart::Date {
+        dict.insert("hour", Variant::Int(p.hour));
+        dict.insert("minute", Variant::Int(p.minute));
+        dict.insert("second", Variant::Int(p.second));
+    }
+    if let Some(dst) = dst {
+        dict.insert("dst", Variant::Bool(dst));
+    }
+    Variant::Dictionary(dict)
+}
+
+/// Formats the requested slice as ISO 8601.
+fn datetime_string(p: &DateTimeParts, part: DatePart, use_space: bool) -> String {
+    let date = format!("{:04}-{:02}-{:02}", p.year, p.month, p.day);
+    let time = format!("{:02}:{:02}:{:02}", p.hour, p.minute, p.second);
+    match part {
+        DatePart::Date => date,
+        DatePart::Time => time,
+        DatePart::DateTime => {
+            let sep = if use_space { " " } else { "T" };
+            format!("{date}{sep}{time}")
+        }
+    }
+}
+
+/// Parses an ISO 8601 string that may carry a date, a time, or both.
+///
+/// Per `Time.xml` any decimal fraction is ignored silently, and omitted fields
+/// default to the epoch (1970-01-01 00:00:00).
+fn parse_datetime_string(s: &str) -> DateTimeParts {
+    let s = s.trim();
+    // The separator is `T` or a space; a lone time string has neither.
+    let (date_str, time_str) = match s.split_once(['T', 't', ' ']) {
+        Some((d, t)) => (Some(d), Some(t)),
+        None if s.contains('-') && !s.contains(':') => (Some(s), None),
+        None if s.contains(':') => (None, Some(s)),
+        None => (Some(s), None),
+    };
+
+    let mut year = 1970;
+    let mut month = 1;
+    let mut day = 1;
+    if let Some(d) = date_str.map(str::trim).filter(|d| !d.is_empty()) {
+        // A leading `-` would be a negative (BCE) year, so split off the sign
+        // first rather than letting it look like a field separator.
+        let (sign, rest) = match d.strip_prefix('-') {
+            Some(rest) => (-1, rest),
+            None => (1, d),
+        };
+        let mut fields = rest.split('-');
+        year = fields
+            .next()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(1970)
+            * sign;
+        month = fields
+            .next()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(1);
+        day = fields
+            .next()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(1);
+    }
+
+    let mut hour = 0;
+    let mut minute = 0;
+    let mut second = 0;
+    if let Some(t) = time_str.map(str::trim).filter(|t| !t.is_empty()) {
+        // Drop a trailing zone designator and any fractional seconds.
+        let t = t.trim_end_matches(['Z', 'z']);
+        let mut fields = t.split(':');
+        hour = fields
+            .next()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        minute = fields
+            .next()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        second = fields
+            .next()
+            .map(|v| v.split('.').next().unwrap_or("0"))
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+    }
+
+    DateTimeParts {
+        year,
+        month,
+        day,
+        weekday: weekday_from_days(days_from_civil(year, month, day)),
+        hour,
+        minute,
+        second,
+    }
+}
+
+/// Reads a datetime dictionary, defaulting omitted keys to the epoch and
+/// ignoring every extra entry (including `dst`), per `Time.xml`.
+fn parts_from_dict(dict: &Dictionary) -> DateTimeParts {
+    let field = |key: &str, default: i64| -> i64 {
+        match dict.get(key) {
+            Some(Variant::Int(i)) => *i,
+            Some(Variant::Float(f)) => *f as i64,
+            Some(Variant::String(s)) => s.trim().parse::<i64>().unwrap_or(default),
+            _ => default,
+        }
+    };
+    let year = field("year", 1970);
+    let month = field("month", 1);
+    let day = field("day", 1);
+    DateTimeParts {
+        year,
+        month,
+        day,
+        weekday: weekday_from_days(days_from_civil(year, month, day)),
+        hour: field("hour", 0),
+        minute: field("minute", 0),
+        second: field("second", 0),
+    }
+}
+
+/// Formats a UTC offset the way `Time.get_offset_string_from_offset_minutes`
+/// does: a sign followed by zero-padded hours and minutes.
+fn offset_string(offset_minutes: i64) -> String {
+    let sign = if offset_minutes < 0 { '-' } else { '+' };
+    let abs = offset_minutes.abs();
+    format!("{sign}{:02}:{:02}", abs / 60, abs % 60)
+}
+
+/// Current Unix time in seconds.
+fn system_unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Reads a trailing `bool` argument, defaulting when absent.
+fn time_bool_arg(args: &[Variant], index: usize, default: bool) -> bool {
+    match args.get(index) {
+        Some(Variant::Bool(b)) => *b,
+        Some(Variant::Int(i)) => *i != 0,
+        _ => default,
+    }
+}
+
+/// Reads a required integer argument (a unix timestamp or minute count).
+fn time_int_arg(method: &str, args: &[Variant], index: usize) -> Result<i64, RuntimeError> {
+    match args.get(index) {
+        Some(Variant::Int(i)) => Ok(*i),
+        Some(Variant::Float(f)) => Ok(*f as i64),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "Time.{method}() expects an integer argument"
+        )))),
     }
 }
 

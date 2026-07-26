@@ -687,21 +687,51 @@ fn draw_sprite2d_with_texture(
             Variant::Color(c) => c,
             _ => Color::WHITE,
         };
+        // Which pixels of the texture this sprite samples — an explicit region
+        // or cell `frame` of the hframes × vframes sheet (pat-0q2kx.107). The
+        // edit view drew the whole texture regardless, so a sheet-based sprite
+        // looked nothing like it does at runtime.
+        let sheet = crate::viewport_2d_render::sprite_sheet_for_node(node);
+        let (tw, th) = (tex.width as f32, tex.height as f32);
+        let mut src = gdscene::sprite_frames::sprite_source_rect(
+            Vector2::new(tw, th),
+            sheet.region_enabled,
+            sheet.region_rect,
+            sheet.hframes,
+            sheet.vframes,
+            sheet.frame,
+        );
+
         let mut draw_tex = tex;
         if flip_h {
             draw_tex = draw_tex.flip_horizontal();
+            // Flipping maps x → width - x, so the cell's span moves with it.
+            // Mirroring the source rect keeps the same pixels selected instead
+            // of sampling the mirrored position of a different cell.
+            src.position.x = tw - (src.position.x + src.size.x);
         }
         if flip_v {
             draw_tex = draw_tex.flip_vertical();
+            src.position.y = th - (src.position.y + src.size.y);
         }
-        let sw = draw_tex.width as f32 * zoom;
-        let sh = draw_tex.height as f32 * zoom;
-        let dx = pos.x + offset.x * zoom - sw / 2.0;
-        let dy = pos.y + offset.y * zoom - sh / 2.0;
-        draw::draw_texture_rect_blended(
+
+        // The drawn size is the SOURCE size, not the whole texture.
+        let sw = src.size.x * zoom;
+        let sh = src.size.y * zoom;
+        // `centered` (Godot's default) centres the sub-rect on the node origin.
+        let (dx, dy) = if sheet.centered {
+            (
+                pos.x + offset.x * zoom - sw / 2.0,
+                pos.y + offset.y * zoom - sh / 2.0,
+            )
+        } else {
+            (pos.x + offset.x * zoom, pos.y + offset.y * zoom)
+        };
+        draw::draw_texture_region_blended(
             fb,
             &draw_tex,
             Rect2::new(Vector2::new(dx, dy), Vector2::new(sw, sh)),
+            src,
             modulate,
         );
     } else {

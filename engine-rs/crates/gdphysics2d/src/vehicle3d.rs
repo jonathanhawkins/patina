@@ -112,12 +112,7 @@ pub struct VehicleBody3D {
 impl VehicleBody3D {
     /// Creates a new vehicle body with a box chassis of the given half-extents
     /// at the given world position and mass. The chassis begins with no wheels.
-    pub fn new(
-        id: VehicleBodyId3D,
-        position: Vector3,
-        half_extents: Vector3,
-        mass: f32,
-    ) -> Self {
+    pub fn new(id: VehicleBodyId3D, position: Vector3, half_extents: Vector3, mass: f32) -> Self {
         let chassis = PhysicsBody3D::new(
             BodyId3D(id.0),
             BodyType3D::Rigid,
@@ -211,8 +206,8 @@ impl VehicleBody3D {
                 wheel.contact_point = Vector3::new(attach.x, ground_y, attach.z);
 
                 let vertical_velocity = self.chassis.linear_velocity.y;
-                let spring_force =
-                    wheel.suspension_stiffness * penetration - wheel.suspension_damping * vertical_velocity;
+                let spring_force = wheel.suspension_stiffness * penetration
+                    - wheel.suspension_damping * vertical_velocity;
                 let spring_force = spring_force.max(0.0);
                 self.chassis
                     .apply_force(Vector3::new(0.0, spring_force, 0.0));
@@ -241,7 +236,11 @@ impl VehicleBody3D {
         if contact_count > 0 && self.brake > 0.0 && forward_speed.abs() > 1e-6 {
             let max_brake = forward_speed.abs() * mass / dt.max(1e-6);
             let brake_mag = self.brake.min(max_brake);
-            let brake_dir = if forward_speed > 0.0 { -forward } else { forward };
+            let brake_dir = if forward_speed > 0.0 {
+                -forward
+            } else {
+                forward
+            };
             self.chassis.apply_force(brake_dir * brake_mag);
         }
 

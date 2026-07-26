@@ -14,6 +14,7 @@ use gdrender3d::{compare_framebuffers_3d, DiffResult3D, FrameBuffer3D, SoftwareR
 use gdserver3d::instance::{
     GeometryInstanceSettings, Instance3DId, ShadowCastingSetting, VisibilityRangeFadeMode,
 };
+use gdserver3d::label3d::Label3D;
 use gdserver3d::light::{Light3D, Light3DId, LightType, OmniShadowMode};
 use gdserver3d::material::{
     Material3D, ShadingMode, StandardMaterial3D, TextureImage, TextureSlot,
@@ -221,6 +222,8 @@ pub struct RenderServer3DAdapter {
     instance_map: InstanceMap,
     multimesh_map: MultiMeshMap,
     sprite_map: SpriteMap,
+    /// Label3D node -> render instance (pat-0q2kx.109).
+    label_map: SpriteMap,
     light_map: LightMap,
     reflection_probe_map: ReflectionProbeMap,
     viewport_width: u32,
@@ -248,6 +251,7 @@ impl RenderServer3DAdapter {
             instance_map: InstanceMap::default(),
             multimesh_map: MultiMeshMap::default(),
             sprite_map: SpriteMap::default(),
+            label_map: SpriteMap::default(),
             light_map: LightMap::default(),
             reflection_probe_map: ReflectionProbeMap::default(),
             viewport_width: width,
@@ -313,7 +317,10 @@ impl RenderServer3DAdapter {
         let sprite_visible = self.sync_sprite3d(tree, camera_transform.origin);
         // CSG roots evaluate their boolean tree into one mesh (pat-nzgdu.119).
         let csg_visible = self.sync_csg_shapes(tree);
-        let visible_count = visible_count + multimesh_visible + sprite_visible + csg_visible;
+        // Label3D text quads billboard toward the same camera (pat-0q2kx.109).
+        let label_visible = self.sync_label3d(tree, camera_transform.origin);
+        let visible_count =
+            visible_count + multimesh_visible + sprite_visible + csg_visible + label_visible;
 
         // 3. Sync light nodes to render server.
         let light_count = self.sync_lights(tree);
@@ -833,6 +840,137 @@ impl RenderServer3DAdapter {
     /// Builds the render material for a `Sprite3D`: the modulate color drives
     /// the albedo, sprites are unlit unless `shaded` is set, and `double_sided`
     /// is honored so the quad shows from behind (Godot's `Sprite3D` default).
+    /// Extracts every `Label3D` node into the render list as a text quad row
+    /// (pat-0q2kx.109).
+    ///
+    /// `gdserver3d::label3d` held the full glyph-layout and billboard model but
+    /// had **no callers anywhere** — nothing read a `Label3D` node, so the class
+    /// registered, produced no geometry, and rendered as nothing (or as a
+    /// generic marker). This is the missing extraction, built as a direct
+    /// mirror of [`sync_sprite3d`](Self::sync_sprite3d) so both node types
+    /// behave identically for billboarding, visibility and instance lifetime.
+    fn sync_label3d(&mut self, tree: &SceneTree, camera_pos: Vector3) -> u32 {
+        let all_nodes = tree.all_nodes_in_tree_order();
+        let mut current: HashMap<NodeId, ()> = HashMap::new();
+        let mut visible_count = 0u32;
+
+        for &nid in &all_nodes {
+            let node = match tree.get_node(nid) {
+                Some(n) => n,
+                None => continue,
+            };
+            if node.class_name() != "Label3D" {
+                continue;
+            }
+            current.insert(nid, ());
+
+            let label = Self::label3d_from_node(tree, nid);
+            let node_transform = node3d::get_global_transform(tree, nid);
+            let visible = node3d::is_visible(tree, nid);
+
+            let basis = if label.billboard == BillboardMode3D::Disabled {
+                node_transform.basis
+            } else {
+                label.billboard_basis(node_transform.origin, camera_pos)
+            };
+            let transform = Transform3D {
+                basis,
+                origin: node_transform.origin,
+            };
+
+            let inst_id = if let Some(&existing) = self.label_map.node_to_instance.get(&nid) {
+                existing
+            } else {
+                let new_id = self.renderer.create_instance();
+                self.label_map.node_to_instance.insert(nid, new_id);
+                new_id
+            };
+
+            // Rebuilt every frame so a `text` edit re-renders next frame, which
+            // is exactly what the acceptance case checks.
+            self.renderer.set_mesh(inst_id, label.to_mesh());
+            self.renderer.set_material(
+                inst_id,
+                Material3D {
+                    // `Label3D::modulate` is a raw [f32; 4] (unlike
+                    // `Sprite3D::modulate`, which is already a Color), so it
+                    // must be converted rather than assigned through.
+                    albedo: gdcore::math::Color::new(
+                        label.modulate[0],
+                        label.modulate[1],
+                        label.modulate[2],
+                        label.modulate[3],
+                    ),
+                    // Godot's Label3D is unlit by default: text must stay
+                    // legible regardless of scene lighting.
+                    shading_mode: ShadingMode::Unlit,
+                    double_sided: true,
+                    ..Material3D::default()
+                },
+            );
+            self.renderer.set_transform(inst_id, transform);
+            self.renderer.set_visible(inst_id, visible);
+
+            if visible {
+                visible_count += 1;
+            }
+        }
+
+        let stale: Vec<NodeId> = self
+            .label_map
+            .node_to_instance
+            .keys()
+            .filter(|nid| !current.contains_key(nid))
+            .copied()
+            .collect();
+        for nid in stale {
+            if let Some(inst_id) = self.label_map.node_to_instance.remove(&nid) {
+                self.renderer.free_instance(inst_id);
+            }
+        }
+
+        visible_count
+    }
+
+    /// Reads a `Label3D` node's properties into a [`Label3D`], falling back to
+    /// Godot's documented defaults for anything the node does not set.
+    fn label3d_from_node(tree: &SceneTree, nid: NodeId) -> Label3D {
+        let mut label = Label3D::default();
+        let Some(node) = tree.get_node(nid) else {
+            return label;
+        };
+
+        if let gdvariant::Variant::String(t) = node.get_property("text") {
+            label.text = t;
+        }
+        match node.get_property("pixel_size") {
+            gdvariant::Variant::Float(f) if f > 0.0 => label.pixel_size = f as f32,
+            gdvariant::Variant::Int(i) if i > 0 => label.pixel_size = i as f32,
+            _ => {}
+        }
+        // Godot exposes `font_size` in points over a 16pt base; the server type
+        // takes a unitless scale, so convert rather than assigning raw points —
+        // passing 32 straight through would render the text 32× too large.
+        match node.get_property("font_size") {
+            gdvariant::Variant::Int(i) if i > 0 => label.font_scale = i as f32 / 16.0,
+            gdvariant::Variant::Float(f) if f > 0.0 => label.font_scale = f as f32 / 16.0,
+            _ => {}
+        }
+        if let gdvariant::Variant::Color(c) = node.get_property("modulate") {
+            label.modulate = [c.r, c.g, c.b, c.a];
+        }
+        label.billboard = match node.get_property("billboard") {
+            gdvariant::Variant::Int(1) => BillboardMode3D::Enabled,
+            gdvariant::Variant::Int(2) => BillboardMode3D::Particles,
+            gdvariant::Variant::Bool(true) => BillboardMode3D::Enabled,
+            _ => BillboardMode3D::Disabled,
+        };
+        if let gdvariant::Variant::Bool(b) = node.get_property("centered") {
+            label.centered = b;
+        }
+        label
+    }
+
     fn sprite_material(sprite: &Sprite3D) -> Material3D {
         Material3D {
             albedo: sprite.modulate,

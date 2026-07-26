@@ -423,3 +423,142 @@ fn malformed_breakpoint_arguments_are_rejected() {
         "profiler_enable takes a real bool, got: {err:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// pat-0q2kx.122 — `debug()` / `script_debug()`, the two arms Godot has and
+// `call_enginedebugger_static` did not.
+//
+// ⚠️ This does NOT satisfy pat-0q2kx.122's acceptance either: that needs a
+// breakpoint to pause the interpreter at a `script:line`, which is impossible
+// today because nothing in the AST carries a line and `Interpreter::current_line`
+// is never written. See the bead's blocked report. These cover only the
+// script-callable break request and the state it leaves for the transport.
+// ---------------------------------------------------------------------------
+
+use gdcore::debugger::DebuggerState;
+use gdscript_interop::interpreter::take_engine_debugger_break;
+
+/// `EngineDebugger.debug()` starts a break: the debugger ends up paused and the
+/// transport can read back why.
+#[test]
+fn debug_requests_a_break_while_attached() {
+    engine_debugger_detach();
+    let _ = take_engine_debugger_break();
+    engine_debugger_attach();
+
+    run_val("EngineDebugger.debug()\nreturn 0\n");
+
+    assert_eq!(
+        with_engine_debugger(|d| d.state()),
+        DebuggerState::Paused,
+        "debug() must put the session into its paused state"
+    );
+    let brk = take_engine_debugger_break().expect("debug() must leave a break for the transport");
+    assert_eq!(brk.language, None, "plain debug() names no language");
+    assert!(brk.can_continue, "can_continue defaults to true in Godot");
+    assert!(
+        !brk.is_error_breakpoint,
+        "is_error_breakpoint defaults to false in Godot"
+    );
+    assert!(
+        take_engine_debugger_break().is_none(),
+        "taking the break must leave none pending"
+    );
+
+    engine_debugger_detach();
+}
+
+/// The arguments are honored, not defaulted away.
+#[test]
+fn debug_arguments_reach_the_break() {
+    engine_debugger_detach();
+    let _ = take_engine_debugger_break();
+    engine_debugger_attach();
+
+    run_val("EngineDebugger.debug(false, true)\nreturn 0\n");
+    let brk = take_engine_debugger_break().expect("break recorded");
+    assert!(!brk.can_continue, "can_continue=false must survive");
+    assert!(
+        brk.is_error_breakpoint,
+        "is_error_breakpoint=true must survive"
+    );
+
+    engine_debugger_detach();
+}
+
+/// `script_debug()` records the language it was attributed to, and takes its
+/// can_continue / is_error_breakpoint one position later than `debug()`.
+#[test]
+fn script_debug_records_its_language() {
+    engine_debugger_detach();
+    let _ = take_engine_debugger_break();
+    engine_debugger_attach();
+
+    run_val("EngineDebugger.script_debug(\"GDScript\", false, true)\nreturn 0\n");
+    let brk = take_engine_debugger_break().expect("break recorded");
+    assert_eq!(brk.language.as_deref(), Some("GDScript"));
+    assert!(!brk.can_continue);
+    assert!(brk.is_error_breakpoint);
+
+    engine_debugger_detach();
+}
+
+/// With no session attached, `debug()` is inert. Pausing a game that has no
+/// debugger to resume it would be strictly worse than doing nothing.
+#[test]
+fn debug_without_a_session_is_inert() {
+    engine_debugger_detach();
+    let _ = take_engine_debugger_break();
+
+    run_val("EngineDebugger.debug()\nreturn 0\n");
+
+    assert_eq!(
+        with_engine_debugger(|d| d.state()),
+        DebuggerState::Detached,
+        "an unattached debugger must not be paused by a script"
+    );
+    assert!(
+        take_engine_debugger_break().is_none(),
+        "no session means no break to report"
+    );
+}
+
+/// `is_skipping_breakpoints` suppresses a plain `debug()` break but NOT an
+/// error break — Godot still stops on errors while breakpoints are skipped.
+#[test]
+fn skipping_breakpoints_gates_debug_but_not_errors() {
+    engine_debugger_detach();
+    let _ = take_engine_debugger_break();
+    engine_debugger_attach();
+    engine_debugger_set_skipping_breakpoints(true);
+
+    run_val("EngineDebugger.debug()\nreturn 0\n");
+    assert!(
+        take_engine_debugger_break().is_none(),
+        "a plain break must be skipped while skipping breakpoints"
+    );
+    assert_eq!(
+        with_engine_debugger(|d| d.state()),
+        DebuggerState::Running,
+        "the session must keep running through a skipped break"
+    );
+
+    run_val("EngineDebugger.debug(true, true)\nreturn 0\n");
+    assert!(
+        take_engine_debugger_break().is_some(),
+        "an error break must still stop while breakpoints are skipped"
+    );
+
+    engine_debugger_set_skipping_breakpoints(false);
+    engine_debugger_detach();
+}
+
+/// A non-bool argument is a type error rather than a silently defaulted one.
+#[test]
+fn debug_rejects_non_bool_arguments() {
+    let err = run_err("EngineDebugger.debug(1)\nreturn 0\n");
+    assert!(
+        matches!(err.kind, RuntimeErrorKind::TypeError(_)),
+        "debug() takes real bools, got: {err:?}"
+    );
+}

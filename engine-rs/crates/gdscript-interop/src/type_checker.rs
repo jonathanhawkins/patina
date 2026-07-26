@@ -490,10 +490,7 @@ mod tests {
 
     #[test]
     fn detects_return_type_mismatch() {
-        let src = concat!(
-            "func number() -> int:\n",
-            "    return \"forty-two\"\n",
-        );
+        let src = concat!("func number() -> int:\n", "    return \"forty-two\"\n",);
         let errors = type_check(src).unwrap();
         assert!(errors
             .iter()
@@ -502,10 +499,7 @@ mod tests {
 
     #[test]
     fn detects_duplicate_class_name() {
-        let src = concat!(
-            "class_name Foo\n",
-            "class_name Bar\n",
-        );
+        let src = concat!("class_name Foo\n", "class_name Bar\n",);
         let errors = type_check(src).unwrap();
         assert!(errors
             .iter()
@@ -522,6 +516,9 @@ mod tests {
             "    speed(5)\n",
         );
         let errors = type_check(src).unwrap();
-        assert!(errors.is_empty(), "expected widening to succeed: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "expected widening to succeed: {errors:?}"
+        );
     }
 }

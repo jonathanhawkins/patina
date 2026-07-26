@@ -63,6 +63,21 @@ pub fn boot_project_with_user_root(
     let settings = ProjectSettings::load_godot_project(&project_root.join("project.godot"))
         .map_err(|e| format!("failed to load ProjectSettings: {e}"))?;
 
+    // (1a) Name the `user://` directory after the project, the way Godot does
+    // (`<data dir>/Godot/app_userdata/<application/config/name>`). Without this
+    // every Patina project shared one `user://` (pat-0q2kx.123). The declared
+    // feature tags go in at the same time so `OS.has_feature("my_tag")` answers
+    // for project-defined tags, not just the built-in ones.
+    gdplatform::os::set_project_name(settings.project_name());
+    gdplatform::os::clear_custom_features();
+    if let Some(features) = settings.get("application/config/features") {
+        if let Some(list) = features.as_string() {
+            for tag in list.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+                gdplatform::os::add_custom_feature(tag);
+            }
+        }
+    }
+
     // (1b) Install the DisplayServer backend now that the project's configured
     // viewport is known. Without this a script calling
     // `DisplayServer.window_get_size()` got a hardcoded 1920x1080 from inside
@@ -154,7 +169,8 @@ fn load_scene_into_tree(
     parent: NodeId,
     res_path: &str,
 ) -> Result<NodeId, String> {
-    let fs_path = resolve_path(res_path).map_err(|e| format!("failed to resolve '{res_path}': {e}"))?;
+    let fs_path =
+        resolve_path(res_path).map_err(|e| format!("failed to resolve '{res_path}': {e}"))?;
     let source = std::fs::read_to_string(&fs_path)
         .map_err(|e| format!("failed to read scene '{}': {e}", fs_path.display()))?;
     let packed = PackedScene::from_tscn(&source)
@@ -246,7 +262,10 @@ mod tests {
         // The builtin `ui_*` actions are also present (installed from the default
         // table, not per-demo).
         assert!(
-            booted.input_map.actions().any(|a| a.as_str() == "ui_accept"),
+            booted
+                .input_map
+                .actions()
+                .any(|a| a.as_str() == "ui_accept"),
             "builtin ui_* actions are registered at boot"
         );
     }

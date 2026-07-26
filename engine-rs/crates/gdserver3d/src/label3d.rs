@@ -15,6 +15,7 @@
 //! only on `gdcore`/`gdvariant`). A renderer maps each quad to its glyph in a
 //! font atlas; this server type provides the geometry + billboard basis.
 
+use crate::mesh::{Mesh3D, PrimitiveType};
 use crate::sprite3d::BillboardMode3D;
 use gdcore::math::Vector3;
 use gdcore::math3d::Basis;
@@ -119,6 +120,46 @@ impl Label3D {
             cursor_x += adv;
         }
         quads
+    }
+
+    /// Builds the label's renderable geometry: every visible glyph as a quad,
+    /// merged into one mesh (pat-0q2kx.109).
+    ///
+    /// One mesh rather than one instance per glyph, because the whole row shares
+    /// a transform and a material — the renderer would otherwise pay per-glyph
+    /// instance overhead for text that never moves independently.
+    ///
+    /// Whitespace produces no quad (it only advances the cursor), so an
+    /// all-whitespace or empty `text` yields an empty mesh, which the renderer
+    /// draws as nothing.
+    pub fn to_mesh(&self) -> Mesh3D {
+        let quads = self.glyph_quads();
+        let mut vertices = Vec::with_capacity(quads.len() * 4);
+        let mut normals = Vec::with_capacity(quads.len() * 4);
+        let mut uvs = Vec::with_capacity(quads.len() * 4);
+        let mut indices = Vec::with_capacity(quads.len() * 6);
+
+        for (i, quad) in quads.iter().enumerate() {
+            let base = (i * 4) as u32;
+            vertices.extend_from_slice(quad);
+            // The quad lies in the label's local XY plane, so it faces +Z; the
+            // billboard basis (or the node's own) rotates that toward the camera.
+            normals.extend_from_slice(&[Vector3::new(0.0, 0.0, 1.0); 4]);
+            // Each glyph spans the full 0..1 UV range: the glyph atlas is
+            // selected per-quad by the rasterizer, not by sub-rect UVs here.
+            uvs.extend_from_slice(&[[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]);
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+
+        Mesh3D {
+            vertices,
+            normals,
+            uvs,
+            indices,
+            primitive_type: PrimitiveType::Triangles,
+            surfaces: Vec::new(),
+            ..Default::default()
+        }
     }
 
     /// Computes the rotation basis for billboard orientation, identical in

@@ -244,6 +244,11 @@ pub struct SliderJoint3D {
     pub base: Joint3DBase,
     /// Sliding axis in local space of body A.
     pub axis: Vector3,
+    /// Local-space anchor point on body A (pat-0q2kx.118). The slide axis runs
+    /// through this point, and the linear limits are measured from it.
+    pub local_a: Vector3,
+    /// Local-space anchor point on body B.
+    pub local_b: Vector3,
     /// Whether linear limits are enabled.
     pub use_linear_limit: bool,
     /// Lower linear limit (meters).
@@ -276,6 +281,8 @@ impl SliderJoint3D {
         Self {
             base: Joint3DBase::new(id, body_a, body_b),
             axis: Vector3::new(1.0, 0.0, 0.0),
+            local_a: Vector3::ZERO,
+            local_b: Vector3::ZERO,
             use_linear_limit: false,
             linear_limit_lower: -1.0,
             linear_limit_upper: 1.0,
@@ -289,6 +296,13 @@ impl SliderJoint3D {
             angular_limit_restitution: 0.7,
             angular_limit_damping: 1.0,
         }
+    }
+
+    /// Sets the local-space anchor points on both bodies.
+    pub fn with_anchors(mut self, local_a: Vector3, local_b: Vector3) -> Self {
+        self.local_a = local_a;
+        self.local_b = local_b;
+        self
     }
 
     /// Sets the sliding axis.
@@ -405,6 +419,14 @@ impl AxisLimit {
 pub struct ConeTwistJoint3D {
     /// Shared joint properties.
     pub base: Joint3DBase,
+    /// Local-space pivot point on body A (pat-0q2kx.118) — the ball of the
+    /// ball-and-socket.
+    pub local_a: Vector3,
+    /// Local-space pivot point on body B.
+    pub local_b: Vector3,
+    /// The cone's centre line, in local space of body A. Bullet (and so Godot)
+    /// uses frame A's X axis (pat-0q2kx.118).
+    pub twist_axis: Vector3,
     /// Maximum swing angle from the twist axis, in radians (cone half-angle).
     pub swing_span: f32,
     /// Maximum twist angle about the axis, in radians.
@@ -422,12 +444,32 @@ impl ConeTwistJoint3D {
     pub fn new(id: JointId3D, body_a: BodyId3D, body_b: BodyId3D) -> Self {
         Self {
             base: Joint3DBase::new(id, body_a, body_b),
+            local_a: Vector3::ZERO,
+            local_b: Vector3::ZERO,
+            twist_axis: Vector3::new(1.0, 0.0, 0.0),
             swing_span: std::f32::consts::FRAC_PI_4,
             twist_span: std::f32::consts::PI,
             bias: 0.3,
             softness: 0.8,
             relaxation: 1.0,
         }
+    }
+
+    /// Sets the local-space pivot points on both bodies.
+    pub fn with_pivots(mut self, local_a: Vector3, local_b: Vector3) -> Self {
+        self.local_a = local_a;
+        self.local_b = local_b;
+        self
+    }
+
+    /// Sets the cone's centre line, normalising it. A degenerate axis is
+    /// ignored, keeping the previous one.
+    pub fn with_twist_axis(mut self, axis: Vector3) -> Self {
+        let len = (axis.x * axis.x + axis.y * axis.y + axis.z * axis.z).sqrt();
+        if len > 1e-6 {
+            self.twist_axis = Vector3::new(axis.x / len, axis.y / len, axis.z / len);
+        }
+        self
     }
 
     /// Excess of `swing_angle` (radians, from the axis) beyond `swing_span`, or
@@ -455,6 +497,11 @@ impl ConeTwistJoint3D {
 pub struct Generic6DofJoint3D {
     /// Shared joint properties.
     pub base: Joint3DBase,
+    /// Local-space anchor point on body A (pat-0q2kx.118) — the origin the six
+    /// per-axis limits are measured from.
+    pub local_a: Vector3,
+    /// Local-space anchor point on body B.
+    pub local_b: Vector3,
     /// Linear limits for the local X/Y/Z axes (meters).
     pub linear_limits: [AxisLimit; 3],
     /// Angular limits for the local X/Y/Z axes (radians).
@@ -466,9 +513,18 @@ impl Generic6DofJoint3D {
     pub fn new(id: JointId3D, body_a: BodyId3D, body_b: BodyId3D) -> Self {
         Self {
             base: Joint3DBase::new(id, body_a, body_b),
+            local_a: Vector3::ZERO,
+            local_b: Vector3::ZERO,
             linear_limits: [AxisLimit::default(); 3],
             angular_limits: [AxisLimit::default(); 3],
         }
+    }
+
+    /// Sets the local-space anchor points on both bodies.
+    pub fn with_anchors(mut self, local_a: Vector3, local_b: Vector3) -> Self {
+        self.local_a = local_a;
+        self.local_b = local_b;
+        self
     }
 
     /// Constraint error for the linear `axis` (0..=2) at `value`, or `0.0` for

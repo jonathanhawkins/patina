@@ -124,6 +124,16 @@ impl std::fmt::Display for SettingsValue {
 pub struct ProjectSettings {
     /// All settings keyed by their full path (e.g. `"application/config/name"`).
     properties: BTreeMap<String, SettingsValue>,
+    /// Godot's registered defaults, consulted by [`get`](Self::get) whenever a
+    /// project omits a key (pat-0q2kx.126).
+    ///
+    /// Deliberately a *separate* map from `properties` rather than pre-filled
+    /// into it. Godot's `project.godot` only ever stores keys that differ from
+    /// their default, so folding the table into `properties` would make
+    /// [`to_godot_format`](Self::to_godot_format) write out ~60 keys the
+    /// project never set, and would change `property_count()` from "what this
+    /// project declares" to "everything the engine knows about".
+    defaults: BTreeMap<String, SettingsValue>,
     /// The `config_version` from the project file header.
     config_version: u32,
     /// Path to the loaded project file, if any.
@@ -134,6 +144,7 @@ impl Default for ProjectSettings {
     fn default() -> Self {
         let mut ps = Self {
             properties: BTreeMap::new(),
+            defaults: godot_default_table(),
             config_version: 5,
             project_path: None,
         };
@@ -186,14 +197,27 @@ impl ProjectSettings {
 
     // -- get / set ----------------------------------------------------------
 
-    /// Gets a setting by path. Returns `None` if not set.
+    /// Gets a setting by path, falling back to Godot's registered default.
+    ///
+    /// Mirrors `GLOBAL_GET`, which always answers with the registered default
+    /// when the project has not overridden a key. Returns `None` only for keys
+    /// that are neither set nor documented.
     pub fn get(&self, path: &str) -> Option<&SettingsValue> {
-        self.properties.get(path)
+        self.properties
+            .get(path)
+            .or_else(|| self.defaults.get(path))
     }
 
-    /// Gets a setting, falling back to a default if not set.
+    /// Gets a setting, falling back to Godot's registered default and then to
+    /// the caller's `default`.
     pub fn get_or<'a>(&'a self, path: &str, default: &'a SettingsValue) -> &'a SettingsValue {
-        self.properties.get(path).unwrap_or(default)
+        self.get(path).unwrap_or(default)
+    }
+
+    /// Returns the engine's registered default for `path`, ignoring anything
+    /// the project set — the analogue of Godot's `property_get_revert`.
+    pub fn get_default(&self, path: &str) -> Option<&SettingsValue> {
+        self.defaults.get(path)
     }
 
     /// Sets a setting by path, creating or overwriting it.
@@ -201,9 +225,10 @@ impl ProjectSettings {
         self.properties.insert(path.to_string(), value);
     }
 
-    /// Returns `true` if the setting exists.
+    /// Returns `true` if the setting exists — either set by the project or
+    /// registered as an engine default, matching `ProjectSettings.has_setting`.
     pub fn has(&self, path: &str) -> bool {
-        self.properties.contains_key(path)
+        self.properties.contains_key(path) || self.defaults.contains_key(path)
     }
 
     /// Removes a setting. Returns the old value if it existed.
@@ -424,8 +449,15 @@ impl ProjectSettings {
 
     /// Parses settings from a Godot project file string.
     pub fn from_godot_format(content: &str) -> Result<Self, String> {
+        // Seeded here too, not just in `default()`: a real `project.godot`
+        // declares only the handful of keys it overrides, so without the table
+        // `get()` answered `None` for every documented setting the file omitted
+        // (pat-0q2kx.126). `properties` still holds only what the file declares,
+        // so the project's own values always win and a save round-trip is
+        // unchanged.
         let mut ps = Self {
             properties: BTreeMap::new(),
+            defaults: godot_default_table(),
             config_version: 5,
             project_path: None,
         };
@@ -488,6 +520,230 @@ impl ProjectSettings {
 
         output
     }
+}
+
+// ---------------------------------------------------------------------------
+// Godot's registered default table (pat-0q2kx.126)
+// ---------------------------------------------------------------------------
+
+/// The runtime-relevant slice of Godot's `GLOBAL_DEF` table.
+///
+/// Godot registers ~300 core defaults across `project_settings.cpp`,
+/// `main.cpp`, the physics and audio servers and `scene_tree.cpp`, and
+/// `GLOBAL_GET` answers with the registered value whenever a project has not
+/// overridden the key. Patina previously had no such table at all: a loaded
+/// `project.godot` carried only its own literal keys, so `get()` returned
+/// `None` for every documented setting the file omitted and each caller
+/// invented its own `unwrap_or` literal — which is how the same setting ended
+/// up with different fallbacks in different places.
+///
+/// This is the single source those callers now read through. It covers the
+/// settings the runtime actually consults rather than all 932 documented
+/// members; adding a key here is the way to extend it.
+fn godot_default_table() -> BTreeMap<String, SettingsValue> {
+    let mut t = BTreeMap::new();
+    let mut put = |k: &str, v: SettingsValue| {
+        t.insert(k.to_string(), v);
+    };
+
+    // -- application (project_settings.cpp) ---------------------------------
+    put(
+        "application/config/name",
+        SettingsValue::String(String::new()),
+    );
+    put(
+        "application/config/description",
+        SettingsValue::String(String::new()),
+    );
+    put(
+        "application/run/main_scene",
+        SettingsValue::String(String::new()),
+    );
+    put("application/run/disable_stdout", SettingsValue::Bool(false));
+    put("application/run/disable_stderr", SettingsValue::Bool(false));
+    put(
+        "application/run/flush_stdout_on_print",
+        SettingsValue::Bool(false),
+    );
+    // main.cpp:2173-2176 — engine loop caps.
+    put("application/run/max_fps", SettingsValue::Int(0));
+    put(
+        "application/run/low_processor_mode",
+        SettingsValue::Bool(false),
+    );
+    put(
+        "application/run/low_processor_mode_sleep_usec",
+        SettingsValue::Int(6900),
+    );
+    put(
+        "application/boot_splash/show_image",
+        SettingsValue::Bool(true),
+    );
+    put(
+        "application/boot_splash/bg_color",
+        SettingsValue::Color(0.14, 0.14, 0.14, 1.0),
+    );
+
+    // -- physics/common (main.cpp:2173-2176) --------------------------------
+    put(
+        "physics/common/physics_ticks_per_second",
+        SettingsValue::Int(60),
+    );
+    put(
+        "physics/common/max_physics_steps_per_frame",
+        SettingsValue::Int(8),
+    );
+    put(
+        "physics/common/physics_jitter_fix",
+        SettingsValue::Float(0.5),
+    );
+
+    // -- physics/2d (physics_server_2d.cpp:905-919) -------------------------
+    put("physics/2d/default_gravity", SettingsValue::Float(980.0));
+    put(
+        "physics/2d/default_gravity_vector",
+        SettingsValue::Vector2(0.0, 1.0),
+    );
+    put("physics/2d/default_linear_damp", SettingsValue::Float(0.1));
+    put("physics/2d/default_angular_damp", SettingsValue::Float(1.0));
+    put(
+        "physics/2d/sleep_threshold_linear",
+        SettingsValue::Float(2.0),
+    );
+    put(
+        "physics/2d/sleep_threshold_angular",
+        SettingsValue::Float(0.139_626_34),
+    );
+    put("physics/2d/time_before_sleep", SettingsValue::Float(0.5));
+    put(
+        "physics/2d/solver/solver_iterations",
+        SettingsValue::Int(16),
+    );
+
+    // -- physics/3d (physics_server_3d.cpp:1141-1154) -----------------------
+    put("physics/3d/default_gravity", SettingsValue::Float(9.8));
+    put(
+        "physics/3d/default_gravity_vector",
+        SettingsValue::Vector3(0.0, -1.0, 0.0),
+    );
+    put("physics/3d/default_linear_damp", SettingsValue::Float(0.1));
+    put("physics/3d/default_angular_damp", SettingsValue::Float(0.1));
+    put(
+        "physics/3d/solver/solver_iterations",
+        SettingsValue::Int(16),
+    );
+
+    // -- display/window (project_settings.cpp) ------------------------------
+    put(
+        "display/window/size/viewport_width",
+        SettingsValue::Int(1152),
+    );
+    put(
+        "display/window/size/viewport_height",
+        SettingsValue::Int(648),
+    );
+    put("display/window/size/mode", SettingsValue::Int(0));
+    put("display/window/size/resizable", SettingsValue::Bool(true));
+    put("display/window/size/borderless", SettingsValue::Bool(false));
+    put(
+        "display/window/size/always_on_top",
+        SettingsValue::Bool(false),
+    );
+    put(
+        "display/window/stretch/mode",
+        SettingsValue::String("disabled".into()),
+    );
+    put(
+        "display/window/stretch/aspect",
+        SettingsValue::String("keep".into()),
+    );
+    put("display/window/stretch/scale", SettingsValue::Float(1.0));
+    put("display/window/vsync/vsync_mode", SettingsValue::Int(1));
+    put("display/window/handheld/orientation", SettingsValue::Int(0));
+
+    // -- rendering (main.cpp:3504, project_settings.cpp) --------------------
+    put(
+        "rendering/renderer/rendering_method",
+        SettingsValue::String("forward_plus".into()),
+    );
+    put(
+        "rendering/environment/defaults/default_clear_color",
+        SettingsValue::Color(0.3, 0.3, 0.3, 1.0),
+    );
+    put(
+        "rendering/textures/canvas_textures/default_texture_filter",
+        SettingsValue::Int(1),
+    );
+    put(
+        "rendering/textures/canvas_textures/default_texture_repeat",
+        SettingsValue::Int(0),
+    );
+    put(
+        "rendering/anti_aliasing/quality/msaa_2d",
+        SettingsValue::Int(0),
+    );
+    put(
+        "rendering/anti_aliasing/quality/msaa_3d",
+        SettingsValue::Int(0),
+    );
+    put(
+        "rendering/occlusion_culling/use_occlusion_culling",
+        SettingsValue::Bool(false),
+    );
+
+    // -- audio (audio_server.cpp:217-218) -----------------------------------
+    put("audio/driver/mix_rate", SettingsValue::Int(44100));
+    put("audio/driver/output_latency", SettingsValue::Int(15));
+    put(
+        "audio/buses/default_bus_layout",
+        SettingsValue::String("res://default_bus_layout.tres".into()),
+    );
+
+    // -- gui (scene_tree.cpp:2064-2184) -------------------------------------
+    put("gui/timers/tooltip_delay_sec", SettingsValue::Float(0.5));
+    put(
+        "gui/timers/incremental_search_max_interval_msec",
+        SettingsValue::Int(2000),
+    );
+    put(
+        "gui/timers/text_edit_idle_detect_sec",
+        SettingsValue::Float(3.0),
+    );
+    put("gui/common/drag_threshold", SettingsValue::Int(10));
+    put(
+        "gui/common/snap_controls_to_pixels",
+        SettingsValue::Bool(true),
+    );
+    put("gui/theme/default_font_antialiasing", SettingsValue::Int(1));
+    put(
+        "gui/theme/default_font_subpixel_positioning",
+        SettingsValue::Int(1),
+    );
+
+    // -- input / navigation / debug -----------------------------------------
+    put(
+        "input_devices/pointing/emulate_touch_from_mouse",
+        SettingsValue::Bool(false),
+    );
+    put(
+        "input_devices/pointing/emulate_mouse_from_touch",
+        SettingsValue::Bool(true),
+    );
+    put("navigation/2d/default_cell_size", SettingsValue::Float(1.0));
+    put(
+        "navigation/3d/default_cell_size",
+        SettingsValue::Float(0.25),
+    );
+    put(
+        "debug/settings/stdout/print_fps",
+        SettingsValue::Bool(false),
+    );
+    put(
+        "debug/settings/stdout/verbose_stdout",
+        SettingsValue::Bool(false),
+    );
+
+    t
 }
 
 // ---------------------------------------------------------------------------

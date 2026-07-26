@@ -12,6 +12,154 @@ use gdvariant::Variant;
 use crate::node::NodeId;
 
 // ---------------------------------------------------------------------------
+// Atlas TileSet — the Godot-shaped resource model (pat-0q2kx.108)
+// ---------------------------------------------------------------------------
+
+/// One `TileSetAtlasSource`: a texture carved into a uniform grid of tiles.
+///
+/// Mirrors `scene/resources/2d/tile_set.cpp` `TileSetAtlasSource`, whose region
+/// for atlas coordinates `(cx, cy)` is
+/// `margins + (cx, cy) * (texture_region_size + separation)`, sized
+/// `texture_region_size`.
+///
+/// [`TileDefinition`] above models a *single* region per source; a real Godot
+/// atlas addresses many tiles in one texture by atlas coordinate, which is what
+/// `tile_map_data` cells actually reference.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TileSetAtlasSource {
+    /// Path to the atlas texture (`res://…`).
+    pub texture_path: String,
+    /// Size of one tile's region in the atlas, in pixels.
+    pub texture_region_size: Vector2i,
+    /// Offset of the first tile's top-left corner within the texture.
+    pub margins: Vector2i,
+    /// Gap between adjacent tile regions.
+    pub separation: Vector2i,
+}
+
+impl TileSetAtlasSource {
+    /// Creates an atlas source with Godot's default margins and separation.
+    pub fn new(texture_path: impl Into<String>, texture_region_size: Vector2i) -> Self {
+        Self {
+            texture_path: texture_path.into(),
+            texture_region_size,
+            margins: Vector2i::ZERO,
+            separation: Vector2i::ZERO,
+        }
+    }
+
+    /// The texture sub-rectangle for the tile at `atlas_coords`.
+    ///
+    /// Port of `TileSetAtlasSource::get_tile_texture_region`.
+    pub fn tile_region(&self, atlas_coords: Vector2i) -> Rect2 {
+        let step_x = self.texture_region_size.x + self.separation.x;
+        let step_y = self.texture_region_size.y + self.separation.y;
+        Rect2::new(
+            Vector2::new(
+                (self.margins.x + atlas_coords.x * step_x) as f32,
+                (self.margins.y + atlas_coords.y * step_y) as f32,
+            ),
+            Vector2::new(
+                self.texture_region_size.x as f32,
+                self.texture_region_size.y as f32,
+            ),
+        )
+    }
+}
+
+/// A Godot-shaped `TileSet`: a cell size plus atlas sources keyed by source id.
+///
+/// This is what a `.tscn`-authored `tile_set = SubResource(...)` resolves to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtlasTileSet {
+    /// `TileSet.tile_size` — the size of one map cell in pixels.
+    pub tile_size: Vector2i,
+    /// Atlas sources by `source_id` (the key `tile_map_data` cells reference).
+    pub sources: HashMap<i32, TileSetAtlasSource>,
+}
+
+impl AtlasTileSet {
+    /// Creates an empty tile set with the given cell size.
+    pub fn new(tile_size: Vector2i) -> Self {
+        Self {
+            tile_size,
+            sources: HashMap::new(),
+        }
+    }
+
+    /// The texture path and sub-rectangle a cell's [`TileData`] resolves to, or
+    /// `None` when its `source_id` names no atlas source.
+    pub fn tile_texture_region(&self, data: &TileData) -> Option<(&str, Rect2)> {
+        let source = self.sources.get(&data.source_id)?;
+        Some((
+            source.texture_path.as_str(),
+            source.tile_region(data.atlas_coords),
+        ))
+    }
+}
+
+/// Property prefix under which `packed_scene` flattens a resolved `tile_set`
+/// sub-resource onto its `TileMapLayer` node, mirroring the `__shape__*` and
+/// `__curve__*` companions used for other sub-resources.
+pub const TILE_SET_PREFIX: &str = "__tile_set__";
+
+/// Reads the flattened `__tile_set__*` companion properties off a node back
+/// into an [`AtlasTileSet`].
+///
+/// Returns `None` when the node carries no tile set at all, so a caller can
+/// tell "no tile set authored" from "an empty one".
+pub fn tile_set_from_properties(
+    get: impl Fn(&str) -> Variant,
+    source_ids: &[i32],
+) -> Option<AtlasTileSet> {
+    let vec2i = |key: &str| -> Option<Vector2i> {
+        match get(key) {
+            Variant::Vector2i(v) => Some(v),
+            Variant::Vector2(v) => Some(Vector2i::new(v.x as i32, v.y as i32)),
+            _ => None,
+        }
+    };
+    let tile_size = vec2i(&format!("{TILE_SET_PREFIX}tile_size"))?;
+    let mut set = AtlasTileSet::new(tile_size);
+    for &id in source_ids {
+        let prefix = format!("{TILE_SET_PREFIX}source_{id}_");
+        let Variant::String(texture_path) = get(&format!("{prefix}texture")) else {
+            continue;
+        };
+        // Godot's atlas default is 16x16; a source that omits the property
+        // still addresses tiles on that grid.
+        let region =
+            vec2i(&format!("{prefix}texture_region_size")).unwrap_or_else(|| Vector2i::new(16, 16));
+        set.sources.insert(
+            id,
+            TileSetAtlasSource {
+                texture_path,
+                texture_region_size: region,
+                margins: vec2i(&format!("{prefix}margins")).unwrap_or(Vector2i::ZERO),
+                separation: vec2i(&format!("{prefix}separation")).unwrap_or(Vector2i::ZERO),
+            },
+        );
+    }
+    Some(set)
+}
+
+/// The source ids a node's flattened tile set declares, as written by
+/// `packed_scene` into `__tile_set__source_ids`.
+pub fn tile_set_source_ids(value: &Variant) -> Vec<i32> {
+    match value {
+        Variant::PackedInt32Array(ids) => ids.clone(),
+        Variant::Array(items) => items
+            .iter()
+            .filter_map(|v| match v {
+                Variant::Int(i) => Some(*i as i32),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TileDefinition & TileSet
 // ---------------------------------------------------------------------------
 
@@ -434,6 +582,96 @@ pub fn tile_navigation_polygons(
             ]
         };
         out.push(poly);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Per-tile physics polygons (pat-0q2kx.117)
+// ---------------------------------------------------------------------------
+
+/// Node property listing the tile source ids whose tiles carry collision.
+///
+/// Godot stores collision polygons per `TileData` inside the `TileSet`, keyed by
+/// atlas coordinate (`<ax>:<ay>/<alt>/physics_layer_<n>/polygon_<m>/points` on
+/// the `TileSetAtlasSource`). `PackedScene` flattens those onto the node, the
+/// same way `__tile_nav_sources__` carries the navigation layer.
+pub const TILE_PHYSICS_SOURCES: &str = "__tile_physics_sources__";
+
+/// Prefix of the flattened per-tile collision companions. The full keys are
+/// `__tile_physics_<source>_<ax>_<ay>_points` (a `PackedVector2Array` in
+/// **tile-local pixels, relative to the tile centre**, which is Godot's own
+/// convention) and `__tile_physics_<source>_<ax>_<ay>_one_way` (a bool).
+pub const TILE_PHYSICS_PREFIX: &str = "__tile_physics_";
+
+/// Builds the flattened property key holding a tile's collision polygon.
+pub fn tile_physics_points_key(source_id: i32, atlas: Vector2i) -> String {
+    format!(
+        "{TILE_PHYSICS_PREFIX}{source_id}_{}_{}_points",
+        atlas.x, atlas.y
+    )
+}
+
+/// Builds the flattened property key holding a tile's `one_way_collision` flag.
+pub fn tile_physics_one_way_key(source_id: i32, atlas: Vector2i) -> String {
+    format!(
+        "{TILE_PHYSICS_PREFIX}{source_id}_{}_{}_one_way",
+        atlas.x, atlas.y
+    )
+}
+
+/// Builds one [`TileCollisionInfo`] per painted cell whose tile carries
+/// collision (pat-0q2kx.117).
+///
+/// Mirrors Godot's `TileMapLayer::_physics_update`, which creates a static body
+/// per painted cell from the tile's physics layers. Only cells whose
+/// `source_id` appears in `physics_sources` contribute, so erasing a cell — or
+/// painting one from a source with no collision — leaves no body behind.
+///
+/// `get_polygon` resolves a `(source_id, atlas_coords)` pair to that tile's
+/// tile-local polygon and its one-way flag. A collision-enabled tile with no
+/// explicit polygon collides across its whole cell rect, which is Godot's
+/// default tile collision shape and the common authoring case.
+///
+/// The returned cells are ordered deterministically (row-major), so the bodies
+/// a map produces are reproducible run to run — a `HashMap` walk is not.
+pub fn tile_collision_infos(
+    cells: &HashMap<Vector2i, TileData>,
+    tile_size: Vector2i,
+    physics_sources: &[i32],
+    get_polygon: impl Fn(i32, Vector2i) -> (Vec<Vector2>, bool),
+) -> Vec<gdphysics2d::tilemap_collision::TileCollisionInfo> {
+    use gdphysics2d::tilemap_collision::TileCollisionInfo;
+
+    if physics_sources.is_empty() || tile_size.x <= 0 || tile_size.y <= 0 {
+        return Vec::new();
+    }
+
+    let mut painted: Vec<(&Vector2i, &TileData)> = cells.iter().collect();
+    painted.sort_by_key(|(cell, _)| (cell.y, cell.x));
+
+    let mut out = Vec::new();
+    for (cell, data) in painted {
+        if !physics_sources.contains(&data.source_id) {
+            continue;
+        }
+        let (polygon, one_way) = get_polygon(data.source_id, data.atlas_coords);
+        if polygon.len() >= 3 {
+            out.push(TileCollisionInfo::polygon(*cell, polygon, one_way));
+        } else {
+            // No authored polygon: collide across the whole cell. `rect` is
+            // two-sided, so carry the one-way flag over explicitly rather than
+            // silently dropping it.
+            let mut info = TileCollisionInfo::rect(
+                *cell,
+                Rect2::new(
+                    Vector2::ZERO,
+                    Vector2::new(tile_size.x as f32, tile_size.y as f32),
+                ),
+            );
+            info.one_way = one_way;
+            out.push(info);
+        }
     }
     out
 }

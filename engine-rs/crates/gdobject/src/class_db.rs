@@ -780,6 +780,178 @@ fn node_class() -> ClassRegistration {
         )
 }
 
+/// Registers the `Joint3D` node family (pat-0q2kx.118).
+///
+/// `gdphysics3d::joint` carried the parameter structs and the solver helpers for
+/// all five kinds, but none of the classes was in ClassDB and no scene path ever
+/// built one — an authored `PinJoint3D` instanced as an unknown class and
+/// constrained nothing.
+///
+/// Parents and defaults come from `upstream/godot/doc/classes/<Name>.xml`. Godot
+/// spells the subclass parameters with slashes (`angular_limit/upper`,
+/// `params/bias`); those names are kept verbatim because that is exactly what a
+/// `.tscn` writes, and `PhysicsServer3D::register_joints` reads them back by the
+/// same key. Note `exclude_nodes_from_collision` defaults to **true**: jointed
+/// bodies ignore each other unless the author opts back in.
+fn register_joint_3d_classes() {
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+
+    register_class(
+        ClassRegistration::new("Joint3D")
+            .parent("Node3D")
+            .abstract_class()
+            .property(PropertyInfo::new(
+                "node_a",
+                Variant::NodePath(gdcore::node_path::NodePath::empty()),
+            ))
+            .property(PropertyInfo::new(
+                "node_b",
+                Variant::NodePath(gdcore::node_path::NodePath::empty()),
+            ))
+            .property(PropertyInfo::new(
+                "exclude_nodes_from_collision",
+                Variant::Bool(true),
+            ))
+            .property(PropertyInfo::new("solver_priority", Variant::Int(1))),
+    );
+
+    register_class(
+        ClassRegistration::new("PinJoint3D")
+            .parent("Joint3D")
+            .property(PropertyInfo::new("params/bias", Variant::Float(0.3)))
+            .property(PropertyInfo::new("params/damping", Variant::Float(1.0)))
+            .property(PropertyInfo::new(
+                "params/impulse_clamp",
+                Variant::Float(0.0),
+            )),
+    );
+
+    register_class(
+        ClassRegistration::new("HingeJoint3D")
+            .parent("Joint3D")
+            .property(PropertyInfo::new("params/bias", Variant::Float(0.3)))
+            .property(PropertyInfo::new(
+                "angular_limit/enable",
+                Variant::Bool(false),
+            ))
+            .property(PropertyInfo::new(
+                "angular_limit/upper",
+                Variant::Float(FRAC_PI_2 as f64),
+            ))
+            .property(PropertyInfo::new(
+                "angular_limit/lower",
+                Variant::Float(-FRAC_PI_2 as f64),
+            ))
+            .property(PropertyInfo::new("angular_limit/bias", Variant::Float(0.3)))
+            .property(PropertyInfo::new(
+                "angular_limit/softness",
+                Variant::Float(0.9),
+            ))
+            .property(PropertyInfo::new(
+                "angular_limit/relaxation",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new("motor/enable", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "motor/target_velocity",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new("motor/max_impulse", Variant::Float(1.0))),
+    );
+
+    register_class(
+        ClassRegistration::new("SliderJoint3D")
+            .parent("Joint3D")
+            .property(PropertyInfo::new(
+                "linear_limit/upper_distance",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new(
+                "linear_limit/lower_distance",
+                Variant::Float(-1.0),
+            ))
+            .property(PropertyInfo::new(
+                "linear_limit/softness",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new(
+                "linear_limit/restitution",
+                Variant::Float(0.7),
+            ))
+            .property(PropertyInfo::new(
+                "linear_limit/damping",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new(
+                "angular_limit/upper_angle",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                "angular_limit/lower_angle",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                "angular_limit/softness",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new(
+                "angular_limit/restitution",
+                Variant::Float(0.7),
+            ))
+            .property(PropertyInfo::new(
+                "angular_limit/damping",
+                Variant::Float(0.0),
+            )),
+    );
+
+    register_class(
+        ClassRegistration::new("ConeTwistJoint3D")
+            .parent("Joint3D")
+            .property(PropertyInfo::new(
+                "swing_span",
+                Variant::Float(FRAC_PI_4 as f64),
+            ))
+            .property(PropertyInfo::new("twist_span", Variant::Float(PI as f64)))
+            .property(PropertyInfo::new("bias", Variant::Float(0.3)))
+            .property(PropertyInfo::new("softness", Variant::Float(0.8)))
+            .property(PropertyInfo::new("relaxation", Variant::Float(1.0))),
+    );
+
+    // Generic6DOFJoint3D carries the same six knobs per axis; only the limit
+    // enable/bounds are modelled here because those are what the solver reads.
+    // Godot enables every axis limit by default with a zero-width range, which
+    // locks the joint until the author widens it.
+    let mut g6dof = ClassRegistration::new("Generic6DOFJoint3D").parent("Joint3D");
+    for axis in ["x", "y", "z"] {
+        g6dof = g6dof
+            .property(PropertyInfo::new(
+                format!("linear_limit_{axis}/enabled"),
+                Variant::Bool(true),
+            ))
+            .property(PropertyInfo::new(
+                format!("linear_limit_{axis}/upper_distance"),
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                format!("linear_limit_{axis}/lower_distance"),
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                format!("angular_limit_{axis}/enabled"),
+                Variant::Bool(true),
+            ))
+            .property(PropertyInfo::new(
+                format!("angular_limit_{axis}/upper_angle"),
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                format!("angular_limit_{axis}/lower_angle"),
+                Variant::Float(0.0),
+            ));
+    }
+    register_class(g6dof);
+}
+
 pub fn register_3d_classes() {
     use gdcore::math::Vector3;
     use gdcore::math3d::{Basis, Transform3D};
@@ -853,6 +1025,122 @@ pub fn register_3d_classes() {
 
     // -- MultiMeshInstance3D --
     register_class(ClassRegistration::new("MultiMeshInstance3D").parent("GeometryInstance3D"));
+
+    // -- Sprite3D family (pat-0q2kx.111) --
+    //
+    // `gdserver3d::sprite3d` builds the textured quad and `render_server_3d.rs`
+    // syncs it every frame, but none of these three classes had a ClassDB entry.
+    // Since `Node::is_class` resolves through ClassDB, an authored `Sprite3D`
+    // could not be recognised as a `GeometryInstance3D` — it fell out of class
+    // walks and never appeared in the Create-Node dialog.
+    //
+    // Parents and defaults are each class's `doc/classes/<Name>.xml`.
+    // `SpriteBase3D` is abstract in Godot: it carries the whole shared surface
+    // but is never instantiated directly.
+    register_class(
+        ClassRegistration::new("SpriteBase3D")
+            .parent("GeometryInstance3D")
+            .abstract_class()
+            .property(PropertyInfo::new("centered", Variant::Bool(true)))
+            .property(PropertyInfo::new(
+                "offset",
+                Variant::Vector2(gdcore::math::Vector2::ZERO),
+            ))
+            .property(PropertyInfo::new("flip_h", Variant::Bool(false)))
+            .property(PropertyInfo::new("flip_v", Variant::Bool(false)))
+            // Fully qualified: `register_3d_classes` imports only Vector3/Basis/
+            // Transform3D, so `Color` is not in scope here the way it is in
+            // `register_2d_classes`.
+            .property(PropertyInfo::new(
+                "modulate",
+                Variant::Color(gdcore::math::Color::WHITE),
+            ))
+            .property(PropertyInfo::new("pixel_size", Variant::Float(0.01)))
+            // Godot's default axis is Vector3.AXIS_Z = 2.
+            .property(PropertyInfo::new("axis", Variant::Int(2)))
+            .property(PropertyInfo::new("billboard", Variant::Int(0)))
+            .property(PropertyInfo::new("transparent", Variant::Bool(true)))
+            .property(PropertyInfo::new("shaded", Variant::Bool(false)))
+            .property(PropertyInfo::new("double_sided", Variant::Bool(true)))
+            .property(PropertyInfo::new("no_depth_test", Variant::Bool(false)))
+            .property(PropertyInfo::new("fixed_size", Variant::Bool(false)))
+            .property(PropertyInfo::new("alpha_cut", Variant::Int(0)))
+            .property(PropertyInfo::new(
+                "alpha_scissor_threshold",
+                Variant::Float(0.5),
+            ))
+            .property(PropertyInfo::new("alpha_hash_scale", Variant::Float(1.0)))
+            .property(PropertyInfo::new(
+                "alpha_antialiasing_mode",
+                Variant::Int(0),
+            ))
+            .property(PropertyInfo::new(
+                "alpha_antialiasing_edge",
+                Variant::Float(0.0),
+            ))
+            // Godot's default is TEXTURE_FILTER_LINEAR_WITH_MIPMAPS = 3.
+            .property(PropertyInfo::new("texture_filter", Variant::Int(3)))
+            .property(PropertyInfo::new("render_priority", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("AlphaCutMode")
+                    .constant("ALPHA_CUT_DISABLED", 0)
+                    .constant("ALPHA_CUT_DISCARD", 1)
+                    .constant("ALPHA_CUT_OPAQUE_PREPASS", 2)
+                    .constant("ALPHA_CUT_HASH", 3),
+            )
+            .enumeration(
+                EnumInfo::new("DrawFlags")
+                    .constant("FLAG_TRANSPARENT", 0)
+                    .constant("FLAG_SHADED", 1)
+                    .constant("FLAG_DOUBLE_SIDED", 2)
+                    .constant("FLAG_DISABLE_DEPTH_TEST", 3)
+                    .constant("FLAG_FIXED_SIZE", 4)
+                    .constant("FLAG_MAX", 5),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("Sprite3D")
+            .parent("SpriteBase3D")
+            .property(PropertyInfo::new("texture", Variant::Nil))
+            .property(PropertyInfo::new("hframes", Variant::Int(1)))
+            .property(PropertyInfo::new("vframes", Variant::Int(1)))
+            .property(PropertyInfo::new("frame", Variant::Int(0)))
+            .property(PropertyInfo::new(
+                "frame_coords",
+                Variant::Vector2i(gdcore::math::Vector2i::new(0, 0)),
+            ))
+            .property(PropertyInfo::new("region_enabled", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "region_rect",
+                Variant::Rect2(gdcore::math::Rect2::new(
+                    gdcore::math::Vector2::ZERO,
+                    gdcore::math::Vector2::ZERO,
+                )),
+            ))
+            .signal(SignalInfo::new("frame_changed"))
+            .signal(SignalInfo::new("texture_changed")),
+    );
+    register_class(
+        ClassRegistration::new("AnimatedSprite3D")
+            .parent("SpriteBase3D")
+            .property(PropertyInfo::new("sprite_frames", Variant::Nil))
+            .property(PropertyInfo::new(
+                "animation",
+                Variant::StringName(gdcore::string_name::StringName::from("default")),
+            ))
+            .property(PropertyInfo::new(
+                "autoplay",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new("frame", Variant::Int(0)))
+            .property(PropertyInfo::new("frame_progress", Variant::Float(0.0)))
+            .property(PropertyInfo::new("speed_scale", Variant::Float(1.0)))
+            .signal(SignalInfo::new("frame_changed"))
+            .signal(SignalInfo::new("animation_changed"))
+            .signal(SignalInfo::new("animation_finished"))
+            .signal(SignalInfo::new("animation_looped"))
+            .signal(SignalInfo::new("sprite_frames_changed")),
+    );
 
     // -- Light3D (abstract base for all lights) --
     register_class(
@@ -960,6 +1248,8 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("disabled", Variant::Bool(false))),
     );
 
+    register_joint_3d_classes();
+
     // -- Shape3D resource hierarchy (pat-nzgdu.96) --
     // The shapes a CollisionShape3D.shape references. Shape3D is the Resource
     // base carrying `margin` (Godot default 0.04); every concrete shape derives
@@ -1020,7 +1310,9 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new(
                 "collide_with_areas",
                 Variant::Bool(false),
-            )),
+            ))
+            .property(PropertyInfo::new("hit_back_faces", Variant::Bool(true)))
+            .property(PropertyInfo::new("hit_from_inside", Variant::Bool(false))),
     );
     register_class(
         ClassRegistration::new("ShapeCast3D")
@@ -3454,8 +3746,48 @@ pub fn register_2d_classes() {
     if !class_exists("Camera2D") {
         register_class(ClassRegistration::new("Camera2D").parent("Node2D"));
     }
+    // pat-0q2kx.108: TileMapLayer had a bare registration, so an inspector
+    // never showed the properties a painted layer actually carries and a
+    // `.tscn` round-trip had no defaults to compare against. Names, types and
+    // defaults are Godot 4.6.1's (`extension_api.json` + doc/classes/
+    // TileMapLayer.xml). `tile_set` is a Resource reference, hence Nil.
     if !class_exists("TileMapLayer") {
-        register_class(ClassRegistration::new("TileMapLayer").parent("Node2D"));
+        register_class(
+            ClassRegistration::new("TileMapLayer")
+                .parent("Node2D")
+                .property(PropertyInfo::new(
+                    "tile_map_data",
+                    Variant::PackedByteArray(Vec::new()),
+                ))
+                .property(PropertyInfo::new("tile_set", Variant::Nil))
+                .property(PropertyInfo::new("enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("navigation_enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("collision_enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("occlusion_enabled", Variant::Bool(true)))
+                .property(PropertyInfo::new(
+                    "use_kinematic_bodies",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "x_draw_order_reversed",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("y_sort_origin", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "rendering_quadrant_size",
+                    Variant::Int(16),
+                ))
+                .property(PropertyInfo::new("physics_quadrant_size", Variant::Int(16)))
+                .property(PropertyInfo::new(
+                    "collision_visibility_mode",
+                    Variant::Int(0),
+                ))
+                .property(PropertyInfo::new(
+                    "navigation_visibility_mode",
+                    Variant::Int(0),
+                ))
+                .signal(SignalInfo::new("changed")),
+        );
     }
 
     // -- Misc canvas nodes (pat-nzgdu.174) ---------------------------------
@@ -3768,8 +4100,40 @@ pub fn register_2d_classes() {
             ClassRegistration::new("VisibleOnScreenNotifier3D").parent("VisualInstance3D"),
         );
     }
+    // pat-0q2kx.109: Label3D was a bare parent-only registration with no
+    // properties, so the inspector showed nothing to edit and a `.tscn`
+    // `text = "..."` had no declared property to land on.
+    //
+    // ⚠️ Defaults come from doc/classes/Label3D.xml, and several are NOT the
+    // zero value: `pixel_size` is 0.005, `font_size` 16, `modulate` white, and
+    // `alpha_cut` 0 = DISABLED. Registering them as zero/black would make every
+    // fresh Label3D invisible.
     if !class_exists("Label3D") {
-        register_class(ClassRegistration::new("Label3D").parent("GeometryInstance3D"));
+        register_class(
+            ClassRegistration::new("Label3D")
+                .parent("GeometryInstance3D")
+                .property(PropertyInfo::new("text", Variant::String(String::new())))
+                .property(PropertyInfo::new("font_size", Variant::Int(16)))
+                .property(PropertyInfo::new("pixel_size", Variant::Float(0.005)))
+                .property(PropertyInfo::new(
+                    "modulate",
+                    Variant::Color(gdcore::math::Color::WHITE),
+                ))
+                .property(PropertyInfo::new(
+                    "outline_modulate",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                ))
+                .property(PropertyInfo::new("outline_size", Variant::Int(12)))
+                .property(PropertyInfo::new("billboard", Variant::Int(0)))
+                .property(PropertyInfo::new("alpha_cut", Variant::Int(0)))
+                .property(PropertyInfo::new("horizontal_alignment", Variant::Int(1)))
+                .property(PropertyInfo::new("vertical_alignment", Variant::Int(1)))
+                .property(PropertyInfo::new("autowrap_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("width", Variant::Float(500.0)))
+                .property(PropertyInfo::new("double_sided", Variant::Bool(true)))
+                .property(PropertyInfo::new("no_depth_test", Variant::Bool(false)))
+                .property(PropertyInfo::new("fixed_size", Variant::Bool(false))),
+        );
     }
     if !class_exists("RichTextLabel") {
         register_class(ClassRegistration::new("RichTextLabel").parent("Control"));
@@ -4357,6 +4721,73 @@ pub fn register_2d_classes() {
     if !class_exists("StaticBody2D") {
         register_class(ClassRegistration::new("StaticBody2D").parent("PhysicsBody2D"));
     }
+
+    // -- Joint2D family (pat-0q2kx.114) --
+    //
+    // `gdphysics2d::joint` solves all three joint kinds and `world.add_joint`
+    // registers them, but no scene path built one and none of the classes was in
+    // ClassDB. Parents and defaults from doc/classes/<Name>.xml. Note
+    // `disable_collision` defaults to **true** in Godot: jointed bodies ignore
+    // each other unless the author opts back in.
+    if !class_exists("Joint2D") {
+        register_class(
+            ClassRegistration::new("Joint2D")
+                .parent("Node2D")
+                .abstract_class()
+                .property(PropertyInfo::new(
+                    "node_a",
+                    Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                ))
+                .property(PropertyInfo::new(
+                    "node_b",
+                    Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                ))
+                .property(PropertyInfo::new("bias", Variant::Float(0.0)))
+                .property(PropertyInfo::new("disable_collision", Variant::Bool(true))),
+        );
+    }
+    if !class_exists("PinJoint2D") {
+        register_class(
+            ClassRegistration::new("PinJoint2D")
+                .parent("Joint2D")
+                .property(PropertyInfo::new("softness", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "angular_limit_enabled",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "angular_limit_lower",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "angular_limit_upper",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("motor_enabled", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "motor_target_velocity",
+                    Variant::Float(0.0),
+                )),
+        );
+    }
+    if !class_exists("GrooveJoint2D") {
+        register_class(
+            ClassRegistration::new("GrooveJoint2D")
+                .parent("Joint2D")
+                .property(PropertyInfo::new("length", Variant::Float(50.0)))
+                .property(PropertyInfo::new("initial_offset", Variant::Float(25.0))),
+        );
+    }
+    if !class_exists("DampedSpringJoint2D") {
+        register_class(
+            ClassRegistration::new("DampedSpringJoint2D")
+                .parent("Joint2D")
+                .property(PropertyInfo::new("length", Variant::Float(50.0)))
+                .property(PropertyInfo::new("rest_length", Variant::Float(0.0)))
+                .property(PropertyInfo::new("stiffness", Variant::Float(20.0)))
+                .property(PropertyInfo::new("damping", Variant::Float(1.0))),
+        );
+    }
     if !class_exists("RigidBody2D") {
         register_class(
             ClassRegistration::new("RigidBody2D")
@@ -4385,7 +4816,14 @@ pub fn register_2d_classes() {
             ClassRegistration::new("Area2D")
                 .parent("CollisionObject2D")
                 .property(PropertyInfo::new("monitoring", Variant::Bool(true)))
-                .property(PropertyInfo::new("monitorable", Variant::Bool(true))),
+                .property(PropertyInfo::new("monitorable", Variant::Bool(true)))
+                // The angular-damp override (pat-0q2kx.112), the rotational
+                // twin of the linear one Godot exposes alongside it.
+                .property(PropertyInfo::new(
+                    "angular_damp_space_override",
+                    Variant::Int(0),
+                ))
+                .property(PropertyInfo::new("angular_damp", Variant::Float(1.0))),
         );
     }
     if !class_exists("CollisionShape2D") {

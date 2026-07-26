@@ -14,7 +14,10 @@ use crate::shape::Shape2D;
 pub struct CollisionResult {
     /// Whether the shapes are overlapping.
     pub colliding: bool,
-    /// The collision normal pointing from shape B toward shape A.
+    /// The collision normal, pointing from shape **A toward shape B** — the
+    /// direction B must be pushed to separate the pair. (`circle_circle` builds
+    /// it as `pos_b - pos_a`, and `separate_bodies` moves B along `+normal`;
+    /// this doc said the opposite.)
     pub normal: Vector2,
     /// The penetration depth along the normal.
     pub depth: f32,
@@ -192,7 +195,11 @@ impl ShapeProxy {
                 }
             }
             Shape2D::ConvexPolygon { .. } => ShapeProxy::Rounded {
-                verts: shape.polygon_points().iter().map(|p| tf.xform(*p)).collect(),
+                verts: shape
+                    .polygon_points()
+                    .iter()
+                    .map(|p| tf.xform(*p))
+                    .collect(),
                 radius: 0.0,
             },
             Shape2D::ConcavePolygon { .. } => ShapeProxy::Concave {
@@ -211,7 +218,10 @@ impl ShapeProxy {
                 }
             }
             Shape2D::SeparationRay { length } => ShapeProxy::Rounded {
-                verts: vec![tf.xform(Vector2::ZERO), tf.xform(Vector2::new(0.0, *length))],
+                verts: vec![
+                    tf.xform(Vector2::ZERO),
+                    tf.xform(Vector2::new(0.0, *length)),
+                ],
                 radius: 0.0,
             },
         }
@@ -232,8 +242,14 @@ fn collide(a: &ShapeProxy, b: &ShapeProxy) -> CollisionResult {
         // Two infinite half-planes have no meaningful bounded contact.
         (ShapeProxy::HalfPlane { .. }, ShapeProxy::HalfPlane { .. }) => CollisionResult::NONE,
         (
-            ShapeProxy::Rounded { verts: va, radius: ra },
-            ShapeProxy::Rounded { verts: vb, radius: rb },
+            ShapeProxy::Rounded {
+                verts: va,
+                radius: ra,
+            },
+            ShapeProxy::Rounded {
+                verts: vb,
+                radius: rb,
+            },
         ) => rounded_vs_rounded(va, *ra, vb, *rb),
     }
 }
@@ -502,12 +518,7 @@ fn hull_edges(verts: &[Vector2]) -> Vec<(Vector2, Vector2)> {
 /// Standard clamped closest-point-between-segments (Ericson, *Real-Time
 /// Collision Detection*). Degenerate zero-length segments are handled, and
 /// crossing segments return coincident points (zero distance).
-fn seg_seg_closest(
-    p1: Vector2,
-    q1: Vector2,
-    p2: Vector2,
-    q2: Vector2,
-) -> (Vector2, Vector2) {
+fn seg_seg_closest(p1: Vector2, q1: Vector2, p2: Vector2, q2: Vector2) -> (Vector2, Vector2) {
     let d1 = q1 - p1; // direction of segment 1
     let d2 = q2 - p2; // direction of segment 2
     let r = p1 - p2;
@@ -629,10 +640,30 @@ fn nearest_edge_outward(p: Vector2, verts: &[Vector2]) -> (Vector2, f32) {
     (best_normal, best_dist)
 }
 
+/// World-space support vertices for `shape` under `tf`, plus the radius it is
+/// inflated by (a circle is one point with a radius, a capsule two).
+///
+/// `None` for shapes with no finite vertex set — a world boundary is a
+/// half-plane and a concave shape is a segment soup. Exposed so the contact
+/// solver can build a two-point manifold from the same vertices the narrow
+/// phase used, rather than re-deriving them and drifting out of sync
+/// (pat-0q2kx.116).
+pub fn world_vertices(shape: &Shape2D, tf: &Transform2D) -> Option<(Vec<Vector2>, f32)> {
+    match ShapeProxy::from_shape(shape, tf) {
+        ShapeProxy::Rounded { verts, radius } => Some((verts, radius)),
+        _ => None,
+    }
+}
+
 /// Separates two bodies based on a collision result.
 ///
 /// Distributes the separation proportionally by inverse mass. Static bodies
 /// do not move.
+///
+/// ⚠️ Single-point, single-pass, non-accumulating: this is the *fallback* path
+/// and the one the character controller and the narrow-phase unit tests use.
+/// [`crate::solver`] is what the world step runs — a stack of boxes needs an
+/// iterated manifold solver, which this is not (pat-0q2kx.116).
 pub fn separate_bodies(a: &mut PhysicsBody2D, b: &mut PhysicsBody2D, result: &CollisionResult) {
     if !result.colliding || result.depth <= 0.0 {
         return;
@@ -674,10 +705,24 @@ pub fn separate_bodies(a: &mut PhysicsBody2D, b: &mut PhysicsBody2D, result: &Co
     a.angular_velocity -= (r_a.x * impulse.y - r_a.y * impulse.x) * a.inverse_inertia();
     b.angular_velocity += (r_b.x * impulse.y - r_b.y * impulse.x) * b.inverse_inertia();
 
-    // Friction: reduce tangential velocity component
+    // Any contact wakes both bodies — a sleeping box struck by another, or
+    // resting on a conveyor, must resume simulating (pat-0q2kx.116).
+    a.wake();
+    b.wake();
+
+    // Friction: reduce tangential velocity component.
+    //
+    // The relative velocity used here is the SURFACE velocity, which adds each
+    // body's `constant_linear_velocity` (pat-0q2kx.116). That property is how
+    // Godot models a conveyor belt: the body itself does not move, but its
+    // surface drags whatever rests on it. Using the rigid-body velocities alone
+    // — as this did — meant `constant_linear_velocity` was stored on the body
+    // and consulted by nothing, so a conveyor was inert.
     let friction = (a.friction + b.friction) * 0.5;
     if friction > 0.0 {
-        let new_relative_vel = b.linear_velocity - a.linear_velocity;
+        let surface_a = a.linear_velocity + a.constant_linear_velocity;
+        let surface_b = b.linear_velocity + b.constant_linear_velocity;
+        let new_relative_vel = surface_b - surface_a;
         let tangent_vel = new_relative_vel - result.normal * new_relative_vel.dot(result.normal);
         let tangent_speed = tangent_vel.length();
         if tangent_speed > 1e-6 {
@@ -908,8 +953,13 @@ mod tests {
         };
         let circle_pos = Vector2::new(1.7, 0.0); // clears the flat face at x=1 (gap 0.7 > 0.5)
 
-        let axis_aligned =
-            test_collision(&circle, &tf(circle_pos, 0.0), &square, &tf(Vector2::ZERO, 0.0)).unwrap();
+        let axis_aligned = test_collision(
+            &circle,
+            &tf(circle_pos, 0.0),
+            &square,
+            &tf(Vector2::ZERO, 0.0),
+        )
+        .unwrap();
         assert!(!axis_aligned.colliding);
 
         // Rotated 45°, the square's corner reaches x = sqrt(2) ≈ 1.414, within
@@ -921,7 +971,10 @@ mod tests {
             &tf(Vector2::ZERO, std::f32::consts::FRAC_PI_4),
         )
         .unwrap();
-        assert!(rotated.colliding, "rotated square corner should reach circle");
+        assert!(
+            rotated.colliding,
+            "rotated square corner should reach circle"
+        );
     }
 
     #[test]
@@ -940,8 +993,16 @@ mod tests {
         )
         .unwrap();
         assert!(result.colliding);
-        assert!((result.depth - 0.5).abs() < 1e-4, "depth was {}", result.depth);
-        assert!((result.normal.x + 1.0).abs() < 1e-4, "normal.x was {}", result.normal.x);
+        assert!(
+            (result.depth - 0.5).abs() < 1e-4,
+            "depth was {}",
+            result.depth
+        );
+        assert!(
+            (result.normal.x + 1.0).abs() < 1e-4,
+            "normal.x was {}",
+            result.normal.x
+        );
     }
 
     #[test]
@@ -963,7 +1024,11 @@ mod tests {
         )
         .unwrap();
         assert!(result.colliding);
-        assert!((result.depth - 0.2).abs() < 1e-4, "depth was {}", result.depth);
+        assert!(
+            (result.depth - 0.2).abs() < 1e-4,
+            "depth was {}",
+            result.depth
+        );
     }
 
     #[test]
@@ -980,9 +1045,17 @@ mod tests {
         )
         .unwrap();
         assert!(result.colliding);
-        assert!((result.depth - 0.5).abs() < 1e-4, "depth was {}", result.depth);
+        assert!(
+            (result.depth - 0.5).abs() < 1e-4,
+            "depth was {}",
+            result.depth
+        );
         // Normal points A→B (circle → plane) = +Y (down toward the floor line).
-        assert!((result.normal.y - 1.0).abs() < 1e-4, "normal.y was {}", result.normal.y);
+        assert!(
+            (result.normal.y - 1.0).abs() < 1e-4,
+            "normal.y was {}",
+            result.normal.y
+        );
 
         // A circle well above the floor does not collide.
         let clear = test_collision(
@@ -998,8 +1071,7 @@ mod tests {
     #[test]
     fn concave_polygon_floor_collision() {
         // A wide flat floor expressed as a single concave segment.
-        let floor =
-            Shape2D::concave_polygon(&[Vector2::new(-10.0, 0.0), Vector2::new(10.0, 0.0)]);
+        let floor = Shape2D::concave_polygon(&[Vector2::new(-10.0, 0.0), Vector2::new(10.0, 0.0)]);
         let circle = Shape2D::Circle { radius: 1.0 };
         let result = test_collision(
             &circle,
@@ -1009,7 +1081,11 @@ mod tests {
         )
         .unwrap();
         assert!(result.colliding);
-        assert!((result.depth - 0.5).abs() < 1e-4, "depth was {}", result.depth);
+        assert!(
+            (result.depth - 0.5).abs() < 1e-4,
+            "depth was {}",
+            result.depth
+        );
     }
 
     #[test]
@@ -1024,7 +1100,11 @@ mod tests {
         )
         .unwrap();
         assert!(result.colliding);
-        assert!((result.depth - 0.5).abs() < 1e-4, "depth was {}", result.depth);
+        assert!(
+            (result.depth - 0.5).abs() < 1e-4,
+            "depth was {}",
+            result.depth
+        );
     }
 
     #[test]
@@ -1045,9 +1125,17 @@ mod tests {
         .unwrap();
         assert!(result.colliding);
         // Nearest edge is x = 3 (0.5 away) → depth = radius + 0.5 = 1.5.
-        assert!((result.depth - 1.5).abs() < 1e-4, "depth was {}", result.depth);
+        assert!(
+            (result.depth - 1.5).abs() < 1e-4,
+            "depth was {}",
+            result.depth
+        );
         // Circle (A) must be pushed toward -X, so A→B normal is -X.
-        assert!((result.normal.x + 1.0).abs() < 1e-4, "normal.x was {}", result.normal.x);
+        assert!(
+            (result.normal.x + 1.0).abs() < 1e-4,
+            "normal.x was {}",
+            result.normal.x
+        );
     }
 
     #[test]
@@ -1331,8 +1419,13 @@ mod tests {
             half_extents: Vector2::new(10.0, 10.0),
         };
         assert!(
-            test_collision(&point, &Transform2D::IDENTITY, &box_shape, &Transform2D::IDENTITY)
-                .is_none(),
+            test_collision(
+                &point,
+                &Transform2D::IDENTITY,
+                &box_shape,
+                &Transform2D::IDENTITY
+            )
+            .is_none(),
             "a zero-radius circle has no extent and cannot produce a contact"
         );
     }

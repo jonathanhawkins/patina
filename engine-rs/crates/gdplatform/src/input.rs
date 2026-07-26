@@ -91,6 +91,12 @@ pub enum Key {
     Backslash,
     Minus,
     Equal,
+    /// The backquote/grave key (Godot `Key::QUOTELEFT`) — distinct from
+    /// [`Key::Quote`], which is the apostrophe. `ui_swap_input_direction` binds
+    /// Ctrl+Backquote (pat-0q2kx.125).
+    QuoteLeft,
+    /// The context-menu key (Godot `Key::MENU`), bound by `ui_menu`.
+    Menu,
 }
 
 impl Key {
@@ -175,6 +181,8 @@ impl Key {
             Key::Backslash => "\\",
             Key::Minus => "-",
             Key::Equal => "=",
+            Key::QuoteLeft => "`",
+            Key::Menu => "Menu",
         }
     }
 
@@ -261,6 +269,11 @@ impl Key {
             "\\" => Some(Key::Backslash),
             "-" => Some(Key::Minus),
             "=" => Some(Key::Equal),
+            // The browser reports these by `KeyboardEvent.code`/`key`; both
+            // spellings are accepted so a routed web event resolves either way
+            // (pat-0q2kx.125).
+            "`" | "Backquote" => Some(Key::QuoteLeft),
+            "Menu" | "ContextMenu" => Some(Key::Menu),
             _ => None,
         }
     }
@@ -881,6 +894,8 @@ impl InputMap {
             ),
             ("ui_text_clear_carets_and_selection", vec![k(Key::Escape)]),
             ("ui_text_toggle_insert_mode", vec![k(Key::Insert)]),
+            // Upstream binds the context-menu key here (input_map.cpp:773-775).
+            ("ui_menu", vec![k(Key::Menu)]),
             ("ui_text_submit", vec![k(Key::Enter)]),
             ("ui_unicode_start", vec![ctrl_shift(Key::U)]),
             // ----- GraphEdit -----
@@ -896,6 +911,9 @@ impl InputMap {
             ("ui_filedialog_find", vec![ctrl(Key::F)]),
             ("ui_filedialog_focus_path", vec![ctrl(Key::L)]),
             // ----- Misc -----
+            // Ctrl+Backquote upstream (`Key::QUOTELEFT | CMD_OR_CTRL`,
+            // input_map.cpp:846-847) — flips RTL/LTR text entry.
+            ("ui_swap_input_direction", vec![ctrl(Key::QuoteLeft)]),
             ("ui_accessibility_drag_and_drop", vec![]),
             (
                 "ui_colorpicker_delete_preset",
@@ -2463,6 +2481,10 @@ fn godot_keycode_to_key(code: i64) -> Option<Key> {
         92 => Some(Key::Backslash),
         45 => Some(Key::Minus),
         61 => Some(Key::Equal),
+        // Godot `Key::QUOTELEFT = 0x0060` and `Key::MENU = SPECIAL | 0x42`
+        // (core/os/keyboard.h), where SPECIAL is `1 << 22` (pat-0q2kx.125).
+        96 => Some(Key::QuoteLeft),
+        4194370 => Some(Key::Menu),
         _ => None,
     }
 }

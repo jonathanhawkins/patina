@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use gdcore::math::Vector2;
+use gdcore::math::{Vector2, Vector2i};
 use gdphysics2d::area2d::{
     Area2D, AreaId, AreaOverlapEvent, AreaSpaceOverride, AreaStore, OverlapEvent, OverlapState,
 };
@@ -47,6 +47,56 @@ fn float_prop(tree: &SceneTree, id: NodeId, key: &str, default: f64) -> f64 {
             _ => default,
         })
         .unwrap_or(default)
+}
+
+/// A joint's `node_a`/`node_b` as a path string, or `None` when unset
+/// (pat-0q2kx.114). Godot writes these as `NodePath`; a hand-written scene may
+/// spell them as a plain String, so both are accepted.
+fn joint_node_path(node: &crate::node::Node, key: &str) -> Option<String> {
+    let path = match node.get_property(key) {
+        Variant::NodePath(p) => p.to_string(),
+        Variant::String(s) => s,
+        _ => return None,
+    };
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+/// Resolves a joint's `node_a`/`node_b` path, which Godot treats as relative to
+/// the joint node itself; an absolute path is accepted too.
+fn resolve_joint_target(tree: &SceneTree, from: NodeId, path: &str) -> Option<NodeId> {
+    if path.starts_with('/') {
+        tree.get_node_by_path(path)
+    } else {
+        tree.get_node_relative(from, path)
+    }
+}
+
+/// Reads a float property, or `None` when the node does not carry it
+/// (pat-0q2kx.115).
+///
+/// Distinct from [`float_prop`]: an override that is merely *absent* must leave
+/// the existing value alone, which a defaulting read cannot express — a
+/// `PhysicsMaterial` with no `bounce` would otherwise stamp 0.0 over whatever
+/// the body already had.
+fn opt_float_prop(tree: &SceneTree, id: NodeId, key: &str) -> Option<f64> {
+    match tree.get_node(id)?.get_property(key) {
+        Variant::Float(f) => Some(f),
+        Variant::Int(i) => Some(i as f64),
+        _ => None,
+    }
+}
+
+/// Reads a `Vector2` property, or `None` when absent — the same
+/// leave-it-alone semantics as [`opt_float_prop`].
+fn opt_vec2_prop(tree: &SceneTree, id: NodeId, key: &str) -> Option<Vector2> {
+    match tree.get_node(id)?.get_property(key) {
+        Variant::Vector2(v) => Some(v),
+        _ => None,
+    }
 }
 
 /// Reads a u32 property from a node, defaulting to `default`.
@@ -439,8 +489,17 @@ pub struct PhysicsServer {
     body_to_node: HashMap<BodyId, NodeId>,
     /// Maps scene node IDs to area IDs.
     node_to_area: HashMap<NodeId, AreaId>,
+    /// Maps joint scene nodes to the world joints built from them, so a
+    /// re-registration pass does not duplicate them (pat-0q2kx.114).
+    node_to_joint: HashMap<NodeId, gdphysics2d::joint::JointId>,
     /// Maps area IDs back to scene node IDs.
     area_to_node: HashMap<AreaId, NodeId>,
+    /// Static bodies generated from each tilemap node's painted tiles, so a
+    /// later pass can drop the previous generation (pat-0q2kx.117).
+    tilemap_bodies: HashMap<NodeId, Vec<BodyId>>,
+    /// What the tile bodies of each tilemap node were built from, so an
+    /// unchanged map is not rebuilt every frame.
+    tilemap_fingerprints: HashMap<NodeId, TileMapFingerprint>,
     /// Collision events from the last physics step.
     last_collision_events: Vec<CollisionEvent>,
     /// Body-area overlap events from the last physics step.
@@ -453,6 +512,23 @@ pub struct PhysicsServer {
     tracing_enabled: bool,
     /// Current trace frame counter.
     trace_frame: u64,
+}
+
+/// Everything about a tilemap node that changes the static bodies it generates
+/// (pat-0q2kx.117). Equality decides whether the tile bodies are rebuilt, so it
+/// must cover the painted cells themselves — a same-size edit (one cell erased,
+/// another painted) would slip past a body-count comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TileMapFingerprint {
+    /// Raw `tile_map_data` bytes: which cells are painted, with what.
+    cells: Vec<u8>,
+    /// Tile source ids that carry collision.
+    sources: Vec<i32>,
+    /// Cell size in pixels.
+    tile_size: Vector2i,
+    /// The layer's global position, as bits — `Vector2` is not `Eq`, and an
+    /// exact bit comparison is what "unchanged" means here.
+    origin: (u32, u32),
 }
 
 impl std::fmt::Debug for PhysicsServer {
@@ -474,7 +550,10 @@ impl PhysicsServer {
             node_to_body: HashMap::new(),
             body_to_node: HashMap::new(),
             node_to_area: HashMap::new(),
+            node_to_joint: HashMap::new(),
             area_to_node: HashMap::new(),
+            tilemap_bodies: HashMap::new(),
+            tilemap_fingerprints: HashMap::new(),
             last_collision_events: Vec::new(),
             last_overlap_events: Vec::new(),
             last_area_overlap_events: Vec::new(),
@@ -548,6 +627,25 @@ impl PhysicsServer {
         self.world.gravity()
     }
 
+    /// Applies the space-wide `physics/2d/*` project settings — default damping,
+    /// sleep thresholds and `time_before_sleep` (pat-0q2kx.116).
+    ///
+    /// Godot's space reads these at construction and its bodies consult them
+    /// every step (`godot_space_2d.cpp:1219-1222`); here the world stamps them
+    /// onto its bodies instead, which is the same thing from the body's side.
+    pub fn set_space_params(&mut self, params: gdphysics2d::world::SpaceParams2D) {
+        self.world.set_space_params(params);
+    }
+
+    /// Sets the contact solver's `physics/2d/solver/*` tunables.
+    pub fn set_solver_params(&mut self, iterations: usize, contact_bias: f32) {
+        let solver = self.world.contact_solver_mut();
+        // Godot clamps the iteration count to at least one; a zero would turn
+        // every contact into a no-op rather than a fast one.
+        solver.iterations = iterations.max(1);
+        solver.contact_bias = contact_bias;
+    }
+
     /// Returns the body ID for a scene node, if registered.
     pub fn body_for_node(&self, node_id: NodeId) -> Option<BodyId> {
         self.node_to_body.get(&node_id).copied()
@@ -613,6 +711,31 @@ impl PhysicsServer {
                 body.collision_mask = u32_prop(tree, node_id, "collision_mask", 1);
                 body.bounce = float_prop(tree, node_id, "bounce", 0.0) as f32;
                 body.friction = float_prop(tree, node_id, "friction", 0.5) as f32;
+                // Godot has no flat `bounce`/`friction` on a body — they live on
+                // a `PhysicsMaterial` in `physics_material_override`, which
+                // `PackedScene` flattens onto the node as `__physics_material__*`
+                // (pat-0q2kx.115). The override wins when present; the flat
+                // props above stay as the fallback so hand-built scenes and the
+                // existing tests keep working.
+                if let Some(f) = opt_float_prop(tree, node_id, "__physics_material__friction") {
+                    body.friction = f as f32;
+                }
+                if let Some(b) = opt_float_prop(tree, node_id, "__physics_material__bounce") {
+                    body.bounce = b as f32;
+                }
+                // The rest of Godot's RigidBody2D surface. `PhysicsBody2D`
+                // already models and honors these — `integrate` skips a frozen
+                // or sleeping body outright and zeroes angular motion under
+                // `lock_rotation` (gdphysics2d/src/body.rs:307-341) — but the
+                // bridge never read them off the node, so an authored
+                // `freeze = true` did nothing at runtime.
+                body.freeze = bool_prop(tree, node_id, "freeze", false);
+                body.lock_rotation = bool_prop(tree, node_id, "lock_rotation", false);
+                body.can_sleep = bool_prop(tree, node_id, "can_sleep", true);
+                body.sleeping = bool_prop(tree, node_id, "sleeping", false);
+                if let Some(com) = opt_vec2_prop(tree, node_id, "center_of_mass") {
+                    body.center_of_mass = com;
+                }
                 body.linear_velocity = vec2_prop(tree, node_id, "linear_velocity", Vector2::ZERO);
                 body.rotation = crate::node2d::get_global_rotation(tree, node_id);
                 body.angular_velocity = float_prop(tree, node_id, "angular_velocity", 0.0) as f32;
@@ -667,11 +790,254 @@ impl PhysicsServer {
                     0,
                 ));
                 area.linear_damp = float_prop(tree, node_id, "linear_damp", 0.1) as f32;
+                // The rotational twin of the linear override (pat-0q2kx.112).
+                area.angular_damp_space_override = space_override_from_int(u32_prop(
+                    tree,
+                    node_id,
+                    "angular_damp_space_override",
+                    0,
+                ));
+                area.angular_damp = float_prop(tree, node_id, "angular_damp", 1.0) as f32;
+                area.monitorable = bool_prop(tree, node_id, "monitorable", true);
+                area.rotation = crate::node2d::get_global_rotation(tree, node_id);
                 area.priority = i32_prop(tree, node_id, "priority", 0);
                 let area_id = self.area_store.add_area(area);
                 self.node_to_area.insert(node_id, area_id);
                 self.area_to_node.insert(area_id, node_id);
             }
+        }
+
+        // Painted tiles become static bodies of their own (pat-0q2kx.117).
+        self.register_tilemap_bodies(tree, &all_ids);
+
+        // Joints come last: they resolve `node_a`/`node_b` to BodyIds, so every
+        // body has to be in `node_to_body` before this runs (pat-0q2kx.114).
+        self.register_joints(tree, &all_ids);
+    }
+
+    /// Builds static collision bodies from `TileMapLayer`/`TileMap` tiles
+    /// (pat-0q2kx.117).
+    ///
+    /// Godot's `TileMapLayer::_physics_update` creates a static body per painted
+    /// cell out of the tile's physics layers, which is what makes a character
+    /// walk on painted ground. `gdphysics2d::tilemap_collision` did the
+    /// conversion and was unit-tested, but nothing called it — `tilemap_to_physics`
+    /// had zero callers outside the crate's own re-export, so a `.tscn` tilemap
+    /// contributed no collision at all and characters fell straight through.
+    ///
+    /// Re-runs cheaply: the painted cells and their tile set are fingerprinted,
+    /// and the tile bodies are rebuilt only when that fingerprint changes — so
+    /// `set_cell`/`erase_cell` add and remove collision, while an untouched map
+    /// keeps its bodies (and their ids) across frames.
+    fn register_tilemap_bodies(&mut self, tree: &SceneTree, all_ids: &[NodeId]) {
+        for &node_id in all_ids {
+            let Some(node) = tree.get_node(node_id) else {
+                continue;
+            };
+            if !matches!(node.class_name(), "TileMapLayer" | "TileMap") {
+                continue;
+            }
+
+            let physics_sources = match node.get_property(crate::tilemap::TILE_PHYSICS_SOURCES) {
+                Variant::PackedInt32Array(ids) => ids,
+                _ => Vec::new(),
+            };
+            let raw_cells = match node.get_property("tile_map_data") {
+                Variant::PackedByteArray(bytes) => bytes,
+                _ => Vec::new(),
+            };
+            let tile_size = match node.get_property("tile_size") {
+                Variant::Vector2i(v) => v,
+                Variant::Vector2(v) => Vector2i::new(v.x as i32, v.y as i32),
+                // Godot's TileSet default.
+                _ => Vector2i::new(16, 16),
+            };
+            let origin = crate::node2d::get_global_position(tree, node_id);
+
+            // Fingerprint everything that changes the generated bodies. Cheap
+            // enough to compute every registration pass and exact — comparing
+            // body counts would miss a same-size edit (one cell erased, another
+            // painted).
+            let fingerprint = TileMapFingerprint {
+                cells: raw_cells.clone(),
+                sources: physics_sources.clone(),
+                tile_size,
+                origin: (origin.x.to_bits(), origin.y.to_bits()),
+            };
+            if self.tilemap_fingerprints.get(&node_id) == Some(&fingerprint) {
+                continue;
+            }
+
+            // Drop the previous generation before building the new one, so an
+            // erased cell actually stops colliding.
+            if let Some(old) = self.tilemap_bodies.remove(&node_id) {
+                for body_id in old {
+                    let _ = self.world.remove_body(body_id);
+                }
+            }
+
+            let cells = crate::tilemap::decode_tile_map_data(&raw_cells);
+            let infos = crate::tilemap::tile_collision_infos(
+                &cells,
+                tile_size,
+                &physics_sources,
+                |source_id, atlas| {
+                    let points = match node
+                        .get_property(&crate::tilemap::tile_physics_points_key(source_id, atlas))
+                    {
+                        Variant::PackedVector2Array(p) => p,
+                        _ => Vec::new(),
+                    };
+                    let one_way = matches!(
+                        node.get_property(&crate::tilemap::tile_physics_one_way_key(
+                            source_id, atlas
+                        )),
+                        Variant::Bool(true)
+                    );
+                    (points, one_way)
+                },
+            );
+
+            let result = gdphysics2d::tilemap_collision::tilemap_to_physics(
+                &mut self.world,
+                &infos,
+                tile_size,
+                origin,
+            );
+            self.tilemap_bodies.insert(node_id, result.body_ids);
+            self.tilemap_fingerprints.insert(node_id, fingerprint);
+        }
+    }
+
+    /// Builds world joints from `Joint2D` scene nodes (pat-0q2kx.114).
+    ///
+    /// `gdphysics2d::joint` solved all three kinds and `world.add_joint`
+    /// registered them, but every caller was one of that crate's own tests — no
+    /// scene path ever created a joint, so an authored `PinJoint2D` constrained
+    /// nothing.
+    ///
+    /// Godot resolves `node_a`/`node_b` as NodePaths **relative to the joint**
+    /// and anchors the joint at its own global position
+    /// (upstream/godot/scene/2d/physics/joints/joint_2d.cpp). A joint naming a
+    /// node that is not a registered body is skipped rather than guessed at: a
+    /// half-connected joint would yank a body toward the origin.
+    fn register_joints(&mut self, tree: &SceneTree, all_ids: &[NodeId]) {
+        use gdphysics2d::joint::{DampedSpringJoint2D, GrooveJoint2D, Joint2D, PinJoint2D};
+
+        for &node_id in all_ids {
+            let Some(node) = tree.get_node(node_id) else {
+                continue;
+            };
+            let class = node.class_name().to_owned();
+            if !matches!(
+                class.as_str(),
+                "PinJoint2D" | "GrooveJoint2D" | "DampedSpringJoint2D"
+            ) {
+                continue;
+            }
+            if self.node_to_joint.contains_key(&node_id) {
+                continue;
+            }
+
+            // `node_a`/`node_b` are NodePaths relative to the joint node.
+            //
+            // Resolved in three sequential steps rather than one closure: a
+            // closure capturing `&self.node_to_body` would still be live when
+            // `self.world.add_joint` needs `&mut self` below.
+            let (Some(path_a), Some(path_b)) = (
+                joint_node_path(node, "node_a"),
+                joint_node_path(node, "node_b"),
+            ) else {
+                continue;
+            };
+            let (Some(target_a), Some(target_b)) = (
+                resolve_joint_target(tree, node_id, &path_a),
+                resolve_joint_target(tree, node_id, &path_b),
+            ) else {
+                continue;
+            };
+            let (Some(body_a), Some(body_b)) = (
+                self.node_to_body.get(&target_a).copied(),
+                self.node_to_body.get(&target_b).copied(),
+            ) else {
+                continue;
+            };
+
+            let anchor = crate::node2d::get_global_position(tree, node_id);
+            // The bodies' current placement is what the joint is bound around,
+            // so read it before building anything.
+            let pos_a = crate::node2d::get_global_position(tree, target_a);
+            let rot_a = crate::node2d::get_global_rotation(tree, target_a);
+            let pos_b = crate::node2d::get_global_position(tree, target_b);
+            let rot_b = crate::node2d::get_global_rotation(tree, target_b);
+
+            let mut joint = match class.as_str() {
+                "PinJoint2D" => {
+                    // `bind`, not `new`: Godot hinges the bodies where they
+                    // already stand rather than collapsing both onto the anchor,
+                    // which is what lets a pendulum swing.
+                    let mut pin =
+                        PinJoint2D::bind(body_a, pos_a, rot_a, body_b, pos_b, rot_b, anchor);
+                    pin.softness = float_prop(tree, node_id, "softness", 0.0) as f32;
+                    pin.angular_limit_enabled =
+                        bool_prop(tree, node_id, "angular_limit_enabled", false);
+                    pin.angular_limit_lower =
+                        float_prop(tree, node_id, "angular_limit_lower", 0.0) as f32;
+                    pin.angular_limit_upper =
+                        float_prop(tree, node_id, "angular_limit_upper", 0.0) as f32;
+                    pin.motor_enabled = bool_prop(tree, node_id, "motor_enabled", false);
+                    pin.motor_target_velocity =
+                        float_prop(tree, node_id, "motor_target_velocity", 0.0) as f32;
+                    Joint2D::Pin(pin)
+                }
+                "DampedSpringJoint2D" => {
+                    // Godot's `rest_length` defaults to 0, which means "use
+                    // `length`" (damped_spring_joint_2d.cpp); passing the 0
+                    // through would collapse the spring to a point.
+                    let length = float_prop(tree, node_id, "length", 50.0) as f32;
+                    let rest = float_prop(tree, node_id, "rest_length", 0.0) as f32;
+                    let rest_length = if rest > 0.0 { rest } else { length };
+                    Joint2D::DampedSpring(
+                        DampedSpringJoint2D::new(
+                            body_a,
+                            body_b,
+                            rest_length,
+                            float_prop(tree, node_id, "stiffness", 20.0) as f32,
+                            float_prop(tree, node_id, "damping", 1.0) as f32,
+                        )
+                        .with_length(length),
+                    )
+                }
+                _ => {
+                    // GrooveJoint2D: the groove runs along the joint node's
+                    // local +Y for `length`, with body B anchored at
+                    // `initial_offset` along it (groove_joint_2d.cpp).
+                    //
+                    // `GrooveJoint2D` stores its endpoints as offsets **from the
+                    // bodies**, not in world space, so the world-space groove is
+                    // rebased onto each body here — passing world points made the
+                    // groove drift by the bodies' own positions.
+                    let length = float_prop(tree, node_id, "length", 50.0) as f32;
+                    let offset = float_prop(tree, node_id, "initial_offset", 25.0) as f32;
+                    let rot = crate::node2d::get_global_rotation(tree, node_id);
+                    let dir = Vector2::new(-rot.sin(), rot.cos());
+                    Joint2D::Groove(GrooveJoint2D::new(
+                        body_a,
+                        body_b,
+                        anchor - pos_a,
+                        (anchor + dir * length) - pos_a,
+                        (anchor + dir * offset) - pos_b,
+                    ))
+                }
+            };
+
+            // Shared `Joint2D` properties.
+            let base = joint.base_mut();
+            base.bias = float_prop(tree, node_id, "bias", 0.0) as f32;
+            base.disable_collision = bool_prop(tree, node_id, "disable_collision", true);
+
+            let joint_id = self.world.add_joint(joint);
+            self.node_to_joint.insert(node_id, joint_id);
         }
     }
 
@@ -797,12 +1163,28 @@ impl PhysicsServer {
             }
         }
 
-        // Sync Area2D positions and monitoring flag from the scene tree.
+        // Sync Area2D transform and monitoring flags from the scene tree.
         for (&node_id, &area_id) in &self.node_to_area {
+            // Read before the mutable borrow so the tree is not borrowed twice.
+            let position = crate::node2d::get_global_position(tree, node_id);
+            let rotation = crate::node2d::get_global_rotation(tree, node_id);
+            let monitoring = bool_prop(tree, node_id, "monitoring", true);
+            let monitorable = bool_prop(tree, node_id, "monitorable", true);
+            let point_offset = vec2_prop(tree, node_id, "gravity_point_center", Vector2::ZERO);
             if let Some(area) = self.area_store.get_area_mut(area_id) {
                 // Areas had the identical local-as-world bug as bodies.
-                area.position = crate::node2d::get_global_position(tree, node_id);
-                area.monitoring = bool_prop(tree, node_id, "monitoring", true);
+                area.position = position;
+                // Overlap tests build the area's transform from this, so a
+                // rotated area now tests as the rotated shape it is
+                // (pat-0q2kx.112).
+                area.rotation = rotation;
+                area.monitoring = monitoring;
+                area.monitorable = monitorable;
+                // Godot's point-gravity attractor is node-relative and moves
+                // with the area. Resolving it once at registration froze the
+                // attractor in place, so moving the area left its gravity
+                // behind (pat-0q2kx.112).
+                area.gravity_point_center = position + point_offset;
             }
         }
     }
@@ -823,6 +1205,8 @@ impl PhysicsServer {
             let default_gravity = self.world.gravity();
             let mut gravity_overrides: HashMap<BodyId, Vector2> = HashMap::new();
             let mut damp_overrides: HashMap<BodyId, f32> = HashMap::new();
+            // The rotational twin of `damp_overrides` (pat-0q2kx.112).
+            let mut angular_damp_overrides: HashMap<BodyId, f32> = HashMap::new();
             for &body_id in self.node_to_body.values() {
                 if let Some(body) = self.world.get_body(body_id) {
                     // Only dynamic bodies integrate under gravity/damping.
@@ -831,13 +1215,21 @@ impl PhysicsServer {
                     }
                     let g = self.area_store.compute_body_gravity(body, default_gravity);
                     let d = self.area_store.compute_body_damp(body, body.linear_damp);
+                    angular_damp_overrides.insert(
+                        body.id,
+                        self.area_store
+                            .compute_body_angular_damp(body, body.angular_damp),
+                    );
                     gravity_overrides.insert(body_id, g);
                     damp_overrides.insert(body_id, d);
                 }
             }
-            self.last_collision_events =
-                self.world
-                    .step_with_area_overrides(dt, &gravity_overrides, &damp_overrides);
+            self.last_collision_events = self.world.step_with_area_overrides(
+                dt,
+                &gravity_overrides,
+                &damp_overrides,
+                &angular_damp_overrides,
+            );
         } else {
             self.last_collision_events = self.world.step(dt);
         }
@@ -857,8 +1249,36 @@ impl PhysicsServer {
         self.trace_frame += 1;
     }
 
+    /// Publishes each `Area2D`'s current overlap set onto its node as
+    /// `_overlapping_bodies`, which is what the script-facing
+    /// `get_overlapping_bodies()` / `has_overlapping_bodies()` read
+    /// (pat-0q2kx.112).
+    ///
+    /// The same bridge the 3D server uses (pat-0q2kx.35): the script phase holds
+    /// no handle on the physics server, so the physics phase leaves the answer
+    /// on the node. The interpreter arm is already shared between 2D and 3D —
+    /// only the 2D side never filled it in, so `get_overlapping_bodies()` on an
+    /// `Area2D` always returned an empty array however many bodies were inside.
+    pub fn publish_overlapping_bodies(&self, tree: &mut SceneTree) {
+        for (&area_node, &area_id) in &self.node_to_area {
+            let bodies: Vec<Variant> = self
+                .area_store
+                .overlapping_bodies(area_id)
+                .into_iter()
+                .filter_map(|bid| self.body_to_node.get(&bid).copied())
+                .map(|nid| Variant::ObjectId(nid.object_id()))
+                .collect();
+            if let Some(node) = tree.get_node_mut(area_node) {
+                node.set_property("_overlapping_bodies", Variant::Array(bodies));
+            }
+        }
+    }
+
     /// Pulls physics body transforms back into the scene tree.
     pub fn sync_from_physics(&self, tree: &mut SceneTree) {
+        // The overlap set the last step produced reaches scripts here, on the
+        // same tick the enter/exit signals fire.
+        self.publish_overlapping_bodies(tree);
         for (&node_id, &body_id) in &self.node_to_body {
             if let Some(body) = self.world.get_body(body_id) {
                 // Don't write back static body properties (they don't move).
@@ -1108,7 +1528,13 @@ impl PhysicsServer {
             character.set_on_floor(was_on_floor);
             character.platform_velocity = stored_platform_vel;
 
-            // Collect static/other bodies to collide against (exclude self)
+            // Collect static/other bodies to collide against (exclude self).
+            //
+            // Tile bodies are included explicitly: they are generated from
+            // painted cells and so have no scene node of their own, which means
+            // they never appear in `node_to_body`. Walking that map alone let a
+            // character pass straight through painted ground even though the
+            // static bodies were sitting in the world (pat-0q2kx.117).
             let obstacle_refs: Vec<&PhysicsBody2D> = self
                 .node_to_body
                 .iter()
@@ -1118,6 +1544,12 @@ impl PhysicsServer {
                     }
                     self.world.get_body(other_body_id)
                 })
+                .chain(
+                    self.tilemap_bodies
+                        .values()
+                        .flatten()
+                        .filter_map(|&tile_body| self.world.get_body(tile_body)),
+                )
                 .collect();
 
             // move_and_slide_delta applies dt internally and returns px/s velocity.

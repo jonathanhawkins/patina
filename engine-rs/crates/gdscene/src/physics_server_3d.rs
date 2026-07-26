@@ -16,10 +16,15 @@
 use std::collections::{HashMap, HashSet};
 
 use gdcore::math::Vector3;
+use gdcore::math3d::{Quaternion, Transform3D};
 use gdphysics3d::area3d::{
     Area3D, AreaId3D, AreaOverlapEvent3D, OverlapEvent3D, OverlapState3D, SpaceOverride,
 };
 use gdphysics3d::body::{BodyId3D, BodyType3D, FreezeMode, PhysicsBody3D};
+use gdphysics3d::joint::{
+    AxisLimit, ConeTwistJoint3D, Generic6DofJoint3D, HingeJoint3D, Joint3D, JointId3D, PinJoint3D,
+    SliderJoint3D,
+};
 use gdphysics3d::shape::Shape3D;
 use gdphysics3d::world::PhysicsWorld3D;
 use gdvariant::Variant;
@@ -35,6 +40,72 @@ fn body_type_for_class_3d(class_name: &str) -> Option<BodyType3D> {
         "StaticBody3D" => Some(BodyType3D::Static),
         "CharacterBody3D" => Some(BodyType3D::Kinematic),
         _ => None,
+    }
+}
+
+/// `true` for the five concrete `Joint3D` node classes (pat-0q2kx.118).
+fn is_joint_class_3d(class_name: &str) -> bool {
+    matches!(
+        class_name,
+        "PinJoint3D" | "HingeJoint3D" | "SliderJoint3D" | "ConeTwistJoint3D" | "Generic6DOFJoint3D"
+    )
+}
+
+/// A joint's `node_a`/`node_b` as a path string, or `None` when unset
+/// (pat-0q2kx.118). Godot writes these as `NodePath`; a hand-written scene may
+/// spell them as a plain String, so both are accepted.
+fn joint_node_path_3d(node: &crate::node::Node, key: &str) -> Option<String> {
+    let path = match node.get_property(key) {
+        Variant::NodePath(p) => p.to_string(),
+        Variant::String(s) => s,
+        _ => return None,
+    };
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+/// Resolves a joint's `node_a`/`node_b` path, which Godot treats as relative to
+/// the joint node itself; an absolute path is accepted too.
+fn resolve_joint_target_3d(tree: &SceneTree, from: NodeId, path: &str) -> Option<NodeId> {
+    if path.starts_with('/') {
+        tree.get_node_by_path(path)
+    } else {
+        tree.get_node_relative(from, path)
+    }
+}
+
+/// The joint node's own frame, re-expressed in one body's local space.
+///
+/// Godot configures every 3D joint from `body.global_transform.affine_inverse()
+/// * joint.global_transform` (`scene/3d/physics/joints/*.cpp`), so the pivot and
+/// the constraint axes all come from where the joint node sits, not from the
+/// bodies. Only the two axes the solver actually reads are kept: the hinge runs
+/// along the frame's **Z** column and the slider/cone-twist along **X**
+/// (`modules/godot_physics_3d/joints/godot_{hinge,slider,cone_twist}_joint_3d.cpp`).
+struct JointFrame3D {
+    /// The joint's origin in the body's local space.
+    pivot: Vector3,
+    /// The joint frame's local X column, in the body's local space.
+    x: Vector3,
+    /// The joint frame's local Z column, in the body's local space.
+    z: Vector3,
+}
+
+/// Projects `joint` into `body_node`'s local space.
+///
+/// Uses the same position/rotation pair that body registration writes into the
+/// world — global origin, local rotation — so the frame the solver sees agrees
+/// with the frame the body is simulated in.
+fn joint_frame_in_body(tree: &SceneTree, body_node: NodeId, joint: &Transform3D) -> JointFrame3D {
+    let body_position = node3d::get_global_transform(tree, body_node).origin;
+    let inverse = Quaternion::from_euler(node3d::get_rotation(tree, body_node)).inverse();
+    JointFrame3D {
+        pivot: inverse.xform(joint.origin - body_position),
+        x: inverse.xform(joint.basis.x).normalized(),
+        z: inverse.xform(joint.basis.z).normalized(),
     }
 }
 
@@ -128,6 +199,26 @@ fn vec3_array_prop_3d(node: &crate::node::Node, key: &str) -> Vec<Vector3> {
     }
 }
 
+/// Reads a packed float array (or an `Array` of numbers) from a node, used for
+/// `HeightMapShape3D.map_data` (pat-0q2kx.119). Returns an empty vec when the
+/// property is absent or not numeric.
+fn float_array_prop_3d(node: &crate::node::Node, key: &str) -> Vec<f32> {
+    match node.get_property(key) {
+        Variant::PackedFloat32Array(v) => v,
+        Variant::PackedFloat64Array(v) => v.into_iter().map(|f| f as f32).collect(),
+        Variant::PackedInt32Array(v) => v.into_iter().map(|i| i as f32).collect(),
+        Variant::Array(items) => items
+            .into_iter()
+            .filter_map(|v| match v {
+                Variant::Float(f) => Some(f as f32),
+                Variant::Int(i) => Some(i as f32),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Extracts a 3D collision shape from a `CollisionShape3D` node's properties.
 pub(crate) fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Shape3D> {
     let node = tree.get_node(node_id)?;
@@ -140,57 +231,126 @@ pub(crate) fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Sh
         return None;
     }
 
-    match node.get_property("shape") {
-        Variant::String(s) => match s.as_str() {
-            "SphereShape3D" => {
-                let radius = float_prop_3d(tree, node_id, "radius", 0.5) as f32;
-                Some(Shape3D::Sphere { radius })
+    // A real `.tscn` writes `shape = SubResource("id")`, which the parser leaves
+    // as `"SubResource:<id>"`; the geometry lives on the sub-resource and is
+    // copied onto this node under `__shape__*` at instancing (packed_scene.rs).
+    // Hand-built nodes instead put the class name in `shape` with the dimensions
+    // directly on the node. Both are accepted — same resolution the 2D server
+    // already does in `physics_server::shape_from_node`. Without this a
+    // `.tscn`-authored CollisionShape3D resolved to nothing and its body silently
+    // fell back to a default sphere.
+    let shape_prop = node.get_property("shape");
+    let resolved_class: Option<String> = match &shape_prop {
+        Variant::String(s) if s.starts_with("SubResource:") => {
+            match node.get_property("__shape__class") {
+                Variant::String(class) => Some(class),
+                // An unresolved reference has no geometry — better no shape than
+                // a default-sized one standing in for the authored size.
+                _ => None,
             }
-            "BoxShape3D" => {
-                let size = match node.get_property("size") {
-                    Variant::Vector3(v) => v,
-                    _ => Vector3::new(1.0, 1.0, 1.0),
-                };
-                Some(Shape3D::BoxShape {
-                    half_extents: Vector3::new(size.x / 2.0, size.y / 2.0, size.z / 2.0),
-                })
-            }
-            "CapsuleShape3D" => {
-                let radius = float_prop_3d(tree, node_id, "radius", 0.5) as f32;
-                let height = float_prop_3d(tree, node_id, "height", 1.0) as f32;
-                Some(Shape3D::CapsuleShape { radius, height })
-            }
-            "CylinderShape3D" => {
-                let radius = float_prop_3d(tree, node_id, "radius", 0.5) as f32;
-                let height = float_prop_3d(tree, node_id, "height", 1.0) as f32;
-                Some(Shape3D::CylinderShape { radius, height })
-            }
-            "ConvexPolygonShape3D" => Some(Shape3D::ConvexPolygonShape {
-                points: vec3_array_prop_3d(node, "points"),
-            }),
-            "ConcavePolygonShape3D" => Some(Shape3D::ConcavePolygonShape {
-                // Godot stores the triangle soup in `data` (every 3 vertices =
-                // one triangle); accept `faces` as an alias.
-                faces: {
-                    let data = vec3_array_prop_3d(node, "data");
-                    if data.is_empty() {
-                        vec3_array_prop_3d(node, "faces")
-                    } else {
-                        data
-                    }
-                },
-            }),
-            "WorldBoundaryShape3D" => Some(Shape3D::WorldBoundaryShape {
-                normal: Vector3::new(0.0, 1.0, 0.0),
-                distance: 0.0,
-            }),
+        }
+        Variant::String(s) => Some(s.clone()),
+        _ => None,
+    };
+
+    // Dimension readers that prefer the sub-resource's copied value.
+    let has = |key: &str| !matches!(node.get_property(key), Variant::Nil);
+    let num = |key: &str, default: f64| -> f32 {
+        let ns = format!("__shape__{key}");
+        if has(&ns) {
+            float_prop_3d(tree, node_id, &ns, default) as f32
+        } else {
+            float_prop_3d(tree, node_id, key, default) as f32
+        }
+    };
+    let v3 = |key: &str, default: Vector3| -> Vector3 {
+        let ns = format!("__shape__{key}");
+        let read = |k: &str| match node.get_property(k) {
+            Variant::Vector3(v) => Some(v),
             _ => None,
-        },
-        _ => {
+        };
+        read(&ns).or_else(|| read(key)).unwrap_or(default)
+    };
+    let v3s = |key: &str| -> Vec<Vector3> {
+        let namespaced = vec3_array_prop_3d(node, &format!("__shape__{key}"));
+        if namespaced.is_empty() {
+            vec3_array_prop_3d(node, key)
+        } else {
+            namespaced
+        }
+    };
+    let f32s = |key: &str| -> Vec<f32> {
+        let namespaced = float_array_prop_3d(node, &format!("__shape__{key}"));
+        if namespaced.is_empty() {
+            float_array_prop_3d(node, key)
+        } else {
+            namespaced
+        }
+    };
+
+    match resolved_class.as_deref() {
+        Some("SphereShape3D") => Some(Shape3D::Sphere {
+            radius: num("radius", 0.5),
+        }),
+        Some("BoxShape3D") => {
+            let size = v3("size", Vector3::new(1.0, 1.0, 1.0));
+            Some(Shape3D::BoxShape {
+                half_extents: Vector3::new(size.x / 2.0, size.y / 2.0, size.z / 2.0),
+            })
+        }
+        Some("CapsuleShape3D") => Some(Shape3D::CapsuleShape {
+            radius: num("radius", 0.5),
+            height: num("height", 1.0),
+        }),
+        Some("CylinderShape3D") => Some(Shape3D::CylinderShape {
+            radius: num("radius", 0.5),
+            height: num("height", 1.0),
+        }),
+        Some("ConvexPolygonShape3D") => Some(Shape3D::ConvexPolygonShape {
+            points: v3s("points"),
+        }),
+        Some("ConcavePolygonShape3D") => Some(Shape3D::ConcavePolygonShape {
+            // Godot stores the triangle soup in `data` (every 3 vertices =
+            // one triangle); accept `faces` as an alias.
+            faces: {
+                let data = v3s("data");
+                if data.is_empty() {
+                    v3s("faces")
+                } else {
+                    data
+                }
+            },
+            // `ConcavePolygonShape3D.backface_collision` defaults to false.
+            backface_collision: if has("__shape__backface_collision") {
+                truthy_prop_3d(tree, node_id, "__shape__backface_collision", false)
+            } else {
+                truthy_prop_3d(tree, node_id, "backface_collision", false)
+            },
+        }),
+        // pat-0q2kx.119 — heightmap terrain and separation rays.
+        Some("HeightMapShape3D") => Some(Shape3D::HeightMapShape {
+            map_width: num("map_width", 2.0) as i32,
+            map_depth: num("map_depth", 2.0) as i32,
+            map_data: f32s("map_data"),
+        }),
+        Some("SeparationRayShape3D") => Some(Shape3D::SeparationRayShape {
+            length: num("length", 1.0),
+            // `SeparationRayShape3D.slide_on_slope` defaults to false.
+            slide_on_slope: if has("__shape__slide_on_slope") {
+                truthy_prop_3d(tree, node_id, "__shape__slide_on_slope", false)
+            } else {
+                truthy_prop_3d(tree, node_id, "slide_on_slope", false)
+            },
+        }),
+        Some("WorldBoundaryShape3D") => Some(Shape3D::WorldBoundaryShape {
+            normal: Vector3::new(0.0, 1.0, 0.0),
+            distance: 0.0,
+        }),
+        Some(_) => None,
+        None => {
             // Fallback: check for "radius" (sphere) or "size" (box) properties.
-            let radius_prop = node.get_property("radius");
-            match &radius_prop {
-                Variant::Float(r) => Some(Shape3D::Sphere { radius: *r as f32 }),
+            match node.get_property("radius") {
+                Variant::Float(r) => Some(Shape3D::Sphere { radius: r as f32 }),
                 _ => None,
             }
         }
@@ -217,6 +377,11 @@ pub struct PhysicsServer3D {
     previous_contacts: HashSet<(BodyId3D, BodyId3D)>,
     /// `(a, b, entered)` for this step, drained when turned into signals.
     last_contact_events: Vec<(BodyId3D, BodyId3D, bool)>,
+    /// `Joint3D` scene nodes registered into the world (pat-0q2kx.118).
+    node_to_joint: HashMap<NodeId, JointId3D>,
+    /// Source of joint ids. `PhysicsWorld3D::add_joint` keeps whatever id the
+    /// joint was built with, so the server is what has to hand out unique ones.
+    next_joint_id: u64,
     gravity: Vector3,
 }
 
@@ -232,6 +397,8 @@ impl PhysicsServer3D {
             last_area_overlap_events: Vec::new(),
             previous_contacts: HashSet::new(),
             last_contact_events: Vec::new(),
+            node_to_joint: HashMap::new(),
+            next_joint_id: 1,
             gravity: Vector3::new(0.0, -9.8, 0.0),
         }
     }
@@ -247,6 +414,8 @@ impl PhysicsServer3D {
             last_area_overlap_events: Vec::new(),
             previous_contacts: HashSet::new(),
             last_contact_events: Vec::new(),
+            node_to_joint: HashMap::new(),
+            next_joint_id: 1,
             gravity,
         }
     }
@@ -392,6 +561,231 @@ impl PhysicsServer3D {
         }
 
         self.sync_areas(tree, &all_nodes);
+
+        // Joints last: they resolve `node_a`/`node_b` to `BodyId3D`s, so every
+        // body has to be in `node_to_body` before this runs (pat-0q2kx.118).
+        self.sync_joints(tree, &all_nodes);
+    }
+
+    /// Builds world joints from `Joint3D` scene nodes, and frees the ones whose
+    /// node has left the tree (pat-0q2kx.118).
+    ///
+    /// `gdphysics3d::joint` carried the parameters for all five kinds and
+    /// `world.add_joint` registered them, but every caller was one of that
+    /// crate's own tests — no scene path ever created a joint, so an authored
+    /// `PinJoint3D` constrained nothing.
+    ///
+    /// A joint naming a node that is not a registered body is skipped rather
+    /// than guessed at: a half-connected joint would yank its one real body
+    /// toward the origin.
+    fn sync_joints(&mut self, tree: &SceneTree, all_nodes: &[NodeId]) {
+        let mut current: HashSet<NodeId> = HashSet::new();
+        for &nid in all_nodes {
+            let is_joint = tree
+                .get_node(nid)
+                .is_some_and(|n| is_joint_class_3d(n.class_name()));
+            if !is_joint {
+                continue;
+            }
+            current.insert(nid);
+            if self.node_to_joint.contains_key(&nid) {
+                continue;
+            }
+            if let Some(joint) = self.build_joint(tree, nid) {
+                let id = self.world.add_joint(joint);
+                self.node_to_joint.insert(nid, id);
+            }
+        }
+
+        // A joint node that left the tree must release its constraint, or the
+        // bodies stay welded to something that is no longer in the scene.
+        let stale: Vec<NodeId> = self
+            .node_to_joint
+            .keys()
+            .filter(|nid| !current.contains(nid))
+            .copied()
+            .collect();
+        for nid in stale {
+            if let Some(joint_id) = self.node_to_joint.remove(&nid) {
+                self.world.remove_joint(joint_id);
+            }
+        }
+    }
+
+    /// Translates one `Joint3D` scene node into a world joint, or `None` when
+    /// either end fails to resolve to a registered body.
+    ///
+    /// Every parameter is read back under the exact key a `.tscn` writes
+    /// (`angular_limit/upper`, `params/bias`, `linear_limit_x/enabled`, …), with
+    /// the defaults from `doc/classes/<Name>.xml`.
+    ///
+    /// Known simplification: the constraint axes are taken from the joint's
+    /// frame as seen by **body A**. Godot stores a separate frame per body, so a
+    /// scene that authors body B pre-rotated relative to the joint keeps that
+    /// offset there and snaps it here.
+    fn build_joint(&mut self, tree: &SceneTree, node_id: NodeId) -> Option<Joint3D> {
+        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+
+        let node = tree.get_node(node_id)?;
+        let class = node.class_name().to_owned();
+        let path_a = joint_node_path_3d(node, "node_a")?;
+        let path_b = joint_node_path_3d(node, "node_b")?;
+        let target_a = resolve_joint_target_3d(tree, node_id, &path_a)?;
+        let target_b = resolve_joint_target_3d(tree, node_id, &path_b)?;
+        let body_a = self.node_to_body.get(&target_a).copied()?;
+        let body_b = self.node_to_body.get(&target_b).copied()?;
+        if body_a == body_b {
+            return None;
+        }
+
+        let global = node3d::get_global_transform(tree, node_id);
+        let frame_a = joint_frame_in_body(tree, target_a, &global);
+        let frame_b = joint_frame_in_body(tree, target_b, &global);
+
+        let id = JointId3D(self.next_joint_id);
+        self.next_joint_id += 1;
+
+        let mut joint = match class.as_str() {
+            "PinJoint3D" => {
+                let mut pin =
+                    PinJoint3D::new(id, body_a, body_b).with_pivots(frame_a.pivot, frame_b.pivot);
+                pin.bias = float_prop_3d(tree, node_id, "params/bias", 0.3) as f32;
+                pin.damping = float_prop_3d(tree, node_id, "params/damping", 1.0) as f32;
+                pin.impulse_clamp =
+                    float_prop_3d(tree, node_id, "params/impulse_clamp", 0.0) as f32;
+                Joint3D::Pin(pin)
+            }
+            "HingeJoint3D" => {
+                let mut hinge = HingeJoint3D::new(id, body_a, body_b).with_axis(frame_a.z);
+                hinge.anchor_a = frame_a.pivot;
+                hinge.anchor_b = frame_b.pivot;
+                hinge.use_limit = truthy_prop_3d(tree, node_id, "angular_limit/enable", false);
+                hinge.lower_limit =
+                    float_prop_3d(tree, node_id, "angular_limit/lower", -FRAC_PI_2 as f64) as f32;
+                hinge.upper_limit =
+                    float_prop_3d(tree, node_id, "angular_limit/upper", FRAC_PI_2 as f64) as f32;
+                hinge.limit_bias = float_prop_3d(tree, node_id, "angular_limit/bias", 0.3) as f32;
+                hinge.limit_softness =
+                    float_prop_3d(tree, node_id, "angular_limit/softness", 0.9) as f32;
+                hinge.limit_relaxation =
+                    float_prop_3d(tree, node_id, "angular_limit/relaxation", 1.0) as f32;
+                hinge.motor_enabled = truthy_prop_3d(tree, node_id, "motor/enable", false);
+                hinge.motor_target_velocity =
+                    float_prop_3d(tree, node_id, "motor/target_velocity", 1.0) as f32;
+                hinge.motor_max_impulse =
+                    float_prop_3d(tree, node_id, "motor/max_impulse", 1.0) as f32;
+                Joint3D::Hinge(hinge)
+            }
+            "SliderJoint3D" => {
+                let mut slider = SliderJoint3D::new(id, body_a, body_b)
+                    .with_axis(frame_a.x)
+                    .with_anchors(frame_a.pivot, frame_b.pivot);
+                // Godot has no enable flag for the slider's limits — they are
+                // always on, and an author widens them instead.
+                slider.use_linear_limit = true;
+                slider.linear_limit_lower =
+                    float_prop_3d(tree, node_id, "linear_limit/lower_distance", -1.0) as f32;
+                slider.linear_limit_upper =
+                    float_prop_3d(tree, node_id, "linear_limit/upper_distance", 1.0) as f32;
+                slider.linear_limit_softness =
+                    float_prop_3d(tree, node_id, "linear_limit/softness", 1.0) as f32;
+                slider.linear_limit_restitution =
+                    float_prop_3d(tree, node_id, "linear_limit/restitution", 0.7) as f32;
+                slider.linear_limit_damping =
+                    float_prop_3d(tree, node_id, "linear_limit/damping", 1.0) as f32;
+                slider.use_angular_limit = true;
+                slider.angular_limit_lower =
+                    float_prop_3d(tree, node_id, "angular_limit/lower_angle", 0.0) as f32;
+                slider.angular_limit_upper =
+                    float_prop_3d(tree, node_id, "angular_limit/upper_angle", 0.0) as f32;
+                slider.angular_limit_softness =
+                    float_prop_3d(tree, node_id, "angular_limit/softness", 1.0) as f32;
+                slider.angular_limit_restitution =
+                    float_prop_3d(tree, node_id, "angular_limit/restitution", 0.7) as f32;
+                slider.angular_limit_damping =
+                    float_prop_3d(tree, node_id, "angular_limit/damping", 0.0) as f32;
+                Joint3D::Slider(slider)
+            }
+            "ConeTwistJoint3D" => {
+                let mut cone = ConeTwistJoint3D::new(id, body_a, body_b)
+                    .with_pivots(frame_a.pivot, frame_b.pivot)
+                    .with_twist_axis(frame_a.x);
+                cone.swing_span =
+                    float_prop_3d(tree, node_id, "swing_span", FRAC_PI_4 as f64) as f32;
+                cone.twist_span = float_prop_3d(tree, node_id, "twist_span", PI as f64) as f32;
+                cone.bias = float_prop_3d(tree, node_id, "bias", 0.3) as f32;
+                cone.softness = float_prop_3d(tree, node_id, "softness", 0.8) as f32;
+                cone.relaxation = float_prop_3d(tree, node_id, "relaxation", 1.0) as f32;
+                Joint3D::ConeTwist(cone)
+            }
+            _ => {
+                // Generic6DOFJoint3D. Godot enables every axis limit by default
+                // with a zero-width range, so an unconfigured 6-DOF joint is a
+                // weld — matching that is the difference between "inert" and
+                // "wrong".
+                let mut dof = Generic6DofJoint3D::new(id, body_a, body_b)
+                    .with_anchors(frame_a.pivot, frame_b.pivot);
+                for (index, axis) in ["x", "y", "z"].iter().enumerate() {
+                    dof.linear_limits[index] = AxisLimit {
+                        enabled: truthy_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("linear_limit_{axis}/enabled"),
+                            true,
+                        ),
+                        lower: float_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("linear_limit_{axis}/lower_distance"),
+                            0.0,
+                        ) as f32,
+                        upper: float_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("linear_limit_{axis}/upper_distance"),
+                            0.0,
+                        ) as f32,
+                    };
+                    dof.angular_limits[index] = AxisLimit {
+                        enabled: truthy_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("angular_limit_{axis}/enabled"),
+                            true,
+                        ),
+                        lower: float_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("angular_limit_{axis}/lower_angle"),
+                            0.0,
+                        ) as f32,
+                        upper: float_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("angular_limit_{axis}/upper_angle"),
+                            0.0,
+                        ) as f32,
+                    };
+                }
+                Joint3D::Generic6Dof(dof)
+            }
+        };
+
+        let base = joint.base_mut();
+        base.exclude_nodes_from_collision =
+            truthy_prop_3d(tree, node_id, "exclude_nodes_from_collision", true);
+        base.solver_priority = float_prop_3d(tree, node_id, "solver_priority", 1.0) as i32;
+        Some(joint)
+    }
+
+    /// Number of joints the scene tree has registered into the world.
+    pub fn joint_count(&self) -> usize {
+        self.world.joint_count()
+    }
+
+    /// Returns the world joint built for a `Joint3D` scene node, if any.
+    pub fn joint_for_node(&self, node_id: NodeId) -> Option<JointId3D> {
+        self.node_to_joint.get(&node_id).copied()
     }
 
     /// Pushes a registered `RigidBody3D` node's authored state into its world
@@ -1035,7 +1429,7 @@ mod tests {
         let nid = tree.add_child(root, shape_node).unwrap();
 
         match shape_from_node_3d(&tree, nid) {
-            Some(Shape3D::ConcavePolygonShape { faces }) => {
+            Some(Shape3D::ConcavePolygonShape { faces, .. }) => {
                 assert_eq!(
                     faces.len(),
                     3,

@@ -10,7 +10,8 @@
 //! module stays consistent with the other `*3d` helper modules:
 //!
 //! - Configuration: `target_position`, `enabled`, `collision_mask`,
-//!   `exclude_parent`, `collide_with_bodies`, `collide_with_areas`.
+//!   `exclude_parent`, `collide_with_bodies`, `collide_with_areas`,
+//!   `hit_back_faces`, `hit_from_inside`.
 //! - Result cache: `_hit_colliding`, `_hit_collider`, `_hit_point`,
 //!   `_hit_normal`.
 
@@ -138,6 +139,44 @@ pub fn is_collide_with_areas_enabled(tree: &SceneTree, node_id: NodeId) -> bool 
         .unwrap_or(false)
 }
 
+/// Sets whether the ray reports hits on the back faces of concave shapes.
+pub fn set_hit_back_faces(tree: &mut SceneTree, node_id: NodeId, enabled: bool) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("hit_back_faces", Variant::Bool(enabled));
+    }
+}
+
+/// Reads the `hit_back_faces` flag, defaulting to `true` to match Godot.
+pub fn is_hit_back_faces_enabled(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("hit_back_faces") {
+            Variant::Bool(b) => b,
+            _ => true,
+        })
+        .unwrap_or(true)
+}
+
+/// Sets whether a ray whose origin lies inside a shape reports that shape.
+pub fn set_hit_from_inside(tree: &mut SceneTree, node_id: NodeId, enabled: bool) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("hit_from_inside", Variant::Bool(enabled));
+    }
+}
+
+/// Reads the `hit_from_inside` flag, defaulting to `false` to match Godot.
+///
+/// When enabled, a ray starting inside a shape reports a collision at its own
+/// origin with a zero normal (see `RayCast3D.get_collision_normal`); when
+/// disabled that shape is skipped entirely rather than reporting its far side.
+pub fn is_hit_from_inside_enabled(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("hit_from_inside") {
+            Variant::Bool(b) => b,
+            _ => false,
+        })
+        .unwrap_or(false)
+}
+
 /// Adds a physics body node to the per-raycast exclusion set.
 pub fn add_exception(tree: &mut SceneTree, node_id: NodeId, excluded: NodeId) {
     let mut list = read_exceptions(tree, node_id);
@@ -216,6 +255,8 @@ pub fn force_raycast_update(
     query.collision_mask = get_collision_mask(tree, node_id);
     query.collide_with_bodies = collide_bodies;
     query.collide_with_areas = collide_areas;
+    query.hit_back_faces = is_hit_back_faces_enabled(tree, node_id);
+    query.hit_from_inside = is_hit_from_inside_enabled(tree, node_id);
 
     // Build exclusion set: explicit exceptions plus (optionally) the parent body.
     let mut exclude: HashSet<BodyId3D> = HashSet::new();

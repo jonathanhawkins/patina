@@ -364,6 +364,13 @@ pub struct MainLoop {
     max_physics_steps_per_frame: u32,
     /// Total frames executed.
     frame_counter: u64,
+    /// Total physics ticks executed, backing `Engine.get_physics_frames()`
+    /// (pat-0q2kx.121).
+    physics_tick_counter: u64,
+    /// Last observed generation of script-side `Engine.physics_ticks_per_second`
+    /// writes. A change means a script set the tick rate and this loop must
+    /// adopt it (pat-0q2kx.121).
+    engine_physics_tps_gen: u64,
     /// Total accumulated process (variable-timestep) time in seconds.
     process_time: f64,
     /// Total accumulated physics (fixed-timestep) time in seconds.
@@ -405,6 +412,16 @@ fn prop_f32(v: Variant) -> Option<f32> {
         Variant::Int(i) => Some(i as f32),
         _ => None,
     }
+}
+
+/// Reads a [`gdcore::ProjectSettings`] entry as `f32`, accepting an
+/// int-spelled value too — a `project.godot` writes `time_before_sleep=1`
+/// without a decimal point (pat-0q2kx.116).
+///
+/// `None` when the key is absent, so a caller can tell "the project said 0.0"
+/// apart from "the project said nothing" and keep its own default.
+fn float_setting(settings: &gdcore::ProjectSettings, key: &str) -> Option<f32> {
+    settings.get(key)?.as_float().map(|f| f as f32)
 }
 
 /// Godot's `NavigationRegion2D/3D.enabled` — a disabled region contributes
@@ -449,6 +466,12 @@ fn navmesh_polygon_indices(node: &crate::node::Node, vert_count: usize) -> Vec<V
 impl MainLoop {
     /// Creates a new `MainLoop` that owns the given [`SceneTree`].
     pub fn new(tree: SceneTree) -> Self {
+        // NOTE: the `Engine` singleton state lives in process statics (scripts
+        // can only reach the interpreter) and is deliberately NOT reset here —
+        // in Godot the singleton outlives the main loop, and a script that set
+        // `Engine.time_scale` in `_ready` runs before the loop is constructed
+        // in several boot paths. Tests that need a clean slate call
+        // `gdscript_interop::reset_engine_singleton_state()` (pat-0q2kx.121).
         Self {
             tree,
             physics_server: PhysicsServer::new(),
@@ -457,6 +480,8 @@ impl MainLoop {
             physics_ticks_per_second: 60,
             max_physics_steps_per_frame: 8,
             frame_counter: 0,
+            physics_tick_counter: 0,
+            engine_physics_tps_gen: gdscript_interop::engine_physics_ticks_per_second_generation(),
             process_time: 0.0,
             physics_time: 0.0,
             physics_accumulator: 0.0,
@@ -1475,6 +1500,9 @@ impl MainLoop {
     pub fn set_physics_ticks_per_second(&mut self, tps: u32) {
         assert!(tps > 0, "physics_ticks_per_second must be > 0");
         self.physics_ticks_per_second = tps;
+        // Mirror to the Engine singleton so `Engine.physics_ticks_per_second`
+        // answers the rate this loop actually runs at (pat-0q2kx.121).
+        gdscript_interop::publish_engine_physics_ticks_per_second(tps as i64);
     }
 
     /// Returns the configured physics ticks per second.
@@ -1509,6 +1537,12 @@ impl MainLoop {
                 self.physics_ticks_per_second = tps as u32;
             }
         }
+        // `Engine.get_physics_ticks_per_second()` must report the booted rate,
+        // not the 60 default, once project.godot has been applied
+        // (pat-0q2kx.121).
+        gdscript_interop::publish_engine_physics_ticks_per_second(
+            self.physics_ticks_per_second as i64,
+        );
 
         // 2D gravity = scalar magnitude × direction vector.
         let g2 = settings
@@ -1533,6 +1567,45 @@ impl MainLoop {
         };
         self.physics_server_3d
             .set_gravity(Vector3::new(dir3.x * g3, dir3.y * g3, dir3.z * g3));
+
+        // 2D space + solver parameters (pat-0q2kx.116). These were stored on the
+        // body and the world and read from nowhere — a project that authored
+        // `default_linear_damp = 1.0` simulated as if it had not.
+        //
+        // ⚠️ Absent keys fall back to *Patina's* zero-effect defaults, not
+        // Godot's (`default_linear_damp` 0.1, `default_angular_damp` 1.0).
+        // Applying Godot's implicit damping to every project-booted 2D world is
+        // a real parity gap, but it is also a behaviour change for every scene
+        // that never asked for it, so it wants its own bead rather than riding
+        // along here.
+        let mut space = gdphysics2d::world::SpaceParams2D::default();
+        if let Some(v) = float_setting(settings, "physics/2d/default_linear_damp") {
+            space.default_linear_damp = v;
+        }
+        if let Some(v) = float_setting(settings, "physics/2d/default_angular_damp") {
+            space.default_angular_damp = v;
+        }
+        if let Some(v) = float_setting(settings, "physics/2d/sleep_threshold_linear") {
+            space.sleep_threshold_linear = v;
+        }
+        if let Some(v) = float_setting(settings, "physics/2d/sleep_threshold_angular") {
+            space.sleep_threshold_angular = v;
+        }
+        if let Some(v) = float_setting(settings, "physics/2d/time_before_sleep") {
+            space.time_before_sleep = v;
+        }
+        self.physics_server.set_space_params(space);
+
+        let iterations = settings
+            .get("physics/2d/solver/solver_iterations")
+            .and_then(|v| v.as_int())
+            .filter(|n| *n > 0)
+            .map(|n| n as usize)
+            .unwrap_or(gdphysics2d::solver::DEFAULT_SOLVER_ITERATIONS);
+        let contact_bias = float_setting(settings, "physics/2d/solver/default_contact_bias")
+            .unwrap_or(gdphysics2d::solver::DEFAULT_CONTACT_BIAS);
+        self.physics_server
+            .set_solver_params(iterations, contact_bias);
     }
 
     /// Sets the maximum number of physics steps per frame (default 8).
@@ -1841,6 +1914,39 @@ impl MainLoop {
     ///
     /// Returns a [`FrameOutput`] describing what happened during this frame.
     pub fn step(&mut self, delta_secs: f64) -> FrameOutput {
+        // -- Engine singleton sync (pat-0q2kx.121) --
+        // `Engine.physics_ticks_per_second = N` from a script has to land on the
+        // loop that owns the fixed step. The generation counter distinguishes a
+        // script write from the value this loop publishes itself, so two loops
+        // sharing the process statics never fight over the tick rate.
+        let script_tps_gen = gdscript_interop::engine_physics_ticks_per_second_generation();
+        if script_tps_gen != self.engine_physics_tps_gen {
+            self.engine_physics_tps_gen = script_tps_gen;
+            let tps = gdscript_interop::engine_physics_ticks_per_second();
+            if tps > 0 {
+                self.physics_ticks_per_second = tps as u32;
+            }
+        } else {
+            gdscript_interop::publish_engine_physics_ticks_per_second(
+                self.physics_ticks_per_second as i64,
+            );
+        }
+        gdscript_interop::set_engine_max_physics_steps_per_frame(
+            self.max_physics_steps_per_frame as i64,
+        );
+
+        // The real (unscaled) delta the driver reported. `Engine.time_scale`
+        // scales the simulation, not the wall clock, so the measured FPS and
+        // pixel-per-second mouse velocity are computed from this one.
+        let real_delta_secs = delta_secs;
+        if real_delta_secs > 0.0 {
+            gdscript_interop::set_engine_frames_per_second(1.0 / real_delta_secs);
+        }
+        // Godot's `Main::iteration` multiplies the frame delta by `time_scale`
+        // before both the process and physics phases, which is what makes
+        // slow-motion slow physics down too.
+        let delta_secs = delta_secs * gdscript_interop::engine_time_scale();
+
         // Bridge engine-owned InputState → script-facing InputSnapshot.
         // Only apply if no manual snapshot was set via set_input().
         if !self.tree.has_input_snapshot() {
@@ -1887,11 +1993,11 @@ impl MainLoop {
                 // Godot reports mouse velocity in pixels/second, and the delta
                 // is only known here — `InputState` just accumulates the motion
                 // (pat-0q2kx.92).
-                mouse_velocity: if delta_secs > 0.0 {
+                mouse_velocity: if real_delta_secs > 0.0 {
                     let motion = self.input_state.mouse_motion_this_frame();
                     gdcore::math::Vector2::new(
-                        motion.x / delta_secs as f32,
-                        motion.y / delta_secs as f32,
+                        motion.x / real_delta_secs as f32,
+                        motion.y / real_delta_secs as f32,
                     )
                 } else {
                     gdcore::math::Vector2::ZERO
@@ -1943,6 +2049,10 @@ impl MainLoop {
         // Godot per-tick order: INTERNAL_PHYSICS_PROCESS -> PHYSICS_PROCESS
         self.physics_accumulator += delta_secs;
         let mut physics_steps = 0u32;
+        // `Engine.is_in_physics_frame()` is true for the whole fixed-step
+        // section, so a script called from `_physics_process` can tell which
+        // callback it is running in (pat-0q2kx.121).
+        gdscript_interop::set_engine_in_physics_frame(true);
         while self.physics_accumulator >= physics_dt
             && physics_steps < self.max_physics_steps_per_frame
         {
@@ -2013,7 +2123,16 @@ impl MainLoop {
             self.physics_accumulator -= physics_dt;
             self.physics_time += physics_dt;
             physics_steps += 1;
+            self.physics_tick_counter += 1;
+            // Publish inside the loop so a script running in `_physics_process`
+            // reads the tick it is currently in, not last frame's count.
+            gdscript_interop::set_engine_frame_counters(
+                self.frame_counter,
+                self.physics_tick_counter,
+                self.frame_counter,
+            );
         }
+        gdscript_interop::set_engine_in_physics_frame(false);
 
         // Clamp accumulator if we hit the step limit (spiral-of-death guard).
         if physics_steps >= self.max_physics_steps_per_frame {
@@ -2082,6 +2201,14 @@ impl MainLoop {
         // Script calls are interleaved per-node to match Godot's dispatch.
         // SceneTree.process_frame fires immediately before the process phase
         // so `await get_tree().process_frame` resumes each frame (pat-nzgdu.84).
+        // Godot increments the process-frame counter at the *end* of the
+        // iteration, so a script in `_process` on the first frame reads 0
+        // (pat-0q2kx.121).
+        gdscript_interop::set_engine_frame_counters(
+            self.frame_counter,
+            self.physics_tick_counter,
+            self.frame_counter,
+        );
         let process_frame_root = self.tree.root_id();
         self.tree
             .emit_signal(process_frame_root, "process_frame", &[]);
@@ -2144,6 +2271,11 @@ impl MainLoop {
         // -- bookkeeping --
         self.process_time += delta_secs;
         self.frame_counter += 1;
+        gdscript_interop::set_engine_frame_counters(
+            self.frame_counter,
+            self.physics_tick_counter,
+            self.frame_counter,
+        );
 
         FrameOutput {
             frame_count: self.frame_counter,

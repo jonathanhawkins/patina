@@ -18,6 +18,7 @@ use gdresource::loader::parse_variant_value;
 use gdvariant::Variant;
 
 use crate::node::{Node, NodeId};
+use crate::tilemap::TILE_SET_PREFIX;
 
 // ---------------------------------------------------------------------------
 // SceneConnection
@@ -485,6 +486,99 @@ impl PackedScene {
             }
         }
 
+        // Flatten a `PhysicsMaterial` override onto the body node
+        // (pat-0q2kx.115).
+        //
+        // Godot bodies have no flat `bounce`/`friction`: both live on a
+        // `PhysicsMaterial` resource assigned to `physics_material_override`
+        // (upstream/godot/scene/resources/physics_material.cpp). The physics
+        // bridge cannot reach `sub_resource_props` — by the time it runs, the
+        // `PackedScene` is gone — so the values travel on the node under
+        // `__physics_material__*`, mirroring the `__material__*` / `__shape__*`
+        // passes.
+        //
+        // Only keys the resource actually carries are written, so an override
+        // that sets `bounce` alone does not silently reset `friction`.
+        for tmpl in &mut templates {
+            let Some(mat_id) = sub_ref_id(tmpl.properties.get("physics_material_override")) else {
+                continue;
+            };
+            if sub_resources.get(&mat_id).map(String::as_str) != Some("PhysicsMaterial") {
+                continue;
+            }
+            let Some(props) = sub_resource_props.get(&mat_id) else {
+                continue;
+            };
+            for key in ["friction", "bounce", "rough", "absorbent"] {
+                if let Some(value) = props.get(key) {
+                    tmpl.properties
+                        .insert(format!("__physics_material__{key}"), value.clone());
+                }
+            }
+        }
+
+        // Bake a `Curve2D`/`Curve3D` sub-resource into the polyline the path
+        // driver samples (pat-0q2kx.104).
+        //
+        // Godot serializes the curve as `_data = { "points": PackedVector2Array }`
+        // where every three entries are one control point — `in` handle, `out`
+        // handle, then position, in that order (upstream/godot/scene/resources/
+        // curve.cpp `Curve2D::_set_data`). Handles are relative to the position.
+        //
+        // `process_path_follows` has always read a `curve_points` polyline off
+        // the Path2D node, but nothing produced it from a real scene: a
+        // Godot-authored `curve = SubResource("Curve2D_…")` was parsed and
+        // dropped, so PathFollow2D was inert outside hand-built tests. Baking
+        // here — rather than at sample time — matches Godot, which bakes on load
+        // and samples the cache, and it keeps `curve_points` as the storage key
+        // so the existing driver needs no change.
+        for tmpl in &mut templates {
+            let Some(curve_id) = sub_ref_id(tmpl.properties.get("curve")) else {
+                continue;
+            };
+            let is_2d = sub_resources.get(&curve_id).map(String::as_str) == Some("Curve2D");
+            if !is_2d {
+                // Curve3D bakes through the 3D path driver; only the 2D half is
+                // in scope here, and guessing at the other would be worse than
+                // leaving it untouched.
+                continue;
+            }
+            let Some(Variant::Dictionary(data)) = sub_resource_props
+                .get(&curve_id)
+                .and_then(|p| p.get("_data"))
+            else {
+                continue;
+            };
+            let Some(Variant::PackedVector2Array(raw)) = data.get("points") else {
+                continue;
+            };
+            // A malformed array is skipped rather than truncated: a partial
+            // triple would silently bake a curve with a wrong last segment.
+            if raw.is_empty() || raw.len() % 3 != 0 {
+                continue;
+            }
+            let control: Vec<crate::bezier_bake::CurvePoint> = raw
+                .chunks_exact(3)
+                .map(|t| crate::bezier_bake::CurvePoint {
+                    in_handle: t[0],
+                    out_handle: t[1],
+                    position: t[2],
+                })
+                .collect();
+            // Godot's `bake_interval` is a distance (default 5px); this baker
+            // takes samples per segment, so a fixed step count stands in. 16 is
+            // dense enough that the arc-length table tracks a typical editor
+            // curve to well under a pixel.
+            let baked = crate::bezier_bake::bake_curve(&control, 16);
+            if baked.is_empty() {
+                continue;
+            }
+            tmpl.properties.insert(
+                "curve_points".into(),
+                Variant::PackedVector2Array(baked.iter().map(|b| b.position).collect()),
+            );
+        }
+
         // Unflatten a `SpriteFrames` sub-resource back into the `__sf_*`
         // companion keys the runtime and the editor panel read (pat-0q2kx.74).
         //
@@ -760,6 +854,104 @@ impl PackedScene {
                 tmpl.properties
                     .insert("__navmesh_polygons__".into(), polygons.clone());
             }
+        }
+
+        // Resolve `tile_set = SubResource("id")` on TileMapLayer/TileMap nodes
+        // (pat-0q2kx.108). Unlike the passes above this is a *two-level* walk:
+        // the TileSet resource lists `sources/<id> = SubResource("...")`, and it
+        // is those `TileSetAtlasSource` sub-resources that carry the texture and
+        // `texture_region_size` a cell's atlas coordinates index into. Both
+        // levels are flattened onto the node under `__tile_set__*` so the
+        // renderer can resolve a cell to a texture region from the tree alone,
+        // exactly as `__shape__*` lets the physics server build a body shape.
+        // The declared `tile_set` property keeps its `SubResource:<id>` value.
+        for tmpl in &mut templates {
+            // Owned: the inserts below take `tmpl.properties` mutably, so the
+            // id cannot stay borrowed out of it.
+            let set_id = match tmpl.properties.get("tile_set") {
+                Some(Variant::String(raw)) => match raw.strip_prefix("SubResource:") {
+                    Some(id) => id.to_string(),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            let Some(set_props) = sub_resource_props.get(&set_id) else {
+                continue;
+            };
+
+            // `TileSet.tile_size` is the map's cell size. Godot omits it when it
+            // is the 16x16 default, so an absent property is not "no tile set".
+            let tile_size = match set_props.get("tile_size") {
+                Some(Variant::Vector2i(v)) => Variant::Vector2i(*v),
+                Some(Variant::Vector2(v)) => {
+                    Variant::Vector2i(gdcore::math::Vector2i::new(v.x as i32, v.y as i32))
+                }
+                _ => Variant::Vector2i(gdcore::math::Vector2i::new(16, 16)),
+            };
+            tmpl.properties
+                .insert(format!("{TILE_SET_PREFIX}tile_size"), tile_size);
+
+            let mut source_ids: Vec<i32> = Vec::new();
+            let mut physics_source_ids: Vec<i32> = Vec::new();
+            for (key, value) in set_props {
+                // `sources/3 = SubResource("TileSetAtlasSource_x")`
+                let Some(id_str) = key.strip_prefix("sources/") else {
+                    continue;
+                };
+                let Ok(source_id) = id_str.trim().parse::<i32>() else {
+                    continue;
+                };
+                let Variant::String(source_ref) = value else {
+                    continue;
+                };
+                let Some(source_sub) = source_ref.strip_prefix("SubResource:") else {
+                    continue;
+                };
+                let Some(source_props) = sub_resource_props.get(source_sub) else {
+                    continue;
+                };
+                source_ids.push(source_id);
+
+                let prefix = format!("{TILE_SET_PREFIX}source_{source_id}_");
+                // `texture = ExtResource("id")` — resolve to the real path, the
+                // same value a Sprite2D's `texture` ends up holding.
+                if let Some(Variant::String(tex)) = source_props.get("texture") {
+                    let path = tex
+                        .strip_prefix("ExtResource:")
+                        .and_then(|id| ext_resources.get(id).map(|e| e.path.clone()))
+                        .unwrap_or_else(|| tex.clone());
+                    tmpl.properties
+                        .insert(format!("{prefix}texture"), Variant::String(path));
+                }
+                for key in ["texture_region_size", "margins", "separation"] {
+                    if let Some(value) = source_props.get(key) {
+                        tmpl.properties
+                            .insert(format!("{prefix}{key}"), value.clone());
+                    }
+                }
+
+                // Per-tile collision (pat-0q2kx.117). A real TileSetAtlasSource
+                // writes one key per tile per physics layer:
+                //   `<ax>:<ay>/<alt>/physics_layer_0/polygon_0/points`
+                //   `<ax>:<ay>/<alt>/physics_layer_0/polygon_0/one_way`
+                // Flattened onto the node the physics server can build the
+                // tile's static bodies from the tree alone, exactly as
+                // `__shape__*` lets it build a CollisionShape2D's body.
+                if collect_tile_physics(source_id, source_props, &mut tmpl.properties) {
+                    physics_source_ids.push(source_id);
+                }
+            }
+            source_ids.sort_unstable();
+            tmpl.properties.insert(
+                format!("{TILE_SET_PREFIX}source_ids"),
+                Variant::PackedInt32Array(source_ids),
+            );
+            physics_source_ids.sort_unstable();
+            physics_source_ids.dedup();
+            tmpl.properties.insert(
+                crate::tilemap::TILE_PHYSICS_SOURCES.to_string(),
+                Variant::PackedInt32Array(physics_source_ids),
+            );
         }
 
         if templates.is_empty() {
@@ -1197,6 +1389,83 @@ fn extract_header_attrs(header: &str) -> HashMap<String, String> {
 /// the 3D viewport's wireframe gizmo. `dims` carries the shape's real extents
 /// (box `size`, sphere `radius`, capsule/cylinder `radius,height`) when present,
 /// so the gizmo matches the actual collision bounds rather than a default size.
+/// Flattens a `TileSetAtlasSource`'s per-tile collision polygons onto the
+/// TileMap node's properties (pat-0q2kx.117).
+///
+/// Godot writes one key per tile, per physics layer, per polygon:
+/// `"<ax>:<ay>/<alt>/physics_layer_<n>/polygon_<m>/points"` and a sibling
+/// `".../one_way"`. Only the first polygon of the first physics layer is
+/// carried across — [`Shape2D::ConvexPolygon`](gdphysics2d::shape::Shape2D)
+/// is a single convex hull, so a multi-polygon tile would need several bodies
+/// per cell, which the tile physics path does not model yet.
+///
+/// Returns whether the source contributed any collision at all, so the caller
+/// can record it in `__tile_physics_sources__`.
+fn collect_tile_physics(
+    source_id: i32,
+    source_props: &HashMap<String, Variant>,
+    out: &mut HashMap<String, Variant>,
+) -> bool {
+    let mut any = false;
+    for (key, value) in source_props {
+        // Split `<ax>:<ay>/<alt>/physics_layer_<n>/polygon_<m>/points`.
+        let Some((coords, rest)) = key.split_once('/') else {
+            continue;
+        };
+        let Some((ax, ay)) = coords.split_once(':') else {
+            continue;
+        };
+        let (Ok(ax), Ok(ay)) = (ax.trim().parse::<i32>(), ay.trim().parse::<i32>()) else {
+            continue;
+        };
+        // `rest` is `<alt>/physics_layer_<n>/polygon_<m>/<field>`; the
+        // alternative id is dropped because only the default tile (alt 0) can
+        // be painted through `tile_map_data` today.
+        let Some((_alt, layer_rest)) = rest.split_once('/') else {
+            continue;
+        };
+        if !layer_rest.starts_with("physics_layer_") {
+            continue;
+        }
+        let atlas = gdcore::math::Vector2i::new(ax, ay);
+
+        if layer_rest.ends_with("/polygon_0/points") {
+            // Godot authors these relative to the tile's centre, which is also
+            // where `tilemap_to_physics` places the body — so they carry over
+            // with no rebasing.
+            let points = match value {
+                Variant::PackedVector2Array(p) => p.clone(),
+                Variant::Array(items) => items
+                    .iter()
+                    .filter_map(|v| match v {
+                        Variant::Vector2(p) => Some(*p),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => continue,
+            };
+            if points.len() >= 3 {
+                out.insert(
+                    crate::tilemap::tile_physics_points_key(source_id, atlas),
+                    Variant::PackedVector2Array(points),
+                );
+                any = true;
+            }
+        } else if layer_rest.ends_with("/polygon_0/one_way") {
+            let one_way =
+                matches!(value, Variant::Bool(true)) || matches!(value, Variant::Int(i) if *i != 0);
+            out.insert(
+                crate::tilemap::tile_physics_one_way_key(source_id, atlas),
+                Variant::Bool(one_way),
+            );
+            // A tile may declare only `one_way` and rely on the default
+            // full-cell shape, so this counts as collision too.
+            any = true;
+        }
+    }
+    any
+}
+
 fn encode_shape_marker(ty: &str, props: Option<&HashMap<String, Variant>>) -> String {
     let num = |k: &str| -> Option<f32> {
         match props?.get(k)? {
