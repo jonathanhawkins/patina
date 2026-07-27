@@ -15,7 +15,7 @@ use crate::inspector::InspectorPanel;
 /// Property names whose mutation invalidates a Control's layout. Matches the
 /// inputs read by [`gdscene::control::resolve_control_layout`] and
 /// [`gdscene::control::arrange_container`].
-fn is_layout_property(name: &str) -> bool {
+pub fn is_layout_property(name: &str) -> bool {
     matches!(
         name,
         "anchor_left"

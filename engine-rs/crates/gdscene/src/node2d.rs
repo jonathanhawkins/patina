@@ -278,11 +278,31 @@ pub fn set_texture_path(tree: &mut SceneTree, node_id: NodeId, path: &str) {
 
 /// Reads the `"texture"` property as a path string, if present.
 pub fn get_texture_path(tree: &SceneTree, node_id: NodeId) -> Option<String> {
-    tree.get_node(node_id)
-        .and_then(|n| match n.get_property("texture") {
-            Variant::String(s) => Some(s),
-            _ => None,
-        })
+    let node = tree.get_node(node_id)?;
+    // ⚠️ A `.tscn` writes `texture = ExtResource("1_icon")` and the loader leaves
+    // that ref in place, parking the real path in an `__extres__texture`
+    // companion (`packed_scene.rs:809`) so the scene round-trips byte-for-byte.
+    // The inspector's resource picker writes the same pair. Reading `texture`
+    // alone therefore handed every consumer the literal string
+    // `ExtResource("1_icon")` **as if it were a path** — the editor's
+    // `TextureCache` fed it to `resolve_res_path`, got `<root>/ExtResource("…")`,
+    // failed to load, and fell back to the placeholder. Every sprite that got
+    // its texture from a scene file or from the picker rendered untextured
+    // (pat-0q2kx.13).
+    if let Variant::String(path) = node.get_property("__extres__texture") {
+        if !path.is_empty() {
+            return Some(path);
+        }
+    }
+    match node.get_property("texture") {
+        // A bare path (what `set_texture_path` writes, and what a hand-built
+        // node carries). An unresolved ref is NOT a path — returning it would
+        // reintroduce the bug above for a node whose `[ext_resource]` header is
+        // missing, so it yields `None` and the sprite draws no texture rather
+        // than chasing a file named `ExtResource("…")`.
+        Variant::String(s) if !s.starts_with("ExtResource(") => Some(s),
+        _ => None,
+    }
 }
 
 /// Sets the `"offset"` property on a Sprite2D node.

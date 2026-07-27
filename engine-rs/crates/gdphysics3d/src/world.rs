@@ -377,7 +377,7 @@ pub struct PhysicsWorld3D {
     /// Gravity acceleration applied to all rigid bodies each step.
     pub gravity: Vector3,
     /// Soft bodies stepped with gravity each frame (pat-p0s82.18).
-    soft_bodies: Vec<gdphysics2d::softbody3d::SoftBody3D>,
+    soft_bodies: Vec<crate::softbody3d::SoftBody3D>,
     /// Areas whose space overrides (gravity/damp) are applied during the step.
     area_store: AreaStore3D,
     /// Joints solved after integration each step (pat-u3l8c.57).
@@ -517,7 +517,7 @@ impl PhysicsWorld3D {
     }
 
     /// Register a soft body for simulation.
-    pub fn add_soft_body(&mut self, body: gdphysics2d::softbody3d::SoftBody3D) {
+    pub fn add_soft_body(&mut self, body: crate::softbody3d::SoftBody3D) {
         self.soft_bodies.push(body);
     }
 
@@ -527,7 +527,7 @@ impl PhysicsWorld3D {
     }
 
     /// Mutable access to soft bodies.
-    pub fn soft_bodies_mut(&mut self) -> &mut [gdphysics2d::softbody3d::SoftBody3D] {
+    pub fn soft_bodies_mut(&mut self) -> &mut [crate::softbody3d::SoftBody3D] {
         &mut self.soft_bodies
     }
 
@@ -2043,7 +2043,7 @@ mod tests {
 mod softbody_world_tests {
     use super::*;
     use gdcore::math::Vector3;
-    use gdphysics2d::softbody3d::{SoftBody3D, SoftBodyId3D};
+    use crate::softbody3d::{SoftBody3D, SoftBodyId3D};
 
     #[test]
     fn soft_body_steps_with_world() {

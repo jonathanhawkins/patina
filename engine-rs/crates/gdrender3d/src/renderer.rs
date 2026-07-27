@@ -777,6 +777,27 @@ impl SoftwareRenderer3D {
                         fragment_shader_for_mode(entry.material.shading_mode)
                     };
 
+                // Reflection probes add their ambient contribution to any
+                // surface inside their box (pat-0q2kx.195). `sample_probes_at`
+                // and `add_reflection_probe` both already existed, and the
+                // editor now feeds probes from `.tscn` nodes — but nothing in
+                // either shading loop ever *read* them, so an authored probe
+                // changed not one pixel. Sampled per instance at its world
+                // origin, which is what a point query like `sample_probes_at`
+                // supports; a per-fragment sample would need the probe list
+                // threaded into `ShaderUniforms`.
+                //
+                // With no probes — or a probe left at Godot's default black
+                // `ambient_color` — this adds exactly zero, so every existing
+                // frame is byte-identical.
+                let probe_ambient = self.sample_reflection_probes(entry.transform.origin);
+                let entry_ambient = Color::new(
+                    ambient.r + probe_ambient.r,
+                    ambient.g + probe_ambient.g,
+                    ambient.b + probe_ambient.b,
+                    1.0,
+                );
+
                 let uniforms = ShaderUniforms {
                     model_matrix,
                     view_matrix,
@@ -785,7 +806,7 @@ impl SoftwareRenderer3D {
                     // (the camera post-process encodes back to sRGB).
                     albedo: entry.material.albedo.srgb_to_linear(),
                     emission: entry.material.emission.srgb_to_linear(),
-                    ambient,
+                    ambient: entry_ambient,
                     roughness: entry.material.roughness,
                     metallic: entry.material.metallic,
                     camera_position: viewport.camera_transform.origin,

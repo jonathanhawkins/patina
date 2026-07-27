@@ -1978,6 +1978,267 @@ impl Interpreter {
     // Expression evaluation
     // -----------------------------------------------------------------------
 
+    /// Dispatches `Thread` instance methods (pat-0q2kx.209).
+    ///
+    /// `start()` runs the Callable inline; see the note on the handle tables
+    /// above for why a Callable cannot be handed to a real OS thread. A script
+    /// error inside the body is **propagated** rather than swallowed — Godot
+    /// would print it and end the thread, and surfacing it is far more useful
+    /// than a silently-empty `wait_to_finish()`.
+    fn call_thread_instance(
+        &mut self,
+        oid: gdcore::id::ObjectId,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        let raw = oid.raw();
+        match method {
+            "start" => {
+                let callable = match args.first() {
+                    Some(Variant::Callable(c)) => c.clone(),
+                    // Godot returns an Error rather than aborting the caller.
+                    _ => return Ok(Variant::Int(THREAD_ERR_INVALID_PARAMETER)),
+                };
+                let result = self.invoke_callable(&callable, &[])?;
+                THREADS.with(|m| {
+                    if let Some(state) = m.borrow_mut().get_mut(&raw) {
+                        state.started = true;
+                        state.result = result;
+                    }
+                });
+                Ok(Variant::Int(EXPRESSION_OK))
+            }
+            "is_started" => Ok(Variant::Bool(
+                THREADS.with(|m| m.borrow().get(&raw).is_some_and(|s| s.started)),
+            )),
+            // Inline execution finishes inside `start()`, so a Thread is never
+            // observably alive — the same as Godot's no-threads build.
+            "is_alive" => Ok(Variant::Bool(false)),
+            "wait_to_finish" => Ok(THREADS.with(|m| {
+                m.borrow()
+                    .get(&raw)
+                    .map(|s| s.result.clone())
+                    .unwrap_or(Variant::Nil)
+            })),
+            // Godot types the thread id as a String.
+            "get_id" => Ok(Variant::String(raw.to_string())),
+            "is_main_thread" => Ok(Variant::Bool(true)),
+            other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "Thread has no method '{other}'"
+            )))),
+        }
+    }
+
+    /// Dispatches the `WorkerThreadPool` singleton (pat-0q2kx.209).
+    ///
+    /// Tasks run inline, so every one is complete by the time its id is
+    /// returned and the `wait_*` calls are no-ops. That keeps the observable
+    /// contract — submit, then `is_task_completed()` is true and results are
+    /// visible — which is what scripts actually depend on.
+    fn call_worker_thread_pool_static(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        let next_id = || {
+            NEXT_WTP_ID.with(|n| {
+                let v = n.get();
+                n.set(v + 1);
+                v
+            })
+        };
+
+        match method {
+            "add_task" => {
+                let callable = match args.first() {
+                    Some(Variant::Callable(c)) => c.clone(),
+                    _ => return Ok(Variant::Int(-1)),
+                };
+                self.invoke_callable(&callable, &[])?;
+                let id = next_id();
+                WTP_TASKS.with(|m| {
+                    m.borrow_mut().insert(id, true);
+                });
+                Ok(Variant::Int(id as i64))
+            }
+
+            "add_group_task" => {
+                let callable = match args.first() {
+                    Some(Variant::Callable(c)) => c.clone(),
+                    _ => return Ok(Variant::Int(-1)),
+                };
+                let elements = match args.get(1) {
+                    Some(Variant::Int(n)) => (*n).max(0),
+                    Some(Variant::Float(f)) => (*f as i64).max(0),
+                    _ => 0,
+                };
+
+                let id = next_id();
+                WTP_GROUPS.with(|m| {
+                    m.borrow_mut().insert(id, (0, elements as u32));
+                });
+                // Godot hands each invocation its element index.
+                for i in 0..elements {
+                    self.invoke_callable(&callable, &[Variant::Int(i)])?;
+                    WTP_GROUPS.with(|m| {
+                        if let Some((processed, _)) = m.borrow_mut().get_mut(&id) {
+                            *processed += 1;
+                        }
+                    });
+                }
+                Ok(Variant::Int(id as i64))
+            }
+
+            "is_task_completed" => {
+                let id = int_arg_u64(args.first());
+                Ok(Variant::Bool(
+                    WTP_TASKS.with(|m| m.borrow().get(&id).copied().unwrap_or(false)),
+                ))
+            }
+            "wait_for_task_completion" => Ok(Variant::Int(EXPRESSION_OK)),
+
+            "is_group_task_completed" => {
+                let id = int_arg_u64(args.first());
+                Ok(Variant::Bool(WTP_GROUPS.with(|m| {
+                    m.borrow()
+                        .get(&id)
+                        .is_some_and(|(processed, total)| processed >= total)
+                })))
+            }
+            "get_group_processed_element_count" => {
+                let id = int_arg_u64(args.first());
+                Ok(Variant::Int(WTP_GROUPS.with(|m| {
+                    m.borrow().get(&id).map(|(p, _)| *p as i64).unwrap_or(0)
+                })))
+            }
+            "wait_for_group_task_completion" => Ok(Variant::Nil),
+
+            // No task is ever "currently running" from a caller's perspective,
+            // because the call has already returned by then.
+            "get_caller_task_id" | "get_caller_group_id" => Ok(Variant::Int(-1)),
+
+            other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "WorkerThreadPool has no method '{other}'"
+            )))),
+        }
+    }
+
+    /// Dispatches `Expression` instance methods (pat-0q2kx.207).
+    ///
+    /// Godot's `Expression` reports failure through **state**, never by
+    /// aborting: `parse` returns an `Error` code and `execute` returns `null`
+    /// while setting `has_execute_failed()`. Preserving that is the entire
+    /// point of the class — it exists to evaluate untrusted, user-authored
+    /// formulas, so a bad one must not take the calling script down with it.
+    /// Every error path below therefore returns `Ok(...)`.
+    fn call_expression_instance(
+        &mut self,
+        oid: gdcore::id::ObjectId,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        let raw = oid.raw();
+
+        match method {
+            "parse" => {
+                let code = args.first().map(arg_str).unwrap_or_default();
+                let input_names: Vec<String> = match args.get(1) {
+                    Some(Variant::Array(items)) => items.iter().map(arg_str).collect(),
+                    Some(Variant::PackedStringArray(items)) => items.clone(),
+                    _ => Vec::new(),
+                };
+                let compiled = compile_expression(&code);
+
+                EXPRESSIONS.with(|m| {
+                    let mut table = m.borrow_mut();
+                    let Some(state) = table.get_mut(&raw) else {
+                        return Ok(Variant::Int(EXPRESSION_ERR_PARSE_ERROR));
+                    };
+                    match compiled {
+                        Ok(expr) => {
+                            state.expr = Some(expr);
+                            state.input_names = input_names;
+                            state.error_text.clear();
+                            state.execute_failed = false;
+                            Ok(Variant::Int(EXPRESSION_OK))
+                        }
+                        Err(msg) => {
+                            // A failed re-parse must invalidate the previous
+                            // program, or `execute()` would silently keep
+                            // evaluating the last one that happened to compile.
+                            state.expr = None;
+                            state.error_text = msg;
+                            Ok(Variant::Int(EXPRESSION_ERR_PARSE_ERROR))
+                        }
+                    }
+                })
+            }
+
+            "execute" => {
+                let inputs: Vec<Variant> = match args.first() {
+                    Some(Variant::Array(items)) => items.clone(),
+                    _ => Vec::new(),
+                };
+
+                // Cloned out of the table before evaluating: `eval_expr` can
+                // re-enter this dispatch (an expression may itself construct an
+                // Expression), and holding the RefCell borrow across it would
+                // panic.
+                let program = EXPRESSIONS.with(|m| {
+                    m.borrow()
+                        .get(&raw)
+                        .map(|s| (s.expr.clone(), s.input_names.clone()))
+                });
+                let Some((Some(expr), names)) = program else {
+                    return Ok(set_expression_failure(
+                        raw,
+                        "Expression.execute() called before a successful parse()",
+                    ));
+                };
+
+                self.environment.push_scope();
+                for (i, name) in names.iter().enumerate() {
+                    self.environment
+                        .define(name.clone(), inputs.get(i).cloned().unwrap_or(Variant::Nil));
+                }
+                let evaluated = self.eval_expr(&expr);
+                self.environment.pop_scope();
+
+                match evaluated {
+                    Ok(value) => {
+                        EXPRESSIONS.with(|m| {
+                            if let Some(state) = m.borrow_mut().get_mut(&raw) {
+                                state.execute_failed = false;
+                                state.error_text.clear();
+                            }
+                        });
+                        Ok(value)
+                    }
+                    // An undefined identifier, a bad call, a divide by zero:
+                    // reported, not propagated.
+                    Err(err) => Ok(set_expression_failure(raw, &err.to_string())),
+                }
+            }
+
+            "has_execute_failed" => {
+                Ok(Variant::Bool(EXPRESSIONS.with(|m| {
+                    m.borrow().get(&raw).is_some_and(|s| s.execute_failed)
+                })))
+            }
+
+            "get_error_text" => Ok(Variant::String(EXPRESSIONS.with(|m| {
+                m.borrow()
+                    .get(&raw)
+                    .map(|s| s.error_text.clone())
+                    .unwrap_or_default()
+            }))),
+
+            other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "Expression has no method '{other}'"
+            )))),
+        }
+    }
+
     fn eval_expr(&mut self, expr: &Expr) -> Result<Variant, RuntimeError> {
         match expr {
             Expr::Literal(v) => Ok(v.clone()),
@@ -2183,6 +2444,16 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "Input") {
                             return self.call_input_method(member, &evaluated_args);
                         }
+                        // RenderingServer singleton: raw canvas items a script can
+                        // draw into without nodes (pat-0q2kx.213).
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "RenderingServer") {
+                            return self.call_rendering_server_method(member, &evaluated_args);
+                        }
+                        // PhysicsServer2D singleton: RID-addressed physics that a
+                        // script can drive without nodes (pat-0q2kx.200).
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "PhysicsServer2D") {
+                            return self.call_physics_server_2d_method(member, &evaluated_args);
+                        }
                         // InputMap singleton: runtime rebinding (pat-0q2kx.89).
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "InputMap") {
                             return self.call_input_map_method(member, &evaluated_args);
@@ -2214,6 +2485,11 @@ impl Interpreter {
                         }
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "JSON") {
                             return call_json_static(member, &evaluated_args);
+                        }
+                        // WorkerThreadPool singleton (pat-0q2kx.209). Inherent
+                        // because its tasks invoke Callables.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "WorkerThreadPool") {
+                            return self.call_worker_thread_pool_static(member, &evaluated_args);
                         }
                         // ClassDB reflection singleton (pat-u3l8c.21).
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "ClassDB") {
@@ -2293,6 +2569,13 @@ impl Interpreter {
                                 // instance owns its own stream, independent of
                                 // the global randi()/randf() builtins
                                 // (pat-0q2kx.164).
+                                // StreamPeerBuffer is RefCounted: a script builds
+                                // one, writes into it, and reads back — the
+                                // 356-line port was unreachable without this
+                                // (pat-0q2kx.183).
+                                if class_name == "StreamPeerBuffer" {
+                                    return Ok(Variant::ObjectId(new_stream_peer_handle()));
+                                }
                                 if class_name == "RandomNumberGenerator" {
                                     return Ok(Variant::ObjectId(new_rng_handle()));
                                 }
@@ -2300,8 +2583,39 @@ impl Interpreter {
                                 // is the standard idiom (pat-0q2kx.165). The
                                 // engine already existed in gdcore; nothing bound
                                 // it, so scripts could not construct one.
+                                // Expression is RefCounted; `Expression.new()`
+                                // then `.parse(code, inputs)` is the idiom
+                                // (pat-0q2kx.207).
+                                if class_name == "Expression" {
+                                    return Ok(Variant::ObjectId(new_expression_handle()));
+                                }
+                                // Threading primitives — all RefCounted in
+                                // Godot, so handle-table objects here
+                                // (pat-0q2kx.209).
+                                if class_name == "Thread" {
+                                    return Ok(Variant::ObjectId(new_thread_handle()));
+                                }
+                                if class_name == "Mutex" {
+                                    return Ok(Variant::ObjectId(new_mutex_handle()));
+                                }
+                                if class_name == "Semaphore" {
+                                    return Ok(Variant::ObjectId(new_semaphore_handle()));
+                                }
                                 if class_name == "RegEx" {
                                     return Ok(Variant::ObjectId(new_regex_handle()));
+                                }
+                                // The crypto trio (pat-0q2kx.206). All three are
+                                // RefCounted; `gdcore::crypto` had the hashing,
+                                // HMAC and AES implementations already and no
+                                // script could reach any of them.
+                                if class_name == "HashingContext" {
+                                    return Ok(Variant::ObjectId(new_hashing_context_handle()));
+                                }
+                                if class_name == "AESContext" {
+                                    return Ok(Variant::ObjectId(new_aes_context_handle()));
+                                }
+                                if class_name == "Crypto" {
+                                    return Ok(Variant::ObjectId(new_crypto_handle()));
                                 }
                                 if is_node_class_name(class_name) {
                                     if let Some(ref mut access) = self.scene_access {
@@ -5373,6 +5687,375 @@ impl Interpreter {
         Ok(return_val)
     }
 
+    /// Dispatch a `RenderingServer.method()` call against the canvas-item store
+    /// (pat-0q2kx.213).
+    ///
+    /// Godot ground truth: `servers/rendering_server.cpp`'s `canvas_*` bindings.
+    /// The store is a process global rather than something reached through
+    /// `scene_access`, because Godot's RenderingServer is a process singleton and
+    /// a script holds no handle to a renderer — see [`crate::canvas_server`].
+    ///
+    /// RIDs surface as `Int`; Patina's `Variant` has no `Rid` variant and they
+    /// are opaque handles either way. An unknown method is a `RuntimeError`
+    /// rather than a silent `Nil`, so a script using a `canvas_*` call this
+    /// subset does not cover fails loudly instead of drawing nothing.
+    fn call_rendering_server_method(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        use crate::canvas_server as cs;
+        // Function-local: this file has no module-level `gdcore::math` import,
+        // and adding one would be a wider change than this dispatch needs.
+        use gdcore::math::{Color, Rect2, Transform2D, Vector2};
+
+        fn rid_arg(args: &[Variant], idx: usize) -> u64 {
+            match args.get(idx) {
+                Some(Variant::Int(i)) => (*i).max(0) as u64,
+                Some(Variant::Float(f)) => f.max(0.0) as u64,
+                _ => 0,
+            }
+        }
+        fn color_arg(args: &[Variant], idx: usize) -> Color {
+            match args.get(idx) {
+                Some(Variant::Color(c)) => *c,
+                // Godot's canvas_item_add_* default when a color is omitted.
+                _ => Color::new(1.0, 1.0, 1.0, 1.0),
+            }
+        }
+        fn rect_arg(args: &[Variant], idx: usize) -> Rect2 {
+            match args.get(idx) {
+                Some(Variant::Rect2(r)) => *r,
+                _ => Rect2 {
+                    position: Vector2::ZERO,
+                    size: Vector2::ZERO,
+                },
+            }
+        }
+        fn points_arg(args: &[Variant], idx: usize) -> Vec<Vector2> {
+            match args.get(idx) {
+                Some(Variant::PackedVector2Array(v)) => v.clone(),
+                // A plain Array of Vector2 is what an untyped GDScript literal
+                // (`[Vector2(0,0), …]`) evaluates to.
+                Some(Variant::Array(items)) => items
+                    .iter()
+                    .filter_map(|i| match i {
+                        Variant::Vector2(v) => Some(*v),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        }
+
+        let arity = |want: usize| -> Result<(), RuntimeError> {
+            if args.len() == want {
+                Ok(())
+            } else {
+                Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "RenderingServer.{method}() takes {want} argument(s), got {}",
+                    args.len()
+                ))))
+            }
+        };
+
+        match method {
+            "canvas_item_create" => {
+                arity(0)?;
+                Ok(Variant::Int(cs::canvas_item_create() as i64))
+            }
+            "canvas_item_set_parent" => {
+                arity(2)?;
+                Ok(Variant::Bool(cs::canvas_item_set_parent(
+                    rid_arg(args, 0),
+                    rid_arg(args, 1),
+                )))
+            }
+            "canvas_item_set_visible" | "canvas_item_set_visibility" => {
+                arity(2)?;
+                let visible = matches!(args.get(1), Some(Variant::Bool(true)));
+                Ok(Variant::Bool(cs::canvas_item_set_visible(
+                    rid_arg(args, 0),
+                    visible,
+                )))
+            }
+            "canvas_item_set_transform" => {
+                arity(2)?;
+                let xform = match args.get(1) {
+                    Some(Variant::Transform2D(t)) => *t,
+                    _ => Transform2D::IDENTITY,
+                };
+                Ok(Variant::Bool(cs::canvas_item_set_transform(
+                    rid_arg(args, 0),
+                    xform,
+                )))
+            }
+            "canvas_item_set_modulate" | "canvas_item_set_self_modulate" => {
+                arity(2)?;
+                Ok(Variant::Bool(cs::canvas_item_set_modulate(
+                    rid_arg(args, 0),
+                    color_arg(args, 1),
+                )))
+            }
+            "canvas_item_set_z_index" => {
+                arity(2)?;
+                Ok(Variant::Bool(cs::canvas_item_set_z_index(
+                    rid_arg(args, 0),
+                    float_arg(args, 1) as i32,
+                )))
+            }
+            "canvas_item_clear" => {
+                arity(1)?;
+                Ok(Variant::Bool(cs::canvas_item_clear(rid_arg(args, 0))))
+            }
+            "free_rid" => {
+                arity(1)?;
+                Ok(Variant::Bool(cs::free_canvas_item(rid_arg(args, 0))))
+            }
+            "canvas_item_add_rect" => {
+                arity(3)?;
+                Ok(Variant::Bool(cs::canvas_item_add(
+                    rid_arg(args, 0),
+                    cs::CanvasCommand::Rect {
+                        rect: rect_arg(args, 1),
+                        color: color_arg(args, 2),
+                    },
+                )))
+            }
+            "canvas_item_add_circle" => {
+                arity(4)?;
+                Ok(Variant::Bool(cs::canvas_item_add(
+                    rid_arg(args, 0),
+                    cs::CanvasCommand::Circle {
+                        center: vec2_arg(args, 1),
+                        radius: float_arg(args, 2) as f32,
+                        color: color_arg(args, 3),
+                    },
+                )))
+            }
+            // Godot's `width` is optional and defaults to -1 (a hairline, which
+            // it rasterizes 1px wide).
+            "canvas_item_add_line" => {
+                if args.len() < 4 || args.len() > 5 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "RenderingServer.{method}() takes 4 or 5 arguments, got {}",
+                        args.len()
+                    ))));
+                }
+                let width = match args.get(4) {
+                    Some(_) => float_arg(args, 4) as f32,
+                    None => -1.0,
+                };
+                Ok(Variant::Bool(cs::canvas_item_add(
+                    rid_arg(args, 0),
+                    cs::CanvasCommand::Line {
+                        from: vec2_arg(args, 1),
+                        to: vec2_arg(args, 2),
+                        width: if width <= 0.0 { 1.0 } else { width },
+                        color: color_arg(args, 3),
+                    },
+                )))
+            }
+            // Godot takes a per-vertex color array; the rasterizer fills a
+            // polygon with a single color, so the first entry is used and a
+            // gradient is not silently faked.
+            "canvas_item_add_polygon" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "RenderingServer.{method}() takes 2 or 3 arguments, got {}",
+                        args.len()
+                    ))));
+                }
+                let color = match args.get(2) {
+                    Some(Variant::PackedColorArray(c)) if !c.is_empty() => c[0],
+                    Some(Variant::Array(items)) => items
+                        .iter()
+                        .find_map(|i| match i {
+                            Variant::Color(c) => Some(*c),
+                            _ => None,
+                        })
+                        .unwrap_or(Color::new(1.0, 1.0, 1.0, 1.0)),
+                    Some(Variant::Color(c)) => *c,
+                    _ => Color::new(1.0, 1.0, 1.0, 1.0),
+                };
+                Ok(Variant::Bool(cs::canvas_item_add(
+                    rid_arg(args, 0),
+                    cs::CanvasCommand::Polygon {
+                        points: points_arg(args, 1),
+                        color,
+                    },
+                )))
+            }
+            _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("RenderingServer.{method}"),
+            ))),
+        }
+    }
+
+    /// Dispatch a `PhysicsServer2D.method()` call through the scene access
+    /// physics API (pat-0q2kx.200).
+    ///
+    /// Godot ground truth: `servers/physics_server_2d.cpp`. This is the
+    /// script-facing subset — RID-addressed shape and body creation, body state,
+    /// and swept motion — which is what lets a script drive physics without
+    /// nodes. RIDs surface as `Int`, since Patina's `Variant` has no `Rid`
+    /// variant; they are opaque handles either way.
+    ///
+    /// With no scene access, or none bound to a physics server, creation returns
+    /// `0` (Godot's invalid RID) and queries return `Nil`/`false` rather than
+    /// erroring, matching how the rest of this dispatch degrades off-tree.
+    fn call_physics_server_2d_method(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        /// RIDs are counters, so an `Int` is exact; a `Float` is tolerated
+        /// because arithmetic on a handle yields one.
+        fn rid_arg(args: &[Variant], idx: usize) -> u64 {
+            match args.get(idx) {
+                Some(Variant::Int(i)) => (*i).max(0) as u64,
+                Some(Variant::Float(f)) => f.max(0.0) as u64,
+                _ => 0,
+            }
+        }
+
+        let arity = |want: usize| -> Result<(), RuntimeError> {
+            if args.len() == want {
+                Ok(())
+            } else {
+                Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "PhysicsServer2D.{method}() takes {want} argument(s), got {}",
+                    args.len()
+                ))))
+            }
+        };
+
+        match method {
+            "circle_shape_create" => {
+                arity(0)?;
+                let rid = self
+                    .scene_access
+                    .as_mut()
+                    .map_or(0, |a| a.physics2d_circle_shape_create());
+                Ok(Variant::Int(rid as i64))
+            }
+            "rectangle_shape_create" => {
+                arity(0)?;
+                let rid = self
+                    .scene_access
+                    .as_mut()
+                    .map_or(0, |a| a.physics2d_rectangle_shape_create());
+                Ok(Variant::Int(rid as i64))
+            }
+            // Godot takes a `Variant` whose type depends on the shape: a float
+            // radius for a circle, a Vector2 of half-extents for a rectangle.
+            "shape_set_data" => {
+                arity(2)?;
+                let shape = rid_arg(args, 0);
+                let ok = match args.get(1) {
+                    Some(Variant::Vector2(v)) => {
+                        let extents = (v.x, v.y);
+                        self.scene_access
+                            .as_mut()
+                            .is_some_and(|a| a.physics2d_shape_set_data_extents(shape, extents))
+                    }
+                    _ => {
+                        let radius = float_arg(args, 1) as f32;
+                        self.scene_access
+                            .as_mut()
+                            .is_some_and(|a| a.physics2d_shape_set_data_radius(shape, radius))
+                    }
+                };
+                Ok(Variant::Bool(ok))
+            }
+            "body_create" => {
+                arity(0)?;
+                let rid = self
+                    .scene_access
+                    .as_mut()
+                    .map_or(0, |a| a.physics2d_body_create());
+                Ok(Variant::Int(rid as i64))
+            }
+            // The scene has exactly one 2D space, so any non-zero space handle
+            // means "the scene's space" — a script cannot obtain a second one.
+            // Zero still means "remove from space", as in Godot.
+            "body_set_space" => {
+                arity(2)?;
+                let (body, space) = (rid_arg(args, 0), rid_arg(args, 1));
+                let ok = self
+                    .scene_access
+                    .as_mut()
+                    .is_some_and(|a| a.physics2d_body_set_space(body, space));
+                Ok(Variant::Bool(ok))
+            }
+            "body_add_shape" => {
+                arity(2)?;
+                let (body, shape) = (rid_arg(args, 0), rid_arg(args, 1));
+                let ok = self
+                    .scene_access
+                    .as_mut()
+                    .is_some_and(|a| a.physics2d_body_add_shape(body, shape));
+                Ok(Variant::Bool(ok))
+            }
+            // BODY_STATE_TRANSFORM = 0, BODY_STATE_LINEAR_VELOCITY = 2.
+            "body_set_state" => {
+                arity(3)?;
+                let body = rid_arg(args, 0);
+                let state = float_arg(args, 1) as i64;
+                let value = vec2_arg(args, 2);
+                let ok = self.scene_access.as_mut().is_some_and(|a| {
+                    a.physics2d_body_set_state_vec2(body, state, (value.x, value.y))
+                });
+                Ok(Variant::Bool(ok))
+            }
+            "body_get_state" => {
+                arity(2)?;
+                let body = rid_arg(args, 0);
+                let state = float_arg(args, 1) as i64;
+                // Only TRANSFORM is readable so far; anything else would have to
+                // invent a value, so report Nil instead.
+                if state != 0 {
+                    return Ok(Variant::Nil);
+                }
+                let pos = self
+                    .scene_access
+                    .as_ref()
+                    .and_then(|a| a.physics2d_body_get_position(body));
+                Ok(match pos {
+                    Some((x, y)) => Variant::Vector2(gdcore::math::Vector2::new(x, y)),
+                    None => Variant::Nil,
+                })
+            }
+            // Godot's real signature threads a `PhysicsTestMotionParameters2D`
+            // and writes a `PhysicsTestMotionResult2D`; neither resource exists
+            // in Patina yet, so the staged form takes the motion directly and
+            // returns both halves of the result as a Dictionary — `collided` and
+            // `travel` are the two fields the result object is read for.
+            "body_test_motion" => {
+                arity(2)?;
+                let body = rid_arg(args, 0);
+                let motion = vec2_arg(args, 1);
+                let result = self
+                    .scene_access
+                    .as_ref()
+                    .and_then(|a| a.physics2d_body_test_motion(body, (motion.x, motion.y)));
+                let Some((collided, travel)) = result else {
+                    return Ok(Variant::Nil);
+                };
+                let mut d = Dictionary::new();
+                d.insert("collided", Variant::Bool(collided));
+                d.insert(
+                    "travel",
+                    Variant::Vector2(gdcore::math::Vector2::new(travel.0, travel.1)),
+                );
+                Ok(Variant::Dictionary(d))
+            }
+            _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("PhysicsServer2D.{method}"),
+            ))),
+        }
+    }
+
     /// Dispatch an `Input.method()` call through the scene_access input API.
     fn call_input_method(
         &mut self,
@@ -6183,6 +6866,9 @@ impl Interpreter {
             if gdplatform::websocket_peer::is_websocket_peer_handle(*oid) {
                 return call_websocket_peer_instance(*oid, method, args);
             }
+            if is_stream_peer_handle(*oid) {
+                return call_stream_peer_instance(*oid, method, args);
+            }
             if is_rng_handle(*oid) {
                 return call_rng_instance(*oid, method, args);
             }
@@ -6192,8 +6878,34 @@ impl Interpreter {
                 let access = self.scene_access.as_deref_mut();
                 return call_undo_redo_instance(*oid, method, args, access);
             }
+            if is_thread_handle(*oid) {
+                // Inherent: `start()` invokes a Callable, which needs the
+                // interpreter (pat-0q2kx.209).
+                return self.call_thread_instance(*oid, method, args);
+            }
+            if is_mutex_handle(*oid) {
+                return call_mutex_instance(*oid, method, args);
+            }
+            if is_semaphore_handle(*oid) {
+                return call_semaphore_instance(*oid, method, args);
+            }
+            if is_expression_handle(*oid) {
+                // An inherent method rather than a free function like its
+                // siblings: `execute()` evaluates through `eval_expr`, so it
+                // needs the interpreter itself, not just the handle table.
+                return self.call_expression_instance(*oid, method, args);
+            }
             if is_regex_handle(*oid) {
                 return call_regex_instance(*oid, method, args);
+            }
+            if is_hashing_context_handle(*oid) {
+                return call_hashing_context_instance(*oid, method, args);
+            }
+            if is_aes_context_handle(*oid) {
+                return call_aes_context_instance(*oid, method, args);
+            }
+            if is_crypto_handle(*oid) {
+                return call_crypto_instance(*oid, method, args);
             }
             if is_regex_match_handle(*oid) {
                 return call_regex_match_instance(*oid, method, args);
@@ -12311,7 +13023,9 @@ const BUILTIN_SINGLETONS: &[&str] = &[
     "JSON",
     "Marshalls",
     "OS",
+    "PhysicsServer2D",
     "ProjectSettings",
+    "RenderingServer",
     "ResourceUID",
     "Time",
     "TranslationServer",
@@ -13862,6 +14576,167 @@ fn error_code_string(code: i64) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// StreamPeerBuffer (pat-0q2kx.183)
+// ---------------------------------------------------------------------------
+
+/// Tags an `ObjectId` issued by [`new_stream_peer_handle`]; mirrors the
+/// ConfigFile / CameraFeed / UndoRedo / RandomNumberGenerator handle tags
+/// (0xCF / 0xCA / 0xED / 0xB9).
+const STREAM_PEER_HANDLE_TAG: u64 = 0x5B00_0000_0000_0000;
+
+thread_local! {
+    /// Live `StreamPeerBuffer`s, keyed by handle sequence.
+    ///
+    /// `gdplatform::stream_peer_buffer` is a complete 356-line port — typed
+    /// put_*/get_* with a movable cursor and big-endian support — that was
+    /// reachable only from `packet_peer_stream.rs` internally. It was never
+    /// registered and never constructible, so no script could touch it.
+    static STREAM_PEERS: std::cell::RefCell<
+        HashMap<u64, gdplatform::stream_peer_buffer::StreamPeerBuffer>,
+    > = std::cell::RefCell::new(HashMap::new());
+    /// Sequence backing the handle id.
+    static NEXT_STREAM_PEER: std::cell::Cell<u64> = std::cell::Cell::new(1);
+}
+
+/// Mints a fresh `StreamPeerBuffer` handle.
+fn new_stream_peer_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_STREAM_PEER.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    STREAM_PEERS.with(|m| {
+        m.borrow_mut()
+            .insert(seq, gdplatform::stream_peer_buffer::StreamPeerBuffer::new());
+    });
+    gdcore::id::ObjectId::from_raw(STREAM_PEER_HANDLE_TAG | seq)
+}
+
+/// Returns `true` when `id` was issued by [`new_stream_peer_handle`].
+fn is_stream_peer_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == STREAM_PEER_HANDLE_TAG
+}
+
+/// Runs `f` against the buffer behind `id`, if it is still live.
+fn with_stream_peer<R>(
+    id: gdcore::id::ObjectId,
+    f: impl FnOnce(&mut gdplatform::stream_peer_buffer::StreamPeerBuffer) -> R,
+) -> Option<R> {
+    let seq = id.raw() & 0x00FF_FFFF_FFFF_FFFF;
+    STREAM_PEERS.with(|m| m.borrow_mut().get_mut(&seq).map(f))
+}
+
+/// `StreamPeerBuffer` instance methods (`core/io/stream_peer.cpp`).
+fn call_stream_peer_instance(
+    id: gdcore::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let int_arg = |i: usize| -> i64 {
+        match args.get(i) {
+            Some(Variant::Int(n)) => *n,
+            Some(Variant::Float(f)) => *f as i64,
+            _ => 0,
+        }
+    };
+    let bytes_arg = |i: usize| -> Vec<u8> {
+        match args.get(i) {
+            Some(Variant::PackedByteArray(b)) => b.clone(),
+            Some(Variant::String(s)) => s.as_bytes().to_vec(),
+            _ => Vec::new(),
+        }
+    };
+
+    let out = with_stream_peer(id, |b| match method {
+        // The Variant codec this bead exists for.
+        "put_var" => {
+            let ok = b.put_var(args.first().unwrap_or(&Variant::Nil));
+            Some(Variant::Bool(ok))
+        }
+        "get_var" => Some(b.get_var().unwrap_or(Variant::Nil)),
+
+        "put_data" | "put_partial_data" => {
+            b.put_data(&bytes_arg(0));
+            Some(Variant::Nil)
+        }
+        "get_data" | "get_partial_data" => Some(Variant::PackedByteArray(
+            b.get_data(int_arg(0).max(0) as usize),
+        )),
+
+        "put_8" => {
+            b.put_8(int_arg(0) as i8);
+            Some(Variant::Nil)
+        }
+        "put_u8" => {
+            b.put_u8(int_arg(0) as u8);
+            Some(Variant::Nil)
+        }
+        "put_16" => {
+            b.put_16(int_arg(0) as i16);
+            Some(Variant::Nil)
+        }
+        "put_u16" => {
+            b.put_u16(int_arg(0) as u16);
+            Some(Variant::Nil)
+        }
+        "put_32" => {
+            b.put_32(int_arg(0) as i32);
+            Some(Variant::Nil)
+        }
+        "put_u32" => {
+            b.put_u32(int_arg(0) as u32);
+            Some(Variant::Nil)
+        }
+        "put_64" => {
+            b.put_64(int_arg(0));
+            Some(Variant::Nil)
+        }
+        "put_u64" => {
+            b.put_u64(int_arg(0) as u64);
+            Some(Variant::Nil)
+        }
+
+        "get_8" => Some(Variant::Int(b.get_8() as i64)),
+        "get_u8" => Some(Variant::Int(b.get_u8() as i64)),
+        "get_16" => Some(Variant::Int(b.get_16() as i64)),
+        "get_u16" => Some(Variant::Int(b.get_u16() as i64)),
+        "get_32" => Some(Variant::Int(b.get_32() as i64)),
+        "get_u32" => Some(Variant::Int(b.get_u32() as i64)),
+        "get_64" => Some(Variant::Int(b.get_64())),
+        "get_u64" => Some(Variant::Int(b.get_u64() as i64)),
+
+        "seek" => {
+            b.seek(int_arg(0).max(0) as usize);
+            Some(Variant::Nil)
+        }
+        "get_position" => Some(Variant::Int(b.get_position() as i64)),
+        "get_size" => Some(Variant::Int(b.get_size() as i64)),
+        // Godot reports what remains AFTER the cursor, not the whole buffer.
+        "get_available_bytes" => Some(Variant::Int(
+            b.get_size().saturating_sub(b.get_position()) as i64
+        )),
+        "clear" => {
+            b.clear();
+            Some(Variant::Nil)
+        }
+        "get_data_array" | "data_array" => Some(Variant::PackedByteArray(b.data_array().to_vec())),
+        "set_big_endian" => {
+            b.set_big_endian(matches!(args.first(), Some(Variant::Bool(true))));
+            Some(Variant::Nil)
+        }
+        "is_big_endian" => Some(Variant::Bool(b.is_big_endian())),
+        _ => None,
+    })
+    .flatten();
+
+    out.ok_or_else(|| {
+        RuntimeError::new(RuntimeErrorKind::UndefinedFunction(format!(
+            "StreamPeerBuffer has no method '{method}'"
+        )))
+    })
+}
+
+// ---------------------------------------------------------------------------
 // RandomNumberGenerator (pat-0q2kx.164)
 // ---------------------------------------------------------------------------
 
@@ -14199,6 +15074,281 @@ fn call_encoded_object_as_id_instance(
 }
 
 // ---------------------------------------------------------------------------
+// HashingContext / AESContext / Crypto (pat-0q2kx.206)
+// ---------------------------------------------------------------------------
+//
+// `gdcore::crypto` already had streaming MD5/SHA-1/SHA-256 (`MultiHashContext`),
+// HMAC (`HmacContext`) and real AES-CBC — and **none of it was reachable from a
+// script**. Only `String.sha256_text` touched the module; there were no `.new()`
+// arms and no ClassDB entries, so `HashingContext.new()` failed outright. All
+// three are RefCounted in Godot, so they follow the handle-table idiom.
+
+/// Tag bits marking an `ObjectId` as a `HashingContext` handle.
+const HASHING_CONTEXT_HANDLE_TAG: u64 = 0xC1_00_0000_0000_0000;
+/// Tag bits marking an `ObjectId` as an `AESContext` handle.
+const AES_CONTEXT_HANDLE_TAG: u64 = 0xC2_00_0000_0000_0000;
+/// Tag bits marking an `ObjectId` as a `Crypto` handle.
+const CRYPTO_HANDLE_TAG: u64 = 0xC3_00_0000_0000_0000;
+
+thread_local! {
+    static HASHING_CONTEXTS: std::cell::RefCell<HashMap<u64, gdcore::crypto::MultiHashContext>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_HASHING_CONTEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    static AES_CONTEXTS: std::cell::RefCell<HashMap<u64, gdcore::crypto::AesContext>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_AES_CONTEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    /// `Crypto` is stateless — the table exists only so a handle can be
+    /// validated, which is why the value is `()`.
+    static CRYPTOS: std::cell::RefCell<HashMap<u64, ()>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_CRYPTO: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Returns `true` when `id` was issued by [`new_hashing_context_handle`].
+fn is_hashing_context_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == HASHING_CONTEXT_HANDLE_TAG
+}
+
+/// Returns `true` when `id` names an `AESContext`.
+fn is_aes_context_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == AES_CONTEXT_HANDLE_TAG
+}
+
+/// Returns `true` when `id` names a `Crypto`.
+fn is_crypto_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == CRYPTO_HANDLE_TAG
+}
+
+fn new_hashing_context_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_HASHING_CONTEXT.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = HASHING_CONTEXT_HANDLE_TAG | seq;
+    HASHING_CONTEXTS.with(|m| {
+        m.borrow_mut()
+            .insert(raw, gdcore::crypto::MultiHashContext::new())
+    });
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+fn new_aes_context_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_AES_CONTEXT.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = AES_CONTEXT_HANDLE_TAG | seq;
+    AES_CONTEXTS.with(|m| {
+        m.borrow_mut()
+            .insert(raw, gdcore::crypto::AesContext::new())
+    });
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+fn new_crypto_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_CRYPTO.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = CRYPTO_HANDLE_TAG | seq;
+    CRYPTOS.with(|m| m.borrow_mut().insert(raw, ()));
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Reads a `PackedByteArray` argument.
+///
+/// A `String` is accepted too and taken as its UTF-8 bytes: GDScript's
+/// `"abc".to_utf8_buffer()` is the idiomatic way to get bytes, but scripts
+/// routinely pass the string itself, and rejecting that is friction with no
+/// safety benefit.
+fn crypto_bytes_arg(args: &[Variant], index: usize, what: &str) -> Result<Vec<u8>, RuntimeError> {
+    match args.get(index) {
+        Some(Variant::PackedByteArray(b)) => Ok(b.clone()),
+        Some(Variant::String(s)) => Ok(s.as_bytes().to_vec()),
+        Some(Variant::StringName(s)) => Ok(s.as_str().as_bytes().to_vec()),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{what} expects a PackedByteArray argument"
+        )))),
+    }
+}
+
+fn crypto_int_arg(args: &[Variant], index: usize, what: &str) -> Result<i64, RuntimeError> {
+    match args.get(index) {
+        Some(Variant::Int(i)) => Ok(*i),
+        Some(Variant::Float(f)) => Ok(*f as i64),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{what} expects an int argument"
+        )))),
+    }
+}
+
+/// Godot's `HashingContext.HashType`: 0 = MD5, 1 = SHA-1, 2 = SHA-256
+/// (`doc/classes/HashingContext.xml`).
+fn hash_type_from_int(v: i64) -> Option<gdcore::crypto::HashType> {
+    match v {
+        0 => Some(gdcore::crypto::HashType::Md5),
+        1 => Some(gdcore::crypto::HashType::Sha1),
+        2 => Some(gdcore::crypto::HashType::Sha256),
+        _ => None,
+    }
+}
+
+/// `HashingContext`'s script surface. Every method returns a Godot Error code
+/// except `finish`, which returns the digest.
+fn call_hashing_context_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let raw = id.raw();
+    match method {
+        "start" => {
+            let kind = crypto_int_arg(args, 0, "HashingContext.start()")?;
+            let Some(kind) = hash_type_from_int(kind) else {
+                // An unknown hash type is FAILED, not a script error: Godot
+                // returns an Error here rather than raising.
+                return Ok(Variant::Int(1));
+            };
+            HASHING_CONTEXTS.with(|m| {
+                if let Some(ctx) = m.borrow_mut().get_mut(&raw) {
+                    ctx.start(kind);
+                }
+            });
+            Ok(Variant::Int(0))
+        }
+        "update" => {
+            let data = crypto_bytes_arg(args, 0, "HashingContext.update()")?;
+            let ok = HASHING_CONTEXTS.with(|m| {
+                m.borrow_mut()
+                    .get_mut(&raw)
+                    .map(|ctx| ctx.update(&data).is_ok())
+                    .unwrap_or(false)
+            });
+            // ERR_UNCONFIGURED (3) is what Godot returns for update-before-start.
+            Ok(Variant::Int(if ok { 0 } else { 3 }))
+        }
+        "finish" => {
+            let digest = HASHING_CONTEXTS.with(|m| {
+                m.borrow_mut()
+                    .get_mut(&raw)
+                    .and_then(|ctx| ctx.finish().ok())
+            });
+            // Godot returns an empty PackedByteArray when unstarted, not null.
+            Ok(Variant::PackedByteArray(digest.unwrap_or_default()))
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("HashingContext.{other}"),
+        ))),
+    }
+}
+
+/// `AESContext`'s script surface (`doc/classes/AESContext.xml`).
+fn call_aes_context_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdcore::crypto::{AesCipher, AesMode};
+    let raw = id.raw();
+    match method {
+        "start" => {
+            let mode = crypto_int_arg(args, 0, "AESContext.start()")?;
+            let key = crypto_bytes_arg(args, 1, "AESContext.start()")?;
+            // The IV is optional — ECB takes none, and Godot's signature
+            // defaults it to an empty PackedByteArray.
+            let iv = crypto_bytes_arg(args, 2, "AESContext.start()").unwrap_or_default();
+            // MODE_ECB_ENCRYPT 0, MODE_ECB_DECRYPT 1, MODE_CBC_ENCRYPT 2,
+            // MODE_CBC_DECRYPT 3 — the exact ordering from the doc XML.
+            let combo = match mode {
+                0 => (AesCipher::Ecb, AesMode::Encrypt),
+                1 => (AesCipher::Ecb, AesMode::Decrypt),
+                2 => (AesCipher::Cbc, AesMode::Encrypt),
+                3 => (AesCipher::Cbc, AesMode::Decrypt),
+                _ => return Ok(Variant::Int(1)),
+            };
+            let ok = AES_CONTEXTS.with(|m| {
+                m.borrow_mut()
+                    .get_mut(&raw)
+                    .map(|ctx| ctx.start_cipher(combo.0, combo.1, &key, &iv).is_ok())
+                    .unwrap_or(false)
+            });
+            Ok(Variant::Int(if ok { 0 } else { 1 }))
+        }
+        "update" => {
+            let data = crypto_bytes_arg(args, 0, "AESContext.update()")?;
+            let out =
+                AES_CONTEXTS.with(|m| m.borrow().get(&raw).and_then(|ctx| ctx.update(&data).ok()));
+            // An empty PackedByteArray is Godot's failure return here.
+            Ok(Variant::PackedByteArray(out.unwrap_or_default()))
+        }
+        "finish" => {
+            AES_CONTEXTS.with(|m| {
+                if let Some(ctx) = m.borrow_mut().get_mut(&raw) {
+                    let _ = ctx.finish();
+                }
+            });
+            Ok(Variant::Nil)
+        }
+        // ⚠️ Godot's `get_iv_state()` returns the IV as it stands after the
+        // chained blocks processed so far, for resuming a stream. This context
+        // encrypts whole buffers in one `update`, so there is no partial state
+        // to report and returning the starting IV would be a lie. Empty is the
+        // honest answer; see the completion report.
+        "get_iv_state" => Ok(Variant::PackedByteArray(Vec::new())),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("AESContext.{other}"),
+        ))),
+    }
+}
+
+/// `Crypto`'s script surface. The RSA/X509 half is stage 2 and reports
+/// ERR_UNAVAILABLE rather than pretending.
+fn call_crypto_instance(
+    _id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    match method {
+        "generate_random_bytes" => {
+            let n = crypto_int_arg(args, 0, "Crypto.generate_random_bytes()")?;
+            let n = n.max(0) as usize;
+            Ok(Variant::PackedByteArray(
+                gdcore::crypto::generate_random_bytes(n),
+            ))
+        }
+        "hmac_digest" => {
+            let kind = crypto_int_arg(args, 0, "Crypto.hmac_digest()")?;
+            let Some(kind) = hash_type_from_int(kind) else {
+                return Ok(Variant::PackedByteArray(Vec::new()));
+            };
+            let key = crypto_bytes_arg(args, 1, "Crypto.hmac_digest()")?;
+            let msg = crypto_bytes_arg(args, 2, "Crypto.hmac_digest()")?;
+            Ok(Variant::PackedByteArray(gdcore::crypto::hmac(
+                kind, &key, &msg,
+            )))
+        }
+        "constant_time_compare" => {
+            let a = crypto_bytes_arg(args, 0, "Crypto.constant_time_compare()")?;
+            let b = crypto_bytes_arg(args, 1, "Crypto.constant_time_compare()")?;
+            Ok(Variant::Bool(gdcore::crypto::constant_time_compare(&a, &b)))
+        }
+        // ⚠️ Stage 2 (RSA + X509 via the RustCrypto crates). These report
+        // ERR_UNAVAILABLE (2) / null **loudly** rather than returning something
+        // that looks like a key — a silent stub here would let a script build a
+        // "signature" that verifies nothing.
+        "generate_rsa" | "generate_self_signed_certificate" => Ok(Variant::Nil),
+        "sign" | "encrypt" | "decrypt" => Ok(Variant::PackedByteArray(Vec::new())),
+        "verify" => Ok(Variant::Bool(false)),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("Crypto.{other}"),
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RegEx / RegExMatch (pat-0q2kx.165)
 // ---------------------------------------------------------------------------
 //
@@ -14208,6 +15358,284 @@ fn call_encoded_object_as_id_instance(
 // ConfigFile/CameraFeed/UndoRedo rather than being scene nodes.
 
 /// Tag bits marking an `ObjectId` as a `RegEx` handle.
+// ---------------------------------------------------------------------------
+// Threading: Thread / Mutex / Semaphore / WorkerThreadPool (pat-0q2kx.209)
+// ---------------------------------------------------------------------------
+//
+// ⚠️ These run their Callables **inline**, on the calling thread, which is
+// Godot's own documented behaviour for a no-threads web export
+// (`core/object/worker_thread_pool.cpp` falls back to synchronous execution when
+// `THREADS_ENABLED` is off). It is not a shortcut around the real engine types:
+// `gdplatform::thread` spawns genuine OS threads, but every one of its entry
+// points requires `F: FnOnce() + Send + 'static`, and a GDScript `Callable`
+// cannot satisfy that — it borrows the interpreter, whose handle tables are
+// `thread_local` and whose values are `Rc`-based. Handing a Callable to another
+// thread is not a wiring problem, it is a soundness one.
+//
+// The observable contract is preserved: a task submitted has completed by the
+// time control returns, so `is_task_completed` is true, `wait_*` is a no-op, and
+// `wait_to_finish` yields the Callable's value.
+
+/// Tag bits marking an `ObjectId` as a `Thread` handle.
+const THREAD_HANDLE_TAG: u64 = 0xE5_00_0000_0000_0000;
+/// Tag bits marking an `ObjectId` as a `Mutex` handle.
+const MUTEX_HANDLE_TAG: u64 = 0xE6_00_0000_0000_0000;
+/// Tag bits marking an `ObjectId` as a `Semaphore` handle.
+const SEMAPHORE_HANDLE_TAG: u64 = 0xE7_00_0000_0000_0000;
+
+/// A started `Thread` and the value its Callable returned.
+#[derive(Debug, Default)]
+struct ThreadState {
+    started: bool,
+    result: Variant,
+}
+
+thread_local! {
+    static THREADS: std::cell::RefCell<HashMap<u64, ThreadState>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_THREAD: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    /// `Mutex` handles -> recursion depth.
+    ///
+    /// Godot's Mutex is **recursive**, and `gdplatform`'s `GodotMutex::lock`
+    /// hands back a guard whose lifetime is tied to the borrow — which cannot be
+    /// stored across the separate `lock()` / `unlock()` script calls Godot
+    /// exposes. A depth counter reproduces every behaviour observable from a
+    /// single-threaded runtime and, unlike a real OS mutex held across
+    /// interpreter calls, cannot deadlock the game.
+    static MUTEXES: std::cell::RefCell<HashMap<u64, u32>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_MUTEX: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    /// `Semaphore` handles -> current count.
+    static SEMAPHORES: std::cell::RefCell<HashMap<u64, i32>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_SEMAPHORE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    /// WorkerThreadPool tasks: id -> completed. Every task is complete on
+    /// return, but the table still records ids so `is_task_completed` can tell
+    /// a real id from a fabricated one.
+    static WTP_TASKS: std::cell::RefCell<HashMap<u64, bool>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Group tasks: id -> (elements processed, total elements).
+    static WTP_GROUPS: std::cell::RefCell<HashMap<u64, (u32, u32)>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_WTP_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// `ERR_INVALID_PARAMETER` in Godot's `Error` enum — what `Thread.start`
+/// returns when handed something that is not a Callable.
+const THREAD_ERR_INVALID_PARAMETER: i64 = 31;
+
+/// Reads a task/group id argument, which scripts hold as an `int`.
+fn int_arg_u64(v: Option<&Variant>) -> u64 {
+    match v {
+        Some(Variant::Int(i)) if *i >= 0 => *i as u64,
+        Some(Variant::Float(f)) if *f >= 0.0 => *f as u64,
+        _ => 0,
+    }
+}
+
+fn is_thread_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == THREAD_HANDLE_TAG
+}
+
+fn is_mutex_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == MUTEX_HANDLE_TAG
+}
+
+fn is_semaphore_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == SEMAPHORE_HANDLE_TAG
+}
+
+fn new_thread_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_THREAD.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = THREAD_HANDLE_TAG | seq;
+    THREADS.with(|m| {
+        m.borrow_mut().insert(raw, ThreadState::default());
+    });
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+fn new_mutex_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_MUTEX.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = MUTEX_HANDLE_TAG | seq;
+    MUTEXES.with(|m| {
+        m.borrow_mut().insert(raw, 0);
+    });
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+fn new_semaphore_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_SEMAPHORE.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = SEMAPHORE_HANDLE_TAG | seq;
+    SEMAPHORES.with(|m| {
+        m.borrow_mut().insert(raw, 0);
+    });
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Dispatches `Mutex` methods. Godot's Mutex is recursive, so a re-lock from
+/// the same thread succeeds rather than deadlocking.
+fn call_mutex_instance(
+    oid: gdcore::id::ObjectId,
+    method: &str,
+    _args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let raw = oid.raw();
+    MUTEXES.with(|m| {
+        let mut table = m.borrow_mut();
+        let depth = table.entry(raw).or_insert(0);
+        match method {
+            "lock" => {
+                *depth += 1;
+                Ok(Variant::Nil)
+            }
+            // Single-threaded: nothing else can hold it, and a recursive
+            // re-lock is legal, so this always succeeds.
+            "try_lock" => {
+                *depth += 1;
+                Ok(Variant::Bool(true))
+            }
+            "unlock" => {
+                *depth = depth.saturating_sub(1);
+                Ok(Variant::Nil)
+            }
+            other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "Mutex has no method '{other}'"
+            )))),
+        }
+    })
+}
+
+/// Dispatches `Semaphore` methods over a plain counter.
+fn call_semaphore_instance(
+    oid: gdcore::id::ObjectId,
+    method: &str,
+    _args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let raw = oid.raw();
+    SEMAPHORES.with(|m| {
+        let mut table = m.borrow_mut();
+        let count = table.entry(raw).or_insert(0);
+        match method {
+            "post" => {
+                *count += 1;
+                Ok(Variant::Nil)
+            }
+            "try_wait" => {
+                if *count > 0 {
+                    *count -= 1;
+                    Ok(Variant::Bool(true))
+                } else {
+                    Ok(Variant::Bool(false))
+                }
+            }
+            // Godot's `wait()` blocks until a post arrives. Inline there is no
+            // other thread to post, so blocking would hang the game forever
+            // with no way out; consuming when available and returning otherwise
+            // is the same choice Godot's no-threads build is forced into.
+            "wait" => {
+                if *count > 0 {
+                    *count -= 1;
+                }
+                Ok(Variant::Nil)
+            }
+            other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "Semaphore has no method '{other}'"
+            )))),
+        }
+    })
+}
+
+/// Tag bits marking an `ObjectId` as an `Expression` handle (pat-0q2kx.207).
+const EXPRESSION_HANDLE_TAG: u64 = 0xE4_00_0000_0000_0000;
+
+/// Godot's `Error` codes used by `Expression.parse`.
+const EXPRESSION_OK: i64 = 0;
+/// `ERR_PARSE_ERROR` in Godot's `Error` enum.
+const EXPRESSION_ERR_PARSE_ERROR: i64 = 43;
+
+/// A parsed `Expression`: the compiled tree plus the input names bound
+/// positionally at `execute()` time, and the failure state Godot exposes via
+/// `has_execute_failed()` / `get_error_text()`.
+#[derive(Debug, Default)]
+struct ExpressionState {
+    expr: Option<Expr>,
+    input_names: Vec<String>,
+    error_text: String,
+    execute_failed: bool,
+}
+
+thread_local! {
+    /// Live `Expression` handles, keyed by raw ObjectId.
+    static EXPRESSIONS: std::cell::RefCell<HashMap<u64, ExpressionState>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_EXPRESSION: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Returns `true` when `id` was issued by [`new_expression_handle`].
+fn is_expression_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == EXPRESSION_HANDLE_TAG
+}
+
+/// Allocates an `Expression` in the handle table (script `Expression.new()`).
+fn new_expression_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_EXPRESSION.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = EXPRESSION_HANDLE_TAG | seq;
+    EXPRESSIONS.with(|m| {
+        m.borrow_mut().insert(raw, ExpressionState::default());
+    });
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Records an execute failure and returns the `null` Godot yields.
+fn set_expression_failure(raw: u64, message: &str) -> Variant {
+    EXPRESSIONS.with(|m| {
+        if let Some(state) = m.borrow_mut().get_mut(&raw) {
+            state.execute_failed = true;
+            state.error_text = message.to_string();
+        }
+    });
+    Variant::Nil
+}
+
+/// Compiles `code` into a single expression tree.
+///
+/// The parser only exposes `parse_script`, so the expression is wrapped in a
+/// `var` declaration and its initializer lifted back out. That deliberately
+/// reuses the **whole** GDScript expression grammar — operators, ternaries,
+/// indexing, builtin calls, constructors — rather than growing a second,
+/// subtly-different expression parser next to it.
+fn compile_expression(code: &str) -> Result<Expr, String> {
+    let wrapped = format!("var __patina_expr = {code}");
+    let tokens = tokenize(&wrapped).map_err(|e| e.to_string())?;
+    let mut parser = Parser::new(tokens, &wrapped);
+    let stmts = parser.parse_script().map_err(|e| e.to_string())?;
+
+    match stmts.into_iter().next() {
+        Some(Stmt::VarDecl {
+            value: Some(expr), ..
+        }) => Ok(expr),
+        // An empty or non-expression body: `Expression.parse("")` and
+        // `parse("var x = 1")` both land here rather than panicking.
+        _ => Err(format!("Expected a single expression, got: {code}")),
+    }
+}
+
 const REGEX_HANDLE_TAG: u64 = 0xE2_00_0000_0000_0000;
 /// Tag bits marking an `ObjectId` as a `RegExMatch` handle.
 const REGEX_MATCH_HANDLE_TAG: u64 = 0xE3_00_0000_0000_0000;

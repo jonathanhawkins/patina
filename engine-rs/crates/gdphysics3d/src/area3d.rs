@@ -106,6 +106,13 @@ pub struct Area3D {
     pub gravity_direction: Vector3,
     /// Whether gravity is a point (radial) rather than directional.
     pub gravity_point: bool,
+    /// Offset from [`position`](Self::position) to the point of attraction
+    /// (`Area3D.gravity_point_center`, default `Vector3(0, -1, 0)`).
+    pub gravity_point_center: Vector3,
+    /// Distance at which point gravity equals [`gravity`](Self::gravity);
+    /// falloff is inverse-square either side of it. `0.0` means constant
+    /// strength regardless of distance (`Area3D.gravity_point_unit_distance`).
+    pub gravity_point_unit_distance: f32,
     /// Linear damp override.
     pub linear_damp: f32,
     /// Angular damp override.
@@ -128,6 +135,8 @@ impl Area3D {
             gravity: 9.8,
             gravity_direction: Vector3::new(0.0, -1.0, 0.0),
             gravity_point: false,
+            gravity_point_center: Vector3::new(0.0, -1.0, 0.0),
+            gravity_point_unit_distance: 0.0,
             linear_damp: 0.1,
             angular_damp: 0.1,
         }
@@ -143,13 +152,32 @@ impl Area3D {
     /// integration, matching Godot's semantics.
     pub fn gravity_vector(&self, at: Vector3) -> Vector3 {
         if self.gravity_point {
-            let dir = self.position - at;
+            // The attractor is the area's origin offset by `gravity_point_center`
+            // (Area3D.xml: "the point of attraction"), not the origin itself.
+            let center = self.position + self.gravity_point_center;
+            let dir = center - at;
             let len = dir.length();
-            if len > 1e-6 {
-                dir * (self.gravity / len)
-            } else {
-                Vector3::ZERO
+            if len <= 1e-6 {
+                return Vector3::ZERO;
             }
+            // `Area3D.xml`: strength equals `gravity` exactly AT
+            // `gravity_point_unit_distance`, falling off by the inverse square
+            // law either side of it — the doc's own worked example is gravity
+            // 4.0 with unit distance 100, giving 1.0 at 200 m and 16.0 at 50 m.
+            // When the unit distance is 0 the strength is constant regardless of
+            // distance.
+            //
+            // This previously computed `gravity / len`, a 1/r falloff matching
+            // NEITHER mode: it was wrong at every distance except len == 1, and
+            // silently so, since the direction was still correct.
+            let magnitude = if self.gravity_point_unit_distance > 0.0 {
+                let ratio = self.gravity_point_unit_distance / len;
+                self.gravity * ratio * ratio
+            } else {
+                self.gravity
+            };
+            // `dir / len` is the unit direction toward the centre.
+            dir * (magnitude / len)
         } else {
             self.gravity_direction.normalized() * self.gravity
         }

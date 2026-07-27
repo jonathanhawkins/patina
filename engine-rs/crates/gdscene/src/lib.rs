@@ -24,6 +24,7 @@ pub mod animation_tscn;
 pub mod astar;
 pub mod audio_server_bridge;
 pub mod autoload;
+pub mod behavioral_2d;
 pub mod bezier_bake;
 pub mod camera3d;
 pub mod canvas_order;
@@ -46,6 +47,7 @@ pub mod line_edit;
 pub mod main_loop;
 pub mod menu;
 pub mod multiplayer;
+pub mod nav_polygon;
 pub mod nav_simplify;
 pub mod navigation;
 pub mod node;
@@ -83,6 +85,7 @@ pub mod transform_inspector;
 pub mod tween;
 pub mod video_stream;
 pub mod viewport;
+pub mod visibility_3d;
 
 // Re-export the most-used types at the crate root.
 pub use autoload::{boot_autoloads_from_dir, instantiate_autoloads, AutoloadResult};

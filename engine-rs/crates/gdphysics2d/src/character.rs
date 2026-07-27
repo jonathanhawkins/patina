@@ -172,6 +172,58 @@ fn sweep_steps(motion: Vector2, shape: &Shape2D) -> usize {
     ((distance / extent).ceil() as usize).clamp(1, MAX_SUBSTEPS)
 }
 
+/// Godot's `PhysicsServer2D.body_test_motion` / `PhysicsBody2D.test_move`
+/// (pat-0q2kx.200): would moving `shape` from `from` along `motion` hit any of
+/// `bodies`, and how far does it get?
+///
+/// Returns `(collided, travel)`. `travel` is the motion actually achieved, so a
+/// blocked sweep reports a vector strictly shorter than `motion` — which is the
+/// property `test_move` and the server API are asked for.
+///
+/// Substeps with the same [`sweep_steps`] budget `move_and_slide` uses, so a
+/// fast test cannot tunnel through a thin wall and report "clear". The narrow
+/// phase does the shape work, so every shape pair the engine supports is
+/// covered rather than just circles.
+///
+/// ⚠️ Bodies the sweep starts already overlapping are skipped: `test_move`
+/// answers "can I move", and a body resting in contact with the floor must not
+/// report every motion as blocked.
+pub fn test_motion(
+    from: Vector2,
+    rotation: f32,
+    shape: &Shape2D,
+    motion: Vector2,
+    bodies: &[&PhysicsBody2D],
+) -> (bool, Vector2) {
+    let steps = sweep_steps(motion, shape);
+    let step = motion * (1.0 / steps as f32);
+
+    let overlaps_at = |pos: Vector2, other: &PhysicsBody2D| -> bool {
+        let tf = Transform2D::from_rotation_origin(rotation, pos);
+        let other_tf = body_transform(other);
+        collision::test_collision(shape, &tf, &other.shape, &other_tf)
+            .map(|r| r.colliding && r.depth > 0.0)
+            .unwrap_or(false)
+    };
+
+    // Anything already touching at the start is not an obstacle to this motion.
+    let ignored: Vec<bool> = bodies.iter().map(|b| overlaps_at(from, b)).collect();
+
+    let mut reached = from;
+    for i in 1..=steps {
+        let candidate = from + step * i as f32;
+        let blocked = bodies
+            .iter()
+            .enumerate()
+            .any(|(bi, b)| !ignored[bi] && overlaps_at(candidate, b));
+        if blocked {
+            return (true, reached - from);
+        }
+        reached = candidate;
+    }
+    (false, motion)
+}
+
 /// The smallest half-extent of a shape — the dimension a sweep must not skip.
 fn shape_min_extent(shape: &Shape2D) -> f32 {
     match shape {

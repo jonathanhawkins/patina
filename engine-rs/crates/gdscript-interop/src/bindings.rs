@@ -815,6 +815,85 @@ pub trait SceneAccess {
         false
     }
 
+    // -- PhysicsServer2D, server-side API (pat-0q2kx.200) -------------------
+    //
+    // Godot scripts can drive physics without nodes through the
+    // `PhysicsServer2D` singleton (`servers/physics_server_2d.cpp`). Vectors are
+    // `(f32, f32)` tuples to match the convention already used by
+    // `get_input_vector` here rather than pulling a math crate into the trait.
+    //
+    // The defaults describe a host with no physics server bound: RID creation
+    // yields 0 (Godot's invalid RID) and queries report nothing, so a script
+    // running under a bare interpreter degrades instead of panicking.
+
+    /// `PhysicsServer2D.circle_shape_create()` — a fresh circle shape RID.
+    fn physics2d_circle_shape_create(&mut self) -> u64 {
+        0
+    }
+
+    /// `PhysicsServer2D.rectangle_shape_create()` — a fresh rectangle shape RID.
+    fn physics2d_rectangle_shape_create(&mut self) -> u64 {
+        0
+    }
+
+    /// `PhysicsServer2D.shape_set_data(shape, radius)` for a circle shape.
+    fn physics2d_shape_set_data_radius(&mut self, _shape: u64, _radius: f32) -> bool {
+        false
+    }
+
+    /// `PhysicsServer2D.shape_set_data(shape, extents)` for a rectangle shape.
+    fn physics2d_shape_set_data_extents(&mut self, _shape: u64, _extents: (f32, f32)) -> bool {
+        false
+    }
+
+    /// `PhysicsServer2D.body_create()` — a fresh body RID, not yet in a space.
+    fn physics2d_body_create(&mut self) -> u64 {
+        0
+    }
+
+    /// `PhysicsServer2D.body_set_space(body, space)` — admits the body to a
+    /// space, which is what actually puts it in the simulated world.
+    fn physics2d_body_set_space(&mut self, _body: u64, _space: u64) -> bool {
+        false
+    }
+
+    /// `PhysicsServer2D.body_add_shape(body, shape)`.
+    fn physics2d_body_add_shape(&mut self, _body: u64, _shape: u64) -> bool {
+        false
+    }
+
+    /// `PhysicsServer2D.body_set_state(body, state, value)` for the Vector2
+    /// states — `TRANSFORM` (0) and `LINEAR_VELOCITY` (2).
+    fn physics2d_body_set_state_vec2(
+        &mut self,
+        _body: u64,
+        _state: i64,
+        _value: (f32, f32),
+    ) -> bool {
+        false
+    }
+
+    /// The body's current position, or `None` when the RID is not in a space.
+    fn physics2d_body_get_position(&self, _body: u64) -> Option<(f32, f32)> {
+        None
+    }
+
+    /// `PhysicsServer2D.body_test_motion(body, motion)` — `(collided, travel)`,
+    /// or `None` when the RID is not in a space.
+    fn physics2d_body_test_motion(
+        &self,
+        _body: u64,
+        _motion: (f32, f32),
+    ) -> Option<(bool, (f32, f32))> {
+        None
+    }
+
+    /// `PhysicsBody2D.test_move(motion)` on a scene node — whether the motion
+    /// would be blocked.
+    fn physics2d_node_test_move(&self, _node: u64, _motion: (f32, f32)) -> bool {
+        false
+    }
+
     /// Whether `_physics_process` runs on `node`
     /// (`Node.is_physics_processing`).
     fn is_physics_processing(&self, _node: u64) -> bool {

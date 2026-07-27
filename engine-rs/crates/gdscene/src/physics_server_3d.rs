@@ -39,6 +39,12 @@ fn body_type_for_class_3d(class_name: &str) -> Option<BodyType3D> {
         "RigidBody3D" => Some(BodyType3D::Rigid),
         "StaticBody3D" => Some(BodyType3D::Static),
         "CharacterBody3D" => Some(BodyType3D::Kinematic),
+        // A ragdoll bone registers as Kinematic so it follows the animated bone
+        // pose, and `start_ragdoll_simulation` flips it to Rigid — matching
+        // Godot, where a PhysicalBone3D is inert until
+        // `physical_bones_start_simulation()` hands it to the solver
+        // (pat-0q2kx.203).
+        "PhysicalBone3D" => Some(BodyType3D::Kinematic),
         _ => None,
     }
 }
@@ -107,6 +113,62 @@ fn joint_frame_in_body(tree: &SceneTree, body_node: NodeId, joint: &Transform3D)
         x: inverse.xform(joint.basis.x).normalized(),
         z: inverse.xform(joint.basis.z).normalized(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Ragdoll helpers (pat-0q2kx.203)
+// ---------------------------------------------------------------------------
+
+/// Marks a `PhysicalBoneSimulator3D` as actively simulating.
+///
+/// Godot keeps this as internal simulator state; carrying it as a node property
+/// keeps it observable from a test and from the inspector without a parallel
+/// side table that could drift out of sync with the tree.
+pub const RAGDOLL_SIMULATING_PROP: &str = "__ragdoll_simulating";
+
+/// Walks up from a node to the first ancestor of `class_name`.
+fn ancestor_of_class(tree: &SceneTree, from: NodeId, class_name: &str) -> Option<NodeId> {
+    let mut current = tree.get_node(from)?.parent();
+    while let Some(id) = current {
+        let node = tree.get_node(id)?;
+        if node.class_name() == class_name {
+            return Some(id);
+        }
+        current = node.parent();
+    }
+    None
+}
+
+/// The `PhysicalBoneSimulator3D` governing a `PhysicalBone3D`.
+fn simulator_for_bone(tree: &SceneTree, bone: NodeId) -> Option<NodeId> {
+    ancestor_of_class(tree, bone, "PhysicalBoneSimulator3D")
+}
+
+/// Every `PhysicalBone3D` governed by `simulator`.
+fn ragdoll_bones_under(tree: &SceneTree, simulator: NodeId) -> Vec<NodeId> {
+    tree.all_nodes_in_tree_order()
+        .into_iter()
+        .filter(|id| {
+            tree.get_node(*id)
+                .is_some_and(|n| n.class_name() == "PhysicalBone3D")
+                && simulator_for_bone(tree, *id) == Some(simulator)
+        })
+        .collect()
+}
+
+/// Resolves a `PhysicalBone3D` to the `(skeleton, bone_index)` it drives.
+///
+/// Godot binds by **name** (`bone_name`), resolving to an index at runtime —
+/// so a `.tscn` that reorders bones still binds correctly.
+fn bone_binding(tree: &SceneTree, bone_node: NodeId) -> Option<(NodeId, usize)> {
+    let simulator = simulator_for_bone(tree, bone_node)?;
+    let skeleton = ancestor_of_class(tree, simulator, "Skeleton3D")?;
+    let name = match tree.get_node(bone_node)?.get_property("bone_name") {
+        Variant::String(s) if !s.is_empty() => s,
+        _ => return None,
+    };
+    let idx = crate::skeleton3d::find_bone(tree, skeleton, &name)?;
+    Some((skeleton, idx))
 }
 
 /// Reads a float property from a 3D node, defaulting to `default`.
@@ -379,6 +441,14 @@ pub struct PhysicsServer3D {
     last_contact_events: Vec<(BodyId3D, BodyId3D, bool)>,
     /// `Joint3D` scene nodes registered into the world (pat-0q2kx.118).
     node_to_joint: HashMap<NodeId, JointId3D>,
+    /// Auto-created ragdoll joints, keyed by the `PhysicalBone3D` node they
+    /// constrain (pat-0q2kx.203).
+    ///
+    /// Deliberately NOT stored in `node_to_joint`: that map's stale sweep in
+    /// `sync_joints` drops every entry whose node is not one of the five
+    /// authored `Joint3D` classes, which would delete these on the very next
+    /// sync and let the ragdoll fall apart.
+    ragdoll_joints: HashMap<NodeId, JointId3D>,
     /// Source of joint ids. `PhysicsWorld3D::add_joint` keeps whatever id the
     /// joint was built with, so the server is what has to hand out unique ones.
     next_joint_id: u64,
@@ -398,6 +468,7 @@ impl PhysicsServer3D {
             previous_contacts: HashSet::new(),
             last_contact_events: Vec::new(),
             node_to_joint: HashMap::new(),
+            ragdoll_joints: HashMap::new(),
             next_joint_id: 1,
             gravity: Vector3::new(0.0, -9.8, 0.0),
         }
@@ -415,6 +486,7 @@ impl PhysicsServer3D {
             previous_contacts: HashSet::new(),
             last_contact_events: Vec::new(),
             node_to_joint: HashMap::new(),
+            ragdoll_joints: HashMap::new(),
             next_joint_id: 1,
             gravity,
         }
@@ -578,6 +650,179 @@ impl PhysicsServer3D {
     /// A joint naming a node that is not a registered body is skipped rather
     /// than guessed at: a half-connected joint would yank its one real body
     /// toward the origin.
+    /// Godot's `PhysicalBoneSimulator3D.physical_bones_start_simulation()`
+    /// (pat-0q2kx.203).
+    ///
+    /// Flips every `PhysicalBone3D` under `simulator` from Kinematic (following
+    /// the animated pose) to Rigid, and auto-creates the joint tying each bone's
+    /// body to its **parent bone's** body. Without those joints the bodies are
+    /// independent boxes and the ragdoll scatters instead of hanging.
+    ///
+    /// Known limitation, reported with the bead: only `JOINT_TYPE_PIN` is
+    /// modelled faithfully. Cone/hinge/slider/6DOF bones still receive a pin so
+    /// the chain holds together, which constrains position but not the
+    /// per-type angular limits.
+    /// `only` restricts which bones are handed to the solver, matching Godot's
+    /// optional `bones` argument; an empty slice simulates all of them. Bones
+    /// left out stay Kinematic and act as anchors — which is how a ragdoll
+    /// hangs from a fixed hip instead of falling as a loose pile. Joints are
+    /// still created for excluded bones, or the chain would not be attached to
+    /// its anchor at all.
+    pub fn start_ragdoll_simulation(
+        &mut self,
+        tree: &mut SceneTree,
+        simulator: NodeId,
+        only: &[String],
+    ) {
+        let bones = ragdoll_bones_under(tree, simulator);
+
+        // bone index -> the PhysicalBone3D node driving it, so a child bone can
+        // find the body it must be jointed to.
+        let mut by_bone_idx: HashMap<usize, NodeId> = HashMap::new();
+        for &b in &bones {
+            if let Some((_, idx)) = bone_binding(tree, b) {
+                by_bone_idx.insert(idx, b);
+            }
+        }
+
+        for &bone_node in &bones {
+            let Some(body_id) = self.node_to_body.get(&bone_node).copied() else {
+                continue;
+            };
+            let simulate_this = only.is_empty()
+                || tree.get_node(bone_node).is_some_and(|n| {
+                    matches!(n.get_property("bone_name"), Variant::String(ref s) if only.iter().any(|b| b == s))
+                });
+            if simulate_this {
+                if let Some(body) = self.world.get_body_mut(body_id) {
+                    body.body_type = BodyType3D::Rigid;
+                }
+            }
+
+            // Joint this bone to the body of its parent bone, if that bone is
+            // also simulated. A root bone simply has no joint.
+            if self.ragdoll_joints.contains_key(&bone_node) {
+                continue;
+            }
+            let Some((skeleton, idx)) = bone_binding(tree, bone_node) else {
+                continue;
+            };
+            let parent_idx = crate::skeleton3d::get_bone_parent(tree, skeleton, idx);
+            if parent_idx < 0 {
+                continue;
+            }
+            let Some(&parent_node) = by_bone_idx.get(&(parent_idx as usize)) else {
+                continue;
+            };
+            let Some(parent_body) = self.node_to_body.get(&parent_node).copied() else {
+                continue;
+            };
+
+            // The joint sits at this bone's head — its global rest origin — so
+            // the chain pivots where the bones actually meet.
+            let joint_global = crate::skeleton3d::get_bone_global_pose(tree, skeleton, idx);
+            let frame_child = joint_frame_in_body(tree, bone_node, &joint_global);
+            let frame_parent = joint_frame_in_body(tree, parent_node, &joint_global);
+
+            let id = JointId3D(self.next_joint_id);
+            self.next_joint_id += 1;
+            let joint = Joint3D::Pin(
+                PinJoint3D::new(id, parent_body, body_id)
+                    .with_pivots(frame_parent.pivot, frame_child.pivot),
+            );
+            self.world.add_joint(joint);
+            self.ragdoll_joints.insert(bone_node, id);
+        }
+
+        if let Some(node) = tree.get_node_mut(simulator) {
+            node.set_property(RAGDOLL_SIMULATING_PROP, Variant::Bool(true));
+        }
+    }
+
+    /// Godot's `physical_bones_stop_simulation()`: hands the bones back to the
+    /// animation system by returning them to Kinematic and releasing the
+    /// auto-created joints.
+    pub fn stop_ragdoll_simulation(&mut self, tree: &mut SceneTree, simulator: NodeId) {
+        for bone_node in ragdoll_bones_under(tree, simulator) {
+            if let Some(body_id) = self.node_to_body.get(&bone_node).copied() {
+                if let Some(body) = self.world.get_body_mut(body_id) {
+                    body.body_type = BodyType3D::Kinematic;
+                    // Otherwise the stored momentum reappears the moment
+                    // simulation is started again.
+                    body.linear_velocity = Vector3::ZERO;
+                    body.angular_velocity = Vector3::ZERO;
+                }
+            }
+            if let Some(id) = self.ragdoll_joints.remove(&bone_node) {
+                // `remove_joint` returns the removed joint; nothing needs it.
+                let _ = self.world.remove_joint(id);
+            }
+        }
+
+        if let Some(node) = tree.get_node_mut(simulator) {
+            node.set_property(RAGDOLL_SIMULATING_PROP, Variant::Bool(false));
+        }
+    }
+
+    /// Writes each simulated bone body's transform back onto its skeleton bone
+    /// so the skinned mesh follows the ragdoll.
+    ///
+    /// Runs only for simulators that are actually simulating — otherwise this
+    /// would overwrite animation output with the kinematic bodies' own poses
+    /// every tick, freezing the character.
+    pub fn write_back_ragdoll_poses(&self, tree: &mut SceneTree) {
+        struct Writeback {
+            skeleton: NodeId,
+            bone_idx: usize,
+            global: Transform3D,
+        }
+        let mut writebacks: Vec<Writeback> = Vec::new();
+
+        for bone_node in tree.all_nodes_in_tree_order() {
+            let is_bone = tree
+                .get_node(bone_node)
+                .is_some_and(|n| n.class_name() == "PhysicalBone3D");
+            if !is_bone {
+                continue;
+            }
+            let Some(simulator) = simulator_for_bone(tree, bone_node) else {
+                continue;
+            };
+            let simulating = tree.get_node(simulator).is_some_and(|n| {
+                matches!(n.get_property(RAGDOLL_SIMULATING_PROP), Variant::Bool(true))
+            });
+            if !simulating {
+                continue;
+            }
+            let Some((skeleton, bone_idx)) = bone_binding(tree, bone_node) else {
+                continue;
+            };
+            let Some(body_id) = self.node_to_body.get(&bone_node).copied() else {
+                continue;
+            };
+            let Some(body) = self.world.get_body(body_id) else {
+                continue;
+            };
+
+            writebacks.push(Writeback {
+                skeleton,
+                bone_idx,
+                global: Transform3D {
+                    basis: gdcore::math3d::Basis::from_quaternion(body.rotation),
+                    origin: body.position,
+                },
+            });
+        }
+
+        // Applied parent-first: `set_bone_global_pose` solves against the
+        // parent's CURRENT global pose, so writing a child before its parent
+        // would solve against a stale parent and drift down the chain.
+        writebacks.sort_by_key(|w| w.bone_idx);
+        for w in writebacks {
+            crate::skeleton3d::set_bone_global_pose(tree, w.skeleton, w.bone_idx, w.global);
+        }
+    }
+
     fn sync_joints(&mut self, tree: &SceneTree, all_nodes: &[NodeId]) {
         let mut current: HashSet<NodeId> = HashSet::new();
         for &nid in all_nodes {
@@ -972,6 +1217,17 @@ impl PhysicsServer3D {
                 area.gravity_direction =
                     vec3_prop_3d(tree, nid, "gravity_direction", Vector3::new(0.0, -1.0, 0.0));
                 area.gravity_point = truthy_prop_3d(tree, nid, "gravity_point", false);
+                // Point-gravity shape (pat-0q2kx.193). Defaults from Area3D.xml:
+                // the centre offset is Vector3(0, -1, 0) and the unit distance
+                // is 0.0, which means constant strength rather than falloff.
+                area.gravity_point_center = vec3_prop_3d(
+                    tree,
+                    nid,
+                    "gravity_point_center",
+                    Vector3::new(0.0, -1.0, 0.0),
+                );
+                area.gravity_point_unit_distance =
+                    float_prop_3d(tree, nid, "gravity_point_unit_distance", 0.0) as f32;
                 area.linear_damp = float_prop_3d(tree, nid, "linear_damp", 0.1) as f32;
                 area.angular_damp = float_prop_3d(tree, nid, "angular_damp", 0.1) as f32;
             }

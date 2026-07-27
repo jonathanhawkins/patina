@@ -476,6 +476,29 @@ pub struct MainLoop {
     nav_agents_2d: HashMap<NodeId, NavigationAgent2D>,
     /// Per-node 3D navigation agents, keyed by node id (pat-u3l8c.5).
     nav_agents_3d: HashMap<NodeId, NavigationAgent3D>,
+    /// `CollisionObject2D`s the pointer was inside on the previous pick pass
+    /// (pat-0q2kx.199).
+    ///
+    /// Hover is a *transition*, so it cannot be derived from one frame's hit
+    /// set alone — `mouse_entered`/`mouse_exited` fire only on the difference
+    /// against this set. Godot keeps the same state on the viewport
+    /// (`Viewport::_process_picking`'s `physics_2d_mouseover`).
+    hovered_pickables: std::collections::HashSet<NodeId>,
+    /// `CollisionObject3D`s the pointer was over on the previous 3D pick pass —
+    /// the 3D twin of [`Self::hovered_pickables`] (pat-0q2kx.202). Godot keeps
+    /// these separately too (`physics_object_over` vs `physics_2d_mouseover`):
+    /// a pointer can be over a 2D Control *and* a 3D body at once, and merging
+    /// the sets would make either one's exit cancel the other's enter.
+    hovered_pickables_3d: std::collections::HashSet<NodeId>,
+    /// Size of the surface mouse positions are expressed in, used to unproject
+    /// a screen point through the current `Camera3D` (pat-0q2kx.202).
+    ///
+    /// Defaults to Godot's own `display/window/size/viewport_{width,height}`
+    /// defaults, 1152x648. A host rendering at another size must call
+    /// [`Self::set_viewport_size`], or every pick ray is aimed at the wrong
+    /// part of the frustum — silently, since a wrong ray still hits *something*
+    /// often enough to look plausible.
+    viewport_size: (u32, u32),
 }
 
 /// Reads a numeric node property as `f32`, accepting either a `Float` or an
@@ -568,6 +591,9 @@ impl MainLoop {
             particles_3d: HashMap::new(),
             nav_agents_2d: HashMap::new(),
             nav_agents_3d: HashMap::new(),
+            hovered_pickables: std::collections::HashSet::new(),
+            hovered_pickables_3d: std::collections::HashSet::new(),
+            viewport_size: (1152, 648),
         }
     }
 
@@ -1813,6 +1839,26 @@ impl MainLoop {
         &mut self.physics_server_3d
     }
 
+    /// Godot's `PhysicalBoneSimulator3D.physical_bones_start_simulation()`
+    /// (pat-0q2kx.203): hands the simulator's bones to the physics solver.
+    ///
+    /// Lives on `MainLoop` rather than being called as
+    /// `physics_server_3d_mut().start_ragdoll_simulation(tree_mut(), ..)`
+    /// because that borrows `self` mutably twice; here the server and the tree
+    /// are disjoint fields.
+    /// `only` names the bones to simulate; empty simulates all of them.
+    pub fn physical_bones_start_simulation(&mut self, simulator: NodeId, only: &[String]) {
+        self.physics_server_3d
+            .start_ragdoll_simulation(&mut self.tree, simulator, only);
+    }
+
+    /// Godot's `physical_bones_stop_simulation()`: returns the bones to
+    /// animation control.
+    pub fn physical_bones_stop_simulation(&mut self, simulator: NodeId) {
+        self.physics_server_3d
+            .stop_ragdoll_simulation(&mut self.tree, simulator);
+    }
+
     /// Returns a reference to the audio bridge.
     pub fn audio_bridge(&self) -> &AudioServerBridge {
         &self.audio_bridge
@@ -1904,15 +1950,190 @@ impl MainLoop {
             })
             .collect();
 
+        // -- hover transitions (pat-0q2kx.199) --
+        // Resolved before dispatch on purpose: enter/exit are notifications, not
+        // consumable input. Were they emitted inside the loop below, a script
+        // that handles the click would trip the `is_input_handled` return and
+        // strand the pointer as permanently "inside" a collider it has left.
+        let current: std::collections::HashSet<NodeId> = hits.iter().copied().collect();
+        let exited: Vec<NodeId> = self
+            .hovered_pickables
+            .difference(&current)
+            .copied()
+            .collect();
+        let entered: Vec<NodeId> = current
+            .difference(&self.hovered_pickables)
+            .copied()
+            .collect();
+        self.hovered_pickables = current;
+
+        // Exits precede entries, matching Godot: a pointer sliding from one
+        // collider onto an overlapping one releases the old before taking the
+        // new, so a script tracking "what am I over" never sees two at once.
+        for nid in exited {
+            self.tree.emit_signal(nid, "mouse_exited", &[]);
+        }
+        for nid in entered {
+            self.tree.emit_signal(nid, "mouse_entered", &[]);
+        }
+
         let payload = crate::scene_tree::input_event_to_variant(event);
         for nid in hits {
             if self.tree.is_input_handled() {
                 return;
             }
+            // Godot delivers picking to the `input_event` signal as well as the
+            // virtual method. Only the method was wired, so the ordinary case —
+            // a scene connecting `input_event` in the editor, with no script on
+            // the collider at all — received nothing.
+            //
+            // The signal carries just the event, matching the argument list the
+            // committed `_input_event` call above already established. Godot's
+            // full `(viewport, event, shape_idx)` is not reproducible yet:
+            // `colliders_at_point` returns node ids with the shape index already
+            // discarded, and passing a placeholder `0` would be wrong for any
+            // body with more than one shape.
+            self.tree
+                .emit_signal(nid, "input_event", &[payload.clone()]);
             let _ = self
                 .tree
                 .call_script_method(nid, "_input_event", &[payload.clone()]);
         }
+    }
+
+    /// Sets the surface size mouse positions are measured in, so 3D picking can
+    /// unproject a screen point through the current `Camera3D` (pat-0q2kx.202).
+    pub fn set_viewport_size(&mut self, width: u32, height: u32) {
+        self.viewport_size = (width.max(1), height.max(1));
+    }
+
+    /// The surface size used for 3D pick rays.
+    pub fn viewport_size(&self) -> (u32, u32) {
+        self.viewport_size
+    }
+
+    /// Casts the pointer through the current `Camera3D` into the 3D physics
+    /// world and dispatches `input_event` / `mouse_entered` / `mouse_exited` to
+    /// the `CollisionObject3D` it hits (pat-0q2kx.202).
+    ///
+    /// `Viewport::_process_picking` (upstream/godot/scene/main/viewport.cpp:750)
+    /// unprojects each unhandled mouse event through the current camera, raycasts
+    /// the 3D space, and dispatches to the hit object when its
+    /// `input_ray_pickable` is set.
+    ///
+    /// Every piece existed and none of them were joined: `project_ray_origin` /
+    /// `project_ray_normal` (`camera3d.rs:854`/`:885`) had **no callers at all**,
+    /// `PhysicsRayQuery3D` was only reached from `RayCast3D` nodes, and
+    /// `input_ray_pickable` appeared solely as an inspector schema string. So a
+    /// click never reached a 3D body no matter how the scene was authored.
+    ///
+    /// This is deliberately the same shape as [`Self::physics_pick_input`] — the
+    /// 2D twin two functions up — including the ordering rules, which are load
+    /// bearing and were worked out there.
+    fn physics_pick_input_3d(&mut self, event: &InputEvent) {
+        let position = match event {
+            InputEvent::MouseButton { position, .. } => *position,
+            InputEvent::MouseMotion { position, .. } => *position,
+            // Picking is a pointer-space query; keys have no cursor position.
+            _ => return,
+        };
+        if self.tree.is_input_handled() {
+            return;
+        }
+        // No current camera means no frustum to unproject through. Godot skips
+        // 3D picking entirely in that case rather than guessing a view.
+        let Some(camera) = crate::camera3d::current_camera3d(&self.tree) else {
+            return;
+        };
+        // ⚠️ This stage runs BEFORE the physics phase, so the 3D world reflects
+        // the *previous* frame. On the very first `step` of a fresh scene it is
+        // still empty — the 3D server registers lazily inside `sync_to_physics`
+        // — so a click delivered on frame 1 hits nothing. Godot picks inside the
+        // physics frame instead, against an already-updated space. Matching the
+        // 2D twin's placement was chosen over matching Godot's, because the
+        // handled-state this stage reads is what lets a Control swallow a click
+        // before the world sees it.
+
+        let (vw, vh) = self.viewport_size;
+        let from = crate::camera3d::project_ray_origin(&self.tree, camera, position, vw, vh);
+        let dir = crate::camera3d::project_ray_normal(&self.tree, camera, position, vw, vh);
+        // Godot casts to the camera's far plane, so a body beyond the view
+        // distance is not pickable even though it is in front of the camera.
+        let far = crate::node3d::get_far(&self.tree, camera) as f32;
+        let to = from + dir * far;
+
+        let mut query = gdphysics3d::PhysicsRayQuery3D::new(from, to);
+        // Picking ignores collision layers — Godot gates it on
+        // `input_ray_pickable`, not on the mask — so every layer stays in.
+        query.collide_with_bodies = true;
+        query.collide_with_areas = true;
+
+        // Resolve to a scene node and release the physics borrow before any
+        // script runs: a script reached through `input_event` can mutate the
+        // tree.
+        let hit = query.intersect(self.physics_server_3d.world().bodies());
+        let hit = hit.and_then(|h| {
+            let nid = self.physics_server_3d.node_for_body(h.body_id)?;
+            // ⚠️ Godot's default is `input_ray_pickable = true`, so a body that
+            // never mentions the property still picks. Only an explicit `false`
+            // opts out.
+            let pickable = self.tree.get_node(nid).is_some_and(|n| {
+                !matches!(n.get_property("input_ray_pickable"), Variant::Bool(false))
+            });
+            pickable.then_some((nid, h.point, h.normal))
+        });
+
+        // -- hover transitions --
+        // Resolved before dispatch, for the reason the 2D twin documents:
+        // enter/exit are notifications, not consumable input. Emitting them
+        // inside the dispatch below would let a script that handles the click
+        // trip the `is_input_handled` return and strand the pointer as
+        // permanently "over" a body it has left.
+        let current: std::collections::HashSet<NodeId> =
+            hit.iter().map(|(nid, _, _)| *nid).collect();
+        let exited: Vec<NodeId> = self
+            .hovered_pickables_3d
+            .difference(&current)
+            .copied()
+            .collect();
+        let entered: Vec<NodeId> = current
+            .difference(&self.hovered_pickables_3d)
+            .copied()
+            .collect();
+        self.hovered_pickables_3d = current;
+
+        // Exits precede entries, matching Godot and the 2D twin.
+        for nid in exited {
+            self.tree.emit_signal(nid, "mouse_exited", &[]);
+        }
+        for nid in entered {
+            self.tree.emit_signal(nid, "mouse_entered", &[]);
+        }
+
+        let Some((nid, point, normal)) = hit else {
+            return;
+        };
+        if self.tree.is_input_handled() {
+            return;
+        }
+
+        // Godot's signature is
+        // `input_event(camera, event, event_position, normal, shape_idx)`.
+        //
+        // ⚠️ `shape_idx` is omitted, for the same reason the 2D twin omits it:
+        // the ray result carries a `BodyId3D`, not which of that body's shapes
+        // was struck, and a placeholder `0` would be silently wrong for any body
+        // with more than one shape. The four arguments that ARE emitted are the
+        // real values.
+        let payload = crate::scene_tree::input_event_to_variant(event);
+        let args = [
+            Variant::ObjectId(camera.object_id()),
+            payload.clone(),
+            Variant::Vector3(point),
+            Variant::Vector3(normal),
+        ];
+        self.tree.emit_signal(nid, "input_event", &args);
+        let _ = self.tree.call_script_method(nid, "_input_event", &args);
     }
 
     /// Sets the [`InputMap`] that maps physical events to named actions.
@@ -2228,6 +2449,27 @@ impl MainLoop {
                 // here rather than in `push_input` because it needs the physics
                 // world, which the scene tree does not own (pat-0q2kx.138).
                 self.physics_pick_input(&event);
+                // 3D picking runs in the same stage and AFTER the 2D pass, so a
+                // 2D collider that handles the click stops it reaching the world
+                // behind it — matching Godot, where the 2D pass is dispatched
+                // first and each dispatch can mark the event handled
+                // (pat-0q2kx.202).
+                self.physics_pick_input_3d(&event);
+
+                // -- touch-button phase (pat-0q2kx.190) --
+                // TouchScreenButton hit-tests the pointer against its shape (or
+                // texture) and injects its `action`, so an on-screen control
+                // drives the same actions a key binding would. The edits come
+                // back rather than being applied in place because the routing
+                // holds the tree borrow while `input_state` is a sibling field.
+                for edit in crate::behavioral_2d::route_touch_screen_buttons(&mut self.tree, &event)
+                {
+                    if edit.pressed {
+                        self.input_state.action_press(&edit.action, 1.0);
+                    } else {
+                        self.input_state.action_release(&edit.action);
+                    }
+                }
             }
         }
 
@@ -2291,6 +2533,13 @@ impl MainLoop {
             self.physics_server_3d.step(physics_dt as f32);
             self.physics_server_3d.sync_from_physics(&mut self.tree);
 
+            // -- ragdoll writeback (pat-0q2kx.203) --
+            // Simulated PhysicalBone3D bodies push their transforms onto the
+            // Skeleton3D bone poses, so the skinned mesh follows the ragdoll.
+            // After sync_from_physics so it writes THIS tick's solved bodies.
+            self.physics_server_3d
+                .write_back_ragdoll_poses(&mut self.tree);
+
             // Drive CharacterBody3D nodes, mirroring the 2D character pass
             // above. Runs AFTER step/sync so the sweep tests against this
             // tick's body positions. Nothing called the (already complete)
@@ -2325,7 +2574,15 @@ impl MainLoop {
             self.tree
                 .emit_signal(physics_frame_root, "physics_frame", &[]);
             self.tree.process_internal_physics_frame();
+            // Bind the physics server for the script phase so a
+            // `_physics_process` handler can drive `PhysicsServer2D` directly
+            // (pat-0q2kx.200). Bracketed tightly around the phase: the tree
+            // holds only the address, so it must not outlive this statement, and
+            // the next thing to touch the server is the following tick's step.
+            self.tree
+                .set_script_physics_server(&mut self.physics_server);
             self.tree.process_physics_frame_with_scripts(physics_dt);
+            self.tree.clear_script_physics_server();
             self.physics_accumulator -= physics_dt;
             self.physics_time += physics_dt;
             physics_steps += 1;
@@ -2363,6 +2620,11 @@ impl MainLoop {
             // AnimatedSprite2D advances its own frame counter in the idle phase,
             // independent of any AnimationPlayer (pat-0q2kx.74).
             self.tree.process_animated_sprites(delta_secs);
+            // VideoStreamPlayer advances in the same idle phase and emits
+            // `finished` at the end of a non-looping stream. Inside the `paused`
+            // guard on purpose: Godot's SceneTree pause stops video with
+            // everything else (pat-0q2kx.182).
+            self.tree.process_video_players(delta_secs);
             self.tree.process_tweens(delta_secs);
 
             // -- skeleton phase (pat-0q2kx.3) --
@@ -2382,6 +2644,28 @@ impl MainLoop {
             // Project PathFollow2D/3D nodes onto their parent Path's curve each
             // frame so their transform tracks `progress` (and any auto-advance).
             self.process_path_follows(delta_secs as f32);
+
+            // -- behavioral 2D nodes phase (pat-0q2kx.190) --
+            // RemoteTransform2D copies its transform onto its remote target,
+            // then the visibility notifiers test their rects against the
+            // camera-visible rect and emit screen_entered/screen_exited. The
+            // remote push runs first so a notifier moved by one this frame is
+            // tested at the position it actually ended up in.
+            crate::behavioral_2d::process_remote_transforms(&mut self.tree);
+            crate::behavioral_2d::process_visibility_notifiers(&mut self.tree);
+
+            // -- RemoteTransform3D phase (pat-0q2kx.197) --
+            // The 3D sibling of the pass above: forwards each RemoteTransform3D's
+            // transform onto its remote_path target. `remote_target_transform`
+            // held the per-channel masking all along but had no non-test caller.
+            crate::node3d::process_remote_transforms_3d(&mut self.tree);
+
+            // -- 3D visibility phase (pat-0q2kx.198) --
+            // Frustum-cull each VisibleOnScreenNotifier3D's AABB against the
+            // current Camera3D and emit screen_entered/screen_exited on the
+            // transition. Runs after the remote-transform pass so a notifier
+            // moved by one this frame is tested where it actually ended up.
+            crate::visibility_3d::process_visibility_notifiers_3d(&mut self.tree);
 
             // -- navigation phase (pat-u3l8c.5) --
             // Drive NavigationAgent2D/3D nodes along their computed paths so agents
@@ -2435,7 +2719,14 @@ impl MainLoop {
         self.tree
             .emit_signal(process_frame_root, "process_frame", &[]);
         self.tree.process_internal_frame();
+        // Bound here as well as around the physics phase: `PhysicsServer2D` calls
+        // from `_process` are ordinary Godot, and leaving the idle phase unbound
+        // would hand those scripts an invalid RID with nothing to explain why
+        // (pat-0q2kx.200).
+        self.tree
+            .set_script_physics_server(&mut self.physics_server);
         self.tree.process_frame_with_scripts(delta_secs);
+        self.tree.clear_script_physics_server();
 
         // -- coroutine resume phase (pat-nzgdu.6) --
         // Drive GDScript `await` coroutines: advance SceneTreeTimers once,

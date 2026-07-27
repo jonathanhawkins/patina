@@ -46,11 +46,11 @@ pub mod world;
 pub mod body3d;
 pub mod collision3d;
 pub mod shape3d;
-pub mod softbody3d;
 pub mod vehicle3d;
 pub mod world3d;
-
-pub use softbody3d::{SoftBody3D, SoftBodyId3D};
+// `softbody3d` moved to the `gdphysics3d` crate (pat-0q2kx.204). It is a 3D
+// soft-body solver whose only consumer is `gdphysics3d::world`, so living here
+// forced that crate to reach across into the 2D one for a core 3D type.
 
 // Re-export key types for convenience.
 pub use area2d::{Area2D, AreaId, AreaStore, OverlapEvent, OverlapState};

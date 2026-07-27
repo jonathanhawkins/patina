@@ -166,9 +166,27 @@ pub fn sha256_hex(data: &[u8]) -> String {
 /// + `cbc` crates for a real, tested implementation.
 pub struct AesContext {
     mode: AesMode,
-    key: Option<[u8; 32]>,
+    cipher: AesCipher,
+    /// 16 bytes for AES-128, 32 for AES-256 (pat-0q2kx.206). Was a fixed
+    /// `[u8; 32]`, which is why only AES-256 was expressible.
+    key: Option<Vec<u8>>,
     iv: Option<[u8; 16]>,
     started: bool,
+}
+
+/// Block-chaining mode. Godot's `AESContext` folds this together with
+/// encrypt/decrypt into one enum (`MODE_ECB_ENCRYPT` … `MODE_CBC_DECRYPT`);
+/// they are separate here because [`AesMode`] already existed and
+/// `gdresource::config_file` depends on its meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AesCipher {
+    /// Cipher Block Chaining — needs a 16-byte IV.
+    #[default]
+    Cbc,
+    /// Electronic Codebook — no IV. Identical plaintext blocks encrypt to
+    /// identical ciphertext blocks, which is why Godot's own docs steer callers
+    /// to CBC; it is supported because `AESContext` exposes it.
+    Ecb,
 }
 
 /// AES operation mode.
@@ -185,6 +203,7 @@ impl AesContext {
     pub fn new() -> Self {
         Self {
             mode: AesMode::Encrypt,
+            cipher: AesCipher::Cbc,
             key: None,
             iv: None,
             started: false,
@@ -192,56 +211,154 @@ impl AesContext {
     }
 
     /// Starts the AES context with a 32-byte key and 16-byte IV.
+    ///
+    /// Kept exactly as it was — AES-256-CBC, 32-byte key required —  because
+    /// `gdresource::config_file` encrypts with it and a widened contract here
+    /// would silently change what that writes. Use [`Self::start_cipher`] for
+    /// AES-128 or ECB.
     pub fn start(&mut self, mode: AesMode, key: &[u8], iv: &[u8]) -> Result<(), &'static str> {
         if key.len() != 32 {
             return Err("AES-256 requires a 32-byte key");
         }
-        if iv.len() != 16 {
-            return Err("AES-CBC requires a 16-byte IV");
+        self.start_cipher(AesCipher::Cbc, mode, key, iv)
+    }
+
+    /// Starts the context in an explicit chaining mode, accepting a 16-byte
+    /// (AES-128) or 32-byte (AES-256) key (pat-0q2kx.206).
+    ///
+    /// ECB takes no IV; anything passed is ignored rather than rejected, so a
+    /// script that hands `AESContext.start()` an empty `PackedByteArray` — which
+    /// is what Godot's own ECB examples do — is not turned away.
+    pub fn start_cipher(
+        &mut self,
+        cipher: AesCipher,
+        mode: AesMode,
+        key: &[u8],
+        iv: &[u8],
+    ) -> Result<(), &'static str> {
+        if key.len() != 16 && key.len() != 32 {
+            return Err("AES requires a 16-byte (AES-128) or 32-byte (AES-256) key");
         }
-        let mut k = [0u8; 32];
-        k.copy_from_slice(key);
-        let mut v = [0u8; 16];
-        v.copy_from_slice(iv);
+        let v = match cipher {
+            AesCipher::Cbc => {
+                if iv.len() != 16 {
+                    return Err("AES-CBC requires a 16-byte IV");
+                }
+                let mut v = [0u8; 16];
+                v.copy_from_slice(iv);
+                Some(v)
+            }
+            AesCipher::Ecb => None,
+        };
         self.mode = mode;
-        self.key = Some(k);
-        self.iv = Some(v);
+        self.cipher = cipher;
+        self.key = Some(key.to_vec());
+        self.iv = v;
         self.started = true;
         Ok(())
     }
 
     /// Encrypt or decrypt a full buffer (PKCS7 padded on encrypt).
+    ///
+    /// ⚠️ **Divergence from Godot, deliberately preserved.** Godot's
+    /// `AESContext.update()` does *no* padding: it requires the input to be a
+    /// multiple of 16 and returns the raw blocks. This pads with PKCS7 on
+    /// encrypt and strips it on decrypt. Changing it would alter every file
+    /// `gdresource::config_file` has already encrypted, so the padding stays and
+    /// the divergence is documented rather than papered over. A round-trip
+    /// through this API is self-consistent either way.
     pub fn update(&self, data: &[u8]) -> Result<Vec<u8>, &'static str> {
-        use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
-        type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
-        type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
-
         if !self.started {
             return Err("AES context not started");
         }
         let key = self.key.as_ref().ok_or("AES key missing")?;
+        match self.cipher {
+            AesCipher::Cbc => self.update_cbc(key, data),
+            AesCipher::Ecb => self.update_ecb(key, data),
+        }
+    }
+
+    fn update_cbc(&self, key: &[u8], data: &[u8]) -> Result<Vec<u8>, &'static str> {
+        use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+
         let iv = self.iv.as_ref().ok_or("AES IV missing")?;
         match self.mode {
             AesMode::Encrypt => {
-                let encryptor = Aes256CbcEnc::new(key.into(), iv.into());
                 // Buffer must have room for PKCS7 padding (up to +16).
                 let mut buf = vec![0u8; data.len() + 16];
                 buf[..data.len()].copy_from_slice(data);
-                let out = encryptor
-                    .encrypt_padded_mut::<Pkcs7>(&mut buf, data.len())
-                    .map_err(|_| "AES encrypt failed")?;
+                let out = match key.len() {
+                    16 => cbc::Encryptor::<aes::Aes128>::new(key.into(), iv.into())
+                        .encrypt_padded_mut::<Pkcs7>(&mut buf, data.len()),
+                    _ => cbc::Encryptor::<aes::Aes256>::new(key.into(), iv.into())
+                        .encrypt_padded_mut::<Pkcs7>(&mut buf, data.len()),
+                }
+                .map_err(|_| "AES encrypt failed")?;
                 Ok(out.to_vec())
             }
             AesMode::Decrypt => {
                 if data.is_empty() || data.len() % 16 != 0 {
                     return Err("AES ciphertext length must be multiple of 16");
                 }
-                let decryptor = Aes256CbcDec::new(key.into(), iv.into());
                 let mut buf = data.to_vec();
-                let out = decryptor
-                    .decrypt_padded_mut::<Pkcs7>(&mut buf)
-                    .map_err(|_| "AES decrypt failed")?;
+                let out = match key.len() {
+                    16 => cbc::Decryptor::<aes::Aes128>::new(key.into(), iv.into())
+                        .decrypt_padded_mut::<Pkcs7>(&mut buf),
+                    _ => cbc::Decryptor::<aes::Aes256>::new(key.into(), iv.into())
+                        .decrypt_padded_mut::<Pkcs7>(&mut buf),
+                }
+                .map_err(|_| "AES decrypt failed")?;
                 Ok(out.to_vec())
+            }
+        }
+    }
+
+    /// ECB, block by block. The `ecb` crate is not a dependency and adding one
+    /// for a mode this small is not worth it — ECB *is* "apply the block cipher
+    /// to each block independently", so it is written out here.
+    fn update_ecb(&self, key: &[u8], data: &[u8]) -> Result<Vec<u8>, &'static str> {
+        use aes::cipher::generic_array::GenericArray;
+        use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+
+        match self.mode {
+            AesMode::Encrypt => {
+                let mut buf = pkcs7_pad(data);
+                match key.len() {
+                    16 => {
+                        let c = aes::Aes128::new(GenericArray::from_slice(key));
+                        for block in buf.chunks_mut(16) {
+                            c.encrypt_block(GenericArray::from_mut_slice(block));
+                        }
+                    }
+                    _ => {
+                        let c = aes::Aes256::new(GenericArray::from_slice(key));
+                        for block in buf.chunks_mut(16) {
+                            c.encrypt_block(GenericArray::from_mut_slice(block));
+                        }
+                    }
+                }
+                Ok(buf)
+            }
+            AesMode::Decrypt => {
+                if data.is_empty() || data.len() % 16 != 0 {
+                    return Err("AES ciphertext length must be multiple of 16");
+                }
+                let mut buf = data.to_vec();
+                match key.len() {
+                    16 => {
+                        let c = aes::Aes128::new(GenericArray::from_slice(key));
+                        for block in buf.chunks_mut(16) {
+                            c.decrypt_block(GenericArray::from_mut_slice(block));
+                        }
+                    }
+                    _ => {
+                        let c = aes::Aes256::new(GenericArray::from_slice(key));
+                        for block in buf.chunks_mut(16) {
+                            c.decrypt_block(GenericArray::from_mut_slice(block));
+                        }
+                    }
+                }
+                pkcs7_unpad(&buf)
             }
         }
     }
@@ -259,6 +376,67 @@ impl Default for AesContext {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// PKCS7 pad to the 16-byte block size. A length that is already a multiple of
+/// 16 gains a **whole** extra block — that is the standard, and it is what makes
+/// unpadding unambiguous.
+fn pkcs7_pad(data: &[u8]) -> Vec<u8> {
+    let pad = 16 - (data.len() % 16);
+    let mut out = Vec::with_capacity(data.len() + pad);
+    out.extend_from_slice(data);
+    out.resize(data.len() + pad, pad as u8);
+    out
+}
+
+/// Strips PKCS7 padding, rejecting anything malformed rather than returning a
+/// truncated buffer.
+fn pkcs7_unpad(data: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let pad = *data.last().ok_or("AES decrypt failed")? as usize;
+    if pad == 0 || pad > 16 || pad > data.len() {
+        return Err("AES decrypt failed");
+    }
+    if data[data.len() - pad..].iter().any(|b| *b as usize != pad) {
+        return Err("AES decrypt failed");
+    }
+    Ok(data[..data.len() - pad].to_vec())
+}
+
+/// Fills `out` with pseudo-random bytes (Godot `Crypto.generate_random_bytes`).
+///
+/// ⚠️ **NOT cryptographically secure.** This draws from
+/// [`crate::rng`], a SystemTime-seeded xorshift — the same stream `randi()`
+/// serves — because `getrandom` is not a dependency of this crate and a worker
+/// adding one unilaterally is not appropriate. It is fine for nonces, IVs in
+/// tests, and session ids; it must not be used to generate keys. Replacing the
+/// body with `getrandom` is the whole fix and needs no call-site changes.
+pub fn generate_random_bytes(len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    while out.len() < len {
+        let word = crate::rng::randi().to_le_bytes();
+        let take = (len - out.len()).min(4);
+        out.extend_from_slice(&word[..take]);
+    }
+    out
+}
+
+/// Compares two buffers in time independent of *where* they first differ
+/// (Godot `Crypto.constant_time_compare`).
+///
+/// ⚠️ Unequal lengths return `false` immediately, which does leak the length —
+/// exactly as Godot's own implementation does (`crypto_core.cpp`), since the
+/// caller already knows both lengths.
+pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    // The accumulator is what makes this constant time: no early exit, and the
+    // result depends on every byte.
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 // ---------------------------------------------------------------------------

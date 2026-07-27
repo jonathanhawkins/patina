@@ -311,6 +311,17 @@ impl PhysicsWorld2D {
         self.bodies.len()
     }
 
+    /// Iterates every body in the world, in `BodyId` order so the sequence is
+    /// deterministic (the backing map is unordered) — pat-0q2kx.200.
+    ///
+    /// Needed by the `PhysicsServer2D` sweep APIs, which test a subject against
+    /// every *other* body regardless of which node (if any) owns it.
+    pub fn bodies(&self) -> impl Iterator<Item = &PhysicsBody2D> {
+        let mut ids: Vec<&BodyId> = self.bodies.keys().collect();
+        ids.sort_by_key(|id| id.0);
+        ids.into_iter().filter_map(|id| self.bodies.get(id))
+    }
+
     /// Adds a joint to the world and returns its unique ID.
     pub fn add_joint(&mut self, joint: Joint2D) -> JointId {
         let id = JointId(self.next_joint_id);

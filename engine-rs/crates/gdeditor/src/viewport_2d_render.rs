@@ -20,6 +20,7 @@ use gdscene::control_render::ControlDrawItem;
 use gdscene::node::NodeId;
 use gdscene::tilemap::{self, TILE_SET_PREFIX};
 use gdscene::{canvas_order, control, node2d, SceneTree};
+use gdscript_interop::canvas_server;
 use gdvariant::Variant;
 
 use crate::texture_cache::TextureCache;
@@ -318,11 +319,120 @@ pub fn collect_canvas_items(tree: &SceneTree) -> Vec<Render2DItem> {
             })
         })
         .collect();
+    // -- script-created canvas items (pat-0q2kx.213) --
+    //
+    // `RenderingServer.canvas_item_*` items are parented to a node's canvas item
+    // (`get_canvas_item()`), so they draw under that node's global transform,
+    // layer, clip and light mask. Merging them by iterating the node items above
+    // is what makes that automatic — and it also gives the right visibility
+    // semantics for free: a node filtered out above for being hidden contributes
+    // no script items either, exactly as hiding a Godot node hides the canvas
+    // items attached to it.
+    //
+    // Appended before the sort so a script item's `z_index` participates in the
+    // same ordering as node items rather than always landing on top.
+    if canvas_server::has_any_node_items() {
+        // Cloned because the loop pushes into `items` while reading the host
+        // list; script items never host other script items, so one pass is enough.
+        let hosts: Vec<Render2DItem> = items.clone();
+        for host in &hosts {
+            for ci in canvas_server::items_for_node(host.node_id) {
+                let base = host.global_transform * ci.transform;
+                for cmd in &ci.commands {
+                    let (global_transform, kind) = canvas_command_render(base, cmd);
+                    items.push(Render2DItem {
+                        node_id: host.node_id,
+                        global_transform,
+                        // The item's own modulate composes with the host node's,
+                        // the way a child canvas item's does in Godot.
+                        modulate: Color::new(
+                            host.modulate.r * ci.modulate.r,
+                            host.modulate.g * ci.modulate.g,
+                            host.modulate.b * ci.modulate.b,
+                            host.modulate.a * ci.modulate.a,
+                        ),
+                        z_index: host.z_index + ci.z_index as i64,
+                        canvas_layer: host.canvas_layer,
+                        clip_rect: host.clip_rect,
+                        light_mask: host.light_mask,
+                        kind,
+                    });
+                }
+            }
+        }
+    }
     // Godot draws canvas layers in ascending `layer` order, and within a layer
     // by ascending `z_index`; a stable sort keeps the draw-order walk above as
     // the tiebreaker within the same layer+z.
     items.sort_by_key(|i| (i.canvas_layer, i.z_index));
     items
+}
+
+/// Maps one stored canvas command onto the render list's `(transform, kind)`.
+///
+/// `base` is the host node's global transform composed with the canvas item's
+/// own, so each command only contributes its local placement.
+///
+/// ⚠️ `Circle` is emitted as a filled regular polygon: the rasterizer has no
+/// circle primitive, and a 32-gon at typical canvas sizes is visually a circle.
+/// That is an approximation rather than parity, and it is here rather than
+/// silently dropping the command.
+fn canvas_command_render(
+    base: Transform2D,
+    cmd: &canvas_server::CanvasCommand,
+) -> (Transform2D, Render2DKind) {
+    use canvas_server::CanvasCommand;
+    match cmd {
+        // ColorRect draws from the transform origin, so the rect's own position
+        // rides in the transform.
+        CanvasCommand::Rect { rect, color } => (
+            base * Transform2D::translated(rect.position),
+            Render2DKind::ColorRect {
+                size: rect.size,
+                color: *color,
+            },
+        ),
+        CanvasCommand::Circle {
+            center,
+            radius,
+            color,
+        } => {
+            const SEGMENTS: usize = 32;
+            let points = (0..SEGMENTS)
+                .map(|i| {
+                    let a = (i as f32) * std::f32::consts::TAU / (SEGMENTS as f32);
+                    Vector2::new(radius * a.cos(), radius * a.sin())
+                })
+                .collect();
+            (
+                base * Transform2D::translated(*center),
+                Render2DKind::Polygon {
+                    points,
+                    color: *color,
+                },
+            )
+        }
+        CanvasCommand::Line {
+            from,
+            to,
+            width,
+            color,
+        } => (
+            base,
+            Render2DKind::Line {
+                points: vec![*from, *to],
+                width: *width,
+                color: *color,
+            },
+        ),
+        CanvasCommand::Polygon { points, color } => (
+            base,
+            Render2DKind::Polygon {
+                points: points.clone(),
+                color: *color,
+            },
+        ),
+    }
 }
 
 /// Appends `id` and its subtree to `out` in Godot's draw order.

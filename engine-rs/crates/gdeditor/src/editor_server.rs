@@ -2256,6 +2256,8 @@ fn handle_connection(
         // Mesh toolbar: generate a collision body from a MeshInstance3D
         // (pat-0q2kx.169).
         // Ruler-dragged guides (pat-0q2kx.172).
+        // Navigation bake (pat-0q2kx.188).
+        ("POST", "/api/navigation/bake") => api_navigation_bake(state, &req.body, &mut stream),
         ("GET", "/api/viewport/guides") => api_get_guides(state, &mut stream),
         ("POST", "/api/viewport/guides") => api_post_guides(state, &req.body, &mut stream),
         ("POST", "/api/mesh/create_collision") => {
@@ -4205,6 +4207,123 @@ fn api_get_node(state: &Arc<Mutex<EditorState>>, id_str: &str, stream: &mut TcpS
 }
 
 /// `POST /api/node/add` — adds a new node to the tree.
+/// `POST /api/navigation/bake` — Godot's "Bake NavigationPolygon" toolbar
+/// action for a `NavigationRegion2D` (pat-0q2kx.188).
+///
+/// Body: `{"node_id": u64, "outlines": [[[x,y], …], …], "cell": f32?}`. The
+/// first outline is the traversable area; later outlines inside it are
+/// obstructions to carve.
+///
+/// Outlines arrive in the request rather than being read off the node because
+/// the `.tscn` parser does not read them: `packed_scene.rs` resolves a
+/// NavigationPolygon's `vertices`/`polygons` into `__navmesh_vertices__` /
+/// `__navmesh_polygons__` but never its `outlines`. The editor's outline
+/// editing plugin owns them client-side and posts them here.
+///
+/// The bake writes exactly the two properties the *runtime* already consumes
+/// (`main_loop.rs` `navmesh_polygon_indices`), so a baked region feeds live
+/// path queries with no further plumbing — which is the point of the bead.
+fn api_navigation_bake(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let cell = parsed.get("cell").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+
+    // `[[[x, y], …], …]` — an array of outlines, each an array of points.
+    let mut outlines: Vec<Vec<Vector2>> = Vec::new();
+    if let Some(arr) = parsed.get("outlines").and_then(|v| v.as_array()) {
+        for outline in arr {
+            let Some(points) = outline.as_array() else {
+                continue;
+            };
+            let mut pts = Vec::with_capacity(points.len());
+            for p in points {
+                let Some(xy) = p.as_array() else { continue };
+                if xy.len() < 2 {
+                    continue;
+                }
+                let x = xy[0].as_f64().unwrap_or(0.0) as f32;
+                let y = xy[1].as_f64().unwrap_or(0.0) as f32;
+                pts.push(Vector2::new(x, y));
+            }
+            if pts.len() >= 3 {
+                outlines.push(pts);
+            }
+        }
+    }
+    if outlines.is_empty() {
+        send_error(stream, 400, "no usable outlines (each needs 3+ points)");
+        return;
+    }
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    let class_name = state
+        .scene_tree
+        .get_node(node_id)
+        .map(|n| n.class_name().to_string())
+        .unwrap_or_default();
+    if class_name != "NavigationRegion2D" {
+        send_error(stream, 400, "node is not a NavigationRegion2D");
+        return;
+    }
+
+    let mut nav = gdscene::nav_polygon::NavigationPolygon::new();
+    for outline in outlines {
+        nav.add_outline(outline);
+    }
+    let polygon_count = nav.make_polygons_from_outlines_with_cell(cell);
+
+    // Flatten into the shared vertex list + per-polygon index arrays the
+    // runtime reads. Vertices are not deduplicated: adjacent cells repeat their
+    // shared corners, which costs a little memory but keeps each polygon's
+    // winding independent of its neighbours.
+    let mut vertices: Vec<Vector2> = Vec::new();
+    let mut polygons: Vec<Variant> = Vec::new();
+    for poly in nav.polygons() {
+        let base = vertices.len() as i32;
+        let idx: Vec<i32> = (0..poly.len() as i32).map(|i| base + i).collect();
+        vertices.extend(poly.iter().copied());
+        polygons.push(Variant::PackedInt32Array(idx));
+    }
+
+    let vertex_count = vertices.len();
+    if let Some(node) = state.scene_tree.get_node_mut(node_id) {
+        node.set_property(
+            "__navmesh_vertices__",
+            Variant::PackedVector2Array(vertices),
+        );
+        node.set_property("__navmesh_polygons__", Variant::Array(polygons));
+    }
+    state.scene_modified = true;
+    state.add_log(
+        "info",
+        format!("Baked {polygon_count} navigation polygons for '{class_name}'"),
+    );
+
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"polygon_count":{polygon_count},"vertex_count":{vertex_count}}}"#),
+    );
+}
+
 /// `GET /api/viewport/guides` — the ruler-dragged guide lines (pat-0q2kx.172).
 fn api_get_guides(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let state = state.lock().unwrap();
@@ -6783,6 +6902,20 @@ fn api_set_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     state.redo_stack.clear();
     state.scene_modified = true;
     state.add_log("info", format!("Changed property '{}'", prop_name));
+
+    // Editing an anchor/margin must REFLOW, not just store a number
+    // (pat-0q2kx.19). `control_binding::invalidate_layout` re-resolves the
+    // node's rect, re-arranges it if it is a container, and re-arranges its
+    // parent when the parent is one — so a size-flag or min-size change
+    // propagates to siblings. It had zero callers, which is why an anchor edit
+    // in the inspector changed the stored value and moved nothing on screen.
+    if crate::control_binding::is_layout_property(&prop_name) {
+        let parent_size = Vector2::new(
+            state.viewport_width.max(1) as f32,
+            state.viewport_height.max(1) as f32,
+        );
+        crate::control_binding::invalidate_layout(&mut state.scene_tree, node_id, parent_size);
+    }
 
     // pat-zzgh5: broadcast a mutation event to every `/api/events` subscriber.
     let event = format!(

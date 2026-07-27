@@ -10,6 +10,7 @@
 pub mod autoload_registry;
 pub mod bindings;
 pub mod bridge;
+pub mod canvas_server;
 pub mod coroutine;
 pub mod fuzz_gdscript;
 pub mod global_constants;

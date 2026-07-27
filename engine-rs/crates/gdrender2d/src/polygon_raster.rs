@@ -145,6 +145,84 @@ pub fn fill_polygon_textured(
 /// the segment; `joint` controls interior-vertex fill and `cap` the endpoints.
 /// When `closed` is true the last point connects back to the first (and caps
 /// are not applied).
+/// A polyline whose width and colour vary per point — Godot's `Line2D`
+/// `width_curve` and `gradient` (pat-0q2kx.191).
+///
+/// [`draw_polyline`] takes one width and one colour for the whole stroke, so a
+/// `Line2D` carrying a gradient or a width curve rendered as a flat, uniform
+/// line: the curve and gradient were simply unrepresentable. `widths` and
+/// `colors` are sampled per point and interpolated along each segment; either
+/// may be shorter than `points`, in which case its last entry is held (matching
+/// how a curve with fewer samples than points behaves).
+///
+/// Implemented by stepping each segment and delegating to [`draw_polyline`] for
+/// the sub-segments, so joint and cap handling stay in one place rather than
+/// being reimplemented with subtly different geometry.
+pub fn draw_polyline_shaded(
+    fb: &mut FrameBuffer,
+    points: &[Vector2],
+    widths: &[f32],
+    colors: &[Color],
+    closed: bool,
+    cap: LineCap,
+    joint: LineJoint,
+) {
+    let n = points.len();
+    if n < 2 || widths.is_empty() || colors.is_empty() {
+        return;
+    }
+    // Hold the last entry when the curve/gradient is shorter than the points.
+    let width_at = |i: usize| widths[i.min(widths.len() - 1)];
+    let color_at = |i: usize| colors[i.min(colors.len() - 1)];
+
+    let seg_count = if closed { n } else { n - 1 };
+    for i in 0..seg_count {
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        let (w0, w1) = (width_at(i), width_at((i + 1) % n));
+        let (c0, c1) = (color_at(i), color_at((i + 1) % n));
+
+        let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        if len < 1e-6 {
+            continue;
+        }
+        // One step per pixel of length: fine enough that neighbouring steps
+        // overlap (each is drawn at its own width), coarse enough to stay cheap.
+        let steps = (len.ceil() as usize).max(1);
+        for s in 0..steps {
+            let t0 = s as f32 / steps as f32;
+            let t1 = (s + 1) as f32 / steps as f32;
+            let p0 = Vector2::new(a.x + (b.x - a.x) * t0, a.y + (b.y - a.y) * t0);
+            let p1 = Vector2::new(a.x + (b.x - a.x) * t1, a.y + (b.y - a.y) * t1);
+
+            // Sample at the sub-segment's midpoint so the step's single colour
+            // and width sit at its centre rather than biasing to one end.
+            let tm = (t0 + t1) * 0.5;
+            let w = w0 + (w1 - w0) * tm;
+            let c = Color::new(
+                c0.r + (c1.r - c0.r) * tm,
+                c0.g + (c1.g - c0.g) * tm,
+                c0.b + (c1.b - c0.b) * tm,
+                c0.a + (c1.a - c0.a) * tm,
+            );
+            if w <= 0.0 {
+                continue;
+            }
+            // Interior steps use Round joints so consecutive steps of differing
+            // width leave no notch between them; the caller's `cap` applies only
+            // at the true ends of the stroke.
+            let step_cap = if !closed && i == 0 && s == 0 {
+                cap
+            } else if !closed && i == seg_count - 1 && s == steps - 1 {
+                cap
+            } else {
+                LineCap::None
+            };
+            draw_polyline(fb, &[p0, p1], w, c, false, step_cap, joint);
+        }
+    }
+}
+
 pub fn draw_polyline(
     fb: &mut FrameBuffer,
     points: &[Vector2],

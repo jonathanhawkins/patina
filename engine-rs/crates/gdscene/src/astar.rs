@@ -229,6 +229,24 @@ impl<V: AStarVector> AStar<V> {
     /// Returns an empty vector when either endpoint is missing or disabled, or
     /// when no route exists.
     pub fn get_id_path(&self, from: i64, to: i64) -> Vec<i64> {
+        self.get_id_path_partial(from, to, false)
+    }
+
+    /// [`get_id_path`] with Godot 4's `allow_partial` argument (pat-0q2kx.185).
+    ///
+    /// When the goal is unreachable and `allow_partial` is true, Godot returns
+    /// the path to the reachable point that got CLOSEST to the goal instead of
+    /// an empty vector — which is what lets an agent make progress toward a
+    /// walled-off target rather than standing still.
+    ///
+    /// "Closest" is measured by straight-line distance to the goal among the
+    /// points the search actually reached, matching Godot's choice of the best
+    /// heuristic value seen.
+    ///
+    /// A partial path is never returned when the goal IS reachable, and never
+    /// when the start or goal is disabled — a disabled endpoint means "no path",
+    /// not "get as close as you can".
+    pub fn get_id_path_partial(&self, from: i64, to: i64, allow_partial: bool) -> Vec<i64> {
         let (Some(start), Some(goal)) = (self.points.get(&from), self.points.get(&to)) else {
             return Vec::new();
         };
@@ -239,6 +257,8 @@ impl<V: AStarVector> AStar<V> {
             return vec![from];
         }
         let goal_pos = goal.position;
+        // Best (closest-to-goal) point finalized so far, for `allow_partial`.
+        let mut best: (i64, f32) = (from, start.position.dist(goal_pos));
 
         let mut g_score: HashMap<i64, f32> = HashMap::new();
         let mut came_from: HashMap<i64, i64> = HashMap::new();
@@ -260,6 +280,12 @@ impl<V: AStarVector> AStar<V> {
                 continue;
             }
             let cur = &self.points[&current];
+            // Track the closest point actually reached, so an unreachable goal
+            // can still yield a best-effort prefix.
+            let d = cur.position.dist(goal_pos);
+            if d < best.1 {
+                best = (current, d);
+            }
             let cur_g = g_score[&current];
             for &nb in &cur.neighbors {
                 let np = match self.points.get(&nb) {
@@ -279,6 +305,13 @@ impl<V: AStarVector> AStar<V> {
                     });
                 }
             }
+        }
+        // The goal was never dequeued. With `allow_partial`, hand back the route
+        // to the closest point reached; `best` is still `from` when nothing
+        // improved on the start, and a single-point path is a truthful "you are
+        // already as close as you can get".
+        if allow_partial {
+            return reconstruct(&came_from, from, best.0);
         }
         Vec::new()
     }
@@ -532,6 +565,61 @@ impl AStarGrid2D {
 
     pub fn is_point_solid(&self, id: Vector2i) -> bool {
         self.cells.get(&id).is_some_and(|c| c.solid)
+    }
+
+    /// Marks every cell in a rectangle solid or clear (`fill_solid_region`,
+    /// pat-0q2kx.185).
+    ///
+    /// Carving a wall a cell at a time is the common case in Godot and the
+    /// reason this exists — the per-cell setter is O(area) calls from script,
+    /// which is exactly the loop a game should not be writing.
+    ///
+    /// Cells outside the configured region are skipped rather than erroring, so
+    /// a rectangle that overhangs the grid fills the part that exists. A
+    /// negative or zero extent fills nothing. Returns the number of cells
+    /// changed, which makes "the region was entirely off-grid" observable.
+    pub fn fill_solid_region(&mut self, position: Vector2i, size: Vector2i, solid: bool) -> usize {
+        self.fill_region(position, size, |cell| cell.solid = solid)
+    }
+
+    /// Sets `weight_scale` across a rectangle (`fill_weight_scale_region`).
+    ///
+    /// A negative weight is rejected outright, matching `set_point_weight_scale`
+    /// — a negative edge cost would let A* loop forever chasing a cheaper path.
+    pub fn fill_weight_scale_region(
+        &mut self,
+        position: Vector2i,
+        size: Vector2i,
+        weight_scale: f32,
+    ) -> usize {
+        if weight_scale < 0.0 {
+            return 0;
+        }
+        self.fill_region(position, size, |cell| cell.weight_scale = weight_scale)
+    }
+
+    /// Shared rectangle walk for the region fills.
+    fn fill_region(
+        &mut self,
+        position: Vector2i,
+        size: Vector2i,
+        mut apply: impl FnMut(&mut GridCell),
+    ) -> usize {
+        if size.x <= 0 || size.y <= 0 {
+            return 0;
+        }
+        let mut changed = 0usize;
+        for y in position.y..position.y.saturating_add(size.y) {
+            for x in position.x..position.x.saturating_add(size.x) {
+                let id = Vector2i::new(x, y);
+                if !self.is_in_boundsv(id) {
+                    continue;
+                }
+                apply(self.cells.entry(id).or_default());
+                changed += 1;
+            }
+        }
+        changed
     }
 
     pub fn set_point_weight_scale(&mut self, id: Vector2i, weight_scale: f32) -> bool {

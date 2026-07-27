@@ -137,6 +137,13 @@ pub struct SceneTree {
     /// Per-node animation trees (Godot `AnimationTree` nodes), ticked each frame
     /// by [`process_animation_trees`](Self::process_animation_trees).
     animation_trees: HashMap<NodeId, AnimationTree>,
+    /// Per-node video players (Godot `VideoStreamPlayer`), advanced each frame
+    /// by [`process_video_players`](Self::process_video_players).
+    ///
+    /// The playback model in [`crate::video_stream`] was complete but had no
+    /// caller outside its own tests, so a `VideoStreamPlayer` in a played scene
+    /// never advanced and never finished (pat-0q2kx.182).
+    video_players: HashMap<NodeId, crate::video_stream::VideoStreamPlayer>,
     /// Control currently under the mouse, for `mouse_entered`/`mouse_exited`
     /// transitions in the GUI input stage (pat-0q2kx.18).
     hovered_control: Option<NodeId>,
@@ -154,6 +161,17 @@ pub struct SceneTree {
     /// Snapshot of input state for the current frame, used by scripts
     /// that call `Input.is_action_pressed()` etc.
     input_snapshot: Option<crate::scripting::InputSnapshot>,
+    /// Address of the [`crate::physics_server::PhysicsServer`] driving this
+    /// frame, or 0 when no server is bound — the route that lets a script reach
+    /// the `PhysicsServer2D` singleton (pat-0q2kx.200).
+    ///
+    /// Stored as a `usize` rather than a `*mut` deliberately: `SceneTree` lives
+    /// inside an `Arc<Mutex<EditorState>>` that the editor server shares across
+    /// HTTP threads, so it must stay `Send`, and a raw-pointer field would
+    /// silently make it `!Send` and break every `gdeditor` handler. The
+    /// pointer is only ever installed for the duration of a script phase by
+    /// [`SceneTree::set_script_physics_server`].
+    script_physics: usize,
     /// `Input` mutations issued by scripts this frame — `action_press`,
     /// `set_mouse_mode`, `warp_mouse`, joypad rumble. The tree cannot apply them
     /// itself (the engine `InputState` belongs to the frame owner, `MainLoop`),
@@ -271,12 +289,14 @@ impl SceneTree {
             signal_stores: HashMap::new(),
             animation_players: HashMap::new(),
             animation_trees: HashMap::new(),
+            video_players: HashMap::new(),
             hovered_control: None,
             gui_press_target: None,
             focus_owner: None,
             tweens: HashMap::new(),
             scripts: HashMap::new(),
             input_snapshot: None,
+            script_physics: 0,
             pending_input_commands: Vec::new(),
             input_mouse_mode: 0,
             cursor_shape: 0,
@@ -740,6 +760,30 @@ impl SceneTree {
     /// Clears the input snapshot.
     pub fn clear_input_snapshot(&mut self) {
         self.input_snapshot = None;
+    }
+
+    /// Binds `server` as the physics server that scripts reach through the
+    /// `PhysicsServer2D` singleton for the duration of a script phase
+    /// (pat-0q2kx.200).
+    ///
+    /// The caller must call [`SceneTree::clear_script_physics_server`] before
+    /// `server` can move or drop. `MainLoop` owns the tree and the server as
+    /// sibling fields and brackets the script phase with these two calls, so the
+    /// address cannot dangle. With nothing bound, `PhysicsServer2D` calls report
+    /// failure rather than reaching a stale pointer.
+    pub fn set_script_physics_server(&mut self, server: &mut crate::physics_server::PhysicsServer) {
+        self.script_physics = server as *mut crate::physics_server::PhysicsServer as usize;
+    }
+
+    /// Unbinds the script-facing physics server. Always call this before the
+    /// bound server moves or drops.
+    pub fn clear_script_physics_server(&mut self) {
+        self.script_physics = 0;
+    }
+
+    /// The bound script-facing physics server address, or 0 when none is bound.
+    pub(crate) fn script_physics_addr(&self) -> usize {
+        self.script_physics
     }
 
     /// Returns `true` if an input snapshot is currently set.
@@ -2018,6 +2062,59 @@ impl SceneTree {
     /// Returns a mutable reference to a node's animation player, if attached.
     pub fn get_animation_player_mut(&mut self, node_id: NodeId) -> Option<&mut AnimationPlayer> {
         self.animation_players.get_mut(&node_id)
+    }
+
+    /// Attaches a `VideoStreamPlayer` to `node_id` (pat-0q2kx.182).
+    pub fn add_video_player(
+        &mut self,
+        node_id: NodeId,
+        player: crate::video_stream::VideoStreamPlayer,
+    ) {
+        self.video_players.insert(node_id, player);
+    }
+
+    /// Returns a node's video player, if attached.
+    pub fn get_video_player(
+        &self,
+        node_id: NodeId,
+    ) -> Option<&crate::video_stream::VideoStreamPlayer> {
+        self.video_players.get(&node_id)
+    }
+
+    /// Returns a mutable reference to a node's video player, if attached.
+    pub fn get_video_player_mut(
+        &mut self,
+        node_id: NodeId,
+    ) -> Option<&mut crate::video_stream::VideoStreamPlayer> {
+        self.video_players.get_mut(&node_id)
+    }
+
+    /// Advances every playing `VideoStreamPlayer` by `delta`, emitting Godot's
+    /// `finished` signal for each stream that ends this tick.
+    ///
+    /// `VideoStreamPlayer::advance` already clears `playing` at the end of a
+    /// non-looping stream, so "finished" is detected by the playing flag going
+    /// false across the call rather than by re-deriving the end condition here —
+    /// which keeps the looping rule in one place.
+    ///
+    /// A paused player is skipped by `advance` itself, so a paused video does
+    /// not creep forward.
+    pub fn process_video_players(&mut self, delta: f64) {
+        // Collect first: emitting a signal takes `&mut self`, so the map cannot
+        // stay borrowed across the emit.
+        let mut finished: Vec<NodeId> = Vec::new();
+        for (node_id, player) in self.video_players.iter_mut() {
+            if !player.is_playing() {
+                continue;
+            }
+            player.advance(delta);
+            if !player.is_playing() {
+                finished.push(*node_id);
+            }
+        }
+        for node_id in finished {
+            self.emit_signal(node_id, "finished", &[]);
+        }
     }
 
     /// Advances the **idle-phase** animation players by `delta` seconds — the

@@ -28,6 +28,7 @@ pub mod memory_profiler;
 pub mod nightly_ci;
 pub mod node_path;
 pub mod perf_comparison;
+pub mod performance;
 pub mod project_settings;
 pub mod property_testing;
 pub mod regex;

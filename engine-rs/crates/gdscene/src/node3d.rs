@@ -856,6 +856,121 @@ pub fn remote_target_transform(
     result
 }
 
+/// Sets the node's local transform such that its **global** transform equals
+/// `t`, by peeling off the parent chain.
+///
+/// Writes through [`store_local_transform`], which updates `transform`,
+/// `position`, `rotation` and `scale` together. That matters here: the
+/// module-private `set_local_transform` above writes *only* the `"transform"`
+/// property, and while `get_local_transform` prefers that key, `get_position`
+/// prefers the separate `position` property — so a transform-only write would
+/// leave `get_position` reporting a stale value for a node this pushes to.
+pub fn set_global_transform(tree: &mut SceneTree, node_id: NodeId, t: Transform3D) {
+    let parent_global = tree
+        .get_node(node_id)
+        .and_then(|n| n.parent())
+        .map(|pid| get_global_transform(tree, pid))
+        .unwrap_or(Transform3D::IDENTITY);
+
+    let local = parent_global.inverse() * t;
+    if let Some(node) = tree.get_node_mut(node_id) {
+        store_local_transform(node, local);
+    }
+}
+
+/// Forwards every `RemoteTransform3D`'s transform onto the node at its
+/// `remote_path` (pat-0q2kx.197).
+///
+/// Godot pushes on `NOTIFICATION_TRANSFORM_CHANGED`; a per-frame phase is the
+/// equivalent for a frame-stepped tree. [`remote_target_transform`] already had
+/// the per-channel masking logic — and every one of its callers lived in
+/// `#[cfg(test)]`, so the node was inert in a real scene.
+pub fn process_remote_transforms_3d(tree: &mut SceneTree) {
+    struct Push {
+        target: NodeId,
+        value: Transform3D,
+        global: bool,
+    }
+    // Gathered before any write: a remote target can itself be another
+    // RemoteTransform3D's source, and mutating mid-walk would let this frame's
+    // result depend on tree order.
+    let mut pushes: Vec<Push> = Vec::new();
+
+    for id in tree.all_nodes_in_tree_order() {
+        let Some(node) = tree.get_node(id) else {
+            continue;
+        };
+        if node.class_name() != "RemoteTransform3D" {
+            continue;
+        }
+
+        let path = match node.get_property("remote_path") {
+            Variant::NodePath(p) => p.to_string(),
+            Variant::String(s) => s,
+            _ => continue,
+        };
+        // Clearing remote_path stops the forwarding, as in Godot.
+        if path.is_empty() {
+            continue;
+        }
+
+        let target = if path.starts_with('/') {
+            tree.get_node_by_path(&path)
+        } else {
+            tree.get_node_relative(id, &path)
+        };
+        let Some(target) = target else {
+            continue;
+        };
+        // Pushing onto yourself would feed the transform back every frame.
+        if target == id {
+            continue;
+        }
+
+        // All four flags default to true in Godot.
+        let flags = RemoteTransformFlags {
+            position: !matches!(node.get_property("update_position"), Variant::Bool(false)),
+            rotation: !matches!(node.get_property("update_rotation"), Variant::Bool(false)),
+            scale: !matches!(node.get_property("update_scale"), Variant::Bool(false)),
+        };
+        let global = !matches!(
+            node.get_property("use_global_coordinates"),
+            Variant::Bool(false)
+        );
+
+        // The target's own transform is an input, not just a destination: the
+        // partial-flag cases keep the channels that are NOT being pushed.
+        let (ours, theirs) = if global {
+            (
+                get_global_transform(tree, id),
+                get_global_transform(tree, target),
+            )
+        } else {
+            (
+                get_local_transform(tree, id),
+                get_local_transform(tree, target),
+            )
+        };
+
+        pushes.push(Push {
+            target,
+            value: remote_target_transform(ours, theirs, flags),
+            global,
+        });
+    }
+
+    for push in pushes {
+        if push.global {
+            set_global_transform(tree, push.target, push.value);
+        } else if let Some(node) = tree.get_node_mut(push.target) {
+            // Same reasoning as `set_global_transform`: go through
+            // `store_local_transform` so `position`/`rotation`/`scale` track
+            // the pushed transform, not just the `"transform"` key.
+            store_local_transform(node, push.value);
+        }
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================

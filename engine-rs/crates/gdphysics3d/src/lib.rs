@@ -36,6 +36,7 @@ pub mod joint;
 pub mod obb_sat_3d;
 pub mod query;
 pub mod shape;
+pub mod softbody3d;
 pub mod world;
 
 pub use area3d::{
@@ -49,4 +50,5 @@ pub use query::{
     PhysicsPointQuery3D, PhysicsRayQuery3D, PhysicsShapeQuery3D, RestInfo3D, ShapeQueryResult3D,
 };
 pub use shape::Shape3D;
+pub use softbody3d::{SoftBody3D, SoftBodyId3D};
 pub use world::PhysicsWorld3D;

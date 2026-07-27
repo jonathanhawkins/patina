@@ -197,6 +197,42 @@ fn inspector_resource_assign_e2e() {
         "a malformed class name must be rejected:\n{resp}"
     );
 
+    // -- The middle link: the node must actually RENDER with the texture -----
+    //
+    // The bead's wiring requirement is a chain — picker -> property -> "node
+    // renders with the texture in the viewport PNG" -> save writes
+    // ext_resource. The endpoint and the save were already covered; this middle
+    // link was not, and it was **broken**: `api_assign_resource_property` writes
+    // `texture = ExtResource("icon_1")` with the real path in an
+    // `__extres__texture` companion (matching what `.tscn` loading does), while
+    // `node2d::get_texture_path` read `texture` alone. The render list therefore
+    // carried the literal string `ExtResource("icon_1")` as a path;
+    // `TextureCache` handed that to `resolve_res_path`, failed to load, and drew
+    // the placeholder. Asserted on the render list rather than on PNG bytes so
+    // it does not depend on the fixture being a decodable image.
+    {
+        let state = handle.state().lock().unwrap();
+        let items = gdeditor::viewport_2d_render::collect_canvas_items(&state.scene_tree);
+        let sprite_item = items
+            .iter()
+            .find(|i| i.node_id == sprite_raw)
+            .expect("the Sprite2D must appear in the 2D render list");
+        match &sprite_item.kind {
+            gdeditor::viewport_2d_render::Render2DKind::Sprite { texture, .. } => {
+                assert_eq!(
+                    texture, "res://icon.png",
+                    "the render list must carry the assigned PATH; an unresolved \
+                     `ExtResource(\"…\")` ref here is what made the sprite draw \
+                     the placeholder instead of its texture"
+                );
+            }
+            other => panic!(
+                "an assigned Sprite2D must render as a textured sprite, not {other:?} — \
+                 falling through to a marker means the texture never reached the viewport"
+            ),
+        }
+    }
+
     // -- Save, then assert Godot's on-disk form ------------------------------
     let resp = http_post(
         port,
@@ -234,4 +270,61 @@ fn inspector_resource_assign_e2e() {
     );
 
     drop(handle);
+}
+
+/// The same resolution, reached the other way: a sprite whose texture came from
+/// a `.tscn`'s `[ext_resource]` rather than from the picker.
+///
+/// This is the broader half of the bug — it hit **every** scene-loaded sprite,
+/// not just picker-assigned ones, because the loader deliberately leaves
+/// `texture = ExtResource("…")` in place so the scene round-trips byte-for-byte
+/// and parks the path in the companion.
+#[test]
+fn a_tscn_ext_resource_texture_reaches_the_render_list() {
+    const SCENE: &str = r#"[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Texture2D" path="res://art/hero.png" id="1_hero"]
+
+[node name="Root" type="Node2D"]
+
+[node name="Hero" type="Sprite2D" parent="."]
+texture = ExtResource("1_hero")
+"#;
+
+    let scene = gdscene::packed_scene::PackedScene::from_tscn(SCENE).expect("parse tscn");
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    gdscene::packed_scene::add_packed_scene_to_tree(&mut tree, root, &scene).expect("instance");
+
+    let items = gdeditor::viewport_2d_render::collect_canvas_items(&tree);
+    let hero = items
+        .iter()
+        .find(|i| {
+            matches!(
+                i.kind,
+                gdeditor::viewport_2d_render::Render2DKind::Sprite { .. }
+            )
+        })
+        .expect("the Sprite2D must render as a sprite, not fall through to a marker");
+
+    match &hero.kind {
+        gdeditor::viewport_2d_render::Render2DKind::Sprite { texture, .. } => assert_eq!(
+            texture, "res://art/hero.png",
+            "the `[ext_resource]` path must reach the render list; the raw \
+             `ExtResource(\"1_hero\")` ref is not a path and cannot be loaded"
+        ),
+        other => unreachable!("filtered to sprites above, got {other:?}"),
+    }
+
+    // The raw ref must still be on the node — the saver re-emits it, so
+    // resolving on read must not overwrite what round-trips.
+    let hero_id =
+        gdscene::node::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(hero.node_id));
+    let hero_node = tree.get_node(hero_id).expect("hero node still in the tree");
+    assert_eq!(
+        hero_node.get_property("texture"),
+        gdvariant::Variant::String("ExtResource(\"1_hero\")".into()),
+        "the round-trip ref must survive — resolution happens on read, not by \
+         rewriting the property"
+    );
 }

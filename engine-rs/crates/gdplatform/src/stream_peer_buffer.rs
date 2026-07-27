@@ -150,6 +150,54 @@ impl StreamPeerBuffer {
         self.put_data(bytes);
     }
 
+    // ---- Variant codec (pat-0q2kx.183) ------------------------------------
+
+    /// Writes `value` in Godot's binary Variant encoding at the cursor
+    /// (`StreamPeer.put_var`).
+    ///
+    /// Godot frames the value with a leading 32-bit byte length so `get_var`
+    /// knows how much to consume; this mirrors that, using the *stream's* own
+    /// endianness for the length so a big-endian peer stays self-consistent.
+    /// Returns `false` when the Variant cannot be encoded, leaving the cursor
+    /// untouched rather than writing a truncated record.
+    pub fn put_var(&mut self, value: &gdvariant::Variant) -> bool {
+        match gdvariant::binary::encode_variant(value) {
+            Ok(bytes) => {
+                self.put_u32(bytes.len() as u32);
+                self.put_data(&bytes);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Reads a Variant written by [`put_var`](Self::put_var)
+    /// (`StreamPeer.get_var`).
+    ///
+    /// Returns `None` — with the cursor restored — when the length prefix is
+    /// absent, the payload is short, or the bytes do not decode. A partial read
+    /// must not silently advance the cursor into the middle of a record, or
+    /// every subsequent `get_*` on the stream reads garbage.
+    pub fn get_var(&mut self) -> Option<gdvariant::Variant> {
+        let start = self.pos;
+        if self.data.len().saturating_sub(self.pos) < 4 {
+            return None;
+        }
+        let len = self.get_u32() as usize;
+        if self.data.len().saturating_sub(self.pos) < len {
+            self.pos = start;
+            return None;
+        }
+        let bytes = self.get_data(len);
+        match gdvariant::binary::decode_variant(&bytes) {
+            Ok((v, _)) => Some(v),
+            Err(_) => {
+                self.pos = start;
+                None
+            }
+        }
+    }
+
     // ---- reads ------------------------------------------------------------
 
     /// Reads up to `len` bytes from the cursor (fewer if the buffer is short).

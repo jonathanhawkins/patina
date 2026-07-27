@@ -1068,7 +1068,7 @@ impl PackedScene {
         let mut path_to_index: HashMap<String, usize> = HashMap::new();
 
         // Create root node.
-        let mut root_node = Node::new(&root_tmpl.name, &root_tmpl.class_name);
+        let mut root_node = node_with_class_defaults(&root_tmpl.name, &root_tmpl.class_name);
         for (key, value) in &root_tmpl.properties {
             root_node.set_property(key, value.clone());
         }
@@ -1104,7 +1104,7 @@ impl PackedScene {
                 ))
             })?;
 
-            let mut node = Node::new(&tmpl.name, &tmpl.class_name);
+            let mut node = node_with_class_defaults(&tmpl.name, &tmpl.class_name);
             for (key, value) in &tmpl.properties {
                 node.set_property(key, value.clone());
             }
@@ -1268,7 +1268,7 @@ impl PackedScene {
             // finds them instead of creating a duplicate.
             Self::map_root_child_paths(&nodes, &mut path_to_index);
         } else {
-            let mut root_node = Node::new(&root_tmpl.name, &root_tmpl.class_name);
+            let mut root_node = node_with_class_defaults(&root_tmpl.name, &root_tmpl.class_name);
             for (key, value) in &root_tmpl.properties {
                 root_node.set_property(key, value.clone());
             }
@@ -1420,7 +1420,7 @@ impl PackedScene {
             }
 
             // Regular (non-instanced) node.
-            let mut node = Node::new(&tmpl.name, &tmpl.class_name);
+            let mut node = node_with_class_defaults(&tmpl.name, &tmpl.class_name);
             for (key, value) in &tmpl.properties {
                 node.set_property(key, value.clone());
             }
@@ -1495,6 +1495,28 @@ impl PackedScene {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Builds a scene node the way Godot instantiates one: through ClassDB, so the
+/// class's registered defaults are already in the property bag before the
+/// scene's stored values override a subset of them (pat-0q2kx.210).
+///
+/// Without this, a member the `.tscn` omits read back as `Nil` instead of its
+/// class default — `scale` was `Nil` rather than `(1, 1)` on every node loaded
+/// from a scene file, while a node made by `SceneTree::create_node` had it.
+///
+/// Deliberately the same walk as [`crate::SceneTree::create_node`] so the two
+/// build paths cannot drift: `get_property_list` returns the inheritance chain
+/// base→derived without deduping, so a derived class's own default overwrites
+/// its base's — the order Godot applies them in. An unpopulated ClassDB (no
+/// `register_*_classes()` call yet) yields an empty list and seeds nothing, so
+/// this is inert rather than wrong in bare tests.
+fn node_with_class_defaults(name: &str, class_name: &str) -> Node {
+    let mut node = Node::new(name, class_name);
+    for prop in gdobject::class_db::get_property_list(class_name) {
+        node.set_property(&prop.name, prop.default_value);
+    }
+    node
+}
 
 /// Extracts `key="value"` pairs from a section header string.
 ///

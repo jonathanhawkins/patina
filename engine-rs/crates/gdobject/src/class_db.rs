@@ -1172,7 +1172,13 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new(
                 "directional_shadow_max_distance",
                 Variant::Float(100.0),
-            )),
+            ))
+            // Overrides the Light3D base's 0.5. The DirectionalLight3D ctor
+            // sets PARAM_SPECULAR = 1.0 explicitly
+            // (upstream/godot/scene/3d/light_3d.cpp:606) while the base sets
+            // 0.5 (:476); Omni/Spot add no override and so keep 0.5.
+            // `instantiate` applies the chain base-to-derived, so this wins.
+            .property(PropertyInfo::new("light_specular", Variant::Float(1.0))),
     );
 
     // -- OmniLight3D --
@@ -1239,7 +1245,18 @@ pub fn register_3d_classes() {
         ClassRegistration::new("Area3D")
             .parent("CollisionObject3D")
             .property(PropertyInfo::new("monitoring", Variant::Bool(true)))
-            .property(PropertyInfo::new("monitorable", Variant::Bool(true))),
+            .property(PropertyInfo::new("monitorable", Variant::Bool(true)))
+            // Same audio-bus surface as Area2D (pat-0q2kx.189). `gdaudio`'s
+            // reroute path is written against Area3D specifically, so this is
+            // the class whose properties it was already looking for.
+            .property(PropertyInfo::new(
+                "audio_bus_override",
+                Variant::Bool(false),
+            ))
+            .property(PropertyInfo::new(
+                "audio_bus_name",
+                Variant::StringName(gdcore::string_name::StringName::new("Master")),
+            )),
     );
 
     register_class(
@@ -1675,6 +1692,16 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("PhysicalBone3D")
             .parent("PhysicsBody3D")
+            // Which skeleton bone this body drives (pat-0q2kx.203). Godot binds
+            // by NAME, resolving to an index at runtime; `bone_id` is the
+            // resolved index and is -1 until the bind happens. Both were absent,
+            // so a `.tscn` carrying `bone_name = "thigh"` had nowhere to put it
+            // and no ragdoll could bind a body to a bone at all.
+            .property(PropertyInfo::new(
+                "bone_name",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new("bone_id", Variant::Int(-1)))
             // Which joint ties this bone to its parent. NONE (0) is Godot's
             // default — a bone is unconstrained until the ragdoll is set up.
             .property(PropertyInfo::new("joint_type", Variant::Int(0)))
@@ -2435,9 +2462,102 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("texture", Variant::Nil)),
     );
     register_class(ClassRegistration::new("CPUParticles3D").parent("GeometryInstance3D"));
-    register_class(ClassRegistration::new("Decal").parent("VisualInstance3D"));
-    register_class(ClassRegistration::new("ReflectionProbe").parent("VisualInstance3D"));
-    register_class(ClassRegistration::new("VoxelGI").parent("VisualInstance3D"));
+    // -- Environment probe / decal nodes (pat-0q2kx.195) ---------------------
+    //
+    // All three were registered bare — name and parent only — so the inspector
+    // showed an authorable `Decal` or `ReflectionProbe` with nothing on it, and
+    // `get_property_list` reported none of the properties the renderer actually
+    // consumes. Defaults below are the doc XML's own (`doc/classes/*.xml`),
+    // which `extension_api.json` does not carry.
+    register_class(
+        ClassRegistration::new("Decal")
+            .parent("VisualInstance3D")
+            .property(PropertyInfo::new(
+                "size",
+                Variant::Vector3(Vector3::new(2.0, 2.0, 2.0)),
+            ))
+            // The four projected channels: Texture2D resources, so Nil until
+            // assigned.
+            .property(PropertyInfo::new("texture_albedo", Variant::Nil))
+            .property(PropertyInfo::new("texture_normal", Variant::Nil))
+            .property(PropertyInfo::new("texture_orm", Variant::Nil))
+            .property(PropertyInfo::new("texture_emission", Variant::Nil))
+            .property(PropertyInfo::new("emission_energy", Variant::Float(1.0)))
+            .property(PropertyInfo::new(
+                "modulate",
+                Variant::Color(gdcore::math::Color::WHITE),
+            ))
+            .property(PropertyInfo::new("albedo_mix", Variant::Float(1.0)))
+            .property(PropertyInfo::new("normal_fade", Variant::Float(0.0)))
+            // ⚠️ Both fades default to 0.3, NOT 0.0 — a 0.0 default makes the
+            // decal edge hard instead of feathered.
+            .property(PropertyInfo::new("upper_fade", Variant::Float(0.3)))
+            .property(PropertyInfo::new("lower_fade", Variant::Float(0.3)))
+            .property(PropertyInfo::new(
+                "distance_fade_enabled",
+                Variant::Bool(false),
+            ))
+            .property(PropertyInfo::new(
+                "distance_fade_begin",
+                Variant::Float(40.0),
+            ))
+            .property(PropertyInfo::new(
+                "distance_fade_length",
+                Variant::Float(10.0),
+            ))
+            // 1048575 = 0xFFFFF, the 20 visual layers. Not 32, and not all-ones.
+            .property(PropertyInfo::new("cull_mask", Variant::Int(1_048_575))),
+    );
+    register_class(
+        ClassRegistration::new("ReflectionProbe")
+            .parent("VisualInstance3D")
+            // 0 = Once, 1 = Always.
+            .property(PropertyInfo::new("update_mode", Variant::Int(0)))
+            .property(PropertyInfo::new("intensity", Variant::Float(1.0)))
+            .property(PropertyInfo::new("blend_distance", Variant::Float(1.0)))
+            .property(PropertyInfo::new("max_distance", Variant::Float(0.0)))
+            .property(PropertyInfo::new(
+                "size",
+                Variant::Vector3(Vector3::new(20.0, 20.0, 20.0)),
+            ))
+            .property(PropertyInfo::new(
+                "origin_offset",
+                Variant::Vector3(Vector3::ZERO),
+            ))
+            .property(PropertyInfo::new("box_projection", Variant::Bool(false)))
+            .property(PropertyInfo::new("interior", Variant::Bool(false)))
+            .property(PropertyInfo::new("enable_shadows", Variant::Bool(false)))
+            // ⚠️ 1 = Environment, not 0 (Disabled). A 0 default would make every
+            // authored probe contribute nothing.
+            .property(PropertyInfo::new("ambient_mode", Variant::Int(1)))
+            .property(PropertyInfo::new(
+                "ambient_color",
+                Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+            ))
+            .property(PropertyInfo::new(
+                "ambient_color_energy",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new("mesh_lod_threshold", Variant::Float(1.0)))
+            .property(PropertyInfo::new("cull_mask", Variant::Int(1_048_575)))
+            .property(PropertyInfo::new(
+                "reflection_mask",
+                Variant::Int(1_048_575),
+            )),
+    );
+    register_class(
+        ClassRegistration::new("VoxelGI")
+            .parent("VisualInstance3D")
+            // 1 = Subdiv128. The bake itself is editor scope; this is the class
+            // surface only.
+            .property(PropertyInfo::new("subdiv", Variant::Int(1)))
+            .property(PropertyInfo::new(
+                "size",
+                Variant::Vector3(Vector3::new(20.0, 20.0, 20.0)),
+            ))
+            .property(PropertyInfo::new("camera_attributes", Variant::Nil))
+            .property(PropertyInfo::new("data", Variant::Nil)),
+    );
 
     // -- Fog (pat-nzgdu.208) -------------------------------------------------
     //
@@ -2538,7 +2658,62 @@ pub fn register_3d_classes() {
                 .method(MethodInfo::new("get_level_counts", 0)),
         );
     }
-    register_class(ClassRegistration::new("LightmapGI").parent("VisualInstance3D"));
+    // Lightmap bake nodes (pat-0q2kx.195). The bake is editor scope; these are
+    // the class surfaces, so a `.tscn` round-trips and the inspector is not
+    // empty. Defaults from `doc/classes/LightmapGI.xml`.
+    register_class(
+        ClassRegistration::new("LightmapGI")
+            .parent("VisualInstance3D")
+            // 1 = BAKE_QUALITY_MEDIUM.
+            .property(PropertyInfo::new("quality", Variant::Int(1)))
+            .property(PropertyInfo::new("supersampling", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "supersampling_factor",
+                Variant::Float(2.0),
+            ))
+            .property(PropertyInfo::new("bounces", Variant::Int(3)))
+            .property(PropertyInfo::new(
+                "bounce_indirect_energy",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new("directional", Variant::Bool(false)))
+            // 0 = SHADOWMASK_MODE_NONE.
+            .property(PropertyInfo::new("shadowmask_mode", Variant::Int(0)))
+            .property(PropertyInfo::new(
+                "use_texture_for_bounces",
+                Variant::Bool(true),
+            ))
+            .property(PropertyInfo::new("interior", Variant::Bool(false)))
+            // ⚠️ `use_denoiser` defaults to TRUE; a false default silently makes
+            // every bake noisy.
+            .property(PropertyInfo::new("use_denoiser", Variant::Bool(true)))
+            .property(PropertyInfo::new("denoiser_strength", Variant::Float(0.1)))
+            .property(PropertyInfo::new("denoiser_range", Variant::Int(10)))
+            // 0.0005, not 0.005 — an order of magnitude apart.
+            .property(PropertyInfo::new("bias", Variant::Float(0.0005)))
+            .property(PropertyInfo::new("texel_scale", Variant::Float(1.0)))
+            .property(PropertyInfo::new("max_texture_size", Variant::Int(16384)))
+            // 2 = GENERATE_PROBES_SUBDIV_8.
+            .property(PropertyInfo::new("generate_probes_subdiv", Variant::Int(2)))
+            // 1 = ENVIRONMENT_MODE_SCENE.
+            .property(PropertyInfo::new("environment_mode", Variant::Int(1)))
+            .property(PropertyInfo::new("environment_custom_sky", Variant::Nil))
+            .property(PropertyInfo::new(
+                "environment_custom_color",
+                Variant::Color(gdcore::math::Color::WHITE),
+            ))
+            .property(PropertyInfo::new(
+                "environment_custom_energy",
+                Variant::Float(1.0),
+            ))
+            .property(PropertyInfo::new("camera_attributes", Variant::Nil))
+            .property(PropertyInfo::new("light_data", Variant::Nil)),
+    );
+    // ⚠️ `LightmapProbe` was not registered at ALL — instantiating one from a
+    // `.tscn` or the create dialog failed outright. It genuinely has no
+    // properties in Godot (it is a placement marker the bake reads), and it
+    // inherits Node3D, NOT VisualInstance3D.
+    register_class(ClassRegistration::new("LightmapProbe").parent("Node3D"));
     register_class(
         ClassRegistration::new("VisualInstance3D")
             .parent("Node3D")
@@ -2772,6 +2947,80 @@ pub fn register_3d_classes() {
     register_class(ClassRegistration::new("CSGBox3D").parent("CSGPrimitive3D"));
     register_class(ClassRegistration::new("CSGSphere3D").parent("CSGPrimitive3D"));
     register_class(ClassRegistration::new("CSGCylinder3D").parent("CSGPrimitive3D"));
+
+    // The three CSG primitives that were absent entirely (pat-0q2kx.194).
+    //
+    // Defaults come from `modules/csg/doc_classes/*.xml` — CSG is a Godot
+    // *module*, so its docs are NOT under `doc/classes/`. Where the doc omits a
+    // default, the value is the constructor's in `modules/csg/csg_shape.cpp`.
+    //
+    // ⚠️ Registration only: `csg_primitive_mesh` still returns `None` for all
+    // three, so they contribute no geometry yet. The schema is what lets a
+    // `.tscn` round-trip and the inspector show them.
+    register_class(
+        ClassRegistration::new("CSGTorus3D")
+            .parent("CSGPrimitive3D")
+            .property(PropertyInfo::new("inner_radius", Variant::Float(0.5)))
+            .property(PropertyInfo::new("outer_radius", Variant::Float(1.0)))
+            .property(PropertyInfo::new("sides", Variant::Int(8)))
+            .property(PropertyInfo::new("ring_sides", Variant::Int(6)))
+            .property(PropertyInfo::new("smooth_faces", Variant::Bool(true)))
+            .property(PropertyInfo::new("material", Variant::Nil)),
+    );
+    register_class(
+        ClassRegistration::new("CSGMesh3D")
+            .parent("CSGPrimitive3D")
+            .property(PropertyInfo::new("mesh", Variant::Nil))
+            .property(PropertyInfo::new("material", Variant::Nil)),
+    );
+    register_class(
+        ClassRegistration::new("CSGPolygon3D")
+            .parent("CSGPrimitive3D")
+            // Godot's default outline is the unit square.
+            .property(PropertyInfo::new(
+                "polygon",
+                // Fully qualified: `register_3d_classes` imports `Vector3`, not
+                // `Vector2` — the `Vector2` imports in this file are fn-local to
+                // other registration functions.
+                Variant::PackedVector2Array(vec![
+                    gdcore::math::Vector2::new(0.0, 0.0),
+                    gdcore::math::Vector2::new(0.0, 1.0),
+                    gdcore::math::Vector2::new(1.0, 1.0),
+                    gdcore::math::Vector2::new(1.0, 0.0),
+                ]),
+            ))
+            // MODE_DEPTH = 0.
+            .property(PropertyInfo::new("mode", Variant::Int(0)))
+            .property(PropertyInfo::new("depth", Variant::Float(1.0)))
+            .property(PropertyInfo::new("spin_degrees", Variant::Float(360.0)))
+            .property(PropertyInfo::new("spin_sides", Variant::Int(8)))
+            .property(PropertyInfo::new(
+                "path_node",
+                Variant::NodePath(gdcore::node_path::NodePath::empty()),
+            ))
+            // PATH_INTERVAL_DISTANCE = 0.
+            .property(PropertyInfo::new("path_interval_type", Variant::Int(0)))
+            .property(PropertyInfo::new("path_interval", Variant::Float(1.0)))
+            .property(PropertyInfo::new(
+                "path_simplify_angle",
+                Variant::Float(0.0),
+            ))
+            // ⚠️ PATH_ROTATION_PATH_FOLLOW = **2**, not enum-zero: the enum runs
+            // POLYGON=0, PATH=1, PATH_FOLLOW=2 and Godot's constructor picks the
+            // last. Registering 0 would silently change how the polygon is
+            // oriented along its path.
+            .property(PropertyInfo::new("path_rotation", Variant::Int(2)))
+            .property(PropertyInfo::new(
+                "path_rotation_accurate",
+                Variant::Bool(false),
+            ))
+            .property(PropertyInfo::new("path_local", Variant::Bool(false)))
+            .property(PropertyInfo::new("path_continuous_u", Variant::Bool(true)))
+            .property(PropertyInfo::new("path_u_distance", Variant::Float(1.0)))
+            .property(PropertyInfo::new("path_joined", Variant::Bool(false)))
+            .property(PropertyInfo::new("smooth_faces", Variant::Bool(false)))
+            .property(PropertyInfo::new("material", Variant::Nil)),
+    );
     // CSGCombiner3D is NOT a primitive — it is a boolean grouping node, and
     // Godot parents it straight to CSGShape3D. Leave it there.
     register_class(ClassRegistration::new("CSGCombiner3D").parent("CSGShape3D"));
@@ -2790,6 +3039,77 @@ pub fn register_3d_classes() {
     // with named groups — but neither class was registered, so ClassDB denied
     // their existence and a script could not construct one (pat-0q2kx.165).
     // Registered right after RefCounted so the parent always resolves.
+    // pat-0q2kx.209 — the threading surface. Thread/Mutex/Semaphore are
+    // RefCounted in Godot; WorkerThreadPool is an Object singleton.
+    if !class_exists("Thread") {
+        register_class(
+            ClassRegistration::new("Thread")
+                .parent("RefCounted")
+                // `start(callable, priority)` — priority defaults to HIGH.
+                .method(MethodInfo::new("start", 2))
+                .method(MethodInfo::new("get_id", 0))
+                .method(MethodInfo::new("is_started", 0))
+                .method(MethodInfo::new("is_alive", 0))
+                .method(MethodInfo::new("wait_to_finish", 0))
+                .method(MethodInfo::new("is_main_thread", 0))
+                .enumeration(
+                    EnumInfo::new("Priority")
+                        .constant("PRIORITY_LOW", 0)
+                        .constant("PRIORITY_NORMAL", 1)
+                        .constant("PRIORITY_HIGH", 2),
+                ),
+        );
+    }
+    if !class_exists("Mutex") {
+        register_class(
+            ClassRegistration::new("Mutex")
+                .parent("RefCounted")
+                .method(MethodInfo::new("lock", 0))
+                .method(MethodInfo::new("try_lock", 0))
+                .method(MethodInfo::new("unlock", 0)),
+        );
+    }
+    if !class_exists("Semaphore") {
+        register_class(
+            ClassRegistration::new("Semaphore")
+                .parent("RefCounted")
+                .method(MethodInfo::new("wait", 0))
+                .method(MethodInfo::new("try_wait", 0))
+                // `post(count)` — count defaults to 1.
+                .method(MethodInfo::new("post", 1)),
+        );
+    }
+    if !class_exists("WorkerThreadPool") {
+        register_class(
+            ClassRegistration::new("WorkerThreadPool")
+                .parent("Object")
+                // add_task(action, high_priority, description)
+                .method(MethodInfo::new("add_task", 3))
+                // add_group_task(action, elements, tasks_needed, high_priority, description)
+                .method(MethodInfo::new("add_group_task", 5))
+                .method(MethodInfo::new("is_task_completed", 1))
+                .method(MethodInfo::new("wait_for_task_completion", 1))
+                .method(MethodInfo::new("is_group_task_completed", 1))
+                .method(MethodInfo::new("get_group_processed_element_count", 1))
+                .method(MethodInfo::new("wait_for_group_task_completion", 1))
+                .method(MethodInfo::new("get_caller_task_id", 0))
+                .method(MethodInfo::new("get_caller_group_id", 0)),
+        );
+    }
+    if !class_exists("Expression") {
+        // pat-0q2kx.207. RefCounted, like RegEx: `Expression.new()` then
+        // `.parse(code, input_names)`. Arities from doc/classes/Expression.xml —
+        // `parse` takes (expression, input_names) and `execute` takes
+        // (inputs, base_instance, show_error, const_calls_only).
+        register_class(
+            ClassRegistration::new("Expression")
+                .parent("RefCounted")
+                .method(MethodInfo::new("parse", 2))
+                .method(MethodInfo::new("execute", 4))
+                .method(MethodInfo::new("has_execute_failed", 0))
+                .method(MethodInfo::new("get_error_text", 0)),
+        );
+    }
     if !class_exists("RegEx") {
         register_class(
             ClassRegistration::new("RegEx")
@@ -2919,6 +3239,444 @@ pub fn register_3d_classes() {
     // pure marker: it draws nothing and has nothing to configure.
     if !class_exists("PlaceholderMaterial") {
         register_class(ClassRegistration::new("PlaceholderMaterial").parent("Material"));
+    }
+
+    // -- Rendering resource classes (pat-0q2kx.214) -------------------------
+    //
+    // Environment / Sky / the sky materials / World3D / CameraAttributes* /
+    // Compositor* were absent from ClassDB entirely, so `ClassDB.instantiate`
+    // and every introspection path failed for them and scripted environment
+    // setup was impossible — even though `gdserver3d` implements the render
+    // side (`environment.rs`, `sky.rs`, `compositor.rs`) and the renderer
+    // consumes it.
+    //
+    // Property names, types and defaults are transcribed from the vendored
+    // `upstream/godot/doc/classes/*.xml`, which is the oracle the acceptance
+    // spot-checks against. Object/resource-valued members default to `Nil` and
+    // the engine-internal RID members (`space`, `scenario`, `navigation_map`,
+    // `direct_space_state`) are omitted — they are server handles, not
+    // authored properties.
+    //
+    // Registered here inside `register_3d_classes` rather than behind a new
+    // `register_rendering_resource_classes()`: a separate entry point would
+    // need its own caller, and an uncalled registration function is how a
+    // class ends up "registered" in name only.
+    //
+    // Math types are FULLY QUALIFIED — this function's local imports are
+    // `Vector3`/`Basis`/`Transform3D` only, so a bare `Color` here is E0433.
+    if !class_exists("Environment") {
+        register_class(
+            ClassRegistration::new("Environment")
+                .parent("Resource")
+                .property(PropertyInfo::new(
+                    "adjustment_brightness",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new(
+                    "adjustment_color_correction",
+                    Variant::Nil,
+                ))
+                .property(PropertyInfo::new(
+                    "adjustment_contrast",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new(
+                    "adjustment_enabled",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "adjustment_saturation",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new(
+                    "ambient_light_color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "ambient_light_energy",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new(
+                    "ambient_light_sky_contribution",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new("ambient_light_source", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "background_camera_feed_id",
+                    Variant::Int(1),
+                ))
+                .property(PropertyInfo::new(
+                    "background_canvas_max_layer",
+                    Variant::Int(0),
+                ))
+                .property(PropertyInfo::new(
+                    "background_color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "background_energy_multiplier",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new(
+                    "background_intensity",
+                    Variant::Float(30000.0),
+                ))
+                .property(PropertyInfo::new("background_mode", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "fog_aerial_perspective",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("fog_density", Variant::Float(0.01)))
+                .property(PropertyInfo::new("fog_depth_begin", Variant::Float(10.0)))
+                .property(PropertyInfo::new("fog_depth_curve", Variant::Float(1.0)))
+                .property(PropertyInfo::new("fog_depth_end", Variant::Float(100.0)))
+                .property(PropertyInfo::new("fog_enabled", Variant::Bool(false)))
+                .property(PropertyInfo::new("fog_height", Variant::Float(0.0)))
+                .property(PropertyInfo::new("fog_height_density", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "fog_light_color",
+                    Variant::Color(gdcore::math::Color::new(0.518, 0.553, 0.608, 1.0)),
+                ))
+                .property(PropertyInfo::new("fog_light_energy", Variant::Float(1.0)))
+                .property(PropertyInfo::new("fog_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("fog_sky_affect", Variant::Float(1.0)))
+                .property(PropertyInfo::new("fog_sun_scatter", Variant::Float(0.0)))
+                .property(PropertyInfo::new("glow_blend_mode", Variant::Int(1)))
+                .property(PropertyInfo::new("glow_bloom", Variant::Float(0.0)))
+                .property(PropertyInfo::new("glow_enabled", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "glow_hdr_luminance_cap",
+                    Variant::Float(12.0),
+                ))
+                .property(PropertyInfo::new("glow_hdr_scale", Variant::Float(2.0)))
+                .property(PropertyInfo::new("glow_hdr_threshold", Variant::Float(1.0)))
+                .property(PropertyInfo::new("glow_intensity", Variant::Float(0.3)))
+                .property(PropertyInfo::new("glow_levels/1", Variant::Float(0.0)))
+                .property(PropertyInfo::new("glow_levels/2", Variant::Float(0.8)))
+                .property(PropertyInfo::new("glow_levels/3", Variant::Float(0.4)))
+                .property(PropertyInfo::new("glow_levels/4", Variant::Float(0.1)))
+                .property(PropertyInfo::new("glow_levels/5", Variant::Float(0.0)))
+                .property(PropertyInfo::new("glow_levels/6", Variant::Float(0.0)))
+                .property(PropertyInfo::new("glow_levels/7", Variant::Float(0.0)))
+                .property(PropertyInfo::new("glow_map", Variant::Nil))
+                .property(PropertyInfo::new("glow_map_strength", Variant::Float(0.8)))
+                .property(PropertyInfo::new("glow_mix", Variant::Float(0.05)))
+                .property(PropertyInfo::new("glow_normalized", Variant::Bool(false)))
+                .property(PropertyInfo::new("glow_strength", Variant::Float(1.0)))
+                .property(PropertyInfo::new("reflected_light_source", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "sdfgi_bounce_feedback",
+                    Variant::Float(0.5),
+                ))
+                .property(PropertyInfo::new(
+                    "sdfgi_cascade0_distance",
+                    Variant::Float(12.8),
+                ))
+                .property(PropertyInfo::new("sdfgi_cascades", Variant::Int(4)))
+                .property(PropertyInfo::new("sdfgi_enabled", Variant::Bool(false)))
+                .property(PropertyInfo::new("sdfgi_energy", Variant::Float(1.0)))
+                .property(PropertyInfo::new(
+                    "sdfgi_max_distance",
+                    Variant::Float(204.8),
+                ))
+                .property(PropertyInfo::new(
+                    "sdfgi_min_cell_size",
+                    Variant::Float(0.2),
+                ))
+                .property(PropertyInfo::new("sdfgi_normal_bias", Variant::Float(1.1)))
+                .property(PropertyInfo::new("sdfgi_probe_bias", Variant::Float(1.1)))
+                .property(PropertyInfo::new(
+                    "sdfgi_read_sky_light",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new(
+                    "sdfgi_use_occlusion",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("sdfgi_y_scale", Variant::Int(1)))
+                .property(PropertyInfo::new("sky", Variant::Nil))
+                .property(PropertyInfo::new("sky_custom_fov", Variant::Float(0.0)))
+                .property(PropertyInfo::new("sky_rotation", Variant::Nil))
+                .property(PropertyInfo::new(
+                    "ssao_ao_channel_affect",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("ssao_detail", Variant::Float(0.5)))
+                .property(PropertyInfo::new("ssao_enabled", Variant::Bool(false)))
+                .property(PropertyInfo::new("ssao_horizon", Variant::Float(0.06)))
+                .property(PropertyInfo::new("ssao_intensity", Variant::Float(2.0)))
+                .property(PropertyInfo::new("ssao_light_affect", Variant::Float(0.0)))
+                .property(PropertyInfo::new("ssao_power", Variant::Float(1.5)))
+                .property(PropertyInfo::new("ssao_radius", Variant::Float(1.0)))
+                .property(PropertyInfo::new("ssao_sharpness", Variant::Float(0.98)))
+                .property(PropertyInfo::new("ssil_enabled", Variant::Bool(false)))
+                .property(PropertyInfo::new("ssil_intensity", Variant::Float(1.0)))
+                .property(PropertyInfo::new(
+                    "ssil_normal_rejection",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new("ssil_radius", Variant::Float(5.0)))
+                .property(PropertyInfo::new("ssil_sharpness", Variant::Float(0.98)))
+                .property(PropertyInfo::new(
+                    "ssr_depth_tolerance",
+                    Variant::Float(0.5),
+                ))
+                .property(PropertyInfo::new("ssr_enabled", Variant::Bool(false)))
+                .property(PropertyInfo::new("ssr_fade_in", Variant::Float(0.15)))
+                .property(PropertyInfo::new("ssr_fade_out", Variant::Float(2.0)))
+                .property(PropertyInfo::new("ssr_max_steps", Variant::Int(64)))
+                .property(PropertyInfo::new(
+                    "tonemap_agx_contrast",
+                    Variant::Float(1.25),
+                ))
+                .property(PropertyInfo::new(
+                    "tonemap_agx_white",
+                    Variant::Float(16.29),
+                ))
+                .property(PropertyInfo::new("tonemap_exposure", Variant::Float(1.0)))
+                .property(PropertyInfo::new("tonemap_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("tonemap_white", Variant::Float(1.0)))
+                .property(PropertyInfo::new(
+                    "volumetric_fog_albedo",
+                    Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "volumetric_fog_ambient_inject",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new(
+                    "volumetric_fog_anisotropy",
+                    Variant::Float(0.2),
+                ))
+                .property(PropertyInfo::new(
+                    "volumetric_fog_density",
+                    Variant::Float(0.05),
+                ))
+                .property(PropertyInfo::new(
+                    "volumetric_fog_detail_spread",
+                    Variant::Float(2.0),
+                ))
+                .property(PropertyInfo::new(
+                    "volumetric_fog_emission",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "volumetric_fog_emission_energy",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new(
+                    "volumetric_fog_enabled",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "volumetric_fog_gi_inject",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new(
+                    "volumetric_fog_length",
+                    Variant::Float(64.0),
+                ))
+                .property(PropertyInfo::new(
+                    "volumetric_fog_sky_affect",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new(
+                    "volumetric_fog_temporal_reprojection_amount",
+                    Variant::Float(0.9),
+                ))
+                .property(PropertyInfo::new(
+                    "volumetric_fog_temporal_reprojection_enabled",
+                    Variant::Bool(true),
+                )),
+        );
+    }
+    if !class_exists("Sky") {
+        register_class(
+            ClassRegistration::new("Sky")
+                .parent("Resource")
+                .property(PropertyInfo::new("process_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("radiance_size", Variant::Int(3)))
+                .property(PropertyInfo::new("sky_material", Variant::Nil)),
+        );
+    }
+    if !class_exists("PanoramaSkyMaterial") {
+        register_class(
+            ClassRegistration::new("PanoramaSkyMaterial")
+                .parent("Material")
+                .property(PropertyInfo::new("energy_multiplier", Variant::Float(1.0)))
+                .property(PropertyInfo::new("filter", Variant::Bool(true)))
+                .property(PropertyInfo::new("panorama", Variant::Nil)),
+        );
+    }
+    if !class_exists("PhysicalSkyMaterial") {
+        register_class(
+            ClassRegistration::new("PhysicalSkyMaterial")
+                .parent("Material")
+                .property(PropertyInfo::new("energy_multiplier", Variant::Float(1.0)))
+                .property(PropertyInfo::new(
+                    "ground_color",
+                    Variant::Color(gdcore::math::Color::new(0.1, 0.07, 0.034, 1.0)),
+                ))
+                .property(PropertyInfo::new("mie_coefficient", Variant::Float(0.005)))
+                .property(PropertyInfo::new(
+                    "mie_color",
+                    Variant::Color(gdcore::math::Color::new(0.69, 0.729, 0.812, 1.0)),
+                ))
+                .property(PropertyInfo::new("mie_eccentricity", Variant::Float(0.8)))
+                .property(PropertyInfo::new("night_sky", Variant::Nil))
+                .property(PropertyInfo::new(
+                    "rayleigh_coefficient",
+                    Variant::Float(2.0),
+                ))
+                .property(PropertyInfo::new(
+                    "rayleigh_color",
+                    Variant::Color(gdcore::math::Color::new(0.3, 0.405, 0.6, 1.0)),
+                ))
+                .property(PropertyInfo::new("sun_disk_scale", Variant::Float(1.0)))
+                .property(PropertyInfo::new("turbidity", Variant::Float(10.0)))
+                .property(PropertyInfo::new("use_debanding", Variant::Bool(true))),
+        );
+    }
+    if !class_exists("World3D") {
+        register_class(
+            ClassRegistration::new("World3D")
+                .parent("Resource")
+                .property(PropertyInfo::new("camera_attributes", Variant::Nil))
+                .property(PropertyInfo::new("environment", Variant::Nil))
+                .property(PropertyInfo::new("fallback_environment", Variant::Nil)),
+        );
+    }
+    if !class_exists("CameraAttributes") {
+        register_class(
+            ClassRegistration::new("CameraAttributes")
+                .parent("Resource")
+                .property(PropertyInfo::new(
+                    "auto_exposure_enabled",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "auto_exposure_scale",
+                    Variant::Float(0.4),
+                ))
+                .property(PropertyInfo::new(
+                    "auto_exposure_speed",
+                    Variant::Float(0.5),
+                ))
+                .property(PropertyInfo::new(
+                    "exposure_multiplier",
+                    Variant::Float(1.0),
+                ))
+                .property(PropertyInfo::new(
+                    "exposure_sensitivity",
+                    Variant::Float(100.0),
+                )),
+        );
+    }
+    if !class_exists("CameraAttributesPractical") {
+        register_class(
+            ClassRegistration::new("CameraAttributesPractical")
+                .parent("CameraAttributes")
+                .property(PropertyInfo::new(
+                    "auto_exposure_max_sensitivity",
+                    Variant::Float(800.0),
+                ))
+                .property(PropertyInfo::new(
+                    "auto_exposure_min_sensitivity",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("dof_blur_amount", Variant::Float(0.1)))
+                .property(PropertyInfo::new(
+                    "dof_blur_far_distance",
+                    Variant::Float(10.0),
+                ))
+                .property(PropertyInfo::new(
+                    "dof_blur_far_enabled",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "dof_blur_far_transition",
+                    Variant::Float(5.0),
+                ))
+                .property(PropertyInfo::new(
+                    "dof_blur_near_distance",
+                    Variant::Float(2.0),
+                ))
+                .property(PropertyInfo::new(
+                    "dof_blur_near_enabled",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "dof_blur_near_transition",
+                    Variant::Float(1.0),
+                )),
+        );
+    }
+    if !class_exists("CameraAttributesPhysical") {
+        register_class(
+            ClassRegistration::new("CameraAttributesPhysical")
+                .parent("CameraAttributes")
+                .property(PropertyInfo::new(
+                    "auto_exposure_max_exposure_value",
+                    Variant::Float(10.0),
+                ))
+                .property(PropertyInfo::new(
+                    "auto_exposure_min_exposure_value",
+                    Variant::Float(-8.0),
+                ))
+                .property(PropertyInfo::new("exposure_aperture", Variant::Float(16.0)))
+                .property(PropertyInfo::new(
+                    "exposure_shutter_speed",
+                    Variant::Float(100.0),
+                ))
+                .property(PropertyInfo::new("frustum_far", Variant::Float(4000.0)))
+                .property(PropertyInfo::new(
+                    "frustum_focal_length",
+                    Variant::Float(35.0),
+                ))
+                .property(PropertyInfo::new(
+                    "frustum_focus_distance",
+                    Variant::Float(10.0),
+                ))
+                .property(PropertyInfo::new("frustum_near", Variant::Float(0.05))),
+        );
+    }
+    if !class_exists("Compositor") {
+        register_class(
+            ClassRegistration::new("Compositor")
+                .parent("Resource")
+                .property(PropertyInfo::new(
+                    "compositor_effects",
+                    Variant::Array(Vec::new()),
+                )),
+        );
+    }
+    if !class_exists("CompositorEffect") {
+        register_class(
+            ClassRegistration::new("CompositorEffect")
+                .parent("Resource")
+                .property(PropertyInfo::new(
+                    "access_resolved_color",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "access_resolved_depth",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("effect_callback_type", Variant::Int(0)))
+                .property(PropertyInfo::new("enabled", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "needs_motion_vectors",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "needs_normal_roughness",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "needs_separate_specular",
+                    Variant::Bool(false),
+                )),
+        );
     }
 
     register_class(
@@ -5036,7 +5794,25 @@ pub fn register_2d_classes() {
         );
     }
     if !class_exists("RemoteTransform3D") {
-        register_class(ClassRegistration::new("RemoteTransform3D").parent("Node3D"));
+        // RemoteTransform3D: 5 own properties from doc/classes/RemoteTransform3D.xml,
+        // the same set as its 2D sibling below (pat-0q2kx.197). Registered bare
+        // until now, so a `.tscn` carrying `remote_path = NodePath("…")` had
+        // nowhere to put it and the node could never forward anything.
+        register_class(
+            ClassRegistration::new("RemoteTransform3D")
+                .parent("Node3D")
+                .property(PropertyInfo::new(
+                    "remote_path",
+                    Variant::NodePath(gdcore::node_path::NodePath::new("")),
+                ))
+                .property(PropertyInfo::new("update_position", Variant::Bool(true)))
+                .property(PropertyInfo::new("update_rotation", Variant::Bool(true)))
+                .property(PropertyInfo::new("update_scale", Variant::Bool(true)))
+                .property(PropertyInfo::new(
+                    "use_global_coordinates",
+                    Variant::Bool(true),
+                )),
+        );
     }
     if !class_exists("RemoteTransform2D") {
         // RemoteTransform2D: 5 own properties from doc/classes/RemoteTransform2D.xml.
@@ -5081,8 +5857,46 @@ pub fn register_2d_classes() {
         );
     }
     if !class_exists("VisibleOnScreenNotifier3D") {
+        // pat-0q2kx.198: parent was already right, but the registration was
+        // bare — no `aabb` for a `.tscn` to land on and no signals to connect,
+        // so the node could not be authored OR observed.
+        //
+        // Math types are FULLY QUALIFIED on purpose: this function's only local
+        // import is `Vector2`, so a bare `Vector3`/`Aabb` here is E0433.
         register_class(
-            ClassRegistration::new("VisibleOnScreenNotifier3D").parent("VisualInstance3D"),
+            ClassRegistration::new("VisibleOnScreenNotifier3D")
+                .parent("VisualInstance3D")
+                // Godot's default box is AABB(-1, -1, -1, 2, 2, 2).
+                .property(PropertyInfo::new(
+                    "aabb",
+                    Variant::Aabb(gdcore::math3d::Aabb::new(
+                        gdcore::math::Vector3::new(-1.0, -1.0, -1.0),
+                        gdcore::math::Vector3::new(2.0, 2.0, 2.0),
+                    )),
+                ))
+                .signal(SignalInfo::new("screen_entered"))
+                .signal(SignalInfo::new("screen_exited")),
+        );
+    }
+    if !class_exists("VisibleOnScreenEnabler3D") {
+        // Was registered nowhere at all — `grep VisibleOnScreen class_db.rs`
+        // found only the Notifier3D line.
+        register_class(
+            ClassRegistration::new("VisibleOnScreenEnabler3D")
+                .parent("VisibleOnScreenNotifier3D")
+                .property(PropertyInfo::new("enable_mode", Variant::Int(0)))
+                // Godot's default is `NodePath("..")`: the node it enables is
+                // its own parent (doc/classes/VisibleOnScreenEnabler3D.xml).
+                .property(PropertyInfo::new(
+                    "enable_node_path",
+                    Variant::NodePath(gdcore::node_path::NodePath::new("..")),
+                ))
+                .enumeration(
+                    EnumInfo::new("EnableMode")
+                        .constant("ENABLE_MODE_INHERIT", 0)
+                        .constant("ENABLE_MODE_ALWAYS", 1)
+                        .constant("ENABLE_MODE_WHEN_PAUSED", 2),
+                ),
         );
     }
     // pat-0q2kx.109: Label3D was a bare parent-only registration with no
@@ -6075,7 +6889,20 @@ pub fn register_2d_classes() {
                     "angular_damp_space_override",
                     Variant::Int(0),
                 ))
-                .property(PropertyInfo::new("angular_damp", Variant::Float(1.0))),
+                .property(PropertyInfo::new("angular_damp", Variant::Float(1.0)))
+                // Audio-bus override surface (pat-0q2kx.189). `gdaudio`'s server
+                // already reroutes a voice when an area overrides the bus, and
+                // `gdeditor`'s generated inspector schema already declares both
+                // properties — ClassDB was the only place that did not know them,
+                // so a `.tscn` carrying either silently dropped it.
+                .property(PropertyInfo::new(
+                    "audio_bus_override",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "audio_bus_name",
+                    Variant::StringName(gdcore::string_name::StringName::new("Master")),
+                )),
         );
     }
     if !class_exists("CollisionShape2D") {
@@ -6134,7 +6961,26 @@ pub fn register_2d_classes() {
                 .property(PropertyInfo::new(
                     "follow_viewport_enabled",
                     Variant::Bool(false),
-                )),
+                ))
+                // The last three of the nine `doc/classes/CanvasLayer.xml`
+                // members, which were missing (pat-0q2kx.212). `transform` is
+                // the one that matters most: Godot lets a layer be positioned
+                // either by offset/rotation/scale OR by an explicit transform,
+                // and with no property registered the second spelling could not
+                // even be authored.
+                //
+                // ⚠️ Fully qualified: only `Vector2` is imported into this
+                // function, so a bare `Transform2D` here is E0433.
+                .property(PropertyInfo::new(
+                    "transform",
+                    Variant::Transform2D(gdcore::math::Transform2D::IDENTITY),
+                ))
+                .property(PropertyInfo::new(
+                    "follow_viewport_scale",
+                    Variant::Float(1.0),
+                ))
+                // A NodePath to another Viewport; Nil until assigned.
+                .property(PropertyInfo::new("custom_viewport", Variant::Nil)),
         );
     }
 
@@ -6815,6 +7661,71 @@ pub fn register_viewport_classes() {
                 .method(MethodInfo::new("_has_mipmaps", 0))
                 .method(MethodInfo::new("_get_data", 0)),
         );
+    }
+
+    // -- Compressed (.ctex) texture family (pat-0q2kx.215) -------------------
+    //
+    // The on-disk counterparts of the Image* textures above: a `.ctex` carries
+    // already-compressed data and `load(path)` reads it, with `load_path`
+    // reporting where it came from. Without these the importer path has no
+    // class to instantiate, so a compressed cubemap cannot be a sky or
+    // reflection source.
+    //
+    // ⚠️ Abstractness differs from the uncompressed siblings and is NOT
+    // guessable from the hierarchy: `TextureLayered` and `Texture3D` are
+    // GDREGISTER_VIRTUAL_CLASS (see above), but `CompressedTextureLayered` is
+    // GDREGISTER_ABSTRACT_CLASS (register_scene_types.cpp:1065) while all five
+    // leaves are plain GDREGISTER_CLASS (:1046, :1061, :1066-1068).
+    if !class_exists("CompressedTexture2D") {
+        register_class(
+            ClassRegistration::new("CompressedTexture2D")
+                .parent("Texture2D")
+                .property(PropertyInfo::new(
+                    "load_path",
+                    Variant::String(String::new()),
+                ))
+                .method(MethodInfo::new("load", 1))
+                .method(MethodInfo::new("get_load_path", 0)),
+        );
+    }
+    if !class_exists("CompressedTexture3D") {
+        register_class(
+            ClassRegistration::new("CompressedTexture3D")
+                .parent("Texture3D")
+                .property(PropertyInfo::new(
+                    "load_path",
+                    Variant::String(String::new()),
+                ))
+                .method(MethodInfo::new("load", 1))
+                .method(MethodInfo::new("get_load_path", 0)),
+        );
+    }
+    if !class_exists("CompressedTextureLayered") {
+        register_class(
+            // The one genuinely abstract member of the family.
+            ClassRegistration::new("CompressedTextureLayered")
+                .parent("TextureLayered")
+                .abstract_class()
+                .property(PropertyInfo::new(
+                    "load_path",
+                    Variant::String(String::new()),
+                ))
+                .method(MethodInfo::new("load", 1))
+                .method(MethodInfo::new("get_load_path", 0)),
+        );
+    }
+    // The three leaves add no members of their own (their doc XML lists none);
+    // `load_path` and `load` reach them through CompressedTextureLayered.
+    // Registering a duplicate `load_path` here would put the property in
+    // `get_property_list` twice, since that walk does not dedupe the chain.
+    for leaf in [
+        "CompressedTexture2DArray",
+        "CompressedCubemap",
+        "CompressedCubemapArray",
+    ] {
+        if !class_exists(leaf) {
+            register_class(ClassRegistration::new(leaf).parent("CompressedTextureLayered"));
+        }
     }
 
     // -- Curve textures (pat-nzgdu.225) --------------------------------------
@@ -8393,6 +9304,103 @@ pub fn register_io_classes() {
                 .method(MethodInfo::new("clear", 0)),
         );
     }
+    // -- Crypto (pat-0q2kx.206) ---------------------------------------------
+    //
+    // `gdcore::crypto` has had streaming MD5/SHA-1/SHA-256, HMAC and real
+    // AES-CBC all along, and none of these classes were registered — so
+    // `ClassDB.class_exists("HashingContext")` answered false and a script could
+    // not construct one. Arities from `doc/classes/{HashingContext,AESContext,
+    // Crypto,CryptoKey,X509Certificate,HMACContext}.xml`.
+    if !class_exists("HashingContext") {
+        register_class(
+            ClassRegistration::new("HashingContext")
+                .parent("RefCounted")
+                .method(MethodInfo::new("start", 1))
+                .method(MethodInfo::new("update", 1))
+                .method(MethodInfo::new("finish", 0))
+                // HashType: the ints a script passes to `start`. Registered as a
+                // named enum rather than loose constants so
+                // `ClassDB.class_has_enum("HashingContext", "HashType")` answers
+                // truthfully; the constants come along with it.
+                .enumeration(
+                    EnumInfo::new("HashType")
+                        .constant("HASH_MD5", 0)
+                        .constant("HASH_SHA1", 1)
+                        .constant("HASH_SHA256", 2),
+                ),
+        );
+    }
+    if !class_exists("AESContext") {
+        register_class(
+            ClassRegistration::new("AESContext")
+                .parent("RefCounted")
+                // `start(mode, key, iv)` — `iv` defaults to an empty array, so
+                // ECB callers pass two.
+                .method(MethodInfo::new("start", 3))
+                .method(MethodInfo::new("update", 1))
+                .method(MethodInfo::new("get_iv_state", 0))
+                .method(MethodInfo::new("finish", 0))
+                // ⚠️ ECB comes FIRST in Godot's enum. Assuming CBC=0 — the
+                // intuitive order, since CBC is the mode you should use — would
+                // silently encrypt in the wrong mode.
+                .enumeration(
+                    EnumInfo::new("Mode")
+                        .constant("MODE_ECB_ENCRYPT", 0)
+                        .constant("MODE_ECB_DECRYPT", 1)
+                        .constant("MODE_CBC_ENCRYPT", 2)
+                        .constant("MODE_CBC_DECRYPT", 3)
+                        .constant("MODE_MAX", 4),
+                ),
+        );
+    }
+    if !class_exists("HMACContext") {
+        register_class(
+            ClassRegistration::new("HMACContext")
+                .parent("RefCounted")
+                .method(MethodInfo::new("start", 2))
+                .method(MethodInfo::new("update", 1))
+                .method(MethodInfo::new("finish", 0)),
+        );
+    }
+    if !class_exists("Crypto") {
+        register_class(
+            ClassRegistration::new("Crypto")
+                .parent("RefCounted")
+                .method(MethodInfo::new("generate_random_bytes", 1))
+                .method(MethodInfo::new("hmac_digest", 3))
+                .method(MethodInfo::new("constant_time_compare", 2))
+                // ⚠️ Registered but stage 2: the interpreter answers these with
+                // null / empty / false rather than a fake key or signature.
+                .method(MethodInfo::new("generate_rsa", 1))
+                .method(MethodInfo::new("generate_self_signed_certificate", 3))
+                .method(MethodInfo::new("sign", 3))
+                .method(MethodInfo::new("verify", 4))
+                .method(MethodInfo::new("encrypt", 2))
+                .method(MethodInfo::new("decrypt", 2)),
+        );
+    }
+    // Both are Resources, not RefCounted — they are saved and loaded as files.
+    if !class_exists("CryptoKey") {
+        register_class(
+            ClassRegistration::new("CryptoKey")
+                .parent("Resource")
+                .method(MethodInfo::new("save", 2))
+                .method(MethodInfo::new("load", 2))
+                .method(MethodInfo::new("save_to_string", 1))
+                .method(MethodInfo::new("load_from_string", 2))
+                .method(MethodInfo::new("is_public_only", 0)),
+        );
+    }
+    if !class_exists("X509Certificate") {
+        register_class(
+            ClassRegistration::new("X509Certificate")
+                .parent("Resource")
+                .method(MethodInfo::new("save", 1))
+                .method(MethodInfo::new("load", 1))
+                .method(MethodInfo::new("save_to_string", 0))
+                .method(MethodInfo::new("load_from_string", 1)),
+        );
+    }
     if !class_exists("ZIPReader") {
         register_class(
             ClassRegistration::new("ZIPReader")
@@ -9233,11 +10241,60 @@ pub fn register_networking_classes() {
                 .method(MethodInfo::new("close", 0)),
         );
     }
+    // `StreamPeerBuffer` (pat-0q2kx.183). The 356-line port in
+    // `gdplatform::stream_peer_buffer` was reachable only from
+    // `packet_peer_stream.rs` internally: unregistered here, so
+    // `StreamPeerBuffer.new()` was an unknown class and nothing in a scene or a
+    // script could construct one. Only the methods actually wired in the
+    // interpreter are registered — advertising the rest would claim a surface
+    // that fails at call time.
+    if !class_exists("StreamPeerBuffer") {
+        register_class(
+            ClassRegistration::new("StreamPeerBuffer")
+                .parent("StreamPeer")
+                .property(PropertyInfo::new(
+                    "data_array",
+                    Variant::PackedByteArray(Vec::new()),
+                ))
+                .method(MethodInfo::new("put_var", 1))
+                .method(MethodInfo::new("get_var", 0))
+                .method(MethodInfo::new("put_data", 1))
+                .method(MethodInfo::new("get_data", 1))
+                .method(MethodInfo::new("put_8", 1))
+                .method(MethodInfo::new("put_u8", 1))
+                .method(MethodInfo::new("put_16", 1))
+                .method(MethodInfo::new("put_u16", 1))
+                .method(MethodInfo::new("put_32", 1))
+                .method(MethodInfo::new("put_u32", 1))
+                .method(MethodInfo::new("put_64", 1))
+                .method(MethodInfo::new("put_u64", 1))
+                .method(MethodInfo::new("get_8", 0))
+                .method(MethodInfo::new("get_u8", 0))
+                .method(MethodInfo::new("get_16", 0))
+                .method(MethodInfo::new("get_u16", 0))
+                .method(MethodInfo::new("get_32", 0))
+                .method(MethodInfo::new("get_u32", 0))
+                .method(MethodInfo::new("get_64", 0))
+                .method(MethodInfo::new("get_u64", 0))
+                .method(MethodInfo::new("seek", 1))
+                .method(MethodInfo::new("get_position", 0))
+                .method(MethodInfo::new("get_size", 0))
+                .method(MethodInfo::new("get_available_bytes", 0))
+                .method(MethodInfo::new("clear", 0))
+                .method(MethodInfo::new("get_data_array", 0))
+                .method(MethodInfo::new("set_big_endian", 1))
+                .method(MethodInfo::new("is_big_endian", 0)),
+        );
+    }
     if !class_exists("StreamPeer") {
         register_class(
             ClassRegistration::new("StreamPeer")
                 .parent("RefCounted")
                 .abstract_class()
+                // `put_var`/`get_var` are on the StreamPeer base in Godot, not
+                // only on the buffer (pat-0q2kx.183).
+                .method(MethodInfo::new("put_var", 1))
+                .method(MethodInfo::new("get_var", 0))
                 .method(MethodInfo::new("put_data", 1))
                 .method(MethodInfo::new("get_data", 1))
                 .method(MethodInfo::new("get_available_bytes", 0)),
@@ -9255,6 +10312,58 @@ pub fn register_networking_classes() {
                 .method(MethodInfo::new("get_available_bytes", 0))
                 .method(MethodInfo::new("disconnect_from_host", 0)),
         );
+    }
+
+    // -- Native socket / DTLS surfaces (pat-0q2kx.184) -----------------------
+    //
+    // A browser cannot open a listening socket or a DTLS association, so the
+    // *transports* are genuinely out of scope for the web target — Godot's own
+    // web export omits them. But `docs/taxonomy.md:413-416` is explicit that the
+    // **class surface must still exist** and report correct errors: a script
+    // doing `ClassDB.class_exists("TCPServer")` or `TCPServer.new()` should find
+    // the class and fail on *use*, not fail to resolve the name.
+    //
+    // These were absent from ClassDB while `gdeditor`'s generated inspector
+    // schema already listed all seven, so the editor and ClassDB disagreed about
+    // whether they exist. Parents below match that generated table.
+    //
+    // No methods are declared: declaring `listen`/`accept` here would imply an
+    // implementation that cannot exist on this target. The surface is the class
+    // and its inheritance chain.
+
+    // `SocketServer` is an intermediate base — registering `TCPServer` without it
+    // would sever the chain to `RefCounted` and `is_parent_class` would silently
+    // answer false.
+    if !class_exists("SocketServer") {
+        register_class(
+            ClassRegistration::new("SocketServer")
+                .parent("RefCounted")
+                .abstract_class(),
+        );
+    }
+    if !class_exists("TCPServer") {
+        register_class(ClassRegistration::new("TCPServer").parent("SocketServer"));
+    }
+    if !class_exists("UDPServer") {
+        register_class(ClassRegistration::new("UDPServer").parent("RefCounted"));
+    }
+    if !class_exists("DTLSServer") {
+        register_class(ClassRegistration::new("DTLSServer").parent("RefCounted"));
+    }
+    if !class_exists("PacketPeerDTLS") {
+        register_class(ClassRegistration::new("PacketPeerDTLS").parent("PacketPeer"));
+    }
+    // `StreamPeer` itself is already registered above (with its `put_var`/
+    // `get_var` surface), so `StreamPeerSocket` can hang off it directly.
+    if !class_exists("StreamPeerSocket") {
+        register_class(
+            ClassRegistration::new("StreamPeerSocket")
+                .parent("StreamPeer")
+                .abstract_class(),
+        );
+    }
+    if !class_exists("StreamPeerUDS") {
+        register_class(ClassRegistration::new("StreamPeerUDS").parent("StreamPeerSocket"));
     }
 }
 
@@ -9375,16 +10484,19 @@ fn register_navigation_resource_classes() {
                 .property(PropertyInfo::new("polygons", Variant::Array(Vec::new())))
                 .property(PropertyInfo::new("outlines", Variant::Array(Vec::new())))
                 .property(PropertyInfo::new("sample_partition_type", Variant::Int(0)))
-                .property(PropertyInfo::new("parsed_geometry_type", Variant::Int(0)))
-                .property(PropertyInfo::new("parsed_collision_mask", Variant::Int(0)))
+                .property(PropertyInfo::new("parsed_geometry_type", Variant::Int(2)))
+                .property(PropertyInfo::new(
+                    "parsed_collision_mask",
+                    Variant::Int(4294967295),
+                ))
                 .property(PropertyInfo::new("source_geometry_mode", Variant::Int(0)))
                 .property(PropertyInfo::new(
                     "source_geometry_group_name",
                     Variant::String(String::new()),
                 ))
-                .property(PropertyInfo::new("cell_size", Variant::Float(0.0)))
+                .property(PropertyInfo::new("cell_size", Variant::Float(1.0)))
                 .property(PropertyInfo::new("border_size", Variant::Float(0.0)))
-                .property(PropertyInfo::new("agent_radius", Variant::Float(0.0)))
+                .property(PropertyInfo::new("agent_radius", Variant::Float(10.0)))
                 .property(PropertyInfo::new(
                     "baking_rect",
                     Variant::Rect2(gdcore::math::Rect2::new(
@@ -9434,7 +10546,7 @@ fn register_navigation_resource_classes() {
                 ))
                 .property(PropertyInfo::new(
                     "geometry_collision_mask",
-                    Variant::Int(0),
+                    Variant::Int(4294967295),
                 ))
                 .property(PropertyInfo::new(
                     "geometry_source_geometry_mode",
@@ -9444,28 +10556,28 @@ fn register_navigation_resource_classes() {
                     "geometry_source_group_name",
                     Variant::String(String::new()),
                 ))
-                .property(PropertyInfo::new("cell_size", Variant::Float(0.0)))
-                .property(PropertyInfo::new("cell_height", Variant::Float(0.0)))
+                .property(PropertyInfo::new("cell_size", Variant::Float(0.25)))
+                .property(PropertyInfo::new("cell_height", Variant::Float(0.25)))
                 .property(PropertyInfo::new("border_size", Variant::Float(0.0)))
-                .property(PropertyInfo::new("agent_height", Variant::Float(0.0)))
-                .property(PropertyInfo::new("agent_radius", Variant::Float(0.0)))
-                .property(PropertyInfo::new("agent_max_climb", Variant::Float(0.0)))
-                .property(PropertyInfo::new("agent_max_slope", Variant::Float(0.0)))
-                .property(PropertyInfo::new("region_min_size", Variant::Float(0.0)))
-                .property(PropertyInfo::new("region_merge_size", Variant::Float(0.0)))
+                .property(PropertyInfo::new("agent_height", Variant::Float(1.5)))
+                .property(PropertyInfo::new("agent_radius", Variant::Float(0.5)))
+                .property(PropertyInfo::new("agent_max_climb", Variant::Float(0.25)))
+                .property(PropertyInfo::new("agent_max_slope", Variant::Float(45.0)))
+                .property(PropertyInfo::new("region_min_size", Variant::Float(2.0)))
+                .property(PropertyInfo::new("region_merge_size", Variant::Float(20.0)))
                 .property(PropertyInfo::new("edge_max_length", Variant::Float(0.0)))
-                .property(PropertyInfo::new("edge_max_error", Variant::Float(0.0)))
+                .property(PropertyInfo::new("edge_max_error", Variant::Float(1.3)))
                 .property(PropertyInfo::new(
                     "vertices_per_polygon",
-                    Variant::Float(0.0),
+                    Variant::Float(6.0),
                 ))
                 .property(PropertyInfo::new(
                     "detail_sample_distance",
-                    Variant::Float(0.0),
+                    Variant::Float(6.0),
                 ))
                 .property(PropertyInfo::new(
                     "detail_sample_max_error",
-                    Variant::Float(0.0),
+                    Variant::Float(1.0),
                 ))
                 .property(PropertyInfo::new(
                     "filter_low_hanging_obstacles",

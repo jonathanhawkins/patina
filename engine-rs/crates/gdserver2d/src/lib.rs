@@ -26,7 +26,11 @@ pub use material::{
     VisualShaderNodeType,
 };
 pub use mesh::{Mesh3D, PrimitiveType};
-pub use parallax::ParallaxLayer;
+// `ParallaxBackground` was missing from this re-export while `ParallaxLayer`
+// was present, so a consumer crate could name a layer but not the background
+// that drives it — and the render-path wiring this family needs lives in
+// `gdscene`/`gdeditor` (pat-0q2kx.192).
+pub use parallax::{ParallaxBackground, ParallaxLayer};
 pub use server::{FrameData, RenderingServer2D};
 pub use server3d::{
     perspective_projection_matrix, FrameData3D, Instance3D, Instance3DId, RenderingServer3D,

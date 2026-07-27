@@ -735,6 +735,36 @@ impl SceneTreeAccessor {
         unsafe { &mut *self.tree }
     }
 
+    /// The physics server bound to the tree for this script phase, or `None`
+    /// when nothing is driving physics (pat-0q2kx.200).
+    ///
+    /// The address is read back off the tree rather than carried in the
+    /// accessor so that every existing `SceneTreeAccessor` construction site
+    /// keeps working unchanged — the accessor already holds the tree pointer.
+    fn physics(&self) -> Option<&crate::physics_server::PhysicsServer> {
+        let addr = self.tree().script_physics_addr();
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: `set_script_physics_server` stored the address of a live
+        // `PhysicsServer` and its caller (`MainLoop`) clears it before that
+        // server can move or drop, so a non-zero address points at a live
+        // server. The server is a sibling of the tree, never inside it, so this
+        // borrow cannot alias the tree pointer.
+        Some(unsafe { &*(addr as *const crate::physics_server::PhysicsServer) })
+    }
+
+    /// Mutable counterpart of [`Self::physics`].
+    fn physics_mut(&mut self) -> Option<&mut crate::physics_server::PhysicsServer> {
+        let addr = self.tree().script_physics_addr();
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: As in `physics`, plus: we hold `&mut self`, so no other
+        // accessor can hand out a second reference to the same server.
+        Some(unsafe { &mut *(addr as *mut crate::physics_server::PhysicsServer) })
+    }
+
     // -- Tween step plumbing (pat-0q2kx.4) ----------------------------------
 
     /// Appends a step to the tween, returning `None` if it no longer exists.
@@ -1209,6 +1239,31 @@ impl SceneAccess for SceneTreeAccessor {
                     || bool_prop(tree, "is_on_wall")
                     || bool_prop(tree, "is_on_ceiling");
                 Some(Variant::Bool(collided))
+            }
+            // `CanvasItem.get_canvas_item()` — the RID standing for this node's
+            // canvas item, which is what a script parents a RenderingServer
+            // canvas item to (pat-0q2kx.213). Allocated on first ask and stable
+            // afterwards, as Godot's is.
+            "get_canvas_item" => Some(Variant::Int(
+                gdscript_interop::canvas_server::node_canvas_item(node) as i64,
+            )),
+            // `PhysicsBody2D.test_move(motion)` — whether the motion would be
+            // blocked, without moving the body (pat-0q2kx.200). Godot's real
+            // signature leads with a transform; the motion is the argument that
+            // decides the answer, so it is read from whichever slot holds a
+            // Vector2 and a bodyless/serverless call reports "not blocked"
+            // rather than a false positive.
+            "test_move" => {
+                let motion = args
+                    .iter()
+                    .find_map(|a| match a {
+                        Variant::Vector2(v) => Some(*v),
+                        _ => None,
+                    })
+                    .unwrap_or(Vector2::ZERO);
+                Some(Variant::Bool(
+                    self.physics2d_node_test_move(node, (motion.x, motion.y)),
+                ))
             }
             // Collision state persisted by `process_character_movement`.
             "is_on_floor" | "is_on_wall" | "is_on_ceiling" => {
@@ -1698,6 +1753,78 @@ impl SceneAccess for SceneTreeAccessor {
     fn is_processing_input(&self, node: u64) -> bool {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         self.tree().is_node_processing_input(nid)
+    }
+
+    // -- PhysicsServer2D (pat-0q2kx.200) ------------------------------------
+    //
+    // Each of these routes to the `PhysicsServer` bound for this script phase.
+    // With no server bound they fall through to the trait defaults' behaviour
+    // (invalid RID / no result) rather than inventing a value.
+
+    fn physics2d_circle_shape_create(&mut self) -> u64 {
+        self.physics_mut()
+            .map_or(0, |p| p.server_circle_shape_create())
+    }
+
+    fn physics2d_rectangle_shape_create(&mut self) -> u64 {
+        self.physics_mut()
+            .map_or(0, |p| p.server_rectangle_shape_create())
+    }
+
+    fn physics2d_shape_set_data_radius(&mut self, shape: u64, radius: f32) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_shape_set_data(shape, radius, None))
+    }
+
+    fn physics2d_shape_set_data_extents(&mut self, shape: u64, extents: (f32, f32)) -> bool {
+        let extents = Vector2::new(extents.0, extents.1);
+        self.physics_mut()
+            .is_some_and(|p| p.server_shape_set_data(shape, 0.0, Some(extents)))
+    }
+
+    fn physics2d_body_create(&mut self) -> u64 {
+        self.physics_mut().map_or(0, |p| p.server_body_create())
+    }
+
+    fn physics2d_body_set_space(&mut self, body: u64, space: u64) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_set_space(body, space))
+    }
+
+    fn physics2d_body_add_shape(&mut self, body: u64, shape: u64) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_add_shape(body, shape))
+    }
+
+    fn physics2d_body_set_state_vec2(&mut self, body: u64, state: i64, value: (f32, f32)) -> bool {
+        let value = Vector2::new(value.0, value.1);
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_set_state_vec2(body, state, value))
+    }
+
+    fn physics2d_body_get_position(&self, body: u64) -> Option<(f32, f32)> {
+        let pos = self.physics()?.server_body_position(body)?;
+        Some((pos.x, pos.y))
+    }
+
+    fn physics2d_body_test_motion(
+        &self,
+        body: u64,
+        motion: (f32, f32),
+    ) -> Option<(bool, (f32, f32))> {
+        let physics = self.physics()?;
+        // An RID with no space has no world position to sweep from; reporting
+        // `None` keeps that distinguishable from "swept and hit nothing".
+        physics.server_body_position(body)?;
+        let (collided, travel) =
+            physics.server_body_test_motion(body, Vector2::new(motion.0, motion.1));
+        Some((collided, (travel.x, travel.y)))
+    }
+
+    fn physics2d_node_test_move(&self, node: u64, motion: (f32, f32)) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.physics()
+            .is_some_and(|p| p.node_test_move(nid, Vector2::new(motion.0, motion.1)))
     }
 
     fn is_physics_processing(&self, node: u64) -> bool {

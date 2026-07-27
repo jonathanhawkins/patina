@@ -1121,6 +1121,41 @@ fn draw_control(
                 }
             }
         }
+        // NinePatchRect (pat-0q2kx.179). The nine-patch rasterizer has existed in
+        // `gdrender2d` with **no producer** — `draw_control` had no arm, so the
+        // class fell through to `_ => {}` and drew nothing at all.
+        //
+        // The per-axis stretch mapping is reused from `stylebox::AxisStretchMode`
+        // rather than re-derived: `NinePatchRect` and `StyleBoxTexture` share
+        // Godot's `AXIS_STRETCH_MODE_*` constants (STRETCH=0, TILE=1, TILE_FIT=2),
+        // and duplicating the table is how the two drift apart.
+        "NinePatchRect" => {
+            if let Some(path) = string_prop(tree, node_id, "texture") {
+                if !path.is_empty() {
+                    let margin = |key: &str| int_prop(tree, node_id, key).unwrap_or(0) as f32;
+                    let axis = |key: &str| {
+                        crate::stylebox::AxisStretchMode::from_i64(
+                            int_prop(tree, node_id, key).unwrap_or(0),
+                        )
+                        .to_nine_patch_axis()
+                    };
+                    out.push(DrawCommand::DrawNinePatch {
+                        texture_path: path,
+                        rect,
+                        margin_left: margin("patch_margin_left"),
+                        margin_top: margin("patch_margin_top"),
+                        margin_right: margin("patch_margin_right"),
+                        margin_bottom: margin("patch_margin_bottom"),
+                        // Godot's `draw_center` defaults to true; an absent
+                        // property must not blank the middle patch.
+                        draw_center: bool_prop(tree, node_id, "draw_center").unwrap_or(true),
+                        axis_h: axis("axis_stretch_horizontal"),
+                        axis_v: axis("axis_stretch_vertical"),
+                        modulate: Color::WHITE,
+                    });
+                }
+            }
+        }
         "RichTextLabel" => {
             // Accept either `bbcode_text` (bbcode_enabled) or plain `text`.
             let raw = string_prop(tree, node_id, "bbcode_text")

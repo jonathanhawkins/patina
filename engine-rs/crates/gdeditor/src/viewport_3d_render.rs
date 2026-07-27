@@ -23,7 +23,9 @@ use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::Material3D;
 use gdserver3d::mesh::Mesh3D;
 use gdserver3d::occluder::{Occluder3D, OccluderInstance3D};
-use gdserver3d::reflection_probe::{ReflectionProbe, ReflectionProbeId};
+use gdserver3d::reflection_probe::{
+    ReflectionProbe, ReflectionProbeAmbientMode, ReflectionProbeId, ReflectionProbeUpdateMode,
+};
 use gdserver3d::server::RenderingServer3D;
 use gdserver3d::viewport::Viewport3D as RenderViewport3D;
 
@@ -1440,6 +1442,24 @@ fn env_bool(node: &gdscene::node::Node, key: &str, default: bool) -> bool {
     }
 }
 
+/// Reads a texture-resource path off a node.
+///
+/// A `.tscn` writes `texture_albedo = ExtResource("1_abc")`, which the loader
+/// flattens into an `__extres__texture_albedo` companion holding the path (see
+/// `packed_scene.rs:809`) while the property itself keeps the resource. Both
+/// spellings are accepted, companion first, so a scene-loaded node and a
+/// hand-built one behave the same. An empty path is `None`, not `Some("")`.
+fn env_texture_path(node: &gdscene::node::Node, key: &str) -> Option<String> {
+    let raw = match node.get_property(&format!("__extres__{key}")) {
+        gdvariant::Variant::String(s) => s,
+        _ => match node.get_property(key) {
+            gdvariant::Variant::String(s) => s,
+            _ => return None,
+        },
+    };
+    (!raw.is_empty()).then_some(raw)
+}
+
 fn env_vec3(node: &gdscene::node::Node, key: &str, default: Vector3) -> Vector3 {
     match node.get_property(key) {
         gdvariant::Variant::Vector3(v) => v,
@@ -1507,6 +1527,14 @@ fn scene_env_effects(tree: &SceneTree) -> SceneEnvEffects3D {
             if let gdvariant::Variant::Int(mask) = node.get_property("cull_mask") {
                 decal.cull_mask = mask as u32;
             }
+            // The four projected texture channels. `Decal3D` has carried these
+            // path fields all along but nothing ever read them off a node, so a
+            // `.tscn` naming `texture_albedo` reached the renderer with `None`
+            // in every channel (pat-0q2kx.195).
+            decal.texture_albedo = env_texture_path(node, "texture_albedo");
+            decal.texture_normal = env_texture_path(node, "texture_normal");
+            decal.texture_orm = env_texture_path(node, "texture_orm");
+            decal.texture_emission = env_texture_path(node, "texture_emission");
             out.decals.push(decal);
         } else if is_probe {
             let mut probe = ReflectionProbe::new(ReflectionProbeId(next_probe_id));
@@ -1526,6 +1554,28 @@ fn scene_env_effects(tree: &SceneTree) -> SceneEnvEffects3D {
             }
             if let gdvariant::Variant::Int(mask) = node.get_property("cull_mask") {
                 probe.cull_mask = mask as u32;
+            }
+            probe.mesh_lod_threshold =
+                env_f32(node, "mesh_lod_threshold", probe.mesh_lod_threshold);
+            // ⚠️ `ambient_mode` gates the probe's whole ambient contribution in
+            // `sample_probes_at` — leaving it unread meant `ambient_mode = 0`
+            // (Disabled) in a `.tscn` was silently ignored and the probe lit
+            // anyway. Unknown ints keep the default rather than falling through
+            // to Disabled, so a newer Godot enum value does not blank a probe.
+            if let gdvariant::Variant::Int(mode) = node.get_property("ambient_mode") {
+                probe.ambient_mode = match mode {
+                    0 => ReflectionProbeAmbientMode::Disabled,
+                    1 => ReflectionProbeAmbientMode::Environment,
+                    2 => ReflectionProbeAmbientMode::ConstantColor,
+                    _ => probe.ambient_mode,
+                };
+            }
+            if let gdvariant::Variant::Int(mode) = node.get_property("update_mode") {
+                probe.update_mode = match mode {
+                    0 => ReflectionProbeUpdateMode::Once,
+                    1 => ReflectionProbeUpdateMode::Always,
+                    _ => probe.update_mode,
+                };
             }
             out.reflection_probes.push(probe);
         } else {

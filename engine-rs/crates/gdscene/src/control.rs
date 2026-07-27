@@ -4002,8 +4002,14 @@ func _on_pressed():
         assert_eq!(pos, Vector2::new(0.0, -120.0));
     }
 
-    #[test]
     // -- pat-nzgdu.142 (clause c): RTL layout mirroring ----------------------
+    //
+    // NOTE: a stray `#[test]` used to sit above this banner, giving the function
+    // below TWO `#[test]` attributes — E0428, which stopped `-p gdscene --lib`
+    // compiling entirely. It went unnoticed for a long time because `--test
+    // <name>` targets do NOT build a crate's `#[cfg(test)]` module, so every
+    // integration test stayed green while the unit-test target was dead
+    // (removed under pat-0q2kx.196).
 
     /// The bead's RTL clause: a Control with `layout_direction = RTL` mirrors
     /// its children's positions — the first child sits at the right edge — while
@@ -4192,5 +4198,4 @@ func _on_pressed():
         assert_eq!(cur_pos, Vector2::new(0.0, TAB_BAR_HEIGHT));
         assert_eq!(cur_size, Vector2::new(300.0, 200.0 - TAB_BAR_HEIGHT));
     }
-
 }

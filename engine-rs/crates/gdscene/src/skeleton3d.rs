@@ -399,6 +399,35 @@ pub fn get_bone_global_pose(tree: &SceneTree, node_id: NodeId, idx: usize) -> Tr
     global
 }
 
+/// Sets bone `idx`'s **global** pose, by solving for the local pose that
+/// produces it (pat-0q2kx.203).
+///
+/// [`get_bone_global_pose`] accumulates `parent_global * rest * pose` down the
+/// chain, so the local pose that lands a bone at `global` is
+/// `(parent_global * rest)⁻¹ * global`. This is the writeback direction a
+/// ragdoll needs: the simulation produces world-space bone transforms, while
+/// the skeleton only stores local poses.
+pub fn set_bone_global_pose(
+    tree: &mut SceneTree,
+    node_id: NodeId,
+    idx: usize,
+    global: Transform3D,
+) {
+    if idx >= get_bone_count(tree, node_id) {
+        return;
+    }
+    let parent = get_bone_parent(tree, node_id, idx);
+    let parent_global = if parent >= 0 {
+        get_bone_global_pose(tree, node_id, parent as usize)
+    } else {
+        Transform3D::IDENTITY
+    };
+    let rest = get_bone_rest(tree, node_id, idx);
+
+    let pose = (parent_global * rest).inverse() * global;
+    set_bone_pose(tree, node_id, idx, pose);
+}
+
 /// Gathers the global pose of every bone into a flat array indexed by bone
 /// index (`0..get_bone_count`).
 ///

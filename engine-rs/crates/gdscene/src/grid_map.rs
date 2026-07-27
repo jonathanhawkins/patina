@@ -52,6 +52,20 @@ pub struct GridCell {
     pub z: i32,
 }
 
+/// One decoded `data/cells` entry, including the orientation and layer that
+/// [`GridMap::decode_cells`]'s `(cell, item)` form drops (pat-0q2kx.196).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodedCell {
+    /// Grid coordinate.
+    pub cell: GridCell,
+    /// MeshLibrary item id.
+    pub item: i32,
+    /// Godot's 24-way orthogonal orientation index (`rot`, 5 bits).
+    pub orientation: u8,
+    /// Godot's cell layer (8 bits).
+    pub layer: u8,
+}
+
 /// GridMap node data.
 #[derive(Debug, Clone, Default)]
 pub struct GridMap {
@@ -62,6 +76,8 @@ pub struct GridMap {
     /// separate resource file and are populated by a future MeshLibrary loader.
     pub mesh_library_resource: Option<String>,
     cells: HashMap<GridCell, i32>,
+    /// Per-cell orientation; absent means Godot's default of 0.
+    orientations: HashMap<GridCell, u8>,
 }
 
 impl GridMap {
@@ -71,12 +87,16 @@ impl GridMap {
             mesh_library: MeshLibrary::new(),
             mesh_library_resource: None,
             cells: HashMap::new(),
+            orientations: HashMap::new(),
         }
     }
 
     pub fn set_cell_item(&mut self, cell: GridCell, item: i32) {
         if item < 0 {
             self.cells.remove(&cell);
+            // Clear the orientation with the cell. Leaving it behind would let a
+            // cleared-then-reset cell inherit a stale rotation (pat-0q2kx.196).
+            self.orientations.remove(&cell);
         } else {
             self.cells.insert(cell, item);
         }
@@ -114,11 +134,34 @@ impl GridMap {
     /// `(cell, item)` pairs. Godot stores each cell as three consecutive
     /// `int32`s: the low and high halves of a 64-bit key packing three signed
     /// `int16` coordinates (`x | y<<16 | z<<32`), followed by a packed cell
-    /// value whose low 16 bits are the mesh-library item id (upper bits hold
-    /// orientation/layer, which this subset does not retain). Empty cells
+    /// value whose low 16 bits are the mesh-library item id. Empty cells
     /// (`item == INVALID_CELL_ITEM`) and any trailing partial triple are
     /// skipped.
+    ///
+    /// This short form **discards the orientation and layer** the packed value
+    /// also carries. Use [`decode_cells_full`](Self::decode_cells_full) to keep
+    /// them — the render path needs the rotation, or every cell draws unrotated.
     pub fn decode_cells(data: &[i32]) -> Vec<(GridCell, i32)> {
+        Self::decode_cells_full(data)
+            .into_iter()
+            .map(|c| (c.cell, c.item))
+            .collect()
+    }
+
+    /// [`decode_cells`](Self::decode_cells) keeping the **orientation and layer**
+    /// the short form discards (pat-0q2kx.196).
+    ///
+    /// Godot packs the cell value as a bitfield (`modules/gridmap/grid_map.h`):
+    /// `item : 16`, `rot : 5`, `layer : 8`. Masking `value & 0xFFFF` for the item
+    /// therefore throws away the rotation — which is why every GridMap cell would
+    /// render unrotated even once the render path expands them, with no error to
+    /// notice.
+    ///
+    /// `rot` indexes Godot's 24 orthogonal orientations. The field is 5 bits, so
+    /// it can physically hold 0..31; values above 23 are not valid orientations
+    /// but are preserved verbatim rather than clamped, so a malformed scene
+    /// round-trips unchanged instead of being silently "corrected".
+    pub fn decode_cells_full(data: &[i32]) -> Vec<DecodedCell> {
         let mut out = Vec::new();
         for chunk in data.chunks_exact(3) {
             let lo = chunk[0] as u32;
@@ -133,16 +176,46 @@ impl GridMap {
             if item == INVALID_CELL_ITEM {
                 continue;
             }
-            out.push((GridCell { x, y, z }, item));
+            out.push(DecodedCell {
+                cell: GridCell { x, y, z },
+                item,
+                orientation: ((value >> 16) & 0x1F) as u8,
+                layer: ((value >> 21) & 0xFF) as u8,
+            });
         }
         out
     }
 
     /// Applies a decoded `data/cells` array to this GridMap.
     pub fn load_cells(&mut self, data: &[i32]) {
-        for (cell, item) in Self::decode_cells(data) {
-            self.set_cell_item(cell, item);
+        // Uses the full decode so the orientation survives the load. Going
+        // through `decode_cells` here would drop it again at the last step —
+        // the whole point of decoding it (pat-0q2kx.196).
+        for decoded in Self::decode_cells_full(data) {
+            self.set_cell_item_oriented(decoded.cell, decoded.item, decoded.orientation);
         }
+    }
+
+    /// [`set_cell_item`](Self::set_cell_item) with Godot's 24-way orientation.
+    ///
+    /// Clearing a cell (`item < 0`) drops its orientation too, so a cleared and
+    /// re-set cell cannot inherit a stale rotation.
+    pub fn set_cell_item_oriented(&mut self, cell: GridCell, item: i32, orientation: u8) {
+        self.set_cell_item(cell, item);
+        if item < 0 {
+            self.orientations.remove(&cell);
+        } else if orientation != 0 {
+            self.orientations.insert(cell, orientation);
+        } else {
+            // Godot's default orientation is 0; storing it would only bloat the
+            // map, and absence already means 0.
+            self.orientations.remove(&cell);
+        }
+    }
+
+    /// The cell's orientation index, `0` (unrotated) when it has none.
+    pub fn cell_orientation(&self, cell: GridCell) -> u8 {
+        self.orientations.get(&cell).copied().unwrap_or(0)
     }
 
     /// Loads the first `GridMap` node found in a `.tscn` scene source into a

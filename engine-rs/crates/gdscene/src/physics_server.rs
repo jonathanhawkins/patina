@@ -483,6 +483,13 @@ pub struct PhysicsServer {
     world: PhysicsWorld2D,
     /// The area overlap store.
     area_store: AreaStore,
+    /// `PhysicsServer2D` script-API handles (pat-0q2kx.200): shape RID -> its
+    /// geometry, body RID -> the world body once it has been given a space.
+    server_shapes: std::collections::HashMap<u64, Shape2D>,
+    server_bodies: std::collections::HashMap<u64, Option<BodyId>>,
+    /// RIDs are opaque; starting above zero keeps `0` meaning "no space", which
+    /// is how Godot spells a spaceless body.
+    next_server_rid: u64,
     /// Maps scene node IDs to physics body IDs.
     node_to_body: HashMap<NodeId, BodyId>,
     /// Maps physics body IDs back to scene node IDs.
@@ -547,6 +554,9 @@ impl PhysicsServer {
         Self {
             world: PhysicsWorld2D::new(),
             area_store: AreaStore::new(),
+            server_shapes: std::collections::HashMap::new(),
+            server_bodies: std::collections::HashMap::new(),
+            next_server_rid: 1,
             node_to_body: HashMap::new(),
             body_to_node: HashMap::new(),
             node_to_area: HashMap::new(),
@@ -611,6 +621,213 @@ impl PhysicsServer {
     /// Returns a reference to the underlying physics world.
     pub fn world(&self) -> &PhysicsWorld2D {
         &self.world
+    }
+
+    /// Mutable access to the world, for the `PhysicsServer2D` script API
+    /// (pat-0q2kx.200) — a server-created body has to join the *same* world the
+    /// scene's nodes are simulated in, or it could never collide with them.
+    pub fn world_mut(&mut self) -> &mut PhysicsWorld2D {
+        &mut self.world
+    }
+
+    // -- PhysicsServer2D singleton API (pat-0q2kx.200) ---------------------
+    //
+    // Godot scripts can bypass nodes entirely and drive physics through the
+    // `PhysicsServer2D` singleton, addressing objects by RID. Patina exposed
+    // none of it. These are the script-facing subset the acceptance drives;
+    // RIDs are opaque u64 handles, which is exactly what Godot's RID is.
+
+    /// `PhysicsServer2D.circle_shape_create()` — a shape RID with a placeholder
+    /// radius until `shape_set_data` supplies one.
+    pub fn server_circle_shape_create(&mut self) -> u64 {
+        let rid = self.next_server_rid;
+        self.next_server_rid += 1;
+        self.server_shapes
+            .insert(rid, Shape2D::Circle { radius: 1.0 });
+        rid
+    }
+
+    /// `PhysicsServer2D.rectangle_shape_create()`.
+    pub fn server_rectangle_shape_create(&mut self) -> u64 {
+        let rid = self.next_server_rid;
+        self.next_server_rid += 1;
+        self.server_shapes.insert(
+            rid,
+            Shape2D::Rectangle {
+                half_extents: Vector2::new(1.0, 1.0),
+            },
+        );
+        rid
+    }
+
+    /// `PhysicsServer2D.shape_set_data(shape, data)`.
+    ///
+    /// Godot's `data` is shape-specific: a float radius for a circle, a
+    /// `Vector2` of *half*-extents for a rectangle. Returns `false` for an
+    /// unknown RID rather than panicking, matching the server's tolerance for a
+    /// freed handle.
+    pub fn server_shape_set_data(
+        &mut self,
+        shape: u64,
+        radius: f32,
+        extents: Option<Vector2>,
+    ) -> bool {
+        match self.server_shapes.get_mut(&shape) {
+            Some(Shape2D::Circle { radius: r }) => {
+                *r = radius.max(0.0);
+                true
+            }
+            Some(Shape2D::Rectangle { half_extents }) => {
+                *half_extents = extents.unwrap_or(Vector2::new(radius, radius));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `PhysicsServer2D.body_create()` — a rigid body not yet in any space.
+    ///
+    /// Deliberately not added to the world until `body_set_space`: Godot's
+    /// spaceless body is inert, and adding it here would make it fall before the
+    /// script asked for it.
+    pub fn server_body_create(&mut self) -> u64 {
+        let rid = self.next_server_rid;
+        self.next_server_rid += 1;
+        self.server_bodies.insert(rid, None);
+        rid
+    }
+
+    /// `PhysicsServer2D.body_set_space(body, space)` — a non-zero space admits
+    /// the body to this server's world; `0` removes it.
+    pub fn server_body_set_space(&mut self, body: u64, space: u64) -> bool {
+        let Some(slot) = self.server_bodies.get_mut(&body) else {
+            return false;
+        };
+        match (space, *slot) {
+            // Already in the space: nothing to do.
+            (s, Some(_)) if s != 0 => true,
+            (s, None) if s != 0 => {
+                let b = PhysicsBody2D::new(
+                    BodyId(0),
+                    BodyType::Rigid,
+                    Vector2::ZERO,
+                    // A body with no shape yet gets a unit circle; `body_add_shape`
+                    // replaces it. A zero-size shape would collide with nothing and
+                    // look like a physics bug rather than a missing call.
+                    Shape2D::Circle { radius: 1.0 },
+                    1.0,
+                );
+                let id = self.world.add_body(b);
+                *slot = Some(id);
+                true
+            }
+            (_, Some(id)) => {
+                self.world.remove_body(id);
+                *slot = None;
+                true
+            }
+            _ => true,
+        }
+    }
+
+    /// `PhysicsServer2D.body_add_shape(body, shape)` — adopts the shape RID's
+    /// geometry. One shape per body here; Godot allows several.
+    pub fn server_body_add_shape(&mut self, body: u64, shape: u64) -> bool {
+        let Some(Some(id)) = self.server_bodies.get(&body).copied() else {
+            return false;
+        };
+        let Some(sh) = self.server_shapes.get(&shape).copied() else {
+            return false;
+        };
+        match self.world.get_body_mut(id) {
+            Some(b) => {
+                b.shape = sh;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `PhysicsServer2D.body_set_state(body, state, value)` for the two states
+    /// the script API needs: `TRANSFORM` (0) position and `LINEAR_VELOCITY` (2).
+    pub fn server_body_set_state_vec2(&mut self, body: u64, state: i64, value: Vector2) -> bool {
+        let Some(Some(id)) = self.server_bodies.get(&body).copied() else {
+            return false;
+        };
+        match self.world.get_body_mut(id) {
+            Some(b) => {
+                match state {
+                    0 => b.position = value,
+                    2 => b.linear_velocity = value,
+                    _ => return false,
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The world-space position of a server-created body, for
+    /// `body_get_state(body, TRANSFORM)`.
+    pub fn server_body_position(&self, body: u64) -> Option<Vector2> {
+        let Some(Some(id)) = self.server_bodies.get(&body).copied() else {
+            return None;
+        };
+        self.world.get_body(id).map(|b| b.position)
+    }
+
+    /// The [`BodyId`] behind a server RID, so a test can cross-check that a
+    /// script-created body really is in the same world as the node-created ones.
+    pub fn server_body_id(&self, body: u64) -> Option<BodyId> {
+        self.server_bodies.get(&body).copied().flatten()
+    }
+
+    /// `PhysicsServer2D.body_test_motion(body, params)` → `(collided, travel)`
+    /// (pat-0q2kx.200).
+    ///
+    /// Sweeps the body's own shape from its current transform along `motion`
+    /// against every *other* body in the world, via the shared
+    /// `character::test_motion` helper `move_and_slide` substeps with — so a fast
+    /// test cannot tunnel through a thin wall and report "clear".
+    pub fn server_body_test_motion(&self, body: u64, motion: Vector2) -> (bool, Vector2) {
+        let Some(id) = self.server_body_id(body) else {
+            return (false, motion);
+        };
+        let Some(subject) = self.world.get_body(id) else {
+            return (false, motion);
+        };
+        let others: Vec<&gdphysics2d::body::PhysicsBody2D> =
+            self.world.bodies().filter(|b| b.id != id).collect();
+        gdphysics2d::character::test_motion(
+            subject.position,
+            subject.rotation,
+            &subject.shape,
+            motion,
+            &others,
+        )
+    }
+
+    /// `PhysicsBody2D.test_move(transform, motion)` for a *node* — the same
+    /// sweep, addressed by scene node instead of RID (pat-0q2kx.200).
+    ///
+    /// `true` when the motion would be blocked, which is Godot's return.
+    pub fn node_test_move(&self, node_id: NodeId, motion: Vector2) -> bool {
+        let Some(id) = self.body_for_node(node_id) else {
+            return false;
+        };
+        let Some(subject) = self.world.get_body(id) else {
+            return false;
+        };
+        let others: Vec<&gdphysics2d::body::PhysicsBody2D> =
+            self.world.bodies().filter(|b| b.id != id).collect();
+        gdphysics2d::character::test_motion(
+            subject.position,
+            subject.rotation,
+            &subject.shape,
+            motion,
+            &others,
+        )
+        .0
     }
 
     /// Sets the global 2D gravity vector (px/s²) on the underlying world.
