@@ -141,7 +141,11 @@ impl Dictionary {
     /// Inserts `key`/`value`, returning the previous value if the key existed.
     /// Re-inserting an existing key keeps its original position (Godot
     /// semantics).
-    pub fn insert(&mut self, key: impl Into<Variant>, value: impl Into<Variant>) -> Option<Variant> {
+    pub fn insert(
+        &mut self,
+        key: impl Into<Variant>,
+        value: impl Into<Variant>,
+    ) -> Option<Variant> {
         let key = key.into();
         let value = value.into();
         if let Some(pos) = self.position(&key) {
@@ -397,9 +401,15 @@ mod tests {
     fn typed_keys_do_not_collide() {
         let mut d = Dictionary::new();
         d.insert(Variant::Int(1), Variant::String("int-one".into()));
-        d.insert(Variant::String("1".into()), Variant::String("str-one".into()));
+        d.insert(
+            Variant::String("1".into()),
+            Variant::String("str-one".into()),
+        );
         assert_eq!(d.len(), 2);
-        assert_eq!(d.get(Variant::Int(1)), Some(&Variant::String("int-one".into())));
+        assert_eq!(
+            d.get(Variant::Int(1)),
+            Some(&Variant::String("int-one".into()))
+        );
         assert_eq!(
             d.get(Variant::String("1".into())),
             Some(&Variant::String("str-one".into()))
@@ -411,7 +421,10 @@ mod tests {
         let mut d = Dictionary::new();
         d.insert(Variant::Int(2), Variant::String("two".into()));
         // 2.0 addresses the same slot as 2.
-        assert_eq!(d.get(Variant::Float(2.0)), Some(&Variant::String("two".into())));
+        assert_eq!(
+            d.get(Variant::Float(2.0)),
+            Some(&Variant::String("two".into()))
+        );
         let old = d.insert(Variant::Float(2.0), Variant::String("TWO".into()));
         assert_eq!(old, Some(Variant::String("two".into())));
         assert_eq!(d.len(), 1);

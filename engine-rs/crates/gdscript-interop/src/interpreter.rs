@@ -59,6 +59,63 @@ fn accumulate_float_property(access: &mut dyn SceneAccess, id: u64, prop: &str, 
     access.set_node_property(id, prop, Variant::Float(cur + delta));
 }
 
+/// IEEE-754 binary16 → `f32`, for `PackedByteArray.decode_half`
+/// (pat-0q2kx.229; Godot's `Math::half_to_float`).
+///
+/// Written out rather than pulled from a crate because Rust has no stable `f16`
+/// and the conversion is exact in this direction: every half value is
+/// representable as an `f32`.
+fn half_bits_to_f32(bits: u16) -> f32 {
+    let sign = ((bits >> 15) & 1) as u32;
+    let exp = ((bits >> 10) & 0x1f) as u32;
+    let frac = (bits & 0x3ff) as u32;
+    let out = match exp {
+        // Zero or subnormal: scale the fraction by 2^-24.
+        0 => {
+            if frac == 0 {
+                sign << 31
+            } else {
+                return (if sign == 1 { -1.0 } else { 1.0 }) * (frac as f32) * 2f32.powi(-24);
+            }
+        }
+        // Inf / NaN.
+        0x1f => (sign << 31) | 0x7f80_0000 | (frac << 13),
+        // Normal: rebias the exponent (15 → 127).
+        _ => (sign << 31) | ((exp + 112) << 23) | (frac << 13),
+    };
+    f32::from_bits(out)
+}
+
+/// `f32` → IEEE-754 binary16, for `PackedByteArray.encode_half`.
+///
+/// Rounds toward zero (truncates the discarded mantissa bits) and saturates to
+/// infinity on overflow, which is what Godot's `Math::make_half_float` does.
+fn f32_to_half_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 31) & 1) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let frac = bits & 0x7f_ffff;
+    if exp == 0xff {
+        // Inf / NaN: keep a non-zero mantissa so NaN stays NaN.
+        let f = if frac != 0 { 0x200 } else { 0 };
+        return (sign << 15) | 0x7c00 | f;
+    }
+    let new_exp = exp - 127 + 15;
+    if new_exp >= 0x1f {
+        // Overflow → infinity.
+        return (sign << 15) | 0x7c00;
+    }
+    if new_exp <= 0 {
+        // Underflow to subnormal or zero.
+        if new_exp < -10 {
+            return sign << 15;
+        }
+        let f = (frac | 0x80_0000) >> (1 - new_exp + 13);
+        return (sign << 15) | f as u16;
+    }
+    (sign << 15) | ((new_exp as u16) << 10) | ((frac >> 13) as u16)
+}
+
 /// Extracts a `Vector2` method argument (defaulting to zero).
 fn vec2_arg(args: &[Variant], idx: usize) -> gdcore::math::Vector2 {
     match args.get(idx) {
@@ -1978,6 +2035,210 @@ impl Interpreter {
     // Expression evaluation
     // -----------------------------------------------------------------------
 
+    /// Dispatches the `XRServer` singleton (pat-0q2kx.236).
+    fn call_xr_server_static(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        match method {
+            // Godot returns the HMD's pose as a Transform3D. The platform
+            // XrServer models the head as position + yaw, so the basis is a
+            // yaw rotation rather than a full orientation — enough for the
+            // transform to be correct about where the head is and which way it
+            // faces, and honest about carrying no pitch/roll yet.
+            "get_hmd_transform" => {
+                let server = gdplatform::XrServer::new();
+                let pose = server.get_head_pose().unwrap_or(gdplatform::XrPose {
+                    position: gdcore::math::Vector3::ZERO,
+                    yaw: 0.0,
+                });
+                let (sin, cos) = pose.yaw.sin_cos();
+                let basis = gdcore::math3d::Basis {
+                    x: gdcore::math::Vector3::new(cos, 0.0, -sin),
+                    y: gdcore::math::Vector3::new(0.0, 1.0, 0.0),
+                    z: gdcore::math::Vector3::new(sin, 0.0, cos),
+                };
+                Ok(Variant::Transform3D(gdcore::math3d::Transform3D {
+                    basis,
+                    origin: pose.position,
+                }))
+            }
+            // An unregistered name yields null, as in Godot — not an error.
+            "find_interface" => {
+                let name = args.first().map(arg_str).unwrap_or_default();
+                Ok(match xr_find_interface(&name) {
+                    Some(id) => Variant::ObjectId(id),
+                    None => Variant::Nil,
+                })
+            }
+            "get_interfaces" => Ok(Variant::PackedStringArray(vec!["WebXR".to_string()])),
+            "get_interface_count" => Ok(Variant::Int(1)),
+            other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "XRServer has no method '{other}'"
+            )))),
+        }
+    }
+
+    /// Dispatches `WebXRInterface` handle methods (pat-0q2kx.236).
+    ///
+    /// Inherent rather than a free function because the signal drain invokes
+    /// script Callables, which needs the interpreter itself.
+    fn call_xr_interface_instance(
+        &mut self,
+        oid: gdcore::id::ObjectId,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        let raw = oid.raw();
+
+        // `connect` is handled here rather than by the generic paths: a handle
+        // is not a scene node, so neither of those can bind to it.
+        if method == "connect" {
+            let signal = args.first().map(arg_str).unwrap_or_default();
+            let Some(Variant::Callable(cb)) = args.get(1) else {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "WebXRInterface.connect() needs a signal name and a Callable".into(),
+                )));
+            };
+            let callable = (**cb).clone();
+            XR_SIGNAL_CALLBACKS.with(|m| {
+                m.borrow_mut()
+                    .entry((raw, signal))
+                    .or_default()
+                    .push(callable);
+            });
+            return Ok(Variant::Int(0));
+        }
+
+        // Mutate the interface, then drain whatever it queued. `initialize()`
+        // and `is_session_supported()` enqueue synchronously, so draining right
+        // after the call is what makes the signal observable in the same frame
+        // the script triggered it.
+        let result = XR_INTERFACES.with(|m| {
+            let mut table = m.borrow_mut();
+            let Some(iface) = table.get_mut(&raw) else {
+                return Ok(Variant::Nil);
+            };
+            match method {
+                "get_name" => Ok(Variant::String(iface.name().to_string())),
+                "is_initialized" => Ok(Variant::Bool(iface.is_initialized())),
+                "get_reference_space_type" => {
+                    Ok(Variant::String(iface.reference_space_type().to_string()))
+                }
+                "get_enabled_features" => Ok(Variant::PackedStringArray(
+                    iface.enabled_features().to_vec(),
+                )),
+                "get_visibility_state" => Ok(Variant::String(iface.visibility_state().to_string())),
+                "set_session_mode" => {
+                    iface.session_mode =
+                        xr_session_mode(&args.first().map(arg_str).unwrap_or_default());
+                    Ok(Variant::Nil)
+                }
+                "get_session_mode" => Ok(Variant::String(
+                    xr_session_mode_str(iface.session_mode).to_string(),
+                )),
+                "set_required_features" => {
+                    iface.required_features = xr_string_list(args.first());
+                    Ok(Variant::Nil)
+                }
+                "get_required_features" => {
+                    Ok(Variant::PackedStringArray(iface.required_features.clone()))
+                }
+                "set_optional_features" => {
+                    iface.optional_features = xr_string_list(args.first());
+                    Ok(Variant::Nil)
+                }
+                "get_optional_features" => {
+                    Ok(Variant::PackedStringArray(iface.optional_features.clone()))
+                }
+                // NOT a Godot method — the leading underscore marks it as a
+                // Patina test seam. There is no real `navigator.xr` here, so a
+                // test has no other way to say "the browser grants immersive-vr
+                // with these features". Named explicitly rather than smuggled in
+                // as a fake `initialize()` argument.
+                "_set_test_stub" => {
+                    let modes: Vec<gdplatform::WebXrSessionMode> = xr_string_list(args.first())
+                        .iter()
+                        .map(|m| xr_session_mode(m))
+                        .collect();
+                    iface.set_stub(gdplatform::WebXrStub {
+                        supported_modes: modes,
+                        available_features: xr_string_list(args.get(1)),
+                        force_failure: match args.get(2) {
+                            Some(Variant::String(msg)) if !msg.is_empty() => Some(msg.clone()),
+                            _ => None,
+                        },
+                    });
+                    Ok(Variant::Nil)
+                }
+                "is_session_supported" => {
+                    iface.is_session_supported(&args.first().map(arg_str).unwrap_or_default());
+                    Ok(Variant::Nil)
+                }
+                "initialize" => Ok(Variant::Bool(iface.initialize())),
+                "uninitialize" => {
+                    iface.uninitialize();
+                    Ok(Variant::Nil)
+                }
+                other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "WebXRInterface has no method '{other}'"
+                )))),
+            }
+        })?;
+
+        self.drain_xr_signals(raw)?;
+        Ok(result)
+    }
+
+    /// Delivers any queued interface signals to connected script Callables.
+    ///
+    /// Taken out of the table before invoking: a callback may itself call back
+    /// into the interface, and holding the `RefCell` borrow across script
+    /// execution would panic.
+    fn drain_xr_signals(&mut self, raw: u64) -> Result<(), RuntimeError> {
+        let signals = XR_INTERFACES.with(|m| {
+            m.borrow_mut()
+                .get_mut(&raw)
+                .map(|i| i.take_signals())
+                .unwrap_or_default()
+        });
+
+        for signal in signals {
+            let (name, sig_args): (&str, Vec<Variant>) = match signal {
+                gdplatform::WebXrSignal::SessionSupported { mode, supported } => (
+                    "session_supported",
+                    vec![
+                        Variant::String(xr_session_mode_str(mode).to_string()),
+                        Variant::Bool(supported),
+                    ],
+                ),
+                gdplatform::WebXrSignal::SessionStarted => ("session_started", Vec::new()),
+                gdplatform::WebXrSignal::SessionFailed { message } => {
+                    ("session_failed", vec![Variant::String(message)])
+                }
+                gdplatform::WebXrSignal::SessionEnded => ("session_ended", Vec::new()),
+                gdplatform::WebXrSignal::VisibilityStateChanged => {
+                    ("visibility_state_changed", Vec::new())
+                }
+                gdplatform::WebXrSignal::ReferenceSpaceReset => {
+                    ("reference_space_reset", Vec::new())
+                }
+            };
+
+            let callbacks = XR_SIGNAL_CALLBACKS.with(|m| {
+                m.borrow()
+                    .get(&(raw, name.to_string()))
+                    .cloned()
+                    .unwrap_or_default()
+            });
+            for cb in callbacks {
+                self.invoke_callable(&cb, &sig_args)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Dispatches `Thread` instance methods (pat-0q2kx.209).
     ///
     /// `start()` runs the Callable inline; see the note on the handle tables
@@ -2523,6 +2784,12 @@ impl Interpreter {
                         // CameraServer singleton (pat-nzgdu.179) — reports 0 feeds
                         // until a script adds one (web parity: Godot ships no web
                         // camera driver).
+                        // XRServer singleton (pat-0q2kx.236). Inherent because
+                        // find_interface hands back a handle whose methods drain
+                        // signals into script Callables.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "XRServer") {
+                            return self.call_xr_server_static(member, &evaluated_args);
+                        }
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "CameraServer") {
                             return call_cameraserver_static(member, &evaluated_args);
                         }
@@ -5421,6 +5688,74 @@ impl Interpreter {
                 };
                 Ok(Some(Variant::Bool(valid)))
             }
+            "rid_from_int64" => {
+                Self::require_args("rid_from_int64", args, 1)?;
+                let _id = to_int(&args[0])?;
+                // ⚠️ `Nil` is the DOCUMENTED UNSUPPORTED VALUE, not a stub.
+                // Godot returns an `RID`; Patina's `Variant` has no RID variant
+                // at all (gdvariant::binary lists RID among the types the enum
+                // lacks), so there is nothing truthful to return. Answering
+                // `Int` would be worse: a script would receive something that
+                // compares and prints like a number while claiming to be a RID.
+                // Same convention as FramebufferCacheRD.get_cache_multipass.
+                // The arity is still validated, so a miscall is a TypeError.
+                Ok(Some(Variant::Nil))
+            }
+            "var_to_bytes_with_objects" => {
+                Self::require_args("var_to_bytes_with_objects", args, 1)?;
+                // Godot's difference from `var_to_bytes` is that a contained
+                // Object serialises in FULL (class name + properties) instead of
+                // as a bare instance id. This codec deliberately does not do
+                // that — binary.rs:449 records the reason: decoding would
+                // construct arbitrary classes from untrusted bytes.
+                //
+                // For an object-free payload the two encodings are byte-identical,
+                // so delegating is exactly right. When an object IS present,
+                // refuse loudly rather than emit id-encoded bytes labelled
+                // "with objects" — that would be silently wrong precisely in the
+                // case the caller chose this function for.
+                if variant_contains_object(&args[0]) {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "var_to_bytes_with_objects(): full-object encoding is not \
+                         supported; this codec encodes an Object as its instance \
+                         id only. Use var_to_bytes() for object-free data."
+                            .into(),
+                    )));
+                }
+                let bytes = gdvariant::binary::encode_variant(&args[0]).map_err(|e| {
+                    RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "var_to_bytes_with_objects: {e:?}"
+                    )))
+                })?;
+                Ok(Some(Variant::PackedByteArray(bytes)))
+            }
+            "bytes_to_var_with_objects" => {
+                Self::require_args("bytes_to_var_with_objects", args, 1)?;
+                let buf = match &args[0] {
+                    Variant::PackedByteArray(b) => b,
+                    other => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "bytes_to_var_with_objects() expects PackedByteArray, got {}",
+                            other.variant_type()
+                        ))))
+                    }
+                };
+                // Symmetric to the encoder: this codec never WRITES a full
+                // object, so there is no full-object payload for the
+                // allow-objects path to decode differently. Any buffer it can
+                // read decodes identically either way.
+                let (v, _used) = gdvariant::binary::decode_variant(buf).map_err(|e| {
+                    RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "bytes_to_var_with_objects: {e:?}"
+                    )))
+                })?;
+                // Still wrapped, exactly as `bytes_to_var` does. Godot returns a
+                // live object here only when the payload carried a full object;
+                // ours never can, and every id-encoded payload yields an inert
+                // EncodedObjectAsID in Godot too. Dropping the wrap would turn a
+                // decoded id into a live scene reference (pat-nzgdu.189).
+                Ok(Some(wrap_decoded_object_ids(v)))
+            }
             "rid_allocate_id" => {
                 Self::require_args("rid_allocate_id", args, 0)?;
                 // Godot hands out a fresh, never-reused integer. A monotonic
@@ -5951,6 +6286,57 @@ impl Interpreter {
                     },
                 )))
             }
+            // -- global shader parameters (pat-0q2kx.225) --
+            //
+            // These are project-wide uniforms: a shader declaring
+            // `global uniform vec4 tint;` reads whatever the store holds, and
+            // every shader naming it updates together. The store lives in
+            // `gdvariant` because it is the only crate both this interpreter
+            // and `gdserver3d`'s shader resolver already depend on.
+            "global_shader_parameter_add" => {
+                let name = args.first().map(arg_str).unwrap_or_default();
+                let type_name = args.get(1).map(arg_str).unwrap_or_default();
+                let value = args.get(2).cloned().unwrap_or(Variant::Nil);
+                gdvariant::shader_globals::add(&name, &type_name, value);
+                Ok(Variant::Nil)
+            }
+            "global_shader_parameter_remove" => {
+                gdvariant::shader_globals::remove(&args.first().map(arg_str).unwrap_or_default());
+                Ok(Variant::Nil)
+            }
+            // Godot requires the parameter to be declared first, so setting an
+            // unknown name is a no-op rather than an implicit add — otherwise a
+            // typo would create a typeless entry that fails much later at shader
+            // binding, with nothing pointing back to this call.
+            "global_shader_parameter_set" => {
+                let name = args.first().map(arg_str).unwrap_or_default();
+                let value = args.get(1).cloned().unwrap_or(Variant::Nil);
+                gdvariant::shader_globals::set(&name, value);
+                Ok(Variant::Nil)
+            }
+            "global_shader_parameter_set_override" => {
+                let name = args.first().map(arg_str).unwrap_or_default();
+                // Godot clears the override by passing null.
+                let value = match args.get(1) {
+                    Some(Variant::Nil) | None => None,
+                    Some(v) => Some(v.clone()),
+                };
+                gdvariant::shader_globals::set_override(&name, value);
+                Ok(Variant::Nil)
+            }
+            "global_shader_parameter_get" => Ok(gdvariant::shader_globals::get(
+                &args.first().map(arg_str).unwrap_or_default(),
+            )),
+            "global_shader_parameter_get_type" => Ok(gdvariant::shader_globals::get_type(
+                &args.first().map(arg_str).unwrap_or_default(),
+            )
+            .map(Variant::String)
+            .unwrap_or(Variant::Nil)),
+            // Godot types this PackedStringArray.
+            "global_shader_parameter_get_list" => Ok(Variant::PackedStringArray(
+                gdvariant::shader_globals::get_list(),
+            )),
+
             _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                 format!("RenderingServer.{method}"),
             ))),
@@ -6956,6 +7342,9 @@ impl Interpreter {
                 // scene, so it is the one handle family that needs access.
                 let access = self.scene_access.as_deref_mut();
                 return call_undo_redo_instance(*oid, method, args, access);
+            }
+            if is_xr_interface_handle(*oid) {
+                return self.call_xr_interface_instance(*oid, method, args);
             }
             if is_thread_handle(*oid) {
                 // Inherent: `start()` invokes a Callable, which needs the
@@ -9660,6 +10049,324 @@ impl Interpreter {
         }
     }
 
+    /// `PackedByteArray`'s binary codec surface (pat-0q2kx.229).
+    ///
+    /// Godot ground truth: `core/variant/variant_call.cpp`'s
+    /// `func_PackedByteArray_*` family, read from the vendored source rather than
+    /// inferred. Two semantics matter and are easy to get wrong:
+    ///
+    /// * `decode_*` is `ERR_FAIL_COND_V(offset < 0 || offset > size - N, 0)` —
+    ///   an out-of-range read yields **0**, not an error.
+    /// * `encode_*` is `ERR_FAIL_COND(...)` returning void — an out-of-range
+    ///   write is a **no-op**, and the value is truncated by a cast to the
+    ///   target width.
+    ///
+    /// Everything is little-endian, matching `core/io/marshalls.h`.
+    ///
+    /// Returns `None` when `method` is not part of this surface (or the receiver
+    /// is not a byte array), so the caller falls through to the general packed
+    /// dispatch and its "no method" error.
+    fn call_pba_codec(
+        &mut self,
+        obj: &Variant,
+        method: &str,
+        args: &[Variant],
+        object_expr: &Expr,
+    ) -> Option<Result<Variant, RuntimeError>> {
+        let bytes = match obj {
+            Variant::PackedByteArray(b) => b,
+            _ => return None,
+        };
+        let len = bytes.len();
+
+        /// Width in bytes and signedness of an integer codec suffix.
+        fn int_spec(suffix: &str) -> Option<(usize, bool)> {
+            Some(match suffix {
+                "u8" => (1, false),
+                "s8" => (1, true),
+                "u16" => (2, false),
+                "s16" => (2, true),
+                "u32" => (4, false),
+                "s32" => (4, true),
+                "u64" => (8, false),
+                "s64" => (8, true),
+                _ => return None,
+            })
+        }
+        /// Byte width of a float codec suffix.
+        fn float_width(suffix: &str) -> Option<usize> {
+            Some(match suffix {
+                "half" => 2,
+                "float" => 4,
+                "double" => 8,
+                _ => return None,
+            })
+        }
+        // Godot's bound signature is (byte_offset) / (byte_offset, value), and a
+        // missing or non-numeric offset is treated as 0 rather than a hard error,
+        // matching how the rest of this dispatch coerces arguments.
+        let offset_arg = |i: usize| -> i64 {
+            match args.get(i) {
+                Some(Variant::Int(v)) => *v,
+                Some(Variant::Float(f)) => *f as i64,
+                _ => 0,
+            }
+        };
+        // `offset > size - N` in Godot's check, done in i64 so a size smaller
+        // than N cannot underflow.
+        let fits =
+            |offset: i64, n: usize| -> bool { offset >= 0 && offset <= len as i64 - n as i64 };
+        let read_le = |offset: i64, n: usize| -> u64 {
+            let mut v = 0u64;
+            for k in 0..n {
+                v |= (bytes[offset as usize + k] as u64) << (8 * k);
+            }
+            v
+        };
+
+        // -- decode_* ---------------------------------------------------------
+        if let Some(suffix) = method.strip_prefix("decode_") {
+            if let Some((n, signed)) = int_spec(suffix) {
+                let off = offset_arg(0);
+                if !fits(off, n) {
+                    return Some(Ok(Variant::Int(0)));
+                }
+                let raw = read_le(off, n);
+                // Godot casts through the sized signed type, so the value
+                // sign-extends; `decode_u64` casts to int64 and therefore wraps
+                // negative above 2^63, which this reproduces.
+                let out = if signed {
+                    match n {
+                        1 => raw as u8 as i8 as i64,
+                        2 => raw as u16 as i16 as i64,
+                        4 => raw as u32 as i32 as i64,
+                        _ => raw as i64,
+                    }
+                } else {
+                    raw as i64
+                };
+                return Some(Ok(Variant::Int(out)));
+            }
+            if let Some(n) = float_width(suffix) {
+                let off = offset_arg(0);
+                if !fits(off, n) {
+                    return Some(Ok(Variant::Float(0.0)));
+                }
+                let raw = read_le(off, n);
+                let out = match n {
+                    2 => half_bits_to_f32(raw as u16) as f64,
+                    4 => f32::from_bits(raw as u32) as f64,
+                    _ => f64::from_bits(raw),
+                };
+                return Some(Ok(Variant::Float(out)));
+            }
+            // Godot's binary Variant marshalling.
+            if suffix == "var" {
+                let off = offset_arg(0);
+                if off < 0 || off > len as i64 {
+                    return Some(Ok(Variant::Nil));
+                }
+                return Some(Ok(
+                    match gdvariant::binary::decode_variant(&bytes[off as usize..]) {
+                        Ok((v, _)) => v,
+                        Err(_) => Variant::Nil,
+                    },
+                ));
+            }
+            if suffix == "var_size" {
+                let off = offset_arg(0);
+                if off < 0 || off > len as i64 {
+                    return Some(Ok(Variant::Int(0)));
+                }
+                return Some(Ok(Variant::Int(
+                    match gdvariant::binary::decode_variant(&bytes[off as usize..]) {
+                        Ok((_, used)) => used as i64,
+                        Err(_) => 0,
+                    },
+                )));
+            }
+        }
+
+        // -- encode_* (mutating) ---------------------------------------------
+        if let Some(suffix) = method.strip_prefix("encode_") {
+            let write = |raw: u64, off: i64, n: usize| -> Variant {
+                let mut out = bytes.clone();
+                for k in 0..n {
+                    out[off as usize + k] = (raw >> (8 * k)) as u8;
+                }
+                Variant::PackedByteArray(out)
+            };
+            if let Some((n, _)) = int_spec(suffix) {
+                let off = offset_arg(0);
+                if !fits(off, n) {
+                    // Godot's ERR_FAIL_COND: nothing written, no error raised.
+                    return Some(Ok(Variant::Nil));
+                }
+                let value = match args.get(1) {
+                    Some(Variant::Int(v)) => *v,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => 0,
+                };
+                let updated = write(value as u64, off, n);
+                return Some(self.write_place(object_expr, updated).map(|_| Variant::Nil));
+            }
+            if let Some(n) = float_width(suffix) {
+                let off = offset_arg(0);
+                if !fits(off, n) {
+                    return Some(Ok(Variant::Nil));
+                }
+                let value = match args.get(1) {
+                    Some(Variant::Float(f)) => *f,
+                    Some(Variant::Int(i)) => *i as f64,
+                    _ => 0.0,
+                };
+                let raw = match n {
+                    2 => f32_to_half_bits(value as f32) as u64,
+                    4 => (value as f32).to_bits() as u64,
+                    _ => value.to_bits(),
+                };
+                let updated = write(raw, off, n);
+                return Some(self.write_place(object_expr, updated).map(|_| Variant::Nil));
+            }
+            if suffix == "var" {
+                let off = offset_arg(0);
+                let value = args.get(1).cloned().unwrap_or(Variant::Nil);
+                let encoded = match gdvariant::binary::encode_variant(&value) {
+                    Ok(e) => e,
+                    // Godot returns -1 when the value cannot be encoded.
+                    Err(_) => return Some(Ok(Variant::Int(-1))),
+                };
+                if off < 0 || off as usize + encoded.len() > len {
+                    return Some(Ok(Variant::Int(-1)));
+                }
+                let mut out = bytes.clone();
+                out[off as usize..off as usize + encoded.len()].copy_from_slice(&encoded);
+                let written = encoded.len() as i64;
+                return Some(
+                    self.write_place(object_expr, Variant::PackedByteArray(out))
+                        .map(|_| Variant::Int(written)),
+                );
+            }
+        }
+
+        // -- has_encoded_var --------------------------------------------------
+        if method == "has_encoded_var" {
+            let off = offset_arg(0);
+            let ok = off >= 0
+                && off <= len as i64
+                && gdvariant::binary::decode_variant(&bytes[off as usize..]).is_ok();
+            return Some(Ok(Variant::Bool(ok)));
+        }
+
+        // -- bswap16/32/64 (mutating) -----------------------------------------
+        // Godot's signature is (offset = 0, count = -1); `count < 0` means "every
+        // whole word from `offset` to the end", and an over-large count is an
+        // error that writes nothing.
+        if let Some(width) = match method {
+            "bswap16" => Some(2usize),
+            "bswap32" => Some(4),
+            "bswap64" => Some(8),
+            _ => None,
+        } {
+            let off = offset_arg(0);
+            let count = match args.get(1) {
+                Some(Variant::Int(v)) => *v,
+                Some(Variant::Float(f)) => *f as i64,
+                _ => -1,
+            };
+            if len == 0 || count == 0 {
+                return Some(Ok(Variant::Nil));
+            }
+            if !fits(off, width) {
+                return Some(Ok(Variant::Nil));
+            }
+            let max = (len as i64 - off) / width as i64;
+            let count = if count < 0 { max } else { count };
+            if count > max {
+                return Some(Ok(Variant::Nil));
+            }
+            let mut out = bytes.clone();
+            for w in 0..count as usize {
+                let start = off as usize + w * width;
+                out[start..start + width].reverse();
+            }
+            return Some(
+                self.write_place(object_expr, Variant::PackedByteArray(out))
+                    .map(|_| Variant::Nil),
+            );
+        }
+
+        // -- to_*_array reinterpret conversions -------------------------------
+        // Trailing bytes that do not fill a whole element are dropped, as in
+        // Godot (`size() / sizeof(T)`).
+        let f32_at =
+            |i: usize| f32::from_bits(u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()));
+        match method {
+            "to_int32_array" => {
+                let v = bytes
+                    .chunks_exact(4)
+                    .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+                    .collect();
+                return Some(Ok(Variant::PackedInt32Array(v)));
+            }
+            "to_int64_array" => {
+                let v = bytes
+                    .chunks_exact(8)
+                    .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+                    .collect();
+                return Some(Ok(Variant::PackedInt64Array(v)));
+            }
+            "to_float32_array" => {
+                let v = bytes
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                    .collect();
+                return Some(Ok(Variant::PackedFloat32Array(v)));
+            }
+            "to_float64_array" => {
+                let v = bytes
+                    .chunks_exact(8)
+                    .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                    .collect();
+                return Some(Ok(Variant::PackedFloat64Array(v)));
+            }
+            "to_vector2_array" => {
+                let v = (0..len / 8)
+                    .map(|i| gdcore::math::Vector2::new(f32_at(i * 8), f32_at(i * 8 + 4)))
+                    .collect();
+                return Some(Ok(Variant::PackedVector2Array(v)));
+            }
+            "to_vector3_array" => {
+                let v = (0..len / 12)
+                    .map(|i| {
+                        gdcore::math::Vector3::new(
+                            f32_at(i * 12),
+                            f32_at(i * 12 + 4),
+                            f32_at(i * 12 + 8),
+                        )
+                    })
+                    .collect();
+                return Some(Ok(Variant::PackedVector3Array(v)));
+            }
+            "to_color_array" => {
+                let v = (0..len / 16)
+                    .map(|i| {
+                        gdcore::math::Color::new(
+                            f32_at(i * 16),
+                            f32_at(i * 16 + 4),
+                            f32_at(i * 16 + 8),
+                            f32_at(i * 16 + 12),
+                        )
+                    })
+                    .collect();
+                return Some(Ok(Variant::PackedColorArray(v)));
+            }
+            _ => {}
+        }
+
+        None
+    }
+
     /// Dispatches `Packed*Array` methods (`size`, `append`, `resize`, `slice`,
     /// `to_byte_array`, …). Mutating methods use the clone → mutate →
     /// `write_place` pattern so `self.data.append(x)` persists, exactly like
@@ -9671,6 +10378,12 @@ impl Interpreter {
         args: &[Variant],
         object_expr: &Expr,
     ) -> Result<Variant, RuntimeError> {
+        // PackedByteArray's binary codec surface is handled first; it returns
+        // `None` for every other method so the general dispatch below still owns
+        // `size`/`append`/`slice`/… (pat-0q2kx.229).
+        if let Some(result) = self.call_pba_codec(obj, method, args, object_expr) {
+            return result;
+        }
         let len = obj.packed_len().unwrap_or(0);
         // Resolves a (possibly negative) index against `len`; `None` if OOB.
         let resolve = |i: i64| -> Option<usize> {
@@ -12583,6 +13296,22 @@ fn hash_variant_into<H: std::hash::Hasher>(v: &Variant, h: &mut H) {
 
 /// Maps a Godot `Variant.Type` integer code to its type name, matching the
 /// `type_string()` builtin. Unknown codes yield `""` (as Godot does).
+/// Whether a Variant tree contains an `ObjectId` anywhere (pat-0q2kx.228).
+///
+/// Used by `var_to_bytes_with_objects` to refuse the one case where this codec
+/// and Godot genuinely disagree. A shallow check would miss the realistic
+/// shape — an object nested inside an Array or Dictionary — so this recurses.
+fn variant_contains_object(v: &Variant) -> bool {
+    match v {
+        Variant::ObjectId(_) => true,
+        Variant::Array(items) => items.iter().any(variant_contains_object),
+        Variant::Dictionary(d) => d
+            .iter()
+            .any(|(k, val)| variant_contains_object(k) || variant_contains_object(val)),
+        _ => false,
+    }
+}
+
 /// Godot's `type_convert(variant, type)` — coerces to the target Variant type
 /// (pat-0q2kx.228).
 ///
@@ -15593,6 +16322,92 @@ fn call_crypto_instance(
 // ConfigFile/CameraFeed/UndoRedo rather than being scene nodes.
 
 /// Tag bits marking an `ObjectId` as a `RegEx` handle.
+// ---------------------------------------------------------------------------
+// XR: XRServer singleton + WebXRInterface handle (pat-0q2kx.236)
+// ---------------------------------------------------------------------------
+
+/// Tag bits marking an `ObjectId` as an XR interface handle.
+const XR_INTERFACE_HANDLE_TAG: u64 = 0xE8_00_0000_0000_0000;
+
+thread_local! {
+    /// Live XR interface handles. Godot's XRServer owns its interfaces, so a
+    /// second `find_interface("WebXR")` must return the SAME object — hence a
+    /// name-keyed lookup beside the handle table rather than a fresh handle per
+    /// call, which would silently give each caller its own session state.
+    static XR_INTERFACES: std::cell::RefCell<HashMap<u64, gdplatform::WebXrInterface>> =
+        std::cell::RefCell::new(HashMap::new());
+    static XR_INTERFACE_BY_NAME: std::cell::RefCell<HashMap<String, u64>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_XR_INTERFACE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    /// Script callbacks connected to an interface's signals, keyed by
+    /// (handle, signal name).
+    ///
+    /// Handle objects are not scene nodes, so neither of the interpreter's
+    /// `connect` paths (both of which resolve through SceneAccess and a node
+    /// identity) can bind them. This registry is the handle-side equivalent.
+    static XR_SIGNAL_CALLBACKS: std::cell::RefCell<HashMap<(u64, String), Vec<CallableRef>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn is_xr_interface_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == XR_INTERFACE_HANDLE_TAG
+}
+
+/// Returns the handle for `name`, creating it on first request.
+///
+/// Only "WebXR" exists today; any other name yields `None` so the script sees
+/// `null`, exactly as Godot does for an unregistered interface.
+fn xr_find_interface(name: &str) -> Option<gdcore::id::ObjectId> {
+    if !name.eq_ignore_ascii_case("webxr") {
+        return None;
+    }
+    let key = "WebXR".to_string();
+    if let Some(raw) = XR_INTERFACE_BY_NAME.with(|m| m.borrow().get(&key).copied()) {
+        return Some(gdcore::id::ObjectId::from_raw(raw));
+    }
+    let seq = NEXT_XR_INTERFACE.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = XR_INTERFACE_HANDLE_TAG | seq;
+    XR_INTERFACES.with(|m| {
+        m.borrow_mut()
+            .insert(raw, gdplatform::WebXrInterface::new());
+    });
+    XR_INTERFACE_BY_NAME.with(|m| {
+        m.borrow_mut().insert(key, raw);
+    });
+    Some(gdcore::id::ObjectId::from_raw(raw))
+}
+
+/// Maps Godot's session-mode strings onto the platform enum.
+fn xr_session_mode(s: &str) -> gdplatform::WebXrSessionMode {
+    match s {
+        "immersive-vr" => gdplatform::WebXrSessionMode::ImmersiveVr,
+        "immersive-ar" => gdplatform::WebXrSessionMode::ImmersiveAr,
+        _ => gdplatform::WebXrSessionMode::Inline,
+    }
+}
+
+fn xr_session_mode_str(m: gdplatform::WebXrSessionMode) -> &'static str {
+    match m {
+        gdplatform::WebXrSessionMode::ImmersiveVr => "immersive-vr",
+        gdplatform::WebXrSessionMode::ImmersiveAr => "immersive-ar",
+        gdplatform::WebXrSessionMode::Inline => "inline",
+    }
+}
+
+/// Reads a `PackedStringArray`/`Array` argument as a feature list.
+fn xr_string_list(v: Option<&Variant>) -> Vec<String> {
+    match v {
+        Some(Variant::PackedStringArray(items)) => items.clone(),
+        Some(Variant::Array(items)) => items.iter().map(arg_str).collect(),
+        Some(other) => vec![arg_str(other)],
+        None => Vec::new(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Threading: Thread / Mutex / Semaphore / WorkerThreadPool (pat-0q2kx.209)
 // ---------------------------------------------------------------------------

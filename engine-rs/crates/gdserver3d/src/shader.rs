@@ -52,6 +52,23 @@ pub enum UniformType {
     Mat4,
 }
 
+/// Where a uniform's value comes from (pat-0q2kx.225).
+///
+/// Godot 4 prefixes a declaration to widen its scope: `global uniform vec4 t;`
+/// reads a project-wide value shared by every shader that names it, and
+/// `instance uniform` gives each instance its own. A plain `uniform` is
+/// per-material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UniformScope {
+    /// Plain `uniform` — per-material, set through the ShaderMaterial.
+    #[default]
+    Local,
+    /// `global uniform` — resolved from the project-wide global store.
+    Global,
+    /// `instance uniform` — per-instance override.
+    Instance,
+}
+
 /// A single uniform declaration extracted from shader source.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShaderUniform3D {
@@ -63,6 +80,8 @@ pub struct ShaderUniform3D {
     pub default_value: Variant,
     /// Optional hint string (e.g. "source_color").
     pub hint: Option<String>,
+    /// Plain, `global`, or `instance` (pat-0q2kx.225).
+    pub scope: UniformScope,
 }
 
 /// A parsed 3D shader program.
@@ -141,13 +160,22 @@ pub fn parse_uniforms(source: &str) -> Vec<ShaderUniform3D> {
     let mut uniforms = Vec::new();
     for line in source.lines() {
         let trimmed = line.trim();
-        if !trimmed.starts_with("uniform ") {
+        // Godot widens a uniform's scope with a prefix. Matching only
+        // `uniform ` silently DROPPED every `global uniform` / `instance
+        // uniform` line, so those declarations vanished rather than erroring
+        // (pat-0q2kx.225). Order matters: the scoped forms must be tested
+        // first, since they also end in `uniform `.
+        let (scope, decl) = if let Some(rest) = trimmed.strip_prefix("global uniform ") {
+            (UniformScope::Global, rest)
+        } else if let Some(rest) = trimmed.strip_prefix("instance uniform ") {
+            (UniformScope::Instance, rest)
+        } else if let Some(rest) = trimmed.strip_prefix("uniform ") {
+            (UniformScope::Local, rest)
+        } else {
             continue;
-        }
-        // Strip trailing semicolon.
-        let trimmed = trimmed.trim_end_matches(';').trim();
-        // "uniform TYPE name [: hint] [= default]"
-        let rest = &trimmed["uniform ".len()..];
+        };
+        // Strip trailing semicolon. "TYPE name [: hint] [= default]"
+        let rest = decl.trim_end_matches(';').trim();
         let mut parts = rest.splitn(2, char::is_whitespace);
         let type_str = match parts.next() {
             Some(t) => t.trim(),
@@ -188,6 +216,7 @@ pub fn parse_uniforms(source: &str) -> Vec<ShaderUniform3D> {
             uniform_type,
             default_value,
             hint,
+            scope,
         });
     }
     uniforms
@@ -1301,6 +1330,22 @@ fn is_binary_op_position_3d(chars: &[(usize, char)], k: usize) -> bool {
 }
 
 /// Evaluates a float expression against a fragment context and uniforms.
+/// A uniform's value for evaluation: the material's own parameter first, then
+/// the project-wide global store (pat-0q2kx.225).
+///
+/// A `global uniform` never appears in a material's parameter map — that map
+/// holds what the ShaderMaterial itself sets — so falling through to the store
+/// is what makes `global uniform vec4 tint;` actually read the project value.
+/// A material parameter of the same name deliberately shadows the global, which
+/// matches Godot: the more specific binding wins.
+fn uniform_value(uniforms: &HashMap<String, Variant>, name: &str) -> Option<Variant> {
+    if let Some(v) = uniforms.get(name) {
+        return Some(v.clone());
+    }
+    let global = gdvariant::shader_globals::get(name);
+    (global != Variant::Nil).then_some(global)
+}
+
 pub fn eval_float_expr_3d(
     expr: &FloatExpr3D,
     ctx: &FragmentContext3D,
@@ -1315,9 +1360,9 @@ pub fn eval_float_expr_3d(
         FloatExpr3D::EyeDir(Vec3Axis3D::X) => ctx.view_dir.x,
         FloatExpr3D::EyeDir(Vec3Axis3D::Y) => ctx.view_dir.y,
         FloatExpr3D::EyeDir(Vec3Axis3D::Z) => ctx.view_dir.z,
-        FloatExpr3D::Uniform(name) => match uniforms.get(name) {
-            Some(Variant::Float(f)) => *f as f32,
-            Some(Variant::Int(i)) => *i as f32,
+        FloatExpr3D::Uniform(name) => match uniform_value(uniforms, name) {
+            Some(Variant::Float(f)) => f as f32,
+            Some(Variant::Int(i)) => i as f32,
             _ => 0.0,
         },
         FloatExpr3D::Sin(inner) => eval_float_expr_3d(inner, ctx, uniforms).sin(),
@@ -1360,8 +1405,8 @@ pub fn eval_color_expr_3d(
             1.0,
         ),
         ColorExpr3D::BuiltinColor | ColorExpr3D::BuiltinAlbedo => ctx.albedo,
-        ColorExpr3D::Uniform(name) => match uniforms.get(name) {
-            Some(Variant::Color(c)) => *c,
+        ColorExpr3D::Uniform(name) => match uniform_value(uniforms, name) {
+            Some(Variant::Color(c)) => c,
             _ => ctx.albedo,
         },
         ColorExpr3D::Mix(a, b, t) => {
@@ -1968,6 +2013,7 @@ uniform bool enabled = true;
                 uniform_type: UniformType::Vec4,
                 default_value: Variant::Color(Color::new(0.0, 0.0, 1.0, 1.0)),
                 hint: None,
+                scope: UniformScope::Local,
             }],
             program: String::new(),
             wgsl_program: None,
@@ -2155,6 +2201,7 @@ uniform bool enabled = true;
                 uniform_type: UniformType::Float,
                 default_value: Variant::Float(1.0),
                 hint: None,
+                scope: UniformScope::Local,
             }],
             program: String::new(),
             wgsl_program: None,
@@ -2178,6 +2225,7 @@ uniform bool enabled = true;
                 uniform_type: UniformType::Float,
                 default_value: Variant::Float(1.0),
                 hint: None,
+                scope: UniformScope::Local,
             }],
             program: String::new(),
             wgsl_program: None,

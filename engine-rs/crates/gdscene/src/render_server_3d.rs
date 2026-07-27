@@ -401,8 +401,16 @@ impl RenderServer3DAdapter {
 
         for &nid in &all_nodes {
             if let Some(node) = tree.get_node(nid) {
-                let class = node.class_name();
-                if class == "Camera3D" {
+                // Inheritance-aware, not `class_name() == "Camera3D"`
+                // (pat-0q2kx.235). Exact equality meant `XRCamera3D` — which is
+                // registered with parent Camera3D and, per Godot, renders as an
+                // ordinary camera when there is no XR session — could never be
+                // found, so a scene whose only camera was an XRCamera3D
+                // rendered from NO camera at all. `is_class` mirrors Godot's
+                // `Object.is_class()` and fixes every future Camera3D subclass
+                // with it; it short-circuits on an exact name match, so this
+                // still works when the ClassDB has not been populated.
+                if node.is_class("Camera3D") {
                     if first_camera.is_none() {
                         first_camera = Some(nid);
                     }

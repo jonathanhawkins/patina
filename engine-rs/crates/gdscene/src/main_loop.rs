@@ -24,7 +24,30 @@ use crate::navigation::{
     NavigationServer2D, NavigationServer3D, OrcaAgent,
 };
 use crate::node::NodeId;
-use crate::particle::{ParticleEmitter, ParticleSimulator};
+use crate::particle::{ParticleEmitter, ParticleSimulator, SubEmitterMode};
+
+/// One resolved `sub_emitter` link for the current frame (pat-0q2kx.233).
+///
+/// Built while the scene tree is borrowed immutably, then consumed after the
+/// particle step loop: the parent and child simulators are separate entries in
+/// `MainLoop::particles`, so the parent→child hop cannot be done under a single
+/// mutable borrow.
+struct SubEmitterChain {
+    /// The emitter whose particles trigger sub-emission.
+    parent: NodeId,
+    /// The particle node named by the parent's `sub_emitter` NodePath.
+    child: NodeId,
+    /// Which particle event fires the burst.
+    mode: SubEmitterMode,
+    /// Particles spawned per dying parent particle (`AT_END`).
+    amount_at_end: u32,
+    /// Particles spawned per newborn parent particle (`AT_START`).
+    amount_at_start: u32,
+    /// `CONSTANT` rate in emissions per second per live parent particle.
+    frequency: f32,
+    /// Whether a child inherits the parent particle's velocity.
+    keep_velocity: bool,
+}
 use crate::path3d::{Curve2D, Curve3D, PathFollow2D, PathFollow3D, PathFollowRotation};
 use crate::physics_server::PhysicsServer;
 use crate::physics_server_3d::PhysicsServer3D;
@@ -628,6 +651,8 @@ impl MainLoop {
         let mut configs_3d: Vec<(NodeId, bool, crate::particle3d::ParticleEmitter3D)> = Vec::new();
         let mut present: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
         let mut present_3d: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        // Resolved parent→child sub-emitter links for this frame (pat-0q2kx.233).
+        let mut sub_chains: Vec<SubEmitterChain> = Vec::new();
         for id in self.tree.all_nodes_in_tree_order() {
             let Some(node) = self.tree.get_node(id) else {
                 continue;
@@ -641,6 +666,54 @@ impl MainLoop {
                 continue;
             }
             present.insert(id);
+            // -- sub_emitter chain (pat-0q2kx.233) --
+            // `sub_emitter` is a NodePath on the emitter node; the trigger mode
+            // and amounts come from its ParticleProcessMaterial, which the .tscn
+            // flattener lands on the node alongside `gravity`/`spread`/… so they
+            // are read the same way as every other material parameter here.
+            {
+                let mode =
+                    SubEmitterMode::from_godot_int(match node.get_property("sub_emitter_mode") {
+                        Variant::Int(v) => v,
+                        Variant::Float(f) => f as i64,
+                        _ => 0,
+                    });
+                let path = match node.get_property("sub_emitter") {
+                    Variant::NodePath(p) => p.to_string(),
+                    Variant::String(s) => s,
+                    _ => String::new(),
+                };
+                // A mode without a target (or a target that does not resolve) is
+                // inert rather than an error, matching Godot.
+                if mode != SubEmitterMode::Disabled && !path.is_empty() {
+                    if let Some(child) = self.tree.get_node_or_null(id, &path) {
+                        let int_prop = |key: &str, default: u32| -> u32 {
+                            match node.get_property(key) {
+                                Variant::Int(v) if v >= 0 => v as u32,
+                                Variant::Float(f) if f >= 0.0 => f as u32,
+                                _ => default,
+                            }
+                        };
+                        sub_chains.push(SubEmitterChain {
+                            parent: id,
+                            child,
+                            mode,
+                            // Godot's ParticleProcessMaterial defaults.
+                            amount_at_end: int_prop("sub_emitter_amount_at_end", 1),
+                            amount_at_start: int_prop("sub_emitter_amount_at_start", 1),
+                            frequency: match node.get_property("sub_emitter_frequency") {
+                                Variant::Float(f) if f > 0.0 => f as f32,
+                                Variant::Int(v) if v > 0 => v as f32,
+                                _ => 4.0,
+                            },
+                            keep_velocity: matches!(
+                                node.get_property("sub_emitter_keep_velocity"),
+                                Variant::Bool(true)
+                            ),
+                        });
+                    }
+                }
+            }
             // Godot's particle nodes default `emitting` to true.
             let is_emitting = !matches!(node.get_property("emitting"), Variant::Bool(false));
             let mut emitter = ParticleEmitter::default();
@@ -730,10 +803,80 @@ impl MainLoop {
             // reach new particles, then restore the computed emitting flag.
             sim.emitter = emitter;
             sim.emitter.emitting = emitting;
+            // The sub-emitter trigger has to be on the simulator before it steps,
+            // since the AT_START/AT_END/CONSTANT events are recorded inside the
+            // step (pat-0q2kx.233).
+            let chain = sub_chains.iter().find(|c| c.parent == id);
+            sim.sub_emitter_mode = chain.map_or(SubEmitterMode::Disabled, |c| c.mode);
+            if let Some(c) = chain {
+                sim.sub_emitter_frequency = c.frequency;
+            }
             sim.step(dt);
             // Drain the one-shot completion edge (fires exactly once per drain).
             if sim.take_finished() {
                 finished_emitters.push(id);
+            }
+        }
+
+        // -- sub-emitter hop (pat-0q2kx.233) --
+        // Two passes, because `self.particles` is a map and parent and child are
+        // separate entries: collect first, then inject. Draining the parent also
+        // clears its queue, so an unresolvable child cannot accumulate a backlog
+        // that fires later.
+        //
+        // The child's own `emitting` flag is deliberately ignored — Godot drives a
+        // sub-emitter entirely from its parent, so a child left `emitting = false`
+        // (the normal way to author one) still receives particles.
+        let mut injections: Vec<(NodeId, Vec<(Vector2, Option<Vector2>)>)> = Vec::new();
+        for chain in &sub_chains {
+            let Some(parent_sim) = self.particles.get_mut(&chain.parent) else {
+                continue;
+            };
+            let events = parent_sim.drain_sub_emissions();
+            if events.is_empty() {
+                continue;
+            }
+            // How many children each trigger spawns. CONSTANT emits one per
+            // trigger; the burst modes use their authored amounts.
+            let per_event = match chain.mode {
+                SubEmitterMode::AtEnd => chain.amount_at_end,
+                SubEmitterMode::AtStart => chain.amount_at_start,
+                SubEmitterMode::Constant => 1,
+                // Disabled/AtCollision record no events, so this is unreachable
+                // in practice; 0 keeps it inert rather than guessing.
+                _ => 0,
+            };
+            // A parent particle's position is in the PARENT emitter's space, and
+            // the child simulates in its own. Godot converts through global
+            // space, and so must this — otherwise a child node authored at the
+            // origin (the normal case) would spawn its particles offset by the
+            // parent's position, which looks like the feature working until you
+            // move either node.
+            let to_child = crate::node2d::get_global_transform(&self.tree, chain.child)
+                .affine_inverse()
+                * crate::node2d::get_global_transform(&self.tree, chain.parent);
+            let mut spawns = Vec::new();
+            for ev in events {
+                let position = to_child.xform(ev.position);
+                // Velocity is a direction: rotate/scale it but do not translate.
+                let velocity = chain
+                    .keep_velocity
+                    .then(|| to_child.basis_xform(ev.velocity));
+                for _ in 0..per_event {
+                    spawns.push((position, velocity));
+                }
+            }
+            if !spawns.is_empty() {
+                injections.push((chain.child, spawns));
+            }
+        }
+        for (child, spawns) in injections {
+            // Only an existing simulator is fed: the child must itself be a
+            // particle node that this pass already registered.
+            if let Some(child_sim) = self.particles.get_mut(&child) {
+                for (position, velocity) in spawns {
+                    child_sim.inject_particle(position, velocity);
+                }
             }
         }
         // Godot fires `finished` when a one_shot emitter completes; a connected

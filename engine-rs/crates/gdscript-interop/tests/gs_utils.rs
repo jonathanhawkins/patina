@@ -184,3 +184,65 @@ fn type_string_covers_packed_vector4_array() {
         Variant::String(String::new())
     );
 }
+
+/// `rid_from_int64` answers `Nil` — the DOCUMENTED unsupported value, not a
+/// stub. Patina's `Variant` has no RID variant, so there is nothing truthful to
+/// return; the point is that a script gets a value instead of dying with
+/// `UndefinedFunction`. Same convention as
+/// `FramebufferCacheRD.get_cache_multipass`.
+#[test]
+fn rid_from_int64_answers_the_documented_unsupported_value() {
+    assert_eq!(run_val("return rid_from_int64(1)"), Variant::Nil);
+    assert_eq!(run_val("return rid_from_int64(0)"), Variant::Nil);
+
+    // Not an Int: returning the id would give a script something that prints
+    // and compares like a number while claiming to be a RID.
+    assert!(
+        !matches!(run_val("return rid_from_int64(7)"), Variant::Int(_)),
+        "answering Int would be a silently wrong type, worse than Nil"
+    );
+}
+
+/// `var_to_bytes_with_objects` matches `var_to_bytes` byte-for-byte on
+/// object-free data, which is the whole payload space this codec supports.
+#[test]
+fn var_to_bytes_with_objects_matches_the_plain_codec_on_plain_data() {
+    for expr in ["42", "\"hi\"", "[1, 2, 3]", "{\"a\": 1}", "true", "3.5"] {
+        let plain = run_val(&format!("return var_to_bytes({expr})"));
+        let with = run_val(&format!("return var_to_bytes_with_objects({expr})"));
+        assert_eq!(
+            plain, with,
+            "for object-free {expr} the two encodings are identical in Godot too"
+        );
+        assert!(matches!(with, Variant::PackedByteArray(_)));
+    }
+}
+
+/// And the pair round-trips through the with-objects decoder.
+#[test]
+fn with_objects_pair_round_trips() {
+    assert_eq!(
+        run_val("return bytes_to_var_with_objects(var_to_bytes_with_objects(42))"),
+        Variant::Int(42)
+    );
+    assert_eq!(
+        run_val("return bytes_to_var_with_objects(var_to_bytes(\"hi\"))"),
+        Variant::String("hi".into()),
+        "the decoders are interchangeable, since neither encoder writes a full object"
+    );
+    // Cross-decoding also works the other way.
+    assert_eq!(
+        run_val("return bytes_to_var(var_to_bytes_with_objects([1, 2]))"),
+        run_val("return [1, 2]")
+    );
+}
+
+/// A non-PackedByteArray argument is a TypeError, not a panic.
+#[test]
+fn bytes_to_var_with_objects_rejects_a_non_buffer() {
+    let mut interp = Interpreter::new();
+    assert!(
+        interp.run("return bytes_to_var_with_objects(5)\n").is_err(),
+        "passing an Int where a PackedByteArray is required must error"
+    );
+}

@@ -117,19 +117,16 @@ fn physics_interpolation_toggle() {
         tp.step(FRAME);
     }
 
-    // Teleport the *body*, not just the node. Writing `position` on the node
-    // alone does not survive: the next tick's `sync_from_physics` rewrites the
-    // node from the body, so the "teleport" silently evaporates and the
-    // assertion below would be measuring ordinary falling.
-    let bid = tp
-        .physics_server_mut()
-        .body_for_node(tp_body)
-        .expect("the body is registered");
-    tp.physics_server_mut()
-        .world_mut()
-        .get_body_mut(bid)
-        .expect("body exists")
-        .position = Vector2::new(0.0, 10_000.0);
+    // Teleport by moving the NODE, which is how a script relocates a body.
+    //
+    // ⚠️ Writing `body.position` directly does NOT work: `sync_to_physics`
+    // opens each tick by pushing the node's transform into the body whenever
+    // the two disagree — for `Rigid` bodies as well as Static/Kinematic
+    // (`physics_server.rs`, the `BodyType::Rigid` arm) — so a body-side write
+    // is reverted to the node's stale position before the step even runs. The
+    // node is the authority for a teleport; the body is the authority for
+    // simulated motion.
+    node2d::set_position(tp.tree_mut(), tp_body, Vector2::new(0.0, 10_000.0));
 
     tp.reset_physics_interpolation(tp_body);
     // Three frames guarantee at least one physics tick at 20 tps, which is what

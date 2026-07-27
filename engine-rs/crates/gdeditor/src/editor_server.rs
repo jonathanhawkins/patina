@@ -10505,25 +10505,30 @@ fn url_decode(s: &str) -> String {
 }
 
 /// `GET /api/script?path=<path>` -- reads a .gd file and returns its content.
-/// `GET /api/assetlib/list` -- a built-in Asset Library catalog. Powers the
-/// AssetLib browser's central view (pat-4jaq7). Served locally with no external
-/// network call; the frontend does search/sort/category filtering client-side.
+/// `GET /api/assetlib/list` -- the Asset Library catalog (pat-0q2kx.240).
+///
+/// Returns an HONEST EMPTY STATE. This endpoint previously served twelve
+/// hardcoded entries ("Pixel Platformer Kit", "Dialogue System", …) that looked
+/// like a real catalog and were not: none of them existed, none could be
+/// installed, and clicking any of them did nothing because no install path
+/// exists anywhere in the server. Fabricated listings are worse than an empty
+/// browser — they invite a user to try to install something that cannot be
+/// installed, and they make the feature look finished to anyone auditing it.
+///
+/// Godot browses godotengine.org over HTTPS and installs the downloaded zip
+/// into the project. Until that exists here, the truthful answer is "no catalog
+/// configured", and `configured: false` lets the frontend render an empty state
+/// with an install-from-file/URL affordance rather than a broken grid.
 fn api_get_assetlib_list(stream: &mut TcpStream) {
     let body = serde_json::json!({
-        "assets": [
-            {"title": "Pixel Platformer Kit", "author": "PatinaTeam", "category": "2D Tools", "support": "official", "license": "MIT", "rating": 5, "icon": "🟩"},
-            {"title": "Top-Down Shooter Template", "author": "PatinaTeam", "category": "Templates", "support": "official", "license": "MIT", "rating": 5, "icon": "🔫"},
-            {"title": "Dialogue System", "author": "community", "category": "Scripts", "support": "community", "license": "MIT", "rating": 4, "icon": "💬"},
-            {"title": "Smooth Camera 2D", "author": "community", "category": "2D Tools", "support": "community", "license": "MIT", "rating": 4, "icon": "🎥"},
-            {"title": "Low-Poly Nature Pack", "author": "PatinaTeam", "category": "3D Assets", "support": "official", "license": "CC0", "rating": 5, "icon": "🌳"},
-            {"title": "PBR Material Library", "author": "community", "category": "3D Assets", "support": "community", "license": "CC0", "rating": 4, "icon": "🪨"},
-            {"title": "Outline Shader", "author": "community", "category": "Shaders", "support": "community", "license": "MIT", "rating": 5, "icon": "✨"},
-            {"title": "Water Shader", "author": "community", "category": "Shaders", "support": "testing", "license": "MIT", "rating": 3, "icon": "🌊"},
-            {"title": "State Machine Addon", "author": "community", "category": "Scripts", "support": "community", "license": "Apache-2.0", "rating": 4, "icon": "⚙️"},
-            {"title": "Pixel Font Pack", "author": "PatinaTeam", "category": "GUI", "support": "official", "license": "OFL", "rating": 4, "icon": "🔤"},
-            {"title": "Inventory UI Kit", "author": "community", "category": "GUI", "support": "community", "license": "MIT", "rating": 4, "icon": "🎒"},
-            {"title": "Platformer Demo", "author": "PatinaTeam", "category": "Demos", "support": "official", "license": "MIT", "rating": 5, "icon": "🎮"}
-        ]
+        "assets": [],
+        // Distinguishes "no catalog source configured" from "the catalog is
+        // configured and happens to return nothing", which the frontend must
+        // present differently.
+        "configured": false,
+        "reason": "no asset catalog configured",
+        // Named so the eventual editor setting and the UI agree on one key.
+        "setting": "editor/assetlib/index_url",
     });
     send_json(stream, &body.to_string());
 }

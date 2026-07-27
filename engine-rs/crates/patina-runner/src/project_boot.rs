@@ -218,6 +218,33 @@ fn boot_from_project_text(
     let settings = ProjectSettings::from_godot_format(content)
         .map_err(|e| format!("failed to load ProjectSettings: {e}"))?;
 
+    // (1b) Seed the global shader parameter store from `[shader_globals]`
+    // (pat-0q2kx.225). A shader declaring `global uniform vec4 tint;` reads
+    // this store, so without seeding here the parsing and the store both exist
+    // and the shader still renders with nothing — the same shape as the
+    // `input_map` gap below, where boot parsed a value nobody ever installed.
+    //
+    // Values are authored as GDScript literals (`Color(1, 0, 0, 1)`), so they
+    // go through the same `parse_variant_value` the `.tres` loader uses. An
+    // unparseable value is skipped rather than defaulted: a global bound to a
+    // wrong-typed value would misrender silently, which is worse than one that
+    // is visibly absent.
+    for global in loader.project_file().shader_globals() {
+        match gdresource::parse_variant_value(&global.value_literal) {
+            Ok(value) => {
+                gdvariant::shader_globals::add(&global.name, &global.type_name, value);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    name = %global.name,
+                    literal = %global.value_literal,
+                    error = %e,
+                    "skipping [shader_globals] entry with an unparseable value"
+                );
+            }
+        }
+    }
+
     // (1a) Name the `user://` directory after the project, the way Godot does
     // (`<data dir>/Godot/app_userdata/<application/config/name>`). Without this
     // every Patina project shared one `user://` (pat-0q2kx.123). The declared

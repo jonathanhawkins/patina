@@ -1383,9 +1383,13 @@ pub fn register_3d_classes() {
     // tracking data into the scene. XROrigin3D is registered just above.
     register_class(ClassRegistration::new("XRServer").parent("Object"));
     register_class(
+        // ⚠️ NOT abstract — `GDREGISTER_CLASS(XRNode3D)` in
+        // register_scene_types.cpp, alongside XRCamera3D / XRController3D /
+        // XRAnchor3D / XROrigin3D, none of which are abstract either
+        // (pat-0q2kx.235). It was marked `.abstract_class()`, which made a
+        // node Godot lets you place in a scene un-instantiable here.
         ClassRegistration::new("XRNode3D")
             .parent("Node3D")
-            .abstract_class()
             .property(PropertyInfo::new("tracker", Variant::String(String::new()))),
     );
     register_class(ClassRegistration::new("XRController3D").parent("XRNode3D"));
@@ -1798,6 +1802,29 @@ pub fn register_3d_classes() {
             .method(MethodInfo::new("get_reference_bone", 1))
             .method(MethodInfo::new("set_reference_node", 2))
             .method(MethodInfo::new("get_reference_node", 1)),
+    );
+
+    // AimModifier3D rotates each configured bone so a chosen forward axis points
+    // at that setting's reference (pat-0q2kx.238).
+    //
+    // ⚠️ Concrete — `GDREGISTER_CLASS(AimModifier3D)` — while its parent
+    // BoneConstraint3D directly above is `GDREGISTER_VIRTUAL_CLASS`. Same
+    // per-setting shape as the parent: only `setting_count` is a real property,
+    // everything else is an indexed accessor pair taking the setting index.
+    register_class(
+        ClassRegistration::new("AimModifier3D")
+            .parent("BoneConstraint3D")
+            .property(PropertyInfo::new("setting_count", Variant::Int(0)))
+            .method(MethodInfo::new("set_forward_axis", 2))
+            .method(MethodInfo::new("get_forward_axis", 1))
+            .method(MethodInfo::new("set_primary_rotation_axis", 2))
+            .method(MethodInfo::new("get_primary_rotation_axis", 1))
+            .method(MethodInfo::new("set_use_secondary_rotation", 2))
+            .method(MethodInfo::new("is_using_secondary_rotation", 1))
+            .method(MethodInfo::new("set_relative", 2))
+            .method(MethodInfo::new("is_relative", 1))
+            .method(MethodInfo::new("set_use_euler", 2))
+            .method(MethodInfo::new("is_using_euler", 1)),
     );
 
     // BoneTwistDisperser3D spreads a bone's roll across the chain between a root
@@ -2385,6 +2412,25 @@ pub fn register_3d_classes() {
             .parent("Resource")
             .abstract_class(),
     );
+    // AnimationNodeExtension — the base a script extends to write a custom
+    // AnimationTree blend node (pat-0q2kx.237).
+    //
+    // ⚠️ NOT abstract, unlike its AnimationNode parent directly above:
+    // `GDREGISTER_VIRTUAL_CLASS(AnimationNodeExtension)`. Virtual classes keep
+    // a creation func, so Godot's `is_abstract` is false and a script may both
+    // extend AND construct one — which is the entire point of an "Extension"
+    // base (same distinction as Texture / TextureLayered, pat-nzgdu.215).
+    register_class(
+        ClassRegistration::new("AnimationNodeExtension")
+            .parent("AnimationNode")
+            // ⚠️ Signature is (playback_info: PackedFloat64Array, test_only:
+            // bool) -> PackedFloat32Array — TWO parameters. The bead describes
+            // it as (time, seek, is_external_seeking); that is an older shape
+            // and would declare the wrong arity.
+            .method(MethodInfo::new("_process_animation_node", 2))
+            .method(MethodInfo::new("get_remaining_time", 2))
+            .method(MethodInfo::new("is_looping", 1)),
+    );
     register_class(
         ClassRegistration::new("AnimationRootNode")
             .parent("AnimationNode")
@@ -2415,7 +2461,30 @@ pub fn register_3d_classes() {
     );
     register_class(ClassRegistration::new("AnimationNodeStateMachinePlayback").parent("Resource"));
 
-    register_class(ClassRegistration::new("GPUParticles3D").parent("GeometryInstance3D"));
+    // GPUParticles3D was registered BARE — name and parent only — so a `.tscn`
+    // carrying a 3D emitter round-tripped without any of its properties and the
+    // inspector showed an authorable node with nothing on it.
+    //
+    // This adds the trail/alignment surface pat-0q2kx.234 is about. Its 2D
+    // sibling already carries `trail_enabled` / `trail_lifetime` /
+    // `trail_sections` / `trail_section_subdivisions` (see the GPUParticles2D
+    // block); the 3D node has no sections pair in Godot — it resamples against
+    // the mesh instead — so only the two shared trail properties apply here.
+    // The rest of GPUParticles3D's schema is still absent and wants its own pass.
+    register_class(
+        ClassRegistration::new("GPUParticles3D")
+            .parent("GeometryInstance3D")
+            .property(PropertyInfo::new("trail_enabled", Variant::Bool(false)))
+            .property(PropertyInfo::new("trail_lifetime", Variant::Float(0.3)))
+            .property(PropertyInfo::new("transform_align", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("TransformAlign")
+                    .constant("TRANSFORM_ALIGN_DISABLED", 0)
+                    .constant("TRANSFORM_ALIGN_Z_BILLBOARD", 1)
+                    .constant("TRANSFORM_ALIGN_Y_TO_VELOCITY", 2)
+                    .constant("TRANSFORM_ALIGN_Z_BILLBOARD_Y_TO_VELOCITY", 3),
+            ),
+    );
 
     // -- GPU particle attractors (pat-nzgdu.144) ---------------------------
     //
@@ -2461,6 +2530,69 @@ pub fn register_3d_classes() {
             // A Texture3D sampled for the force direction; Nil until assigned.
             .property(PropertyInfo::new("texture", Variant::Nil)),
     );
+    // -- GPUParticlesCollision* family (pat-0q2kx.231) -----------------------
+    //
+    // The collision half of the particle-volume family. Its attractor siblings
+    // above were registered; these five were not, so a `.tscn` carrying a
+    // collider failed class resolution outright.
+    //
+    // ⚠️ Several defaults are emphatically NOT the zero value, and each one is
+    // the doc XML's:
+    //   * `cull_mask` is 4294967295 (all 32 layers), not 0 — zero would make
+    //     every collider ignore every particle.
+    //   * `heightfield_mask` is 1048575 (2^20 - 1), a DIFFERENT width from
+    //     cull_mask; copying cull_mask's value here would be wrong.
+    //   * `resolution` is 2, not 0 — an enum whose default is not its first
+    //     member.
+    //   * `size` is Vector3(2, 2, 2), not ZERO — a zero box collides with
+    //     nothing.
+    register_class(
+        // GDREGISTER_ABSTRACT_CLASS — the only abstract member of the family.
+        ClassRegistration::new("GPUParticlesCollision3D")
+            .parent("VisualInstance3D")
+            .abstract_class()
+            .property(PropertyInfo::new("cull_mask", Variant::Int(4294967295))),
+    );
+    register_class(
+        ClassRegistration::new("GPUParticlesCollisionBox3D")
+            .parent("GPUParticlesCollision3D")
+            .property(PropertyInfo::new(
+                "size",
+                Variant::Vector3(gdcore::math::Vector3::new(2.0, 2.0, 2.0)),
+            )),
+    );
+    register_class(
+        ClassRegistration::new("GPUParticlesCollisionSphere3D")
+            .parent("GPUParticlesCollision3D")
+            .property(PropertyInfo::new("radius", Variant::Float(1.0))),
+    );
+    register_class(
+        ClassRegistration::new("GPUParticlesCollisionHeightField3D")
+            .parent("GPUParticlesCollision3D")
+            .property(PropertyInfo::new(
+                "size",
+                Variant::Vector3(gdcore::math::Vector3::new(2.0, 2.0, 2.0)),
+            ))
+            .property(PropertyInfo::new("resolution", Variant::Int(2)))
+            .property(PropertyInfo::new("update_mode", Variant::Int(0)))
+            .property(PropertyInfo::new(
+                "follow_camera_enabled",
+                Variant::Bool(false),
+            ))
+            .property(PropertyInfo::new("heightfield_mask", Variant::Int(1048575))),
+    );
+    register_class(
+        ClassRegistration::new("GPUParticlesCollisionSDF3D")
+            .parent("GPUParticlesCollision3D")
+            .property(PropertyInfo::new(
+                "size",
+                Variant::Vector3(gdcore::math::Vector3::new(2.0, 2.0, 2.0)),
+            ))
+            .property(PropertyInfo::new("resolution", Variant::Int(2)))
+            .property(PropertyInfo::new("thickness", Variant::Float(1.0)))
+            .property(PropertyInfo::new("bake_mask", Variant::Int(4294967295))),
+    );
+
     register_class(ClassRegistration::new("CPUParticles3D").parent("GeometryInstance3D"));
     // -- Environment probe / decal nodes (pat-0q2kx.195) ---------------------
     //
@@ -5593,7 +5725,32 @@ pub fn register_2d_classes() {
                         Vector2::new(-100.0, -100.0),
                         Vector2::new(200.0, 200.0),
                     )),
-                )),
+                ))
+                // -- method surface (pat-0q2kx.232) --
+                //
+                // The properties above were already registered; these were not,
+                // so `$Particles.restart()` had no declaration to resolve
+                // against. Arities are the doc XML's.
+                //
+                // ⚠️ `restart` takes ONE argument (`keep_seed`), not zero — it
+                // gained the parameter in Godot 4.x and reads like a no-arg
+                // call in every older example.
+                .method(MethodInfo::new("restart", 1))
+                .method(MethodInfo::new("emit_particle", 5))
+                .method(MethodInfo::new("capture_rect", 0))
+                .method(MethodInfo::new("convert_from_particles", 1))
+                .method(MethodInfo::new("request_particles_process", 1))
+                // EmitFlags are a BITMASK: powers of two, combined with `|` in
+                // the 5th argument of emit_particle. Numbering them 0..4 would
+                // make POSITION|VELOCITY collide with other combinations.
+                .enumeration(
+                    EnumInfo::new("EmitFlags")
+                        .constant("EMIT_FLAG_POSITION", 1)
+                        .constant("EMIT_FLAG_ROTATION_SCALE", 2)
+                        .constant("EMIT_FLAG_VELOCITY", 4)
+                        .constant("EMIT_FLAG_COLOR", 8)
+                        .constant("EMIT_FLAG_CUSTOM", 16),
+                ),
         );
     }
     if !class_exists("CPUParticles2D") {
@@ -5727,7 +5884,16 @@ pub fn register_2d_classes() {
                     Variant::Float(0.0),
                 ))
                 .property(PropertyInfo::new("texture", Variant::Nil))
-                .property(PropertyInfo::new("use_fixed_seed", Variant::Bool(false))),
+                .property(PropertyInfo::new("use_fixed_seed", Variant::Bool(false)))
+                // The three methods CPUParticles2D shares with its GPU sibling
+                // (pat-0q2kx.232). It has NO emit_particle or capture_rect —
+                // those are GPU-only, and declaring them here would advertise a
+                // surface Godot does not have. Its own param accessors
+                // (get/set_param_min/max/curve, get/set_particle_flag) are a
+                // separate family and out of this bead's scope.
+                .method(MethodInfo::new("restart", 1))
+                .method(MethodInfo::new("convert_from_particles", 1))
+                .method(MethodInfo::new("request_particles_process", 1)),
         );
     }
     if !class_exists("Line2D") {

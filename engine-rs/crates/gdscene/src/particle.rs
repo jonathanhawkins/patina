@@ -375,6 +375,66 @@ impl ParticleEmitter {
 // ParticleSimulator
 // ---------------------------------------------------------------------------
 
+/// Godot's `ParticleProcessMaterial.SubEmitterMode` (pat-0q2kx.233).
+///
+/// ⚠️ The discriminants are **not** in the order the names suggest:
+/// `upstream/godot/scene/resources/particle_process_material.h:94-98` declares
+/// `DISABLED, CONSTANT, AT_END, AT_COLLISION, AT_START`, so `AT_START` is **4**
+/// and `AT_COLLISION` is 3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubEmitterMode {
+    /// No sub-emission (Godot's default).
+    #[default]
+    Disabled,
+    /// Each live particle emits at `sub_emitter_frequency` Hz.
+    Constant,
+    /// A burst when a particle dies.
+    AtEnd,
+    /// A burst when a particle collides — depends on particle collision, which
+    /// Patina does not simulate yet, so this behaves as `Disabled`.
+    AtCollision,
+    /// A burst when a particle is born.
+    AtStart,
+}
+
+impl SubEmitterMode {
+    /// Maps Godot's integer enum onto this one; anything unrecognised is
+    /// `Disabled`, which is the safe reading of a value we do not model.
+    pub fn from_godot_int(v: i64) -> Self {
+        match v {
+            1 => Self::Constant,
+            2 => Self::AtEnd,
+            3 => Self::AtCollision,
+            4 => Self::AtStart,
+            _ => Self::Disabled,
+        }
+    }
+
+    /// The Godot integer for this mode.
+    pub fn to_godot_int(self) -> i64 {
+        match self {
+            Self::Disabled => 0,
+            Self::Constant => 1,
+            Self::AtEnd => 2,
+            Self::AtCollision => 3,
+            Self::AtStart => 4,
+        }
+    }
+}
+
+/// One sub-emitter spawn request recorded by a parent simulator: where the
+/// parent particle was, and how fast it was going (pat-0q2kx.233).
+///
+/// The node layer drains these and injects particles into the child simulator,
+/// inheriting `velocity` only when `sub_emitter_keep_velocity` is set.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SubEmitEvent {
+    /// Position of the parent particle, in the parent emitter's space.
+    pub position: Vector2,
+    /// Velocity of the parent particle at the moment of the trigger.
+    pub velocity: Vector2,
+}
+
 /// Drives particle emission, physics, and culling each frame.
 #[derive(Debug, Clone)]
 pub struct ParticleSimulator {
@@ -386,6 +446,17 @@ pub struct ParticleSimulator {
     pub time_accumulator: f32,
     /// Total number of particles emitted (used for seeding).
     pub total_emitted: u64,
+    /// Sub-emitter trigger mode, mirrored from the node each frame.
+    pub sub_emitter_mode: SubEmitterMode,
+    /// `CONSTANT` mode rate, in emissions per second per live particle.
+    pub sub_emitter_frequency: f32,
+    /// Spawn requests recorded during [`Self::step`], drained by the node layer
+    /// via [`Self::drain_sub_emissions`].
+    sub_emissions: Vec<SubEmitEvent>,
+    /// Fractional carry for `CONSTANT` mode, so a frequency that yields less
+    /// than one emission per frame still emits at the right average rate
+    /// instead of never firing.
+    constant_carry: f32,
     /// Leftover time when `fixed_fps` is set (pat-nzgdu.145).
     fixed_step_accumulator: f32,
     /// A `finished` edge waiting to be drained by the node layer.
@@ -409,10 +480,46 @@ impl ParticleSimulator {
             active_particles: Vec::new(),
             time_accumulator: 0.0,
             total_emitted: 0,
+            sub_emitter_mode: SubEmitterMode::default(),
+            // Godot's ParticleProcessMaterial default.
+            sub_emitter_frequency: 4.0,
+            sub_emissions: Vec::new(),
+            constant_carry: 0.0,
             fixed_step_accumulator: 0.0,
             finished_pending: false,
             finished_emitted: false,
         }
+    }
+
+    /// Takes the sub-emission requests recorded since the last drain
+    /// (pat-0q2kx.233).
+    ///
+    /// The node layer owns the parent→child hop because a simulator has no
+    /// handle on any other simulator; draining here keeps that seam explicit
+    /// rather than letting one simulator reach into another.
+    pub fn drain_sub_emissions(&mut self) -> Vec<SubEmitEvent> {
+        std::mem::take(&mut self.sub_emissions)
+    }
+
+    /// Injects one particle at `position`, as a sub-emitter or an `emit_particle`
+    /// call does (pat-0q2kx.233).
+    ///
+    /// The particle is built from this emitter's own material — a sub-emitter's
+    /// children look like its own particles, which is Godot's behaviour — and
+    /// then relocated. `velocity` overrides the material-derived velocity when
+    /// the parent asked to pass its own along (`sub_emitter_keep_velocity`).
+    ///
+    /// Emission happens regardless of this emitter's `emitting` flag: Godot
+    /// ignores a sub-emitter's own flag, since the parent is what drives it.
+    pub fn inject_particle(&mut self, position: Vector2, velocity: Option<Vector2>) {
+        self.total_emitted += 1;
+        let seed = (self.total_emitted & 0xFFFF_FFFF) as u32;
+        let mut particle = self.emitter.emit_particle(seed.max(1));
+        particle.position = position;
+        if let Some(v) = velocity {
+            particle.velocity = v;
+        }
+        self.active_particles.push(particle);
     }
 
     /// Advance the simulation by `dt` seconds.
@@ -494,6 +601,46 @@ impl ParticleSimulator {
                 .lerp(self.emitter.material.end_color, t);
         }
 
+        // --- CONSTANT sub-emission ---
+        // Each live particle emits at `sub_emitter_frequency` Hz. The rate is
+        // accumulated in aggregate (frequency × live count × dt) with a
+        // fractional carry, so the average spawn rate matches Godot even when it
+        // is below one per frame. Positions come from successive live particles;
+        // the per-particle *phase* is therefore not individually tracked, which
+        // is the one approximation here.
+        if self.sub_emitter_mode == SubEmitterMode::Constant && !self.active_particles.is_empty() {
+            self.constant_carry +=
+                self.sub_emitter_frequency * self.active_particles.len() as f32 * dt_scaled;
+            let mut spawned = 0usize;
+            while self.constant_carry >= 1.0 {
+                self.constant_carry -= 1.0;
+                let p = &self.active_particles[spawned % self.active_particles.len()];
+                self.sub_emissions.push(SubEmitEvent {
+                    position: p.position,
+                    velocity: p.velocity,
+                });
+                spawned += 1;
+                // Guard against a pathological frequency × dt turning one frame
+                // into an unbounded loop.
+                if spawned >= 4096 {
+                    self.constant_carry = 0.0;
+                    break;
+                }
+            }
+        }
+
+        // --- Record AT_END triggers before the dead are dropped ---
+        // Has to happen here: after `retain` the dying particles' positions are
+        // gone, and that position is exactly what the sub-emitter needs.
+        if self.sub_emitter_mode == SubEmitterMode::AtEnd {
+            for p in self.active_particles.iter().filter(|p| p.is_dead()) {
+                self.sub_emissions.push(SubEmitEvent {
+                    position: p.position,
+                    velocity: p.velocity,
+                });
+            }
+        }
+
         // --- Remove dead particles ---
         self.active_particles.retain(|p| !p.is_dead());
 
@@ -511,6 +658,12 @@ impl ParticleSimulator {
                         self.total_emitted += 1;
                         let seed = (self.total_emitted & 0xFFFF_FFFF) as u32;
                         let particle = self.emitter.emit_particle(seed.max(1));
+                        if self.sub_emitter_mode == SubEmitterMode::AtStart {
+                            self.sub_emissions.push(SubEmitEvent {
+                                position: particle.position,
+                                velocity: particle.velocity,
+                            });
+                        }
                         self.active_particles.push(particle);
                     }
                     if self.emitter.one_shot {
@@ -527,6 +680,12 @@ impl ParticleSimulator {
                     self.total_emitted += 1;
                     let seed = (self.total_emitted & 0xFFFF_FFFF) as u32;
                     let particle = self.emitter.emit_particle(seed.max(1));
+                    if self.sub_emitter_mode == SubEmitterMode::AtStart {
+                        self.sub_emissions.push(SubEmitEvent {
+                            position: particle.position,
+                            velocity: particle.velocity,
+                        });
+                    }
                     self.active_particles.push(particle);
                 }
 

@@ -6,8 +6,8 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::serialize::{from_json, to_json};
     use crate::dictionary::Dictionary;
+    use crate::serialize::{from_json, to_json};
     use crate::variant::{Variant, VariantType};
     use gdcore::id::ObjectId;
     use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
