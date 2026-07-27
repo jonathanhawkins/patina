@@ -433,7 +433,25 @@ fn render_node(
 
         // Children anchor against this control's rect in its global space.
         let class = class_of(tree, node_id);
-        let is_container = control::is_container_class_name(&class);
+        // A PanelContainer insets its children by the `panel` stylebox's content
+        // margins (pat-0q2kx.148). This happens here, not in `arrange_container`,
+        // because resolving that stylebox needs the theme and the layout pipeline
+        // carries none — see `control::arrange_panel_container`.
+        //
+        // ⚠️ This is also what makes `StyleBoxEmpty`'s margins observable at all:
+        // Empty draws nothing, so padding is its *entire* purpose, and before
+        // this the margins were parsed, stored, and then never read by anything.
+        let is_container = if class == "PanelContainer" {
+            let margins = theme
+                .get_stylebox("PanelContainer", "panel")
+                .or_else(|| theme.get_stylebox("Panel", "panel"))
+                .map(|sb| sb.content_margins())
+                .unwrap_or([0.0; 4]);
+            control::arrange_panel_container(tree, node_id, size, margins);
+            true
+        } else {
+            control::is_container_class_name(&class)
+        };
         for child in children_of(tree, node_id) {
             render_node(
                 tree,

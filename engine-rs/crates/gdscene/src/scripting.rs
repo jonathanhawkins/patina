@@ -1943,6 +1943,31 @@ impl SceneAccess for SceneTreeAccessor {
             .is_some_and(|p| p.node_test_move(nid, Vector2::new(motion.0, motion.1)))
     }
 
+    /// `RayCast2D.force_raycast_update()` (pat-0q2kx.32) — runs the very same
+    /// `raycast2d::force_raycast_update` the physics tick runs
+    /// (`main_loop.rs::process_raycasts`), so a scripted update and a ticked one
+    /// cannot drift apart.
+    ///
+    /// The physics server is resolved from its stored *address* rather than via
+    /// [`Self::physics`]: that helper borrows `&self`, which would collide with
+    /// the `&mut SceneTree` this call also needs. Reading the address out as a
+    /// `usize` first keeps the two borrows independent — which is the reason the
+    /// server is held as an address in the first place.
+    fn force_raycast_update_2d(&mut self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let addr = self.tree().script_physics_addr();
+        if addr == 0 {
+            return false;
+        }
+        // SAFETY: identical contract to `physics()` — `set_script_physics_server`
+        // stored the address of a live `PhysicsServer` that `MainLoop` clears
+        // before the server can move or drop. The server is a sibling of the
+        // tree, never stored inside it, so this shared borrow cannot alias the
+        // `&mut SceneTree` taken on the next line.
+        let physics = unsafe { &*(addr as *const crate::physics_server::PhysicsServer) };
+        crate::raycast2d::force_raycast_update(self.tree_mut(), physics, nid)
+    }
+
     fn is_physics_processing(&self, node: u64) -> bool {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         self.tree().is_node_physics_processing(nid)

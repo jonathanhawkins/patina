@@ -5178,6 +5178,441 @@ pub fn register_3d_classes() {
     );
     register_class(ClassRegistration::new("VisualShaderNodeTexture").parent("VisualShaderNode"));
 
+    // -- XR tracker / modifier / interface family (pat-0q2kx.263) ----------
+    //
+    // Nine target classes plus three ancestors that did not exist yet:
+    // `XRTracker`, `XRPositionalTracker` and `XRInterface`. Without them the
+    // chains below have no base to attach to — `inheritance_chain` stops at the
+    // first unregistered name, so "correct parent" would be unsatisfiable.
+    //
+    // Parents, properties and every enum constant were GENERATED from
+    // `upstream/godot/doc/classes/*.xml`, not transcribed, because the enums run
+    // to 183 constants (XRFaceTracker's blend shapes alone are ~60) and a typo
+    // in one value is invisible to `class_exists`.
+    //
+    // The doc XML corrects the bead text in three places:
+    //   * XRHandTracker / XRBodyTracker extend XRPositionalTracker, NOT XRTracker
+    //   * XRFaceModifier3D extends Node3D, NOT SkeletonModifier3D
+    //   * XRVRS extends Object, NOT RefCounted
+    //
+    // MobileVRInterface has no doc XML (it is a module class); its parent and
+    // lens properties come from modules/mobile_vr/mobile_vr_interface.h/.cpp.
+    //
+    // Three properties are deliberately omitted for want of an honest scalar
+    // default: XRFaceTracker.blend_shapes (PackedFloat32Array),
+    // XRFaceModifier3D.target (NodePath) and XRVRS.vrs_render_region (Rect2i).
+    register_class(
+        ClassRegistration::new("XRTracker")
+            .parent("RefCounted")
+            .property(PropertyInfo::new(
+                "description",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new("name", Variant::String(String::new())))
+            .property(PropertyInfo::new("type", Variant::Int(128))),
+    );
+    register_class(
+        ClassRegistration::new("XRPositionalTracker")
+            .parent("XRTracker")
+            .property(PropertyInfo::new("hand", Variant::Int(0)))
+            .property(PropertyInfo::new("profile", Variant::String(String::new())))
+            .constant("TRACKER_HAND_UNKNOWN", 0)
+            .constant("TRACKER_HAND_LEFT", 1)
+            .constant("TRACKER_HAND_RIGHT", 2)
+            .constant("TRACKER_HAND_MAX", 3),
+    );
+    register_class(
+        ClassRegistration::new("XRInterface")
+            .parent("RefCounted")
+            .property(PropertyInfo::new(
+                "ar_is_anchor_detection_enabled",
+                Variant::Bool(false),
+            ))
+            .property(PropertyInfo::new("environment_blend_mode", Variant::Int(0)))
+            .property(PropertyInfo::new(
+                "interface_is_primary",
+                Variant::Bool(false),
+            ))
+            .property(PropertyInfo::new("xr_play_area_mode", Variant::Int(0)))
+            .constant("XR_NONE", 0)
+            .constant("XR_MONO", 1)
+            .constant("XR_STEREO", 2)
+            .constant("XR_QUAD", 4)
+            .constant("XR_VR", 8)
+            .constant("XR_AR", 16)
+            .constant("XR_EXTERNAL", 32)
+            .constant("XR_NORMAL_TRACKING", 0)
+            .constant("XR_EXCESSIVE_MOTION", 1)
+            .constant("XR_INSUFFICIENT_FEATURES", 2)
+            .constant("XR_UNKNOWN_TRACKING", 3)
+            .constant("XR_NOT_TRACKING", 4)
+            .constant("XR_PLAY_AREA_UNKNOWN", 0)
+            .constant("XR_PLAY_AREA_3DOF", 1)
+            .constant("XR_PLAY_AREA_SITTING", 2)
+            .constant("XR_PLAY_AREA_ROOMSCALE", 3)
+            .constant("XR_PLAY_AREA_STAGE", 4)
+            .constant("XR_PLAY_AREA_CUSTOM", 2147483647)
+            .constant("XR_ENV_BLEND_MODE_OPAQUE", 0)
+            .constant("XR_ENV_BLEND_MODE_ADDITIVE", 1)
+            .constant("XR_ENV_BLEND_MODE_ALPHA_BLEND", 2)
+            .constant("XR_VRS_TEXTURE_FORMAT_UNIFIED", 0)
+            .constant("XR_VRS_TEXTURE_FORMAT_FRAGMENT_SHADING_RATE", 1)
+            .constant("XR_VRS_TEXTURE_FORMAT_FRAGMENT_DENSITY_MAP", 2),
+    );
+    register_class(
+        ClassRegistration::new("XRHandTracker")
+            .parent("XRPositionalTracker")
+            .property(PropertyInfo::new("hand", Variant::Int(1)))
+            .property(PropertyInfo::new("hand_tracking_source", Variant::Int(0)))
+            .property(PropertyInfo::new("has_tracking_data", Variant::Bool(false)))
+            .property(PropertyInfo::new("type", Variant::Int(16)))
+            .constant("HAND_TRACKING_SOURCE_UNKNOWN", 0)
+            .constant("HAND_TRACKING_SOURCE_UNOBSTRUCTED", 1)
+            .constant("HAND_TRACKING_SOURCE_CONTROLLER", 2)
+            .constant("HAND_TRACKING_SOURCE_NOT_TRACKED", 3)
+            .constant("HAND_TRACKING_SOURCE_MAX", 4)
+            .constant("HAND_JOINT_PALM", 0)
+            .constant("HAND_JOINT_WRIST", 1)
+            .constant("HAND_JOINT_THUMB_METACARPAL", 2)
+            .constant("HAND_JOINT_THUMB_PHALANX_PROXIMAL", 3)
+            .constant("HAND_JOINT_THUMB_PHALANX_DISTAL", 4)
+            .constant("HAND_JOINT_THUMB_TIP", 5)
+            .constant("HAND_JOINT_INDEX_FINGER_METACARPAL", 6)
+            .constant("HAND_JOINT_INDEX_FINGER_PHALANX_PROXIMAL", 7)
+            .constant("HAND_JOINT_INDEX_FINGER_PHALANX_INTERMEDIATE", 8)
+            .constant("HAND_JOINT_INDEX_FINGER_PHALANX_DISTAL", 9)
+            .constant("HAND_JOINT_INDEX_FINGER_TIP", 10)
+            .constant("HAND_JOINT_MIDDLE_FINGER_METACARPAL", 11)
+            .constant("HAND_JOINT_MIDDLE_FINGER_PHALANX_PROXIMAL", 12)
+            .constant("HAND_JOINT_MIDDLE_FINGER_PHALANX_INTERMEDIATE", 13)
+            .constant("HAND_JOINT_MIDDLE_FINGER_PHALANX_DISTAL", 14)
+            .constant("HAND_JOINT_MIDDLE_FINGER_TIP", 15)
+            .constant("HAND_JOINT_RING_FINGER_METACARPAL", 16)
+            .constant("HAND_JOINT_RING_FINGER_PHALANX_PROXIMAL", 17)
+            .constant("HAND_JOINT_RING_FINGER_PHALANX_INTERMEDIATE", 18)
+            .constant("HAND_JOINT_RING_FINGER_PHALANX_DISTAL", 19)
+            .constant("HAND_JOINT_RING_FINGER_TIP", 20)
+            .constant("HAND_JOINT_PINKY_FINGER_METACARPAL", 21)
+            .constant("HAND_JOINT_PINKY_FINGER_PHALANX_PROXIMAL", 22)
+            .constant("HAND_JOINT_PINKY_FINGER_PHALANX_INTERMEDIATE", 23)
+            .constant("HAND_JOINT_PINKY_FINGER_PHALANX_DISTAL", 24)
+            .constant("HAND_JOINT_PINKY_FINGER_TIP", 25)
+            .constant("HAND_JOINT_MAX", 26)
+            .constant("HAND_JOINT_FLAG_ORIENTATION_VALID", 1)
+            .constant("HAND_JOINT_FLAG_ORIENTATION_TRACKED", 2)
+            .constant("HAND_JOINT_FLAG_POSITION_VALID", 4)
+            .constant("HAND_JOINT_FLAG_POSITION_TRACKED", 8)
+            .constant("HAND_JOINT_FLAG_LINEAR_VELOCITY_VALID", 16)
+            .constant("HAND_JOINT_FLAG_ANGULAR_VELOCITY_VALID", 32),
+    );
+    register_class(
+        ClassRegistration::new("XRBodyTracker")
+            .parent("XRPositionalTracker")
+            .property(PropertyInfo::new("body_flags", Variant::Int(0)))
+            .property(PropertyInfo::new("has_tracking_data", Variant::Bool(false)))
+            .property(PropertyInfo::new("type", Variant::Int(32)))
+            .constant("BODY_FLAG_UPPER_BODY_SUPPORTED", 1)
+            .constant("BODY_FLAG_LOWER_BODY_SUPPORTED", 2)
+            .constant("BODY_FLAG_HANDS_SUPPORTED", 4)
+            .constant("JOINT_ROOT", 0)
+            .constant("JOINT_HIPS", 1)
+            .constant("JOINT_SPINE", 2)
+            .constant("JOINT_CHEST", 3)
+            .constant("JOINT_UPPER_CHEST", 4)
+            .constant("JOINT_NECK", 5)
+            .constant("JOINT_HEAD", 6)
+            .constant("JOINT_HEAD_TIP", 7)
+            .constant("JOINT_LEFT_SHOULDER", 8)
+            .constant("JOINT_LEFT_UPPER_ARM", 9)
+            .constant("JOINT_LEFT_LOWER_ARM", 10)
+            .constant("JOINT_RIGHT_SHOULDER", 11)
+            .constant("JOINT_RIGHT_UPPER_ARM", 12)
+            .constant("JOINT_RIGHT_LOWER_ARM", 13)
+            .constant("JOINT_LEFT_UPPER_LEG", 14)
+            .constant("JOINT_LEFT_LOWER_LEG", 15)
+            .constant("JOINT_LEFT_FOOT", 16)
+            .constant("JOINT_LEFT_TOES", 17)
+            .constant("JOINT_RIGHT_UPPER_LEG", 18)
+            .constant("JOINT_RIGHT_LOWER_LEG", 19)
+            .constant("JOINT_RIGHT_FOOT", 20)
+            .constant("JOINT_RIGHT_TOES", 21)
+            .constant("JOINT_LEFT_HAND", 22)
+            .constant("JOINT_LEFT_PALM", 23)
+            .constant("JOINT_LEFT_WRIST", 24)
+            .constant("JOINT_LEFT_THUMB_METACARPAL", 25)
+            .constant("JOINT_LEFT_THUMB_PHALANX_PROXIMAL", 26)
+            .constant("JOINT_LEFT_THUMB_PHALANX_DISTAL", 27)
+            .constant("JOINT_LEFT_THUMB_TIP", 28)
+            .constant("JOINT_LEFT_INDEX_FINGER_METACARPAL", 29)
+            .constant("JOINT_LEFT_INDEX_FINGER_PHALANX_PROXIMAL", 30)
+            .constant("JOINT_LEFT_INDEX_FINGER_PHALANX_INTERMEDIATE", 31)
+            .constant("JOINT_LEFT_INDEX_FINGER_PHALANX_DISTAL", 32)
+            .constant("JOINT_LEFT_INDEX_FINGER_TIP", 33)
+            .constant("JOINT_LEFT_MIDDLE_FINGER_METACARPAL", 34)
+            .constant("JOINT_LEFT_MIDDLE_FINGER_PHALANX_PROXIMAL", 35)
+            .constant("JOINT_LEFT_MIDDLE_FINGER_PHALANX_INTERMEDIATE", 36)
+            .constant("JOINT_LEFT_MIDDLE_FINGER_PHALANX_DISTAL", 37)
+            .constant("JOINT_LEFT_MIDDLE_FINGER_TIP", 38)
+            .constant("JOINT_LEFT_RING_FINGER_METACARPAL", 39)
+            .constant("JOINT_LEFT_RING_FINGER_PHALANX_PROXIMAL", 40)
+            .constant("JOINT_LEFT_RING_FINGER_PHALANX_INTERMEDIATE", 41)
+            .constant("JOINT_LEFT_RING_FINGER_PHALANX_DISTAL", 42)
+            .constant("JOINT_LEFT_RING_FINGER_TIP", 43)
+            .constant("JOINT_LEFT_PINKY_FINGER_METACARPAL", 44)
+            .constant("JOINT_LEFT_PINKY_FINGER_PHALANX_PROXIMAL", 45)
+            .constant("JOINT_LEFT_PINKY_FINGER_PHALANX_INTERMEDIATE", 46)
+            .constant("JOINT_LEFT_PINKY_FINGER_PHALANX_DISTAL", 47)
+            .constant("JOINT_LEFT_PINKY_FINGER_TIP", 48)
+            .constant("JOINT_RIGHT_HAND", 49)
+            .constant("JOINT_RIGHT_PALM", 50)
+            .constant("JOINT_RIGHT_WRIST", 51)
+            .constant("JOINT_RIGHT_THUMB_METACARPAL", 52)
+            .constant("JOINT_RIGHT_THUMB_PHALANX_PROXIMAL", 53)
+            .constant("JOINT_RIGHT_THUMB_PHALANX_DISTAL", 54)
+            .constant("JOINT_RIGHT_THUMB_TIP", 55)
+            .constant("JOINT_RIGHT_INDEX_FINGER_METACARPAL", 56)
+            .constant("JOINT_RIGHT_INDEX_FINGER_PHALANX_PROXIMAL", 57)
+            .constant("JOINT_RIGHT_INDEX_FINGER_PHALANX_INTERMEDIATE", 58)
+            .constant("JOINT_RIGHT_INDEX_FINGER_PHALANX_DISTAL", 59)
+            .constant("JOINT_RIGHT_INDEX_FINGER_TIP", 60)
+            .constant("JOINT_RIGHT_MIDDLE_FINGER_METACARPAL", 61)
+            .constant("JOINT_RIGHT_MIDDLE_FINGER_PHALANX_PROXIMAL", 62)
+            .constant("JOINT_RIGHT_MIDDLE_FINGER_PHALANX_INTERMEDIATE", 63)
+            .constant("JOINT_RIGHT_MIDDLE_FINGER_PHALANX_DISTAL", 64)
+            .constant("JOINT_RIGHT_MIDDLE_FINGER_TIP", 65)
+            .constant("JOINT_RIGHT_RING_FINGER_METACARPAL", 66)
+            .constant("JOINT_RIGHT_RING_FINGER_PHALANX_PROXIMAL", 67)
+            .constant("JOINT_RIGHT_RING_FINGER_PHALANX_INTERMEDIATE", 68)
+            .constant("JOINT_RIGHT_RING_FINGER_PHALANX_DISTAL", 69)
+            .constant("JOINT_RIGHT_RING_FINGER_TIP", 70)
+            .constant("JOINT_RIGHT_PINKY_FINGER_METACARPAL", 71)
+            .constant("JOINT_RIGHT_PINKY_FINGER_PHALANX_PROXIMAL", 72)
+            .constant("JOINT_RIGHT_PINKY_FINGER_PHALANX_INTERMEDIATE", 73)
+            .constant("JOINT_RIGHT_PINKY_FINGER_PHALANX_DISTAL", 74)
+            .constant("JOINT_RIGHT_PINKY_FINGER_TIP", 75)
+            .constant("JOINT_LOWER_CHEST", 76)
+            .constant("JOINT_LEFT_SCAPULA", 77)
+            .constant("JOINT_LEFT_WRIST_TWIST", 78)
+            .constant("JOINT_RIGHT_SCAPULA", 79)
+            .constant("JOINT_RIGHT_WRIST_TWIST", 80)
+            .constant("JOINT_LEFT_FOOT_TWIST", 81)
+            .constant("JOINT_LEFT_HEEL", 82)
+            .constant("JOINT_LEFT_MIDDLE_FOOT", 83)
+            .constant("JOINT_RIGHT_FOOT_TWIST", 84)
+            .constant("JOINT_RIGHT_HEEL", 85)
+            .constant("JOINT_RIGHT_MIDDLE_FOOT", 86)
+            .constant("JOINT_MAX", 87)
+            .constant("JOINT_FLAG_ORIENTATION_VALID", 1)
+            .constant("JOINT_FLAG_ORIENTATION_TRACKED", 2)
+            .constant("JOINT_FLAG_POSITION_VALID", 4)
+            .constant("JOINT_FLAG_POSITION_TRACKED", 8),
+    );
+    register_class(
+        ClassRegistration::new("XRFaceTracker")
+            .parent("XRTracker")
+            .property(PropertyInfo::new("type", Variant::Int(64)))
+            .constant("FT_EYE_LOOK_OUT_RIGHT", 0)
+            .constant("FT_EYE_LOOK_IN_RIGHT", 1)
+            .constant("FT_EYE_LOOK_UP_RIGHT", 2)
+            .constant("FT_EYE_LOOK_DOWN_RIGHT", 3)
+            .constant("FT_EYE_LOOK_OUT_LEFT", 4)
+            .constant("FT_EYE_LOOK_IN_LEFT", 5)
+            .constant("FT_EYE_LOOK_UP_LEFT", 6)
+            .constant("FT_EYE_LOOK_DOWN_LEFT", 7)
+            .constant("FT_EYE_CLOSED_RIGHT", 8)
+            .constant("FT_EYE_CLOSED_LEFT", 9)
+            .constant("FT_EYE_SQUINT_RIGHT", 10)
+            .constant("FT_EYE_SQUINT_LEFT", 11)
+            .constant("FT_EYE_WIDE_RIGHT", 12)
+            .constant("FT_EYE_WIDE_LEFT", 13)
+            .constant("FT_EYE_DILATION_RIGHT", 14)
+            .constant("FT_EYE_DILATION_LEFT", 15)
+            .constant("FT_EYE_CONSTRICT_RIGHT", 16)
+            .constant("FT_EYE_CONSTRICT_LEFT", 17)
+            .constant("FT_BROW_PINCH_RIGHT", 18)
+            .constant("FT_BROW_PINCH_LEFT", 19)
+            .constant("FT_BROW_LOWERER_RIGHT", 20)
+            .constant("FT_BROW_LOWERER_LEFT", 21)
+            .constant("FT_BROW_INNER_UP_RIGHT", 22)
+            .constant("FT_BROW_INNER_UP_LEFT", 23)
+            .constant("FT_BROW_OUTER_UP_RIGHT", 24)
+            .constant("FT_BROW_OUTER_UP_LEFT", 25)
+            .constant("FT_NOSE_SNEER_RIGHT", 26)
+            .constant("FT_NOSE_SNEER_LEFT", 27)
+            .constant("FT_NASAL_DILATION_RIGHT", 28)
+            .constant("FT_NASAL_DILATION_LEFT", 29)
+            .constant("FT_NASAL_CONSTRICT_RIGHT", 30)
+            .constant("FT_NASAL_CONSTRICT_LEFT", 31)
+            .constant("FT_CHEEK_SQUINT_RIGHT", 32)
+            .constant("FT_CHEEK_SQUINT_LEFT", 33)
+            .constant("FT_CHEEK_PUFF_RIGHT", 34)
+            .constant("FT_CHEEK_PUFF_LEFT", 35)
+            .constant("FT_CHEEK_SUCK_RIGHT", 36)
+            .constant("FT_CHEEK_SUCK_LEFT", 37)
+            .constant("FT_JAW_OPEN", 38)
+            .constant("FT_MOUTH_CLOSED", 39)
+            .constant("FT_JAW_RIGHT", 40)
+            .constant("FT_JAW_LEFT", 41)
+            .constant("FT_JAW_FORWARD", 42)
+            .constant("FT_JAW_BACKWARD", 43)
+            .constant("FT_JAW_CLENCH", 44)
+            .constant("FT_JAW_MANDIBLE_RAISE", 45)
+            .constant("FT_LIP_SUCK_UPPER_RIGHT", 46)
+            .constant("FT_LIP_SUCK_UPPER_LEFT", 47)
+            .constant("FT_LIP_SUCK_LOWER_RIGHT", 48)
+            .constant("FT_LIP_SUCK_LOWER_LEFT", 49)
+            .constant("FT_LIP_SUCK_CORNER_RIGHT", 50)
+            .constant("FT_LIP_SUCK_CORNER_LEFT", 51)
+            .constant("FT_LIP_FUNNEL_UPPER_RIGHT", 52)
+            .constant("FT_LIP_FUNNEL_UPPER_LEFT", 53)
+            .constant("FT_LIP_FUNNEL_LOWER_RIGHT", 54)
+            .constant("FT_LIP_FUNNEL_LOWER_LEFT", 55)
+            .constant("FT_LIP_PUCKER_UPPER_RIGHT", 56)
+            .constant("FT_LIP_PUCKER_UPPER_LEFT", 57)
+            .constant("FT_LIP_PUCKER_LOWER_RIGHT", 58)
+            .constant("FT_LIP_PUCKER_LOWER_LEFT", 59)
+            .constant("FT_MOUTH_UPPER_UP_RIGHT", 60)
+            .constant("FT_MOUTH_UPPER_UP_LEFT", 61)
+            .constant("FT_MOUTH_LOWER_DOWN_RIGHT", 62)
+            .constant("FT_MOUTH_LOWER_DOWN_LEFT", 63)
+            .constant("FT_MOUTH_UPPER_DEEPEN_RIGHT", 64)
+            .constant("FT_MOUTH_UPPER_DEEPEN_LEFT", 65)
+            .constant("FT_MOUTH_UPPER_RIGHT", 66)
+            .constant("FT_MOUTH_UPPER_LEFT", 67)
+            .constant("FT_MOUTH_LOWER_RIGHT", 68)
+            .constant("FT_MOUTH_LOWER_LEFT", 69)
+            .constant("FT_MOUTH_CORNER_PULL_RIGHT", 70)
+            .constant("FT_MOUTH_CORNER_PULL_LEFT", 71)
+            .constant("FT_MOUTH_CORNER_SLANT_RIGHT", 72)
+            .constant("FT_MOUTH_CORNER_SLANT_LEFT", 73)
+            .constant("FT_MOUTH_FROWN_RIGHT", 74)
+            .constant("FT_MOUTH_FROWN_LEFT", 75)
+            .constant("FT_MOUTH_STRETCH_RIGHT", 76)
+            .constant("FT_MOUTH_STRETCH_LEFT", 77)
+            .constant("FT_MOUTH_DIMPLE_RIGHT", 78)
+            .constant("FT_MOUTH_DIMPLE_LEFT", 79)
+            .constant("FT_MOUTH_RAISER_UPPER", 80)
+            .constant("FT_MOUTH_RAISER_LOWER", 81)
+            .constant("FT_MOUTH_PRESS_RIGHT", 82)
+            .constant("FT_MOUTH_PRESS_LEFT", 83)
+            .constant("FT_MOUTH_TIGHTENER_RIGHT", 84)
+            .constant("FT_MOUTH_TIGHTENER_LEFT", 85)
+            .constant("FT_TONGUE_OUT", 86)
+            .constant("FT_TONGUE_UP", 87)
+            .constant("FT_TONGUE_DOWN", 88)
+            .constant("FT_TONGUE_RIGHT", 89)
+            .constant("FT_TONGUE_LEFT", 90)
+            .constant("FT_TONGUE_ROLL", 91)
+            .constant("FT_TONGUE_BLEND_DOWN", 92)
+            .constant("FT_TONGUE_CURL_UP", 93)
+            .constant("FT_TONGUE_SQUISH", 94)
+            .constant("FT_TONGUE_FLAT", 95)
+            .constant("FT_TONGUE_TWIST_RIGHT", 96)
+            .constant("FT_TONGUE_TWIST_LEFT", 97)
+            .constant("FT_SOFT_PALATE_CLOSE", 98)
+            .constant("FT_THROAT_SWALLOW", 99)
+            .constant("FT_NECK_FLEX_RIGHT", 100)
+            .constant("FT_NECK_FLEX_LEFT", 101)
+            .constant("FT_EYE_CLOSED", 102)
+            .constant("FT_EYE_WIDE", 103)
+            .constant("FT_EYE_SQUINT", 104)
+            .constant("FT_EYE_DILATION", 105)
+            .constant("FT_EYE_CONSTRICT", 106)
+            .constant("FT_BROW_DOWN_RIGHT", 107)
+            .constant("FT_BROW_DOWN_LEFT", 108)
+            .constant("FT_BROW_DOWN", 109)
+            .constant("FT_BROW_UP_RIGHT", 110)
+            .constant("FT_BROW_UP_LEFT", 111)
+            .constant("FT_BROW_UP", 112)
+            .constant("FT_NOSE_SNEER", 113)
+            .constant("FT_NASAL_DILATION", 114)
+            .constant("FT_NASAL_CONSTRICT", 115)
+            .constant("FT_CHEEK_PUFF", 116)
+            .constant("FT_CHEEK_SUCK", 117)
+            .constant("FT_CHEEK_SQUINT", 118)
+            .constant("FT_LIP_SUCK_UPPER", 119)
+            .constant("FT_LIP_SUCK_LOWER", 120)
+            .constant("FT_LIP_SUCK", 121)
+            .constant("FT_LIP_FUNNEL_UPPER", 122)
+            .constant("FT_LIP_FUNNEL_LOWER", 123)
+            .constant("FT_LIP_FUNNEL", 124)
+            .constant("FT_LIP_PUCKER_UPPER", 125)
+            .constant("FT_LIP_PUCKER_LOWER", 126)
+            .constant("FT_LIP_PUCKER", 127)
+            .constant("FT_MOUTH_UPPER_UP", 128)
+            .constant("FT_MOUTH_LOWER_DOWN", 129)
+            .constant("FT_MOUTH_OPEN", 130)
+            .constant("FT_MOUTH_RIGHT", 131)
+            .constant("FT_MOUTH_LEFT", 132)
+            .constant("FT_MOUTH_SMILE_RIGHT", 133)
+            .constant("FT_MOUTH_SMILE_LEFT", 134)
+            .constant("FT_MOUTH_SMILE", 135)
+            .constant("FT_MOUTH_SAD_RIGHT", 136)
+            .constant("FT_MOUTH_SAD_LEFT", 137)
+            .constant("FT_MOUTH_SAD", 138)
+            .constant("FT_MOUTH_STRETCH", 139)
+            .constant("FT_MOUTH_DIMPLE", 140)
+            .constant("FT_MOUTH_TIGHTENER", 141)
+            .constant("FT_MOUTH_PRESS", 142)
+            .constant("FT_MAX", 143),
+    );
+    register_class(
+        ClassRegistration::new("XRHandModifier3D")
+            .parent("SkeletonModifier3D")
+            .property(PropertyInfo::new("bone_update", Variant::Int(0)))
+            .property(PropertyInfo::new(
+                "hand_tracker",
+                Variant::String(String::new()),
+            ))
+            .constant("BONE_UPDATE_FULL", 0)
+            .constant("BONE_UPDATE_ROTATION_ONLY", 1)
+            .constant("BONE_UPDATE_MAX", 2),
+    );
+    register_class(
+        ClassRegistration::new("XRBodyModifier3D")
+            .parent("SkeletonModifier3D")
+            .property(PropertyInfo::new(
+                "body_tracker",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new("body_update", Variant::Int(7)))
+            .property(PropertyInfo::new("bone_update", Variant::Int(0)))
+            .constant("BODY_UPDATE_UPPER_BODY", 1)
+            .constant("BODY_UPDATE_LOWER_BODY", 2)
+            .constant("BODY_UPDATE_HANDS", 4)
+            .constant("BONE_UPDATE_FULL", 0)
+            .constant("BONE_UPDATE_ROTATION_ONLY", 1)
+            .constant("BONE_UPDATE_MAX", 2),
+    );
+    register_class(
+        ClassRegistration::new("XRFaceModifier3D")
+            .parent("Node3D")
+            .property(PropertyInfo::new(
+                "face_tracker",
+                Variant::String(String::new()),
+            )),
+    );
+    register_class(
+        ClassRegistration::new("XRVRS")
+            .parent("Object")
+            .property(PropertyInfo::new("vrs_min_radius", Variant::Float(20.0)))
+            .property(PropertyInfo::new("vrs_strength", Variant::Float(1.0))),
+    );
+    register_class(ClassRegistration::new("XRInterfaceExtension").parent("XRInterface"));
+    register_class(
+        ClassRegistration::new("MobileVRInterface")
+            .parent("XRInterface")
+            .property(PropertyInfo::new("eye_height", Variant::Float(1.85)))
+            .property(PropertyInfo::new("iod", Variant::Float(6.4)))
+            .property(PropertyInfo::new("display_width", Variant::Float(14.5)))
+            .property(PropertyInfo::new("display_to_lens", Variant::Float(4.0)))
+            .property(PropertyInfo::new("oversample", Variant::Float(1.5)))
+            .property(PropertyInfo::new("k1", Variant::Float(0.215)))
+            .property(PropertyInfo::new("k2", Variant::Float(0.215)))
+            .property(PropertyInfo::new("vrs_min_radius", Variant::Float(20.0)))
+            .property(PropertyInfo::new("vrs_strength", Variant::Float(1.0))),
+    );
+
     // -- Canvas-SDF + screen-space nodes (pat-0q2kx.259) --------------------
     //
     // The `canvas_item` SDF vocabulary — `texture_sdf` / `texture_sdf_normal`,
@@ -9862,6 +10297,42 @@ pub fn register_io_classes() {
                 .method(MethodInfo::new("get_loaded_extensions", 0))
                 .method(MethodInfo::new("get_extension", 1))
                 .signal(SignalInfo::new("extensions_reloaded")),
+        );
+    }
+
+    // -- BitMap (pat-0q2kx.257) ----------------------------------------------
+    //
+    // A boolean matrix stored one bit per element; the implementation is
+    // `gdresource/src/bit_map.rs`. Its consumer is
+    // `TextureButton.texture_click_mask`, which samples it to reject clicks over
+    // transparent pixels.
+    //
+    // Godot ground truth: `doc/classes/BitMap.xml` over
+    // `scene/resources/bit_map.cpp`. Arities come from the doc XML and count
+    // optional parameters, matching the registrations around this one:
+    // `create_from_image_alpha(image, threshold = 0.1)` is 2, and
+    // `opaque_to_polygons(rect, epsilon = 2.0)` is 2.
+    //
+    // `get_bitv`/`set_bitv` are the Vector2i-addressed spellings of
+    // `get_bit`/`set_bit` and are separate methods in Godot, not sugar — a script
+    // calling `get_bitv` must find it registered.
+    if !class_exists("BitMap") {
+        register_class(
+            ClassRegistration::new("BitMap")
+                .parent("Resource")
+                .method(MethodInfo::new("create", 1))
+                .method(MethodInfo::new("create_from_image_alpha", 2))
+                .method(MethodInfo::new("get_bit", 2))
+                .method(MethodInfo::new("get_bitv", 1))
+                .method(MethodInfo::new("set_bit", 3))
+                .method(MethodInfo::new("set_bitv", 2))
+                .method(MethodInfo::new("set_bit_rect", 2))
+                .method(MethodInfo::new("get_true_bit_count", 0))
+                .method(MethodInfo::new("get_size", 0))
+                .method(MethodInfo::new("resize", 1))
+                .method(MethodInfo::new("grow_mask", 2))
+                .method(MethodInfo::new("convert_to_image", 0))
+                .method(MethodInfo::new("opaque_to_polygons", 2)),
         );
     }
 

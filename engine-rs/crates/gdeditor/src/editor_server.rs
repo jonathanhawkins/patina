@@ -2308,6 +2308,9 @@ fn handle_connection(
         ("POST", "/api/property/resource/new") => {
             api_new_resource_property(state, &req.body, &mut stream)
         }
+        ("POST", "/api/property/resource/save_as") => {
+            api_save_resource_property_as(state, &req.body, &mut stream)
+        }
         ("PATCH", "/api/node/patch") => api_patch_node(state, &req.body, &mut stream),
         ("POST", "/api/undo") => api_undo(state, &mut stream),
         ("POST", "/api/redo") => api_redo(state, &mut stream),
@@ -6700,6 +6703,121 @@ fn api_assign_resource_property(
 /// Body: `{"node_id": 123, "property": "shape", "class_name": "RectangleShape2D"}`.
 /// The resource is stored as `SubResource("id")` plus the `__resref__<prop>` =
 /// `Class::id` companion the scene saver turns into a `[sub_resource]` section.
+/// `POST /api/property/resource/save_as` — writes an inline resource out to a
+/// `.tres` and repoints the property at it (pat-0q2kx.13).
+///
+/// Body: `{"node_id":N,"property":"shape","path":"res://shape.tres"}`.
+///
+/// After this the property holds a `res://` path exactly as an assign-by-path
+/// would, so the existing scene save emits an `ext_resource` and **stops**
+/// emitting a `[sub_resource]` for it — that swap is the point of the feature,
+/// not the file write on its own.
+fn api_save_resource_property_as(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let Some(parsed) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let Some(node_raw) = parsed.get("node_id").and_then(|v| v.as_u64()) else {
+        send_error(stream, 400, "missing node_id");
+        return;
+    };
+    let Some(property) = parsed.get("property").and_then(|v| v.as_str()) else {
+        send_error(stream, 400, "missing property");
+        return;
+    };
+    let Some(res_path) = parsed.get("path").and_then(|v| v.as_str()) else {
+        send_error(stream, 400, "missing path");
+        return;
+    };
+    let property = property.to_string();
+
+    let mut state = state.lock().unwrap();
+    // Resolved by walk, like every other node_id endpoint in this file: a raw id
+    // that names no live node must 404 here rather than mint a `NodeId` that
+    // later reads as "property holds no inline resource".
+    let Some(node_id) = find_node_by_raw_id(&state.scene_tree, node_raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    let Some(root) = state.project_root.clone() else {
+        send_error(stream, 400, "no project open");
+        return;
+    };
+    let disk_path = match resolve_res_path(std::path::Path::new(&root), res_path) {
+        Ok(p) => p,
+        Err(e) => {
+            send_error(stream, 400, e);
+            return;
+        }
+    };
+
+    // Only an INLINE resource can be saved out. A property already holding a
+    // path has nothing to write, and reporting that plainly beats silently
+    // rewriting the file it points at.
+    let current = state
+        .scene_tree
+        .get_node(node_id)
+        .map(|n| n.get_property(&property));
+    let Some(Variant::Resource(res_ref)) = current else {
+        send_error(stream, 400, "property holds no inline resource");
+        return;
+    };
+
+    // `Variant::Resource` carries a `gdvariant::ResourceRef`, while the saver
+    // takes a `gdresource::Resource` — different types, and the latter's
+    // `properties` map is private, so it is rebuilt through the public setter
+    // rather than by struct literal.
+    let mut resource = gdresource::Resource::new(&res_ref.class_name);
+    resource.path = res_path.to_string();
+    for (key, value) in &res_ref.properties {
+        resource.set_property(key.clone(), value.clone());
+    }
+    let text = match gdresource::TresSaver::new().save_to_string(&resource) {
+        Ok(t) => t,
+        Err(e) => {
+            send_error(stream, 500, &format!("serialize failed: {e}"));
+            return;
+        }
+    };
+    if let Some(parent) = disk_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&disk_path, &text) {
+        send_error(stream, 500, &format!("write failed: {e}"));
+        return;
+    }
+
+    // Repoint the property, undoably, at the file just written.
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property: property.clone(),
+        new_value: Variant::String(res_path.to_string()),
+        old_value: Variant::Resource(res_ref),
+    };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    // Drop the inline sub-resource bookkeeping so the save does not ALSO emit a
+    // `[sub_resource]` for a property that is now an external reference.
+    if let Some(node) = state.scene_tree.get_node_mut(node_id) {
+        node.set_property(&format!("__resref__{property}"), Variant::Nil);
+        node.set_property(
+            &format!("__extres__{property}"),
+            Variant::String(res_path.to_string()),
+        );
+    }
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.add_log("info", format!("Saved {property} to {res_path}"));
+
+    send_json(stream, &format!(r#"{{"ok":true,"path":"{res_path}"}}"#));
+}
+
 fn api_new_resource_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let Some(parsed) = parse_json_body(body) else {
         send_error(stream, 400, "invalid JSON");

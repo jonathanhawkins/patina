@@ -167,6 +167,14 @@ pub struct PhysicsWorld2D {
     /// The iterated contact solver run between the two halves of integration
     /// (pat-0q2kx.116). Its knobs come from `physics/2d/solver/*`.
     contact_solver: ContactSolver2D,
+    /// Last step's converged contact impulses, used to warm-start this step
+    /// (pat-0q2kx.116).
+    ///
+    /// Lives on the world rather than on [`ContactSolver2D`] for two reasons:
+    /// the solver is `Copy` and is copied out of `self` at the call site to
+    /// dodge a borrow conflict, and a process-global would let two worlds seed
+    /// each other's contacts.
+    contact_cache: solver::ContactCache2D,
     /// Space-wide defaults from `physics/2d/*` (pat-0q2kx.116).
     space: SpaceParams2D,
 }
@@ -221,6 +229,7 @@ impl PhysicsWorld2D {
             previous_contacts: HashSet::new(),
             gravity: DEFAULT_GRAVITY_2D,
             contact_solver: ContactSolver2D::default(),
+            contact_cache: solver::ContactCache2D::default(),
             space: SpaceParams2D::default(),
         }
     }
@@ -592,7 +601,8 @@ impl PhysicsWorld2D {
 
         // Phase 3: solve every contact together, iteratively.
         let contact_solver = self.contact_solver;
-        let bias_velocities = contact_solver.solve(&mut self.bodies, &mut constraints);
+        let bias_velocities =
+            contact_solver.solve(&mut self.bodies, &mut constraints, &mut self.contact_cache);
 
         // A *newly entered* contact wakes both bodies — a sleeping box struck by
         // another must resume simulating.
@@ -1405,10 +1415,18 @@ mod tests {
         let mut gravity_overrides: HashMap<BodyId, Vector2> = HashMap::new();
         gravity_overrides.insert(id_a, Vector2::ZERO); // A: no gravity
         let damp_overrides: HashMap<BodyId, f32> = HashMap::new();
+        // This test predates `angular_damp_overrides` and covers the linear
+        // channel only; an empty map is "no area overrides this axis".
+        let angular_damp_overrides: HashMap<BodyId, f32> = HashMap::new();
 
         let dt = 1.0 / 60.0;
         for _ in 0..30 {
-            world.step_with_area_overrides(dt, &gravity_overrides, &damp_overrides);
+            world.step_with_area_overrides(
+                dt,
+                &gravity_overrides,
+                &damp_overrides,
+                &angular_damp_overrides,
+            );
         }
 
         let ya = world.get_body(id_a).unwrap().position.y;
@@ -1433,8 +1451,11 @@ mod tests {
         let mut damp2: HashMap<BodyId, f32> = HashMap::new();
         damp2.insert(id_c, 5.0); // strong area damping
         let no_gravity: HashMap<BodyId, Vector2> = HashMap::new();
+        // Linear damping only — this case asserts `linear_velocity`, so the
+        // angular channel is deliberately left unoverridden.
+        let no_angular_damp: HashMap<BodyId, f32> = HashMap::new();
         for _ in 0..30 {
-            world2.step_with_area_overrides(dt, &no_gravity, &damp2);
+            world2.step_with_area_overrides(dt, &no_gravity, &damp2, &no_angular_damp);
         }
         let body_c = world2.get_body(id_c).unwrap();
         assert!(

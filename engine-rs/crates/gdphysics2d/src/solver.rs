@@ -435,6 +435,92 @@ impl SolverBody2D {
     }
 }
 
+/// One contact point's accumulated impulses, carried into the next step.
+#[derive(Debug, Clone, Copy)]
+struct CachedContactPoint2D {
+    /// Anchor on A, used to re-identify this point next step.
+    r_a: Vector2,
+    acc_normal: f32,
+    acc_tangent: f32,
+}
+
+/// Warm-start cache: the impulses each contact needed last step
+/// (pat-0q2kx.116).
+///
+/// Without this the solver starts every step from zero and has to rediscover
+/// the whole support chain of a stack from cold in `iterations` sweeps. A
+/// 3-box stack does not fully converge in 16, so each frame leaves a small
+/// residual velocity that integrates into position — measured as 1.42 px of
+/// creep over 300 ticks, or ~0.28 px/s. Seeding each point with what it needed
+/// last step means the sweeps start near the answer instead of at zero.
+///
+/// ⚠️ This is a **hint, not state**. Every value here is re-derived and
+/// re-clamped by the normal solve; a stale or mismatched seed costs one step of
+/// accuracy and cannot produce a wrong-signed impulse, because `acc_normal` is
+/// still clamped to `>= 0` and `acc_tangent` to the friction cone. That is what
+/// makes the approximate point-matching below safe.
+#[derive(Debug, Clone, Default)]
+pub struct ContactCache2D {
+    points: HashMap<(BodyId, BodyId), Vec<CachedContactPoint2D>>,
+}
+
+/// How far a contact anchor may move between steps and still be considered the
+/// same point, in px². A settled stack moves its anchors by ~1e-3 px per step,
+/// so this is loose enough to match through jitter and tight enough that a
+/// genuinely new contact does not inherit a neighbour's impulse.
+const WARM_START_MATCH_TOLERANCE_SQ: f32 = 1.0;
+
+impl ContactCache2D {
+    /// Drops every cached pair. Callers that teleport or rebuild bodies should
+    /// clear, or a contact that no longer exists seeds the one that replaces it.
+    pub fn clear(&mut self) {
+        self.points.clear();
+    }
+
+    /// Seeds `c`'s accumulated impulses from last step's matching points.
+    fn warm_start(&self, c: &mut ContactConstraint2D) {
+        let Some(cached) = self.points.get(&(c.body_a, c.body_b)) else {
+            return;
+        };
+        for point in c.points.iter_mut() {
+            // Nearest anchor rather than index: manifold point ORDER flips as
+            // boxes shift, so index matching would hand a point its neighbour's
+            // impulse precisely when the stack is moving.
+            let best = cached
+                .iter()
+                .map(|old| (old, (old.r_a - point.r_a).length_squared()))
+                .filter(|(_, d)| *d <= WARM_START_MATCH_TOLERANCE_SQ)
+                .min_by(|(_, x), (_, y)| x.total_cmp(y));
+            if let Some((old, _)) = best {
+                point.acc_normal = old.acc_normal;
+                point.acc_tangent = old.acc_tangent;
+            }
+        }
+    }
+
+    /// Records what this step's contacts converged to.
+    ///
+    /// Rebuilt from scratch each step so pairs that stopped touching are
+    /// evicted — otherwise a stale impulse would be re-applied the moment those
+    /// two bodies met again.
+    fn store(&mut self, constraints: &[ContactConstraint2D]) {
+        self.points.clear();
+        for c in constraints {
+            self.points.insert(
+                (c.body_a, c.body_b),
+                c.points
+                    .iter()
+                    .map(|p| CachedContactPoint2D {
+                        r_a: p.r_a,
+                        acc_normal: p.acc_normal,
+                        acc_tangent: p.acc_tangent,
+                    })
+                    .collect(),
+            );
+        }
+    }
+}
+
 /// The iterated contact solver.
 #[derive(Debug, Clone, Copy)]
 pub struct ContactSolver2D {
@@ -468,6 +554,7 @@ impl ContactSolver2D {
         &self,
         bodies: &mut HashMap<BodyId, PhysicsBody2D>,
         constraints: &mut [ContactConstraint2D],
+        cache: &mut ContactCache2D,
     ) -> HashMap<BodyId, (Vector2, f32)> {
         let mut states: HashMap<BodyId, SolverBody2D> = HashMap::new();
         for c in constraints.iter() {
@@ -476,6 +563,38 @@ impl ContactSolver2D {
                     states.entry(id).or_insert_with(|| SolverBody2D::of(body));
                 }
             }
+        }
+
+        // -- warm start (pat-0q2kx.116) --------------------------------------
+        //
+        // Seed each point with the impulse it needed last step and apply it up
+        // front, so the sweeps below refine an almost-correct answer instead of
+        // rediscovering the stack's support chain from zero every frame.
+        //
+        // ⚠️ `acc_bias` is deliberately NOT carried over. That channel is a
+        // depenetration pseudo-velocity, and persisting it would turn
+        // depenetration into propulsion — the same reason the caller drops the
+        // bias velocities after position integration.
+        for c in constraints.iter_mut() {
+            if c.body_a == c.body_b {
+                continue;
+            }
+            cache.warm_start(c);
+            let (Some(mut a), Some(mut b)) = (
+                states.get(&c.body_a).copied(),
+                states.get(&c.body_b).copied(),
+            ) else {
+                continue;
+            };
+            let tangent = Vector2::new(-c.normal.y, c.normal.x);
+            for point in c.points.iter_mut() {
+                point.acc_bias = 0.0;
+                let impulse = c.normal * point.acc_normal + tangent * point.acc_tangent;
+                a.apply_impulse(point.r_a, -impulse);
+                b.apply_impulse(point.r_b, impulse);
+            }
+            states.insert(c.body_a, a);
+            states.insert(c.body_b, b);
         }
 
         for _ in 0..self.iterations.max(1) {
@@ -530,6 +649,8 @@ impl ContactSolver2D {
                 states.insert(c.body_b, b);
             }
         }
+
+        cache.store(constraints);
 
         let mut bias_velocities = HashMap::new();
         for (id, state) in states {
@@ -662,7 +783,11 @@ mod tests {
         let mut bodies = HashMap::new();
         bodies.insert(falling.id, falling.clone());
         bodies.insert(floor.id, floor.clone());
-        ContactSolver2D::default().solve(&mut bodies, &mut constraints);
+        ContactSolver2D::default().solve(
+            &mut bodies,
+            &mut constraints,
+            &mut ContactCache2D::default(),
+        );
 
         let settled = bodies[&falling.id].linear_velocity.y;
         assert!(
@@ -670,6 +795,11 @@ mod tests {
             "the solver must cancel the 200 px/s approach, left {settled}"
         );
     }
+
+    // The warm-start regression tests live in
+    // `tests/solver_warm_start.rs`, not here: this crate's lib-test target does
+    // not currently compile (two E0061s predating pat-0q2kx.116), so a unit test
+    // beside the code would never build. Move them back when that is fixed.
 
     /// Depenetration must ride the bias channel, never the real velocity —
     /// otherwise resolving an overlap launches the body.
@@ -681,7 +811,11 @@ mod tests {
         let mut bodies = HashMap::new();
         bodies.insert(falling.id, falling.clone());
         bodies.insert(floor.id, floor.clone());
-        let bias = ContactSolver2D::default().solve(&mut bodies, &mut constraints);
+        let bias = ContactSolver2D::default().solve(
+            &mut bodies,
+            &mut constraints,
+            &mut ContactCache2D::default(),
+        );
 
         assert!(
             bodies[&falling.id].linear_velocity.length() < 1e-3,
@@ -707,7 +841,11 @@ mod tests {
         let mut bodies = HashMap::new();
         bodies.insert(falling.id, falling.clone());
         bodies.insert(floor.id, floor.clone());
-        let bias = ContactSolver2D::default().solve(&mut bodies, &mut constraints);
+        let bias = ContactSolver2D::default().solve(
+            &mut bodies,
+            &mut constraints,
+            &mut ContactCache2D::default(),
+        );
 
         assert_eq!(
             bodies[&floor.id].linear_velocity,
@@ -736,7 +874,11 @@ mod tests {
         let mut bodies = HashMap::new();
         bodies.insert(falling.id, falling.clone());
         bodies.insert(floor.id, floor.clone());
-        ContactSolver2D::default().solve(&mut bodies, &mut constraints);
+        ContactSolver2D::default().solve(
+            &mut bodies,
+            &mut constraints,
+            &mut ContactCache2D::default(),
+        );
 
         assert!(
             bodies[&falling.id].linear_velocity.x > 0.0,

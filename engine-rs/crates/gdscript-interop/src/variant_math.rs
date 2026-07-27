@@ -315,6 +315,28 @@ pub(crate) fn construct(name: &str, args: &[Variant]) -> Result<Variant, Runtime
                 arg_vec3(args, 0, "AABB()")?,
                 arg_vec3(args, 1, "AABB()")?,
             ))),
+            // AABB(px, py, pz, sx, sy, sz) — the SERIALIZED form, mirroring the
+            // 6-float `Transform2D` arm above (pat-0q2kx.69).
+            //
+            // ⚠️ Godot's *GDScript* AABB takes only `()`, `(AABB)` or
+            // `(Vector3, Vector3)` — there is no 6-float script constructor.
+            // This arm exists because `var_to_str` emits `AABB(1, 2, 3, 4, 5, 6)`
+            // (variant_parser.cpp writes all six components) and `str_to_var`
+            // has to read that back through this same shared constructor. Without
+            // it an AABB survives serialization but not deserialization, which is
+            // a silent one-way trip.
+            6 => Ok(Variant::Aabb(Aabb::new(
+                Vector3::new(
+                    arg_num(args, 0, "AABB()")?,
+                    arg_num(args, 1, "AABB()")?,
+                    arg_num(args, 2, "AABB()")?,
+                ),
+                Vector3::new(
+                    arg_num(args, 3, "AABB()")?,
+                    arg_num(args, 4, "AABB()")?,
+                    arg_num(args, 5, "AABB()")?,
+                ),
+            ))),
             n => Err(bad_arity("AABB()", n)),
         },
         "Plane" => match args.len() {

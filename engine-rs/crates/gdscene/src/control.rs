@@ -1766,6 +1766,38 @@ pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vect
     }
 }
 
+/// Lays out a `PanelContainer`: every child fills the container's rect **inset
+/// by the panel stylebox's content margins** (Godot's
+/// `PanelContainer::_notification` SORT_CHILDREN, scene/gui/panel_container.cpp).
+///
+/// The margins are passed in rather than looked up because layout has no theme:
+/// resolving `panel` needs the theme-override chain, which only the render walk
+/// carries. `control_render` is therefore the caller — see its `PanelContainer`
+/// branch. Keeping the geometry here and the resolution there is what stops this
+/// from needing a `&Theme` parameter on the whole layout pipeline.
+///
+/// ⚠️ A child is never given a negative size: with margins wider than the
+/// container, Godot collapses the content rect rather than inverting it, and an
+/// inverted rect would make hit-testing select the *outside* of the panel.
+pub fn arrange_panel_container(
+    tree: &mut SceneTree,
+    container_id: NodeId,
+    total: Vector2,
+    content_margins: [f32; 4],
+) {
+    set_size(tree, container_id, total);
+    let [l, t, r, b] = content_margins;
+    let inner = Vector2::new((total.x - l - r).max(0.0), (total.y - t - b).max(0.0));
+    let children: Vec<NodeId> = tree
+        .get_node(container_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+    for child in children {
+        set_position(tree, child, Vector2::new(l, t));
+        set_size(tree, child, inner);
+    }
+}
+
 /// Returns `true` for the container classes [`arrange_container`] lays out.
 pub fn is_container_class_name(class: &str) -> bool {
     matches!(

@@ -12,6 +12,9 @@ pub mod canvas_layer;
 pub mod material;
 pub mod mesh;
 pub mod parallax;
+/// Interpreted subset of `shader_type particles`, run per particle by the CPU
+/// simulator (pat-0q2kx.261).
+pub mod particles_shader;
 pub mod server;
 pub mod server3d;
 pub mod shader;

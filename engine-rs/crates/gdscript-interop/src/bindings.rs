@@ -894,6 +894,21 @@ pub trait SceneAccess {
         false
     }
 
+    /// `RayCast2D.force_raycast_update()` — re-runs the node's cast **now**,
+    /// republishing its `_hit_*` properties, and reports whether it hit
+    /// (pat-0q2kx.32).
+    ///
+    /// Godot's `ray_cast_2d.cpp::force_raycast_update` calls
+    /// `_update_raycast_state` immediately rather than waiting for the next
+    /// physics frame. That is the whole point of the method: a script that moves
+    /// the ray (or its parent) and then reads `is_colliding()` in the *same*
+    /// frame must see the result of the new position, not the previous tick's.
+    /// Treating it as a no-op is only correct if nothing ever moves between
+    /// ticks, which is exactly the case scripts use it for.
+    fn force_raycast_update_2d(&mut self, _node: u64) -> bool {
+        false
+    }
+
     /// Whether `_physics_process` runs on `node`
     /// (`Node.is_physics_processing`).
     fn is_physics_processing(&self, _node: u64) -> bool {

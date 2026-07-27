@@ -60,10 +60,12 @@ pub use http_request::{
 };
 pub use input::{ActionBinding, InputEvent, InputMap, InputSnapshot, InputState, Key, MouseButton};
 pub use network::{
-    decode_rpc_packet, decode_spawn_packet, decode_sync_packet, encode_rpc_packet,
-    encode_spawn_packet, encode_sync_packet, ConnectionStatus, DecodedRPC, MockNetwork,
-    MockNetworkPeer, MultiplayerAPI, MultiplayerSpawner, MultiplayerSynchronizer, NetworkCommand,
-    NetworkError, NetworkPeer, ObjectDecoding, Packet, PeerId, RPCCall, RPCConfig, RPCMode,
+    decode_confirm_path, decode_rpc_packet, decode_rpc_packet_cached, decode_simplify_path,
+    decode_spawn_packet, decode_sync_packet, encode_confirm_path, encode_rpc_call,
+    encode_rpc_packet, encode_rpc_packet_with_id, encode_simplify_path, encode_spawn_packet,
+    encode_sync_packet, ConnectionStatus, DecodedRPC, MockNetwork, MockNetworkPeer, MultiplayerAPI,
+    MultiplayerSpawner, MultiplayerSynchronizer, NetworkCommand, NetworkError, NetworkPeer,
+    ObjectDecoding, Packet, PeerId, RPCCall, RPCConfig, RPCMode, RpcAddressing, RpcPathCache,
     SpawnPacket, SpawnRequest, SyncPacket, TransferMode, REPLICATION_KIND_SPAWN,
     REPLICATION_KIND_SYNC,
 };

@@ -944,6 +944,16 @@ pub fn build_control_render_items(
     // entered at every container that is *not* nested inside another container —
     // entering at the subtree root would skip a container whose parent is a plain
     // Control (e.g. Panel > VBoxContainer).
+    //
+    // ⚠️ "not nested inside another container" is load-bearing and was not
+    // actually implemented (pat-0q2kx.39). `sort_container_tree` already
+    // recurses into nested containers itself (`control.rs:2032`), handing each
+    // child its *parent's allotted* size. Re-entering at a nested container
+    // then arranged it a second time with the whole viewport `size`, throwing
+    // away the size its parent had just given it — so a container inside a
+    // container ended up laid out against the viewport instead of its own rect.
+    // Entering only at the outermost containers leaves the recursion to do the
+    // nested ones, which is what the comment above always claimed.
     let mut subtree = Vec::new();
     tree.collect_subtree_top_down(root, &mut subtree);
     for id in subtree {
@@ -951,7 +961,28 @@ pub fn build_control_render_items(
             .get_node(id)
             .map(|n| control::is_container_class_name(n.class_name()))
             .unwrap_or(false);
-        if is_container {
+        if !is_container {
+            continue;
+        }
+        // Skip containers whose parent chain already contains a container: the
+        // outermost one's `sort_container_tree` reaches them with the right size.
+        let nested = {
+            let mut cursor = tree.get_node(id).and_then(|n| n.parent());
+            let mut found = false;
+            while let Some(pid) = cursor {
+                if tree
+                    .get_node(pid)
+                    .map(|n| control::is_container_class_name(n.class_name()))
+                    .unwrap_or(false)
+                {
+                    found = true;
+                    break;
+                }
+                cursor = tree.get_node(pid).and_then(|n| n.parent());
+            }
+            found
+        };
+        if !nested {
             control::sort_container_tree(tree, id, size);
         }
     }

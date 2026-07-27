@@ -2122,6 +2122,52 @@ impl Interpreter {
             }
             "get_interfaces" => Ok(Variant::PackedStringArray(vec!["WebXR".to_string()])),
             "get_interface_count" => Ok(Variant::Int(1)),
+            // -- tracker registry (pat-0q2kx.263) --------------------------
+            //
+            // Keyed by the tracker's NAME, as Godot does, and storing the
+            // HANDLE rather than a copy: `get_tracker` must hand back the same
+            // object, or joint writes made after `add_tracker` are lost to a
+            // snapshot.
+            "add_tracker" => {
+                if let Some(Variant::ObjectId(oid)) = args.first() {
+                    if is_xr_tracker_handle(*oid) {
+                        let name = XR_TRACKERS
+                            .with(|m| m.borrow().get(&oid.raw()).map(|t| t.tracker_name.clone()))
+                            .unwrap_or_default();
+                        XR_TRACKER_REGISTRY.with(|r| r.borrow_mut().insert(name, oid.raw()));
+                    }
+                }
+                Ok(Variant::Nil)
+            }
+            "remove_tracker" => {
+                if let Some(Variant::ObjectId(oid)) = args.first() {
+                    let name = XR_TRACKERS
+                        .with(|m| m.borrow().get(&oid.raw()).map(|t| t.tracker_name.clone()))
+                        .unwrap_or_default();
+                    XR_TRACKER_REGISTRY.with(|r| r.borrow_mut().remove(&name));
+                }
+                Ok(Variant::Nil)
+            }
+            // Godot returns null for an unregistered name rather than raising.
+            "get_tracker" => {
+                let name = args.first().map(arg_str).unwrap_or_default();
+                Ok(XR_TRACKER_REGISTRY
+                    .with(|r| r.borrow().get(&name).copied())
+                    .map(|raw| Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw)))
+                    .unwrap_or(Variant::Nil))
+            }
+            "get_trackers" => {
+                let mut d = gdvariant::Dictionary::new();
+                XR_TRACKER_REGISTRY.with(|r| {
+                    for (name, raw) in r.borrow().iter() {
+                        d.insert(
+                            name.as_str(),
+                            Variant::ObjectId(gdcore::id::ObjectId::from_raw(*raw)),
+                        );
+                    }
+                });
+                Ok(Variant::Dictionary(d))
+            }
             other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "XRServer has no method '{other}'"
             )))),
@@ -2271,6 +2317,40 @@ impl Interpreter {
                 }
                 gdplatform::WebXrSignal::ReferenceSpaceReset => {
                     ("reference_space_reset", Vec::new())
+                }
+                // ⚠️ These seven arms are NOT optional — this match has no
+                // catch-all on purpose, so every `WebXrSignal` variant must be
+                // spelled out here or the crate does not compile. Do not "tidy"
+                // this into a `_ => continue`: a wildcard would make a future
+                // signal compile cleanly and then silently never reach script,
+                // which is far harder to find than a build error. The build
+                // break IS the feature.
+                //
+                // Names are Godot's, from webxr_interface.cpp:67-76, and are
+                // deliberately inconsistent: `selectstart`/`selectend` and
+                // `squeezestart`/`squeezeend` have NO underscore, while
+                // `display_refresh_rate_changed` does. A script connects by
+                // exact string, so "fixing" the spelling breaks the connection.
+                gdplatform::WebXrSignal::SelectStart { input_source_id } => {
+                    ("selectstart", vec![Variant::Int(input_source_id as i64)])
+                }
+                gdplatform::WebXrSignal::SelectEnd { input_source_id } => {
+                    ("selectend", vec![Variant::Int(input_source_id as i64)])
+                }
+                gdplatform::WebXrSignal::Select { input_source_id } => {
+                    ("select", vec![Variant::Int(input_source_id as i64)])
+                }
+                gdplatform::WebXrSignal::SqueezeStart { input_source_id } => {
+                    ("squeezestart", vec![Variant::Int(input_source_id as i64)])
+                }
+                gdplatform::WebXrSignal::SqueezeEnd { input_source_id } => {
+                    ("squeezeend", vec![Variant::Int(input_source_id as i64)])
+                }
+                gdplatform::WebXrSignal::Squeeze { input_source_id } => {
+                    ("squeeze", vec![Variant::Int(input_source_id as i64)])
+                }
+                gdplatform::WebXrSignal::DisplayRefreshRateChanged => {
+                    ("display_refresh_rate_changed", Vec::new())
                 }
             };
 
@@ -2886,6 +2966,20 @@ impl Interpreter {
                                 // The RefCounted IO classes (pat-0q2kx.218).
                                 // Their engines all existed; only `.new()` and
                                 // the method dispatch were missing.
+                                // Script-constructible XR trackers
+                                // (pat-0q2kx.263). WebXR hand tracking
+                                // populates these and registers them on
+                                // XRServer.
+                                if matches!(
+                                    class_name.as_str(),
+                                    "XRTracker"
+                                        | "XRPositionalTracker"
+                                        | "XRHandTracker"
+                                        | "XRBodyTracker"
+                                        | "XRFaceTracker"
+                                ) {
+                                    return Ok(new_xr_tracker_handle(class_name));
+                                }
                                 if class_name == "XMLParser" {
                                     return Ok(Variant::ObjectId(
                                         gdcore::xml_parser::XmlParser::new_handle(),
@@ -7412,6 +7506,14 @@ impl Interpreter {
                 let access = self.scene_access.as_deref_mut();
                 return call_undo_redo_instance(*oid, method, args, access);
             }
+            if is_xr_tracker_handle(*oid) {
+                // Free-standing: a tracker is a plain data object, so none of
+                // its accessors needs the interpreter or the scene.
+                return call_xr_tracker_instance(*oid, method, args);
+            }
+            if is_json_handle(*oid) {
+                return call_json_instance(*oid, method, args);
+            }
             if is_script_backtrace_handle(*oid) {
                 // Free-standing: the getters read the captured snapshot only
                 // (pat-0q2kx.253).
@@ -9366,7 +9468,27 @@ impl Interpreter {
                     }
                     // The MainLoop already re-runs these queries every physics
                     // frame, so a scripted force update is a no-op.
-                    "force_raycast_update" | "force_shapecast_update" => Ok(Variant::Nil),
+                    // `RayCast2D.force_raycast_update()` re-runs the cast NOW
+                    // (pat-0q2kx.32). Godot's `ray_cast_2d.cpp` calls
+                    // `_update_raycast_state` immediately instead of waiting for
+                    // the next physics frame, which is the entire purpose of the
+                    // method: a script that moves the ray and reads
+                    // `is_colliding()` in the same frame must see the new
+                    // position's result. This previously returned `Nil` without
+                    // doing anything, so such a script always read the *previous*
+                    // tick's hit.
+                    //
+                    // The 3D casts and `force_shapecast_update` keep the old
+                    // no-op: their drivers publish from the per-frame 3D query
+                    // phase and have no equivalent single-node entry point, so
+                    // pretending to refresh them would be worse than not.
+                    "force_raycast_update" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            access.force_raycast_update_2d(id);
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "force_shapecast_update" => Ok(Variant::Nil),
                     // -- RigidBody2D force/impulse/torque script API (pat-nzgdu.14).
                     // Rigid bodies have no direct handle to the PhysicsServer, so
                     // these methods accumulate onto `_pending_*` / `constant_*`
@@ -12894,8 +13016,31 @@ fn strip_bbcode(s: &str) -> String {
 /// Formats an `f64` the way Godot serializes floats: always with a decimal
 /// point so an integral value like `5.0` renders as `"5.0"` (not `"5"`), which
 /// keeps `str_to_var` from re-parsing it as an `int`.
+/// A float **component inside a composite constructor** — Godot's `rtos_fix`
+/// (`core/variant/variant_parser.cpp:1985`).
+///
+/// ⚠️ Deliberately does NOT append `.0`. Godot appends that **only** to a bare
+/// `FLOAT` (variant_parser.cpp:2022-2028, "Append \".0\" to floats to ensure
+/// they are float literals"); the component path at :2090 calls `rtos_fix`
+/// straight, so a whole number inside a constructor prints bare. That is why
+/// Godot-authored `.tscn` files read `Vector2(0, 0)`, not `Vector2(0.0, 0.0)` —
+/// grep any scene in this repo to confirm (pat-0q2kx.69).
+///
+/// Zero returns `"0"` so `-0.0` never serialises as `-0`, which Godot avoids
+/// because it produces spurious VCS diffs.
+fn format_gd_component(f: f64) -> String {
+    if f == 0.0 {
+        return "0".to_string();
+    }
+    format!("{f}")
+}
+
+/// A **bare** `Variant::Float` in `var_to_str` output.
+///
+/// `rtos_fix` followed by Godot's `.0` suffix, so the text re-parses as a float
+/// literal rather than an int (variant_parser.cpp:2022-2028).
 fn format_gd_float(f: f64) -> String {
-    let s = format!("{f}");
+    let s = format_gd_component(f);
     if s.contains('.')
         || s.contains('e')
         || s.contains('E')
@@ -12948,21 +13093,21 @@ fn variant_to_gd_string(v: &Variant) -> String {
         Variant::String(s) => format!("\"{}\"", gd_escape_string(s)),
         Variant::Vector2(p) => format!(
             "Vector2({}, {})",
-            format_gd_float(p.x as f64),
-            format_gd_float(p.y as f64)
+            format_gd_component(p.x as f64),
+            format_gd_component(p.y as f64)
         ),
         Variant::Vector3(p) => format!(
             "Vector3({}, {}, {})",
-            format_gd_float(p.x as f64),
-            format_gd_float(p.y as f64),
-            format_gd_float(p.z as f64)
+            format_gd_component(p.x as f64),
+            format_gd_component(p.y as f64),
+            format_gd_component(p.z as f64)
         ),
         Variant::Color(c) => format!(
             "Color({}, {}, {}, {})",
-            format_gd_float(c.r as f64),
-            format_gd_float(c.g as f64),
-            format_gd_float(c.b as f64),
-            format_gd_float(c.a as f64)
+            format_gd_component(c.r as f64),
+            format_gd_component(c.g as f64),
+            format_gd_component(c.b as f64),
+            format_gd_component(c.a as f64)
         ),
         Variant::Array(arr) => {
             let items: Vec<String> = arr.iter().map(variant_to_gd_string).collect();
@@ -12999,54 +13144,54 @@ fn variant_to_gd_string(v: &Variant) -> String {
         Variant::Vector3i(v) => format!("Vector3i({}, {}, {})", v.x, v.y, v.z),
         Variant::Rect2(r) => format!(
             "Rect2({}, {}, {}, {})",
-            format_gd_float(r.position.x as f64),
-            format_gd_float(r.position.y as f64),
-            format_gd_float(r.size.x as f64),
-            format_gd_float(r.size.y as f64)
+            format_gd_component(r.position.x as f64),
+            format_gd_component(r.position.y as f64),
+            format_gd_component(r.size.x as f64),
+            format_gd_component(r.size.y as f64)
         ),
         Variant::Transform2D(t) => format!(
             "Transform2D({}, {}, {}, {}, {}, {})",
-            format_gd_float(t.x.x as f64),
-            format_gd_float(t.x.y as f64),
-            format_gd_float(t.y.x as f64),
-            format_gd_float(t.y.y as f64),
-            format_gd_float(t.origin.x as f64),
-            format_gd_float(t.origin.y as f64)
+            format_gd_component(t.x.x as f64),
+            format_gd_component(t.x.y as f64),
+            format_gd_component(t.y.x as f64),
+            format_gd_component(t.y.y as f64),
+            format_gd_component(t.origin.x as f64),
+            format_gd_component(t.origin.y as f64)
         ),
         Variant::Basis(b) => format!(
             "Basis({}, {}, {}, {}, {}, {}, {}, {}, {})",
-            format_gd_float(b.x.x as f64),
-            format_gd_float(b.x.y as f64),
-            format_gd_float(b.x.z as f64),
-            format_gd_float(b.y.x as f64),
-            format_gd_float(b.y.y as f64),
-            format_gd_float(b.y.z as f64),
-            format_gd_float(b.z.x as f64),
-            format_gd_float(b.z.y as f64),
-            format_gd_float(b.z.z as f64)
+            format_gd_component(b.x.x as f64),
+            format_gd_component(b.x.y as f64),
+            format_gd_component(b.x.z as f64),
+            format_gd_component(b.y.x as f64),
+            format_gd_component(b.y.y as f64),
+            format_gd_component(b.y.z as f64),
+            format_gd_component(b.z.x as f64),
+            format_gd_component(b.z.y as f64),
+            format_gd_component(b.z.z as f64)
         ),
         Variant::Quaternion(q) => format!(
             "Quaternion({}, {}, {}, {})",
-            format_gd_float(q.x as f64),
-            format_gd_float(q.y as f64),
-            format_gd_float(q.z as f64),
-            format_gd_float(q.w as f64)
+            format_gd_component(q.x as f64),
+            format_gd_component(q.y as f64),
+            format_gd_component(q.z as f64),
+            format_gd_component(q.w as f64)
         ),
         Variant::Aabb(a) => format!(
             "AABB({}, {}, {}, {}, {}, {})",
-            format_gd_float(a.position.x as f64),
-            format_gd_float(a.position.y as f64),
-            format_gd_float(a.position.z as f64),
-            format_gd_float(a.size.x as f64),
-            format_gd_float(a.size.y as f64),
-            format_gd_float(a.size.z as f64)
+            format_gd_component(a.position.x as f64),
+            format_gd_component(a.position.y as f64),
+            format_gd_component(a.position.z as f64),
+            format_gd_component(a.size.x as f64),
+            format_gd_component(a.size.y as f64),
+            format_gd_component(a.size.z as f64)
         ),
         Variant::Plane(pl) => format!(
             "Plane({}, {}, {}, {})",
-            format_gd_float(pl.normal.x as f64),
-            format_gd_float(pl.normal.y as f64),
-            format_gd_float(pl.normal.z as f64),
-            format_gd_float(pl.d as f64)
+            format_gd_component(pl.normal.x as f64),
+            format_gd_component(pl.normal.y as f64),
+            format_gd_component(pl.normal.z as f64),
+            format_gd_component(pl.d as f64)
         ),
         Variant::StringName(sn) => format!("&\"{}\"", gd_escape_string(sn.as_str())),
         Variant::NodePath(np) => format!("NodePath(\"{np}\")"),
@@ -13060,7 +13205,7 @@ fn variant_to_gd_string(v: &Variant) -> String {
             "PackedFloat32Array({})",
             items
                 .iter()
-                .map(|f| format_gd_float(*f as f64))
+                .map(|f| format_gd_component(*f as f64))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -13068,7 +13213,7 @@ fn variant_to_gd_string(v: &Variant) -> String {
             "PackedFloat64Array({})",
             items
                 .iter()
-                .map(|f| format_gd_float(*f))
+                .map(|f| format_gd_component(*f))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -13090,42 +13235,42 @@ fn variant_to_gd_string(v: &Variant) -> String {
         // `gdresource`'s parser consumes on the way back in.
         Variant::Transform3D(t) => format!(
             "Transform3D({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
-            format_gd_float(t.basis.x.x as f64),
-            format_gd_float(t.basis.x.y as f64),
-            format_gd_float(t.basis.x.z as f64),
-            format_gd_float(t.basis.y.x as f64),
-            format_gd_float(t.basis.y.y as f64),
-            format_gd_float(t.basis.y.z as f64),
-            format_gd_float(t.basis.z.x as f64),
-            format_gd_float(t.basis.z.y as f64),
-            format_gd_float(t.basis.z.z as f64),
-            format_gd_float(t.origin.x as f64),
-            format_gd_float(t.origin.y as f64),
-            format_gd_float(t.origin.z as f64)
+            format_gd_component(t.basis.x.x as f64),
+            format_gd_component(t.basis.x.y as f64),
+            format_gd_component(t.basis.x.z as f64),
+            format_gd_component(t.basis.y.x as f64),
+            format_gd_component(t.basis.y.y as f64),
+            format_gd_component(t.basis.y.z as f64),
+            format_gd_component(t.basis.z.x as f64),
+            format_gd_component(t.basis.z.y as f64),
+            format_gd_component(t.basis.z.z as f64),
+            format_gd_component(t.origin.x as f64),
+            format_gd_component(t.origin.y as f64),
+            format_gd_component(t.origin.z as f64)
         ),
         Variant::PackedByteArray(a) => format!("PackedByteArray({})", join_gd(a.iter())),
         Variant::PackedVector2Array(a) => format!(
             "PackedVector2Array({})",
-            join_gd(
-                a.iter()
-                    .flat_map(|v| [format_gd_float(v.x as f64), format_gd_float(v.y as f64)])
-            )
+            join_gd(a.iter().flat_map(|v| [
+                format_gd_component(v.x as f64),
+                format_gd_component(v.y as f64)
+            ]))
         ),
         Variant::PackedVector3Array(a) => format!(
             "PackedVector3Array({})",
             join_gd(a.iter().flat_map(|v| [
-                format_gd_float(v.x as f64),
-                format_gd_float(v.y as f64),
-                format_gd_float(v.z as f64)
+                format_gd_component(v.x as f64),
+                format_gd_component(v.y as f64),
+                format_gd_component(v.z as f64)
             ]))
         ),
         Variant::PackedColorArray(a) => format!(
             "PackedColorArray({})",
             join_gd(a.iter().flat_map(|c| [
-                format_gd_float(c.r as f64),
-                format_gd_float(c.g as f64),
-                format_gd_float(c.b as f64),
-                format_gd_float(c.a as f64)
+                format_gd_component(c.r as f64),
+                format_gd_component(c.g as f64),
+                format_gd_component(c.b as f64),
+                format_gd_component(c.a as f64)
             ]))
         ),
         // Objects, callables and signals have no re-parseable textual form in
@@ -16562,6 +16707,157 @@ fn call_script_backtrace_instance(
     })
 }
 
+/// pat-0q2kx.263 — XR trackers a script creates and registers on `XRServer`.
+///
+/// 0xEA because bytes CA 5B B9 ED E1 C1 C2 C3 E8 E5 E6 E7 E4 E2 E3 E9 are all
+/// already taken. Two families sharing a tag would make both `is_*_handle`
+/// predicates claim the same handles and misroute every method call, silently.
+const XR_TRACKER_HANDLE_TAG: u64 = 0xEA_00_0000_0000_0000;
+
+/// One script-created XR tracker.
+///
+/// Joint data is a sparse map rather than a fixed array: Godot's `HandJoint`
+/// enum has 26 entries and a script typically sets a handful, so a dense array
+/// would report zeroed transforms for joints nobody ever wrote as though they
+/// had been tracked.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ScriptXrTracker {
+    class_name: String,
+    tracker_name: String,
+    tracker_type: i64,
+    hand: i64,
+    joint_transforms: HashMap<i64, gdcore::math3d::Transform3D>,
+    joint_flags: HashMap<i64, i64>,
+    joint_radius: HashMap<i64, f32>,
+    blend_shapes: HashMap<i64, f32>,
+}
+
+thread_local! {
+    /// Live tracker handles.
+    static XR_TRACKERS: std::cell::RefCell<HashMap<u64, ScriptXrTracker>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// `XRServer`'s registry: tracker NAME -> handle, as Godot keys it.
+    ///
+    /// ⚠️ Stores the HANDLE, not a copy of the tracker. `get_tracker` must hand
+    /// back the same object, or a joint written *after* `add_tracker` would be
+    /// lost to a snapshot — and a naive "same name comes back" test would still
+    /// pass, so this is the part worth getting right.
+    static XR_TRACKER_REGISTRY: std::cell::RefCell<HashMap<String, u64>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_XR_TRACKER: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+fn is_xr_tracker_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == XR_TRACKER_HANDLE_TAG
+}
+
+/// Creates a tracker handle for `XRHandTracker.new()` and friends.
+fn new_xr_tracker_handle(class_name: &str) -> Variant {
+    let raw = NEXT_XR_TRACKER.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    }) | XR_TRACKER_HANDLE_TAG;
+    XR_TRACKERS.with(|m| {
+        m.borrow_mut().insert(
+            raw,
+            ScriptXrTracker {
+                class_name: class_name.to_string(),
+                ..Default::default()
+            },
+        )
+    });
+    Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw))
+}
+
+/// `XRTracker` / `XRPositionalTracker` / `XRHandTracker` / `XRBodyTracker` /
+/// `XRFaceTracker` instance methods.
+fn call_xr_tracker_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let raw = id.raw();
+    let int_arg = |i: usize| -> i64 {
+        match args.get(i) {
+            Some(Variant::Int(v)) => *v,
+            _ => 0,
+        }
+    };
+    let float_arg = |i: usize| -> f32 {
+        match args.get(i) {
+            Some(Variant::Float(v)) => *v as f32,
+            Some(Variant::Int(v)) => *v as f32,
+            _ => 0.0,
+        }
+    };
+    XR_TRACKERS.with(|m| {
+        let mut map = m.borrow_mut();
+        let Some(t) = map.get_mut(&raw) else {
+            return Ok(Variant::Nil);
+        };
+        Ok(match method {
+            "set_tracker_name" | "set_name" => {
+                t.tracker_name = args.first().map(arg_str).unwrap_or_default();
+                Variant::Nil
+            }
+            "get_tracker_name" | "get_name" => Variant::String(t.tracker_name.clone()),
+            "set_tracker_type" => {
+                t.tracker_type = int_arg(0);
+                Variant::Nil
+            }
+            "get_tracker_type" => Variant::Int(t.tracker_type),
+            "set_tracker_hand" | "set_hand" => {
+                t.hand = int_arg(0);
+                Variant::Nil
+            }
+            "get_tracker_hand" | "get_hand" => Variant::Int(t.hand),
+            "set_hand_joint_transform" => {
+                if let Some(Variant::Transform3D(x)) = args.get(1) {
+                    t.joint_transforms.insert(int_arg(0), *x);
+                }
+                Variant::Nil
+            }
+            // An unset joint answers with the identity transform — what Godot
+            // reports for a joint the tracker has never seen.
+            "get_hand_joint_transform" => Variant::Transform3D(
+                t.joint_transforms
+                    .get(&int_arg(0))
+                    .copied()
+                    .unwrap_or(gdcore::math3d::Transform3D::IDENTITY),
+            ),
+            "set_hand_joint_flags" => {
+                t.joint_flags.insert(int_arg(0), int_arg(1));
+                Variant::Nil
+            }
+            "get_hand_joint_flags" => {
+                Variant::Int(t.joint_flags.get(&int_arg(0)).copied().unwrap_or(0))
+            }
+            "set_hand_joint_radius" => {
+                t.joint_radius.insert(int_arg(0), float_arg(1));
+                Variant::Nil
+            }
+            "get_hand_joint_radius" => {
+                Variant::Float(t.joint_radius.get(&int_arg(0)).copied().unwrap_or(0.0) as f64)
+            }
+            "set_blend_shape" => {
+                t.blend_shapes.insert(int_arg(0), float_arg(1));
+                Variant::Nil
+            }
+            "get_blend_shape" => {
+                Variant::Float(t.blend_shapes.get(&int_arg(0)).copied().unwrap_or(0.0) as f64)
+            }
+            "get_class" => Variant::String(t.class_name.clone()),
+            other => {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "{} has no method '{other}'",
+                    t.class_name
+                ))))
+            }
+        })
+    })
+}
+
 const XR_INTERFACE_HANDLE_TAG: u64 = 0xE8_00_0000_0000_0000;
 
 thread_local! {
@@ -18867,6 +19163,206 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (y, m as i64, d as i64)
 }
 
+/// pat-0q2kx.216 — `JSON.new()` instances.
+///
+/// 0xEB: bytes 5B B9 C1 C2 C3 CA E1 E2 E3 E4 E5 E6 E7 E8 E9 EA ED are taken. A
+/// shared tag makes two `is_*_handle` predicates both claim the same handles and
+/// misroutes every method call with no error anywhere.
+const JSON_HANDLE_TAG: u64 = 0xEB_00_0000_0000_0000;
+
+/// Godot `Error.ERR_PARSE_ERROR` (`global_constants.rs`: 43).
+const JSON_ERR_PARSE_ERROR: i64 = 43;
+
+/// One `JSON` instance: the result of its most recent `parse`.
+///
+/// Godot's JSON resource keeps the *last* parse around — `get_data`,
+/// `get_error_line`, `get_error_message` and `get_parsed_text` all read it
+/// (core/io/json.cpp), which is why this is instance state and not a return
+/// value.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ScriptJson {
+    data: Variant,
+    error_line: i64,
+    error_message: String,
+    parsed_text: String,
+}
+
+thread_local! {
+    static JSONS: std::cell::RefCell<HashMap<u64, ScriptJson>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_JSON: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+fn is_json_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == JSON_HANDLE_TAG
+}
+
+/// Creates the handle `JSON.new()` hands back.
+fn new_json_handle() -> Variant {
+    let raw = NEXT_JSON.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    }) | JSON_HANDLE_TAG;
+    JSONS.with(|m| m.borrow_mut().insert(raw, ScriptJson::default()));
+    Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw))
+}
+
+/// `JSON` instance methods.
+fn call_json_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let raw = id.raw();
+    JSONS.with(|m| {
+        let mut map = m.borrow_mut();
+        let Some(j) = map.get_mut(&raw) else {
+            return Ok(Variant::Nil);
+        };
+        Ok(match method {
+            // Returns an Error CODE, never raises — a script checks the code and
+            // then reads `get_error_line`. Raising here would make the whole
+            // error-reporting surface unreachable, since the script would never
+            // get to run the next line.
+            "parse" => {
+                let text = args.first().map(arg_str).unwrap_or_default();
+                j.parsed_text = text.clone();
+                match serde_json::from_str::<serde_json::Value>(&text) {
+                    Ok(val) => {
+                        j.data = json_value_to_variant(&val);
+                        j.error_line = 0;
+                        j.error_message = String::new();
+                        Variant::Int(0)
+                    }
+                    Err(e) => {
+                        j.data = Variant::Nil;
+                        // serde_json counts lines from 1, as Godot does. A
+                        // failure on the first line must still report 1, not 0 —
+                        // the acceptance asserts `> 0`, and 0 is what "no error"
+                        // looks like.
+                        j.error_line = e.line().max(1) as i64;
+                        j.error_message = e.to_string();
+                        Variant::Int(JSON_ERR_PARSE_ERROR)
+                    }
+                }
+            }
+            "get_data" => j.data.clone(),
+            "get_error_line" => Variant::Int(j.error_line),
+            "get_error_message" => Variant::String(j.error_message.clone()),
+            // Godot returns the text that was *handed to* parse, including text
+            // that failed to parse — it is for reporting, not for round-tripping.
+            "get_parsed_text" => Variant::String(j.parsed_text.clone()),
+            other => {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "JSON has no method '{other}'"
+                ))))
+            }
+        })
+    })
+}
+
+/// Godot `JSON.from_native`: encodes a Variant as JSON-native data, tagging the
+/// types JSON cannot express (core/io/json.cpp `_from_native`).
+///
+/// Non-native Variants become `{"type": "<ClassName>", "args": [...]}`. Plain
+/// JSON values pass through unchanged, so `from_native(1)` is just `1` — the tag
+/// only appears where it is needed to recover the type.
+fn json_from_native(v: &Variant) -> Variant {
+    fn tagged(name: &str, args: Vec<Variant>) -> Variant {
+        let mut d = gdvariant::Dictionary::new();
+        d.insert("type", Variant::String(name.to_string()));
+        d.insert("args", Variant::Array(args));
+        Variant::Dictionary(d)
+    }
+    match v {
+        Variant::Vector2(p) => tagged(
+            "Vector2",
+            vec![Variant::Float(p.x as f64), Variant::Float(p.y as f64)],
+        ),
+        Variant::Vector2i(p) => tagged(
+            "Vector2i",
+            vec![Variant::Int(p.x as i64), Variant::Int(p.y as i64)],
+        ),
+        Variant::Vector3(p) => tagged(
+            "Vector3",
+            vec![
+                Variant::Float(p.x as f64),
+                Variant::Float(p.y as f64),
+                Variant::Float(p.z as f64),
+            ],
+        ),
+        Variant::Color(c) => tagged(
+            "Color",
+            vec![
+                Variant::Float(c.r as f64),
+                Variant::Float(c.g as f64),
+                Variant::Float(c.b as f64),
+                Variant::Float(c.a as f64),
+            ],
+        ),
+        Variant::Array(items) => Variant::Array(items.iter().map(json_from_native).collect()),
+        Variant::Dictionary(d) => {
+            let mut out = gdvariant::Dictionary::new();
+            for (k, val) in d.iter() {
+                out.insert(k.clone(), json_from_native(val));
+            }
+            Variant::Dictionary(out)
+        }
+        other => other.clone(),
+    }
+}
+
+/// Godot `JSON.to_native`: the inverse of [`json_from_native`].
+///
+/// A dictionary that does not carry a recognised `type`/`args` pair is left
+/// alone rather than rejected — plain JSON objects are legitimate data and must
+/// survive the round trip untouched.
+fn json_to_native(v: &Variant) -> Variant {
+    match v {
+        Variant::Dictionary(d) => {
+            let ty = d.get("type");
+            let args = d.get("args");
+            if let (Some(Variant::String(name)), Some(Variant::Array(a))) = (ty, args) {
+                let f = |i: usize| -> f32 {
+                    match a.get(i) {
+                        Some(Variant::Float(x)) => *x as f32,
+                        Some(Variant::Int(x)) => *x as f32,
+                        _ => 0.0,
+                    }
+                };
+                let i = |n: usize| -> i32 {
+                    match a.get(n) {
+                        Some(Variant::Int(x)) => *x as i32,
+                        Some(Variant::Float(x)) => *x as i32,
+                        _ => 0,
+                    }
+                };
+                match name.as_str() {
+                    "Vector2" => return Variant::Vector2(gdcore::math::Vector2::new(f(0), f(1))),
+                    "Vector2i" => {
+                        return Variant::Vector2i(gdcore::math::Vector2i::new(i(0), i(1)))
+                    }
+                    "Vector3" => {
+                        return Variant::Vector3(gdcore::math::Vector3::new(f(0), f(1), f(2)))
+                    }
+                    "Color" => {
+                        return Variant::Color(gdcore::math::Color::new(f(0), f(1), f(2), f(3)))
+                    }
+                    _ => {}
+                }
+            }
+            let mut out = gdvariant::Dictionary::new();
+            for (k, val) in d.iter() {
+                out.insert(k.clone(), json_to_native(val));
+            }
+            Variant::Dictionary(out)
+        }
+        Variant::Array(items) => Variant::Array(items.iter().map(json_to_native).collect()),
+        other => other.clone(),
+    }
+}
+
 fn json_value_to_variant(v: &serde_json::Value) -> Variant {
     match v {
         serde_json::Value::Null => Variant::Nil,
@@ -18995,6 +19491,14 @@ fn json_stringify_variant(value: &Variant, indent: &str, sort_keys: bool, depth:
 
 fn call_json_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
     match method {
+        // `JSON.new()` lands here rather than in the generic `.new()` arm: the
+        // `Ident("JSON")` check above intercepts every `JSON.<member>` call
+        // first, so a handle has to be minted here or `new` reads as a missing
+        // static.
+        "new" => Ok(new_json_handle()),
+        // Godot's static Variant <-> JSON-native converters (json.cpp).
+        "from_native" => Ok(json_from_native(args.first().unwrap_or(&Variant::Nil))),
+        "to_native" => Ok(json_to_native(args.first().unwrap_or(&Variant::Nil))),
         // `parse_string` is Godot's static entry point and returns the parsed
         // value or **null** on bad input, pushing an error rather than raising
         // (json.cpp). `parse` is an *instance* method in Godot; Patina also

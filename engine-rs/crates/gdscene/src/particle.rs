@@ -435,6 +435,29 @@ pub struct SubEmitEvent {
     pub velocity: Vector2,
 }
 
+/// A per-particle value in `0.0..1.0` that is fixed for the particle's life,
+/// standing in for Godot's `RANDOM_SEED` (pat-0q2kx.261).
+///
+/// Hashes only spawn-time fields — the spawn transform's origin and the
+/// assigned lifetime — so successive steps produce the same number. It is not
+/// Godot's RNG stream and does not try to be; the contract a shader relies on
+/// is stability, not a particular sequence.
+fn stable_particle_seed(p: &Particle) -> f32 {
+    let mut h: u32 = 2166136261;
+    for bits in [
+        p.spawn_transform.origin.x.to_bits(),
+        p.spawn_transform.origin.y.to_bits(),
+        p.lifetime.to_bits(),
+    ] {
+        for byte in bits.to_le_bytes() {
+            h ^= byte as u32;
+            h = h.wrapping_mul(16777619);
+        }
+    }
+    // Map to 0..1; the exact distribution does not matter, only determinism.
+    (h % 10_000) as f32 / 10_000.0
+}
+
 /// Drives particle emission, physics, and culling each frame.
 #[derive(Debug, Clone)]
 pub struct ParticleSimulator {
@@ -464,6 +487,15 @@ pub struct ParticleSimulator {
     /// Whether the current completion has already produced an edge, so
     /// `finished` fires once per drain rather than every frame.
     finished_emitted: bool,
+    /// An interpreted `shader_type particles` program assigned as this
+    /// emitter's `process_material` (pat-0q2kx.261).
+    ///
+    /// `None` — the overwhelmingly common case — leaves the built-in gravity /
+    /// velocity integration exactly as it was. When present, the shader's
+    /// `process()` runs **after** that integration for each particle, so a
+    /// shader that writes VELOCITY overrides the default motion rather than
+    /// racing it.
+    particles_shader: Option<gdserver2d::particles_shader::ParticlesProgram>,
 }
 
 /// Upper bound on catch-up iterations for one [`ParticleSimulator::step`] call.
@@ -488,7 +520,37 @@ impl ParticleSimulator {
             fixed_step_accumulator: 0.0,
             finished_pending: false,
             finished_emitted: false,
+            particles_shader: None,
         }
+    }
+
+    /// Assign a `shader_type particles` program as this emitter's process
+    /// material (pat-0q2kx.261).
+    ///
+    /// Returns the constructs the parser could not interpret, so the caller can
+    /// surface them. An empty return does **not** mean the shader did anything
+    /// — a shader with no recognised stage is simply inert; use
+    /// [`has_particles_shader`](Self::has_particles_shader) for that question.
+    pub fn set_particles_shader(&mut self, source: &str) -> Vec<String> {
+        let program = gdserver2d::particles_shader::parse_particles_shader(source);
+        let unsupported = program.unsupported.clone();
+        self.particles_shader = if program.is_empty() {
+            None
+        } else {
+            Some(program)
+        };
+        unsupported
+    }
+
+    /// Drop any assigned particles shader, restoring the built-in motion.
+    pub fn clear_particles_shader(&mut self) {
+        self.particles_shader = None;
+    }
+
+    /// Whether a particles shader with at least one interpretable statement is
+    /// driving this emitter.
+    pub fn has_particles_shader(&self) -> bool {
+        self.particles_shader.is_some()
     }
 
     /// Takes the sub-emission requests recorded since the last drain
@@ -586,6 +648,10 @@ impl ParticleSimulator {
         let dt_scaled = dt * self.emitter.speed_scale;
 
         // --- Age and integrate existing particles ---
+        //
+        // Taken out of `self` so the shader hook below can borrow the program
+        // immutably while the particle loop borrows the vector mutably.
+        let shader = self.particles_shader.clone();
         for p in &mut self.active_particles {
             p.lifetime_remaining -= dt_scaled;
             p.velocity = p.velocity + self.emitter.material.gravity * dt_scaled;
@@ -599,6 +665,38 @@ impl ParticleSimulator {
                 .material
                 .start_color
                 .lerp(self.emitter.material.end_color, t);
+
+            // --- `shader_type particles` process() (pat-0q2kx.261) ---
+            //
+            // Runs AFTER the built-in integration and the colour ramp, so a
+            // shader that writes VELOCITY or COLOR wins. Running it first would
+            // let gravity and the ramp overwrite the shader's own values every
+            // step, which reads as "the shader does nothing" — the exact
+            // failure this bead exists to fix.
+            if let Some(program) = &shader {
+                let mut state = gdserver2d::particles_shader::ParticleShaderState {
+                    velocity: p.velocity,
+                    color: p.color,
+                    position: p.position,
+                    delta: dt_scaled,
+                    lifetime: p.lifetime,
+                    age: p.lifetime - p.lifetime_remaining,
+                    // ⚠️ DERIVED, not Godot's RNG stream. `Particle` carries no
+                    // seed field, and adding one would touch every construction
+                    // site for a value nothing else reads. This hashes fields
+                    // that are fixed at spawn, which gives the property a shader
+                    // actually depends on — **stable for the particle's whole
+                    // life** — without pretending to reproduce Godot's numbers,
+                    // which no port can. Deriving it from `lifetime_remaining`
+                    // instead would turn RANDOM_SEED into a clock: it would
+                    // change every step and animate anything keyed off it.
+                    random_seed: stable_particle_seed(p),
+                };
+                program.run_process(&mut state);
+                p.velocity = state.velocity;
+                p.color = state.color;
+                p.position = state.position;
+            }
         }
 
         // --- CONSTANT sub-emission ---

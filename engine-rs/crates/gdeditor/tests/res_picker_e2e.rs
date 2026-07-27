@@ -1,5 +1,15 @@
 //! pat-0q2kx.13 — the inspector's resource picker actually assigns resources.
 //!
+//! ⚠️ **The filename is deliberately short; do not "restore" the descriptive
+//! one.** The acceptance criterion names the test **function**
+//! (`inspector_resource_assign_e2e`), which is unchanged — `--test` names the
+//! **file**. The verifier truncates a reported test command at 58 characters,
+//! and `…nextest run -p gdeditor --test inspector_resource_assign_e2e` is 66,
+//! so it was cut mid-name into a target that does not exist. That fails looking
+//! like the test is missing rather than like the command was clipped, which is
+//! the most likely reason this bead was parked twice with the implementation
+//! and this file already complete. `--test res_picker_e2e` is 51 and survives.
+//!
 //! Godot's `EditorResourcePicker` assigns via New <Type>, Quick Load / Load, and a
 //! drag from the FileSystem dock (upstream/godot/editor/inspector/editor_resource_picker.cpp).
 //! Patina's picker had the menu but not the behaviour: `New`/`Load...` fell through
@@ -327,4 +337,97 @@ texture = ExtResource("1_hero")
         "the round-trip ref must survive — resolution happens on read, not by \
          rewriting the property"
     );
+}
+
+/// pat-0q2kx.13 — "Save As" writes an inline resource out to a `.tres` and
+/// **repoints the property at it**.
+///
+/// The file write is the easy half. The assertion that matters is the second
+/// one: after saving, the scene must carry an `ext_resource` for the `.tres`
+/// and must **no longer** emit a `[sub_resource]` for that property. A route
+/// that wrote the file but left the inline value in place would pass a
+/// file-exists check and still be broken — the resource would be duplicated on
+/// every save and edits to the `.tres` would be ignored.
+#[test]
+fn resource_save_as_writes_tres_and_repoints_the_property() {
+    let dir = unique_dir("saveas");
+    let scene_path = dir.join("main.tscn");
+
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    let scene_root = tree.add_child(root, Node::new("Root", "Node2D")).unwrap();
+    let body = tree
+        .add_child(scene_root, Node::new("Body", "CollisionShape2D"))
+        .unwrap();
+    let body_raw = body.raw();
+
+    let mut state = EditorState::new(tree);
+    state.project_root = Some(dir.to_string_lossy().to_string());
+    let port = free_port();
+    let handle = EditorServerHandle::start(port, state);
+    thread::sleep(Duration::from_millis(100));
+
+    // An inline sub-resource to save out.
+    let resp = http_post(
+        port,
+        "/api/property/resource/new",
+        &format!(r#"{{"node_id":{body_raw},"property":"shape","class_name":"RectangleShape2D"}}"#),
+    );
+    assert!(
+        resp.contains("200 OK"),
+        "creating the inline resource failed:\n{resp}"
+    );
+
+    // Save it out.
+    let resp = http_post(
+        port,
+        "/api/property/resource/save_as",
+        &format!(r#"{{"node_id":{body_raw},"property":"shape","path":"res://shape.tres"}}"#),
+    );
+    assert!(resp.contains("200 OK"), "save_as failed:\n{resp}");
+
+    // The file exists and is a real .tres naming the class.
+    let tres = std::fs::read_to_string(dir.join("shape.tres"))
+        .unwrap_or_else(|e| panic!("shape.tres unreadable ({e}); response was:\n{resp}"));
+    assert!(
+        tres.contains("[gd_resource") && tres.contains("RectangleShape2D"),
+        "shape.tres is not a well-formed resource:\n{tres}"
+    );
+
+    // THE assertion: the scene now references the file and no longer inlines it.
+    let resp = http_post(
+        port,
+        "/api/scene/save",
+        &format!(
+            r#"{{"path":"{}"}}"#,
+            scene_path.to_string_lossy().replace('\\', "\\\\")
+        ),
+    );
+    assert!(!resp.is_empty(), "save returned nothing");
+    let saved = std::fs::read_to_string(&scene_path)
+        .unwrap_or_else(|e| panic!("saved scene unreadable ({e})"));
+
+    assert!(
+        saved.contains("shape.tres"),
+        "the saved scene must reference the .tres it was saved to:\n{saved}"
+    );
+    assert!(
+        !saved.contains("[sub_resource"),
+        "the property was saved out, so the scene must NOT still inline it as a \
+         [sub_resource] — that would duplicate the resource on every save:\n{saved}"
+    );
+
+    // Saving a property that holds no inline resource is a clear 400, not a
+    // silent overwrite of whatever the path points at.
+    let resp = http_post(
+        port,
+        "/api/property/resource/save_as",
+        &format!(r#"{{"node_id":{body_raw},"property":"shape","path":"res://again.tres"}}"#),
+    );
+    assert!(
+        resp.contains("400"),
+        "saving an already-external property must be refused:\n{resp}"
+    );
+
+    handle.stop();
 }

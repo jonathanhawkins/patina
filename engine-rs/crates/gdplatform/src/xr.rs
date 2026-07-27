@@ -121,6 +121,116 @@ pub enum WebXrSignal {
     VisibilityStateChanged,
     /// `reference_space_reset()`.
     ReferenceSpaceReset,
+    /// `selectstart(input_source_id)`.
+    SelectStart {
+        /// Which input source fired.
+        input_source_id: usize,
+    },
+    /// `selectend(input_source_id)`.
+    SelectEnd {
+        /// Which input source fired.
+        input_source_id: usize,
+    },
+    /// `select(input_source_id)`.
+    ///
+    /// ⚠️ Godot emits this **after** [`SelectEnd`](Self::SelectEnd), from the
+    /// same browser event — see [`WebXrInterface::on_input_event`].
+    Select {
+        /// Which input source fired.
+        input_source_id: usize,
+    },
+    /// `squeezestart(input_source_id)`.
+    SqueezeStart {
+        /// Which input source fired.
+        input_source_id: usize,
+    },
+    /// `squeezeend(input_source_id)`.
+    SqueezeEnd {
+        /// Which input source fired.
+        input_source_id: usize,
+    },
+    /// `squeeze(input_source_id)`, emitted after `squeezeend`.
+    Squeeze {
+        /// Which input source fired.
+        input_source_id: usize,
+    },
+    /// `display_refresh_rate_changed()`.
+    DisplayRefreshRateChanged,
+}
+
+/// The four input events `navigator.xr` delivers, matching
+/// `godot_webxr.h`'s `WEBXR_INPUT_EVENT_*`.
+///
+/// ⚠️ There is deliberately **no `Select`/`Squeeze` variant**: the browser only
+/// fires start/end, and Godot synthesises the completed-gesture signal itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebXrInputEvent {
+    /// `WEBXR_INPUT_EVENT_SELECTSTART`.
+    SelectStart,
+    /// `WEBXR_INPUT_EVENT_SELECTEND`.
+    SelectEnd,
+    /// `WEBXR_INPUT_EVENT_SQUEEZESTART`.
+    SqueezeStart,
+    /// `WEBXR_INPUT_EVENT_SQUEEZEEND`.
+    SqueezeEnd,
+}
+
+/// Godot `WebXRInterface.TargetRayMode`.
+///
+/// Values are Godot's (`extension_api.json`, `WebXRInterface.TargetRayMode`), so
+/// a script comparing against the constant gets the same answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TargetRayMode {
+    /// `TARGET_RAY_MODE_UNKNOWN` — also what an **inactive** source reports.
+    #[default]
+    Unknown = 0,
+    /// `TARGET_RAY_MODE_GAZE`.
+    Gaze = 1,
+    /// `TARGET_RAY_MODE_TRACKED_POINTER`.
+    TrackedPointer = 2,
+    /// `TARGET_RAY_MODE_SCREEN`.
+    Screen = 3,
+}
+
+impl TargetRayMode {
+    /// The integer a script sees.
+    pub fn as_i64(self) -> i64 {
+        self as i64
+    }
+
+    /// Map the browser's numeric mode, defaulting to `Unknown`.
+    pub fn from_i64(v: i64) -> Self {
+        match v {
+            1 => Self::Gaze,
+            2 => Self::TrackedPointer,
+            3 => Self::Screen,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// One WebXR input source, mirroring `WebXRInterfaceJS::InputSource`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WebXrInputSource {
+    /// Whether the browser currently reports this source.
+    pub active: bool,
+    /// The `XRControllerTracker` name this source registers on `XRServer`.
+    pub tracker_name: String,
+    /// Godot's `target_ray_mode` for this source.
+    pub target_ray_mode: TargetRayMode,
+}
+
+/// Godot's fixed tracker names (`webxr_interface_js.h:153`).
+///
+/// ⚠️ Ids **0 and 1 are always the left and right hands** — Godot's own comment
+/// — so the names are positional, not discovered from the browser. Sources 2+
+/// get `tracker_N`.
+pub fn webxr_tracker_name(input_source_id: usize) -> String {
+    match input_source_id {
+        0 => "left_hand".to_string(),
+        1 => "right_hand".to_string(),
+        n => format!("tracker_{n}"),
+    }
 }
 
 /// What a browser's `navigator.xr` would answer, supplied by the caller.
@@ -167,6 +277,10 @@ pub struct WebXrInterface {
     visibility_state: String,
     pending: Vec<WebXrSignal>,
     stub: WebXrStub,
+    /// Per-source state, indexed by input source id (pat-0q2kx.264).
+    input_sources: Vec<WebXrInputSource>,
+    display_refresh_rate: f32,
+    available_display_refresh_rates: Vec<f32>,
 }
 
 impl WebXrInterface {
@@ -316,6 +430,14 @@ impl WebXrInterface {
         self.reference_space_type.clear();
         self.enabled_features.clear();
         self.visibility_state.clear();
+        // ⚠️ Input sources do not survive the session (pat-0q2kx.264). Godot
+        // removes their trackers from XRServer on exit; leaving them active
+        // here would let `is_input_source_active` report a controller for a
+        // session that has ended, and a script polling it would never notice
+        // the headset was taken off.
+        self.input_sources.clear();
+        self.available_display_refresh_rates.clear();
+        self.display_refresh_rate = 0.0;
         self.pending.push(WebXrSignal::SessionEnded);
     }
 
@@ -334,6 +456,126 @@ impl WebXrInterface {
         if self.state == WebXrSessionState::Active {
             self.pending.push(WebXrSignal::ReferenceSpaceReset);
         }
+    }
+
+    // -- Input sources (pat-0q2kx.264) -------------------------------------
+
+    /// The browser reporting an input source connected or updated.
+    ///
+    /// Ids are positional: 0 is the left hand, 1 the right
+    /// (`webxr_interface_js.cpp:679`, "Input source id's 0 and 1 are always the
+    /// left and right hands"), so the tracker name follows from the id rather
+    /// than from anything the browser says.
+    pub fn set_input_source(&mut self, input_source_id: usize, target_ray_mode: TargetRayMode) {
+        if self.input_sources.len() <= input_source_id {
+            self.input_sources
+                .resize(input_source_id + 1, WebXrInputSource::default());
+        }
+        self.input_sources[input_source_id] = WebXrInputSource {
+            active: true,
+            tracker_name: webxr_tracker_name(input_source_id),
+            target_ray_mode,
+        };
+    }
+
+    /// The browser reporting an input source disconnected.
+    ///
+    /// Marks it inactive rather than removing it, so ids stay stable — Godot
+    /// indexes `input_sources` by id, and compacting would rename every source
+    /// after the removed one.
+    pub fn remove_input_source(&mut self, input_source_id: usize) {
+        if let Some(src) = self.input_sources.get_mut(input_source_id) {
+            src.active = false;
+        }
+    }
+
+    /// Godot `is_input_source_active`.
+    pub fn is_input_source_active(&self, input_source_id: usize) -> bool {
+        self.input_sources
+            .get(input_source_id)
+            .is_some_and(|s| s.active)
+    }
+
+    /// Godot `get_input_source_tracker` — the tracker name this source
+    /// registers on `XRServer`, or `None` when the source is not active.
+    pub fn input_source_tracker_name(&self, input_source_id: usize) -> Option<&str> {
+        self.input_sources
+            .get(input_source_id)
+            .filter(|s| s.active)
+            .map(|s| s.tracker_name.as_str())
+    }
+
+    /// Godot `get_input_source_target_ray_mode`.
+    ///
+    /// ⚠️ An **inactive** source reports `Unknown`, not its last mode
+    /// (`webxr_interface_js.cpp:177`). Returning the stale mode would let a
+    /// script keep treating a disconnected controller as a tracked pointer.
+    pub fn input_source_target_ray_mode(&self, input_source_id: usize) -> TargetRayMode {
+        match self.input_sources.get(input_source_id) {
+            Some(s) if s.active => s.target_ray_mode,
+            _ => TargetRayMode::Unknown,
+        }
+    }
+
+    /// A `selectstart` / `selectend` / `squeezestart` / `squeezeend` from the
+    /// browser, queueing Godot's signals.
+    ///
+    /// ⚠️ **`select` is emitted after `selectend`, from the same event** —
+    /// there is no separate browser `select` for Godot to forward. See
+    /// `webxr_interface_js.cpp:843`: "Emit the 'select' event on our own
+    /// (rather than intercepting the one from JavaScript)". Squeeze is the
+    /// same. Emitting `select` between start and end — the order the name suggests
+    /// — would fire it before the gesture completed.
+    pub fn on_input_event(&mut self, event: WebXrInputEvent, input_source_id: usize) {
+        match event {
+            WebXrInputEvent::SelectStart => {
+                self.pending
+                    .push(WebXrSignal::SelectStart { input_source_id });
+            }
+            WebXrInputEvent::SelectEnd => {
+                self.pending
+                    .push(WebXrSignal::SelectEnd { input_source_id });
+                self.pending.push(WebXrSignal::Select { input_source_id });
+            }
+            WebXrInputEvent::SqueezeStart => {
+                self.pending
+                    .push(WebXrSignal::SqueezeStart { input_source_id });
+            }
+            WebXrInputEvent::SqueezeEnd => {
+                self.pending
+                    .push(WebXrSignal::SqueezeEnd { input_source_id });
+                self.pending.push(WebXrSignal::Squeeze { input_source_id });
+            }
+        }
+    }
+
+    // -- Display refresh rate (pat-0q2kx.264) ------------------------------
+
+    /// Godot `get_display_refresh_rate`.
+    pub fn display_refresh_rate(&self) -> f32 {
+        self.display_refresh_rate
+    }
+
+    /// Godot `set_display_refresh_rate`.
+    ///
+    /// Queues `display_refresh_rate_changed` only when the value actually
+    /// changes — re-emitting on every set would make a per-frame writer spam a
+    /// signal Godot fires on transitions.
+    pub fn set_display_refresh_rate(&mut self, rate: f32) {
+        if (self.display_refresh_rate - rate).abs() > f32::EPSILON {
+            self.display_refresh_rate = rate;
+            self.pending.push(WebXrSignal::DisplayRefreshRateChanged);
+        }
+    }
+
+    /// Godot `get_available_display_refresh_rates`.
+    pub fn available_display_refresh_rates(&self) -> &[f32] {
+        &self.available_display_refresh_rates
+    }
+
+    /// The browser reporting the rates this device offers.
+    pub fn set_available_display_refresh_rates(&mut self, rates: Vec<f32>) {
+        self.available_display_refresh_rates = rates;
     }
 }
 

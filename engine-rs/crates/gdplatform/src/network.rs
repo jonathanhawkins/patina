@@ -3,7 +3,7 @@
 //! Multiplayer networking stubs: peer abstraction, RPC configuration,
 //! spawner/synchronizer primitives, and an in-memory mock transport.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use gdvariant::Variant;
@@ -828,12 +828,186 @@ impl NetworkPeer for OfflineMultiplayerPeer {
     }
 }
 
-/// Encode an RPC into the binary wire format:
-/// `PRPC | node_path:u64 | method_len:u16 | method | argc:u16 | args…`
-pub fn encode_rpc_packet(node_path: u64, method: &str, args: &[Variant]) -> Vec<u8> {
+/// How a `RemoteCall` addresses its target node.
+///
+/// Godot negotiates a small id for each node path so repeat calls stop paying
+/// for the path (`scene_cache_interface.cpp`). The mode byte is what lets one
+/// decoder read both forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RpcAddressing {
+    /// Full 8-byte hashed path — used until the peer has confirmed an id.
+    FullPath = 0,
+    /// 2-byte negotiated path id.
+    CachedId = 1,
+}
+
+impl RpcAddressing {
+    /// The wire byte for this mode.
+    pub const fn to_byte(self) -> u8 {
+        self as u8
+    }
+
+    /// Parses a wire byte, or `None` for an unknown mode.
+    pub const fn from_byte(byte: u8) -> Option<RpcAddressing> {
+        Some(match byte {
+            0 => RpcAddressing::FullPath,
+            1 => RpcAddressing::CachedId,
+            _ => return None,
+        })
+    }
+}
+
+/// Per-peer `path <-> id` table backing `SIMPLIFY_PATH` / `CONFIRM_PATH`
+/// (pat-0q2kx.95).
+///
+/// Godot's sender announces `path -> id` once, the receiver confirms, and every
+/// later call carries the id instead of the path
+/// (`scene_cache_interface.cpp`). One cache instance belongs to one peer
+/// relationship: ids are only meaningful between the two endpoints that
+/// negotiated them, and sharing a cache across peers would let peer B's id
+/// resolve to peer A's node.
+///
+/// ⚠️ The sender only switches to the short form **after the receiver
+/// confirms**. Switching on send would address the node by an id the receiver
+/// has not learned yet, and that call would be dropped rather than dispatched.
+#[derive(Debug, Clone, Default)]
+pub struct RpcPathCache {
+    next_id: u16,
+    /// Sender side: hashed path -> id we assigned.
+    by_path: HashMap<u64, u16>,
+    /// Receiver side: id -> hashed path we were told it means.
+    by_id: HashMap<u16, u64>,
+    /// Ids the receiver has acknowledged; only these may be used to address.
+    confirmed: HashSet<u16>,
+}
+
+impl RpcPathCache {
+    /// A cache with no negotiated ids.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The id already assigned to `node_path`, if any.
+    pub fn id_for(&self, node_path: u64) -> Option<u16> {
+        self.by_path.get(&node_path).copied()
+    }
+
+    /// The path an id refers to, once learned from a `SimplifyPath`.
+    pub fn path_for(&self, id: u16) -> Option<u64> {
+        self.by_id.get(&id).copied()
+    }
+
+    /// Whether `node_path` may be addressed by its short id yet.
+    pub fn is_confirmed(&self, node_path: u64) -> bool {
+        self.id_for(node_path)
+            .is_some_and(|id| self.confirmed.contains(&id))
+    }
+
+    /// Assigns an id to `node_path`, or returns the existing one.
+    fn assign(&mut self, node_path: u64) -> u16 {
+        if let Some(id) = self.by_path.get(&node_path) {
+            return *id;
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.by_path.insert(node_path, id);
+        id
+    }
+
+    /// Receiver side: records the mapping a `SimplifyPath` announced.
+    pub fn learn(&mut self, id: u16, node_path: u64) {
+        self.by_id.insert(id, node_path);
+    }
+
+    /// Sender side: records that the peer confirmed `id`.
+    pub fn confirm(&mut self, id: u16) {
+        self.confirmed.insert(id);
+    }
+}
+
+/// `SIMPLIFY_PATH`: announces that `id` will mean `node_path` from now on.
+pub fn encode_simplify_path(id: u16, node_path: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + 2 + 8);
+    out.push(NetworkCommand::SimplifyPath.to_byte());
+    out.extend_from_slice(&id.to_be_bytes());
+    out.extend_from_slice(&node_path.to_be_bytes());
+    out
+}
+
+/// Decodes a `SIMPLIFY_PATH` into `(id, node_path)`.
+pub fn decode_simplify_path(data: &[u8]) -> Option<(u16, u64)> {
+    if data.len() < 1 + 2 + 8 {
+        return None;
+    }
+    if NetworkCommand::from_byte(data[0])? != NetworkCommand::SimplifyPath {
+        return None;
+    }
+    let id = u16::from_be_bytes(data[1..3].try_into().ok()?);
+    let path = u64::from_be_bytes(data[3..11].try_into().ok()?);
+    Some((id, path))
+}
+
+/// `CONFIRM_PATH`: the receiver acknowledges an announced id.
+pub fn encode_confirm_path(id: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(3);
+    out.push(NetworkCommand::ConfirmPath.to_byte());
+    out.extend_from_slice(&id.to_be_bytes());
+    out
+}
+
+/// Decodes a `CONFIRM_PATH` into the id it acknowledges.
+pub fn decode_confirm_path(data: &[u8]) -> Option<u16> {
+    if data.len() < 3 {
+        return None;
+    }
+    if NetworkCommand::from_byte(data[0])? != NetworkCommand::ConfirmPath {
+        return None;
+    }
+    Some(u16::from_be_bytes(data[1..3].try_into().ok()?))
+}
+
+/// Encodes an RPC, using the short path id when the peer has confirmed one.
+///
+/// Returns `(simplify, call)`: `simplify` is `Some` exactly once per path — the
+/// `SIMPLIFY_PATH` that must be sent before (or with) the call so the receiver
+/// can learn the id. Send it first; the call itself still carries the full path
+/// until a `CONFIRM_PATH` comes back, so nothing is dropped while the handshake
+/// is in flight.
+pub fn encode_rpc_call(
+    cache: &mut RpcPathCache,
+    node_path: u64,
+    method: &str,
+    args: &[Variant],
+) -> (Option<Vec<u8>>, Vec<u8>) {
+    let known = cache.id_for(node_path).is_some();
+    let id = cache.assign(node_path);
+    let simplify = if known {
+        None
+    } else {
+        Some(encode_simplify_path(id, node_path))
+    };
+
+    let call = if cache.confirmed.contains(&id) {
+        encode_rpc_packet_with_id(id, method, args)
+    } else {
+        encode_rpc_packet(node_path, method, args)
+    };
+    (simplify, call)
+}
+
+/// A `RemoteCall` addressed by its negotiated id rather than the full path.
+pub fn encode_rpc_packet_with_id(id: u16, method: &str, args: &[Variant]) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(NetworkCommand::RemoteCall.to_byte());
-    out.extend_from_slice(&node_path.to_be_bytes());
+    out.push(RpcAddressing::CachedId.to_byte());
+    out.extend_from_slice(&id.to_be_bytes());
+    encode_rpc_tail(&mut out, method, args);
+    out
+}
+
+/// Shared `method | argc | args…` tail of both `RemoteCall` forms.
+fn encode_rpc_tail(out: &mut Vec<u8>, method: &str, args: &[Variant]) {
     let mb = method.as_bytes();
     out.extend_from_slice(&(mb.len() as u16).to_be_bytes());
     out.extend_from_slice(mb);
@@ -848,6 +1022,16 @@ pub fn encode_rpc_packet(node_path: u64, method: &str, args: &[Variant]) -> Vec<
             out.extend_from_slice(&bytes);
         }
     }
+}
+
+/// Encode an RPC into the binary wire format:
+/// `cmd | mode:u8 | node_path:u64 | method_len:u16 | method | argc:u16 | args…`
+pub fn encode_rpc_packet(node_path: u64, method: &str, args: &[Variant]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(NetworkCommand::RemoteCall.to_byte());
+    out.push(RpcAddressing::FullPath.to_byte());
+    out.extend_from_slice(&node_path.to_be_bytes());
+    encode_rpc_tail(&mut out, method, args);
     out
 }
 
@@ -869,16 +1053,55 @@ pub fn decode_rpc_packet_with(
     data: &[u8],
     objects: ObjectDecoding,
 ) -> Option<(u64, String, Vec<Variant>)> {
-    // 1 command byte + 8 path + 2 method len + 2 argc
-    if data.len() < 1 + 8 + 2 + 2 {
+    decode_rpc_packet_inner(data, None, objects)
+}
+
+/// [`decode_rpc_packet_with`] that can also resolve id-addressed calls.
+///
+/// A `CachedId` packet is meaningless without the cache that negotiated the id,
+/// so the cache-less decoders reject it rather than inventing a path. Pass the
+/// same peer's cache here to accept both forms.
+pub fn decode_rpc_packet_cached(
+    data: &[u8],
+    cache: &RpcPathCache,
+    objects: ObjectDecoding,
+) -> Option<(u64, String, Vec<Variant>)> {
+    decode_rpc_packet_inner(data, Some(cache), objects)
+}
+
+fn decode_rpc_packet_inner(
+    data: &[u8],
+    cache: Option<&RpcPathCache>,
+    objects: ObjectDecoding,
+) -> Option<(u64, String, Vec<Variant>)> {
+    // 1 command + 1 mode + 2 id (the shorter address) + 2 method len + 2 argc
+    if data.len() < 1 + 1 + 2 + 2 + 2 {
         return None;
     }
     if NetworkCommand::from_byte(data[0])? != NetworkCommand::RemoteCall {
         return None;
     }
     let mut i = 1;
-    let node_path = u64::from_be_bytes(data[i..i + 8].try_into().ok()?);
-    i += 8;
+    let mode = RpcAddressing::from_byte(data[i])?;
+    i += 1;
+    let node_path = match mode {
+        RpcAddressing::FullPath => {
+            if i + 8 > data.len() {
+                return None;
+            }
+            let p = u64::from_be_bytes(data[i..i + 8].try_into().ok()?);
+            i += 8;
+            p
+        }
+        RpcAddressing::CachedId => {
+            let id = u16::from_be_bytes(data[i..i + 2].try_into().ok()?);
+            i += 2;
+            // An id we never learned resolves to nothing. Dropping the call is
+            // the only safe answer — guessing a path would dispatch a remote
+            // call at whatever node happened to collide.
+            cache?.path_for(id)?
+        }
+    };
     let mlen = u16::from_be_bytes(data[i..i + 2].try_into().ok()?) as usize;
     i += 2;
     if i + mlen > data.len() {

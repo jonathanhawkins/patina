@@ -46,7 +46,10 @@ mod tests {
         let c_px = sample_equirect(&tex, &Vector3::new(1.0, 0.0, 0.0), false);
         assert!(c_px.r > 0.9 && c_px.g < 0.1, "+X must be red, got {c_px:?}");
         let c_nx = sample_equirect(&tex, &Vector3::new(-1.0, 0.0, 0.0), false);
-        assert!(c_nx.g > 0.9 && c_nx.r < 0.1, "-X must be green, got {c_nx:?}");
+        assert!(
+            c_nx.g > 0.9 && c_nx.r < 0.1,
+            "-X must be green, got {c_nx:?}"
+        );
     }
 
     /// Structural anchors of Godot's PhysicalSkyMaterial shader port: no sun →
@@ -63,14 +66,20 @@ mod tests {
         // No directional light → Godot renders only the (default black)
         // night-sky texture.
         let c = sample(&[], Vector3::new(0.0, 1.0, 0.0));
-        assert!(c.r < 1e-5 && c.g < 1e-5 && c.b < 1e-5, "no sun must be black, got {c:?}");
+        assert!(
+            c.r < 1e-5 && c.g < 1e-5 && c.b < 1e-5,
+            "no sun must be black, got {c:?}"
+        );
 
         // Sun far below the horizon → sun_energy clamps to 0 → black sky.
         let mut below = Light3D::directional(Light3DId(1));
         below.direction = Vector3::new(0.0, 1.0, 0.0); // travels up = sun below
         let suns_below = sky_suns_from_lights(&[below]);
         let c = sample(&suns_below, Vector3::new(0.0, 0.3, -1.0).normalized());
-        assert!(c.r < 1e-4 && c.b < 1e-4, "below-horizon sun must be black, got {c:?}");
+        assert!(
+            c.r < 1e-4 && c.b < 1e-4,
+            "below-horizon sun must be black, got {c:?}"
+        );
 
         // High sun with defaults: zenith is blue-dominant (Rayleigh), and the
         // sun disc (0.5° angular size) is far brighter than 10° away.
@@ -85,8 +94,10 @@ mod tests {
             "default Rayleigh zenith must be blue-dominant, got {zenith:?}"
         );
         let at_sun = sample(&suns, toward_sun);
-        let off_axis =
-            sample(&suns, (toward_sun + Vector3::new(0.17, 0.0, 0.0)).normalized());
+        let off_axis = sample(
+            &suns,
+            (toward_sun + Vector3::new(0.17, 0.0, 0.0)).normalized(),
+        );
         assert!(
             at_sun.r > off_axis.r * 1.5,
             "solar disk must be much brighter than nearby sky: {at_sun:?} vs {off_axis:?}"
@@ -173,10 +184,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut light = Light3D::point(
-            gdserver3d::light::Light3DId(1),
-            Vector3::new(1.2, 0.0, 2.2),
-        );
+        let mut light =
+            Light3D::point(gdserver3d::light::Light3DId(1), Vector3::new(1.2, 0.0, 2.2));
         light.energy = 2.0;
         light.range = 20.0;
         light.shadow_enabled = true;
@@ -223,7 +232,10 @@ mod tests {
     fn debanding_dither_is_bounded_and_per_channel() {
         let d = screen_space_dither(12.0, 34.0);
         for ch in d {
-            assert!(ch >= -0.5 / 255.0 - 1e-6 && ch <= 0.5 / 255.0 + 1e-6, "out of range: {ch}");
+            assert!(
+                ch >= -0.5 / 255.0 - 1e-6 && ch <= 0.5 / 255.0 + 1e-6,
+                "out of range: {ch}"
+            );
         }
         // Channels use divisors 103/71/97 — not all equal at a generic coord.
         assert!(
@@ -307,9 +319,26 @@ mod tests {
             (up.r - 1.0).abs() < 1e-4 && up.b.abs() < 1e-4,
             "up should be COLOR=(1,0,0), got {up:?}"
         );
+        // ⚠️ Looking DOWN, `EYEDIR.y` is **-1**, so this shader yields
+        // `(-1, 0, 2)` — NOT `(0, 0, 1)`. This assertion used to expect the
+        // saturated values and failed the bead for it (verifier.log:4498).
+        //
+        // The saturated reading is the wrong one: **the sky path is HDR by
+        // design**. `sample_procedural_sky` multiplies sun colour by
+        // `sun.energy` and the whole sky by `background_energy_multiplier`
+        // (renderer.rs:1249), both of which routinely exceed 1.0 — that is how a
+        // bright sun feeds glow/tonemapping. Clamping the *shader* path to
+        // [0,1] to satisfy this line would have made it inconsistent with the
+        // procedural path and crushed exactly those highlights, to fix an
+        // assertion rather than a defect.
+        //
+        // So the evaluator was right all along: it computes the expression the
+        // bead specifies, out-of-range components included. Do not "restore"
+        // (0,0,1) here without first making the whole sky path clamp — and see
+        // the note above before deciding that is what you want.
         assert!(
-            down.r.abs() < 1e-4 && (down.b - 1.0).abs() < 1e-4,
-            "down should be COLOR=(0,0,1), got {down:?}"
+            (down.r + 1.0).abs() < 1e-4 && (down.b - 2.0).abs() < 1e-4,
+            "down is EYEDIR.y = -1, so COLOR = vec3(-1, 0, 1-(-1)) = (-1,0,2); got {down:?}"
         );
         assert!(
             up.g.abs() < 1e-4 && down.g.abs() < 1e-4,
