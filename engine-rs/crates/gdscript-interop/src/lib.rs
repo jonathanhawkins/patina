@@ -16,7 +16,9 @@ pub mod editor_commands;
 pub mod fuzz_gdscript;
 pub mod global_constants;
 pub mod interpreter;
+pub mod midi_ports;
 pub mod parser;
+pub mod script_backtrace;
 pub mod tokenizer;
 pub mod type_checker;
 /// Script-facing dispatch for the affine/math builtin Variant types.

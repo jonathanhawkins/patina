@@ -100,7 +100,10 @@ fn input_map_edit_is_live_in_running_editor() {
     // The Input Map tab loads the current map. The default map is non-empty,
     // and "jump" is not one of the defaults.
     let initial = http_get(port, "/api/input_map");
-    assert!(initial.contains("200 OK"), "GET /api/input_map ok: {initial}");
+    assert!(
+        initial.contains("200 OK"),
+        "GET /api/input_map ok: {initial}"
+    );
     let initial = json_body(&initial);
     assert!(
         !action_names(&initial).iter().any(|a| a == "jump"),
@@ -108,7 +111,11 @@ fn input_map_edit_is_live_in_running_editor() {
     );
 
     // Add a "jump" action bound to Space, the way the dialog does.
-    let added = http_post(port, "/api/input_map", r#"{"action":"jump","keys":["Space"]}"#);
+    let added = http_post(
+        port,
+        "/api/input_map",
+        r#"{"action":"jump","keys":["Space"]}"#,
+    );
     assert!(added.contains("200 OK"), "POST add action ok: {added}");
     let added = json_body(&added);
     assert!(
@@ -150,14 +157,22 @@ fn input_map_edit_is_live_in_running_editor() {
 fn input_map_remove_action_is_live() {
     let (handle, port) = boot_editor();
 
-    http_post(port, "/api/input_map", r#"{"action":"sprint","keys":["Shift"]}"#);
+    http_post(
+        port,
+        "/api/input_map",
+        r#"{"action":"sprint","keys":["Shift"]}"#,
+    );
     let with = json_body(&http_get(port, "/api/input_map"));
     assert!(
         action_names(&with).iter().any(|a| a == "sprint"),
         "sprint was added: {with}"
     );
 
-    let removed = http_post(port, "/api/input_map", r#"{"action":"sprint","remove":true}"#);
+    let removed = http_post(
+        port,
+        "/api/input_map",
+        r#"{"action":"sprint","remove":true}"#,
+    );
     assert!(removed.contains("200 OK"), "POST remove ok: {removed}");
 
     let without = json_body(&http_get(port, "/api/input_map"));

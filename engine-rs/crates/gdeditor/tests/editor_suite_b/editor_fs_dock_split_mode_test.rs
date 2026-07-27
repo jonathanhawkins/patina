@@ -105,7 +105,10 @@ fn open_project(port: u16, root: &std::path::Path) {
     let resp = json_ok(&http_post(
         port,
         "/api/project/open",
-        &format!(r#"{{"path":"{}"}}"#, root.display().to_string().replace('\\', "\\\\")),
+        &format!(
+            r#"{{"path":"{}"}}"#,
+            root.display().to_string().replace('\\', "\\\\")
+        ),
     ));
     assert_eq!(resp["ok"], serde_json::json!(true), "project should open");
 }
@@ -124,14 +127,21 @@ fn fs_dock_split_display_mode_toggles() {
 
     // Cycle through Godot's order: tree_only → vsplit → hsplit → tree_only.
     let cycle = |p: u16| {
-        json_ok(&http_post(p, "/api/filesystem/display_mode", r#"{"action":"cycle"}"#))
-            ["display_mode"]
+        json_ok(&http_post(
+            p,
+            "/api/filesystem/display_mode",
+            r#"{"action":"cycle"}"#,
+        ))["display_mode"]
             .as_str()
             .unwrap()
             .to_string()
     };
     assert_eq!(cycle(port), "vsplit");
-    assert_eq!(current_mode(port), "vsplit", "cycle persists in the served state");
+    assert_eq!(
+        current_mode(port),
+        "vsplit",
+        "cycle persists in the served state"
+    );
     assert_eq!(cycle(port), "hsplit");
     assert_eq!(cycle(port), "tree_only");
 

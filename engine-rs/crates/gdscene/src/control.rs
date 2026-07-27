@@ -6,6 +6,7 @@
 //! a [`SceneTree`].
 
 use gdcore::math::{Color, Vector2};
+use gdresource::bit_map::BitMap;
 use gdvariant::Variant;
 
 use crate::node::NodeId;
@@ -555,8 +556,102 @@ pub fn rect_has_point(position: Vector2, size: Vector2, point: Vector2) -> bool 
 /// Returns `true` if `point` (in the control's coordinate space) lies within
 /// this Control's rect (`position` + `size`). Used for viewport hit-testing
 /// before routing a mouse event to the control.
+///
+/// For a `TextureButton` carrying a `texture_click_mask`, the rect test is only
+/// the first half — see [`texture_button_mask_allows_point`].
 pub fn control_has_point(tree: &SceneTree, node_id: NodeId, point: Vector2) -> bool {
-    rect_has_point(get_position(tree, node_id), get_size(tree, node_id), point)
+    let position = get_position(tree, node_id);
+    if !rect_has_point(position, get_size(tree, node_id), point) {
+        return false;
+    }
+    texture_button_mask_allows_point(tree, node_id, point - position)
+}
+
+/// Resolves a `TextureButton`'s `texture_click_mask` into a [`BitMap`], or
+/// `None` when the node is not a TextureButton or carries no mask
+/// (pat-0q2kx.257).
+///
+/// Three authoring paths reach the same mask, and all three are accepted because
+/// each is what some real caller produces:
+///
+/// 1. A `.tscn` writes `texture_click_mask = SubResource("id")`, which the parser
+///    leaves as the string `"SubResource:<id>"` — the bits live on the
+///    sub-resource, copied onto the node as `__click_mask__data` at instancing
+///    (see `packed_scene.rs`). This is checked first, because the string in
+///    `texture_click_mask` itself carries no bits.
+/// 2. A `.tres`/script-assigned `BitMap` arrives as `Variant::Resource`, with the
+///    payload under the resource's own `data` property.
+/// 3. A hand-built node (and most tests) can put the `data` dictionary straight
+///    on the property.
+pub fn texture_button_click_mask(tree: &SceneTree, node_id: NodeId) -> Option<BitMap> {
+    let node = tree.get_node(node_id)?;
+    // The mask is a TextureButton-only property; every other Control must keep
+    // its plain rect test, so this gate is what stops the mask logic from
+    // leaking into the rest of the UI.
+    if !(node.is_class("TextureButton") || node.class_name() == "TextureButton") {
+        return None;
+    }
+    if let Variant::Dictionary(d) = node.get_property("__click_mask__data") {
+        return BitMap::from_data_dict(&d);
+    }
+    match node.get_property("texture_click_mask") {
+        Variant::Resource(r) if r.class_name == "BitMap" => match r.properties.get("data") {
+            Some(Variant::Dictionary(d)) => BitMap::from_data_dict(d),
+            _ => None,
+        },
+        Variant::Dictionary(d) => BitMap::from_data_dict(&d),
+        _ => None,
+    }
+}
+
+/// Whether a `TextureButton`'s click mask admits `local_point` (a point already
+/// relative to the control's own top-left corner).
+///
+/// Returns `true` for every node without a mask, so this composes with a plain
+/// rect test: the mask can only ever *reject* a point the rect accepted, which
+/// is how Godot's `TextureButton::has_point` overrides `Control::has_point`
+/// (`scene/gui/texture_button.cpp:62`).
+///
+/// The point is scaled from the control's rect into the mask's resolution, which
+/// is Godot's general case (`scale = mask_size / _position_rect.size`); a control
+/// with no area uses the mask 1:1, as Godot does when `_position_rect` is empty.
+///
+/// ⚠️ Godot additionally special-cases `STRETCH_TILE` (wrapping the point modulo
+/// the mask) and `STRETCH_KEEP_ASPECT_COVERED` (offsetting by the texture
+/// region). Neither is mapped here: Patina's TextureButton does not yet model
+/// `stretch_mode` or a texture region at all, so there is nothing to read — and
+/// inventing a mapping for a mode the renderer does not implement would encode a
+/// guess as parity. The default `STRETCH_SCALE` path is exact.
+pub fn texture_button_mask_allows_point(
+    tree: &SceneTree,
+    node_id: NodeId,
+    local_point: Vector2,
+) -> bool {
+    let Some(mask) = texture_button_click_mask(tree, node_id) else {
+        return true;
+    };
+    let mask_size = mask.get_size();
+    // An empty mask cannot answer the question; falling through to the rect test
+    // keeps a button with a blank mask clickable rather than silently dead.
+    if mask_size.x <= 0 || mask_size.y <= 0 {
+        return true;
+    }
+    let control_size = get_size(tree, node_id);
+    let (scale_x, scale_y) = if control_size.x > 0.0 && control_size.y > 0.0 {
+        (
+            mask_size.x as f32 / control_size.x,
+            mask_size.y as f32 / control_size.y,
+        )
+    } else {
+        (1.0, 1.0)
+    };
+    let mx = (local_point.x * scale_x).floor() as i32;
+    let my = (local_point.y * scale_y).floor() as i32;
+    // Godot bails out before sampling when the mapped point leaves the mask.
+    if mx < 0 || my < 0 || mx >= mask_size.x || my >= mask_size.y {
+        return false;
+    }
+    mask.get_bit(mx, my)
 }
 
 /// Whether `node_id` participates in Control layout — a real `Control` subclass
@@ -648,9 +743,14 @@ fn hit_test_control(
             return Some(hit);
         }
     }
+    // A TextureButton's click mask makes the node transparent to clicks over its
+    // clear pixels: returning `None` here lets the search continue outward, so
+    // the click reaches whatever sits behind the button rather than being
+    // swallowed by its bounding box (pat-0q2kx.257).
     if is_ctrl
         && get_mouse_filter(tree, node_id) != MouseFilter::Ignore
         && rect_has_point(global_pos, get_size(tree, node_id), child_point)
+        && texture_button_mask_allows_point(tree, node_id, child_point - global_pos)
     {
         return Some(node_id);
     }

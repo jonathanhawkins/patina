@@ -33,6 +33,7 @@ pub mod skin;
 pub mod sky;
 pub mod sprite3d;
 pub mod text_mesh;
+pub mod triangle_mesh;
 pub mod viewport;
 
 pub use compositor::{Compositor, CompositorEffect, EffectCallbackType};

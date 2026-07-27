@@ -63,6 +63,7 @@ pub mod particle;
 pub mod particle3d;
 pub mod path3d;
 pub mod physics_interpolation;
+pub mod physics_interpolation_3d;
 pub mod physics_server;
 pub mod physics_server_3d;
 pub mod polygon_path_finder;

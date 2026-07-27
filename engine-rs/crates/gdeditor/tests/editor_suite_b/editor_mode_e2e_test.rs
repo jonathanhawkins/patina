@@ -90,7 +90,8 @@ fn served_view(port: u16, mode: &str) -> serde_json::Value {
     assert!(set.contains("200 OK"), "set mode {mode} ok: {set}");
     let resp = http_get(port, "/api/editor/main_view");
     assert!(resp.contains("200 OK"), "main_view for {mode} ok: {resp}");
-    serde_json::from_str(extract_body(&resp)).unwrap_or_else(|e| panic!("main_view json {mode}: {e}"))
+    serde_json::from_str(extract_body(&resp))
+        .unwrap_or_else(|e| panic!("main_view json {mode}: {e}"))
 }
 
 /// Boots the real editor server once and asserts that each main-screen mode
@@ -106,7 +107,10 @@ fn editor_mode_e2e_test_modes_serve_distinct_views() {
 
     // 2D mode is the baseline: it IS the 2D canvas viewport.
     let two_d = served_view(port, "2d");
-    assert_eq!(two_d["is_2d_viewport"], true, "2d mode is the 2D viewport: {two_d}");
+    assert_eq!(
+        two_d["is_2d_viewport"], true,
+        "2d mode is the 2D viewport: {two_d}"
+    );
     let two_d_component = two_d["component_id"].as_str().unwrap().to_string();
 
     // Each non-2D mode serves its own distinct, non-2D central view.
@@ -140,7 +144,11 @@ fn editor_mode_e2e_test_modes_serve_distinct_views() {
     }
 
     // All five modes (2d + the four above) serve mutually-distinct views.
-    assert_eq!(seen.len(), 5, "all five modes serve distinct views: {seen:?}");
+    assert_eq!(
+        seen.len(),
+        5,
+        "all five modes serve distinct views: {seen:?}"
+    );
 
     // Statefulness / round-trip (pat-nbakh): the served central view follows the
     // CURRENT mode held by the wired `MainPane` — it is not a one-way latch.

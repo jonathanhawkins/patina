@@ -233,3 +233,38 @@ then (wrap `joltc` / `jolt-rust` via FFI, MIT), put it behind an off-by-default
 
 Prefer `ufbx` (C, permissive) via FFI or pure-Rust port when FBX import is
 scheduled. Not started; glTF is the preferred interchange format.
+
+## GDExtension native plugins (pat-0q2kx.252)
+
+**Classification: Deferred (bucket 2 — wrap via FFI when scheduled). Metadata
+recognition ships now; execution does not.**
+
+Patina recognises `.gdextension` manifests and executes nothing from them.
+`gdcore::gdextension_host` parses the INI-style descriptor, resolves the
+per-platform library path and entry symbol, and records that metadata;
+`GDExtensionManager` exposes the registry to scripts
+(`load_extension` / `is_extension_loaded` / `get_loaded_extensions` /
+`get_extension`, plus `GDExtension` under `Resource`). **No library is `dlopen`'d
+and no native entry point is called.**
+
+That split is deliberate, and the honest statuses follow from it: a manifest that
+parses and names a library for the current platform reports `LOAD_STATUS_OK`
+("recognised and registered"), while a missing or unreadable manifest — or one
+with no library for this platform — reports `LOAD_STATUS_FAILED` rather than
+claiming a load that did not happen. `reload_extension` reports
+`LOAD_STATUS_NEEDS_RESTART`, since nothing is running in-process to reload.
+
+Note for future audits: Godot's `LoadStatus` is a plain enum numbering from 0
+(`core/extension/gdextension_manager.h:54-58`), so **`LOAD_STATUS_FAILED` is 1**
+and `2` is `LOAD_STATUS_ALREADY_LOADED`. pat-0q2kx.252's own acceptance text says
+"LOAD_STATUS_FAILED (2)"; that number is a transcription error and Patina follows
+Godot, not the bead.
+
+**Reopen when** loading real native plugins enters milestone scope. That needs a
+platform-specific dynamic-loader path (`libloading` or hand-rolled `dlopen`
+/`LoadLibrary`), the GDExtension C ABI interface struct, and a decision on the
+wasm target — which has no `dlopen` at all and would need extensions linked at
+build time or run through a component model. Classify as bucket 2 then, put it
+behind an off-by-default feature, and pin it with a fixture that calls a real
+entry symbol.
+

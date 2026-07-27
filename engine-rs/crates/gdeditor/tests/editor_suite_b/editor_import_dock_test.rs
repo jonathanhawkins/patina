@@ -19,7 +19,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -50,10 +54,10 @@ fn scene_dock_renders_scene_and_import_tabs() {
     let (handle, port) = make_server();
     let html = editor_html(port);
     for needle in [
-        "id=\"scene-dock-tab\"",  // the Scene tab
-        ">Scene<",                // its label
-        "id=\"import-dock-tab\"", // the Import tab (was missing)
-        ">Import<",               // its label
+        "id=\"scene-dock-tab\"",       // the Scene tab
+        ">Scene<",                     // its label
+        "id=\"import-dock-tab\"",      // the Import tab (was missing)
+        ">Import<",                    // its label
         "function setupSceneDockTabs", // wired
         "setupSceneDockTabs()",        // invoked at boot
     ] {
@@ -72,14 +76,14 @@ fn import_dock_renders_skeleton() {
     let (handle, port) = make_server();
     let html = editor_html(port);
     for needle in [
-        "id=\"import-dock\"",      // the dock container
-        "id=\"import-empty\"",     // empty-state placeholder
+        "id=\"import-dock\"",        // the dock container
+        "id=\"import-empty\"",       // empty-state placeholder
         "FileSystem dock to import", // empty-state text (mirrors Godot's prompt)
-        "Import As:",              // import_dock.cpp:765 OptionButton label
-        "id=\"import-as\"",        // the type selector
-        "id=\"import-preset\"",    // import_dock.cpp:776 preset menu
-        "id=\"import-reimport\"",  // import_dock.cpp:798 Reimport button
-        ">Reimport<",              // verbatim label
+        "Import As:",                // import_dock.cpp:765 OptionButton label
+        "id=\"import-as\"",          // the type selector
+        "id=\"import-preset\"",      // import_dock.cpp:776 preset menu
+        "id=\"import-reimport\"",    // import_dock.cpp:798 Reimport button
+        ">Reimport<",                // verbatim label
     ] {
         assert!(
             html.contains(needle),
@@ -112,7 +116,10 @@ fn http_request_str(port: u16, request: &str) -> String {
 }
 
 fn http_get(port: u16, path: &str) -> String {
-    http_request_str(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    http_request_str(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> String {
@@ -139,26 +146,59 @@ fn import_dock_populates_for_selected_resource() {
     // A texture resource: importer "Texture2D" with presets + editable options.
     let tex = json_ok(&http_get(port, "/api/import_settings?path=res://icon.png"));
     assert_eq!(tex["importable"], serde_json::json!(true));
-    assert_eq!(tex["importer"], serde_json::json!("Texture2D"), "Import As shows the importer");
+    assert_eq!(
+        tex["importer"],
+        serde_json::json!("Texture2D"),
+        "Import As shows the importer"
+    );
     let presets = tex["presets"].as_array().unwrap();
     assert!(!presets.is_empty(), "Preset menu is populated");
-    let opt_names: Vec<String> = tex["options"].as_array().unwrap().iter().map(|o| o["name"].as_str().unwrap().to_string()).collect();
-    assert!(opt_names.contains(&"compression".to_string()), "texture options include compression: {opt_names:?}");
-    assert!(opt_names.contains(&"filter".to_string()), "texture options include filter: {opt_names:?}");
-    let comp = tex["options"].as_array().unwrap().iter().find(|o| o["name"] == "compression").unwrap();
+    let opt_names: Vec<String> = tex["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        opt_names.contains(&"compression".to_string()),
+        "texture options include compression: {opt_names:?}"
+    );
+    assert!(
+        opt_names.contains(&"filter".to_string()),
+        "texture options include filter: {opt_names:?}"
+    );
+    let comp = tex["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["name"] == "compression")
+        .unwrap();
     assert_eq!(comp["type"], serde_json::json!("enum"));
-    assert!(comp["choices"].as_array().unwrap().len() >= 2, "compression is a choice list");
+    assert!(
+        comp["choices"].as_array().unwrap().len() >= 2,
+        "compression is a choice list"
+    );
 
     // A different resource type maps to a different importer.
     let audio = json_ok(&http_get(port, "/api/import_settings?path=res://music.ogg"));
     assert_eq!(audio["importer"], serde_json::json!("Audio Stream"));
 
     // No path / an unimportable extension -> empty-state.
-    assert_eq!(json_ok(&http_get(port, "/api/import_settings"))["importable"], serde_json::json!(false));
-    assert_eq!(json_ok(&http_get(port, "/api/import_settings?path=res://notes.xyz"))["importable"], serde_json::json!(false));
+    assert_eq!(
+        json_ok(&http_get(port, "/api/import_settings"))["importable"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        json_ok(&http_get(port, "/api/import_settings?path=res://notes.xyz"))["importable"],
+        serde_json::json!(false)
+    );
 
     // Reimport works on an importable resource and rejects an unimportable one.
-    let re = json_ok(&http_post(port, "/api/reimport", r#"{"path":"res://icon.png"}"#));
+    let re = json_ok(&http_post(
+        port,
+        "/api/reimport",
+        r#"{"path":"res://icon.png"}"#,
+    ));
     assert_eq!(re["ok"], serde_json::json!(true));
     assert!(re["reimported"].as_str().unwrap().ends_with("icon.png"));
     assert!(

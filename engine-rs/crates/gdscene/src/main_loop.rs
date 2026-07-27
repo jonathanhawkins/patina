@@ -471,6 +471,10 @@ pub struct MainLoop {
     /// Double-buffered physics transforms for render-tick interpolation
     /// (pat-0q2kx.219).
     physics_interpolation: crate::physics_interpolation::PhysicsInterpolationState,
+    /// The same, for 3D bodies (pat-0q2kx.250). Held separately from the 2D
+    /// buffers because 3D blends rotation with `slerp` on a quaternion rather
+    /// than along a scalar shortest arc.
+    physics_interpolation_3d: crate::physics_interpolation_3d::PhysicsInterpolation3DState,
     /// `SceneTree.physics_interpolation_enabled`, from
     /// `physics/common/physics_interpolation`. Off by default, as in Godot.
     physics_interpolation_enabled: bool,
@@ -613,6 +617,8 @@ impl MainLoop {
             physics_time: 0.0,
             physics_accumulator: 0.0,
             physics_interpolation: crate::physics_interpolation::PhysicsInterpolationState::new(),
+            physics_interpolation_3d:
+                crate::physics_interpolation_3d::PhysicsInterpolation3DState::new(),
             physics_interpolation_enabled: false,
             paused: false,
             input_state: InputState::new(),
@@ -2015,6 +2021,7 @@ impl MainLoop {
         self.physics_interpolation_enabled = enabled;
         if !enabled {
             self.physics_interpolation.clear();
+            self.physics_interpolation_3d.clear();
         }
     }
 
@@ -2023,6 +2030,11 @@ impl MainLoop {
     /// it through the gap it never travelled.
     pub fn reset_physics_interpolation(&mut self, node_id: NodeId) {
         self.physics_interpolation.reset_node(node_id);
+        // Godot's `reset_physics_interpolation()` is one call on `Node`, not one
+        // per dimension, so both buffers are reset. Resetting only the matching
+        // one would require the caller to know which server owns the node —
+        // and would silently smear a 3D teleport (pat-0q2kx.250).
+        self.physics_interpolation_3d.reset_node(node_id);
     }
 
     /// The interpolation buffers, for tests and for a render path that wants
@@ -2031,6 +2043,13 @@ impl MainLoop {
         &self,
     ) -> &crate::physics_interpolation::PhysicsInterpolationState {
         &self.physics_interpolation
+    }
+
+    /// The 3D interpolation buffers (pat-0q2kx.250).
+    pub fn physics_interpolation_3d(
+        &self,
+    ) -> &crate::physics_interpolation_3d::PhysicsInterpolation3DState {
+        &self.physics_interpolation_3d
     }
 
     /// Godot's `PhysicalBoneSimulator3D.physical_bones_start_simulation()`
@@ -2784,6 +2803,11 @@ impl MainLoop {
             // the rendered blend must interpolate what actually happened.
             if self.physics_interpolation_enabled {
                 self.physics_interpolation.capture(&self.tree);
+                // The 3D bodies settle in the same tick (pat-0q2kx.250), so
+                // they are captured here too rather than on a separate cadence
+                // — a second capture point would drift out of step with the 2D
+                // one and publish blends from different ticks.
+                self.physics_interpolation_3d.capture(&self.tree);
             }
 
             self.physics_accumulator -= physics_dt;
@@ -2808,6 +2832,11 @@ impl MainLoop {
         if self.physics_interpolation_enabled {
             let fraction = (self.physics_accumulator / physics_dt) as f32;
             self.physics_interpolation
+                .publish(&mut self.tree, fraction, true);
+            // Same fraction for 3D (pat-0q2kx.250): both dimensions advance on
+            // the one accumulator, so recomputing it per dimension could only
+            // introduce a discrepancy.
+            self.physics_interpolation_3d
                 .publish(&mut self.tree, fraction, true);
         }
 

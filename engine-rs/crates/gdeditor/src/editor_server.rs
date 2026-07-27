@@ -2526,6 +2526,7 @@ fn handle_connection(
             api_input_mouse_up(state, &req.body, &mut stream)
         }
         ("POST", "/api/runtime/input/gamepad") => api_input_gamepad(state, &req.body, &mut stream),
+        ("POST", "/api/runtime/input/midi") => api_input_midi(state, &req.body, &mut stream),
         ("POST", "/api/runtime/input/clear_frame") => api_input_clear_frame(state, &mut stream),
         ("POST", "/api/runtime/input/mouse_mode") => {
             api_input_mouse_mode(state, &req.body, &mut stream)
@@ -14335,6 +14336,78 @@ fn api_input_gamepad(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
         stream,
         &format!(r#"{{"ok":true,"connected":true,"events":{events}}}"#),
     );
+}
+
+/// `POST /api/runtime/input/midi` — the client forwarding Web MIDI
+/// (pat-0q2kx.246).
+///
+/// Body: `{"data":[144,60,100]}` — the bytes of `MIDIMessageEvent.data`, status
+/// byte first, exactly as the browser hands them over — plus an optional
+/// `"device"` port index and an optional `"ports"` array naming the inputs the
+/// client can see.
+///
+/// `ports` rides this route rather than getting its own because the browser
+/// surfaces names and messages from the same `requestMIDIAccess` promise.
+/// Splitting them would let a script receive a message from a port that
+/// `OS.get_connected_midi_inputs()` does not list.
+fn api_input_midi(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.is_running {
+        send_error(stream, 400, "not running");
+        return;
+    }
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => {
+            send_error(stream, 400, "invalid json");
+            return;
+        }
+    };
+
+    // Reported independently of any message, so a client that has MIDI access
+    // but no traffic yet still populates `OS.get_connected_midi_inputs()` —
+    // which is the order the browser actually delivers things in.
+    if let Some(ports) = v["ports"].as_array() {
+        gdscript_interop::midi_ports::set_input_names(
+            ports
+                .iter()
+                .filter_map(|p| p.as_str())
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    let device = v["device"].as_u64().unwrap_or(0) as u32;
+    let packet: Vec<u8> = v["data"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|b| b.as_u64())
+                .map(|b| b as u8)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // A ports-only report carries no packet and is not an error.
+    if packet.is_empty() {
+        send_json(stream, r#"{"ok":true,"events":0}"#);
+        return;
+    }
+
+    // Decoding lives in `gdplatform` so the wire format and the event share one
+    // implementation. An undecodable packet is refused here rather than padded:
+    // padding `[0x90, 60]` would produce NOTE_ON with velocity 0, which is the
+    // conventional spelling of NOTE_OFF — the opposite of what was played.
+    let Some(event) = gdplatform::input::decode_midi_message(&packet, device) else {
+        send_error(stream, 400, "undecodable midi packet");
+        return;
+    };
+    let mut events = 0usize;
+    if let Some(ref mut main_loop) = state.run_main_loop {
+        main_loop.push_event(event);
+        events = 1;
+    }
+    send_json(stream, &format!(r#"{{"ok":true,"events":{events}}}"#));
 }
 
 /// `POST /api/runtime/input/mouse_mode` — the client reporting the **actual**

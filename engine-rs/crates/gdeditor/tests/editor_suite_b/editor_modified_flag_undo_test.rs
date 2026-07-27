@@ -128,8 +128,7 @@ fn editor_modified_flag_clears_on_undo_to_saved() {
         add_resp.contains("200 OK"),
         "POST /api/node/add should succeed, got: {add_resp}"
     );
-    let add_json: serde_json::Value =
-        serde_json::from_str(extract_body(&add_resp)).unwrap();
+    let add_json: serde_json::Value = serde_json::from_str(extract_body(&add_resp)).unwrap();
     assert!(
         add_json["id"].as_u64().is_some(),
         "add response should include the new node id"

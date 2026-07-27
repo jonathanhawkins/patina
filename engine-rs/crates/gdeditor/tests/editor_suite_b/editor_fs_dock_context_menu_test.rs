@@ -20,7 +20,11 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -78,7 +82,10 @@ fn http_request_str(port: u16, request: &str) -> String {
 }
 
 fn http_get(port: u16, path: &str) -> String {
-    http_request_str(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    http_request_str(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> String {
@@ -104,7 +111,10 @@ fn open_project(port: u16, root: &std::path::Path) {
     let resp = json_ok(&http_post(
         port,
         "/api/project/open",
-        &format!(r#"{{"path":"{}"}}"#, root.display().to_string().replace('\\', "\\\\")),
+        &format!(
+            r#"{{"path":"{}"}}"#,
+            root.display().to_string().replace('\\', "\\\\")
+        ),
     ));
     assert_eq!(resp["ok"], serde_json::json!(true));
 }
@@ -120,30 +130,63 @@ fn fs_dock_context_menu_backend_actions() {
 
     // file_info surfaces what Copy Absolute Path / Copy UID / Edit Dependencies
     // / View Owners act on.
-    let info = json_ok(&http_get(port, "/api/filesystem/file_info?path=res://scenes/main.tscn"));
+    let info = json_ok(&http_get(
+        port,
+        "/api/filesystem/file_info?path=res://scenes/main.tscn",
+    ));
     assert!(
-        info["abs_path"].as_str().unwrap().ends_with("scenes/main.tscn"),
+        info["abs_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("scenes/main.tscn"),
         "abs_path resolves under the project: {info}"
     );
-    assert_eq!(info["uid"], serde_json::json!("uid://abcd1234"), "uid read from header");
-    let deps: Vec<String> = info["dependencies"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
-    assert!(deps.contains(&"res://icon.png".to_string()), "dependency parsed: {deps:?}");
-    let owners: Vec<String> = info["owners"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    assert_eq!(
+        info["uid"],
+        serde_json::json!("uid://abcd1234"),
+        "uid read from header"
+    );
+    let deps: Vec<String> = info["dependencies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        deps.contains(&"res://icon.png".to_string()),
+        "dependency parsed: {deps:?}"
+    );
+    let owners: Vec<String> = info["owners"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
     assert!(
         owners.contains(&"res://scenes/level.tscn".to_string()),
         "owner (level.tscn references main.tscn) found: {owners:?}"
     );
 
     // A file without a UID header still gets a (synthesized) copyable UID.
-    let lvl = json_ok(&http_get(port, "/api/filesystem/file_info?path=res://scenes/level.tscn"));
+    let lvl = json_ok(&http_get(
+        port,
+        "/api/filesystem/file_info?path=res://scenes/level.tscn",
+    ));
     assert!(
         lvl["uid"].as_str().unwrap().starts_with("uid://"),
         "synthesized uid for a header-less file: {lvl}"
     );
 
     // Duplicate copies the file next to itself with a derived name.
-    let dup = json_ok(&http_post(port, "/api/filesystem/duplicate", r#"{"path":"res://scenes/main.tscn"}"#));
-    assert_eq!(dup["new_path"], serde_json::json!("res://scenes/main_copy.tscn"));
+    let dup = json_ok(&http_post(
+        port,
+        "/api/filesystem/duplicate",
+        r#"{"path":"res://scenes/main.tscn"}"#,
+    ));
+    assert_eq!(
+        dup["new_path"],
+        serde_json::json!("res://scenes/main_copy.tscn")
+    );
     assert!(
         root.join("scenes/main_copy.tscn").is_file(),
         "duplicate produced a real file on disk"
@@ -155,7 +198,10 @@ fn fs_dock_context_menu_backend_actions() {
         "/api/filesystem/duplicate",
         r#"{"path":"res://scenes/main.tscn","new_name":"main_v2.tscn"}"#,
     ));
-    assert_eq!(dup2["new_path"], serde_json::json!("res://scenes/main_v2.tscn"));
+    assert_eq!(
+        dup2["new_path"],
+        serde_json::json!("res://scenes/main_v2.tscn")
+    );
     assert!(root.join("scenes/main_v2.tscn").is_file());
 
     handle.stop();

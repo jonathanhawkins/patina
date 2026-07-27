@@ -1026,6 +1026,115 @@ pub fn register_3d_classes() {
     // -- MultiMeshInstance3D --
     register_class(ClassRegistration::new("MultiMeshInstance3D").parent("GeometryInstance3D"));
 
+    // -- Import intermediates: ImporterMesh + ImporterMeshInstance3D
+    //    (pat-0q2kx.258) --
+    //
+    // Godot's scene importer builds these while reading glTF/FBX and converts
+    // them to ArrayMesh/MeshInstance3D at the end. They exist in ClassDB
+    // because `EditorScenePostImport` hooks receive the *pre-conversion* tree
+    // and manipulate them by name — so a post-import script that does
+    // `node is ImporterMeshInstance3D` needs the class chain to resolve.
+    //
+    // Parents, method names and arities are generated from `extension_api.json`;
+    // property defaults from `doc/classes/ImporterMeshInstance3D.xml`.
+    //
+    // ⚠️ `ImporterMesh` inherits **Resource**, not Mesh. It is not a Mesh and
+    // cannot be assigned where one is expected — `get_mesh()` is precisely the
+    // conversion that produces a real `ArrayMesh`.
+    register_class(
+        ClassRegistration::new("ImporterMesh")
+            .parent("Resource")
+            .method(MethodInfo::new("add_blend_shape", 1))
+            .method(MethodInfo::new("get_blend_shape_count", 0))
+            .method(MethodInfo::new("get_blend_shape_name", 1))
+            .method(MethodInfo::new("set_blend_shape_mode", 1))
+            .method(MethodInfo::new("get_blend_shape_mode", 0))
+            // 7 args: primitive, arrays, blend_shapes, lods, material, name, flags.
+            .method(MethodInfo::new("add_surface", 7))
+            .method(MethodInfo::new("get_surface_count", 0))
+            .method(MethodInfo::new("get_surface_primitive_type", 1))
+            .method(MethodInfo::new("get_surface_name", 1))
+            .method(MethodInfo::new("get_surface_arrays", 1))
+            .method(MethodInfo::new("get_surface_blend_shape_arrays", 2))
+            .method(MethodInfo::new("get_surface_lod_count", 1))
+            .method(MethodInfo::new("get_surface_lod_size", 2))
+            .method(MethodInfo::new("get_surface_lod_indices", 2))
+            .method(MethodInfo::new("get_surface_material", 1))
+            .method(MethodInfo::new("get_surface_format", 1))
+            .method(MethodInfo::new("set_surface_name", 2))
+            .method(MethodInfo::new("set_surface_material", 2))
+            .method(MethodInfo::new("generate_lods", 3))
+            // ⚠️ arity 1, not 0 — `get_mesh(base_mesh)` takes an optional
+            // ArrayMesh to fill. Registering it as 0 would make a correct
+            // one-argument call look like an arity error.
+            .method(MethodInfo::new("get_mesh", 1))
+            .method(MethodInfo::new("from_mesh", 1))
+            .method(MethodInfo::new("clear", 0))
+            .method(MethodInfo::new("set_lightmap_size_hint", 1))
+            .method(MethodInfo::new("get_lightmap_size_hint", 0)),
+    );
+
+    // ⚠️ Inherits **Node3D**, not GeometryInstance3D — which is why it carries
+    // its own `layer_mask` / `cast_shadow` / `visibility_range_*` copies rather
+    // than inheriting them. Parenting it to GeometryInstance3D would look
+    // tidier and would be wrong: it would silently grant it that base's whole
+    // surface, and `get_property_list` would report properties Godot does not.
+    register_class(
+        ClassRegistration::new("ImporterMeshInstance3D")
+            .parent("Node3D")
+            .property(PropertyInfo::new("mesh", Variant::Nil))
+            .property(PropertyInfo::new("skin", Variant::Nil))
+            .property(PropertyInfo::new(
+                "skeleton_path",
+                Variant::NodePath(gdcore::node_path::NodePath::empty()),
+            ))
+            .property(PropertyInfo::new("layer_mask", Variant::Int(1)))
+            // GeometryInstance3D.ShadowCastingSetting SHADOW_CASTING_SETTING_ON
+            // is 1 — the enum's zero is OFF, so a 0 default would silently stop
+            // every imported mesh casting shadows.
+            .property(PropertyInfo::new("cast_shadow", Variant::Int(1)))
+            .property(PropertyInfo::new(
+                "visibility_range_begin",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                "visibility_range_begin_margin",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                "visibility_range_end",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                "visibility_range_end_margin",
+                Variant::Float(0.0),
+            ))
+            .property(PropertyInfo::new(
+                "visibility_range_fade_mode",
+                Variant::Int(0),
+            ))
+            .method(MethodInfo::new("set_mesh", 1))
+            .method(MethodInfo::new("get_mesh", 0))
+            .method(MethodInfo::new("set_skin", 1))
+            .method(MethodInfo::new("get_skin", 0))
+            .method(MethodInfo::new("set_skeleton_path", 1))
+            .method(MethodInfo::new("get_skeleton_path", 0))
+            .method(MethodInfo::new("set_layer_mask", 1))
+            .method(MethodInfo::new("get_layer_mask", 0))
+            .method(MethodInfo::new("set_cast_shadows_setting", 1))
+            .method(MethodInfo::new("get_cast_shadows_setting", 0))
+            .method(MethodInfo::new("set_visibility_range_end_margin", 1))
+            .method(MethodInfo::new("get_visibility_range_end_margin", 0))
+            .method(MethodInfo::new("set_visibility_range_end", 1))
+            .method(MethodInfo::new("get_visibility_range_end", 0))
+            .method(MethodInfo::new("set_visibility_range_begin_margin", 1))
+            .method(MethodInfo::new("get_visibility_range_begin_margin", 0))
+            .method(MethodInfo::new("set_visibility_range_begin", 1))
+            .method(MethodInfo::new("get_visibility_range_begin", 0))
+            .method(MethodInfo::new("set_visibility_range_fade_mode", 1))
+            .method(MethodInfo::new("get_visibility_range_fade_mode", 0)),
+    );
+
     // -- Sprite3D family (pat-0q2kx.111) --
     //
     // `gdserver3d::sprite3d` builds the textured quad and `render_server_3d.rs`
@@ -3306,6 +3415,51 @@ pub fn register_3d_classes() {
                 .method(MethodInfo::new("get_caller_group_id", 0)),
         );
     }
+    if !class_exists("EngineProfiler") {
+        // pat-0q2kx.251 — the base a script extends to write a custom profiler
+        // that EngineDebugger drives.
+        //
+        // ⚠️ The bead says "inherits Object, abstract to subclass". BOTH halves
+        // are wrong, and the vendored source says so directly:
+        //   * `core/debugger/engine_profiler.h:36` is
+        //     `class EngineProfiler : public RefCounted` — and doc/classes
+        //     agrees (`inherits="RefCounted"`). Parenting to Object would cut
+        //     the class off from the ref-counted half of the chain.
+        //   * `core/register_core_types.cpp:296` is `GDREGISTER_CLASS`, not
+        //     `GDREGISTER_ABSTRACT_CLASS`. It is instantiable — registering it
+        //     abstract would make `EngineProfiler.new()` fail, and a base you
+        //     cannot construct is a strange base for the doc's "custom
+        //     profilers" story.
+        register_class(
+            ClassRegistration::new("EngineProfiler")
+                .parent("RefCounted")
+                // The three virtuals a subclass overrides. Arities from
+                // doc/classes/EngineProfiler.xml: _toggle(enable, options),
+                // _add_frame(data), _tick(frame, process, physics,
+                // physics_frame).
+                .method(MethodInfo::new("_toggle", 2))
+                .method(MethodInfo::new("_add_frame", 1))
+                .method(MethodInfo::new("_tick", 4)),
+        );
+    }
+    if !class_exists("TriangleMesh") {
+        // pat-0q2kx.256 — the CPU BVH a mesh raycast runs against. Implemented
+        // in `gdserver3d::triangle_mesh`; this is only the script-facing
+        // registration. `core/register_core_types.cpp:258` is GDREGISTER_CLASS,
+        // so it is concrete.
+        register_class(
+            ClassRegistration::new("TriangleMesh")
+                .parent("RefCounted")
+                // Arities from doc/classes/TriangleMesh.xml.
+                .method(MethodInfo::new("create_from_faces", 1))
+                .method(MethodInfo::new("get_faces", 0))
+                // intersect_ray(begin, dir) / intersect_segment(begin, end) —
+                // two params each, and NOT interchangeable: the segment form
+                // must miss a face beyond `end`.
+                .method(MethodInfo::new("intersect_ray", 2))
+                .method(MethodInfo::new("intersect_segment", 2)),
+        );
+    }
     if !class_exists("Expression") {
         // pat-0q2kx.207. RefCounted, like RegEx: `Expression.new()` then
         // `.parse(code, input_names)`. Arities from doc/classes/Expression.xml —
@@ -3318,6 +3472,35 @@ pub fn register_3d_classes() {
                 .method(MethodInfo::new("execute", 4))
                 .method(MethodInfo::new("has_execute_failed", 0))
                 .method(MethodInfo::new("get_error_text", 0)),
+        );
+    }
+    if !class_exists("ScriptBacktrace") {
+        // pat-0q2kx.253. RefCounted, produced by
+        // `Engine.capture_script_backtraces(include_variables)` — a script
+        // cannot construct one, it receives a captured snapshot. Every name and
+        // arity below is from doc/classes/ScriptBacktrace.xml rather than
+        // inferred: `format` takes (indent_all, indent_frames), the local and
+        // member accessors are indexed by (frame, index) while the global ones
+        // take a bare index, and only `get_frame_*` take a lone frame index.
+        register_class(
+            ClassRegistration::new("ScriptBacktrace")
+                .parent("RefCounted")
+                .method(MethodInfo::new("format", 2))
+                .method(MethodInfo::new("get_frame_count", 0))
+                .method(MethodInfo::new("get_frame_file", 1))
+                .method(MethodInfo::new("get_frame_function", 1))
+                .method(MethodInfo::new("get_frame_line", 1))
+                .method(MethodInfo::new("get_global_variable_count", 0))
+                .method(MethodInfo::new("get_global_variable_name", 1))
+                .method(MethodInfo::new("get_global_variable_value", 1))
+                .method(MethodInfo::new("get_language_name", 0))
+                .method(MethodInfo::new("get_local_variable_count", 1))
+                .method(MethodInfo::new("get_local_variable_name", 2))
+                .method(MethodInfo::new("get_local_variable_value", 2))
+                .method(MethodInfo::new("get_member_variable_count", 1))
+                .method(MethodInfo::new("get_member_variable_name", 2))
+                .method(MethodInfo::new("get_member_variable_value", 2))
+                .method(MethodInfo::new("is_empty", 0)),
         );
     }
     if !class_exists("RegEx") {
@@ -4994,6 +5177,40 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("param_type", Variant::Int(0))),
     );
     register_class(ClassRegistration::new("VisualShaderNodeTexture").parent("VisualShaderNode"));
+
+    // -- Canvas-SDF + screen-space nodes (pat-0q2kx.259) --------------------
+    //
+    // The `canvas_item` SDF vocabulary — `texture_sdf` / `texture_sdf_normal`,
+    // the two screen-UV<->SDF coordinate conversions and the raymarch helper —
+    // plus the spatial world-space screen normal.
+    //
+    // Registration only, which is the whole of this bead: the builtins these
+    // emit are downstream of the VisualShader code generator and the canvas SDF
+    // pass, neither of which exists yet.
+    //
+    // No properties or methods on any of them: every one of the six doc XMLs
+    // (`doc/classes/VisualShaderNode{TextureSDF,TextureSDFNormal,ScreenUVToSDF,
+    // SDFToScreenUV,SDFRaymarch,ScreenNormalWorldSpace}.xml`) declares an empty
+    // `<members>` and `<methods>`. They are marker nodes whose behaviour lives
+    // in the generator, so inventing ports here would be worse than declaring
+    // none — `class_exists` answers true either way, and a wrong shape would
+    // pass every existence check while corrupting a `.tres` round-trip.
+    register_class(ClassRegistration::new("VisualShaderNodeTextureSDF").parent("VisualShaderNode"));
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTextureSDFNormal").parent("VisualShaderNode"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeScreenUVToSDF").parent("VisualShaderNode"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeSDFToScreenUV").parent("VisualShaderNode"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeSDFRaymarch").parent("VisualShaderNode"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeScreenNormalWorldSpace").parent("VisualShaderNode"),
+    );
     register_class(
         ClassRegistration::new("VisualShaderNodeExpression")
             .parent("VisualShaderNode")
@@ -8050,6 +8267,39 @@ pub fn register_viewport_classes() {
         );
     }
 
+    // -- DPITexture (pat-0q2kx.260) ------------------------------------------
+    //
+    // An SVG-backed Texture2D that re-rasterizes per scale so theme icons stay
+    // crisp instead of bilinear-upscaling a fixed bitmap. Implemented in
+    // `gdresource::dpi_texture`; this is the script-facing registration.
+    // `scene/register_scene_types.cpp:1075` is GDREGISTER_CLASS — concrete,
+    // despite the class being marked experimental in 4.6.
+    if !class_exists("DPITexture") {
+        register_class(
+            ClassRegistration::new("DPITexture")
+                .parent("Texture2D")
+                // Arities from doc/classes/DPITexture.xml.
+                .method(MethodInfo::new("create_from_string", 4))
+                .method(MethodInfo::new("get_scaled_rid", 0))
+                .method(MethodInfo::new("get_source", 0))
+                .method(MethodInfo::new("set_source", 1))
+                .method(MethodInfo::new("set_size_override", 1))
+                .property(PropertyInfo::new("base_scale", Variant::Float(1.0)))
+                // ⚠️ Both scale-ish floats default to 1.0, not 0.0 — a zero
+                // base_scale would rasterize nothing, and zero saturation would
+                // render every icon grey.
+                .property(PropertyInfo::new("saturation", Variant::Float(1.0)))
+                .property(PropertyInfo::new(
+                    "color_map",
+                    Variant::Dictionary(Default::default()),
+                )),
+        );
+        // NOTE: `resource_local_to_scene` is listed on DPITexture in the docs
+        // but belongs to Resource, which already registers it. Declaring it
+        // again would duplicate the entry — `get_property_list` concatenates
+        // the inheritance chain WITHOUT deduping.
+    }
+
     // -- ExternalTexture (pat-nzgdu.209) -------------------------------------
     //
     // A texture backed by a platform external buffer — "as defined by
@@ -8744,6 +8994,168 @@ fn register_rendering_device_classes() {
         );
     }
 
+    // -- pipeline state + attachment format (pat-0q2kx.255) -----------------
+    //
+    // The six plain RefCounted property bags `render_pipeline_create` and
+    // `framebuffer_format_create` consume. All six are `GDREGISTER_CLASS` in
+    // servers/register_server_types.cpp:226-235 — concrete, not abstract, so a
+    // script may construct them.
+    //
+    // ⚠️ Defaults are from doc/classes/RD*.xml, and several are NOT zero. A
+    // property bag whose defaults are wrong is worse than a missing one: the
+    // pipeline it describes is silently different from the one the author
+    // asked for. The non-zero ones are called out individually below.
+
+    // One colour/depth attachment in a framebuffer format.
+    if !class_exists("RDAttachmentFormat") {
+        register_class(
+            ClassRegistration::new("RDAttachmentFormat")
+                .parent("RefCounted")
+                // ⚠️ 36, not 0 — DATA_FORMAT_R8G8B8A8_UNORM. Zero here would be
+                // DATA_FORMAT_R4G4_UNORM_PACK8.
+                .property(PropertyInfo::new("format", Variant::Int(36)))
+                .property(PropertyInfo::new("samples", Variant::Int(0)))
+                .property(PropertyInfo::new("usage_flags", Variant::Int(0))),
+        );
+    }
+
+    // Per-attachment blend equation. Registered before the state that holds an
+    // array of these, mirroring Godot's own registration order.
+    if !class_exists("RDPipelineColorBlendStateAttachment") {
+        register_class(
+            ClassRegistration::new("RDPipelineColorBlendStateAttachment")
+                .parent("RefCounted")
+                .property(PropertyInfo::new("enable_blend", Variant::Bool(false)))
+                .property(PropertyInfo::new("src_color_blend_factor", Variant::Int(0)))
+                .property(PropertyInfo::new("dst_color_blend_factor", Variant::Int(0)))
+                .property(PropertyInfo::new("color_blend_op", Variant::Int(0)))
+                .property(PropertyInfo::new("src_alpha_blend_factor", Variant::Int(0)))
+                .property(PropertyInfo::new("dst_alpha_blend_factor", Variant::Int(0)))
+                .property(PropertyInfo::new("alpha_blend_op", Variant::Int(0)))
+                // ⚠️ All four write masks default TRUE. Defaulting them false
+                // would produce a pipeline that renders nothing at all.
+                .property(PropertyInfo::new("write_r", Variant::Bool(true)))
+                .property(PropertyInfo::new("write_g", Variant::Bool(true)))
+                .property(PropertyInfo::new("write_b", Variant::Bool(true)))
+                .property(PropertyInfo::new("write_a", Variant::Bool(true))),
+        );
+    }
+
+    if !class_exists("RDPipelineColorBlendState") {
+        register_class(
+            ClassRegistration::new("RDPipelineColorBlendState")
+                .parent("RefCounted")
+                .property(PropertyInfo::new("enable_logic_op", Variant::Bool(false)))
+                .property(PropertyInfo::new("logic_op", Variant::Int(0)))
+                // ⚠️ Opaque black, not the all-zero Color a `Default` would give.
+                .property(PropertyInfo::new(
+                    "blend_constant",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                ))
+                .property(PropertyInfo::new("attachments", Variant::Array(Vec::new()))),
+        );
+    }
+
+    if !class_exists("RDPipelineDepthStencilState") {
+        register_class(
+            ClassRegistration::new("RDPipelineDepthStencilState")
+                .parent("RefCounted")
+                .property(PropertyInfo::new("enable_depth_test", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "enable_depth_write",
+                    Variant::Bool(false),
+                ))
+                // ⚠️ 7 = COMPARE_OP_ALWAYS. Zero would be COMPARE_OP_NEVER —
+                // a depth test that rejects every fragment.
+                .property(PropertyInfo::new("depth_compare_operator", Variant::Int(7)))
+                .property(PropertyInfo::new(
+                    "enable_depth_range",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("depth_range_min", Variant::Float(0.0)))
+                .property(PropertyInfo::new("depth_range_max", Variant::Float(0.0)))
+                .property(PropertyInfo::new("enable_stencil", Variant::Bool(false)))
+                // ⚠️ The stencil op triples default to 1 = STENCIL_OP_ZERO,
+                // and the compares to 7 = COMPARE_OP_ALWAYS. Neither is zero.
+                .property(PropertyInfo::new("front_op_fail", Variant::Int(1)))
+                .property(PropertyInfo::new("front_op_pass", Variant::Int(1)))
+                .property(PropertyInfo::new("front_op_depth_fail", Variant::Int(1)))
+                .property(PropertyInfo::new("front_op_compare", Variant::Int(7)))
+                .property(PropertyInfo::new("front_op_compare_mask", Variant::Int(0)))
+                .property(PropertyInfo::new("front_op_write_mask", Variant::Int(0)))
+                .property(PropertyInfo::new("front_op_reference", Variant::Int(0)))
+                .property(PropertyInfo::new("back_op_fail", Variant::Int(1)))
+                .property(PropertyInfo::new("back_op_pass", Variant::Int(1)))
+                .property(PropertyInfo::new("back_op_depth_fail", Variant::Int(1)))
+                .property(PropertyInfo::new("back_op_compare", Variant::Int(7)))
+                .property(PropertyInfo::new("back_op_compare_mask", Variant::Int(0)))
+                .property(PropertyInfo::new("back_op_write_mask", Variant::Int(0)))
+                .property(PropertyInfo::new("back_op_reference", Variant::Int(0))),
+        );
+    }
+
+    if !class_exists("RDPipelineMultisampleState") {
+        register_class(
+            ClassRegistration::new("RDPipelineMultisampleState")
+                .parent("RefCounted")
+                .property(PropertyInfo::new("sample_count", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "enable_sample_shading",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("min_sample_shading", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "enable_alpha_to_coverage",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "enable_alpha_to_one",
+                    Variant::Bool(false),
+                ))
+                // Typed `int[]` in the docs, carried as a plain Array here like
+                // every other typed-array property in this file.
+                .property(PropertyInfo::new(
+                    "sample_masks",
+                    Variant::Array(Vec::new()),
+                )),
+        );
+    }
+
+    if !class_exists("RDPipelineRasterizationState") {
+        register_class(
+            ClassRegistration::new("RDPipelineRasterizationState")
+                .parent("RefCounted")
+                .property(PropertyInfo::new(
+                    "enable_depth_clamp",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "discard_primitives",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("wireframe", Variant::Bool(false)))
+                .property(PropertyInfo::new("cull_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("front_face", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "depth_bias_enabled",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "depth_bias_constant_factor",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("depth_bias_clamp", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "depth_bias_slope_factor",
+                    Variant::Float(0.0),
+                ))
+                // ⚠️ 1.0, not 0.0 — a zero-width line draws nothing.
+                .property(PropertyInfo::new("line_width", Variant::Float(1.0)))
+                // ⚠️ 1, not 0 — zero control points is not a valid patch.
+                .property(PropertyInfo::new("patch_control_points", Variant::Int(1))),
+        );
+    }
+
     // Filtering/wrap/compare state for `sampler_create`.
     if !class_exists("RDSamplerState") {
         register_class(
@@ -9398,6 +9810,59 @@ pub fn register_io_classes() {
     }
     if !class_exists("RefCounted") {
         register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
+    // `Resource` is used as a parent below (`Script`, and `GDExtension` from
+    // pat-0q2kx.252) but was never bootstrapped here, unlike
+    // `register_2d_classes` / `register_3d_classes` / `register_viewport_classes`
+    // which all carry this exact guard. Without it, running *this* registration
+    // alone leaves every Resource subclass severed from the root:
+    // `inheritance_chain` only walks parents it can find, so
+    // `is_parent_class("GDExtension", "Resource")` would be false.
+    if !class_exists("Resource") {
+        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
+    }
+
+    // GDExtension / GDExtensionManager (pat-0q2kx.252). Godot:
+    // `class GDExtension : public Resource` (core/extension/gdextension.h:41) and
+    // `class GDExtensionManager : public Object` (gdextension_manager.h:38).
+    //
+    // Recognition only: the host parses `.gdextension` manifests and records each
+    // platform's library path and entry symbol, and executes nothing. The scope
+    // decision is recorded in `docs/THIRDPARTY_STRATEGY.md`.
+    if !class_exists("GDExtension") {
+        register_class(
+            ClassRegistration::new("GDExtension")
+                .parent("Resource")
+                .method(MethodInfo::new("is_library_open", 0))
+                .method(MethodInfo::new(
+                    "get_minimum_library_initialization_level",
+                    0,
+                )),
+        );
+    }
+    if !class_exists("GDExtensionManager") {
+        register_class(
+            ClassRegistration::new("GDExtensionManager")
+                .parent("Object")
+                // ⚠️ `gdextension_manager.h:54-58` is a plain enum numbering from
+                // 0, so FAILED is **1** and 2 is ALREADY_LOADED. This bead's own
+                // text says "LOAD_STATUS_FAILED (2)"; that number is wrong.
+                .enumeration(
+                    EnumInfo::new("LoadStatus")
+                        .constant("LOAD_STATUS_OK", 0)
+                        .constant("LOAD_STATUS_FAILED", 1)
+                        .constant("LOAD_STATUS_ALREADY_LOADED", 2)
+                        .constant("LOAD_STATUS_NOT_LOADED", 3)
+                        .constant("LOAD_STATUS_NEEDS_RESTART", 4),
+                )
+                .method(MethodInfo::new("load_extension", 1))
+                .method(MethodInfo::new("reload_extension", 1))
+                .method(MethodInfo::new("unload_extension", 1))
+                .method(MethodInfo::new("is_extension_loaded", 1))
+                .method(MethodInfo::new("get_loaded_extensions", 0))
+                .method(MethodInfo::new("get_extension", 1))
+                .signal(SignalInfo::new("extensions_reloaded")),
+        );
     }
 
     // -- Script / ScriptLanguage + the GDExtension hooks (pat-nzgdu.204) ---

@@ -19,7 +19,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -50,22 +54,22 @@ fn game_toolbar_renders_godot_controls() {
     let html = editor_html(port);
     for needle in [
         "id=\"game-toolbar\"",
-        "id=\"game-suspend\"",          // Suspend (SceneTree pause)
-        "id=\"game-next-frame\"",       // Next Frame
-        "id=\"game-speed\"",            // game speed
-        "id=\"game-reset-speed\"",      // Reset Speed
-        "id=\"game-input\"",            // node_type "Input"
+        "id=\"game-suspend\"",     // Suspend (SceneTree pause)
+        "id=\"game-next-frame\"",  // Next Frame
+        "id=\"game-speed\"",       // game speed
+        "id=\"game-reset-speed\"", // Reset Speed
+        "id=\"game-input\"",       // node_type "Input"
         ">Input<",
-        "id=\"game-node-2d\"",          // node_type "2D"
-        "id=\"game-node-3d\"",          // node_type "3D"
-        "id=\"game-select-single\"",    // SELECT_MODE_SINGLE
-        "id=\"game-select-list\"",      // SELECT_MODE_LIST
-        "id=\"game-hide-selection\"",   // hide_selection
-        "id=\"game-selection-options\"",// selection_options_menu
-        "id=\"game-mute\"",             // debug_mute_audio_button
-        "id=\"game-camera-override\"",  // camera_override_button
-        "id=\"game-camera-menu\"",      // camera_override_menu
-        "id=\"game-embed-options\"",    // embed_options_menu
+        "id=\"game-node-2d\"",           // node_type "2D"
+        "id=\"game-node-3d\"",           // node_type "3D"
+        "id=\"game-select-single\"",     // SELECT_MODE_SINGLE
+        "id=\"game-select-list\"",       // SELECT_MODE_LIST
+        "id=\"game-hide-selection\"",    // hide_selection
+        "id=\"game-selection-options\"", // selection_options_menu
+        "id=\"game-mute\"",              // debug_mute_audio_button
+        "id=\"game-camera-override\"",   // camera_override_button
+        "id=\"game-camera-menu\"",       // camera_override_menu
+        "id=\"game-embed-options\"",     // embed_options_menu
     ] {
         assert!(
             html.contains(needle),

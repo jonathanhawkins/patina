@@ -871,6 +871,40 @@ impl PackedScene {
             }
         }
 
+        // Resolve `texture_click_mask = SubResource("id")` on TextureButton to the
+        // BitMap's `data` payload, copied onto the node as `__click_mask__data`
+        // (pat-0q2kx.257).
+        //
+        // The real `texture_click_mask` property keeps its `SubResource:<id>`
+        // string so the scene round-trips and the inspector still shows a
+        // resource reference — the same split every companion above uses. The
+        // copy is what makes the mask *reachable*: the `SubResource:<id>` string
+        // carries no bits, so without it `control::texture_button_click_mask`
+        // has nothing to sample and every click passes.
+        //
+        // A `.tscn` writes the payload as
+        // `data = { "size": Vector2i(w, h), "data": PackedByteArray("<base64>") }`,
+        // which `parse_variant_value` turns into a Dictionary with those exact
+        // string keys — the shape `BitMap::from_data_dict` expects.
+        for tmpl in &mut templates {
+            let resolved = match tmpl.properties.get("texture_click_mask") {
+                Some(Variant::String(s)) => s.strip_prefix("SubResource:").and_then(|id| {
+                    // Gated on the sub-resource's type: `texture_click_mask` is
+                    // typed `BitMap` in Godot, and copying a non-BitMap's `data`
+                    // here would hand the hit test a payload it would silently
+                    // fail to decode.
+                    if sub_resources.get(id).map(String::as_str) != Some("BitMap") {
+                        return None;
+                    }
+                    sub_resource_props.get(id)?.get("data").cloned()
+                }),
+                _ => None,
+            };
+            if let Some(data) = resolved {
+                tmpl.properties.insert("__click_mask__data".into(), data);
+            }
+        }
+
         // Resolve `navigation_polygon` / `navigation_mesh` = SubResource("id") on
         // NavigationRegion2D/3D to the resource's real geometry, stored under
         // companion properties so the declared property keeps its

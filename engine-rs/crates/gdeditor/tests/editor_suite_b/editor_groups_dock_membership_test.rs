@@ -15,7 +15,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -50,7 +54,10 @@ fn http_request_str(port: u16, request: &str) -> String {
 }
 
 fn http_get(port: u16, path: &str) -> String {
-    http_request_str(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    http_request_str(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> String {
@@ -73,7 +80,14 @@ fn node_groups(port: u16, name: &str) -> (u64, Vec<String>) {
     let scene = json_ok(&http_get(port, "/api/scene"));
     fn walk(n: &serde_json::Value, name: &str) -> Option<(u64, Vec<String>)> {
         if n["name"] == serde_json::json!(name) {
-            let groups = n["groups"].as_array().map(|a| a.iter().filter_map(|g| g.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            let groups = n["groups"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|g| g.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
             return Some((n["id"].as_u64().unwrap(), groups));
         }
         for c in n["children"].as_array().into_iter().flatten() {
@@ -96,26 +110,55 @@ fn editor_groups_dock_membership() {
     assert!(groups0.is_empty(), "World starts in no groups");
 
     // Add to "enemies".
-    let add = json_ok(&http_post(port, "/api/node/groups/add", &format!(r#"{{"node_id":{world_id},"group":"enemies"}}"#)));
+    let add = json_ok(&http_post(
+        port,
+        "/api/node/groups/add",
+        &format!(r#"{{"node_id":{world_id},"group":"enemies"}}"#),
+    ));
     assert_eq!(add["ok"], serde_json::json!(true));
     assert_eq!(add["added"], serde_json::json!(true));
-    assert!(node_groups(port, "World").1.contains(&"enemies".to_string()), "World is now in 'enemies'");
+    assert!(
+        node_groups(port, "World")
+            .1
+            .contains(&"enemies".to_string()),
+        "World is now in 'enemies'"
+    );
 
     // Adding the same group again is idempotent.
-    let again = json_ok(&http_post(port, "/api/node/groups/add", &format!(r#"{{"node_id":{world_id},"group":"enemies"}}"#)));
-    assert_eq!(again["added"], serde_json::json!(false), "re-adding does not duplicate");
+    let again = json_ok(&http_post(
+        port,
+        "/api/node/groups/add",
+        &format!(r#"{{"node_id":{world_id},"group":"enemies"}}"#),
+    ));
+    assert_eq!(
+        again["added"],
+        serde_json::json!(false),
+        "re-adding does not duplicate"
+    );
 
     // Add a second group.
-    json_ok(&http_post(port, "/api/node/groups/add", &format!(r#"{{"node_id":{world_id},"group":"players"}}"#)));
+    json_ok(&http_post(
+        port,
+        "/api/node/groups/add",
+        &format!(r#"{{"node_id":{world_id},"group":"players"}}"#),
+    ));
     let mut g = node_groups(port, "World").1;
     g.sort();
     assert_eq!(g, vec!["enemies".to_string(), "players".to_string()]);
 
     // Remove "enemies".
-    let rem = json_ok(&http_post(port, "/api/node/groups/remove", &format!(r#"{{"node_id":{world_id},"group":"enemies"}}"#)));
+    let rem = json_ok(&http_post(
+        port,
+        "/api/node/groups/remove",
+        &format!(r#"{{"node_id":{world_id},"group":"enemies"}}"#),
+    ));
     assert_eq!(rem["ok"], serde_json::json!(true));
     let after = node_groups(port, "World").1;
-    assert_eq!(after, vec!["players".to_string()], "only 'players' remains after removing 'enemies'");
+    assert_eq!(
+        after,
+        vec!["players".to_string()],
+        "only 'players' remains after removing 'enemies'"
+    );
 
     handle.stop();
 }

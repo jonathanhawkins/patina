@@ -674,57 +674,55 @@ pub fn decode_midi_message(packet: &[u8], device: u32) -> Option<InputEvent> {
         return None;
     }
 
-    let mut event = InputEvent::Midi {
+    // Which fields a message fills is Godot's table, transcribed arm for arm
+    // from `MIDIDriver::send_event`. Anything a given message does not fill
+    // stays 0 — `InputEventMIDI` is one concrete class with one field set, so
+    // a NOTE_ON really does carry a `controller_number` of 0.
+    let mut pitch = 0u16;
+    let mut velocity = 0u8;
+    let mut controller_number = 0u8;
+    let mut controller_value = 0u8;
+    let mut instrument = 0u8;
+    let mut pressure = 0u8;
+
+    match message {
+        midi_message::NOTE_OFF | midi_message::NOTE_ON => {
+            pitch = u16::from(data[0]);
+            velocity = data[1];
+        }
+        midi_message::AFTERTOUCH => {
+            pitch = u16::from(data[0]);
+            pressure = data[1];
+        }
+        midi_message::CONTROL_CHANGE => {
+            controller_number = data[0];
+            controller_value = data[1];
+        }
+        midi_message::PROGRAM_CHANGE => instrument = data[0],
+        midi_message::CHANNEL_PRESSURE => pressure = data[0],
+        // 14-bit, LSB first: `(msb << 7) | lsb`. Note the operand order —
+        // reversing it still yields a number in range, so a swap looks like a
+        // wheel that moves erratically rather than like a decode bug.
+        midi_message::PITCH_BEND => {
+            pitch = (u16::from(data[1]) << 7) | u16::from(data[0]);
+        }
+        // QUARTER_FRAME / SONG_POSITION_POINTER / SONG_SELECT carry data Godot
+        // does not decode either; the message id still reaches the script,
+        // which is what Godot delivers.
+        _ => {}
+    }
+
+    Some(InputEvent::Midi {
         channel: midi_channel(status),
         message,
-        pitch: 0,
-        velocity: 0,
-        controller_number: 0,
-        controller_value: 0,
-        instrument: 0,
-        pressure: 0,
-        device,
-    };
-
-    if let InputEvent::Midi {
         pitch,
         velocity,
         controller_number,
         controller_value,
         instrument,
         pressure,
-        ..
-    } = &mut event
-    {
-        match message {
-            midi_message::NOTE_OFF | midi_message::NOTE_ON => {
-                *pitch = u16::from(data[0]);
-                *velocity = data[1];
-            }
-            midi_message::AFTERTOUCH => {
-                *pitch = u16::from(data[0]);
-                *pressure = data[1];
-            }
-            midi_message::CONTROL_CHANGE => {
-                *controller_number = data[0];
-                *controller_value = data[1];
-            }
-            midi_message::PROGRAM_CHANGE => *instrument = data[0],
-            midi_message::CHANNEL_PRESSURE => *pressure = data[0],
-            // 14-bit, LSB first: `(msb << 7) | lsb`. Note the operand order —
-            // reversing it still yields a number in range, so a swap looks like
-            // a wheel that moves erratically rather than like a decode bug.
-            midi_message::PITCH_BEND => {
-                *pitch = (u16::from(data[1]) << 7) | u16::from(data[0]);
-            }
-            // QUARTER_FRAME / SONG_POSITION_POINTER / SONG_SELECT carry data
-            // Godot does not decode either; the message id still reaches the
-            // script, which is what Godot delivers.
-            _ => {}
-        }
-    }
-
-    Some(event)
+        device,
+    })
 }
 
 // ---------------------------------------------------------------------------

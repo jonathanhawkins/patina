@@ -1358,6 +1358,65 @@ fn draw_grid_overlay(fb: &mut impl Raster, viewport: &Viewport3D) {
     }
 }
 
+/// Draws a `RootMotionView`'s counter-scrolled locomotion grid (pat-0q2kx.249).
+///
+/// Godot ground truth: `scene/animation/root_motion_view.cpp`. The grid is a flat
+/// plane of `cell_size` squares extending `radius` from the view, shifted by the
+/// wrapped root motion so it appears to slide under a character that is animating
+/// in place. Drawn through the same projected-line path as the editor's ground
+/// grid, so it fades with distance identically.
+///
+/// `offset` is already wrapped into one cell by `RootMotionView::grid_offset`, so
+/// subtracting it counter-scrolls: the character walks +Z, the grid slides −Z.
+fn draw_root_motion_grid(
+    fb: &mut impl Raster,
+    viewport: &Viewport3D,
+    grid: &RootMotionGridOverlay,
+) {
+    // A non-positive cell would divide the plane into nothing (and `radius` 0
+    // leaves no extent to draw), so there is no grid to show.
+    if grid.cell_size <= 0.0 || grid.radius <= 0.0 || !grid.cell_size.is_finite() {
+        return;
+    }
+    // Bound the line count: a tiny cell against a large radius would otherwise
+    // emit unboundedly many segments for a gizmo.
+    const MAX_LINES_PER_AXIS: i32 = 64;
+    let half = (grid.radius / grid.cell_size).floor() as i32;
+    let half = half.clamp(1, MAX_LINES_PER_AXIS);
+    let extent = half as f32 * grid.cell_size;
+    let fade_dist = extent * 2.0;
+    // Counter-scroll, and keep the plane at the view's height.
+    let ox = -grid.offset.x;
+    let oz = -grid.offset.z;
+    let y = grid.offset.y;
+    let view = viewport.camera.view_transform();
+
+    for i in -half..=half {
+        let d = i as f32 * grid.cell_size;
+        // Lines running along Z (constant X), and along X (constant Z).
+        draw_grid_segment(
+            fb,
+            viewport,
+            &view,
+            Vector3::new(ox + d, y, oz - extent),
+            Vector3::new(ox + d, y, oz + extent),
+            grid.color,
+            grid.color.a,
+            fade_dist,
+        );
+        draw_grid_segment(
+            fb,
+            viewport,
+            &view,
+            Vector3::new(ox - extent, y, oz + d),
+            Vector3::new(ox + extent, y, oz + d),
+            grid.color,
+            grid.color.a,
+            fade_dist,
+        );
+    }
+}
+
 /// Overlay geometry collected while building the render list. These are drawn as
 /// projected anti-aliased lines *over* the rasterized mesh frame, so both the
 /// software and GPU editor render paths produce the same gizmos/selection chrome
@@ -1371,6 +1430,28 @@ struct EditorOverlays3D {
     node_gizmos: Vec<(Transform3D, PrimitiveShape)>,
     /// CollisionShape3D wireframe gizmos.
     collision_gizmos: Vec<(Transform3D, CollisionShapeKind, Vector3)>,
+    /// The `RootMotionView` locomotion grid, if the scene has one
+    /// (pat-0q2kx.249).
+    root_motion_grid: Option<RootMotionGridOverlay>,
+}
+
+/// A `RootMotionView`'s counter-scrolled floor grid, snapshotted for the draw
+/// step (pat-0q2kx.249).
+///
+/// Godot ground truth: `scene/animation/root_motion_view.cpp` — an **editor-only**
+/// visualisation. The grid scrolls *opposite* the AnimationMixer's root motion so
+/// an animator can inspect locomotion while the character stays put.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RootMotionGridOverlay {
+    /// Where the grid sits this frame: the root motion wrapped into one cell, so
+    /// the pattern slides continuously instead of running away from the origin.
+    pub offset: Vector3,
+    /// The node's `color`.
+    pub color: Color,
+    /// Spacing between grid lines.
+    pub cell_size: f32,
+    /// How far the grid extends from its centre, in cells.
+    pub radius: f32,
 }
 
 /// Snapshot of the tree-dependent inputs the editor 3D render needs: the render
@@ -1387,6 +1468,10 @@ pub struct Editor3DRenderInputs {
     pub scene_lights: Vec<SceneLight3D>,
     /// The scene's environment-effect nodes (pat-0q2kx.132).
     pub env_effects: SceneEnvEffects3D,
+    /// The `RootMotionView` grid, or `None` when the scene has no such node
+    /// (pat-0q2kx.249). Cleared by [`strip_editor_only_items`] so a game frame
+    /// never shows it.
+    pub root_motion_grid: Option<RootMotionGridOverlay>,
 }
 
 /// The `FogVolume` / `Decal` / `ReflectionProbe` / `OccluderInstance3D` nodes of
@@ -1421,6 +1506,87 @@ pub fn editor_3d_render_inputs(viewport: &Viewport3D, tree: &SceneTree) -> Edito
         items: viewport.build_render_list(tree),
         scene_lights: scene_lights(tree),
         env_effects: scene_env_effects(tree),
+        root_motion_grid: root_motion_grid(tree),
+    }
+}
+
+/// The scene's `RootMotionView` grid, counter-scrolled by its AnimationMixer's
+/// root motion (pat-0q2kx.249).
+///
+/// **Why this needs no stored scroll state.** Root motion is not kept in an
+/// accumulator anywhere: `SceneTree::process_animations` applies each delta
+/// straight onto the mixer's root node (`apply_root_motion_delta`), so the node's
+/// *current position* already is the accumulated travel. Reading it per frame and
+/// wrapping gives the same scroll Godot shows, with nothing to keep between
+/// frames and no `&mut SceneTree` — which is what lets this run inside the
+/// read-only input snapshot.
+///
+/// `animation_path` names the mixer; the mixer's `root_node` (default `"."`, i.e.
+/// the mixer itself) is the node root motion moves.
+fn root_motion_grid(tree: &SceneTree) -> Option<RootMotionGridOverlay> {
+    use gdscene::root_motion_view::RootMotionView;
+
+    let view_id = tree.all_nodes_in_tree_order().into_iter().find(|id| {
+        tree.get_node(*id)
+            .is_some_and(|n| n.class_name() == "RootMotionView")
+    })?;
+    let view_node = tree.get_node(view_id)?;
+
+    let mut view = RootMotionView::new();
+    if let gdvariant::Variant::Float(f) = view_node.get_property("cell_size") {
+        view.cell_size = f as f32;
+    }
+    if let gdvariant::Variant::Float(f) = view_node.get_property("radius") {
+        view.radius = f as f32;
+    }
+    let color = match view_node.get_property("color") {
+        gdvariant::Variant::Color(c) => c,
+        // `root_motion_view.h:44` — Color(0.5, 0.5, 1.0), i.e. fully opaque.
+        _ => Color::new(0.5, 0.5, 1.0, 1.0),
+    };
+
+    // Resolve `animation_path` -> mixer -> the node root motion drives. A missing
+    // or unresolvable path leaves the grid parked at the origin rather than
+    // hiding it: Godot still draws the grid, it simply does not scroll.
+    let travel = animation_path_root_position(tree, view_id, view_node).unwrap_or(Vector3::ZERO);
+    view.accumulate(&gdscene::animation::RootMotionDelta {
+        position: travel,
+        rotation_y: 0.0,
+    });
+
+    Some(RootMotionGridOverlay {
+        offset: view.grid_offset(),
+        color,
+        cell_size: view.cell_size,
+        radius: view.radius,
+    })
+}
+
+/// The position of the node the `RootMotionView`'s mixer drives, if it resolves.
+fn animation_path_root_position(
+    tree: &SceneTree,
+    view_id: NodeId,
+    view_node: &gdscene::node::Node,
+) -> Option<Vector3> {
+    let path = match view_node.get_property("animation_path") {
+        gdvariant::Variant::NodePath(p) => p.to_string(),
+        gdvariant::Variant::String(s) => s,
+        _ => return None,
+    };
+    if path.is_empty() {
+        return None;
+    }
+    let mixer = tree.get_node_or_null(view_id, &path)?;
+    // `root_node` defaults to "." — the mixer itself.
+    let root_path = match tree.get_node(mixer).map(|n| n.get_property("root_node")) {
+        Some(gdvariant::Variant::NodePath(p)) => p.to_string(),
+        Some(gdvariant::Variant::String(s)) if !s.is_empty() => s,
+        _ => ".".to_string(),
+    };
+    let root = tree.get_node_or_null(mixer, &root_path).unwrap_or(mixer);
+    match tree.get_node(root).map(|n| n.get_property("position")) {
+        Some(gdvariant::Variant::Vector3(v)) => Some(v),
+        _ => None,
     }
 }
 
@@ -1638,6 +1804,10 @@ fn populate_editor_scene_3d(
     viewport: &Viewport3D,
     items: &[Render3DItem],
     env_effects: &SceneEnvEffects3D,
+    // Carried through rather than recomputed: this function has no SceneTree, so
+    // the grid is snapshotted upstream in `editor_3d_render_inputs`
+    // (pat-0q2kx.249).
+    root_motion_grid: Option<RootMotionGridOverlay>,
 ) -> EditorOverlays3D {
     // Environment effects first: `is_occluded` runs during the instance draw
     // loop, so the occluders have to be in place before the meshes are, or the
@@ -1723,6 +1893,7 @@ fn populate_editor_scene_3d(
         primary_tf,
         node_gizmos,
         collision_gizmos,
+        root_motion_grid,
     }
 }
 
@@ -1853,6 +2024,11 @@ fn draw_editor_overlays_3d(
     // --- Ground grid + origin axes, projected as crisp anti-aliased lines. ---
     draw_grid_overlay(fb, viewport);
 
+    // --- RootMotionView's counter-scrolled locomotion grid (pat-0q2kx.249). ---
+    if let Some(grid) = &overlays.root_motion_grid {
+        draw_root_motion_grid(fb, viewport, grid);
+    }
+
     // --- Per-node gizmos: camera frustums and light direction rays. ---
     for (tf, shape) in &overlays.node_gizmos {
         match shape {
@@ -1968,6 +2144,11 @@ pub fn strip_editor_only_items(inputs: &mut Editor3DRenderInputs) {
     // a game frame (pat-0q2kx.110). Dropping them here rather than at collection
     // is what lets one snapshot serve both paths.
     inputs.scene_lights.retain(|light| !light.editor_only);
+    // RootMotionView is an editor-only visualisation and hides at runtime
+    // (pat-0q2kx.249). The software Play path already never calls
+    // `draw_editor_overlays_3d`, but the GPU Play path builds its own inputs
+    // through here, so clearing it is what makes the guarantee hold for both.
+    inputs.root_motion_grid = None;
 }
 
 /// The render layers a spatial node is drawn on — `VisualInstance3D.layers`,
@@ -2081,8 +2262,13 @@ fn render_editor_3d_frame_from_inputs(
     let height = viewport.height.max(1);
     let mut renderer = SoftwareRenderer3D::new();
 
-    let overlays =
-        populate_editor_scene_3d(&mut renderer, viewport, &inputs.items, &inputs.env_effects);
+    let overlays = populate_editor_scene_3d(
+        &mut renderer,
+        viewport,
+        &inputs.items,
+        &inputs.env_effects,
+        inputs.root_motion_grid,
+    );
     setup_editor_lighting_3d(&mut renderer, viewport, &inputs.scene_lights);
 
     // --- Render from the editor camera. Godot's "Preview Environment" toolbar
@@ -2188,8 +2374,13 @@ pub fn render_editor_3d_frame_gpu(
         // lock (the caller snapshotted `inputs` under it), so `/api` handlers stay
         // responsive during the render.
         renderer.reset_scene();
-        let overlays =
-            populate_editor_scene_3d(&mut *renderer, viewport, &inputs.items, &inputs.env_effects);
+        let overlays = populate_editor_scene_3d(
+            &mut *renderer,
+            viewport,
+            &inputs.items,
+            &inputs.env_effects,
+            inputs.root_motion_grid,
+        );
         setup_editor_lighting_3d(&mut *renderer, viewport, &inputs.scene_lights);
         let mut rv = editor_render_viewport(viewport, width, height);
         // Same environment as the software path: the GPU renderer draws the

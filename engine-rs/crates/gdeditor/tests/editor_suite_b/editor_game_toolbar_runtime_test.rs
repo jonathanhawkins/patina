@@ -17,7 +17,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -51,7 +55,10 @@ fn http(port: u16, req: &str) -> String {
 }
 
 fn http_get(port: u16, path: &str) -> String {
-    http(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    http(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> String {
@@ -81,24 +88,70 @@ fn game_view_toolbar_controls_running_game() {
     assert!(http_post(port, "/api/runtime/play", "{}").contains("200 OK"));
 
     // Suspend pauses the SceneTree.
-    assert_eq!(body_json(&http_post(port, "/api/runtime/suspend", r#"{"suspended":true}"#))["suspended"], serde_json::json!(true));
+    assert_eq!(
+        body_json(&http_post(
+            port,
+            "/api/runtime/suspend",
+            r#"{"suspended":true}"#
+        ))["suspended"],
+        serde_json::json!(true)
+    );
     let ss = status(port);
     assert_eq!(ss["suspended"], serde_json::json!(true));
-    assert_eq!(ss["paused"], serde_json::json!(true), "suspend pauses the SceneTree");
+    assert_eq!(
+        ss["paused"],
+        serde_json::json!(true),
+        "suspend pauses the SceneTree"
+    );
 
     // Speed control changes / resets the time scale.
-    assert_eq!(body_json(&http_post(port, "/api/runtime/time_scale", r#"{"scale":2.0}"#))["time_scale"], serde_json::json!(2.0));
+    assert_eq!(
+        body_json(&http_post(
+            port,
+            "/api/runtime/time_scale",
+            r#"{"scale":2.0}"#
+        ))["time_scale"],
+        serde_json::json!(2.0)
+    );
     assert_eq!(status(port)["time_scale"], serde_json::json!(2.0));
-    assert_eq!(body_json(&http_post(port, "/api/runtime/time_scale", "{}"))["time_scale"], serde_json::json!(1.0), "reset returns to 1.0");
+    assert_eq!(
+        body_json(&http_post(port, "/api/runtime/time_scale", "{}"))["time_scale"],
+        serde_json::json!(1.0),
+        "reset returns to 1.0"
+    );
 
     // Input / 2D / 3D switch the interaction mode.
-    assert_eq!(body_json(&http_post(port, "/api/runtime/input_mode", r#"{"mode":"2d"}"#))["input_mode"], serde_json::json!("2d"));
+    assert_eq!(
+        body_json(&http_post(
+            port,
+            "/api/runtime/input_mode",
+            r#"{"mode":"2d"}"#
+        ))["input_mode"],
+        serde_json::json!("2d")
+    );
     assert_eq!(status(port)["input_mode"], serde_json::json!("2d"));
 
     // Hide Selection, Camera Override, Mute act on the session.
-    assert_eq!(body_json(&http_post(port, "/api/runtime/hide_selection", r#"{"hidden":true}"#))["hide_selection"], serde_json::json!(true));
-    assert_eq!(body_json(&http_post(port, "/api/runtime/camera_override", r#"{"enabled":true}"#))["camera_override"], serde_json::json!(true));
-    assert_eq!(body_json(&http_post(port, "/api/runtime/mute", r#"{"muted":true}"#))["muted"], serde_json::json!(true));
+    assert_eq!(
+        body_json(&http_post(
+            port,
+            "/api/runtime/hide_selection",
+            r#"{"hidden":true}"#
+        ))["hide_selection"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        body_json(&http_post(
+            port,
+            "/api/runtime/camera_override",
+            r#"{"enabled":true}"#
+        ))["camera_override"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        body_json(&http_post(port, "/api/runtime/mute", r#"{"muted":true}"#))["muted"],
+        serde_json::json!(true)
+    );
     let sf = status(port);
     assert_eq!(sf["hide_selection"], serde_json::json!(true));
     assert_eq!(sf["camera_override"], serde_json::json!(true));
@@ -110,10 +163,18 @@ fn game_view_toolbar_controls_running_game() {
     // The served toolbar wires the buttons to the runtime endpoints.
     let html = http_get(port, "/editor");
     for needle in [
-        "id=\"game-suspend\"", "id=\"game-speed\"", "id=\"game-reset-speed\"",
-        "id=\"game-mute\"", "id=\"game-camera-override\"", "id=\"game-hide-selection\"",
-        "/api/runtime/suspend", "/api/runtime/time_scale", "/api/runtime/mute",
-        "/api/runtime/input_mode", "/api/runtime/camera_override", "/api/runtime/hide_selection",
+        "id=\"game-suspend\"",
+        "id=\"game-speed\"",
+        "id=\"game-reset-speed\"",
+        "id=\"game-mute\"",
+        "id=\"game-camera-override\"",
+        "id=\"game-hide-selection\"",
+        "/api/runtime/suspend",
+        "/api/runtime/time_scale",
+        "/api/runtime/mute",
+        "/api/runtime/input_mode",
+        "/api/runtime/camera_override",
+        "/api/runtime/hide_selection",
     ] {
         assert!(html.contains(needle), "game toolbar missing `{needle}`");
     }

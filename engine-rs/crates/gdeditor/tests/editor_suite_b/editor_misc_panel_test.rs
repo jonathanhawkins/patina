@@ -18,7 +18,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -52,7 +56,10 @@ fn http(port: u16, req: &str) -> String {
 }
 
 fn http_get(port: u16, path: &str) -> String {
-    http(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    http(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> String {
@@ -92,7 +99,10 @@ fn misc_panel_serves_godot_form() {
     }
 
     // The old ad-hoc text dump must be gone (1:1 with Godot, no "Frames Captured").
-    assert!(!html.contains("Frames Captured"), "misc tab should not show Godot-absent 'Frames Captured'");
+    assert!(
+        !html.contains("Frames Captured"),
+        "misc tab should not show Godot-absent 'Frames Captured'"
+    );
 
     handle.stop();
 }
@@ -117,7 +127,11 @@ fn live_edit_root_set_and_clear() {
     let (handle, port) = make_server();
 
     // "Set From Tree" persists the selected node path.
-    let set = body_json(&http_post(port, "/api/debug/live_edit_root", r#"{"path":"/root/World"}"#));
+    let set = body_json(&http_post(
+        port,
+        "/api/debug/live_edit_root",
+        r#"{"path":"/root/World"}"#,
+    ));
     assert_eq!(set["live_edit_root"], serde_json::json!("/root/World"));
     assert_eq!(
         body_json(&http_get(port, "/api/debug/info"))["misc"]["live_edit_root"],
@@ -126,7 +140,11 @@ fn live_edit_root_set_and_clear() {
     );
 
     // "Clear" (empty/missing path) resets to "/root".
-    let cleared = body_json(&http_post(port, "/api/debug/live_edit_root", r#"{"path":""}"#));
+    let cleared = body_json(&http_post(
+        port,
+        "/api/debug/live_edit_root",
+        r#"{"path":""}"#,
+    ));
     assert_eq!(cleared["live_edit_root"], serde_json::json!("/root"));
     assert_eq!(
         body_json(&http_get(port, "/api/debug/info"))["misc"]["live_edit_root"],

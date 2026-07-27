@@ -170,7 +170,10 @@ fn editor_filesystem_bare_get_responds() {
     let body = extract_body(&resp);
     let v: serde_json::Value = serde_json::from_str(body)
         .unwrap_or_else(|e| panic!("response body must be JSON: {e}; body={body}"));
-    assert!(v["root"].is_string(), "response must have a root path string");
+    assert!(
+        v["root"].is_string(),
+        "response must have a root path string"
+    );
     assert!(v["files"].is_array(), "response must have a files array");
 
     // The build directory must be skipped entirely — directly verifies the fix
@@ -209,7 +212,10 @@ fn editor_filesystem_bare_get_no_handler_leak() {
         "/api/project/open",
         &format!(r#"{{"path":"{}"}}"#, project_path.replace('\\', "\\\\")),
     );
-    assert!(open.contains("200 OK"), "project open should succeed: {open}");
+    assert!(
+        open.contains("200 OK"),
+        "project open should succeed: {open}"
+    );
 
     let start = Instant::now();
     for i in 0..50 {

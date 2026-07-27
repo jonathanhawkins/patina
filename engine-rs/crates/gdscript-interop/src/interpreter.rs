@@ -2036,6 +2036,54 @@ impl Interpreter {
     // -----------------------------------------------------------------------
 
     /// Dispatches the `XRServer` singleton (pat-0q2kx.236).
+    /// Godot `Engine.capture_script_backtraces(include_variables = false)`.
+    ///
+    /// Returns an Array holding one `ScriptBacktrace` per script language.
+    /// GDScript is the only language here, so the array holds exactly one
+    /// handle — but it stays an Array so a script written against Godot
+    /// indexes it the same way.
+    ///
+    /// Inherent rather than an arm inside `call_engine_static`, because that is
+    /// a free function and cannot reach `self.call_stack_frames`
+    /// (pat-0q2kx.253).
+    fn capture_script_backtraces(&mut self, args: &[Variant]) -> Result<Variant, RuntimeError> {
+        let include_variables = matches!(args.first(), Some(Variant::Bool(true)));
+        let frames: Vec<crate::script_backtrace::BacktraceFrame> = self
+            .call_stack_frames
+            .iter()
+            .map(|f| crate::script_backtrace::BacktraceFrame {
+                function: f.function_name.clone(),
+                // `SourceLocation` carries line and column but no file, so this
+                // is empty until a script path is threaded through.
+                file: String::new(),
+                line: f
+                    .source_location
+                    .as_ref()
+                    .map(|l| l.line as i64)
+                    .unwrap_or(0),
+                // `include_variables` is accepted but yields nothing: honestly
+                // populating these needs the per-frame environment scope chain,
+                // which `call_stack_frames` does not record. An empty list is
+                // truthful; invented values would not be.
+                locals: Vec::new(),
+                members: Vec::new(),
+            })
+            .collect();
+        let _ = include_variables;
+
+        let backtrace =
+            crate::script_backtrace::ScriptBacktrace::from_call_stack("GDScript", frames);
+        let raw = NEXT_SCRIPT_BACKTRACE.with(|n| {
+            let v = n.get();
+            n.set(v + 1);
+            v
+        }) | SCRIPT_BACKTRACE_HANDLE_TAG;
+        crate::script_backtrace::insert(raw, backtrace);
+        Ok(Variant::Array(vec![Variant::ObjectId(
+            gdcore::id::ObjectId::from_raw(raw),
+        )]))
+    }
+
     fn call_xr_server_static(
         &mut self,
         method: &str,
@@ -2705,6 +2753,11 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "Input") {
                             return self.call_input_method(member, &evaluated_args);
                         }
+                        // GDExtensionManager singleton: the .gdextension registry
+                        // (pat-0q2kx.252). Recognition only — nothing is dlopen'd.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "GDExtensionManager") {
+                            return call_gdextensionmanager_static(member, &evaluated_args);
+                        }
                         // RenderingServer singleton: raw canvas items a script can
                         // draw into without nodes (pat-0q2kx.213).
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "RenderingServer") {
@@ -2739,6 +2792,12 @@ impl Interpreter {
                             return call_os_static(member, &evaluated_args);
                         }
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "Engine") {
+                            // `capture_script_backtraces` is intercepted before
+                            // the free `call_engine_static`, which cannot see
+                            // `self.call_stack_frames` (pat-0q2kx.253).
+                            if member == "capture_script_backtraces" {
+                                return self.capture_script_backtraces(&evaluated_args);
+                            }
                             return call_engine_static(member, &evaluated_args);
                         }
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "Time") {
@@ -2807,7 +2866,7 @@ impl Interpreter {
                         // the real gdcore::debugger. `is_active()` is false
                         // until a session attaches, matching Godot.
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "EngineDebugger") {
-                            return call_enginedebugger_static(member, &evaluated_args);
+                            return self.call_enginedebugger(member, &evaluated_args);
                         }
                         // FramebufferCacheRD (pat-nzgdu.210) — a static helper
                         // over a RenderingDevice that does not exist here, so it
@@ -7353,6 +7412,11 @@ impl Interpreter {
                 let access = self.scene_access.as_deref_mut();
                 return call_undo_redo_instance(*oid, method, args, access);
             }
+            if is_script_backtrace_handle(*oid) {
+                // Free-standing: the getters read the captured snapshot only
+                // (pat-0q2kx.253).
+                return call_script_backtrace_instance(*oid, method, args);
+            }
             if is_xr_interface_handle(*oid) {
                 return self.call_xr_interface_instance(*oid, method, args);
             }
@@ -11275,6 +11339,73 @@ impl Interpreter {
         result
     }
 
+    /// `EngineDebugger.<method>(…)` (pat-0q2kx.251).
+    ///
+    /// Most of the singleton is pure state and lives in the free
+    /// [`call_enginedebugger_static`]. Two arms additionally drive a registered
+    /// `EngineProfiler` subclass's virtuals, which needs the interpreter — so
+    /// they route through here.
+    ///
+    /// State is written FIRST and the virtual dispatched after, so a `_toggle`
+    /// body that asks `EngineDebugger.is_profiling(name)` sees the new value,
+    /// as it would in Godot (`EngineDebugger::profiler_enable` flips the
+    /// profiler's `active` before invoking the toggle callable).
+    fn call_enginedebugger(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        let result = call_enginedebugger_static(method, args)?;
+        match method {
+            "profiler_enable" => {
+                let name = debug_name_arg(args, 0, "profiler_enable")?;
+                let enable = debug_bool_arg(args, 1, "profiler_enable")?;
+                // `profiler_enable(name, enable, arguments = [])` — the third
+                // argument is what `_toggle` receives as `options`
+                // (doc/classes/EngineDebugger.xml). Absent means an empty
+                // Array, NOT Nil: `_toggle` is typed `(bool, Array)`.
+                let options = match args.get(2) {
+                    Some(Variant::Array(a)) => a.clone(),
+                    _ => Vec::new(),
+                };
+                self.dispatch_profiler_virtual(
+                    &name,
+                    "_toggle",
+                    &[Variant::Bool(enable), Variant::Array(options)],
+                );
+            }
+            "profiler_add_frame_data" => {
+                let name = debug_name_arg(args, 0, "profiler_add_frame_data")?;
+                // The static arm already rejected a non-Array, so this cannot
+                // fall back to empty on a bad call — it errored above.
+                let data = match args.get(1) {
+                    Some(Variant::Array(a)) => a.clone(),
+                    _ => Vec::new(),
+                };
+                self.dispatch_profiler_virtual(&name, "_add_frame", &[Variant::Array(data)]);
+            }
+            _ => {}
+        }
+        Ok(result)
+    }
+
+    /// Invokes `virtual_name` on the object bound to `profiler`, if one is bound
+    /// and it overrides that virtual (pat-0q2kx.251).
+    ///
+    /// Silent when nothing is bound or the subclass leaves the virtual
+    /// unimplemented — all three are optional overrides in Godot, so a profiler
+    /// that only wants `_add_frame` must not error on every `profiler_enable`.
+    fn dispatch_profiler_virtual(&mut self, profiler: &str, virtual_name: &str, args: &[Variant]) {
+        let Some(object) = engine_debugger_profiler_object(profiler) else {
+            return;
+        };
+        if let Some(access) = self.scene_access.as_mut() {
+            // `None` here means "no such override", which is the normal case —
+            // discarded on purpose rather than surfaced as an error.
+            let _ = access.call_script_method(object, virtual_name, args);
+        }
+    }
+
     fn call_instance_method_impl(
         &mut self,
         instance: &mut ClassInstance,
@@ -13957,6 +14088,7 @@ const BUILTIN_SINGLETONS: &[&str] = &[
     "DisplayServer",
     "Engine",
     "EngineDebugger",
+    "GDExtensionManager",
     "Input",
     "InputMap",
     "JavaScriptBridge",
@@ -14241,6 +14373,32 @@ fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
         "get_cache_dir" => Ok(Variant::String(gdplatform::os::cache_dir())),
         "get_temp_dir" => Ok(Variant::String(gdplatform::os::temp_dir())),
         "is_userfs_persistent" => Ok(Variant::Bool(gdplatform::os::is_userfs_persistent())),
+        // -- MIDI (pat-0q2kx.246) ------------------------------------------
+        //
+        // Godot's OS surface is three calls (`core/os/os.cpp:660-683`):
+        // `open` starts the host's MIDI access — `navigator.requestMIDIAccess`
+        // in the web export — the port names arrive **later** on a callback,
+        // and `close` clears them. None of the three touches the message
+        // stream; incoming messages reach a script through `_input`, not
+        // through here.
+        //
+        // The store behind these is `crate::midi_ports`, which is
+        // process-global rather than `thread_local` on purpose: the writer is
+        // an editor-server connection thread and the reader is the thread
+        // stepping the scene. See that module's docs.
+        "open_midi_inputs" => {
+            crate::midi_ports::open_inputs();
+            Ok(Variant::Nil)
+        }
+        "close_midi_inputs" => {
+            crate::midi_ports::close_inputs();
+            Ok(Variant::Nil)
+        }
+        // ⚠️ PackedStringArray, not Array — Godot's signature, and what
+        // `get_cmdline_args` above already returns for the same shape.
+        "get_connected_midi_inputs" => Ok(Variant::PackedStringArray(
+            crate::midi_ports::connected_inputs(),
+        )),
         // -- Blocking delays --
         "delay_msec" => {
             gdplatform::os::delay_msec(os_int_arg(args, 0, "OS.delay_msec()")?);
@@ -15058,6 +15216,12 @@ struct DebugProfilerState {
     enabled: bool,
     /// Frame data handed to `profiler_add_frame_data`, in arrival order.
     frames: Vec<Vec<Variant>>,
+    /// The `EngineProfiler` subclass instance passed to `register_profiler`,
+    /// as a raw object handle (pat-0q2kx.251). `None` when the profiler was
+    /// created implicitly by `profiler_enable` on an unregistered name, or
+    /// registered with a non-object — Godot's `register_profiler` takes a
+    /// `Callable` triple, ours takes the object that owns the virtuals.
+    object: Option<u64>,
 }
 
 thread_local! {
@@ -15144,6 +15308,19 @@ pub fn engine_debugger_profiler_frames(profiler: &str) -> Vec<Vec<Variant>> {
             .map(|s| s.frames.clone())
             .unwrap_or_default()
     })
+}
+
+/// The object bound to `profiler` by `register_profiler`, if any
+/// (pat-0q2kx.251).
+///
+/// Returns the handle rather than dispatching, so the caller reads it and lets
+/// the `DEBUG_PROFILERS` borrow END before invoking anything. A virtual that
+/// touches `EngineDebugger` — `is_profiling()` inside `_toggle` is the obvious
+/// case — would re-enter this map, and dispatching while still inside
+/// `borrow_mut` panics with `BorrowMutError`. Same decide-then-act shape as
+/// [`with_engine_debugger`]'s doc warning.
+fn engine_debugger_profiler_object(profiler: &str) -> Option<u64> {
+    DEBUG_PROFILERS.with(|p| p.borrow().get(profiler).and_then(|s| s.object))
 }
 
 /// Reads a `StringName`/`String` argument, which Godot's EngineDebugger uses for
@@ -15258,10 +15435,24 @@ fn call_enginedebugger_static(method: &str, args: &[Variant]) -> Result<Variant,
         // -- profilers
         "register_profiler" => {
             let name = debug_name_arg(args, 0, "register_profiler")?;
+            // The profiler OBJECT is the point of the call — it owns the
+            // `_toggle`/`_add_frame`/`_tick` virtuals the debugger drives. It
+            // used to be dropped on the floor here, which is why registering a
+            // subclass did nothing observable (pat-0q2kx.251).
+            let object = match args.get(1) {
+                Some(Variant::ObjectId(oid)) => Some(oid.raw()),
+                _ => None,
+            };
             // The trailing `;` matters: without it the closure would return the
             // `&mut` from `or_default()`, which borrows the temporary RefMut.
             DEBUG_PROFILERS.with(|p| {
-                p.borrow_mut().entry(name).or_default();
+                let mut map = p.borrow_mut();
+                let state = map.entry(name).or_default();
+                // Re-registering with no object must not silently unbind the
+                // one already there.
+                if object.is_some() {
+                    state.object = object;
+                }
             });
             Ok(Variant::Nil)
         }
@@ -16303,6 +16494,74 @@ fn call_crypto_instance(
 // ---------------------------------------------------------------------------
 
 /// Tag bits marking an `ObjectId` as an XR interface handle.
+/// pat-0q2kx.253. 0xE9 rather than 0xE7: that byte is already
+/// `SEMAPHORE_HANDLE_TAG`, and two families sharing a tag makes both
+/// `is_*_handle` predicates claim the same handles, misrouting every method call
+/// with no error anywhere.
+const SCRIPT_BACKTRACE_HANDLE_TAG: u64 = 0xE9_00_0000_0000_0000;
+
+thread_local! {
+    /// Handle ids for captured backtraces. The captures themselves live in the
+    /// process-global `script_backtrace` store, since a captured stack is an
+    /// inert value that a debugger may well read from another thread.
+    static NEXT_SCRIPT_BACKTRACE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+fn is_script_backtrace_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == SCRIPT_BACKTRACE_HANDLE_TAG
+}
+
+/// `ScriptBacktrace` instance methods.
+///
+/// Free-standing, unlike the XR and Thread dispatchers: every getter reads only
+/// the captured snapshot, so none of them needs the interpreter.
+fn call_script_backtrace_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let Some(bt) = crate::script_backtrace::get(id.raw()) else {
+        // The handle outlived its capture. Answer like an empty backtrace
+        // rather than raising: Godot hands these out as plain values and a
+        // script has no way to test liveness first.
+        return Ok(match method {
+            "get_frame_count" | "get_global_variable_count" => Variant::Int(0),
+            "is_empty" => Variant::Bool(true),
+            "get_language_name" | "format" => Variant::String(String::new()),
+            _ => Variant::Nil,
+        });
+    };
+    let int_arg = |i: usize| -> i64 {
+        match args.get(i) {
+            Some(Variant::Int(v)) => *v,
+            _ => 0,
+        }
+    };
+    Ok(match method {
+        "get_frame_count" => Variant::Int(bt.frame_count() as i64),
+        "is_empty" => Variant::Bool(bt.is_empty()),
+        "get_language_name" => Variant::String(bt.language_name().to_string()),
+        "get_frame_function" => Variant::String(bt.frame_function(int_arg(0))),
+        "get_frame_file" => Variant::String(bt.frame_file(int_arg(0))),
+        "get_frame_line" => Variant::Int(bt.frame_line(int_arg(0))),
+        "get_global_variable_count" => Variant::Int(bt.global_count() as i64),
+        "get_global_variable_name" => Variant::String(bt.global_name(int_arg(0))),
+        "get_global_variable_value" => bt.global_value(int_arg(0)),
+        "get_local_variable_count" => Variant::Int(bt.local_count(int_arg(0)) as i64),
+        "get_local_variable_name" => Variant::String(bt.local_name(int_arg(0), int_arg(1))),
+        "get_local_variable_value" => bt.local_value(int_arg(0), int_arg(1)),
+        "get_member_variable_count" => Variant::Int(bt.member_count(int_arg(0)) as i64),
+        "get_member_variable_name" => Variant::String(bt.member_name(int_arg(0), int_arg(1))),
+        "get_member_variable_value" => bt.member_value(int_arg(0), int_arg(1)),
+        "format" => Variant::String(bt.format(int_arg(0) as usize, int_arg(1) as usize)),
+        other => {
+            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "ScriptBacktrace has no method '{other}'"
+            ))))
+        }
+    })
+}
+
 const XR_INTERFACE_HANDLE_TAG: u64 = 0xE8_00_0000_0000_0000;
 
 thread_local! {
@@ -17555,6 +17814,71 @@ fn call_cameraserver_static(method: &str, args: &[Variant]) -> Result<Variant, R
 /// script calling it gets `UndefinedVariable("FramebufferCacheRD")` — the class
 /// resolves for reflection while the call does not, which is the gap the bead is
 /// about ("so scripts referencing it resolve").
+/// `GDExtensionManager.*` — the `.gdextension` registry (pat-0q2kx.252).
+///
+/// Godot ground truth: `doc/classes/GDExtensionManager.xml` over
+/// `core/extension/gdextension_manager.h`. This is **recognition only**: the host
+/// parses a manifest and records its per-platform library path and entry symbol;
+/// no library is `dlopen`'d and no native entry point runs. The scope decision is
+/// recorded in `THIRDPARTY_STRATEGY.md`, so the honest statuses are:
+/// a recognised manifest → `OK`, an unreadable one (or one with no library for
+/// this platform) → `FAILED`, a reload → `NEEDS_RESTART`.
+///
+/// ⚠️ `LoadStatus` numbers from **0** (`gdextension_manager.h:54-58`), so `FAILED`
+/// is **1** and `2` is `ALREADY_LOADED`. pat-0q2kx.252's acceptance text says
+/// "LOAD_STATUS_FAILED (2)"; that number is wrong and Patina follows Godot.
+fn call_gdextensionmanager_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    use gdcore::gdextension_host as host;
+
+    // Godot's target-platform names, as written in a `.gdextension`'s
+    // `[libraries]` keys.
+    fn current_platform() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(target_os = "windows") {
+            "windows"
+        } else if cfg!(target_arch = "wasm32") {
+            "web"
+        } else {
+            "linux"
+        }
+    }
+
+    let path_arg = |i: usize| -> String {
+        match args.get(i) {
+            Some(Variant::String(s)) => s.clone(),
+            Some(Variant::NodePath(p)) => p.to_string(),
+            _ => String::new(),
+        }
+    };
+
+    match method {
+        "load_extension" => Ok(Variant::Int(
+            host::load_extension(&path_arg(0), current_platform()).to_godot_int(),
+        )),
+        "reload_extension" => Ok(Variant::Int(
+            host::reload_extension(&path_arg(0)).to_godot_int(),
+        )),
+        "unload_extension" => Ok(Variant::Int(
+            host::unload_extension(&path_arg(0)).to_godot_int(),
+        )),
+        "is_extension_loaded" => Ok(Variant::Bool(host::is_extension_loaded(&path_arg(0)))),
+        // Godot returns a PackedStringArray; an empty registry is an empty array,
+        // not Nil.
+        "get_loaded_extensions" => Ok(Variant::PackedStringArray(host::loaded_extensions())),
+        // Godot hands back the GDExtension resource; with nothing loadable there is
+        // no object to return, so this reports the registered library path (or Nil
+        // when the manifest is not in the registry).
+        "get_extension" => Ok(match host::extension_library(&path_arg(0)) {
+            Some(lib) => Variant::String(lib),
+            None => Variant::Nil,
+        }),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("GDExtensionManager.{other}"),
+        ))),
+    }
+}
+
 fn call_framebuffercacherd_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
     match method {
         // (textures: RID[], passes: RDFramebufferPass[], views: int). The arity

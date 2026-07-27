@@ -6,9 +6,9 @@
 //! server's /api/import_settings + /api/reimport hooks and decodes a real PNG
 //! through the same `decode_png` path the editor's TextureCache uses.
 
+use gdcore::math::Color;
 use gdeditor::editor_server::{EditorServerHandle, EditorState};
 use gdrender2d::renderer::FrameBuffer;
-use gdcore::math::Color;
 use gdscene::node::Node;
 use gdscene::SceneTree;
 use std::io::{Read, Write};
@@ -17,7 +17,11 @@ use std::thread;
 use std::time::Duration;
 
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
@@ -51,7 +55,10 @@ fn http(port: u16, req: &str) -> String {
 }
 
 fn http_get(port: u16, path: &str) -> String {
-    http(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+    http(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 fn http_post(port: u16, path: &str, body: &str) -> String {
@@ -68,18 +75,56 @@ fn fs_dock_import_hooks() {
     let (handle, port) = make_server();
 
     // --- Import settings: a PNG is importable as a Texture2D ---
-    let imp = body_json(&http_get(port, "/api/import_settings?path=res%3A//hero.png"));
-    assert_eq!(imp["importable"], serde_json::json!(true), "PNG is importable");
-    assert_eq!(imp["importer"], serde_json::json!("Texture2D"), "Import As: Texture2D");
-    let presets: Vec<String> = imp["presets"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_string()).collect();
-    assert!(presets.iter().any(|p| p == "2D Pixel"), "texture import presets: {presets:?}");
-    let option_names: Vec<String> = imp["options"].as_array().unwrap().iter().map(|o| o["name"].as_str().unwrap_or("").to_string()).collect();
-    assert!(option_names.iter().any(|n| n == "compression"), "compression option present");
-    assert!(option_names.iter().any(|n| n == "filter"), "filter option present");
+    let imp = body_json(&http_get(
+        port,
+        "/api/import_settings?path=res%3A//hero.png",
+    ));
+    assert_eq!(
+        imp["importable"],
+        serde_json::json!(true),
+        "PNG is importable"
+    );
+    assert_eq!(
+        imp["importer"],
+        serde_json::json!("Texture2D"),
+        "Import As: Texture2D"
+    );
+    let presets: Vec<String> = imp["presets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        presets.iter().any(|p| p == "2D Pixel"),
+        "texture import presets: {presets:?}"
+    );
+    let option_names: Vec<String> = imp["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(
+        option_names.iter().any(|n| n == "compression"),
+        "compression option present"
+    );
+    assert!(
+        option_names.iter().any(|n| n == "filter"),
+        "filter option present"
+    );
 
     // --- Reimport-on-change hook ---
-    let re = body_json(&http_post(port, "/api/reimport", r#"{"path":"res://hero.png"}"#));
-    assert_eq!(re["reimported"], serde_json::json!("res://hero.png"), "reimport reports the path");
+    let re = body_json(&http_post(
+        port,
+        "/api/reimport",
+        r#"{"path":"res://hero.png"}"#,
+    ));
+    assert_eq!(
+        re["reimported"],
+        serde_json::json!("res://hero.png"),
+        "reimport reports the path"
+    );
 
     // --- The PNG produces a usable Texture2D (same decode path as TextureCache) ---
     let mut fb = FrameBuffer::new(3, 2, Color::rgb(0.0, 0.0, 1.0));
@@ -89,15 +134,28 @@ fn fs_dock_import_hooks() {
     assert_eq!(tex.width, 3);
     assert_eq!(tex.height, 2);
     let p = tex.get_pixel(0, 0);
-    assert!((p.r - 1.0).abs() < 0.02 && p.g.abs() < 0.02 && p.b.abs() < 0.02, "decoded pixel matches the source");
+    assert!(
+        (p.r - 1.0).abs() < 0.02 && p.g.abs() < 0.02 && p.b.abs() < 0.02,
+        "decoded pixel matches the source"
+    );
 
     // --- A non-importable plain resource is reported as such ---
-    let txt = body_json(&http_get(port, "/api/import_settings?path=res%3A//notes.txt"));
-    assert_eq!(txt["importable"], serde_json::json!(false), ".txt is not an importable asset");
+    let txt = body_json(&http_get(
+        port,
+        "/api/import_settings?path=res%3A//notes.txt",
+    ));
+    assert_eq!(
+        txt["importable"],
+        serde_json::json!(false),
+        ".txt is not an importable asset"
+    );
 
     // The FileSystem dock wires the Import tab + import settings UI.
     let html = http_get(port, "/editor");
-    assert!(html.contains("/api/import_settings"), "FileSystem dock wires import settings");
+    assert!(
+        html.contains("/api/import_settings"),
+        "FileSystem dock wires import settings"
+    );
 
     handle.stop();
 }

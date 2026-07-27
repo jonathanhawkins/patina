@@ -241,7 +241,11 @@ fn history_goto_jumps_edit_state() {
     // Jump all the way back to the Beginning: both adds are undone.
     let r0 = http_post(port, "/api/history/goto", r#"{"version":0}"#);
     assert!(r0.contains("200 OK"), "goto v0 should 200, got:\n{r0}");
-    assert_eq!(main_child_count(port), 0, "goto Beginning removes both nodes");
+    assert_eq!(
+        main_child_count(port),
+        0,
+        "goto Beginning removes both nodes"
+    );
     assert_eq!(get_history(port)["current"].as_u64(), Some(0));
 
     // Jump forward to the latest version: both adds are redone.
@@ -269,7 +273,10 @@ fn history_goto_clamps_and_validates() {
 
     // Way past the end clamps to the latest version (1) — no panic, scene intact.
     let big = http_post(port, "/api/history/goto", r#"{"version":999}"#);
-    assert!(big.contains("200 OK"), "out-of-range goto should 200, got:\n{big}");
+    assert!(
+        big.contains("200 OK"),
+        "out-of-range goto should 200, got:\n{big}"
+    );
     assert_eq!(main_child_count(port), 1, "clamped goto keeps the node");
     assert_eq!(get_history(port)["current"].as_u64(), Some(1));
 

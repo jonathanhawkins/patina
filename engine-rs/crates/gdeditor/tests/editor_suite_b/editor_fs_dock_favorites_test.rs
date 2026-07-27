@@ -49,11 +49,7 @@ fn make_project() -> TempDir {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("project.godot"), "[application]\n").unwrap();
     std::fs::create_dir_all(dir.path().join("scenes")).unwrap();
-    std::fs::write(
-        dir.path().join("scenes/main.tscn"),
-        "[gd_scene format=3]\n",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join("scenes/main.tscn"), "[gd_scene format=3]\n").unwrap();
     dir
 }
 

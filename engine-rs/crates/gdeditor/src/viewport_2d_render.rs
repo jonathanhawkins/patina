@@ -193,6 +193,23 @@ pub enum Render2DKind {
         /// The node's class name (drives the marker glyph).
         class: String,
     },
+    /// A `MeshInstance2D`'s geometry as a textured triangle fan
+    /// (pat-0q2kx.248).
+    ///
+    /// Only PRIMITIVE meshes reach here today. `packed_scene.rs` flattens a
+    /// `mesh = SubResource(..)` into a `__viewport_mesh__` marker naming the
+    /// primitive type, so a QuadMesh's corners can be generated without
+    /// parsing anything; real `ArrayMesh` geometry needs vertex/uv/index
+    /// flattening that does not exist yet, and such a node still falls through
+    /// to `Marker`.
+    Mesh {
+        /// Texture resource path, empty when untextured.
+        texture: String,
+        /// Local-space corners, already in draw order.
+        vertices: Vec<Vector2>,
+        /// One UV per vertex, same order.
+        uvs: Vec<Vector2>,
+    },
 }
 
 /// One painted tile cell, resolved from `tile_map_data` plus the layer's
@@ -252,6 +269,16 @@ pub struct Render2DItem {
     /// `range_item_cull_mask`, so it has to travel with the item rather than be
     /// assumed frame-wide (pat-0q2kx.130).
     pub light_mask: u32,
+    /// The node's `CanvasItem.visibility_layer` (Godot default layer 1), ANDed
+    /// against the viewport's `canvas_cull_mask` to decide whether the item is
+    /// drawn at all (pat-0q2kx.254).
+    ///
+    /// ⚠️ Not the same thing as [`light_mask`](Self::light_mask), which they are
+    /// easy to confuse: `light_mask` decides which *lights reach* an item that
+    /// is already being drawn, `visibility_layer` decides whether it is drawn.
+    /// This was inspector-settable long before it was read anywhere, so a scene
+    /// could carry a considered value that changed nothing.
+    pub visibility_layer: u32,
     /// How the `Camera2D` view applies to this item (pat-0q2kx.212).
     ///
     /// Resolved during collection because it needs the `CanvasLayer` ancestor's
@@ -349,6 +376,14 @@ pub fn collect_canvas_items(tree: &SceneTree) -> Vec<Render2DItem> {
                     Variant::Int(i) => i as u32,
                     _ => 1,
                 },
+                // `CanvasItem.visibility_layer`, same default of layer 1
+                // (pat-0q2kx.254). Read here rather than at rasterize time
+                // because the node is already in hand; the culling decision
+                // needs the viewport's mask, which the raster owns.
+                visibility_layer: match node.get_property("visibility_layer") {
+                    Variant::Int(i) => i as u32,
+                    _ => 1,
+                },
                 kind: render_kind_for(tree, id, node.class_name()),
             })
         })
@@ -389,6 +424,9 @@ pub fn collect_canvas_items(tree: &SceneTree) -> Vec<Render2DItem> {
                         canvas_layer: host.canvas_layer,
                         clip_rect: host.clip_rect,
                         light_mask: host.light_mask,
+                        // A script-drawn item is part of its host node, so it
+                        // is culled with the host rather than on its own.
+                        visibility_layer: host.visibility_layer,
                         // Inherited from the host, like every other canvas
                         // property here: a script item drawn onto a node inside
                         // a HUD layer must stay pinned with that node
@@ -641,6 +679,43 @@ fn render_kind_for(tree: &SceneTree, id: gdscene::NodeId, class: &str) -> Render
         // only *which* texture, and the playback phase has already published the
         // current frame's onto the node (pat-0q2kx.100). Without this arm the
         // node fell through to `Marker` and animated content was invisible.
+        // MeshInstance2D (pat-0q2kx.248). Registered since forever with no draw
+        // semantics, so it was invisible at runtime.
+        //
+        // Handles the PRIMITIVE case only. `packed_scene.rs` already flattens
+        // `mesh = SubResource(..)` into `__viewport_mesh__ = "primitive:<Type>"`,
+        // and a QuadMesh's geometry is four corners — derivable with no `.tscn`
+        // parsing at all. Real ArrayMesh geometry needs vertex/uv/index
+        // flattening that does not exist yet (there is no `__mesh__` companion),
+        // so those still fall through to `Marker` rather than drawing wrong.
+        "MeshInstance2D" => {
+            let primitive = tree
+                .get_node(id)
+                .map(|n| n.get_property("__viewport_mesh__"))
+                .and_then(|v| match v {
+                    Variant::String(s) => s.strip_prefix("primitive:").map(str::to_string),
+                    _ => None,
+                });
+            // Godot's QuadMesh defaults to 1x1 centred on the origin.
+            if matches!(primitive.as_deref(), Some("QuadMesh") | Some("PlaneMesh")) {
+                let h = 0.5;
+                return Render2DKind::Mesh {
+                    texture: node2d::get_texture_path(tree, id).unwrap_or_default(),
+                    vertices: vec![
+                        Vector2::new(-h, -h),
+                        Vector2::new(h, -h),
+                        Vector2::new(h, h),
+                        Vector2::new(-h, h),
+                    ],
+                    uvs: vec![
+                        Vector2::new(0.0, 0.0),
+                        Vector2::new(1.0, 0.0),
+                        Vector2::new(1.0, 1.0),
+                        Vector2::new(0.0, 1.0),
+                    ],
+                };
+            }
+        }
         "Sprite2D" | "AnimatedSprite2D" => {
             if let Some(texture) = node2d::get_texture_path(tree, id) {
                 return Render2DKind::Sprite {
@@ -1018,6 +1093,9 @@ pub fn build_control_render_items(
             clip_rect: None,
             // Control primitives inherit the default lighting layer.
             light_mask: 1,
+            // ...and the default visibility layer, so a viewport using the
+            // default cull mask still draws the editor's own chrome.
+            visibility_layer: 1,
             kind,
         });
     }
@@ -1194,13 +1272,310 @@ pub fn camera2d_center(
 /// texture fails to load — a sprite falls back to a modulate-tinted placeholder
 /// square so it stays visible. `Marker` items (cameras, empty `Node2D`s) draw
 /// nothing: they are editor-only chrome, invisible at runtime.
+/// The `Viewport` canvas-quality settings the software raster honours
+/// (pat-0q2kx.254).
+///
+/// Godot ground truth: `Viewport.snap_2d_transforms_to_pixel`,
+/// `snap_2d_vertices_to_pixel`, `canvas_cull_mask`, `msaa_2d`, `sdf_oversize`
+/// and `sdf_scale` in `extension_api.json`; the snapping itself is
+/// `servers/rendering/renderer_canvas_cull.cpp`.
+///
+/// [`Default`] is Godot's default viewport: no snapping, every layer visible,
+/// no MSAA — so [`rasterize_render_list`] keeps its existing behaviour exactly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CanvasQuality {
+    /// Round each canvas item's **transform origin** to whole pixels.
+    pub snap_2d_transforms_to_pixel: bool,
+    /// Round each item's **vertices** to whole pixels after transforming.
+    ///
+    /// Godot keeps this separate from the transform flag: snapping the origin
+    /// moves a sprite as a unit, snapping vertices also squares up a rotated or
+    /// scaled shape's corners. In this raster the two coincide for axis-aligned
+    /// primitives, which is why the acceptance exercises the transform flag.
+    pub snap_2d_vertices_to_pixel: bool,
+    /// Layers this viewport draws. An item is culled when
+    /// `(item.visibility_layer & canvas_cull_mask) == 0`.
+    ///
+    /// Godot's default is all 32 layers (`0xFFFF_FFFF`), **not** layer 1 — a
+    /// viewport shows everything until you narrow it.
+    pub canvas_cull_mask: u32,
+    /// Antialiasing **factor**: 1 (off), 2, 4 or 8.
+    ///
+    /// ⚠️ This is the multiplier, **not** Godot's `Viewport.MSAA` enum, which
+    /// is an index: `MSAA_DISABLED=0, MSAA_2X=1, MSAA_4X=2, MSAA_8X=3`. Storing
+    /// the enum here would make `msaa_2d = 2` mean 2× to a reader and 4× to
+    /// Godot — a silent quality difference, never an error. The field carries
+    /// `_factor` in its name for that reason; convert with
+    /// [`msaa_factor_from_godot_enum`] at the settings boundary.
+    pub msaa_2d_factor: u32,
+    /// `Viewport.sdf_oversize` / `sdf_scale`, parsed and carried but **not yet
+    /// consumed** — the canvas SDF is deferred to the GPUParticles2D-collision
+    /// follow-up, per this bead's own scope note. Stored rather than dropped so
+    /// the project setting round-trips instead of being silently discarded.
+    pub sdf_oversize: f32,
+    /// See [`sdf_oversize`](Self::sdf_oversize) — carried, not consumed.
+    pub sdf_scale: f32,
+}
+
+impl Default for CanvasQuality {
+    fn default() -> Self {
+        Self {
+            snap_2d_transforms_to_pixel: false,
+            snap_2d_vertices_to_pixel: false,
+            // Godot's default shows every layer.
+            canvas_cull_mask: u32::MAX,
+            msaa_2d_factor: 1,
+            // Godot's defaults are the 1.0 entries of the SDF_OVERSIZE_* and
+            // SDF_SCALE_* enums (oversize 120% -> 1.2, scale 50% -> 0.5).
+            sdf_oversize: 1.2,
+            sdf_scale: 0.5,
+        }
+    }
+}
+
+impl CanvasQuality {
+    /// Build the Play viewport's quality from `project.godot` (pat-0q2kx.254).
+    ///
+    /// Keys read verbatim from `scene/main/scene_tree.cpp`, which is where
+    /// Godot applies them to the root viewport:
+    ///
+    /// | setting | line | default |
+    /// |---|---|---|
+    /// | `rendering/2d/snap/snap_2d_transforms_to_pixel` | 2106 | `false` |
+    /// | `rendering/2d/snap/snap_2d_vertices_to_pixel` | 2109 | `false` |
+    /// | `rendering/anti_aliasing/quality/msaa_2d` | 2079 | `0` (disabled) |
+    /// | `rendering/2d/sdf/oversize` | 2145 | `1` (120%) |
+    /// | `rendering/2d/sdf/scale` | 2147 | `1` (50%) |
+    ///
+    /// ⚠️ `canvas_cull_mask` is deliberately **not** read here: it is a
+    /// per-`Viewport` property with no project setting, so it keeps the
+    /// all-layers default. Inventing a setting name for it would create a key
+    /// that a real Godot project never writes.
+    pub fn from_project_settings(settings: &gdcore::project_settings::ProjectSettings) -> Self {
+        let flag = |key: &str| settings.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+        let index = |key: &str, fallback: i64| {
+            settings
+                .get(key)
+                .and_then(|v| v.as_int())
+                .unwrap_or(fallback)
+        };
+        Self {
+            snap_2d_transforms_to_pixel: flag("rendering/2d/snap/snap_2d_transforms_to_pixel"),
+            snap_2d_vertices_to_pixel: flag("rendering/2d/snap/snap_2d_vertices_to_pixel"),
+            canvas_cull_mask: u32::MAX,
+            // ⚠️ The stored value is Godot's MSAA *enum index*, so it must go
+            // through the conversion — reading it as a factor would make a
+            // project asking for 4× render at 2×.
+            msaa_2d_factor: msaa_factor_from_godot_enum(index(
+                "rendering/anti_aliasing/quality/msaa_2d",
+                0,
+            )),
+            sdf_oversize: sdf_oversize_from_godot_enum(index("rendering/2d/sdf/oversize", 1)),
+            sdf_scale: sdf_scale_from_godot_enum(index("rendering/2d/sdf/scale", 1)),
+        }
+    }
+
+    /// Whether `item` survives this viewport's cull mask.
+    ///
+    /// ⚠️ A mask of 0 hides everything, which is a legitimate setting and must
+    /// not be "helpfully" treated as unset — Godot draws nothing for a zero
+    /// cull mask, and silently substituting `u32::MAX` would make a deliberately
+    /// blanked viewport render.
+    pub fn shows(&self, item: &Render2DItem) -> bool {
+        item.visibility_layer & self.canvas_cull_mask != 0
+    }
+
+    /// The supersample factor, clamped to the 1/2/4/8 Godot offers.
+    ///
+    /// Anything else rounds **down** to the nearest legal factor rather than up:
+    /// an unexpected value should cost quality, never a 64× allocation.
+    pub fn msaa_factor(&self) -> u32 {
+        match self.msaa_2d_factor {
+            0 | 1 => 1,
+            2 | 3 => 2,
+            4..=7 => 4,
+            _ => 8,
+        }
+    }
+}
+
+/// `Viewport.MSAA` enum index -> supersample factor (pat-0q2kx.254).
+///
+/// `MSAA_DISABLED=0, MSAA_2X=1, MSAA_4X=2, MSAA_8X=3` (`extension_api.json`,
+/// `Viewport.MSAA`). The project setting
+/// `rendering/anti_aliasing/quality/msaa_2d` stores this index, and
+/// `scene_tree.cpp:2079` casts it straight to the enum — so a raw 2 there means
+/// **4×**, not 2×. Out-of-range values fall back to disabled rather than being
+/// clamped upward: an unrecognised setting should cost quality, never a 64×
+/// allocation.
+pub fn msaa_factor_from_godot_enum(index: i64) -> u32 {
+    match index {
+        1 => 2,
+        2 => 4,
+        3 => 8,
+        _ => 1,
+    }
+}
+
+/// `Viewport.SDFOversize` index -> multiplier: 100%/120%/150%/200%.
+/// Godot's project default is index 1 (`scene_tree.cpp:2145`).
+pub fn sdf_oversize_from_godot_enum(index: i64) -> f32 {
+    match index {
+        0 => 1.0,
+        2 => 1.5,
+        3 => 2.0,
+        _ => 1.2,
+    }
+}
+
+/// `Viewport.SDFScale` index -> multiplier: 100%/50%/25%.
+/// Godot's project default is index 1 (`scene_tree.cpp:2147`).
+pub fn sdf_scale_from_godot_enum(index: i64) -> f32 {
+    match index {
+        0 => 1.0,
+        2 => 0.25,
+        _ => 0.5,
+    }
+}
+
+/// Apply `snap_2d_*_to_pixel` to one item's transform (pat-0q2kx.254).
+///
+/// Godot rounds the canvas item's transform origin so a sprite authored at a
+/// fractional position lands on whole pixels — the point of the setting is that
+/// pixel art stops getting a half-covered blend column along its edge.
+///
+/// ⚠️ Uses `floor(v + 0.5)`, not `round`. Rust's `f32::round` breaks ties **away
+/// from zero**, so `-10.5` would go to `-11` while `10.5` goes to `11` — the
+/// rounding direction would flip either side of the origin, and an object
+/// dragged left across x=0 would jitter by a pixel. Godot's `Math::round` has
+/// the same away-from-zero behaviour, but its canvas snap goes through
+/// `floor(x + 0.5)` in `renderer_canvas_cull.cpp`, which is uniform.
+fn snap_item(item: &Render2DItem, quality: &CanvasQuality) -> Render2DItem {
+    if !quality.snap_2d_transforms_to_pixel && !quality.snap_2d_vertices_to_pixel {
+        return item.clone();
+    }
+    let mut out = item.clone();
+    let o = out.global_transform.origin;
+    out.global_transform.origin = Vector2::new((o.x + 0.5).floor(), (o.y + 0.5).floor());
+    out
+}
+
+/// Scale a transform into supersampled space for an MSAA pass.
+///
+/// Scales the basis as well as the origin: scaling only the origin would move
+/// each item to the right place at `factor`× and then draw it at its original
+/// size, so everything would render tiny in a corner-anchored cluster.
+fn scale_transform(t: Transform2D, factor: f32) -> Transform2D {
+    Transform2D {
+        x: Vector2::new(t.x.x * factor, t.x.y * factor),
+        y: Vector2::new(t.y.x * factor, t.y.y * factor),
+        origin: Vector2::new(t.origin.x * factor, t.origin.y * factor),
+    }
+}
+
+/// Box-downsample a supersampled frame back to its final size (pat-0q2kx.254).
+///
+/// Averages each `factor`×`factor` block. This is what turns a hard-edged
+/// diagonal drawn at 4× into the intermediate-alpha pixels the acceptance looks
+/// for — the aliased original has only fully-in and fully-out pixels.
+///
+/// Alpha is averaged with the colour rather than used to weight it: the source
+/// pixels come from a framebuffer that has already blended everything down onto
+/// its clear colour, so they are final composite values, not premultiplied
+/// contributions waiting to be composited again.
+fn box_downsample(src: &FrameBuffer, width: u32, height: u32, factor: u32) -> FrameBuffer {
+    let mut out = FrameBuffer::new(width, height, Color::new(0.0, 0.0, 0.0, 0.0));
+    let n = (factor * factor) as f32;
+    for y in 0..height {
+        for x in 0..width {
+            let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            for sy in 0..factor {
+                for sx in 0..factor {
+                    let p = src.get_pixel(x * factor + sx, y * factor + sy);
+                    r += p.r;
+                    g += p.g;
+                    b += p.b;
+                    a += p.a;
+                }
+            }
+            out.set_pixel(x, y, Color::new(r / n, g / n, b / n, a / n));
+        }
+    }
+    out
+}
+
+/// Rasterize with Godot's default viewport quality (no snapping, no culling,
+/// no MSAA). Unchanged behaviour for the 22 existing call sites.
 pub fn rasterize_render_list(
     items: &[Render2DItem],
     width: u32,
     height: u32,
     clear: Color,
-    mut texture_cache: Option<&mut TextureCache>,
+    texture_cache: Option<&mut TextureCache>,
 ) -> FrameBuffer {
+    rasterize_render_list_with_quality(
+        items,
+        width,
+        height,
+        clear,
+        texture_cache,
+        &CanvasQuality::default(),
+    )
+}
+
+/// Rasterize honouring the viewport's canvas-quality settings (pat-0q2kx.254).
+///
+/// MSAA is a supersample: the whole frame is rasterized at `factor`× in each
+/// axis and box-downsampled. That is not what Godot's hardware `msaa_2d` does
+/// internally, but it is the same *observable* result for a software raster —
+/// a diagonal edge gains intermediate-alpha pixels — and it needs no
+/// per-primitive coverage maths, which this rasterizer has nowhere to put.
+///
+/// ⚠️ Snapping is applied **before** the supersample scale, not after. Rounding
+/// in supersampled space would snap to a quarter-pixel of the final image,
+/// which is not snapping at all — the flag exists to put edges exactly on final
+/// pixel boundaries.
+pub fn rasterize_render_list_with_quality(
+    items: &[Render2DItem],
+    width: u32,
+    height: u32,
+    clear: Color,
+    mut texture_cache: Option<&mut TextureCache>,
+    quality: &CanvasQuality,
+) -> FrameBuffer {
+    let factor = quality.msaa_factor();
+    if factor > 1 {
+        // Snap first, at final-image scale, then scale the already-snapped
+        // transforms up for the supersampled pass.
+        let prepared: Vec<Render2DItem> = items
+            .iter()
+            .filter(|i| quality.shows(i))
+            .map(|i| {
+                let mut it = snap_item(i, quality);
+                it.global_transform = scale_transform(it.global_transform, factor as f32);
+                it
+            })
+            .collect();
+        // The inner pass must not cull or snap again: culling is already done,
+        // and re-snapping would round to supersampled pixels.
+        let big = rasterize_render_list_with_quality(
+            &prepared,
+            width.max(1) * factor,
+            height.max(1) * factor,
+            clear,
+            texture_cache,
+            &CanvasQuality::default(),
+        );
+        return box_downsample(&big, width.max(1), height.max(1), factor);
+    }
+
+    let culled: Vec<Render2DItem> = items
+        .iter()
+        .filter(|i| quality.shows(i))
+        .map(|i| snap_item(i, quality))
+        .collect();
+    let items = &culled[..];
+
     let mut fb = FrameBuffer::new(width.max(1), height.max(1), clear);
     let font = BitmapFont::builtin();
     for item in items {
@@ -1398,6 +1773,27 @@ pub fn rasterize_render_list(
                             rect,
                             modulate(quad.color, item.modulate),
                         );
+                    }
+                }
+            }
+            // pat-0q2kx.248. `fill_polygon_textured` has existed in
+            // gdrender2d since forever with ZERO non-test callers — the
+            // rasterizer did not need writing, only wiring. Vertices are
+            // transformed here the same way the local `fill_polygon` does it,
+            // because the gdrender2d entry point takes screen-space points.
+            Render2DKind::Mesh {
+                texture,
+                vertices,
+                uvs,
+            } => {
+                if vertices.len() >= 3 && uvs.len() == vertices.len() {
+                    let pts: Vec<Vector2> = vertices.iter().map(|v| xform.xform(*v)).collect();
+                    if let Some(cache) = texture_cache.as_deref_mut() {
+                        if let Some(tex) = cache.get(texture) {
+                            gdrender2d::polygon_raster::fill_polygon_textured(
+                                &mut fb, &pts, uvs, tex,
+                            );
+                        }
                     }
                 }
             }

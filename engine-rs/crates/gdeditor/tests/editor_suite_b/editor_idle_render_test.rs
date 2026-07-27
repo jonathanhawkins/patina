@@ -43,7 +43,11 @@ fn idle_render_signature_stable_and_change_sensitive() {
     // STABLE across idle ticks: with no mutation, the signature is unchanged, so
     // the idle loop will NOT re-render (this is what fixes the busy-loop).
     for _ in 0..8 {
-        assert_eq!(sig(&state), base, "signature must be stable across idle ticks");
+        assert_eq!(
+            sig(&state),
+            base,
+            "signature must be stable across idle ticks"
+        );
     }
 
     // Each block mutates one input and asserts the signature changed vs. the
@@ -58,7 +62,11 @@ fn idle_render_signature_stable_and_change_sensitive() {
         new_value: Variant::String("1".into()),
         old_value: Variant::String("0".into()),
     });
-    assert_ne!(sig(&state), prev, "an edit (undo depth) must change the signature");
+    assert_ne!(
+        sig(&state),
+        prev,
+        "an edit (undo depth) must change the signature"
+    );
 
     // ...and redo-stack depth.
     let prev = sig(&state);
@@ -73,11 +81,19 @@ fn idle_render_signature_stable_and_change_sensitive() {
     // 2. Selection — primary and multi.
     let prev = sig(&state);
     state.selected_node = Some(nid);
-    assert_ne!(sig(&state), prev, "selecting a node must change the signature");
+    assert_ne!(
+        sig(&state),
+        prev,
+        "selecting a node must change the signature"
+    );
 
     let prev = sig(&state);
     state.selected_nodes = vec![nid];
-    assert_ne!(sig(&state), prev, "multi-selection must change the signature");
+    assert_ne!(
+        sig(&state),
+        prev,
+        "multi-selection must change the signature"
+    );
 
     // 3. Zoom / pan.
     let prev = sig(&state);
@@ -113,7 +129,11 @@ fn idle_render_signature_stable_and_change_sensitive() {
 
     let prev = sig(&state);
     state.editor_viewport_3d.camera.distance += 2.0;
-    assert_ne!(sig(&state), prev, "camera distance must change the signature");
+    assert_ne!(
+        sig(&state),
+        prev,
+        "camera distance must change the signature"
+    );
 
     let prev = sig(&state);
     state.editor_viewport_3d.camera.focus_point.x += 1.0;
@@ -122,7 +142,11 @@ fn idle_render_signature_stable_and_change_sensitive() {
     // Still stable after all the changes: recomputing without mutation matches.
     let settled = sig(&state);
     for _ in 0..3 {
-        assert_eq!(sig(&state), settled, "signature must be stable once edits stop");
+        assert_eq!(
+            sig(&state),
+            settled,
+            "signature must be stable once edits stop"
+        );
     }
 }
 
@@ -168,7 +192,13 @@ fn should_render_idle_gates_on_change_anim_or_keepalive() {
 
     // Just under the keepalive, unchanged, no animation → still idle.
     assert!(
-        !should_render_idle(Some(&s1), &s1, false, Duration::from_millis(1999), keepalive),
+        !should_render_idle(
+            Some(&s1),
+            &s1,
+            false,
+            Duration::from_millis(1999),
+            keepalive
+        ),
         "must stay idle until the keepalive actually elapses"
     );
 }
@@ -185,11 +215,17 @@ fn force_render_active_on_anim_and_drag() {
     let mut state = make_state();
     // A settled, idle editor does not force a render — gating falls to the
     // signature/keepalive (this is what kills the busy-loop).
-    assert!(!force_render_active(&state), "idle editor must not force-render");
+    assert!(
+        !force_render_active(&state),
+        "idle editor must not force-render"
+    );
 
     // An animation preview keyframes nodes each tick → force render.
     state.animation_playback.playing = true;
-    assert!(force_render_active(&state), "animation preview forces a render");
+    assert!(
+        force_render_active(&state),
+        "animation preview forces a render"
+    );
     state.animation_playback.playing = false;
     assert!(!force_render_active(&state));
 
@@ -203,6 +239,13 @@ fn force_render_active_on_anim_and_drag() {
         start_node_pos: Vector2::ZERO,
         camera_offset: Vector2::ZERO,
     });
-    assert_eq!(sig(&state), s_before, "a drag does not change the signature by itself");
-    assert!(force_render_active(&state), "an in-progress drag forces a render");
+    assert_eq!(
+        sig(&state),
+        s_before,
+        "a drag does not change the signature by itself"
+    );
+    assert!(
+        force_render_active(&state),
+        "an in-progress drag forces a render"
+    );
 }
