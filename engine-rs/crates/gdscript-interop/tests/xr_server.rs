@@ -138,7 +138,10 @@ func check():
 ";
     match call_check(src) {
         Variant::Array(v) => {
-            assert_eq!(v[0], Variant::Bool(true), "initialize() must succeed");
+            // True here means "request accepted" — see the note on
+            // `session_failed_delivers_its_message`. v[2] is what proves the
+            // session actually started.
+            assert_eq!(v[0], Variant::Bool(true), "the request must be accepted");
             assert_eq!(
                 v[1],
                 Variant::Int(1),
@@ -156,6 +159,15 @@ func check():
 
 /// `session_failed` carries its message — a required feature the stubbed
 /// browser will not grant must fail with a reason, not silently.
+///
+/// ⚠️ `initialize()` returns **true even here**. It reports that the *request
+/// was accepted for processing*, not that the session started — WebXR's
+/// `requestSession` is async, so the outcome can only arrive by signal, and
+/// Godot's return value mirrors that. `gdplatform` states this contract at
+/// `xr.rs:246` and already tests it in `a_missing_required_feature_fails_the_
+/// session`. So the real evidence of failure is the pair below: a message
+/// arrived, and **no session is left behind** — `is_initialized()` is false.
+/// Asserting on the return value would be asserting on the wrong thing.
 #[test]
 fn session_failed_delivers_its_message() {
     let src = "\
@@ -174,18 +186,33 @@ func check():
     # The browser grants immersive-vr but NOT hand-tracking.
     xr._set_test_stub([\"immersive-vr\"], [\"local-floor\"], \"\")
     var ok = xr.initialize()
-    return [ok, reason]
+    return [ok, reason, xr.is_initialized()]
 ";
     match call_check(src) {
         Variant::Array(v) => {
-            assert_eq!(v[0], Variant::Bool(false), "the session must fail");
+            assert_eq!(
+                v[0],
+                Variant::Bool(true),
+                "initialize() reports request acceptance, not session success",
+            );
             match &v[1] {
-                Variant::String(msg) => assert!(
-                    !msg.is_empty(),
-                    "session_failed must carry a reason, got an empty string",
-                ),
+                Variant::String(msg) => {
+                    assert!(
+                        !msg.is_empty(),
+                        "session_failed must carry a reason, got an empty string",
+                    );
+                    assert!(
+                        msg.contains("hand-tracking"),
+                        "the message must name the feature that was missing, got {msg:?}",
+                    );
+                }
                 other => panic!("expected a String message, got {other:?}"),
             }
+            assert_eq!(
+                v[2],
+                Variant::Bool(false),
+                "a rejected request must leave NO live session behind",
+            );
         }
         other => panic!("expected an Array, got {other:?}"),
     }

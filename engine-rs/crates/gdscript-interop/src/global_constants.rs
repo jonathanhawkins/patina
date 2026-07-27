@@ -585,44 +585,597 @@ pub fn global_constant(name: &str) -> Option<Variant> {
     Some(Variant::Int(v))
 }
 
-/// Returns `true` if `name` is one of the enum type names that GDScript may
-/// use as an enum-qualified prefix (`Key.KEY_SPACE`, `Error.OK`). The two
-/// `Variant.*` enums are excluded — they are not bareword prefixes.
-pub fn is_global_enum(name: &str) -> bool {
-    matches!(
-        name,
-        "Side"
-            | "Corner"
-            | "Orientation"
-            | "ClockDirection"
-            | "HorizontalAlignment"
-            | "VerticalAlignment"
-            | "InlineAlignment"
-            | "EulerOrder"
-            | "Key"
-            | "KeyModifierMask"
-            | "KeyLocation"
-            | "MouseButton"
-            | "MouseButtonMask"
-            | "JoyButton"
-            | "JoyAxis"
-            | "MIDIMessage"
-            | "Error"
-            | "PropertyHint"
-            | "PropertyUsageFlags"
-            | "MethodFlags"
-    )
+/// The member set of each @GlobalScope enum, keyed by the enum's bareword
+/// prefix — `Key`, `Error`, `PropertyHint`, ... (pat-0q2kx.243).
+///
+/// Godot's global enum constants all live in one flat namespace, which is why
+/// [`global_constant`] can answer a bareword without knowing its enum. But
+/// GDScript's analyzer still **type-checks the qualified form**: `Key.OK` and
+/// `Error.KEY_ESCAPE` are compile errors ("Cannot find member ... in enum ..."),
+/// even though `OK` and `KEY_ESCAPE` are both perfectly good barewords. Without
+/// this table `Error.KEY_ESCAPE` silently answered 4194305 — a wrong constant
+/// that type-checks, which is worse than an error because a script comparing a
+/// return code against it just never matches.
+///
+/// Generated 1:1 from `extension_api.json` `.global_enums[].values[]` (Godot
+/// v4.6.1.stable.official) rather than typed by hand: 446 names across 20 enums
+/// is well past the point where a single transposition would go unnoticed. Each
+/// slice is sorted, which is what makes it diffable against a regenerated dump.
+///
+/// The two `Variant.*` enums are deliberately absent: `Variant` is not a
+/// bareword prefix in GDScript, so `Variant.Type.TYPE_INT` never reaches here.
+fn global_enum_members(enum_name: &str) -> Option<&'static [&'static str]> {
+    let members = match enum_name {
+        "Side" => SIDE_MEMBERS,
+        "Corner" => CORNER_MEMBERS,
+        "Orientation" => ORIENTATION_MEMBERS,
+        "ClockDirection" => CLOCK_DIRECTION_MEMBERS,
+        "HorizontalAlignment" => HORIZONTAL_ALIGNMENT_MEMBERS,
+        "VerticalAlignment" => VERTICAL_ALIGNMENT_MEMBERS,
+        "InlineAlignment" => INLINE_ALIGNMENT_MEMBERS,
+        "EulerOrder" => EULER_ORDER_MEMBERS,
+        "Key" => KEY_MEMBERS,
+        "KeyModifierMask" => KEY_MODIFIER_MASK_MEMBERS,
+        "KeyLocation" => KEY_LOCATION_MEMBERS,
+        "MouseButton" => MOUSE_BUTTON_MEMBERS,
+        "MouseButtonMask" => MOUSE_BUTTON_MASK_MEMBERS,
+        "JoyButton" => JOY_BUTTON_MEMBERS,
+        "JoyAxis" => JOY_AXIS_MEMBERS,
+        "MIDIMessage" => MIDI_MESSAGE_MEMBERS,
+        "Error" => ERROR_MEMBERS,
+        "PropertyHint" => PROPERTY_HINT_MEMBERS,
+        "PropertyUsageFlags" => PROPERTY_USAGE_FLAGS_MEMBERS,
+        "MethodFlags" => METHOD_FLAGS_MEMBERS,
+        _ => return None,
+    };
+    Some(members)
 }
 
-/// Resolve an enum-qualified member access (`Key.KEY_SPACE`). Godot's global
-/// enum members share the flat bareword namespace, so a valid enum prefix
-/// delegates the member to [`global_constant`].
+/// `Side` — 4 members.
+static SIDE_MEMBERS: &[&str] = &["SIDE_BOTTOM", "SIDE_LEFT", "SIDE_RIGHT", "SIDE_TOP"];
+
+/// `Corner` — 4 members.
+static CORNER_MEMBERS: &[&str] = &[
+    "CORNER_BOTTOM_LEFT",
+    "CORNER_BOTTOM_RIGHT",
+    "CORNER_TOP_LEFT",
+    "CORNER_TOP_RIGHT",
+];
+
+/// `Orientation` — 2 members.
+static ORIENTATION_MEMBERS: &[&str] = &["HORIZONTAL", "VERTICAL"];
+
+/// `ClockDirection` — 2 members.
+static CLOCK_DIRECTION_MEMBERS: &[&str] = &["CLOCKWISE", "COUNTERCLOCKWISE"];
+
+/// `HorizontalAlignment` — 4 members.
+static HORIZONTAL_ALIGNMENT_MEMBERS: &[&str] = &[
+    "HORIZONTAL_ALIGNMENT_CENTER",
+    "HORIZONTAL_ALIGNMENT_FILL",
+    "HORIZONTAL_ALIGNMENT_LEFT",
+    "HORIZONTAL_ALIGNMENT_RIGHT",
+];
+
+/// `VerticalAlignment` — 4 members.
+static VERTICAL_ALIGNMENT_MEMBERS: &[&str] = &[
+    "VERTICAL_ALIGNMENT_BOTTOM",
+    "VERTICAL_ALIGNMENT_CENTER",
+    "VERTICAL_ALIGNMENT_FILL",
+    "VERTICAL_ALIGNMENT_TOP",
+];
+
+/// `InlineAlignment` — 13 members.
+static INLINE_ALIGNMENT_MEMBERS: &[&str] = &[
+    "INLINE_ALIGNMENT_BASELINE_TO",
+    "INLINE_ALIGNMENT_BOTTOM",
+    "INLINE_ALIGNMENT_BOTTOM_TO",
+    "INLINE_ALIGNMENT_CENTER",
+    "INLINE_ALIGNMENT_CENTER_TO",
+    "INLINE_ALIGNMENT_IMAGE_MASK",
+    "INLINE_ALIGNMENT_TEXT_MASK",
+    "INLINE_ALIGNMENT_TOP",
+    "INLINE_ALIGNMENT_TOP_TO",
+    "INLINE_ALIGNMENT_TO_BASELINE",
+    "INLINE_ALIGNMENT_TO_BOTTOM",
+    "INLINE_ALIGNMENT_TO_CENTER",
+    "INLINE_ALIGNMENT_TO_TOP",
+];
+
+/// `EulerOrder` — 6 members.
+static EULER_ORDER_MEMBERS: &[&str] = &[
+    "EULER_ORDER_XYZ",
+    "EULER_ORDER_XZY",
+    "EULER_ORDER_YXZ",
+    "EULER_ORDER_YZX",
+    "EULER_ORDER_ZXY",
+    "EULER_ORDER_ZYX",
+];
+
+/// `Key` — 193 members.
+static KEY_MEMBERS: &[&str] = &[
+    "KEY_0",
+    "KEY_1",
+    "KEY_2",
+    "KEY_3",
+    "KEY_4",
+    "KEY_5",
+    "KEY_6",
+    "KEY_7",
+    "KEY_8",
+    "KEY_9",
+    "KEY_A",
+    "KEY_ALT",
+    "KEY_AMPERSAND",
+    "KEY_APOSTROPHE",
+    "KEY_ASCIICIRCUM",
+    "KEY_ASCIITILDE",
+    "KEY_ASTERISK",
+    "KEY_AT",
+    "KEY_B",
+    "KEY_BACK",
+    "KEY_BACKSLASH",
+    "KEY_BACKSPACE",
+    "KEY_BACKTAB",
+    "KEY_BAR",
+    "KEY_BRACELEFT",
+    "KEY_BRACERIGHT",
+    "KEY_BRACKETLEFT",
+    "KEY_BRACKETRIGHT",
+    "KEY_C",
+    "KEY_CAPSLOCK",
+    "KEY_CLEAR",
+    "KEY_COLON",
+    "KEY_COMMA",
+    "KEY_CTRL",
+    "KEY_D",
+    "KEY_DELETE",
+    "KEY_DOLLAR",
+    "KEY_DOWN",
+    "KEY_E",
+    "KEY_END",
+    "KEY_ENTER",
+    "KEY_EQUAL",
+    "KEY_ESCAPE",
+    "KEY_EXCLAM",
+    "KEY_F",
+    "KEY_F1",
+    "KEY_F10",
+    "KEY_F11",
+    "KEY_F12",
+    "KEY_F13",
+    "KEY_F14",
+    "KEY_F15",
+    "KEY_F16",
+    "KEY_F17",
+    "KEY_F18",
+    "KEY_F19",
+    "KEY_F2",
+    "KEY_F20",
+    "KEY_F21",
+    "KEY_F22",
+    "KEY_F23",
+    "KEY_F24",
+    "KEY_F25",
+    "KEY_F26",
+    "KEY_F27",
+    "KEY_F28",
+    "KEY_F29",
+    "KEY_F3",
+    "KEY_F30",
+    "KEY_F31",
+    "KEY_F32",
+    "KEY_F33",
+    "KEY_F34",
+    "KEY_F35",
+    "KEY_F4",
+    "KEY_F5",
+    "KEY_F6",
+    "KEY_F7",
+    "KEY_F8",
+    "KEY_F9",
+    "KEY_FAVORITES",
+    "KEY_FORWARD",
+    "KEY_G",
+    "KEY_GLOBE",
+    "KEY_GREATER",
+    "KEY_H",
+    "KEY_HELP",
+    "KEY_HOME",
+    "KEY_HOMEPAGE",
+    "KEY_HYPER",
+    "KEY_I",
+    "KEY_INSERT",
+    "KEY_J",
+    "KEY_JIS_EISU",
+    "KEY_JIS_KANA",
+    "KEY_K",
+    "KEY_KEYBOARD",
+    "KEY_KP_0",
+    "KEY_KP_1",
+    "KEY_KP_2",
+    "KEY_KP_3",
+    "KEY_KP_4",
+    "KEY_KP_5",
+    "KEY_KP_6",
+    "KEY_KP_7",
+    "KEY_KP_8",
+    "KEY_KP_9",
+    "KEY_KP_ADD",
+    "KEY_KP_DIVIDE",
+    "KEY_KP_ENTER",
+    "KEY_KP_MULTIPLY",
+    "KEY_KP_PERIOD",
+    "KEY_KP_SUBTRACT",
+    "KEY_L",
+    "KEY_LAUNCH0",
+    "KEY_LAUNCH1",
+    "KEY_LAUNCH2",
+    "KEY_LAUNCH3",
+    "KEY_LAUNCH4",
+    "KEY_LAUNCH5",
+    "KEY_LAUNCH6",
+    "KEY_LAUNCH7",
+    "KEY_LAUNCH8",
+    "KEY_LAUNCH9",
+    "KEY_LAUNCHA",
+    "KEY_LAUNCHB",
+    "KEY_LAUNCHC",
+    "KEY_LAUNCHD",
+    "KEY_LAUNCHE",
+    "KEY_LAUNCHF",
+    "KEY_LAUNCHMAIL",
+    "KEY_LAUNCHMEDIA",
+    "KEY_LEFT",
+    "KEY_LESS",
+    "KEY_M",
+    "KEY_MEDIANEXT",
+    "KEY_MEDIAPLAY",
+    "KEY_MEDIAPREVIOUS",
+    "KEY_MEDIARECORD",
+    "KEY_MEDIASTOP",
+    "KEY_MENU",
+    "KEY_META",
+    "KEY_MINUS",
+    "KEY_N",
+    "KEY_NONE",
+    "KEY_NUMBERSIGN",
+    "KEY_NUMLOCK",
+    "KEY_O",
+    "KEY_OPENURL",
+    "KEY_P",
+    "KEY_PAGEDOWN",
+    "KEY_PAGEUP",
+    "KEY_PARENLEFT",
+    "KEY_PARENRIGHT",
+    "KEY_PAUSE",
+    "KEY_PERCENT",
+    "KEY_PERIOD",
+    "KEY_PLUS",
+    "KEY_PRINT",
+    "KEY_Q",
+    "KEY_QUESTION",
+    "KEY_QUOTEDBL",
+    "KEY_QUOTELEFT",
+    "KEY_R",
+    "KEY_REFRESH",
+    "KEY_RIGHT",
+    "KEY_S",
+    "KEY_SCROLLLOCK",
+    "KEY_SEARCH",
+    "KEY_SECTION",
+    "KEY_SEMICOLON",
+    "KEY_SHIFT",
+    "KEY_SLASH",
+    "KEY_SPACE",
+    "KEY_SPECIAL",
+    "KEY_STANDBY",
+    "KEY_STOP",
+    "KEY_SYSREQ",
+    "KEY_T",
+    "KEY_TAB",
+    "KEY_U",
+    "KEY_UNDERSCORE",
+    "KEY_UNKNOWN",
+    "KEY_UP",
+    "KEY_V",
+    "KEY_VOLUMEDOWN",
+    "KEY_VOLUMEMUTE",
+    "KEY_VOLUMEUP",
+    "KEY_W",
+    "KEY_X",
+    "KEY_Y",
+    "KEY_YEN",
+    "KEY_Z",
+];
+
+/// `KeyModifierMask` — 9 members.
+static KEY_MODIFIER_MASK_MEMBERS: &[&str] = &[
+    "KEY_CODE_MASK",
+    "KEY_MASK_ALT",
+    "KEY_MASK_CMD_OR_CTRL",
+    "KEY_MASK_CTRL",
+    "KEY_MASK_GROUP_SWITCH",
+    "KEY_MASK_KPAD",
+    "KEY_MASK_META",
+    "KEY_MASK_SHIFT",
+    "KEY_MODIFIER_MASK",
+];
+
+/// `KeyLocation` — 3 members.
+static KEY_LOCATION_MEMBERS: &[&str] = &[
+    "KEY_LOCATION_LEFT",
+    "KEY_LOCATION_RIGHT",
+    "KEY_LOCATION_UNSPECIFIED",
+];
+
+/// `MouseButton` — 10 members.
+static MOUSE_BUTTON_MEMBERS: &[&str] = &[
+    "MOUSE_BUTTON_LEFT",
+    "MOUSE_BUTTON_MIDDLE",
+    "MOUSE_BUTTON_NONE",
+    "MOUSE_BUTTON_RIGHT",
+    "MOUSE_BUTTON_WHEEL_DOWN",
+    "MOUSE_BUTTON_WHEEL_LEFT",
+    "MOUSE_BUTTON_WHEEL_RIGHT",
+    "MOUSE_BUTTON_WHEEL_UP",
+    "MOUSE_BUTTON_XBUTTON1",
+    "MOUSE_BUTTON_XBUTTON2",
+];
+
+/// `MouseButtonMask` — 5 members.
+static MOUSE_BUTTON_MASK_MEMBERS: &[&str] = &[
+    "MOUSE_BUTTON_MASK_LEFT",
+    "MOUSE_BUTTON_MASK_MB_XBUTTON1",
+    "MOUSE_BUTTON_MASK_MB_XBUTTON2",
+    "MOUSE_BUTTON_MASK_MIDDLE",
+    "MOUSE_BUTTON_MASK_RIGHT",
+];
+
+/// `JoyButton` — 24 members.
+static JOY_BUTTON_MEMBERS: &[&str] = &[
+    "JOY_BUTTON_A",
+    "JOY_BUTTON_B",
+    "JOY_BUTTON_BACK",
+    "JOY_BUTTON_DPAD_DOWN",
+    "JOY_BUTTON_DPAD_LEFT",
+    "JOY_BUTTON_DPAD_RIGHT",
+    "JOY_BUTTON_DPAD_UP",
+    "JOY_BUTTON_GUIDE",
+    "JOY_BUTTON_INVALID",
+    "JOY_BUTTON_LEFT_SHOULDER",
+    "JOY_BUTTON_LEFT_STICK",
+    "JOY_BUTTON_MAX",
+    "JOY_BUTTON_MISC1",
+    "JOY_BUTTON_PADDLE1",
+    "JOY_BUTTON_PADDLE2",
+    "JOY_BUTTON_PADDLE3",
+    "JOY_BUTTON_PADDLE4",
+    "JOY_BUTTON_RIGHT_SHOULDER",
+    "JOY_BUTTON_RIGHT_STICK",
+    "JOY_BUTTON_SDL_MAX",
+    "JOY_BUTTON_START",
+    "JOY_BUTTON_TOUCHPAD",
+    "JOY_BUTTON_X",
+    "JOY_BUTTON_Y",
+];
+
+/// `JoyAxis` — 9 members.
+static JOY_AXIS_MEMBERS: &[&str] = &[
+    "JOY_AXIS_INVALID",
+    "JOY_AXIS_LEFT_X",
+    "JOY_AXIS_LEFT_Y",
+    "JOY_AXIS_MAX",
+    "JOY_AXIS_RIGHT_X",
+    "JOY_AXIS_RIGHT_Y",
+    "JOY_AXIS_SDL_MAX",
+    "JOY_AXIS_TRIGGER_LEFT",
+    "JOY_AXIS_TRIGGER_RIGHT",
+];
+
+/// `MIDIMessage` — 19 members.
+static MIDI_MESSAGE_MEMBERS: &[&str] = &[
+    "MIDI_MESSAGE_ACTIVE_SENSING",
+    "MIDI_MESSAGE_AFTERTOUCH",
+    "MIDI_MESSAGE_CHANNEL_PRESSURE",
+    "MIDI_MESSAGE_CONTINUE",
+    "MIDI_MESSAGE_CONTROL_CHANGE",
+    "MIDI_MESSAGE_NONE",
+    "MIDI_MESSAGE_NOTE_OFF",
+    "MIDI_MESSAGE_NOTE_ON",
+    "MIDI_MESSAGE_PITCH_BEND",
+    "MIDI_MESSAGE_PROGRAM_CHANGE",
+    "MIDI_MESSAGE_QUARTER_FRAME",
+    "MIDI_MESSAGE_SONG_POSITION_POINTER",
+    "MIDI_MESSAGE_SONG_SELECT",
+    "MIDI_MESSAGE_START",
+    "MIDI_MESSAGE_STOP",
+    "MIDI_MESSAGE_SYSTEM_EXCLUSIVE",
+    "MIDI_MESSAGE_SYSTEM_RESET",
+    "MIDI_MESSAGE_TIMING_CLOCK",
+    "MIDI_MESSAGE_TUNE_REQUEST",
+];
+
+/// `Error` — 49 members.
+static ERROR_MEMBERS: &[&str] = &[
+    "ERR_ALREADY_EXISTS",
+    "ERR_ALREADY_IN_USE",
+    "ERR_BUG",
+    "ERR_BUSY",
+    "ERR_CANT_ACQUIRE_RESOURCE",
+    "ERR_CANT_CONNECT",
+    "ERR_CANT_CREATE",
+    "ERR_CANT_FORK",
+    "ERR_CANT_OPEN",
+    "ERR_CANT_RESOLVE",
+    "ERR_COMPILATION_FAILED",
+    "ERR_CONNECTION_ERROR",
+    "ERR_CYCLIC_LINK",
+    "ERR_DATABASE_CANT_READ",
+    "ERR_DATABASE_CANT_WRITE",
+    "ERR_DOES_NOT_EXIST",
+    "ERR_DUPLICATE_SYMBOL",
+    "ERR_FILE_ALREADY_IN_USE",
+    "ERR_FILE_BAD_DRIVE",
+    "ERR_FILE_BAD_PATH",
+    "ERR_FILE_CANT_OPEN",
+    "ERR_FILE_CANT_READ",
+    "ERR_FILE_CANT_WRITE",
+    "ERR_FILE_CORRUPT",
+    "ERR_FILE_EOF",
+    "ERR_FILE_MISSING_DEPENDENCIES",
+    "ERR_FILE_NOT_FOUND",
+    "ERR_FILE_NO_PERMISSION",
+    "ERR_FILE_UNRECOGNIZED",
+    "ERR_HELP",
+    "ERR_INVALID_DATA",
+    "ERR_INVALID_DECLARATION",
+    "ERR_INVALID_PARAMETER",
+    "ERR_LINK_FAILED",
+    "ERR_LOCKED",
+    "ERR_METHOD_NOT_FOUND",
+    "ERR_OUT_OF_MEMORY",
+    "ERR_PARAMETER_RANGE_ERROR",
+    "ERR_PARSE_ERROR",
+    "ERR_PRINTER_ON_FIRE",
+    "ERR_QUERY_FAILED",
+    "ERR_SCRIPT_FAILED",
+    "ERR_SKIP",
+    "ERR_TIMEOUT",
+    "ERR_UNAUTHORIZED",
+    "ERR_UNAVAILABLE",
+    "ERR_UNCONFIGURED",
+    "FAILED",
+    "OK",
+];
+
+/// `PropertyHint` — 45 members.
+static PROPERTY_HINT_MEMBERS: &[&str] = &[
+    "PROPERTY_HINT_ARRAY_TYPE",
+    "PROPERTY_HINT_COLOR_NO_ALPHA",
+    "PROPERTY_HINT_DICTIONARY_TYPE",
+    "PROPERTY_HINT_DIR",
+    "PROPERTY_HINT_ENUM",
+    "PROPERTY_HINT_ENUM_SUGGESTION",
+    "PROPERTY_HINT_EXPRESSION",
+    "PROPERTY_HINT_EXP_EASING",
+    "PROPERTY_HINT_FILE",
+    "PROPERTY_HINT_FILE_PATH",
+    "PROPERTY_HINT_FLAGS",
+    "PROPERTY_HINT_GLOBAL_DIR",
+    "PROPERTY_HINT_GLOBAL_FILE",
+    "PROPERTY_HINT_GLOBAL_SAVE_FILE",
+    "PROPERTY_HINT_GROUP_ENABLE",
+    "PROPERTY_HINT_HIDE_QUATERNION_EDIT",
+    "PROPERTY_HINT_INPUT_NAME",
+    "PROPERTY_HINT_INT_IS_OBJECTID",
+    "PROPERTY_HINT_INT_IS_POINTER",
+    "PROPERTY_HINT_LAYERS_2D_NAVIGATION",
+    "PROPERTY_HINT_LAYERS_2D_PHYSICS",
+    "PROPERTY_HINT_LAYERS_2D_RENDER",
+    "PROPERTY_HINT_LAYERS_3D_NAVIGATION",
+    "PROPERTY_HINT_LAYERS_3D_PHYSICS",
+    "PROPERTY_HINT_LAYERS_3D_RENDER",
+    "PROPERTY_HINT_LAYERS_AVOIDANCE",
+    "PROPERTY_HINT_LINK",
+    "PROPERTY_HINT_LOCALE_ID",
+    "PROPERTY_HINT_LOCALIZABLE_STRING",
+    "PROPERTY_HINT_MAX",
+    "PROPERTY_HINT_MULTILINE_TEXT",
+    "PROPERTY_HINT_NODE_PATH_TO_EDITED_NODE",
+    "PROPERTY_HINT_NODE_PATH_VALID_TYPES",
+    "PROPERTY_HINT_NODE_TYPE",
+    "PROPERTY_HINT_NONE",
+    "PROPERTY_HINT_OBJECT_ID",
+    "PROPERTY_HINT_OBJECT_TOO_BIG",
+    "PROPERTY_HINT_ONESHOT",
+    "PROPERTY_HINT_PASSWORD",
+    "PROPERTY_HINT_PLACEHOLDER_TEXT",
+    "PROPERTY_HINT_RANGE",
+    "PROPERTY_HINT_RESOURCE_TYPE",
+    "PROPERTY_HINT_SAVE_FILE",
+    "PROPERTY_HINT_TOOL_BUTTON",
+    "PROPERTY_HINT_TYPE_STRING",
+];
+
+/// `PropertyUsageFlags` — 32 members.
+static PROPERTY_USAGE_FLAGS_MEMBERS: &[&str] = &[
+    "PROPERTY_USAGE_ALWAYS_DUPLICATE",
+    "PROPERTY_USAGE_ARRAY",
+    "PROPERTY_USAGE_CATEGORY",
+    "PROPERTY_USAGE_CHECKABLE",
+    "PROPERTY_USAGE_CHECKED",
+    "PROPERTY_USAGE_CLASS_IS_BITFIELD",
+    "PROPERTY_USAGE_CLASS_IS_ENUM",
+    "PROPERTY_USAGE_DEFAULT",
+    "PROPERTY_USAGE_DEFERRED_SET_RESOURCE",
+    "PROPERTY_USAGE_EDITOR",
+    "PROPERTY_USAGE_EDITOR_BASIC_SETTING",
+    "PROPERTY_USAGE_EDITOR_INSTANTIATE_OBJECT",
+    "PROPERTY_USAGE_GROUP",
+    "PROPERTY_USAGE_HIGH_END_GFX",
+    "PROPERTY_USAGE_INTERNAL",
+    "PROPERTY_USAGE_KEYING_INCREMENTS",
+    "PROPERTY_USAGE_NEVER_DUPLICATE",
+    "PROPERTY_USAGE_NIL_IS_VARIANT",
+    "PROPERTY_USAGE_NODE_PATH_FROM_SCENE_ROOT",
+    "PROPERTY_USAGE_NONE",
+    "PROPERTY_USAGE_NO_EDITOR",
+    "PROPERTY_USAGE_NO_INSTANCE_STATE",
+    "PROPERTY_USAGE_READ_ONLY",
+    "PROPERTY_USAGE_RESOURCE_NOT_PERSISTENT",
+    "PROPERTY_USAGE_RESTART_IF_CHANGED",
+    "PROPERTY_USAGE_SCRIPT_DEFAULT_VALUE",
+    "PROPERTY_USAGE_SCRIPT_VARIABLE",
+    "PROPERTY_USAGE_SECRET",
+    "PROPERTY_USAGE_STORAGE",
+    "PROPERTY_USAGE_STORE_IF_NULL",
+    "PROPERTY_USAGE_SUBGROUP",
+    "PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED",
+];
+
+/// `MethodFlags` — 9 members.
+static METHOD_FLAGS_MEMBERS: &[&str] = &[
+    "METHOD_FLAGS_DEFAULT",
+    "METHOD_FLAG_CONST",
+    "METHOD_FLAG_EDITOR",
+    "METHOD_FLAG_NORMAL",
+    "METHOD_FLAG_OBJECT_CORE",
+    "METHOD_FLAG_STATIC",
+    "METHOD_FLAG_VARARG",
+    "METHOD_FLAG_VIRTUAL",
+    "METHOD_FLAG_VIRTUAL_REQUIRED",
+];
+
+/// Returns `true` if `name` is an @GlobalScope enum type name usable as a
+/// GDScript enum-qualified prefix (`Key.KEY_SPACE`, `Error.OK`).
+///
+/// Answers the *prefix* question only — it says nothing about whether a given
+/// member belongs to that enum. Use [`global_enum_member`] to resolve a
+/// qualified access; it applies the membership check this function skips.
+pub fn is_global_enum(name: &str) -> bool {
+    global_enum_members(name).is_some()
+}
+
+/// Resolve an enum-qualified member access (`Key.KEY_SPACE`) to its value.
+///
+/// Both halves must agree: `enum_name` has to be a real @GlobalScope enum
+/// **and** `member` has to belong to that enum. Only then is the value read
+/// from [`global_constant`], which owns the flat namespace the members share.
+///
+/// Returns `None` for a member that exists globally but under a different enum
+/// (`Error.KEY_ESCAPE`, `Key.OK`). The caller in `interpreter.rs` treats that
+/// `None` as "not a static member", so evaluation falls through to the normal
+/// identifier resolution and halts with `UndefinedVariable` — Godot likewise
+/// rejects the expression rather than answering the other enum's integer.
 pub fn global_enum_member(enum_name: &str, member: &str) -> Option<Variant> {
-    if is_global_enum(enum_name) {
-        global_constant(member)
-    } else {
-        None
+    // A scan rather than a binary search: `slice::contains`/`binary_search` want
+    // a `&&'static str`, and `member` borrows the caller's expression, so the
+    // lifetimes do not unify. The longest set is `Key` at 193 entries and most
+    // comparisons fail on the first byte, so the difference is not measurable.
+    if !global_enum_members(enum_name)?.iter().any(|m| *m == member) {
+        return None;
     }
+    global_constant(member)
 }
 
 /// Godot `Variant.Type` integer code for a value — the number `typeof(x)`
@@ -694,5 +1247,106 @@ mod tests {
             global_constant("MOUSE_MODE_CONFINED_HIDDEN"),
             Some(Variant::Int(4))
         );
+    }
+
+    /// pat-0q2kx.243: a member has to belong to the enum it is qualified with.
+    /// The two rejected cases are the exact ones the bead names — both members
+    /// exist as barewords, which is why the old prefix-only check let them
+    /// through with another enum's value.
+    #[test]
+    fn qualified_member_must_belong_to_its_enum() {
+        assert_eq!(
+            global_enum_member("Key", "KEY_SPACE"),
+            Some(Variant::Int(32))
+        );
+        assert_eq!(global_enum_member("Error", "OK"), Some(Variant::Int(0)));
+
+        assert_eq!(
+            global_enum_member("Error", "KEY_ESCAPE"),
+            None,
+            "KEY_ESCAPE belongs to Key, so Error.KEY_ESCAPE must not answer 4194305"
+        );
+        assert_eq!(
+            global_enum_member("Key", "OK"),
+            None,
+            "OK belongs to Error, so Key.OK must not answer 0"
+        );
+        // Both really are valid barewords — that is what makes the qualified
+        // form a membership question rather than a spelling one.
+        assert_eq!(global_constant("KEY_ESCAPE"), Some(Variant::Int(4_194_305)));
+        assert_eq!(global_constant("OK"), Some(Variant::Int(0)));
+    }
+
+    /// An unknown prefix is still rejected, and a member that is a bareword but
+    /// belongs to no @GlobalScope enum at all (`CONNECT_DEFERRED` is
+    /// `Object.ConnectFlags`, a *class* enum) cannot be reached through any
+    /// global prefix.
+    #[test]
+    fn unknown_prefix_and_non_global_members_reject() {
+        assert_eq!(global_enum_member("Vector2", "KEY_SPACE"), None);
+        assert_eq!(global_enum_member("Variant", "TYPE_INT"), None);
+        assert!(!is_global_enum("Variant"));
+        assert!(is_global_enum("Key") && is_global_enum("MethodFlags"));
+
+        assert_eq!(global_constant("CONNECT_DEFERRED"), Some(Variant::Int(1)));
+        for prefix in ["Key", "Error", "MethodFlags", "PropertyUsageFlags"] {
+            assert_eq!(
+                global_enum_member(prefix, "CONNECT_DEFERRED"),
+                None,
+                "{prefix}.CONNECT_DEFERRED is not a global enum member"
+            );
+        }
+    }
+
+    /// Every name in the generated table must resolve in the flat value table.
+    /// A member listed here but absent from [`global_constant`] would make the
+    /// qualified form answer `None` while the bareword works — a split that no
+    /// individual constant test would show.
+    #[test]
+    fn every_listed_member_has_a_value() {
+        const ENUMS: &[&str] = &[
+            "Side",
+            "Corner",
+            "Orientation",
+            "ClockDirection",
+            "HorizontalAlignment",
+            "VerticalAlignment",
+            "InlineAlignment",
+            "EulerOrder",
+            "Key",
+            "KeyModifierMask",
+            "KeyLocation",
+            "MouseButton",
+            "MouseButtonMask",
+            "JoyButton",
+            "JoyAxis",
+            "MIDIMessage",
+            "Error",
+            "PropertyHint",
+            "PropertyUsageFlags",
+            "MethodFlags",
+        ];
+        let mut total = 0;
+        for e in ENUMS {
+            let members = global_enum_members(e).unwrap_or_else(|| panic!("{e} has no member set"));
+            assert!(!members.is_empty(), "{e} member set is empty");
+            for m in members {
+                assert!(
+                    global_enum_member(e, m).is_some(),
+                    "{e}.{m} is listed but has no value"
+                );
+            }
+            // Strictly ascending: sorted (what makes the table diffable against
+            // a regenerated dump) and duplicate-free in one assertion.
+            assert!(
+                members.windows(2).all(|w| w[0] < w[1]),
+                "{e} member list is not strictly sorted"
+            );
+            total += members.len();
+        }
+        // 446 = the 512 @GlobalScope constants less the two `Variant.*` enums,
+        // Variant.Type (40) and Variant.Operator (26), which are not bareword
+        // prefixes in GDScript.
+        assert_eq!(total, 446, "member count drifted from extension_api.json");
     }
 }

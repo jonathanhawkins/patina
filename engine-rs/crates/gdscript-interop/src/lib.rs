@@ -12,6 +12,7 @@ pub mod bindings;
 pub mod bridge;
 pub mod canvas_server;
 pub mod coroutine;
+pub mod editor_commands;
 pub mod fuzz_gdscript;
 pub mod global_constants;
 pub mod interpreter;

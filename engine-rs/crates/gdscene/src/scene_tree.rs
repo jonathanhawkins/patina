@@ -137,6 +137,16 @@ pub struct SceneTree {
     /// Per-node animation trees (Godot `AnimationTree` nodes), ticked each frame
     /// by [`process_animation_trees`](Self::process_animation_trees).
     animation_trees: HashMap<NodeId, AnimationTree>,
+    /// Per-node graph models (Godot `GraphEdit`), holding the node set and
+    /// connection list a script manipulates via `connect_node` /
+    /// `disconnect_node` (pat-0q2kx.244).
+    ///
+    /// `graph_edit.rs` was a complete 732-line model with NO owner anywhere, so
+    /// nothing could reach it. It lives on the tree rather than the frame loop
+    /// because the connection list is authored state that must survive whether
+    /// or not the scene is ticking — and because the scripting accessor reaches
+    /// the tree, not `MainLoop`.
+    graph_edits: HashMap<NodeId, crate::graph_edit::GraphEdit>,
     /// Per-node video players (Godot `VideoStreamPlayer`), advanced each frame
     /// by [`process_video_players`](Self::process_video_players).
     ///
@@ -289,6 +299,7 @@ impl SceneTree {
             signal_stores: HashMap::new(),
             animation_players: HashMap::new(),
             animation_trees: HashMap::new(),
+            graph_edits: HashMap::new(),
             video_players: HashMap::new(),
             hovered_control: None,
             gui_press_target: None,
@@ -2461,6 +2472,23 @@ impl SceneTree {
         self.animation_trees.get(&node_id)
     }
 
+    /// A node's graph model, creating an empty one on first use
+    /// (pat-0q2kx.244).
+    ///
+    /// Lazy rather than created at `add_child` time: a GraphEdit with no
+    /// connections is indistinguishable from an absent one, so allocating for
+    /// every node that merely *might* be a GraphEdit would cost memory for
+    /// nothing. The first `connect_node` is what makes it real.
+    pub fn graph_edit_mut(&mut self, node_id: NodeId) -> &mut crate::graph_edit::GraphEdit {
+        self.graph_edits.entry(node_id).or_default()
+    }
+
+    /// A node's graph model if one has been created; `None` before the first
+    /// mutation. Callers that only read must not force one into existence.
+    pub fn get_graph_edit(&self, node_id: NodeId) -> Option<&crate::graph_edit::GraphEdit> {
+        self.graph_edits.get(&node_id)
+    }
+
     /// Returns a mutable reference to a node's animation tree, if attached.
     /// Scripts reach this to set `parameters/...` entries at runtime.
     pub fn get_animation_tree_mut(&mut self, node_id: NodeId) -> Option<&mut AnimationTree> {
@@ -4431,6 +4459,33 @@ pub(crate) fn input_event_to_variant(event: &gdplatform::input::InputEvent) -> V
             d.insert("action", action.clone());
             d.insert("pressed", *pressed);
             d.insert("strength", *strength);
+        }
+        // Godot `InputEventMIDI` (pat-0q2kx.246). Every field is present on
+        // every message, matching Godot's single concrete class — a script
+        // switches on `message` first, exactly as it would there.
+        Ev::Midi {
+            channel,
+            message,
+            pitch,
+            velocity,
+            controller_number,
+            controller_value,
+            instrument,
+            pressure,
+            device,
+        } => {
+            d.insert("type", "midi");
+            d.insert("channel", i64::from(*channel));
+            // The @GlobalScope `MIDI_MESSAGE_*` integer, so a script can write
+            // `event.message == MIDI_MESSAGE_NOTE_ON` and have it hold.
+            d.insert("message", i64::from(*message));
+            d.insert("pitch", i64::from(*pitch));
+            d.insert("velocity", i64::from(*velocity));
+            d.insert("controller_number", i64::from(*controller_number));
+            d.insert("controller_value", i64::from(*controller_value));
+            d.insert("instrument", i64::from(*instrument));
+            d.insert("pressure", i64::from(*pressure));
+            d.insert("device", i64::from(*device));
         }
     }
     Variant::Dictionary(d)

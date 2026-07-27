@@ -1827,6 +1827,84 @@ pub fn register_3d_classes() {
             .method(MethodInfo::new("is_using_euler", 1)),
     );
 
+    // CopyTransformModifier3D copies a reference bone/node transform onto an
+    // apply bone; ConvertTransformModifier3D maps one transform component onto
+    // another (pat-0q2kx.239). Both are concrete `BoneConstraint3D` children with
+    // the same shape as AimModifier3D above: `setting_count` is the only real
+    // property and everything else is an indexed accessor pair.
+    //
+    // ⚠️ The flag defaults are `*_ALL`, not zero
+    // (`copy_transform_modifier_3d.h:54-55`): TRANSFORM_FLAG_ALL = 7 and
+    // AXIS_FLAG_ALL = 7. Registering these as 0 would describe a modifier that
+    // masks everything away, which is the opposite of Godot's default.
+    register_class(
+        ClassRegistration::new("CopyTransformModifier3D")
+            .parent("BoneConstraint3D")
+            .property(PropertyInfo::new("setting_count", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("TransformFlag")
+                    .constant("TRANSFORM_FLAG_POSITION", 1)
+                    .constant("TRANSFORM_FLAG_ROTATION", 2)
+                    .constant("TRANSFORM_FLAG_SCALE", 4)
+                    .constant("TRANSFORM_FLAG_ALL", 7),
+            )
+            .enumeration(
+                EnumInfo::new("AxisFlag")
+                    .constant("AXIS_FLAG_X", 1)
+                    .constant("AXIS_FLAG_Y", 2)
+                    .constant("AXIS_FLAG_Z", 4)
+                    .constant("AXIS_FLAG_ALL", 7),
+            )
+            .method(MethodInfo::new("set_copy_flags", 2))
+            .method(MethodInfo::new("get_copy_flags", 1))
+            .method(MethodInfo::new("set_axis_flags", 2))
+            .method(MethodInfo::new("get_axis_flags", 1))
+            .method(MethodInfo::new("set_invert_flags", 2))
+            .method(MethodInfo::new("get_invert_flags", 1))
+            .method(MethodInfo::new("set_copy_position", 2))
+            .method(MethodInfo::new("is_position_copying", 1))
+            .method(MethodInfo::new("set_copy_rotation", 2))
+            .method(MethodInfo::new("is_rotation_copying", 1))
+            .method(MethodInfo::new("set_copy_scale", 2))
+            .method(MethodInfo::new("is_scale_copying", 1))
+            .method(MethodInfo::new("set_relative", 2))
+            .method(MethodInfo::new("is_relative", 1))
+            .method(MethodInfo::new("set_additive", 2))
+            .method(MethodInfo::new("is_additive", 1)),
+    );
+
+    register_class(
+        ClassRegistration::new("ConvertTransformModifier3D")
+            .parent("BoneConstraint3D")
+            .property(PropertyInfo::new("setting_count", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("TransformMode")
+                    .constant("TRANSFORM_MODE_POSITION", 0)
+                    .constant("TRANSFORM_MODE_ROTATION", 1)
+                    .constant("TRANSFORM_MODE_SCALE", 2),
+            )
+            .method(MethodInfo::new("set_apply_transform_mode", 2))
+            .method(MethodInfo::new("get_apply_transform_mode", 1))
+            .method(MethodInfo::new("set_apply_axis", 2))
+            .method(MethodInfo::new("get_apply_axis", 1))
+            .method(MethodInfo::new("set_apply_range_min", 2))
+            .method(MethodInfo::new("get_apply_range_min", 1))
+            .method(MethodInfo::new("set_apply_range_max", 2))
+            .method(MethodInfo::new("get_apply_range_max", 1))
+            .method(MethodInfo::new("set_reference_transform_mode", 2))
+            .method(MethodInfo::new("get_reference_transform_mode", 1))
+            .method(MethodInfo::new("set_reference_axis", 2))
+            .method(MethodInfo::new("get_reference_axis", 1))
+            .method(MethodInfo::new("set_reference_range_min", 2))
+            .method(MethodInfo::new("get_reference_range_min", 1))
+            .method(MethodInfo::new("set_reference_range_max", 2))
+            .method(MethodInfo::new("get_reference_range_max", 1))
+            .method(MethodInfo::new("set_relative", 2))
+            .method(MethodInfo::new("is_relative", 1))
+            .method(MethodInfo::new("set_additive", 2))
+            .method(MethodInfo::new("is_additive", 1)),
+    );
+
     // BoneTwistDisperser3D spreads a bone's roll across the chain between a root
     // and an end bone, so a wrist twisting 90° does not "candy-wrapper" the
     // forearm — each intermediate joint takes a share.
@@ -7015,6 +7093,28 @@ pub fn register_2d_classes() {
     if !class_exists("ColorRect") {
         register_class(ClassRegistration::new("ColorRect").parent("Control"));
     }
+    // ReferenceRect draws only a coloured border around its rect, to visualise a
+    // Control's extents (pat-0q2kx.245).
+    //
+    // ⚠️ `editor_only` defaults to **true** and `border_color` to **red**
+    // (`scene/gui/reference_rect.h:38-40`) — an unconfigured ReferenceRect is
+    // deliberately invisible at runtime, so registering `editor_only` as false
+    // would describe the opposite of Godot's node.
+    if !class_exists("ReferenceRect") {
+        register_class(
+            ClassRegistration::new("ReferenceRect")
+                .parent("Control")
+                // Fully qualified: `register_2d_classes` imports only
+                // `gdcore::math::Vector2`, so a bare `Color` here is E0433 —
+                // this file has taken that break twice before.
+                .property(PropertyInfo::new(
+                    "border_color",
+                    Variant::Color(gdcore::math::Color::new(1.0, 0.0, 0.0, 1.0)),
+                ))
+                .property(PropertyInfo::new("border_width", Variant::Float(1.0)))
+                .property(PropertyInfo::new("editor_only", Variant::Bool(true))),
+        );
+    }
     // The menu family (pat-0q2kx.177). A full `PopupMenu` model already existed
     // in `gdscene::popup` (items, separators, `activate_item` → `id_pressed`)
     // but the class was never registered, so a `.tscn` naming one could not
@@ -7740,6 +7840,83 @@ pub fn register_root_window_chain() {
                 ))
                 .method(MethodInfo::new("get_window", 0))
                 .method(MethodInfo::new("get_viewport", 0)),
+        );
+    }
+
+    // -- Dialog chain: Window <- AcceptDialog <- ConfirmationDialog <-
+    //    ScriptCreateDialog (pat-0q2kx.242) ---------------------------------
+    //
+    // The bead asks only for ScriptCreateDialog, but BOTH intermediates were
+    // absent. Registering a class under a parent that does not exist severs
+    // the chain — `is_parent_class(ScriptCreateDialog, "Window")` would be
+    // false and `inheritance_chain` would stop dead (pat-nzgdu.98) — so the
+    // two intermediates are the minimum for a correct registration, not scope
+    // creep. All three are plain GDREGISTER_CLASS.
+    if !class_exists("AcceptDialog") {
+        register_class(
+            ClassRegistration::new("AcceptDialog")
+                .parent("Window")
+                // ⚠️ Most of these bools default TRUE, and `title` is "Alert!",
+                // not "". A zero-initialised table would make every dialog
+                // non-exclusive, non-transient and un-escapable.
+                .property(PropertyInfo::new(
+                    "title",
+                    Variant::String("Alert!".to_string()),
+                ))
+                .property(PropertyInfo::new(
+                    "dialog_text",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "ok_button_text",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new("dialog_autowrap", Variant::Bool(false)))
+                .property(PropertyInfo::new("visible", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "dialog_close_on_escape",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new("dialog_hide_on_ok", Variant::Bool(true)))
+                .property(PropertyInfo::new("exclusive", Variant::Bool(true)))
+                .property(PropertyInfo::new("keep_title_visible", Variant::Bool(true)))
+                .property(PropertyInfo::new("maximize_disabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("minimize_disabled", Variant::Bool(true)))
+                .property(PropertyInfo::new("transient", Variant::Bool(true)))
+                .property(PropertyInfo::new("wrap_controls", Variant::Bool(true))),
+        );
+    }
+    if !class_exists("ConfirmationDialog") {
+        register_class(
+            ClassRegistration::new("ConfirmationDialog")
+                .parent("AcceptDialog")
+                // Overrides the inherited "Alert!" — a confirmation dialog
+                // titled "Alert!" is the visible symptom of skipping this.
+                .property(PropertyInfo::new(
+                    "title",
+                    Variant::String("Please Confirm...".to_string()),
+                ))
+                .property(PropertyInfo::new(
+                    "cancel_button_text",
+                    Variant::String("Cancel".to_string()),
+                ))
+                .property(PropertyInfo::new(
+                    "min_size",
+                    Variant::Vector2i(gdcore::math::Vector2i::new(200, 70)),
+                ))
+                .property(PropertyInfo::new(
+                    "size",
+                    Variant::Vector2i(gdcore::math::Vector2i::new(200, 100)),
+                )),
+        );
+    }
+    if !class_exists("ScriptCreateDialog") {
+        register_class(
+            ClassRegistration::new("ScriptCreateDialog")
+                .parent("ConfirmationDialog")
+                // config(inherits, path, built_in_enabled, load_enabled)
+                .method(MethodInfo::new("config", 4))
+                .signal(SignalInfo::new("script_created").arg("script")),
         );
     }
 }

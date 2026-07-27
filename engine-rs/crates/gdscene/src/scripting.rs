@@ -1229,6 +1229,72 @@ impl SceneAccess for SceneTreeAccessor {
             // observable contract — "a body whose script calls move_and_slide
             // moves, one that never calls it does not" — holds either way; only
             // the timing differs by one tick.
+            // -- GraphEdit connection model (pat-0q2kx.244) --
+            //
+            // `graph_edit.rs` is a complete 732-line model — port typing,
+            // duplicate rejection, validity rules — that had NO owner, so a
+            // script could not reach any of it. These three route to the
+            // per-node model now stored on the tree.
+            //
+            // Godot returns an Error code (OK == 0) from connect_node, not a
+            // bool, so a script can `if err != OK`. Mapping the model's
+            // Result onto that is the whole translation.
+            "connect_node" | "disconnect_node" => {
+                let from = arg_str(0)?;
+                let from_port = match args.get(1) {
+                    Some(Variant::Int(i)) if *i >= 0 => *i as u32,
+                    // ERR_INVALID_PARAMETER (core/error/error_list.h).
+                    _ => return Some(Variant::Int(31)),
+                };
+                let to = arg_str(2)?;
+                let to_port = match args.get(3) {
+                    Some(Variant::Int(i)) if *i >= 0 => *i as u32,
+                    // ERR_INVALID_PARAMETER (core/error/error_list.h).
+                    _ => return Some(Variant::Int(31)),
+                };
+                let graph = self.tree_mut().graph_edit_mut(nid);
+                let res = if method == "connect_node" {
+                    graph.connect_node(&from, from_port, &to, to_port)
+                } else {
+                    graph.disconnect_node(&from, from_port, &to, to_port)
+                };
+                // OK == 0, ERR_INVALID_PARAMETER == 31 (core/error/error_list.h).
+                Some(Variant::Int(if res.is_ok() { 0 } else { 31 }))
+            }
+            "get_connection_list" => {
+                // Godot yields an Array of Dictionaries keyed
+                // from_node/from_port/to_node/to_port. Reading through
+                // `get_graph_edit` rather than `graph_edit_mut` so a pure query
+                // does not allocate a model for a node that has none.
+                let list = match self.tree().get_graph_edit(nid) {
+                    Some(g) => g
+                        .get_connection_list()
+                        .iter()
+                        .map(|c| {
+                            let mut d = gdvariant::Dictionary::new();
+                            d.insert(
+                                Variant::String("from_node".into()),
+                                Variant::String(c.from_node.clone()),
+                            );
+                            d.insert(
+                                Variant::String("from_port".into()),
+                                Variant::Int(c.from_port as i64),
+                            );
+                            d.insert(
+                                Variant::String("to_node".into()),
+                                Variant::String(c.to_node.clone()),
+                            );
+                            d.insert(
+                                Variant::String("to_port".into()),
+                                Variant::Int(c.to_port as i64),
+                            );
+                            Variant::Dictionary(d)
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                };
+                Some(Variant::Array(list))
+            }
             "move_and_slide" => {
                 if let Some(n) = self.tree_mut().get_node_mut(nid) {
                     n.set_property("_move_and_slide_requested", Variant::Bool(true));

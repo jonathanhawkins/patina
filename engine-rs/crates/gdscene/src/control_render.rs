@@ -46,6 +46,10 @@ const CONTROL_CLASSES: &[&str] = &[
     "Button",
     "Label",
     "ColorRect",
+    // pat-0q2kx.245 — like the entries below, this membership fallback is what
+    // keeps `is_control()` from rejecting the node when the ClassDB Control
+    // chain is unavailable, which would skip the draw arm entirely.
+    "ReferenceRect",
     "TextureRect",
     "RichTextLabel",
     // pat-nzgdu.198 — TextEdit/CodeEdit draw their text (and syntax-highlighted
@@ -1029,6 +1033,48 @@ fn draw_control(
                 color,
                 filled: true,
             });
+        }
+        // ReferenceRect draws only a border, to visualise a Control's extents
+        // (pat-0q2kx.245; `scene/gui/reference_rect.cpp:37-44`).
+        //
+        // Godot's condition is `is_editor_hint() || !editor_only`. This is the
+        // **runtime** pass, where `is_editor_hint()` is false, so it reduces to
+        // `!editor_only` — and `editor_only` defaults to **true**
+        // (`reference_rect.h:40`), so an unconfigured ReferenceRect correctly
+        // draws nothing here. The editor's own viewport is a separate renderer;
+        // when an editor-hint accessor exists on this side, this becomes the
+        // full two-term condition.
+        "ReferenceRect" => {
+            if bool_prop(tree, node_id, "editor_only").unwrap_or(true) {
+                return;
+            }
+            let color = color_prop(tree, node_id, "border_color")
+                // Godot's default is red (`Color(1, 0, 0)`), not white.
+                .unwrap_or(Color::new(1.0, 0.0, 0.0, 1.0));
+            let width = float_prop(tree, node_id, "border_width").unwrap_or(1.0) as f32;
+            if width <= 0.0 {
+                return;
+            }
+            // `DrawCommand::DrawRect` strokes a single-pixel outline and carries
+            // no width, so a thick border is drawn as concentric outlines inset
+            // one pixel at a time. Godot strokes with a real width; this matches
+            // it at width 1 and approximates it above that.
+            let steps = width.round().max(1.0) as i32;
+            for i in 0..steps {
+                let inset = i as f32;
+                let size = Vector2::new(rect.size.x - inset * 2.0, rect.size.y - inset * 2.0);
+                if size.x <= 0.0 || size.y <= 0.0 {
+                    break;
+                }
+                out.push(DrawCommand::DrawRect {
+                    rect: Rect2 {
+                        position: Vector2::new(rect.position.x + inset, rect.position.y + inset),
+                        size,
+                    },
+                    color,
+                    filled: false,
+                });
+            }
         }
         // pat-nzgdu.197. The orientation is the CLASS, not a property — so the
         // only difference between the two is which stylebox the theme hands

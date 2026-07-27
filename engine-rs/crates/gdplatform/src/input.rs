@@ -533,12 +533,198 @@ pub enum InputEvent {
         /// Pen tilt in `-1.0..=1.0` per axis (`InputEventScreenDrag.tilt`).
         tilt: Vector2,
     },
+    /// A decoded MIDI message (Godot `InputEventMIDI`), pat-0q2kx.246.
+    ///
+    /// Built by [`decode_midi_message`] from the raw bytes a MIDI port
+    /// delivers; the field set and the per-message decoding are Godot's
+    /// (`core/os/midi_driver.cpp` `MIDIDriver::send_event`).
+    ///
+    /// Every field is present on every message because Godot's
+    /// `InputEventMIDI` is one concrete class with one field set — a
+    /// `NOTE_ON` simply leaves `controller_number` at 0. Scripts are expected
+    /// to switch on [`message`](Self::Midi::message) before reading, exactly
+    /// as they do in Godot.
+    Midi {
+        /// MIDI channel `0..=15`, from the low nibble of the status byte.
+        /// `0` for System messages, which carry no channel.
+        channel: u8,
+        /// The `MIDIMessage` enum value: the status byte's high nibble for
+        /// Voice messages (`0x9` for `NOTE_ON`), or the whole byte for
+        /// System messages (`0xF0` for `SYSTEM_EXCLUSIVE`).
+        message: u8,
+        /// Note number for NOTE_ON/NOTE_OFF/AFTERTOUCH. For PITCH_BEND this
+        /// is the **14-bit** bend value, not a note.
+        pitch: u16,
+        /// Note velocity for NOTE_ON/NOTE_OFF.
+        velocity: u8,
+        /// Controller number for CONTROL_CHANGE.
+        controller_number: u8,
+        /// Controller value for CONTROL_CHANGE.
+        controller_value: u8,
+        /// Patch/program number for PROGRAM_CHANGE.
+        instrument: u8,
+        /// Pressure for AFTERTOUCH (per note) and CHANNEL_PRESSURE.
+        pressure: u8,
+        /// Index of the port the message arrived on, mirroring Godot's
+        /// `InputEvent.device`.
+        device: u32,
+    },
     /// A named action event (e.g. from `InputMap`).
     Action {
         action: String,
         pressed: bool,
         strength: f32,
     },
+}
+
+// ---------------------------------------------------------------------------
+// MIDI decoding (pat-0q2kx.246)
+// ---------------------------------------------------------------------------
+
+/// `MIDIMessage` values Godot's decoder branches on. Named rather than spelled
+/// as literals at the match sites because `0xB` vs `0xC` is a one-character
+/// error that produces a plausible event on the wrong field.
+///
+/// These are the @GlobalScope `MIDI_MESSAGE_*` integers, which is what a script
+/// compares against — `MIDI_MESSAGE_NOTE_ON == 9`.
+pub mod midi_message {
+    pub const NONE: u8 = 0;
+    pub const NOTE_OFF: u8 = 0x8;
+    pub const NOTE_ON: u8 = 0x9;
+    pub const AFTERTOUCH: u8 = 0xA;
+    pub const CONTROL_CHANGE: u8 = 0xB;
+    pub const PROGRAM_CHANGE: u8 = 0xC;
+    pub const CHANNEL_PRESSURE: u8 = 0xD;
+    pub const PITCH_BEND: u8 = 0xE;
+    pub const SYSTEM_EXCLUSIVE: u8 = 0xF0;
+    pub const QUARTER_FRAME: u8 = 0xF1;
+    pub const SONG_POSITION_POINTER: u8 = 0xF2;
+    pub const SONG_SELECT: u8 = 0xF3;
+}
+
+/// Godot's `MIDIDriver::Parser::status_to_msg_enum`
+/// (`core/os/midi_driver.cpp:64`): a Voice status byte reports its **high
+/// nibble** (`0x90` -> `0x9`, NOTE_ON) while a System byte reports itself
+/// whole (`0xF0` -> `0xF0`). A byte with the top bit clear is data, not a
+/// status, and has no message.
+pub fn midi_status_to_message(status: u8) -> u8 {
+    if status & 0x80 == 0 {
+        midi_message::NONE
+    } else if status < 0xF0 {
+        status >> 4
+    } else {
+        status
+    }
+}
+
+/// Godot's `MIDIDriver::Parser::channel` (`core/os/midi_driver.cpp:98`).
+///
+/// ⚠️ Only **Voice** messages (`0x80..=0xEF`) carry a channel. A System
+/// message reports channel 0 — its low nibble is part of the message id, so
+/// masking it in would report, say, `SONG_SELECT` (`0xF3`) on channel 3.
+pub fn midi_channel(status: u8) -> u8 {
+    if (0x80..0xF0).contains(&status) {
+        status & 0x0F
+    } else {
+        0
+    }
+}
+
+/// Number of data bytes a message requires, from Godot's
+/// `MIDIDriver::Parser::expected_data` (`core/os/midi_driver.cpp:79`).
+pub fn midi_expected_data(message: u8) -> usize {
+    match message {
+        midi_message::NOTE_OFF
+        | midi_message::NOTE_ON
+        | midi_message::AFTERTOUCH
+        | midi_message::CONTROL_CHANGE
+        | midi_message::PITCH_BEND
+        | midi_message::SONG_POSITION_POINTER => 2,
+        midi_message::PROGRAM_CHANGE
+        | midi_message::CHANNEL_PRESSURE
+        | midi_message::QUARTER_FRAME
+        | midi_message::SONG_SELECT => 1,
+        _ => 0,
+    }
+}
+
+/// Decode one raw MIDI message into an [`InputEvent::Midi`].
+///
+/// `packet` is a status byte followed by its data bytes — exactly what the Web
+/// MIDI API hands to `MIDIMessageEvent.data`. Mirrors Godot's
+/// `MIDIDriver::send_event` (`core/os/midi_driver.cpp:105`) field for field.
+///
+/// Returns `None` when the packet cannot produce an event, which Godot treats
+/// the same way (`ERR_FAIL_COND` there, a dropped message here):
+///
+/// * empty, or starting with a data byte rather than a status byte — a
+///   fragment, not a message;
+/// * fewer data bytes than the message requires. Truncating instead would
+///   invent a velocity of 0, and NOTE_ON with velocity 0 is the conventional
+///   spelling of NOTE_OFF — a dropped message is recoverable, a silently
+///   inverted one is not.
+pub fn decode_midi_message(packet: &[u8], device: u32) -> Option<InputEvent> {
+    let status = *packet.first()?;
+    let message = midi_status_to_message(status);
+    if message == midi_message::NONE {
+        return None;
+    }
+    let data = &packet[1..];
+    if data.len() < midi_expected_data(message) {
+        return None;
+    }
+
+    let mut event = InputEvent::Midi {
+        channel: midi_channel(status),
+        message,
+        pitch: 0,
+        velocity: 0,
+        controller_number: 0,
+        controller_value: 0,
+        instrument: 0,
+        pressure: 0,
+        device,
+    };
+
+    if let InputEvent::Midi {
+        pitch,
+        velocity,
+        controller_number,
+        controller_value,
+        instrument,
+        pressure,
+        ..
+    } = &mut event
+    {
+        match message {
+            midi_message::NOTE_OFF | midi_message::NOTE_ON => {
+                *pitch = u16::from(data[0]);
+                *velocity = data[1];
+            }
+            midi_message::AFTERTOUCH => {
+                *pitch = u16::from(data[0]);
+                *pressure = data[1];
+            }
+            midi_message::CONTROL_CHANGE => {
+                *controller_number = data[0];
+                *controller_value = data[1];
+            }
+            midi_message::PROGRAM_CHANGE => *instrument = data[0],
+            midi_message::CHANNEL_PRESSURE => *pressure = data[0],
+            // 14-bit, LSB first: `(msb << 7) | lsb`. Note the operand order —
+            // reversing it still yields a number in range, so a swap looks like
+            // a wheel that moves erratically rather than like a decode bug.
+            midi_message::PITCH_BEND => {
+                *pitch = (u16::from(data[1]) << 7) | u16::from(data[0]);
+            }
+            // QUARTER_FRAME / SONG_POSITION_POINTER / SONG_SELECT carry data
+            // Godot does not decode either; the message id still reaches the
+            // script, which is what Godot delivers.
+            _ => {}
+        }
+    }
+
+    Some(event)
 }
 
 // ---------------------------------------------------------------------------
@@ -1211,6 +1397,19 @@ pub struct InputState {
     emulate_mouse_from_touch: bool,
     /// `input_devices/pointing/emulate_touch_from_mouse` — OFF by default.
     emulate_touch_from_mouse: bool,
+
+    // -- Device sensors (pat-0q2kx.247) --
+    //
+    // Godot's web build feeds `devicemotion` / `deviceorientation` into these
+    // (platform/web/js/libs/library_godot_input.js). All four read as ZERO
+    // until a platform posts a reading, which is also what a desktop build
+    // reports — so a script polling them on a sensorless device sees Godot's
+    // behaviour rather than an error.
+    accelerometer: gdcore::math::Vector3,
+    gravity: gdcore::math::Vector3,
+    gyroscope: gdcore::math::Vector3,
+    /// Generally stays zero on web: no browser exposes a raw magnetometer.
+    magnetometer: gdcore::math::Vector3,
 }
 
 /// How many frames after a finger's last press a second press still counts as a
@@ -1254,7 +1453,55 @@ impl InputState {
             // press a Button without the game doing anything.
             emulate_mouse_from_touch: true,
             emulate_touch_from_mouse: false,
+            accelerometer: gdcore::math::Vector3::ZERO,
+            gravity: gdcore::math::Vector3::ZERO,
+            gyroscope: gdcore::math::Vector3::ZERO,
+            magnetometer: gdcore::math::Vector3::ZERO,
         }
+    }
+
+    /// Godot's `Input.get_accelerometer()` — device acceleration including
+    /// gravity, m/s² (pat-0q2kx.247).
+    pub fn accelerometer(&self) -> gdcore::math::Vector3 {
+        self.accelerometer
+    }
+
+    /// Godot's `Input.get_gravity()` — the gravity component alone.
+    pub fn gravity(&self) -> gdcore::math::Vector3 {
+        self.gravity
+    }
+
+    /// Godot's `Input.get_gyroscope()` — angular velocity, rad/s.
+    pub fn gyroscope(&self) -> gdcore::math::Vector3 {
+        self.gyroscope
+    }
+
+    /// Godot's `Input.get_magnetometer()`. Stays ZERO on web, where no browser
+    /// exposes a raw magnetometer — reporting zero is the honest answer, and
+    /// matches what Godot's own web build returns.
+    pub fn magnetometer(&self) -> gdcore::math::Vector3 {
+        self.magnetometer
+    }
+
+    /// Platform hook for a `devicemotion` reading.
+    ///
+    /// These setters are part of Godot's script API too (`Input.set_*`), not
+    /// merely an internal feed — a game may inject synthetic readings for
+    /// testing, which is why they are public rather than crate-private.
+    pub fn set_accelerometer(&mut self, v: gdcore::math::Vector3) {
+        self.accelerometer = v;
+    }
+
+    pub fn set_gravity(&mut self, v: gdcore::math::Vector3) {
+        self.gravity = v;
+    }
+
+    pub fn set_gyroscope(&mut self, v: gdcore::math::Vector3) {
+        self.gyroscope = v;
+    }
+
+    pub fn set_magnetometer(&mut self, v: gdcore::math::Vector3) {
+        self.magnetometer = v;
     }
 
     /// Mouse motion accumulated since the last [`flush_frame`](Self::flush_frame),
@@ -1321,6 +1568,12 @@ impl InputState {
                         | InputEvent::ScreenTouch { .. }
                         | InputEvent::ScreenDrag { .. }
                         | InputEvent::Action { .. }
+                        // No `ActionBinding` pairs with a MIDI message, so
+                        // `action_match` already answers `None` for one
+                        // (pat-0q2kx.246). Listed anyway, per this guard's
+                        // stated purpose, so that adding a MIDI binding kind
+                        // later is a deliberate act rather than an accident.
+                        | InputEvent::Midi { .. }
                 ) {
                     continue;
                 }
@@ -1436,6 +1689,13 @@ impl InputState {
                     self.actions_just_released.insert(action.clone());
                 }
             }
+            // MIDI carries no held state (pat-0q2kx.246). Godot's `Input`
+            // singleton has no `is_midi_*` query either: `InputEventMIDI` goes
+            // straight through `parse_input_event` to `_input` and nothing
+            // accumulates. A NOTE_ON does **not** become a pressed key here —
+            // tracking it would invent a "held note" API Godot does not have,
+            // and one that no NOTE_OFF path would reliably clear.
+            InputEvent::Midi { .. } => {}
         }
     }
 

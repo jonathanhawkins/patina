@@ -834,6 +834,10 @@ impl EditorState {
     /// Creates a new editor state with the given scene tree.
     pub fn new(tree: SceneTree) -> Self {
         gdobject::class_db::register_editor_classes();
+        // The @tool EditorPlugin scripting classes (pat-0q2kx.241). Seeded here
+        // rather than only in tests so a plugin script's `extends EditorDock`
+        // resolves against the running editor.
+        gdobject::editor_plugin_classes::register_editor_plugin_classes();
         Self {
             scene_tree: tree,
             selected_node: None,
@@ -19285,8 +19289,18 @@ const EDITOR_COMMANDS: &[(&str, &str, &str)] = &[
 ];
 
 /// `GET /api/commands` — returns the full list of editor commands for the palette.
+///
+/// Built-ins first, then anything a `@tool` plugin registered through
+/// `EditorCommandPalette.add_command` (pat-0q2kx.241). Before that, this
+/// enumerated only the `EDITOR_COMMANDS` const, so a script-registered command
+/// could never reach the palette however the class was declared — registering
+/// the class without this merge would have been inert.
+///
+/// A script command carries `"source": "plugin"` so the frontend can tell the
+/// two apart; a built-in keeps its existing shape untouched, since the palette
+/// UI and the `/api/command/execute` validator both already read it.
 fn api_get_commands(stream: &mut TcpStream) {
-    let commands: Vec<serde_json::Value> = EDITOR_COMMANDS
+    let mut commands: Vec<serde_json::Value> = EDITOR_COMMANDS
         .iter()
         .map(|&(id, label, category)| {
             serde_json::json!({
@@ -19296,6 +19310,30 @@ fn api_get_commands(stream: &mut TcpStream) {
             })
         })
         .collect();
+
+    for cmd in gdscript_interop::editor_commands::all() {
+        // A plugin must not be able to shadow a built-in id: /api/command/execute
+        // dispatches built-ins by id, so a colliding entry would make the
+        // palette show one command and the server run a different one.
+        if EDITOR_COMMANDS
+            .iter()
+            .any(|&(id, _, _)| id == cmd.key_name.as_str())
+        {
+            continue;
+        }
+        // `category()` borrows `cmd`, so it must be read before any field is
+        // moved into the JSON — otherwise this is a use of a partially moved
+        // value.
+        let category = cmd.category();
+        commands.push(serde_json::json!({
+            "id": cmd.key_name,
+            "label": cmd.command_name,
+            "category": category,
+            "shortcut": cmd.shortcut,
+            "source": "plugin",
+        }));
+    }
+
     let json = serde_json::json!({ "commands": commands }).to_string();
     send_json(stream, &json);
 }
@@ -19355,6 +19393,14 @@ fn api_execute_command(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
             // Verify the command id is valid
             let valid = EDITOR_COMMANDS.iter().any(|&(id, _, _)| id == cmd.as_str());
             if !valid {
+                // A `@tool` plugin's command (pat-0q2kx.241). Its callback is a
+                // method on the plugin script instance, so run it there rather
+                // than reporting the id as unknown.
+                if let Some(entry) = gdscript_interop::editor_commands::find(&cmd) {
+                    let result = invoke_plugin_command(state, &entry);
+                    send_json(stream, &result.to_string());
+                    return;
+                }
                 send_error(stream, 404, "unknown command");
                 return;
             }
@@ -19365,6 +19411,82 @@ fn api_execute_command(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
             });
             send_json(stream, &json.to_string());
         }
+    }
+}
+
+/// Runs a `@tool` plugin command's bound callback (pat-0q2kx.241).
+///
+/// The command store records only the callback's *method name*, because the
+/// interpreter that registers it has no idea which addon folder it came from.
+/// So the owning plugin is found by asking each enabled plugin instance whether
+/// it has that method. If two plugins expose the same method name the first
+/// enabled one wins — reported in the response as `plugin`, so an ambiguous
+/// dispatch is visible rather than silent.
+///
+/// Errors are reported in the JSON rather than as an HTTP error: the command
+/// itself is real and was found, so a failing callback is a script problem to
+/// surface in the editor log, not a bad request.
+fn invoke_plugin_command(
+    state: &Arc<Mutex<EditorState>>,
+    entry: &gdscript_interop::editor_commands::ScriptCommand,
+) -> serde_json::Value {
+    let Some(callback) = entry.callback.clone() else {
+        return serde_json::json!({
+            "ok": false,
+            "command": entry.key_name.as_str(),
+            "reason": "command has no bound callable",
+        });
+    };
+
+    let mut st = state.lock().unwrap();
+    let owner = st
+        .active_plugins
+        .iter()
+        .find(|(_, inst)| inst.has_method(&callback))
+        .map(|(folder, _)| folder.clone());
+
+    let Some(folder) = owner else {
+        return serde_json::json!({
+            "ok": false,
+            "command": entry.key_name.as_str(),
+            "reason": format!("no enabled plugin defines '{callback}'"),
+        });
+    };
+
+    let outcome = st
+        .active_plugins
+        .get_mut(&folder)
+        .map(|inst| inst.call_method(&callback, &[]));
+
+    // Drain the script's prints into the editor log the same way the enable
+    // path does, so a plugin command's output is not swallowed.
+    let output: Vec<String> = st
+        .active_plugins
+        .get_mut(&folder)
+        .map(|inst| inst.take_output())
+        .unwrap_or_default();
+    for line in output {
+        st.add_log("info", line);
+    }
+
+    match outcome {
+        Some(Err(e)) => {
+            let reason = format!("plugin command '{}' failed: {e:?}", entry.key_name);
+            st.add_log("error", reason.clone());
+            serde_json::json!({
+                "ok": false,
+                "command": entry.key_name.as_str(),
+                "plugin": folder,
+                "reason": reason,
+            })
+        }
+        _ => serde_json::json!({
+            "ok": true,
+            "action": "plugin",
+            "command": entry.key_name.as_str(),
+            "plugin": folder,
+            "callback": callback,
+        }),
     }
 }
 

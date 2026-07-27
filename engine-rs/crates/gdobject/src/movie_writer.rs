@@ -31,7 +31,10 @@ fn registry() -> &'static Mutex<Vec<RegisteredWriter>> {
 /// Godot `MovieWriter.add_writer(writer)`: registers a writer (by subclass name)
 /// into the process-global registry so it is considered at movie-mode start.
 pub fn add_writer(name: impl Into<String>) {
-    registry().lock().unwrap().push(RegisteredWriter { name: name.into() });
+    registry()
+        .lock()
+        .unwrap()
+        .push(RegisteredWriter { name: name.into() });
 }
 
 /// Returns all registered writers, in registration order.
@@ -75,8 +78,7 @@ mod tests {
         add_writer("MJPEGWriter");
         add_writer("PNGWriter");
         assert_eq!(writer_count(), 2, "both writers are registered");
-        let names: Vec<String> =
-            registered_writers().into_iter().map(|w| w.name).collect();
+        let names: Vec<String> = registered_writers().into_iter().map(|w| w.name).collect();
         assert_eq!(
             names,
             vec!["MJPEGWriter".to_string(), "PNGWriter".to_string()],

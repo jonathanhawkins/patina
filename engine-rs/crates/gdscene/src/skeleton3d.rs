@@ -663,6 +663,21 @@ pub fn process_modifiers(tree: &mut SceneTree, skeleton_id: NodeId) {
             }
             continue;
         }
+        // BoneConstraint3D children — not IK solvers either: they write an apply
+        // bone's pose from a reference bone rather than solving a chain
+        // (pat-0q2kx.239).
+        if class == COPY_TRANSFORM_CLASS {
+            if modifier_active(tree, child) {
+                apply_copy_transform_modifier(tree, skeleton_id, child);
+            }
+            continue;
+        }
+        if class == CONVERT_TRANSFORM_CLASS {
+            if modifier_active(tree, child) {
+                apply_convert_transform_modifier(tree, skeleton_id, child);
+            }
+            continue;
+        }
         let solver = match class.as_str() {
             IK_MODIFIER_CLASS => IkSolverKind::Ccd,
             FABRIK_CLASS => IkSolverKind::Fabrik,
@@ -696,6 +711,442 @@ fn bone_axis_vector(axis: i64) -> Vector3 {
         3 => Vector3::new(0.0, -1.0, 0.0),
         5 => Vector3::new(0.0, 0.0, -1.0),
         _ => Vector3::new(0.0, 0.0, 1.0),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BoneConstraint3D family: Copy / Convert transform modifiers (pat-0q2kx.239)
+//
+// Godot ground truth: `scene/3d/copy_transform_modifier_3d.cpp`,
+// `scene/3d/convert_transform_modifier_3d.cpp`, `scene/3d/bone_constraint_3d.cpp`.
+// Both are *pose-pure* — a function of the current pose with no delta and no
+// state carried between calls — which is why they fit `process_modifiers` as it
+// stands, while a time-integrating modifier like SpringBoneSimulator3D cannot.
+// ---------------------------------------------------------------------------
+
+/// `CopyTransformModifier3D`'s class name.
+pub const COPY_TRANSFORM_CLASS: &str = "CopyTransformModifier3D";
+/// `ConvertTransformModifier3D`'s class name.
+pub const CONVERT_TRANSFORM_CLASS: &str = "ConvertTransformModifier3D";
+
+/// `TRANSFORM_FLAG_ALL` / `AXIS_FLAG_ALL` — Godot's **defaults** for
+/// `copy_flags` and `axis_flags` (`copy_transform_modifier_3d.h:54-55`).
+///
+/// ⚠️ Reading a missing flag property as enum-zero would mask every component
+/// and axis away, turning the modifier into a silent no-op. The default is
+/// all-bits-set, not zero.
+const FLAG_ALL: i64 = 7;
+
+/// Reads `settings/<index>/<key>` off a modifier node.
+fn setting_prop(tree: &SceneTree, modifier_id: NodeId, index: usize, key: &str) -> Variant {
+    tree.get_node(modifier_id)
+        .map(|n| n.get_property(&format!("settings/{index}/{key}")))
+        .unwrap_or(Variant::Nil)
+}
+
+fn setting_int(tree: &SceneTree, m: NodeId, i: usize, key: &str, default: i64) -> i64 {
+    match setting_prop(tree, m, i, key) {
+        Variant::Int(v) => v,
+        Variant::Float(f) => f as i64,
+        _ => default,
+    }
+}
+
+fn setting_f32(tree: &SceneTree, m: NodeId, i: usize, key: &str, default: f32) -> f32 {
+    match setting_prop(tree, m, i, key) {
+        Variant::Float(f) => f as f32,
+        Variant::Int(v) => v as f32,
+        _ => default,
+    }
+}
+
+fn setting_bool(tree: &SceneTree, m: NodeId, i: usize, key: &str, default: bool) -> bool {
+    match setting_prop(tree, m, i, key) {
+        Variant::Bool(b) => b,
+        _ => default,
+    }
+}
+
+/// How many settings a constraint modifier carries.
+///
+/// Prefers the authored `setting_count`, but falls back to probing
+/// `settings/<n>/…` so a hand-written fixture that omits the count still works
+/// (a `.tscn` from Godot always writes it).
+fn constraint_setting_count(tree: &SceneTree, modifier_id: NodeId) -> usize {
+    if let Some(n) = tree.get_node(modifier_id) {
+        match n.get_property("setting_count") {
+            Variant::Int(v) if v > 0 => return v as usize,
+            Variant::Float(f) if f > 0.0 => return f as usize,
+            _ => {}
+        }
+    }
+    let mut count = 0usize;
+    while count < 64 {
+        let has_any = [
+            "apply_bone",
+            "apply_bone_name",
+            "reference_bone",
+            "reference_bone_name",
+        ]
+        .iter()
+        .any(|k| !matches!(setting_prop(tree, modifier_id, count, k), Variant::Nil));
+        if !has_any {
+            break;
+        }
+        count += 1;
+    }
+    count
+}
+
+/// Resolves a setting's bone index from either the integer or the name form.
+fn setting_bone(
+    tree: &SceneTree,
+    skeleton_id: NodeId,
+    modifier_id: NodeId,
+    index: usize,
+    which: &str,
+) -> Option<usize> {
+    match setting_prop(tree, modifier_id, index, &format!("{which}_bone")) {
+        Variant::Int(v) if v >= 0 => return Some(v as usize),
+        _ => {}
+    }
+    let name = match setting_prop(tree, modifier_id, index, &format!("{which}_bone_name")) {
+        Variant::String(s) if !s.is_empty() => s,
+        _ => return None,
+    };
+    find_bone(tree, skeleton_id, &name)
+}
+
+/// The component of `v` along Godot's `Vector3::Axis` (`0=X 1=Y 2=Z`).
+fn axis_component(v: Vector3, axis: i64) -> f32 {
+    match axis {
+        1 => v.y,
+        2 => v.z,
+        _ => v.x,
+    }
+}
+
+/// `v` with its `axis` component replaced.
+fn with_axis_component(v: Vector3, axis: i64, value: f32) -> Vector3 {
+    match axis {
+        1 => Vector3::new(v.x, value, v.z),
+        2 => Vector3::new(v.x, v.y, value),
+        _ => Vector3::new(value, v.y, v.z),
+    }
+}
+
+/// Godot's `SkeletonModifier3D::get_roll_angle` — the signed twist of `rot`
+/// about `axis` (`skeleton_modifier_3d.cpp:346`).
+///
+/// Projects the quaternion's vector part onto the axis, rebuilds a quaternion
+/// from that component plus the original `w`, and reads its angle. A degenerate
+/// (zero-length) projection is 0 rather than NaN.
+fn roll_angle(rot: Quaternion, axis: Vector3) -> f32 {
+    let a = axis.normalized();
+    let dot = rot.x * a.x + rot.y * a.y + rot.z * a.z;
+    let (rx, ry, rz, rw) = (a.x * dot, a.y * dot, a.z * dot, rot.w);
+    let length = (rx * rx + ry * ry + rz * rz + rw * rw).sqrt();
+    if length <= 1e-6 {
+        return 0.0;
+    }
+    let (rx, ry, rz, rw) = (rx / length, ry / length, rz / length, rw / length);
+    let angle = 2.0 * rw.clamp(-1.0, 1.0).acos();
+    let direction = if rx * a.x + ry * a.y + rz * a.z > 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    angle * direction
+}
+
+/// Builds a pose from position/rotation/scale.
+///
+/// Scales the rotation basis per column, matching `recompose_bone_pose`:
+/// `Basis` has no `scaled`, and `Transform3D::scaled` would also scale the
+/// origin, which must stay exactly `position`.
+fn compose_pose(position: Vector3, rotation: Quaternion, scale: Vector3) -> Transform3D {
+    let r = Basis::from_quaternion(rotation);
+    Transform3D {
+        basis: Basis {
+            x: r.x * scale.x,
+            y: r.y * scale.y,
+            z: r.z * scale.z,
+        },
+        origin: position,
+    }
+}
+
+/// Applies Godot's rotation axis mask (`_process_copy`, the `axis_flags` switch).
+///
+/// A single axis keeps only the twist about it; **two** axes remove the twist
+/// about the *third* one (not "keep those two"); all three pass through; none
+/// gives identity.
+fn mask_rotation(rot: Quaternion, axis_flags: i64) -> Quaternion {
+    let twist = |axis: Vector3| Quaternion::from_axis_angle(axis, roll_angle(rot, axis));
+    let x = Vector3::new(1.0, 0.0, 0.0);
+    let y = Vector3::new(0.0, 1.0, 0.0);
+    let z = Vector3::new(0.0, 0.0, 1.0);
+    match axis_flags & 7 {
+        0 => Quaternion::IDENTITY,
+        1 => twist(x),
+        2 => twist(y),
+        4 => twist(z),
+        3 => rot * twist(z).inverse(),
+        6 => rot * twist(x).inverse(),
+        5 => rot * twist(y).inverse(),
+        _ => rot,
+    }
+}
+
+/// `CopyTransformModifier3D`: writes a reference bone's transform onto an apply
+/// bone, per setting (pat-0q2kx.239).
+pub fn apply_copy_transform_modifier(
+    tree: &mut SceneTree,
+    skeleton_id: NodeId,
+    modifier_id: NodeId,
+) {
+    let count = constraint_setting_count(tree, modifier_id);
+    for i in 0..count {
+        let Some(apply) = setting_bone(tree, skeleton_id, modifier_id, i, "apply") else {
+            continue;
+        };
+        let Some(reference) = setting_bone(tree, skeleton_id, modifier_id, i, "reference") else {
+            continue;
+        };
+        let bones = get_bone_count(tree, skeleton_id);
+        if apply >= bones || reference >= bones {
+            continue;
+        }
+
+        let amount = setting_f32(tree, modifier_id, i, "amount", 1.0);
+        let copy_flags = setting_int(tree, modifier_id, i, "copy_flags", FLAG_ALL);
+        let axis_flags = setting_int(tree, modifier_id, i, "axis_flags", FLAG_ALL);
+        let invert_flags = setting_int(tree, modifier_id, i, "invert_flags", 0);
+        let additive = setting_bool(tree, modifier_id, i, "additive", false);
+        let relative = setting_bool(tree, modifier_id, i, "relative", false);
+
+        // 1. Start from the reference pose, optionally made relative to its rest.
+        let mut dest = get_bone_pose(tree, skeleton_id, reference);
+        if relative {
+            let rest = get_bone_rest(tree, skeleton_id, reference);
+            let rest_scale = rest.basis.get_scale();
+            let dest_scale = dest.basis.get_scale();
+            // A zero rest scale has no ratio to take; keep the reference value
+            // rather than producing an infinity.
+            let ratio = |d: f32, r: f32| if r != 0.0 { d / r } else { d };
+            let rel_scale = Vector3::new(
+                ratio(dest_scale.x, rest_scale.x),
+                ratio(dest_scale.y, rest_scale.y),
+                ratio(dest_scale.z, rest_scale.z),
+            );
+            let rel_rot = rest.basis.get_rotation_quaternion().inverse()
+                * dest.basis.get_rotation_quaternion();
+            dest = compose_pose(dest.origin - rest.origin, rel_rot, rel_scale);
+        }
+
+        // 2/3. Split, then mask position and scale per axis.
+        let mut pos = dest.origin;
+        let mut scl = dest.basis.get_scale();
+        for axis in 0..3i64 {
+            if axis_flags & (1 << axis) == 0 {
+                pos = with_axis_component(pos, axis, 0.0);
+                scl = with_axis_component(scl, axis, 1.0);
+            }
+        }
+        // 4. Mask rotation by the flag *combination*.
+        let mut rot = mask_rotation(dest.basis.get_rotation_quaternion(), axis_flags);
+
+        // 5. Invert the axes that are both enabled and inverted.
+        for axis in 0..3i64 {
+            let bit = 1 << axis;
+            if axis_flags & bit != 0 && invert_flags & bit != 0 {
+                pos = with_axis_component(pos, axis, -axis_component(pos, axis));
+                let s = axis_component(scl, axis);
+                scl = with_axis_component(scl, axis, if s != 0.0 { 1.0 / s } else { s });
+                rot = match axis {
+                    1 => Quaternion { y: -rot.y, ..rot },
+                    2 => Quaternion { z: -rot.z, ..rot },
+                    _ => Quaternion { x: -rot.x, ..rot },
+                };
+            }
+        }
+        rot = rot.normalized();
+
+        // 6. Recompose against the apply bone's pose (additive), its rest
+        //    (relative), or absolutely.
+        let target = if additive {
+            let base_pos = get_bone_pose_position(tree, skeleton_id, apply);
+            let base_rot = get_bone_pose_rotation(tree, skeleton_id, apply);
+            let base_scl = get_bone_pose_scale(tree, skeleton_id, apply);
+            compose_pose(
+                base_pos + pos,
+                base_rot * rot,
+                Vector3::new(base_scl.x * scl.x, base_scl.y * scl.y, base_scl.z * scl.z),
+            )
+        } else if relative {
+            let rest = get_bone_rest(tree, skeleton_id, apply);
+            let rest_scl = rest.basis.get_scale();
+            compose_pose(
+                rest.origin + pos,
+                rest.basis.get_rotation_quaternion() * rot,
+                Vector3::new(rest_scl.x * scl.x, rest_scl.y * scl.y, rest_scl.z * scl.z),
+            )
+        } else {
+            compose_pose(pos, rot, scl)
+        };
+
+        // 7. Blend by `amount` — Godot interpolates the whole transform.
+        let blended = get_bone_pose(tree, skeleton_id, apply).interpolate_with(target, amount);
+
+        // 8. Write only the components `copy_flags` selects.
+        if copy_flags & 1 != 0 {
+            set_bone_pose_position(tree, skeleton_id, apply, blended.origin);
+        }
+        if copy_flags & 2 != 0 {
+            set_bone_pose_rotation(
+                tree,
+                skeleton_id,
+                apply,
+                blended.basis.get_rotation_quaternion(),
+            );
+        }
+        if copy_flags & 4 != 0 {
+            set_bone_pose_scale(tree, skeleton_id, apply, blended.basis.get_scale());
+        }
+    }
+}
+
+/// `ConvertTransformModifier3D`: maps one transform component of a reference
+/// bone onto a component of an apply bone, through a range remap
+/// (pat-0q2kx.239).
+pub fn apply_convert_transform_modifier(
+    tree: &mut SceneTree,
+    skeleton_id: NodeId,
+    modifier_id: NodeId,
+) {
+    let count = constraint_setting_count(tree, modifier_id);
+    for i in 0..count {
+        let Some(apply) = setting_bone(tree, skeleton_id, modifier_id, i, "apply") else {
+            continue;
+        };
+        let Some(reference) = setting_bone(tree, skeleton_id, modifier_id, i, "reference") else {
+            continue;
+        };
+        let bones = get_bone_count(tree, skeleton_id);
+        if apply >= bones || reference >= bones {
+            continue;
+        }
+
+        let amount = setting_f32(tree, modifier_id, i, "amount", 1.0);
+        let ref_mode = setting_int(tree, modifier_id, i, "reference_transform_mode", 0);
+        let ref_axis = setting_int(tree, modifier_id, i, "reference_axis", 0);
+        let ref_min = setting_f32(tree, modifier_id, i, "reference_range_min", 0.0);
+        let ref_max = setting_f32(tree, modifier_id, i, "reference_range_max", 0.0);
+        let apply_mode = setting_int(tree, modifier_id, i, "apply_transform_mode", 0);
+        let apply_axis = setting_int(tree, modifier_id, i, "apply_axis", 0);
+        let apply_min = setting_f32(tree, modifier_id, i, "apply_range_min", 0.0);
+        let apply_max = setting_f32(tree, modifier_id, i, "apply_range_max", 0.0);
+        // Godot's ConvertTransform3DSetting defaults `relative` to TRUE.
+        let relative = setting_bool(tree, modifier_id, i, "relative", true);
+        let additive = setting_bool(tree, modifier_id, i, "additive", false);
+
+        // Extract the scalar the reference contributes.
+        let src = get_bone_pose(tree, skeleton_id, reference);
+        let mut point = match ref_mode {
+            1 => {
+                let axis = match ref_axis {
+                    1 => Vector3::new(0.0, 1.0, 0.0),
+                    2 => Vector3::new(0.0, 0.0, 1.0),
+                    _ => Vector3::new(1.0, 0.0, 0.0),
+                };
+                roll_angle(src.basis.get_rotation_quaternion(), axis)
+            }
+            2 => axis_component(src.basis.get_scale(), ref_axis),
+            _ => axis_component(src.origin, ref_axis),
+        };
+
+        // Remap. ⚠️ A degenerate reference range is a STEP, not a division:
+        // Godot yields 0 at or below the bound and 1 above it.
+        point = if (ref_max - ref_min).abs() <= 1e-6 {
+            if point <= ref_min {
+                0.0
+            } else {
+                1.0
+            }
+        } else {
+            (point - ref_min) / (ref_max - ref_min)
+        };
+        point = apply_min + (apply_max - apply_min) * point.clamp(0.0, 1.0);
+
+        // Write the mapped scalar into the apply component.
+        let current = get_bone_pose(tree, skeleton_id, apply);
+        let target = match apply_mode {
+            1 => {
+                let axis = match apply_axis {
+                    1 => Vector3::new(0.0, 1.0, 0.0),
+                    2 => Vector3::new(0.0, 0.0, 1.0),
+                    _ => Vector3::new(1.0, 0.0, 0.0),
+                };
+                let base = if additive {
+                    roll_angle(get_bone_pose_rotation(tree, skeleton_id, apply), axis)
+                } else if relative {
+                    roll_angle(
+                        get_bone_rest(tree, skeleton_id, apply)
+                            .basis
+                            .get_rotation_quaternion(),
+                        axis,
+                    )
+                } else {
+                    0.0
+                };
+                compose_pose(
+                    current.origin,
+                    Quaternion::from_axis_angle(axis, base + point),
+                    current.basis.get_scale(),
+                )
+            }
+            2 => {
+                let base = if additive {
+                    axis_component(get_bone_pose_scale(tree, skeleton_id, apply), apply_axis)
+                } else if relative {
+                    axis_component(
+                        get_bone_rest(tree, skeleton_id, apply).basis.get_scale(),
+                        apply_axis,
+                    )
+                } else {
+                    0.0
+                };
+                compose_pose(
+                    current.origin,
+                    current.basis.get_rotation_quaternion(),
+                    with_axis_component(current.basis.get_scale(), apply_axis, base + point),
+                )
+            }
+            _ => {
+                let base = if additive {
+                    axis_component(get_bone_pose_position(tree, skeleton_id, apply), apply_axis)
+                } else if relative {
+                    axis_component(get_bone_rest(tree, skeleton_id, apply).origin, apply_axis)
+                } else {
+                    0.0
+                };
+                compose_pose(
+                    with_axis_component(current.origin, apply_axis, base + point),
+                    current.basis.get_rotation_quaternion(),
+                    current.basis.get_scale(),
+                )
+            }
+        };
+
+        let blended = current.interpolate_with(target, amount);
+        set_bone_pose_position(tree, skeleton_id, apply, blended.origin);
+        set_bone_pose_rotation(
+            tree,
+            skeleton_id,
+            apply,
+            blended.basis.get_rotation_quaternion(),
+        );
+        set_bone_pose_scale(tree, skeleton_id, apply, blended.basis.get_scale());
     }
 }
 

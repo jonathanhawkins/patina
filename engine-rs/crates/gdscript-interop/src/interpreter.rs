@@ -2790,6 +2790,16 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "XRServer") {
                             return self.call_xr_server_static(member, &evaluated_args);
                         }
+                        // EditorCommandPalette (pat-0q2kx.241) — a @tool plugin
+                        // registers palette entries here, and the editor
+                        // server's GET /api/commands merges them with its
+                        // built-ins. Free-standing because the store is
+                        // process-global: the plugin's _enter_tree and the HTTP
+                        // handler that lists commands run on different threads.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "EditorCommandPalette")
+                        {
+                            return call_editor_command_palette_static(member, &evaluated_args);
+                        }
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "CameraServer") {
                             return call_cameraserver_static(member, &evaluated_args);
                         }
@@ -13242,56 +13252,22 @@ fn gd_string_to_variant(s: &str) -> Variant {
 
 /// Deterministic (within a run) hash of a [`Variant`] for the `hash` builtin.
 /// Uses `DefaultHasher`; need not match Godot's exact hash values.
+/// `@GlobalScope.hash()` — Godot's `Variant::hash()` (pat-0q2kx.230).
+///
+/// ⚠️ This used to build a `std` `DefaultHasher` (SipHash), and its own doc
+/// comment admitted the values "need not match Godot's". They did not, and worse
+/// they did not match Patina's **own** `String.hash()`, which has always been
+/// djb2 — so `hash("x") == "x".hash()` was false.
+///
+/// The algorithm lives in [`gdvariant::hash`] rather than here: it is a Variant
+/// operation, and keeping it beside the Variant definition means the codec, the
+/// interpreter, and anything else that needs a Godot-identical hash share one
+/// implementation instead of drifting.
+///
+/// Widened to `i64` because Godot's `hash()` builtin returns an int; the C++
+/// returns `uint32_t`, so the value is always non-negative.
 fn variant_hash(v: &Variant) -> i64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::Hasher;
-    let mut h = DefaultHasher::new();
-    hash_variant_into(v, &mut h);
-    h.finish() as i64
-}
-
-/// Feeds a [`Variant`]'s structure into `h`, recursing into arrays/dictionaries.
-fn hash_variant_into<H: std::hash::Hasher>(v: &Variant, h: &mut H) {
-    use std::hash::Hash;
-    // Tag by discriminant so distinct types can't collide trivially.
-    std::mem::discriminant(v).hash(h);
-    match v {
-        Variant::Nil => {}
-        Variant::Bool(b) => b.hash(h),
-        Variant::Int(i) => i.hash(h),
-        Variant::Float(f) => f.to_bits().hash(h),
-        Variant::String(s) => s.hash(h),
-        Variant::StringName(s) => s.as_str().hash(h),
-        Variant::Vector2(p) => {
-            p.x.to_bits().hash(h);
-            p.y.to_bits().hash(h);
-        }
-        Variant::Vector3(p) => {
-            p.x.to_bits().hash(h);
-            p.y.to_bits().hash(h);
-            p.z.to_bits().hash(h);
-        }
-        Variant::Color(c) => {
-            c.r.to_bits().hash(h);
-            c.g.to_bits().hash(h);
-            c.b.to_bits().hash(h);
-            c.a.to_bits().hash(h);
-        }
-        Variant::Array(arr) => {
-            (arr.len() as u64).hash(h);
-            for e in arr {
-                hash_variant_into(e, h);
-            }
-        }
-        Variant::Dictionary(d) => {
-            (d.len() as u64).hash(h);
-            for (k, val) in d.iter() {
-                hash_variant_into(k, h);
-                hash_variant_into(val, h);
-            }
-        }
-        other => format!("{other}").hash(h),
-    }
+    gdvariant::hash::godot_hash(v) as i64
 }
 
 /// Maps a Godot `Variant.Type` integer code to its type name, matching the
@@ -17449,6 +17425,64 @@ fn camera_feed_arg(args: &[Variant], who: &str) -> Result<u64, RuntimeError> {
 /// `get_feed_count()` is 0 until a script calls `add_feed`, and every method
 /// resolves instead of raising UndefinedFunction. A real getUserMedia-backed feed
 /// is a browser-side (wasm) concern layered on this same surface.
+/// `EditorCommandPalette` statics (pat-0q2kx.241).
+///
+/// Godot reaches the palette through `EditorInterface.get_command_palette()`,
+/// which returns the singleton `EditorCommandPalette`. Calling the methods on
+/// the class name directly — which is what the acceptance exercises — is
+/// accepted here as the same singleton, so a `@tool` script can register a
+/// command without an `EditorInterface` object graph that Patina's served
+/// editor does not have.
+///
+/// Writes land in [`crate::editor_commands`], a process-global store the editor
+/// server reads when answering `GET /api/commands`.
+fn call_editor_command_palette_static(
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    match method {
+        // add_command(command_name, key_name, binded_callable, shortcut_text)
+        "add_command" => {
+            let command_name = args.first().map(arg_str).unwrap_or_default();
+            let key_name = args.get(1).map(arg_str).unwrap_or_default();
+            if key_name.is_empty() {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "EditorCommandPalette.add_command() needs a key_name".into(),
+                )));
+            }
+            // Only a bound method reference names something re-invokable; a
+            // lambda has no name to record, so it is stored as absent rather
+            // than as a misleading placeholder string.
+            let callback = match args.get(2) {
+                Some(Variant::Callable(c)) => match c.as_ref() {
+                    CallableRef::Method { method, .. } if !method.is_empty() => {
+                        Some(method.clone())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            let shortcut = args.get(3).map(arg_str);
+            crate::editor_commands::add_command(&command_name, &key_name, callback, shortcut);
+            Ok(Variant::Nil)
+        }
+        "remove_command" => {
+            let key_name = args.first().map(arg_str).unwrap_or_default();
+            Ok(Variant::Bool(crate::editor_commands::remove_command(
+                &key_name,
+            )))
+        }
+        "has_command" => {
+            let key_name = args.first().map(arg_str).unwrap_or_default();
+            Ok(Variant::Bool(crate::editor_commands::contains(&key_name)))
+        }
+        "get_command_count" => Ok(Variant::Int(crate::editor_commands::count() as i64)),
+        other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "EditorCommandPalette has no method '{other}'"
+        )))),
+    }
+}
+
 fn call_cameraserver_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
     match method {
         "get_feed_count" => Ok(Variant::Int(
