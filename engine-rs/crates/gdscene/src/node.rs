@@ -122,6 +122,14 @@ pub struct Node {
     ready: bool,
     /// Process priority — lower values process first. Default 0.
     process_priority: i32,
+    /// Physics-process priority, ordering `_physics_process` **independently**
+    /// of [`process_priority`](Self::process_priority) (Godot's
+    /// `process_physics_priority`, pat-0q2kx.221).
+    ///
+    /// ⚠️ Godot has two separate orderings and the physics one reused
+    /// `process_priority` here, so a node could not run late in `_process` and
+    /// early in `_physics_process` — the exact reason the property exists.
+    process_physics_priority: i32,
     /// Controls whether this node processes when the tree is paused.
     process_mode: ProcessMode,
     /// Whether `_process` runs on this node (Godot's `set_process`).
@@ -156,6 +164,7 @@ impl Node {
             inside_tree: false,
             ready: false,
             process_priority: 0,
+            process_physics_priority: 0,
             process_mode: ProcessMode::default(),
             process_enabled: true,
             physics_process_enabled: true,
@@ -184,6 +193,7 @@ impl Node {
             inside_tree: false,
             ready: false,
             process_priority: 0,
+            process_physics_priority: 0,
             process_mode: ProcessMode::default(),
             process_enabled: true,
             physics_process_enabled: true,
@@ -477,6 +487,19 @@ impl Node {
     /// Sets this node's process priority. Lower values process first.
     pub fn set_process_priority(&mut self, priority: i32) {
         self.process_priority = priority;
+    }
+
+    /// Returns this node's **physics**-process priority (pat-0q2kx.221).
+    ///
+    /// Separate from [`process_priority`](Self::process_priority), as in Godot:
+    /// a node can run late in `_process` and early in `_physics_process`.
+    pub fn process_physics_priority(&self) -> i32 {
+        self.process_physics_priority
+    }
+
+    /// Sets this node's physics-process priority. Lower values process first.
+    pub fn set_process_physics_priority(&mut self, priority: i32) {
+        self.process_physics_priority = priority;
     }
 
     /// Returns this node's process mode.

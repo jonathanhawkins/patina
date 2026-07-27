@@ -71,7 +71,30 @@ fn sky_material_color_at(material: &SkyMaterial, t: f32) -> Color {
             let gray = lerp(0.5, 0.3, t);
             Color::new(gray, gray, gray * 1.1, 1.0)
         }
+        // A shader sky *can* be previewed for real — the body is arithmetic over
+        // EYEDIR, so evaluating it costs nothing and shows the author's actual
+        // gradient instead of a placeholder (pat-0q2kx.224).
+        SkyMaterial::Shader(mat) => shader_sky_color(mat, t),
     }
+}
+
+/// Evaluates a shader sky for the preview strip's vertical position `t`.
+///
+/// `t` runs 0 (top) → 1 (bottom), so the synthesized `EYEDIR` sweeps straight up
+/// to straight down — the same axis the strip depicts. An inert body falls back
+/// to the procedural gradient, matching what the renderer does.
+fn shader_sky_color(mat: &gdserver3d::sky::ShaderSkyMaterial, t: f32) -> Color {
+    use gdserver3d::shader::{execute_fragment_3d, FragmentContext3D};
+
+    if mat.is_inert() {
+        return procedural_sky_color(&ProceduralSkyMaterial::default(), t);
+    }
+    let ctx = FragmentContext3D {
+        view_dir: gdcore::math::Vector3::new(0.0, 1.0 - 2.0 * t, 0.0),
+        ..FragmentContext3D::default()
+    };
+    let no_texture = |_: &str, _: f32, _: f32| Color::BLACK;
+    execute_fragment_3d(&mat.body, &ctx, &mat.material.parameters, &no_texture)
 }
 
 /// Computes procedural sky color using Godot's gradient model.
@@ -264,6 +287,15 @@ impl EnvironmentPreviewInfo {
                 }
             }
             SkyMaterial::Physical(_) => "Physical Sky".to_string(),
+            // Naming the inert case matters: a ShaderMaterial with no `sky()`
+            // function renders as the procedural fallback, and the inspector
+            // should say why rather than claim a custom sky is active.
+            SkyMaterial::Shader(mat) => if mat.is_inert() {
+                "Shader Sky (no sky() function)"
+            } else {
+                "Shader Sky"
+            }
+            .to_string(),
         });
 
         let fog_description = if env.fog_enabled {

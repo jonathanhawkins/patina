@@ -1240,6 +1240,56 @@ impl SceneAccess for SceneTreeAccessor {
                     || bool_prop(tree, "is_on_ceiling");
                 Some(Variant::Bool(collided))
             }
+            // `ResourcePreloader` accessors (pat-0q2kx.218). The preloaded set
+            // lives in the node's `resources` Dictionary, which is how a `.tscn`
+            // authors it; `gdscene::resource_preloader::ResourcePreloader` models
+            // the same mapping but nothing instantiated one per node, so these
+            // read the authored property directly rather than duplicating state
+            // that could drift from it.
+            //
+            // Gated on the class name rather than `is_class`, because ClassDB is
+            // only populated by an explicit `register_*_classes()` and these must
+            // work in a bare tree — and ungated they would answer `get_resource`
+            // for every node in the scene.
+            "get_resource" | "has_resource" | "get_resource_list"
+                if self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.class_name() == "ResourcePreloader") =>
+            {
+                let dict = match self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.get_property("resources"))
+                {
+                    Some(Variant::Dictionary(d)) => d,
+                    // No authored `resources`: an empty preloader, not an error.
+                    _ => Default::default(),
+                };
+                match method {
+                    "get_resource" => {
+                        let name = arg_str(0)?;
+                        Some(
+                            dict.get(Variant::String(name))
+                                .cloned()
+                                .unwrap_or(Variant::Nil),
+                        )
+                    }
+                    "has_resource" => {
+                        let name = arg_str(0)?;
+                        Some(Variant::Bool(dict.contains_key(Variant::String(name))))
+                    }
+                    // Godot returns a PackedStringArray of the resource names.
+                    _ => Some(Variant::PackedStringArray(
+                        dict.keys()
+                            .map(|k| match k {
+                                Variant::String(s) => s.clone(),
+                                other => format!("{other:?}"),
+                            })
+                            .collect(),
+                    )),
+                }
+            }
             // `CanvasItem.get_canvas_item()` — the RID standing for this node's
             // canvas item, which is what a script parents a RenderingServer
             // canvas item to (pat-0q2kx.213). Allocated on first ask and stable

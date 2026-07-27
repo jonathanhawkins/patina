@@ -2547,6 +2547,29 @@ impl Interpreter {
                                         gdresource::ConfigFile::new_handle(),
                                     ));
                                 }
+                                // The RefCounted IO classes (pat-0q2kx.218).
+                                // Their engines all existed; only `.new()` and
+                                // the method dispatch were missing.
+                                if class_name == "XMLParser" {
+                                    return Ok(Variant::ObjectId(
+                                        gdcore::xml_parser::XmlParser::new_handle(),
+                                    ));
+                                }
+                                if class_name == "ZIPReader" {
+                                    return Ok(Variant::ObjectId(
+                                        gdresource::ZipReader::new_handle(),
+                                    ));
+                                }
+                                if class_name == "ZIPPacker" {
+                                    return Ok(Variant::ObjectId(
+                                        gdresource::ZipPacker::new_handle(),
+                                    ));
+                                }
+                                if class_name == "PCKPacker" {
+                                    return Ok(Variant::ObjectId(
+                                        gdresource::pck::PckPacker::new_handle(),
+                                    ));
+                                }
                                 // CameraFeed is a RefCounted-style handle, not a
                                 // node: it needs no scene access (pat-nzgdu.179).
                                 if class_name == "CameraFeed" {
@@ -5366,6 +5389,48 @@ impl Interpreter {
                 let code = to_int(&args[0])?;
                 Ok(Some(Variant::String(type_code_to_name(code).to_string())))
             }
+            // -- @GlobalScope utilities that raised UndefinedFunction
+            //    (pat-0q2kx.228) --
+            "error_string" => {
+                Self::require_args("error_string", args, 1)?;
+                let code = to_int(&args[0])?;
+                Ok(Some(Variant::String(
+                    error_code_to_string(code).to_string(),
+                )))
+            }
+            "type_convert" => {
+                Self::require_args("type_convert", args, 2)?;
+                let target = to_int(&args[1])?;
+                Ok(Some(convert_variant_to_type(&args[0], target)))
+            }
+            "is_instance_id_valid" => {
+                Self::require_args("is_instance_id_valid", args, 1)?;
+                let id = to_int(&args[0])?;
+                // Godot: id 0 is never a live object. Otherwise consult the
+                // same alive registry `is_instance_valid` uses, so a freed
+                // object reports false rather than "the id looks non-zero".
+                let valid = if id <= 0 {
+                    false
+                } else {
+                    match &self.scene_access {
+                        Some(access) => access.is_object_alive(id as u64),
+                        // No scene to consult — mirrors is_instance_valid's
+                        // legacy behaviour rather than inventing an answer.
+                        None => true,
+                    }
+                };
+                Ok(Some(Variant::Bool(valid)))
+            }
+            "rid_allocate_id" => {
+                Self::require_args("rid_allocate_id", args, 0)?;
+                // Godot hands out a fresh, never-reused integer. A monotonic
+                // counter is the whole contract; ids start at 1 so 0 stays the
+                // "invalid RID" sentinel.
+                static NEXT_RID: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(1);
+                let id = NEXT_RID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(Some(Variant::Int(id as i64)))
+            }
             "hash" => {
                 Self::require_args("hash", args, 1)?;
                 Ok(Some(Variant::Int(variant_hash(&args[0]))))
@@ -6859,6 +6924,20 @@ impl Interpreter {
             }
             if gdresource::is_config_file_handle(*oid) {
                 return call_config_file_instance(*oid, method, args);
+            }
+            // The RefCounted IO handle families (pat-0q2kx.218). Each owns a
+            // distinct ObjectId tag byte, so exactly one arm can match.
+            if gdcore::xml_parser::is_xml_parser_handle(*oid) {
+                return call_xml_parser_instance(*oid, method, args);
+            }
+            if gdresource::is_zip_reader_handle(*oid) {
+                return call_zip_reader_instance(*oid, method, args);
+            }
+            if gdresource::is_zip_packer_handle(*oid) {
+                return call_zip_packer_instance(*oid, method, args);
+            }
+            if gdresource::pck::is_pck_packer_handle(*oid) {
+                return call_pck_packer_instance(*oid, method, args);
             }
             if is_camera_feed_handle(*oid) {
                 return call_camera_feed_instance(*oid, method, args);
@@ -12504,6 +12583,141 @@ fn hash_variant_into<H: std::hash::Hasher>(v: &Variant, h: &mut H) {
 
 /// Maps a Godot `Variant.Type` integer code to its type name, matching the
 /// `type_string()` builtin. Unknown codes yield `""` (as Godot does).
+/// Godot's `type_convert(variant, type)` — coerces to the target Variant type
+/// (pat-0q2kx.228).
+///
+/// Scope is deliberate: the scalar types Godot can always construct from
+/// another scalar. `to_int` is not reusable here because it REJECTS strings,
+/// while `type_convert("5", TYPE_INT)` must yield 5 — Godot parses a leading
+/// integer and yields 0 when there is none, which is what this mirrors.
+///
+/// Target types outside that set yield `Nil` rather than a guess. Godot
+/// default-constructs the target, but fabricating an empty Vector2/Array here
+/// would claim a conversion this function did not really perform.
+fn convert_variant_to_type(value: &Variant, target: i64) -> Variant {
+    /// Godot's `String::to_int()`: leading integer, 0 if absent.
+    fn str_to_int(s: &str) -> i64 {
+        let t = s.trim();
+        let mut end = 0;
+        for (i, c) in t.char_indices() {
+            if c.is_ascii_digit() || (i == 0 && (c == '-' || c == '+')) {
+                end = i + c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        t[..end].parse::<i64>().unwrap_or(0)
+    }
+    fn str_to_float(s: &str) -> f64 {
+        let t = s.trim();
+        let mut end = 0;
+        for (i, c) in t.char_indices() {
+            if c.is_ascii_digit() || c == '.' || (i == 0 && (c == '-' || c == '+')) {
+                end = i + c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        t[..end].parse::<f64>().unwrap_or(0.0)
+    }
+
+    match target {
+        // TYPE_NIL
+        0 => Variant::Nil,
+        // TYPE_BOOL
+        1 => Variant::Bool(match value {
+            Variant::Nil => false,
+            Variant::Bool(b) => *b,
+            Variant::Int(i) => *i != 0,
+            Variant::Float(f) => *f != 0.0,
+            Variant::String(s) => !s.is_empty(),
+            _ => true,
+        }),
+        // TYPE_INT
+        2 => Variant::Int(match value {
+            Variant::Bool(b) => *b as i64,
+            Variant::Int(i) => *i,
+            Variant::Float(f) => *f as i64,
+            Variant::String(s) => str_to_int(s),
+            _ => 0,
+        }),
+        // TYPE_FLOAT
+        3 => Variant::Float(match value {
+            Variant::Bool(b) => *b as i64 as f64,
+            Variant::Int(i) => *i as f64,
+            Variant::Float(f) => *f,
+            Variant::String(s) => str_to_float(s),
+            _ => 0.0,
+        }),
+        // TYPE_STRING
+        4 => Variant::String(value.to_string_lossy()),
+        _ => Variant::Nil,
+    }
+}
+
+/// Godot's `error_string(Error)` — `core/error/error_list.cpp`'s `error_names`
+/// table, verbatim (pat-0q2kx.228).
+///
+/// ⚠️ These are HUMAN-READABLE strings, not enum names. Only entry 0 coincides:
+/// `FAILED` is `"Failed"`, `ERR_UNAVAILABLE` is `"Unavailable"`. Returning the
+/// enum spelling would agree with Godot on `OK` and disagree on the other 48 —
+/// which is exactly what a test that only checks `error_string(OK)` would miss.
+fn error_code_to_string(code: i64) -> &'static str {
+    // Godot: `if (error < 0 || error >= ERR_MAX) return "(invalid error code)"`.
+    match code {
+        0 => "OK",
+        1 => "Failed",
+        2 => "Unavailable",
+        3 => "Unconfigured",
+        4 => "Unauthorized",
+        5 => "Parameter out of range",
+        6 => "Out of memory",
+        7 => "File not found",
+        8 => "File: Bad drive",
+        9 => "File: Bad path",
+        10 => "File: Permission denied",
+        11 => "File already in use",
+        12 => "Can't open file",
+        13 => "Can't write file",
+        14 => "Can't read file",
+        15 => "File unrecognized",
+        16 => "File corrupt",
+        17 => "Missing dependencies for file",
+        18 => "End of file",
+        19 => "Can't open",
+        20 => "Can't create",
+        21 => "Query failed",
+        22 => "Already in use",
+        23 => "Locked",
+        24 => "Timeout",
+        25 => "Can't connect",
+        26 => "Can't resolve",
+        27 => "Connection error",
+        28 => "Can't acquire resource",
+        29 => "Can't fork",
+        30 => "Invalid data",
+        31 => "Invalid parameter",
+        32 => "Already exists",
+        33 => "Does not exist",
+        34 => "Can't read database",
+        35 => "Can't write database",
+        36 => "Compilation failed",
+        37 => "Method not found",
+        38 => "Link failed",
+        39 => "Script failed",
+        40 => "Cyclic link detected",
+        41 => "Invalid declaration",
+        42 => "Duplicate symbol",
+        43 => "Parse error",
+        44 => "Busy",
+        45 => "Skip",
+        46 => "Help",
+        47 => "Bug",
+        48 => "Printer on fire",
+        _ => "(invalid error code)",
+    }
+}
+
 fn type_code_to_name(code: i64) -> &'static str {
     match code {
         0 => "Nil",
@@ -12544,6 +12758,10 @@ fn type_code_to_name(code: i64) -> &'static str {
         35 => "PackedVector2Array",
         36 => "PackedVector3Array",
         37 => "PackedColorArray",
+        // Godot 4.3 added PackedVector4Array as type 38; the table stopped at
+        // 37, so `type_string(38)` answered "" instead of naming the type
+        // (pat-0q2kx.228).
+        38 => "PackedVector4Array",
         _ => "",
     }
 }
@@ -12728,6 +12946,23 @@ fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
 
 fn engine_err_to_runtime(err: gdcore::EngineError) -> RuntimeError {
     RuntimeError::new(RuntimeErrorKind::TypeError(err.to_string()))
+}
+
+/// Integer counterpart of [`arg_as_string`] (pat-0q2kx.218). A Float is accepted
+/// because GDScript arithmetic on an int literal yields one.
+fn arg_as_int(args: &[Variant], idx: usize, ctx: &str) -> Result<i64, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::Int(i)) => Ok(*i),
+        Some(Variant::Float(f)) => Ok(*f as i64),
+        Some(_) => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{ctx}: argument {} must be an int",
+            idx + 1
+        )))),
+        None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{ctx}: missing argument {}",
+            idx + 1
+        )))),
+    }
 }
 
 fn arg_as_string(args: &[Variant], idx: usize, ctx: &str) -> Result<String, RuntimeError> {
@@ -17512,8 +17747,86 @@ fn variant_to_json_value(v: &Variant) -> serde_json::Value {
     }
 }
 
+/// Serializes a `Variant` the way Godot's `JSON.stringify` does (pat-0q2kx.216).
+///
+/// Written as a direct walk rather than handing the whole value to
+/// `serde_json::to_string`, for one reason: `sort_keys`. This workspace builds
+/// `serde_json` **without** `preserve_order`, so its `Map` is a `BTreeMap` and
+/// every object it emits is sorted — `sort_keys = false` would be impossible to
+/// honour through that path even though Patina's `Dictionary` does keep
+/// insertion order (`entries: Vec<(Variant, Variant)>`).
+///
+/// Scalars still go through `serde_json` so string escaping and number
+/// formatting stay exactly as before; only container framing is done here.
+fn json_stringify_variant(value: &Variant, indent: &str, sort_keys: bool, depth: usize) -> String {
+    let pretty = !indent.is_empty();
+    let pad = |n: usize| indent.repeat(n);
+    let (open_sep, close_sep) = if pretty {
+        (format!("\n{}", pad(depth + 1)), format!("\n{}", pad(depth)))
+    } else {
+        (String::new(), String::new())
+    };
+    let comma = if pretty {
+        format!(",\n{}", pad(depth + 1))
+    } else {
+        ",".to_string()
+    };
+    let colon = if pretty { ": " } else { ":" };
+
+    match value {
+        Variant::Dictionary(map) => {
+            if map.iter().next().is_none() {
+                return "{}".to_string();
+            }
+            let mut pairs: Vec<(String, &Variant)> = map
+                .iter()
+                .map(|(k, v)| {
+                    // JSON object keys are strings; stringify non-string keys
+                    // exactly as `variant_to_json_value` does.
+                    let key = match k {
+                        Variant::String(s) => s.clone(),
+                        other => other.to_string_lossy(),
+                    };
+                    (key, v)
+                })
+                .collect();
+            if sort_keys {
+                pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+            let body = pairs
+                .iter()
+                .map(|(k, v)| {
+                    let key = serde_json::Value::String(k.clone()).to_string();
+                    let val = json_stringify_variant(v, indent, sort_keys, depth + 1);
+                    format!("{key}{colon}{val}")
+                })
+                .collect::<Vec<_>>()
+                .join(&comma);
+            format!("{{{open_sep}{body}{close_sep}}}")
+        }
+        Variant::Array(items) => {
+            if items.is_empty() {
+                return "[]".to_string();
+            }
+            let body = items
+                .iter()
+                .map(|v| json_stringify_variant(v, indent, sort_keys, depth + 1))
+                .collect::<Vec<_>>()
+                .join(&comma);
+            format!("[{open_sep}{body}{close_sep}]")
+        }
+        other => serde_json::to_string(&variant_to_json_value(other))
+            .unwrap_or_else(|_| "null".to_string()),
+    }
+}
+
 fn call_json_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
     match method {
+        // `parse_string` is Godot's static entry point and returns the parsed
+        // value or **null** on bad input, pushing an error rather than raising
+        // (json.cpp). `parse` is an *instance* method in Godot; Patina also
+        // dispatches it here, and it keeps raising so existing callers that
+        // rely on the error are unaffected.
         "parse" | "parse_string" => {
             if args.len() != 1 {
                 return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -17523,24 +17836,53 @@ fn call_json_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeEr
             let text = arg_as_string(args, 0, "JSON.parse")?;
             match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(val) => Ok(json_value_to_variant(&val)),
-                Err(e) => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
-                    "JSON.parse error: {e}"
-                )))),
+                Err(e) => {
+                    if method == "parse_string" {
+                        // Godot: `if (err != OK) { ... return Variant(); }`
+                        Ok(Variant::Nil)
+                    } else {
+                        Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "JSON.parse error: {e}"
+                        ))))
+                    }
+                }
             }
         }
+        // stringify(data, indent = "", sort_keys = true, full_precision = false)
         "stringify" => {
-            if args.is_empty() || args.len() > 2 {
+            if args.is_empty() || args.len() > 4 {
                 return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                    "JSON.stringify() takes 1 or 2 arguments".into(),
+                    "JSON.stringify() takes 1 to 4 arguments".into(),
                 )));
             }
-            let value = variant_to_json_value(&args[0]);
-            match serde_json::to_string(&value) {
-                Ok(s) => Ok(Variant::String(s)),
-                Err(e) => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
-                    "JSON.stringify error: {e}"
-                )))),
-            }
+            let indent = match args.get(1) {
+                None | Some(Variant::Nil) => String::new(),
+                Some(Variant::String(s)) => s.clone(),
+                Some(_) => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "JSON.stringify(): indent must be a string".into(),
+                    )))
+                }
+            };
+            // ⚠️ Godot's default is TRUE, not false — an omitted third argument
+            // must still sort (JSON.xml: `sort_keys: bool = true`).
+            let sort_keys = match args.get(2) {
+                None | Some(Variant::Nil) => true,
+                Some(Variant::Bool(b)) => *b,
+                Some(_) => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "JSON.stringify(): sort_keys must be a bool".into(),
+                    )))
+                }
+            };
+            // `full_precision` is accepted for signature parity. It is not yet
+            // honoured: Patina's floats already round-trip through serde_json's
+            // shortest-representation writer, so there is no reduced-precision
+            // mode to switch off. Rejecting the argument would be worse — it
+            // would make a correct Godot call fail.
+            Ok(Variant::String(json_stringify_variant(
+                &args[0], &indent, sort_keys, 0,
+            )))
         }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("JSON.{other}"),
@@ -17664,10 +18006,454 @@ fn call_config_file_instance(
             })
             .map_err(engine_err_to_runtime)
         }
+        // -- pat-0q2kx.218: the method gaps ------------------------------------
+        // All six already existed on `gdresource::ConfigFile`; only the dispatch
+        // was missing, so a script could not reach them.
+        "erase_section" => {
+            let section = arg_as_string(args, 0, "erase_section")?;
+            ConfigFile::with_handle_mut(id, |cfg| {
+                cfg.erase_section(&section);
+                Ok(Variant::Nil)
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "erase_section_key" => {
+            if args.len() != 2 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "ConfigFile.erase_section_key() takes 2 arguments".into(),
+                )));
+            }
+            let section = arg_as_string(args, 0, "erase_section_key")?;
+            let key = arg_as_string(args, 1, "erase_section_key")?;
+            ConfigFile::with_handle_mut(id, |cfg| {
+                cfg.erase_section_key(&section, &key);
+                Ok(Variant::Nil)
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        // Godot returns an Error int, so 0 is OK and a parse failure is
+        // ERR_PARSE_ERROR (43) rather than a thrown script error.
+        "parse" => {
+            let data = arg_as_string(args, 0, "parse")?;
+            ConfigFile::with_handle_mut(id, |cfg| {
+                Ok(Variant::Int(match cfg.parse(&data) {
+                    Ok(()) => 0,
+                    Err(_) => 43,
+                }))
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "encode_to_text" => {
+            ConfigFile::with_handle_mut(id, |cfg| Ok(Variant::String(cfg.encode_to_text())))
+                .map_err(engine_err_to_runtime)
+        }
+        // Only the password variants exist: `gdresource::ConfigFile` has
+        // `save_encrypted_pass`/`load_encrypted_pass` and no raw-32-byte-key
+        // form, so `save_encrypted`/`load_encrypted` are deliberately NOT
+        // aliased onto these — silently treating a binary key as a passphrase
+        // would produce files Godot cannot read.
+        "save_encrypted_pass" => {
+            if args.len() != 2 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "ConfigFile.save_encrypted_pass() takes 2 arguments".into(),
+                )));
+            }
+            let path = arg_as_string(args, 0, "save_encrypted_pass")?;
+            let pass = arg_as_string(args, 1, "save_encrypted_pass")?;
+            ConfigFile::with_handle_mut(id, |cfg| {
+                Ok(Variant::Int(match cfg.save_encrypted_pass(&path, &pass) {
+                    Ok(()) => 0,
+                    // ERR_FILE_CANT_WRITE
+                    Err(_) => 14,
+                }))
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "load_encrypted_pass" => {
+            if args.len() != 2 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "ConfigFile.load_encrypted_pass() takes 2 arguments".into(),
+                )));
+            }
+            let path = arg_as_string(args, 0, "load_encrypted_pass")?;
+            let pass = arg_as_string(args, 1, "load_encrypted_pass")?;
+            ConfigFile::with_handle_mut(id, |cfg| {
+                match ConfigFile::load_encrypted_pass(&path, &pass) {
+                    Ok(loaded) => {
+                        *cfg = loaded;
+                        Ok(Variant::Int(0))
+                    }
+                    // ERR_FILE_CANT_OPEN — also what a wrong password yields,
+                    // which is the case the acceptance test pins.
+                    Err(_) => Ok(Variant::Int(12)),
+                }
+            })
+            .map_err(engine_err_to_runtime)
+        }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("ConfigFile.{other}"),
         ))),
     }
+}
+
+/// A handle whose entry has been dropped is a script error rather than a silent
+/// `Nil` — the alternative is a script quietly reading zeros off a closed file.
+fn dead_handle(class: &str, method: &str) -> RuntimeError {
+    // `TypeError` is this file's general-purpose misuse variant (it carries every
+    // arity and argument-type error here); `RuntimeErrorKind` has no
+    // `InvalidOperation`.
+    RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+        "{class}.{method}(): handle is closed or invalid"
+    )))
+}
+
+/// `XMLParser` instance methods (pat-0q2kx.218).
+///
+/// Godot ground truth: `core/io/xml_parser.cpp`. The engine has existed at
+/// `gdcore::xml_parser` all along; nothing could reach it from a script.
+fn call_xml_parser_instance(
+    id: gdcore::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdcore::xml_parser::{XmlNodeType, XmlParser};
+
+    // Godot's NodeType enum ordering (XMLParser.NODE_*).
+    fn node_type_int(t: XmlNodeType) -> i64 {
+        match t {
+            XmlNodeType::None => 0,
+            XmlNodeType::Element => 1,
+            XmlNodeType::ElementEnd => 2,
+            XmlNodeType::Text => 3,
+            XmlNodeType::Comment => 4,
+            XmlNodeType::CData => 5,
+            XmlNodeType::Unknown => 6,
+        }
+    }
+
+    let out = match method {
+        // Godot returns an Error int: 0 on success, ERR_FILE_EOF (later) when
+        // the document is exhausted. `read` advancing past the end is Error 1.
+        "read" => XmlParser::with_handle_mut(id, |p| Variant::Int(if p.read() { 0 } else { 1 })),
+        "get_node_type" => {
+            XmlParser::with_handle_mut(id, |p| Variant::Int(node_type_int(p.node_type())))
+        }
+        "get_node_name" => {
+            XmlParser::with_handle_mut(id, |p| Variant::String(p.node_name().to_string()))
+        }
+        "get_node_data" => {
+            XmlParser::with_handle_mut(id, |p| Variant::String(p.node_data().to_string()))
+        }
+        "is_empty" => XmlParser::with_handle_mut(id, |p| Variant::Bool(p.is_empty())),
+        "get_attribute_count" => {
+            XmlParser::with_handle_mut(id, |p| Variant::Int(p.attribute_count() as i64))
+        }
+        "get_attribute_name" => {
+            let i = arg_as_int(args, 0, "get_attribute_name")?.max(0) as usize;
+            XmlParser::with_handle_mut(id, |p| {
+                Variant::String(p.attribute_name(i).unwrap_or("").to_string())
+            })
+        }
+        "get_attribute_value" => {
+            let i = arg_as_int(args, 0, "get_attribute_value")?.max(0) as usize;
+            XmlParser::with_handle_mut(id, |p| {
+                Variant::String(p.attribute_value(i).unwrap_or("").to_string())
+            })
+        }
+        "has_attribute" => {
+            let name = arg_as_string(args, 0, "has_attribute")?;
+            XmlParser::with_handle_mut(id, |p| Variant::Bool(p.has_attribute(&name)))
+        }
+        // Godot's `get_named_attribute_value` errors on a missing attribute
+        // while `..._safe` returns "". The safe form is the one scripts use.
+        "get_named_attribute_value" | "get_named_attribute_value_safe" => {
+            let name = arg_as_string(args, 0, "get_named_attribute_value")?;
+            XmlParser::with_handle_mut(id, |p| {
+                Variant::String(p.named_attribute_value(&name).unwrap_or("").to_string())
+            })
+        }
+        "open_buffer" => {
+            let source = arg_as_string(args, 0, "open_buffer")?;
+            XmlParser::with_handle_mut(id, |p| {
+                p.open_buffer(&source);
+                Variant::Int(0)
+            })
+        }
+        // Reads the file through FileAccess so `res://` resolution matches every
+        // other script-facing open.
+        "open" => {
+            let path = arg_as_string(args, 0, "open")?;
+            let text = match gdcore::FileAccess::open(&path, gdcore::FileMode::Read)
+                .and_then(|mut fa| fa.get_as_text())
+            {
+                Ok(t) => t,
+                // ERR_FILE_CANT_OPEN, rather than throwing: Godot's open()
+                // returns an Error code.
+                Err(_) => return Ok(Variant::Int(12)),
+            };
+            XmlParser::with_handle_mut(id, |p| {
+                p.open_buffer(&text);
+                Variant::Int(0)
+            })
+        }
+        "seek" => {
+            let pos = arg_as_int(args, 0, "seek")?.max(0) as usize;
+            XmlParser::with_handle_mut(id, |p| {
+                // 0 = OK, ERR_INVALID_PARAMETER = 31 when past the end.
+                Variant::Int(if p.seek(pos) { 0 } else { 31 })
+            })
+        }
+        "skip_section" => XmlParser::with_handle_mut(id, |p| {
+            p.skip_section();
+            Variant::Nil
+        }),
+        "get_current_line" => XmlParser::with_handle_mut(id, |p| Variant::Int(p.cursor() as i64)),
+        other => {
+            return Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("XMLParser.{other}"),
+            )))
+        }
+    };
+    out.ok_or_else(|| dead_handle("XMLParser", method))
+}
+
+/// `ZIPReader` instance methods (pat-0q2kx.218).
+///
+/// Godot ground truth: `modules/zip/zip_reader.cpp`.
+fn call_zip_reader_instance(
+    id: gdcore::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdresource::ZipReader;
+
+    let out = match method {
+        "open" => {
+            let path = arg_as_string(args, 0, "open")?;
+            ZipReader::with_handle_mut(id, |z| {
+                Variant::Int(match z.open(&path) {
+                    Ok(()) => 0,
+                    // ERR_FILE_CANT_OPEN
+                    Err(_) => 12,
+                })
+            })
+        }
+        "close" => ZipReader::with_handle_mut(id, |z| {
+            Variant::Int(match z.close() {
+                Ok(()) => 0,
+                Err(_) => 1,
+            })
+        }),
+        "get_files" => {
+            ZipReader::with_handle_mut(id, |z| Variant::PackedStringArray(z.get_files()))
+        }
+        // Godot's second argument is `case_sensitive`, defaulting to true.
+        "file_exists" => {
+            let path = arg_as_string(args, 0, "file_exists")?;
+            let cs = args
+                .get(1)
+                .map_or(true, |v| !matches!(v, Variant::Bool(false)));
+            ZipReader::with_handle_mut(id, |z| Variant::Bool(z.file_exists(&path, cs)))
+        }
+        "read_file" => {
+            let path = arg_as_string(args, 0, "read_file")?;
+            let cs = args
+                .get(1)
+                .map_or(true, |v| !matches!(v, Variant::Bool(false)));
+            ZipReader::with_handle_mut(id, |z| match z.read_file(&path, cs) {
+                Ok(bytes) => Variant::PackedByteArray(bytes),
+                // Godot returns an empty PackedByteArray on failure.
+                Err(_) => Variant::PackedByteArray(Vec::new()),
+            })
+        }
+        other => {
+            return Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("ZIPReader.{other}"),
+            )))
+        }
+    };
+    out.ok_or_else(|| dead_handle("ZIPReader", method))
+}
+
+/// `ZIPPacker` instance methods (pat-0q2kx.218).
+///
+/// Godot ground truth: `modules/zip/zip_packer.cpp`.
+fn call_zip_packer_instance(
+    id: gdcore::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdresource::{ZipAppend, ZipPacker};
+
+    let out = match method {
+        // APPEND_CREATE = 0, APPEND_CREATEAFTER = 1, APPEND_ADDINZIP = 2.
+        "open" => {
+            let path = arg_as_string(args, 0, "open")?;
+            let append = match args.get(1) {
+                Some(Variant::Int(1)) => ZipAppend::CreateAfter,
+                Some(Variant::Int(2)) => ZipAppend::AddInZip,
+                _ => ZipAppend::Create,
+            };
+            ZipPacker::with_handle_mut(id, |z| {
+                Variant::Int(match z.open(&path, append) {
+                    Ok(()) => 0,
+                    // ERR_FILE_CANT_WRITE
+                    Err(_) => 14,
+                })
+            })
+        }
+        "start_file" => {
+            let path = arg_as_string(args, 0, "start_file")?;
+            ZipPacker::with_handle_mut(id, |z| {
+                Variant::Int(match z.start_file(&path) {
+                    Ok(()) => 0,
+                    Err(_) => 14,
+                })
+            })
+        }
+        "write_file" => {
+            let data = match args.first() {
+                Some(Variant::PackedByteArray(b)) => b.clone(),
+                // A script may hand over a String; Godot takes PackedByteArray,
+                // and encoding UTF-8 is the lossless reading of that.
+                Some(Variant::String(s)) => s.as_bytes().to_vec(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "ZIPPacker.write_file() takes a PackedByteArray".into(),
+                    )))
+                }
+            };
+            ZipPacker::with_handle_mut(id, |z| {
+                Variant::Int(match z.write_file(&data) {
+                    Ok(()) => 0,
+                    Err(_) => 14,
+                })
+            })
+        }
+        "close_file" => ZipPacker::with_handle_mut(id, |z| {
+            Variant::Int(match z.close_file() {
+                Ok(()) => 0,
+                Err(_) => 14,
+            })
+        }),
+        "close" => ZipPacker::with_handle_mut(id, |z| {
+            Variant::Int(match z.close() {
+                Ok(()) => 0,
+                Err(_) => 14,
+            })
+        }),
+        "set_compression_level" => {
+            let level = arg_as_int(args, 0, "set_compression_level")? as i32;
+            ZipPacker::with_handle_mut(id, |z| {
+                z.set_compression_level(level);
+                Variant::Nil
+            })
+        }
+        "get_compression_level" => {
+            ZipPacker::with_handle_mut(id, |z| Variant::Int(z.compression_level() as i64))
+        }
+        other => {
+            return Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("ZIPPacker.{other}"),
+            )))
+        }
+    };
+    out.ok_or_else(|| dead_handle("ZIPPacker", method))
+}
+
+/// `PCKPacker` instance methods (pat-0q2kx.218).
+///
+/// Godot ground truth: `core/io/pck_packer.cpp`. Godot's `pck_start` opens the
+/// output file and `flush` finishes it; Patina's engine accumulates in memory
+/// and serializes on flush, so the destination path is remembered from
+/// `pck_start` and used by `flush`.
+fn call_pck_packer_instance(
+    id: gdcore::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdresource::pck::PckPacker;
+
+    let out = match method {
+        "pck_start" => {
+            let path = arg_as_string(args, 0, "pck_start")?;
+            let alignment = args.get(1).and_then(|v| match v {
+                Variant::Int(i) => Some(*i as u64),
+                _ => None,
+            });
+            // Stored on the interpreter side rather than the engine struct: the
+            // engine's packer is a pure accumulator and giving it a path field
+            // would mean a half-open file living across script calls.
+            pck_packer_paths().insert(id.raw(), path);
+            PckPacker::with_handle_mut(id, |p| {
+                if let Some(a) = alignment {
+                    // `with_alignment` consumes self, so swap through a clone of
+                    // the accumulated state rather than rebuilding it.
+                    let taken = std::mem::replace(p, PckPacker::new());
+                    *p = taken.with_alignment(a);
+                }
+                Variant::Int(0)
+            })
+        }
+        // Godot's signature is (pck_path, source_path, encrypt): the file's
+        // bytes come from disk. `encrypt` is accepted and ignored — Patina's
+        // pack format has no per-file encryption, and rejecting the argument
+        // would break otherwise-valid scripts.
+        "add_file" => {
+            if args.len() < 2 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "PCKPacker.add_file() takes at least 2 arguments".into(),
+                )));
+            }
+            let pck_path = arg_as_string(args, 0, "add_file")?;
+            let source = arg_as_string(args, 1, "add_file")?;
+            let data = match gdcore::FileAccess::open(&source, gdcore::FileMode::Read).and_then(
+                |mut fa| {
+                    // No whole-file byte read on FileAccess; length-then-read is
+                    // the same pair Godot's `get_buffer(get_length())` uses.
+                    let len = fa.get_length()? as usize;
+                    fa.get_buffer(len)
+                },
+            ) {
+                Ok(d) => d,
+                // ERR_FILE_CANT_OPEN
+                Err(_) => return Ok(Variant::Int(12)),
+            };
+            PckPacker::with_handle_mut(id, |p| {
+                p.add_file(pck_path, data);
+                Variant::Int(0)
+            })
+        }
+        "get_file_count" => PckPacker::with_handle_mut(id, |p| Variant::Int(p.file_count() as i64)),
+        "flush" => {
+            let Some(path) = pck_packer_paths().get(&id.raw()).cloned() else {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "PCKPacker.flush() called before pck_start()".into(),
+                )));
+            };
+            PckPacker::with_handle_mut(id, |p| {
+                Variant::Int(match p.flush_to_path(&path) {
+                    Ok(()) => 0,
+                    Err(_) => 14,
+                })
+            })
+        }
+        other => {
+            return Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("PCKPacker.{other}"),
+            )))
+        }
+    };
+    out.ok_or_else(|| dead_handle("PCKPacker", method))
+}
+
+/// Destination paths remembered by `PCKPacker.pck_start`, keyed by handle.
+fn pck_packer_paths() -> std::sync::MutexGuard<'static, HashMap<u64, String>> {
+    static PATHS: OnceLock<Mutex<HashMap<u64, String>>> = OnceLock::new();
+    PATHS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Returns `true` if the identifier is a known Godot node class name that

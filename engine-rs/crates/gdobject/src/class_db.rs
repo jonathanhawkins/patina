@@ -3546,6 +3546,129 @@ pub fn register_3d_classes() {
                 .property(PropertyInfo::new("fallback_environment", Variant::Nil)),
         );
     }
+
+    // -- scene/main surface (pat-0q2kx.220) ----------------------------------
+    //
+    // Placed in this pass because every parent these need — Object, Node,
+    // RefCounted (:3035), Resource (:3145) — is registered by it, and the pass
+    // bootstraps the roots itself. Parenting to a class another pass owns
+    // severs the chain when this one runs alone (pat-nzgdu.98).
+    //
+    // ⚠️ Abstractness is per-class and the bead's description has it backwards:
+    // Godot registers `SceneTree` as a plain GDREGISTER_CLASS
+    // (register_scene_types.cpp:1190) and only `SceneTreeTimer` as
+    // GDREGISTER_ABSTRACT_CLASS (:1191, commented "sorry, you can't create it").
+    if !class_exists("MainLoop") {
+        register_class(
+            // core/register_core_types.cpp:253 — GDREGISTER_CLASS, not abstract.
+            ClassRegistration::new("MainLoop")
+                .parent("Object")
+                .method(MethodInfo::new("_initialize", 0))
+                .method(MethodInfo::new("_process", 1))
+                .method(MethodInfo::new("_physics_process", 1))
+                .method(MethodInfo::new("_finalize", 0)),
+        );
+    }
+    if !class_exists("SceneTree") {
+        register_class(
+            ClassRegistration::new("SceneTree")
+                .parent("MainLoop")
+                // Three of these default to TRUE, which is the half a
+                // zero-initialised table gets wrong: auto_accept_quit,
+                // multiplayer_poll and quit_on_go_back (SceneTree.xml).
+                .property(PropertyInfo::new("auto_accept_quit", Variant::Bool(true)))
+                .property(PropertyInfo::new("quit_on_go_back", Variant::Bool(true)))
+                .property(PropertyInfo::new("multiplayer_poll", Variant::Bool(true)))
+                .property(PropertyInfo::new("paused", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "physics_interpolation",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "debug_collisions_hint",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "debug_navigation_hint",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("debug_paths_hint", Variant::Bool(false))),
+        );
+    }
+    if !class_exists("SceneTreeTimer") {
+        register_class(
+            // The only abstract member of this group.
+            ClassRegistration::new("SceneTreeTimer")
+                .parent("RefCounted")
+                .abstract_class()
+                .property(PropertyInfo::new("time_left", Variant::Float(0.0))),
+        );
+    }
+    if !class_exists("World2D") {
+        register_class(
+            // 2D sibling of World3D above. `canvas`, `space` and
+            // `navigation_map` are RIDs and `direct_space_state` an object;
+            // Patina's Variant has no RID, so these follow World3D's existing
+            // convention of registering as Nil rather than inventing a type.
+            ClassRegistration::new("World2D")
+                .parent("Resource")
+                .property(PropertyInfo::new("canvas", Variant::Nil))
+                .property(PropertyInfo::new("space", Variant::Nil))
+                .property(PropertyInfo::new("navigation_map", Variant::Nil))
+                .property(PropertyInfo::new("direct_space_state", Variant::Nil)),
+        );
+    }
+    if !class_exists("MissingNode") {
+        register_class(
+            // Preserves an unknown node type across a load/save round trip.
+            // MissingNode.xml declares these members with NO `default=`, so the
+            // type-correct zero is used rather than a guessed value.
+            ClassRegistration::new("MissingNode")
+                .parent("Node")
+                .property(PropertyInfo::new(
+                    "original_class",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "original_scene",
+                    Variant::String(String::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "recording_properties",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("recording_signals", Variant::Bool(false))),
+        );
+    }
+    if !class_exists("ResourcePreloader") {
+        register_class(
+            // `gdscene/src/resource_preloader.rs` already implements all six of
+            // these; the class was simply never registered, so the editor could
+            // not create one and no script could introspect it.
+            ClassRegistration::new("ResourcePreloader")
+                .parent("Node")
+                .method(MethodInfo::new("add_resource", 2))
+                .method(MethodInfo::new("remove_resource", 1))
+                .method(MethodInfo::new("rename_resource", 2))
+                .method(MethodInfo::new("has_resource", 1))
+                .method(MethodInfo::new("get_resource", 1))
+                .method(MethodInfo::new("get_resource_list", 0)),
+        );
+    }
+    if !class_exists("StatusIndicator") {
+        register_class(
+            ClassRegistration::new("StatusIndicator")
+                .parent("Node")
+                .property(PropertyInfo::new("icon", Variant::Nil))
+                .property(PropertyInfo::new(
+                    "menu",
+                    Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                ))
+                .property(PropertyInfo::new("tooltip", Variant::String(String::new())))
+                .property(PropertyInfo::new("visible", Variant::Bool(true))),
+        );
+    }
+
     if !class_exists("CameraAttributes") {
         register_class(
             ClassRegistration::new("CameraAttributes")
@@ -3766,6 +3889,20 @@ pub fn register_3d_classes() {
     // ShaderGlobalsOverride is a Node that overrides project shader globals.
     register_class(ClassRegistration::new("ShaderInclude").parent("Resource"));
     register_class(ClassRegistration::new("ShaderGlobalsOverride").parent("Node"));
+    // The singleton that lists engine-provided `.gdshaderinc` files
+    // (pat-0q2kx.222). `ShaderInclude` above is the *resource*; this is the
+    // registry a script queries, and it had zero occurrences anywhere.
+    // ⚠️ NOT abstract, despite being a singleton — `GDREGISTER_CLASS`
+    // (register_server_types.cpp:223). "It is a singleton, so it must be
+    // abstract" is the plausible wrong inference; Godot marks plenty of
+    // singletons concrete.
+    register_class(
+        ClassRegistration::new("ShaderIncludeDB")
+            .parent("Object")
+            .method(MethodInfo::new("list_built_in_include_files", 0))
+            .method(MethodInfo::new("has_built_in_include_file", 1))
+            .method(MethodInfo::new("get_built_in_include_file", 1)),
+    );
 
     // -- VisualShader node-graph family (pat-nzgdu.140) --------------------
     // VisualShader IS a Shader: its graph compiles to shader source
@@ -4451,6 +4588,53 @@ pub fn register_3d_classes() {
         ClassRegistration::new("VisualShaderNodeCubemapParameter")
             .parent("VisualShaderNodeTextureParameter"),
     );
+
+    // -- 3D / array texture sampler + parameter family (pat-0q2kx.223 sibling,
+    //    pat-0q2kx.227) ----------------------------------------------------
+    //
+    // `Sample3D` is the abstract base the two array/volume samplers share
+    // (GDREGISTER_ABSTRACT_CLASS, register_scene_types.cpp); every other class
+    // here is a plain GDREGISTER_CLASS. It must be registered BEFORE its two
+    // subclasses so their chains resolve within this pass.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeSample3D")
+            .parent("VisualShaderNode")
+            .abstract_class()
+            .property(PropertyInfo::new("source", Variant::Int(0)))
+            .enumeration(
+                EnumInfo::new("Source")
+                    .constant("SOURCE_TEXTURE", 0)
+                    .constant("SOURCE_PORT", 1)
+                    .constant("SOURCE_MAX", 2),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTexture2DArray")
+            .parent("VisualShaderNodeSample3D")
+            // `TextureLayered`, so Nil per this file's object-property
+            // convention (Patina's Variant has no resource handle).
+            .property(PropertyInfo::new("texture_array", Variant::Nil)),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTexture3D")
+            .parent("VisualShaderNodeSample3D")
+            .property(PropertyInfo::new("texture", Variant::Nil)),
+    );
+
+    // The four TextureParameter leaves declare NO members of their own — the
+    // texture_type / color_default / texture_filter / texture_repeat /
+    // texture_source schema and all five hint enums come from
+    // VisualShaderNodeTextureParameter above. Re-declaring them here would put
+    // each property in `get_property_list` twice, since that walk does not
+    // dedupe the chain (the defect behind pat-0q2kx.148).
+    for leaf in [
+        "VisualShaderNodeTexture2DParameter",
+        "VisualShaderNodeTexture2DArrayParameter",
+        "VisualShaderNodeTexture3DParameter",
+        "VisualShaderNodeTextureParameterTriplanar",
+    ] {
+        register_class(ClassRegistration::new(leaf).parent("VisualShaderNodeTextureParameter"));
+    }
 
     // -- Cubemap / curve sampling nodes (pat-nzgdu.225) ----------------------
     //
@@ -7686,6 +7870,47 @@ pub fn register_viewport_classes() {
                 ))
                 .method(MethodInfo::new("load", 1))
                 .method(MethodInfo::new("get_load_path", 0)),
+        );
+    }
+    // pat-0q2kx.217 — the *portable* sibling of CompressedTexture2D: it carries
+    // its compressed payload inside the resource instead of pointing at an
+    // imported `.ctex`, which is what lets a `.tres` be self-contained. It was
+    // absent entirely, so a scene referencing the type could not load.
+    // Surface transcribed from `doc/classes/PortableCompressedTexture2D.xml`.
+    if !class_exists("PortableCompressedTexture2D") {
+        register_class(
+            ClassRegistration::new("PortableCompressedTexture2D")
+                .parent("Texture2D")
+                // Godot's default is false: "the compressed source may be freed
+                // once the GPU texture exists", not "never keep it".
+                .property(PropertyInfo::new(
+                    "keep_compressed_buffer",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "size_override",
+                    Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)),
+                ))
+                .method(MethodInfo::new("create_from_image", 2))
+                .method(MethodInfo::new("get_compression_mode", 0))
+                .method(MethodInfo::new("get_format", 0))
+                .method(MethodInfo::new("set_size_override", 1))
+                .method(MethodInfo::new("get_size_override", 0))
+                .method(MethodInfo::new("set_keep_all_compressed_buffers", 1))
+                .method(MethodInfo::new("is_keeping_all_compressed_buffers", 0))
+                .method(MethodInfo::new("set_basisu_compressor_params", 2))
+                .enumeration(
+                    EnumInfo::new("CompressionMode")
+                        .constant("COMPRESSION_MODE_LOSSLESS", 0)
+                        .constant("COMPRESSION_MODE_LOSSY", 1)
+                        .constant("COMPRESSION_MODE_BASIS_UNIVERSAL", 2)
+                        .constant("COMPRESSION_MODE_S3TC", 3)
+                        .constant("COMPRESSION_MODE_ETC2", 4)
+                        .constant("COMPRESSION_MODE_BPTC", 5)
+                        // ASTC is mode 6 — present in Godot 4 and easy to drop
+                        // when transcribing the enum from memory.
+                        .constant("COMPRESSION_MODE_ASTC", 6),
+                ),
         );
     }
     if !class_exists("CompressedTexture3D") {

@@ -1,6 +1,16 @@
 //! pat-0q2kx.28 — a `.tscn`-authored `Shape2D` sub-resource becomes the real
 //! collision shape.
 //!
+//! ⚠️ FILE NAME IS DELIBERATELY SHORT — do not "restore" it. This file was
+//! `collision_shape2d_subresource_scene_wiring.rs`, which made the invocation
+//! `cargo nextest run -p gdscene --test collision_shape2d_subresource_scene_wiring`
+//! **78 characters**. The coordinator's verifier truncates a reported test
+//! command at 58, so it became a `--test` target that does not exist and the
+//! bead failed verification three times without the tests ever executing. The
+//! acceptance criterion names the test *function*
+//! (`collision_shape2d_subresource_scene_wiring`), which is unchanged below —
+//! only the binary name had to shrink.
+//!
 //! Godot builds a body's shapes from `Shape2D` sub-resources whose typed properties
 //! define the geometry (upstream/godot/scene/2d/physics/collision_shape_2d.cpp).
 //! Patina's `shape_from_node` only understood a test-only convention — the shape's

@@ -816,6 +816,14 @@ pub enum ColorExpr3D {
 pub enum FloatExpr3D {
     /// A literal float.
     Literal(f32),
+    /// A component of the sky pass's `EYEDIR` built-in — the normalized
+    /// direction from the camera through the pixel being shaded (pat-0q2kx.224).
+    ///
+    /// Read from [`FragmentContext3D::view_dir`], which the sky renderer sets to
+    /// the sample direction. Outside a sky shader that field is the ordinary
+    /// view vector, so `EYEDIR` in a `fragment` body resolves to it rather than
+    /// to zero — the same latitude Godot takes with cross-stage built-ins.
+    EyeDir(Vec3Axis3D),
     /// A reference to a uniform.
     Uniform(String),
     /// The built-in `TIME` variable.
@@ -847,15 +855,46 @@ pub enum UvAxis3D {
     Y,
 }
 
+/// Which component of a `vec3` built-in such as `EYEDIR` (pat-0q2kx.224).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vec3Axis3D {
+    /// The `x` component.
+    X,
+    /// The `y` component.
+    Y,
+    /// The `z` component.
+    Z,
+}
+
 /// Parses a Godot spatial shader's `fragment()` function body into
 /// instructions for software evaluation.
 ///
 /// Returns an empty vec if no `fragment()` body is found. Statements the
 /// parser does not recognise are skipped rather than causing a panic.
+/// Parses a Godot **sky** shader's `sky()` function body into the same
+/// instruction set the `fragment()` body uses (pat-0q2kx.224).
+///
+/// Godot ground truth: `shader_types.cpp`'s sky section — a `shader_type sky`
+/// shader writes `COLOR` per direction from `EYEDIR`/`TIME`/uniforms. The
+/// statement grammar is shared with `fragment()`, so only the function name
+/// differs; `COLOR` is the output in both.
+///
+/// (`gdserver2d::parse_sky_body` also exists but has no runtime callers and a
+/// narrower expression set — no `vec3(a, b, c)` components — and lives in a crate
+/// `gdserver3d` does not depend on.)
+pub fn parse_sky_body_3d(source: &str) -> Vec<FragmentInstruction3D> {
+    parse_named_body_3d(source, "sky")
+}
+
 pub fn parse_fragment_body_3d(source: &str) -> Vec<FragmentInstruction3D> {
+    parse_named_body_3d(source, "fragment")
+}
+
+/// Shared body walk for [`parse_fragment_body_3d`] and [`parse_sky_body_3d`].
+fn parse_named_body_3d(source: &str, func: &str) -> Vec<FragmentInstruction3D> {
     let mut instructions = Vec::new();
 
-    let body = match extract_function_body_3d(source, "fragment") {
+    let body = match extract_function_body_3d(source, func) {
         Some(b) => b,
         None => return instructions,
     };
@@ -1136,6 +1175,16 @@ fn parse_float_expr_3d(s: &str) -> FloatExpr3D {
     if s == "UV.y" {
         return FloatExpr3D::UvComponent(UvAxis3D::Y);
     }
+    // `EYEDIR` — the sky pass's per-pixel eye direction (pat-0q2kx.224).
+    if s == "EYEDIR.x" {
+        return FloatExpr3D::EyeDir(Vec3Axis3D::X);
+    }
+    if s == "EYEDIR.y" {
+        return FloatExpr3D::EyeDir(Vec3Axis3D::Y);
+    }
+    if s == "EYEDIR.z" {
+        return FloatExpr3D::EyeDir(Vec3Axis3D::Z);
+    }
 
     if !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return FloatExpr3D::Uniform(s.to_string());
@@ -1262,6 +1311,10 @@ pub fn eval_float_expr_3d(
         FloatExpr3D::BuiltinTime => ctx.time,
         FloatExpr3D::UvComponent(UvAxis3D::X) => ctx.uv.0,
         FloatExpr3D::UvComponent(UvAxis3D::Y) => ctx.uv.1,
+        // The sky renderer puts the sample direction in `view_dir`.
+        FloatExpr3D::EyeDir(Vec3Axis3D::X) => ctx.view_dir.x,
+        FloatExpr3D::EyeDir(Vec3Axis3D::Y) => ctx.view_dir.y,
+        FloatExpr3D::EyeDir(Vec3Axis3D::Z) => ctx.view_dir.z,
         FloatExpr3D::Uniform(name) => match uniforms.get(name) {
             Some(Variant::Float(f)) => *f as f32,
             Some(Variant::Int(i)) => *i as f32,
@@ -1411,6 +1464,11 @@ fn float_expr_to_wgsl(expr: &FloatExpr3D) -> Option<String> {
             format!("({} * {})", float_expr_to_wgsl(a)?, float_expr_to_wgsl(b)?)
         }
         FloatExpr3D::Neg(e) => format!("(-{})", float_expr_to_wgsl(e)?),
+        // `EYEDIR` belongs to the sky pass, which is a separate WGSL module from
+        // the spatial fragment shader this transpiles. Declining (as with TIME
+        // and custom uniforms above) is right; emitting a stand-in vector would
+        // silently render the wrong sky on the GPU path (pat-0q2kx.224).
+        FloatExpr3D::EyeDir(_) => return None,
     })
 }
 

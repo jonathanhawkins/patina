@@ -252,8 +252,35 @@ pub struct Render2DItem {
     /// `range_item_cull_mask`, so it has to travel with the item rather than be
     /// assumed frame-wide (pat-0q2kx.130).
     pub light_mask: u32,
+    /// How the `Camera2D` view applies to this item (pat-0q2kx.212).
+    ///
+    /// Resolved during collection because it needs the `CanvasLayer` ancestor's
+    /// properties, which are gone by the time the view is applied.
+    pub canvas_follow: CanvasFollow,
     /// What to draw for this node.
     pub kind: Render2DKind,
+}
+
+/// Whether the `Camera2D` view moves an item, and by how much (pat-0q2kx.212).
+///
+/// This replaces testing `canvas_layer != 0`, which
+/// [`apply_camera2d_view`] used to do and which its own doc comment flagged as
+/// wrong: a `CanvasLayer` with `layer` explicitly set to `0` was indistinguishable
+/// from having no `CanvasLayer` ancestor, so it followed the camera when it should
+/// have stayed put. `layer` is a **draw-order** number in `-128..128`; it was never
+/// a statement about viewport following.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CanvasFollow {
+    /// On the default canvas: the camera view applies in full.
+    DefaultCanvas,
+    /// On a `CanvasLayer` with `follow_viewport_enabled` off (Godot's default) —
+    /// screen-fixed. This is what keeps a HUD still while the world scrolls.
+    Fixed,
+    /// On a `CanvasLayer` that follows the viewport, carrying its
+    /// `follow_viewport_scale`. Godot re-parents the layer's canvas to the
+    /// viewport's with that scale (`canvas_set_parent`), which is how a
+    /// fractional value produces parallax.
+    Follows(f32),
 }
 
 impl Viewport2D {
@@ -297,9 +324,15 @@ pub fn collect_canvas_items(tree: &SceneTree) -> Vec<Render2DItem> {
             if !node2d::is_visible_in_tree(tree, id) {
                 return None;
             }
+            // The CanvasLayer ancestor's transform and follow mode, resolved
+            // once (pat-0q2kx.212).
+            let (layer_xform, canvas_follow) = canvas_layer_placement(tree, id);
             Some(Render2DItem {
                 node_id: id.raw(),
-                global_transform: node2d::get_global_transform(tree, id),
+                // The layer transform pre-multiplies the node's own chain, which
+                // is what Godot's separate-canvas-per-layer arrangement amounts
+                // to. Identity for the default canvas, so nothing else moves.
+                global_transform: layer_xform * node2d::get_global_transform(tree, id),
                 // Godot's composite: inherited modulate (the chain's `modulate`,
                 // including this node's own) times this node's `self_modulate`.
                 // Reading only the node's own `modulate` meant a half-alpha parent
@@ -310,6 +343,7 @@ pub fn collect_canvas_items(tree: &SceneTree) -> Vec<Render2DItem> {
                 z_index: canvas_order::effective_z_index(tree, id) as i64,
                 canvas_layer: canvas_layer_for(tree, id),
                 clip_rect: clip_rect_for(tree, id),
+                canvas_follow,
                 // Godot's `CanvasItem.light_mask` default is layer 1.
                 light_mask: match node.get_property("light_mask") {
                     Variant::Int(i) => i as u32,
@@ -355,6 +389,12 @@ pub fn collect_canvas_items(tree: &SceneTree) -> Vec<Render2DItem> {
                         canvas_layer: host.canvas_layer,
                         clip_rect: host.clip_rect,
                         light_mask: host.light_mask,
+                        // Inherited from the host, like every other canvas
+                        // property here: a script item drawn onto a node inside
+                        // a HUD layer must stay pinned with that node
+                        // (pat-0q2kx.212). The host's `global_transform` already
+                        // carries the layer transform, so `base` above does too.
+                        canvas_follow: host.canvas_follow,
                         kind,
                     });
                 }
@@ -482,24 +522,55 @@ fn clip_rect_for(tree: &SceneTree, id: NodeId) -> Option<Rect2> {
 ///
 /// Godot draws each `CanvasLayer` above the default canvas (whose implicit layer
 /// is `0`), and a `CanvasLayer` node's `layer` property defaults to `1`, so a UI
-/// layer naturally renders over the world. Read straight off the node's `layer`
-/// property (the `gdscene` canvas-layer helper module is not yet wired in).
+/// layer naturally renders over the world.
 fn canvas_layer_for(tree: &SceneTree, id: gdscene::NodeId) -> i64 {
+    match canvas_layer_ancestor(tree, id) {
+        Some(layer) => gdscene::canvas_layer::get_layer(tree, layer),
+        None => 0,
+    }
+}
+
+/// The nearest `CanvasLayer` ancestor of `id`, or `None` in the default canvas.
+///
+/// Returning the node rather than just its `layer` number is what lets one walk
+/// answer all three questions the render list needs — draw order, the layer's own
+/// transform, and whether it follows the viewport (pat-0q2kx.212). The number
+/// alone could not distinguish "no CanvasLayer" from "a CanvasLayer with
+/// `layer = 0`".
+fn canvas_layer_ancestor(tree: &SceneTree, id: gdscene::NodeId) -> Option<gdscene::NodeId> {
     let mut current = tree.get_node(id).and_then(|n| n.parent());
     while let Some(pid) = current {
-        let Some(node) = tree.get_node(pid) else {
-            break;
-        };
+        let node = tree.get_node(pid)?;
         if node.is_class("CanvasLayer") {
-            return match node.get_property("layer") {
-                Variant::Int(l) => l,
-                // Godot's CanvasLayer.layer defaults to 1.
-                _ => 1,
-            };
+            return Some(pid);
         }
         current = node.parent();
     }
-    0
+    None
+}
+
+/// The layer transform to pre-multiply into `id`'s descendants, and how the
+/// camera view should treat them (pat-0q2kx.212).
+///
+/// ⚠️ The transform has to be applied here rather than fall out of the parent
+/// walk: `node2d::get_global_transform` composes each ancestor's *local*
+/// transform, and a `CanvasLayer` is not a `CanvasItem` — it has `offset` where a
+/// Node2D has `position` — so the walk passes straight through it and the layer
+/// silently reads as identity. Authoring `offset` on a CanvasLayer moved nothing
+/// at all before this.
+fn canvas_layer_placement(tree: &SceneTree, id: gdscene::NodeId) -> (Transform2D, CanvasFollow) {
+    let Some(layer) = canvas_layer_ancestor(tree, id) else {
+        return (Transform2D::IDENTITY, CanvasFollow::DefaultCanvas);
+    };
+    // The composition itself lives next to the other CanvasLayer property
+    // helpers in `gdscene`, where the `transform`-wins rule is documented.
+    let xform = gdscene::canvas_layer::layer_transform(tree, layer);
+    let follow = if gdscene::canvas_layer::get_follow_viewport_enabled(tree, layer) {
+        CanvasFollow::Follows(gdscene::canvas_layer::get_follow_viewport_scale(tree, layer) as f32)
+    } else {
+        CanvasFollow::Fixed
+    };
+    (xform, follow)
 }
 
 /// Chooses the draw kind for a visible canvas node: a sprite for a textured
@@ -938,6 +1009,10 @@ pub fn build_control_render_items(
             modulate: Color::new(1.0, 1.0, 1.0, 1.0),
             z_index: CONTROL_Z_BASE + z as i64,
             canvas_layer: 0,
+            // These primitives are emitted by the Control layout pass with
+            // `canvas_layer: 0` already, i.e. the default canvas — so the camera
+            // view applies to them as it always has (pat-0q2kx.212).
+            canvas_follow: CanvasFollow::DefaultCanvas,
             // Control primitives are drawn by their own layout pass, which has
             // already resolved them inside their container.
             clip_rect: None,
@@ -1034,17 +1109,31 @@ pub fn camera2d_view_transform(
 /// scrolls and zooms under it — previously the view was folded into every item,
 /// so a health bar drifted off-screen as soon as the camera moved (pat-0q2kx.40).
 ///
-/// KNOWN LIMITATION: a `CanvasLayer` with `layer` explicitly set to `0` is
-/// indistinguishable here from "no CanvasLayer ancestor" and will follow the
-/// camera. Legal in Godot (range -128..128, default 1) but unusual. The exact fix
-/// is a `follows_viewport` flag resolved during item collection, which needs a
-/// field on [`Render2DItem`].
+/// The former KNOWN LIMITATION here — that a `CanvasLayer` with `layer` set to
+/// `0` was indistinguishable from "no CanvasLayer ancestor" and so followed the
+/// camera — is **fixed** (pat-0q2kx.212). The decision now rides on
+/// [`CanvasFollow`], resolved during collection from the layer node itself, so
+/// `layer` is back to meaning only draw order.
+///
+/// A layer with `follow_viewport_enabled` now follows, scaled by
+/// `follow_viewport_scale`: Godot re-parents the layer's canvas to the viewport's
+/// with that factor (`canvas_set_parent`), so `0.5` moves the layer half as far
+/// as the world — the parallax idiom.
 pub fn apply_camera2d_view(items: &mut [Render2DItem], view: Transform2D) {
     for item in items.iter_mut() {
-        if item.canvas_layer != 0 {
-            continue;
+        match item.canvas_follow {
+            CanvasFollow::DefaultCanvas => {
+                item.global_transform = view * item.global_transform;
+            }
+            CanvasFollow::Fixed => {}
+            CanvasFollow::Follows(scale) => {
+                // The scale sits between the viewport transform and the layer's
+                // own, matching Godot's parent-with-scale rather than scaling
+                // the finished item — which would also resize the contents.
+                let scaled = Transform2D::scaled(Vector2::new(scale, scale));
+                item.global_transform = view * scaled * item.global_transform;
+            }
         }
-        item.global_transform = view * item.global_transform;
     }
 }
 

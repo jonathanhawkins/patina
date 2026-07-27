@@ -199,6 +199,15 @@ pub enum VisualShaderNodeType {
     Multiply,
     /// Linear interpolation (mix).
     Mix,
+    /// The `UV` built-in, i.e. Godot's `VisualShaderNodeInput` with
+    /// `input_name = "uv"` (pat-0q2kx.226).
+    ///
+    /// ⚠️ Emits a **`vec2`**, unlike every other kind here, which are `vec4`
+    /// colours or scalars. `UV * colour` is the idiomatic gradient graph and is
+    /// what the bead's acceptance builds, so the multiply arm swizzles rather
+    /// than letting a `vec2 * vec4` reach the shader compiler — see
+    /// [`VisualShader::node_expr`].
+    Uv,
 }
 
 /// A single node in a visual-shader graph.
@@ -428,11 +437,27 @@ impl VisualShader {
                 self.resolve_input(node, 0, depth),
                 self.resolve_input(node, 1, depth)
             ),
-            VisualShaderNodeType::Multiply => format!(
-                "({} * {})",
-                self.resolve_input(node, 0, depth),
-                self.resolve_input(node, 1, depth)
-            ),
+            // `UV` is a vec2 built-in; the surrounding arms are vec4/scalar.
+            VisualShaderNodeType::Uv => "UV".to_string(),
+            VisualShaderNodeType::Multiply => {
+                let (a, b) = (
+                    self.resolve_input(node, 0, depth),
+                    self.resolve_input(node, 1, depth),
+                );
+                // ⚠️ `vec2 * vec4` does not compile in GDShader. A UV operand is
+                // widened to vec4 so the common "tint by UV" graph — which is
+                // exactly what this bead's acceptance builds — produces valid
+                // source instead of a shader that fails at compile time, well
+                // away from the graph that caused it.
+                let widen = |e: &str| {
+                    if e == "UV" {
+                        "vec4(UV, 0.0, 1.0)".to_string()
+                    } else {
+                        e.to_string()
+                    }
+                };
+                format!("({} * {})", widen(&a), widen(&b))
+            }
             VisualShaderNodeType::Mix => format!(
                 "mix({}, {}, {})",
                 self.resolve_input(node, 0, depth),

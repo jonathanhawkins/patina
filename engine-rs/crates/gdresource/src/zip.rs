@@ -627,6 +627,101 @@ impl ZipPacker {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Script-facing handle registries (`ZIPReader.new()` / `ZIPPacker.new()`)
+// pat-0q2kx.218
+// ---------------------------------------------------------------------------
+
+use gdcore::id::ObjectId;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
+/// Distinct tag bytes so the interpreter's `is_*_handle` chain routes a call to
+/// exactly one family. Reader and packer are separate families because their
+/// method tables are disjoint — a `write_file` on a reader must be a "no such
+/// method" error, not a silent no-op.
+const ZIP_READER_HANDLE_TAG: u64 = 0xA200_0000_0000_0000;
+const ZIP_PACKER_HANDLE_TAG: u64 = 0xA300_0000_0000_0000;
+static NEXT_ZIP_READER_HANDLE: AtomicU64 = AtomicU64::new(1);
+static NEXT_ZIP_PACKER_HANDLE: AtomicU64 = AtomicU64::new(1);
+static ZIP_READER_HANDLES: Mutex<Option<HashMap<u64, ZipReader>>> = Mutex::new(None);
+static ZIP_PACKER_HANDLES: Mutex<Option<HashMap<u64, ZipPacker>>> = Mutex::new(None);
+
+fn zip_reader_handles() -> std::sync::MutexGuard<'static, Option<HashMap<u64, ZipReader>>> {
+    ZIP_READER_HANDLES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn zip_packer_handles() -> std::sync::MutexGuard<'static, Option<HashMap<u64, ZipPacker>>> {
+    ZIP_PACKER_HANDLES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Returns `true` when `id` was issued by [`ZipReader::new_handle`].
+pub fn is_zip_reader_handle(id: ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == ZIP_READER_HANDLE_TAG
+}
+
+/// Returns `true` when `id` was issued by [`ZipPacker::new_handle`].
+pub fn is_zip_packer_handle(id: ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == ZIP_PACKER_HANDLE_TAG
+}
+
+impl ZipReader {
+    /// Allocates a closed reader in the handle table (`ZIPReader.new()`).
+    pub fn new_handle() -> ObjectId {
+        let seq = NEXT_ZIP_READER_HANDLE.fetch_add(1, Ordering::Relaxed);
+        let raw = ZIP_READER_HANDLE_TAG | seq;
+        zip_reader_handles()
+            .get_or_insert_with(HashMap::new)
+            .insert(raw, ZipReader::new());
+        ObjectId::from_raw(raw)
+    }
+
+    /// Runs `f` against the live reader for `id`.
+    pub fn with_handle_mut<R>(id: ObjectId, f: impl FnOnce(&mut ZipReader) -> R) -> Option<R> {
+        let mut guard = zip_reader_handles();
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.get_mut(&id.raw()).map(f)
+    }
+
+    /// Drops a handle created by [`new_handle`](Self::new_handle).
+    pub fn close_handle(id: ObjectId) {
+        if let Some(map) = zip_reader_handles().as_mut() {
+            map.remove(&id.raw());
+        }
+    }
+}
+
+impl ZipPacker {
+    /// Allocates a closed packer in the handle table (`ZIPPacker.new()`).
+    pub fn new_handle() -> ObjectId {
+        let seq = NEXT_ZIP_PACKER_HANDLE.fetch_add(1, Ordering::Relaxed);
+        let raw = ZIP_PACKER_HANDLE_TAG | seq;
+        zip_packer_handles()
+            .get_or_insert_with(HashMap::new)
+            .insert(raw, ZipPacker::new());
+        ObjectId::from_raw(raw)
+    }
+
+    /// Runs `f` against the live packer for `id`.
+    pub fn with_handle_mut<R>(id: ObjectId, f: impl FnOnce(&mut ZipPacker) -> R) -> Option<R> {
+        let mut guard = zip_packer_handles();
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.get_mut(&id.raw()).map(f)
+    }
+
+    /// Drops a handle created by [`new_handle`](Self::new_handle).
+    pub fn close_handle(id: ObjectId) {
+        if let Some(map) = zip_packer_handles().as_mut() {
+            map.remove(&id.raw());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -445,6 +445,12 @@ pub struct MainLoop {
     physics_time: f64,
     /// Time left over from physics stepping, carried into the next frame.
     physics_accumulator: f64,
+    /// Double-buffered physics transforms for render-tick interpolation
+    /// (pat-0q2kx.219).
+    physics_interpolation: crate::physics_interpolation::PhysicsInterpolationState,
+    /// `SceneTree.physics_interpolation_enabled`, from
+    /// `physics/common/physics_interpolation`. Off by default, as in Godot.
+    physics_interpolation_enabled: bool,
     /// Whether the main loop is currently paused.
     paused: bool,
     /// Engine-owned input state. Receives events via [`push_event`](Self::push_event)
@@ -583,6 +589,8 @@ impl MainLoop {
             process_time: 0.0,
             physics_time: 0.0,
             physics_accumulator: 0.0,
+            physics_interpolation: crate::physics_interpolation::PhysicsInterpolationState::new(),
+            physics_interpolation_enabled: false,
             paused: false,
             input_state: InputState::new(),
             cursor: gdplatform::cursor::CursorManager::new(),
@@ -1694,6 +1702,16 @@ impl MainLoop {
                 self.physics_ticks_per_second = tps as u32;
             }
         }
+        // `SceneTree.physics_interpolation_enabled` (pat-0q2kx.219). Godot
+        // defaults this off, so a project that never opts in renders exactly as
+        // before — this whole feature is inert until the setting flips.
+        if let Some(on) = settings
+            .get("physics/common/physics_interpolation")
+            .and_then(|v| v.as_bool())
+        {
+            self.set_physics_interpolation_enabled(on);
+        }
+
         // `Engine.get_physics_ticks_per_second()` must report the booted rate,
         // not the 60 default, once project.godot has been applied
         // (pat-0q2kx.121).
@@ -1837,6 +1855,39 @@ impl MainLoop {
     /// Returns a mutable reference to the 3D physics server.
     pub fn physics_server_3d_mut(&mut self) -> &mut PhysicsServer3D {
         &mut self.physics_server_3d
+    }
+
+    /// Whether render-tick physics interpolation is on
+    /// (`SceneTree.physics_interpolation_enabled`).
+    pub fn physics_interpolation_enabled(&self) -> bool {
+        self.physics_interpolation_enabled
+    }
+
+    /// Toggles render-tick physics interpolation.
+    ///
+    /// Turning it off clears the buffers: stale snapshots from an earlier
+    /// enabled period would otherwise blend a node from wherever it used to be
+    /// the moment it were re-enabled.
+    pub fn set_physics_interpolation_enabled(&mut self, enabled: bool) {
+        self.physics_interpolation_enabled = enabled;
+        if !enabled {
+            self.physics_interpolation.clear();
+        }
+    }
+
+    /// Godot's `Node.reset_physics_interpolation()` — call after teleporting a
+    /// body so the next frame renders it where it now is, instead of streaking
+    /// it through the gap it never travelled.
+    pub fn reset_physics_interpolation(&mut self, node_id: NodeId) {
+        self.physics_interpolation.reset_node(node_id);
+    }
+
+    /// The interpolation buffers, for tests and for a render path that wants
+    /// the blended transform.
+    pub fn physics_interpolation(
+        &self,
+    ) -> &crate::physics_interpolation::PhysicsInterpolationState {
+        &self.physics_interpolation
     }
 
     /// Godot's `PhysicalBoneSimulator3D.physical_bones_start_simulation()`
@@ -2583,6 +2634,15 @@ impl MainLoop {
                 .set_script_physics_server(&mut self.physics_server);
             self.tree.process_physics_frame_with_scripts(physics_dt);
             self.tree.clear_script_physics_server();
+            // -- interpolation capture (pat-0q2kx.219) --
+            // End of the tick: record the transforms this tick settled on,
+            // rolling the previous ones back a slot. Runs after the script
+            // phase so a `_physics_process` that moved a body is included —
+            // the rendered blend must interpolate what actually happened.
+            if self.physics_interpolation_enabled {
+                self.physics_interpolation.capture(&self.tree);
+            }
+
             self.physics_accumulator -= physics_dt;
             self.physics_time += physics_dt;
             physics_steps += 1;
@@ -2596,6 +2656,17 @@ impl MainLoop {
             );
         }
         gdscript_interop::set_engine_in_physics_frame(false);
+
+        // -- interpolation publish (pat-0q2kx.219) --
+        // How far this render frame sits past the last completed tick. With
+        // physics at 20 tps and 60 fps rendering, two frames in three do no
+        // physics at all — those are exactly the frames that used to show a
+        // stale transform and now show a blended one.
+        if self.physics_interpolation_enabled {
+            let fraction = (self.physics_accumulator / physics_dt) as f32;
+            self.physics_interpolation
+                .publish(&mut self.tree, fraction, true);
+        }
 
         // Clamp accumulator if we hit the step limit (spiral-of-death guard).
         if physics_steps >= self.max_physics_steps_per_frame {

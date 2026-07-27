@@ -1733,6 +1733,28 @@ fn sky_uniform_for_env(
                 [mat.mie_eccentricity, mat.sun_disk_scale, 0.0, 0.0],
                 2.0_f32, // physical mode flag (sun_params.z)
             ),
+            // A custom `shader_type sky` material has no WGSL module yet — the
+            // GPU sky pass is a follow-up, and the software renderer owns
+            // pixel-accurate custom-sky output today (pat-0q2kx.224). Feed the
+            // procedural slots from Godot's own ProceduralSkyMaterial defaults so
+            // the GPU path shows a plausible sky rather than uninitialized
+            // values; it will differ from software until the module lands.
+            SkyMaterial::Shader(_) => {
+                let d = gdserver3d::sky::ProceduralSkyMaterial::default();
+                (
+                    lin4(&d.sky_top_color, d.sky_energy_multiplier),
+                    lin4(&d.sky_horizon_color, d.sky_energy_multiplier),
+                    lin4(&d.ground_bottom_color, d.ground_energy_multiplier),
+                    lin4(&d.ground_horizon_color, d.ground_energy_multiplier),
+                    [
+                        0.6 / d.sky_curve.max(1e-4),
+                        0.6 / d.ground_curve.max(1e-4),
+                        1.0,
+                        1.0,
+                    ],
+                    0.0_f32,
+                )
+            }
         };
 
     Some(SkyUniformData {

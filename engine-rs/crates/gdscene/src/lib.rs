@@ -27,6 +27,11 @@ pub mod autoload;
 pub mod behavioral_2d;
 pub mod bezier_bake;
 pub mod camera3d;
+// ⚠️ `canvas_layer.rs` existed since the HUD work but was **never declared**, so
+// the compiler had never seen it: not "unused helpers" but an orphaned file, its
+// 14 getters/setters and its whole test module dead text (pat-0q2kx.212).
+// Declaring it is what makes `CanvasLayer` placement reachable from the renderer.
+pub mod canvas_layer;
 pub mod canvas_order;
 pub mod char_fx;
 pub mod character3d;
@@ -57,6 +62,7 @@ pub mod packed_scene;
 pub mod particle;
 pub mod particle3d;
 pub mod path3d;
+pub mod physics_interpolation;
 pub mod physics_server;
 pub mod physics_server_3d;
 pub mod polygon_path_finder;
@@ -86,6 +92,10 @@ pub mod tween;
 pub mod video_stream;
 pub mod viewport;
 pub mod visibility_3d;
+// Turning a parsed `.tres` VisualShader into a compilable graph. Lives here
+// because gdresource (parsing) and gdserver2d (the graph type) are siblings —
+// only a crate downstream of both can see the two halves (pat-0q2kx.226).
+pub mod visual_shader_load;
 
 // Re-export the most-used types at the crate root.
 pub use autoload::{boot_autoloads_from_dir, instantiate_autoloads, AutoloadResult};

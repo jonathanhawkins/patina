@@ -267,4 +267,95 @@ mod tests {
             .count();
         assert!(diffs > 0, "debanding should alter some pixels");
     }
+
+    /// pat-0q2kx.224 — **the acceptance test.** A custom `shader_type sky`
+    /// material renders a vertical gradient distinct from the default procedural
+    /// sky, and its uniforms change the output.
+    ///
+    /// Godot ground truth: `shader_types.cpp`'s sky section — `sky()` writes
+    /// `COLOR` per direction from `EYEDIR`. This drives the real
+    /// `sample_sky_color`, so it fails if the `SkyMaterial::Shader` arm or the
+    /// EYEDIR builtin is missing rather than only if the parser is.
+    #[test]
+    fn sky_custom_shader_render() {
+        use gdserver3d::shader::{Shader3D, ShaderMaterial3D, ShaderType3D};
+        use gdserver3d::sky::{ProceduralSkyMaterial, ShaderSkyMaterial};
+
+        // The bead's shader verbatim: blue at the horizon, green-free, red rising
+        // with EYEDIR.y.
+        const SRC: &str =
+            "shader_type sky;\nvoid sky() {\n    COLOR = vec3(EYEDIR.y, 0.0, 1.0 - EYEDIR.y);\n}\n";
+
+        let mut mat = ShaderMaterial3D::new();
+        mat.shader = Some(Shader3D::new(ShaderType3D::Sky, SRC));
+        let sky = ShaderSkyMaterial::new(mat);
+        assert!(
+            !sky.is_inert(),
+            "the sky() body must parse — an inert body silently falls back to \
+             the procedural sky and would make every assertion below vacuous"
+        );
+        let material = SkyMaterial::Shader(sky);
+
+        let up =
+            crate::renderer::sample_sky_color(&material, &Vector3::new(0.0, 1.0, 0.0), 1.0, &[]);
+        let down =
+            crate::renderer::sample_sky_color(&material, &Vector3::new(0.0, -1.0, 0.0), 1.0, &[]);
+
+        // Link 1 — EYEDIR reached the evaluator: looking up gives r=1,b=0 and
+        // looking down gives r=0,b=1. A zeroed EYEDIR would make both identical.
+        assert!(
+            (up.r - 1.0).abs() < 1e-4 && up.b.abs() < 1e-4,
+            "up should be COLOR=(1,0,0), got {up:?}"
+        );
+        assert!(
+            down.r.abs() < 1e-4 && (down.b - 1.0).abs() < 1e-4,
+            "down should be COLOR=(0,0,1), got {down:?}"
+        );
+        assert!(
+            up.g.abs() < 1e-4 && down.g.abs() < 1e-4,
+            "the shader never writes green"
+        );
+
+        // Link 2 — it is a real vertical gradient, not two flat halves.
+        let mid =
+            crate::renderer::sample_sky_color(&material, &Vector3::new(0.0, 0.25, 0.0), 1.0, &[]);
+        assert!(
+            mid.r > down.r && mid.r < up.r,
+            "a mid direction must interpolate: {} not between {} and {}",
+            mid.r,
+            down.r,
+            up.r
+        );
+
+        // Link 3 — distinct from the default procedural sky, which is the
+        // "did the custom sky actually apply" check.
+        let proc = SkyMaterial::Procedural(ProceduralSkyMaterial::default());
+        let proc_up =
+            crate::renderer::sample_sky_color(&proc, &Vector3::new(0.0, 1.0, 0.0), 1.0, &[]);
+        assert!(
+            (proc_up.r - up.r).abs() > 0.1 || (proc_up.b - up.b).abs() > 0.1,
+            "the shader sky must differ from the procedural default (shader {up:?} vs procedural {proc_up:?})"
+        );
+
+        // Link 4 — uniforms alter the output. `tint` is read straight into COLOR,
+        // so changing the parameter must change the pixel.
+        const UNI_SRC: &str =
+            "shader_type sky;\nuniform vec4 tint;\nvoid sky() {\n    COLOR = tint;\n}\n";
+        let sample_tinted = |r: f32| {
+            let mut m = ShaderMaterial3D::new();
+            m.shader = Some(Shader3D::new(ShaderType3D::Sky, UNI_SRC));
+            m.set_shader_parameter(
+                "tint",
+                gdvariant::Variant::Color(Color::new(r, 0.0, 0.0, 1.0)),
+            );
+            let mat = SkyMaterial::Shader(ShaderSkyMaterial::new(m));
+            crate::renderer::sample_sky_color(&mat, &Vector3::new(0.0, 1.0, 0.0), 1.0, &[])
+        };
+        let dark = sample_tinted(0.2);
+        let bright = sample_tinted(0.9);
+        assert!(
+            bright.r > dark.r + 0.5,
+            "a sky uniform must reach the output: tint 0.2 -> {dark:?}, tint 0.9 -> {bright:?}"
+        );
+    }
 }

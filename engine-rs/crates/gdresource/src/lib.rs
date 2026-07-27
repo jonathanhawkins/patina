@@ -34,12 +34,14 @@ pub mod loader;
 pub mod missing;
 pub mod noise;
 pub mod pck;
+pub mod portable_compressed_texture;
 pub mod project;
 pub mod radiance_hdr;
 pub mod res_loader;
 pub mod resource;
 pub mod saver;
 pub mod shader_ast;
+pub mod shader_preprocessor;
 pub mod shader_tokenizer;
 pub mod uid;
 pub mod unified;
@@ -58,7 +60,9 @@ pub use importers::{
 pub use loader::{parse_uid_string, parse_variant_value, ResourceLoader, TresLoader};
 pub use missing::{MissingNode, MissingResource, PreservedProperties};
 pub use noise::{FastNoiseLite, FractalType, NoiseType};
-pub use project::{AutoloadEntry, GodotProjectFile, InputMapEntry, ProjectConfig, ProjectLoader};
+pub use project::{
+    AutoloadEntry, GodotProjectFile, InputMapEntry, ProjectConfig, ProjectLoader, ShaderGlobal,
+};
 pub use res_loader::{
     is_res_binary, load_res_binary, parse_res_header, ResBinaryHeader, RES_MAGIC,
 };
@@ -66,7 +70,7 @@ pub use resource::{ExtResource, Resource};
 pub use saver::{ResourceSaver, TresSaver};
 pub use uid::{id_to_text, parse_uid_sidecar, text_to_id, UidRegistry, UID_INVALID_TEXT};
 pub use unified::UnifiedLoader;
-pub use zip::{ZipAppend, ZipPacker, ZipReader};
+pub use zip::{is_zip_packer_handle, is_zip_reader_handle, ZipAppend, ZipPacker, ZipReader};
 
 /// Import a glTF 2.0 (`.gltf` / `.glb`) asset into a mesh document resource.
 ///

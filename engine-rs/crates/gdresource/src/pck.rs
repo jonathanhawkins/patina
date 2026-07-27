@@ -900,6 +900,72 @@ fn next_mount_priority_below() -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// Script-facing handle registry (`PCKPacker.new()`) — pat-0q2kx.218
+// ---------------------------------------------------------------------------
+
+/// Distinct tag byte, as with the other handle families.
+const PCK_PACKER_HANDLE_TAG: u64 = 0xA400_0000_0000_0000;
+// Fully qualified to match this file's existing convention (see `MOUNT_BELOW`);
+// pck.rs imports neither the atomics nor `Mutex`.
+static NEXT_PCK_PACKER_HANDLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static PCK_PACKER_HANDLES: std::sync::Mutex<Option<BTreeMap<u64, PckPacker>>> =
+    std::sync::Mutex::new(None);
+
+fn pck_packer_handles() -> std::sync::MutexGuard<'static, Option<BTreeMap<u64, PckPacker>>> {
+    PCK_PACKER_HANDLES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Returns `true` when `id` was issued by [`PckPacker::new_handle`].
+pub fn is_pck_packer_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == PCK_PACKER_HANDLE_TAG
+}
+
+impl PckPacker {
+    /// Allocates an empty packer in the handle table (`PCKPacker.new()`).
+    pub fn new_handle() -> gdcore::id::ObjectId {
+        let seq = NEXT_PCK_PACKER_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let raw = PCK_PACKER_HANDLE_TAG | seq;
+        pck_packer_handles()
+            .get_or_insert_with(BTreeMap::new)
+            .insert(raw, PckPacker::new());
+        gdcore::id::ObjectId::from_raw(raw)
+    }
+
+    /// Runs `f` against the live packer for `id`.
+    pub fn with_handle_mut<R>(
+        id: gdcore::id::ObjectId,
+        f: impl FnOnce(&mut PckPacker) -> R,
+    ) -> Option<R> {
+        let mut guard = pck_packer_handles();
+        let map = guard.get_or_insert_with(BTreeMap::new);
+        map.get_mut(&id.raw()).map(f)
+    }
+
+    /// Drops a handle created by [`new_handle`](Self::new_handle).
+    pub fn close_handle(id: gdcore::id::ObjectId) {
+        if let Some(map) = pck_packer_handles().as_mut() {
+            map.remove(&id.raw());
+        }
+    }
+
+    /// `PCKPacker.flush()` — serializes the accumulated files and writes the
+    /// pack to `path`.
+    ///
+    /// Godot's `flush(verbose)` writes to the file named by the earlier
+    /// `pck_start(pck_name, …)` call; the path is threaded here instead so the
+    /// packer holds no partially-open file between script calls.
+    pub fn flush_to_path(&self, path: &str) -> EngineResult<()> {
+        let bytes = self
+            .pack()
+            .map_err(|e| EngineError::InvalidOperation(format!("PCKPacker.flush failed: {e}")))?;
+        std::fs::write(path, bytes)
+            .map_err(|e| EngineError::InvalidOperation(format!("PCKPacker.flush failed: {e}")))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

@@ -1378,7 +1378,49 @@ pub(crate) fn sample_sky_color(
         SkyMaterial::Procedural(mat) => sample_procedural_sky(mat, dir, energy, suns),
         SkyMaterial::Physical(mat) => sample_physical_sky(mat, dir, energy, suns),
         SkyMaterial::Panoramic(mat) => sample_panoramic_sky(mat, dir, energy),
+        SkyMaterial::Shader(mat) => sample_shader_sky(mat, dir, energy),
     }
+}
+
+/// Evaluates a custom `shader_type sky` material for one view direction
+/// (pat-0q2kx.224).
+///
+/// Godot ground truth: `shader_types.cpp`'s sky section — `sky()` writes `COLOR`
+/// given `EYEDIR` (the direction being shaded), `TIME` and the material's
+/// uniforms. `EYEDIR` reaches the expression evaluator through
+/// [`FragmentContext3D::view_dir`], which is what this sets to `dir`.
+///
+/// A material whose body parsed to nothing falls back to the default procedural
+/// sky rather than rendering black: an unparsed statement should look like "the
+/// custom sky did not apply", not like a hole in the world.
+fn sample_shader_sky(
+    mat: &gdserver3d::sky::ShaderSkyMaterial,
+    dir: &Vector3,
+    energy: f32,
+) -> Color {
+    use gdserver3d::shader::{execute_fragment_3d, FragmentContext3D};
+
+    if mat.is_inert() {
+        return sample_procedural_sky(
+            &gdserver3d::sky::ProceduralSkyMaterial::default(),
+            dir,
+            energy,
+            &[],
+        );
+    }
+
+    let ctx = FragmentContext3D {
+        // The sky pass's EYEDIR.
+        view_dir: *dir,
+        ..FragmentContext3D::default()
+    };
+    // No texture sampling in the sky pass yet; a `texture()` call yields black
+    // rather than reading an unrelated bound sampler.
+    let no_texture = |_: &str, _: f32, _: f32| Color::BLACK;
+    let c = execute_fragment_3d(&mat.body, &ctx, &mat.material.parameters, &no_texture);
+
+    // `background_energy` scales the sky the same way it does the built-ins.
+    Color::new(c.r * energy, c.g * energy, c.b * energy, c.a)
 }
 
 /// Equirectangular panorama sampling (Godot `SKY_COORDS`).

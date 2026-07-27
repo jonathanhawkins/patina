@@ -1656,6 +1656,25 @@ impl SceneTree {
         ids
     }
 
+    /// IDs sorted by **physics**-process priority (pat-0q2kx.221).
+    ///
+    /// ⚠️ Godot orders `_physics_process` by `process_physics_priority`, a
+    /// property independent of `process_priority`. Physics dispatch used the
+    /// idle-process ordering here, so the two could never differ — a node could
+    /// not run late in `_process` and early in `_physics_process`, which is the
+    /// entire point of Godot having two properties.
+    ///
+    /// Stable, like its idle twin, so equal priorities keep tree order.
+    pub fn all_nodes_in_physics_process_order(&self) -> Vec<NodeId> {
+        let mut ids = self.all_nodes_in_tree_order();
+        ids.sort_by_key(|id| {
+            self.nodes
+                .get(id)
+                .map_or(0, |n| n.process_physics_priority())
+        });
+        ids
+    }
+
     /// Resolves the effective [`ProcessMode`] for a node by walking up the
     /// parent chain until a non-`Inherit` mode is found. If the root node
     /// has `Inherit`, it is treated as `Pausable`.
@@ -3616,7 +3635,8 @@ impl SceneTree {
     /// Calls `_physics_process(delta)` on all nodes that have attached scripts.
     pub fn process_all_scripts_physics_process(&mut self, delta: f64) {
         let ids: Vec<NodeId> = self
-            .all_nodes_in_process_order()
+            // ⚠️ The PHYSICS ordering, not the idle one (pat-0q2kx.221).
+            .all_nodes_in_physics_process_order()
             .into_iter()
             .filter(|id| self.should_process_node(*id))
             // `set_physics_process(false)` gates only the physics callback —
@@ -4592,6 +4612,261 @@ impl SceneTree {
             if let Some(n) = self.nodes.get_mut(&id) {
                 f(n);
             }
+        }
+    }
+
+    // -- Node API completeness (pat-0q2kx.221) -------------------------------
+
+    /// Delivers `what` to `start` and every descendant, parent-first
+    /// (Godot `Node.propagate_notification`).
+    ///
+    /// ⚠️ Distinct from the existing [`propagate_call`](Self::propagate_call),
+    /// which runs a Rust closure over the nodes. This one reaches **scripts**:
+    /// each node's `_notification(what)` fires, which is what a scene actually
+    /// observes.
+    ///
+    /// The traversal order is captured up front, so a `_notification` handler
+    /// that adds or removes nodes cannot make the walk skip or revisit — Godot
+    /// has the same snapshot semantics.
+    pub fn propagate_notification(&mut self, start: NodeId, what: i64) {
+        let mut order = vec![start];
+        order.extend(self.descendants(start));
+        for id in order {
+            // Record on the node even when it has no script, so a Rust-side
+            // observer (and `notification_log`) sees the same delivery a
+            // scripted node would.
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.receive_notification(gdobject::notification::Notification::new(what as i32));
+            }
+            self.notify_script(id, what);
+        }
+    }
+
+    /// Replaces `old` with `new_node` in the tree, moving `old`'s children onto
+    /// it (Godot `Node.replace_by(node, keep_groups)`).
+    ///
+    /// `new_node` must already be in the tree — Godot's signature takes a node,
+    /// and an orphan has nothing to re-root children onto. `old` is removed.
+    /// Returns `false` when either id is unknown or `old` is the root (which has
+    /// no parent to splice into).
+    ///
+    /// ⚠️ The replacement takes `old`'s **index** among its siblings, not the
+    /// end of the child list. Draw order and `get_index()` both key off that, so
+    /// appending instead would silently reorder a scene.
+    pub fn replace_by(&mut self, old: NodeId, new_node: NodeId, keep_groups: bool) -> bool {
+        let Some(parent) = self.nodes.get(&old).and_then(|n| n.parent()) else {
+            return false;
+        };
+        if !self.nodes.contains_key(&new_node) || old == new_node {
+            return false;
+        }
+        let index = match self.nodes.get(&parent) {
+            Some(p) => match p.children().iter().position(|c| *c == old) {
+                Some(i) => i,
+                None => return false,
+            },
+            None => return false,
+        };
+        let children: Vec<NodeId> = match self.nodes.get(&old) {
+            Some(n) => n.children().to_vec(),
+            None => return false,
+        };
+        let groups: Vec<String> = if keep_groups {
+            self.nodes
+                .get(&old)
+                .map(|n| n.groups().iter().cloned().collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Re-parent the children first, while `old` still owns them.
+        for child in children {
+            if let Some(c) = self.nodes.get_mut(&child) {
+                c.set_parent(Some(new_node));
+            }
+            if let Some(n) = self.nodes.get_mut(&new_node) {
+                if !n.children().contains(&child) {
+                    n.children_mut().push(child);
+                }
+            }
+        }
+        if let Some(n) = self.nodes.get_mut(&old) {
+            n.children_mut().clear();
+        }
+        for group in groups {
+            let _ = self.add_to_group(new_node, &group);
+        }
+
+        // Splice `new_node` into `old`'s slot, then drop `old`. Detaching the
+        // replacement from wherever it was first keeps the child list free of
+        // duplicates when it was already a sibling.
+        if let Some(prev_parent) = self.nodes.get(&new_node).and_then(|n| n.parent()) {
+            if let Some(p) = self.nodes.get_mut(&prev_parent) {
+                p.children_mut().retain(|c| *c != new_node);
+            }
+        }
+        if let Some(p) = self.nodes.get_mut(&parent) {
+            p.children_mut().retain(|c| *c != new_node);
+            let at = index.min(p.children().len());
+            p.children_mut().insert(at, new_node);
+            p.children_mut().retain(|c| *c != old);
+        }
+        if let Some(n) = self.nodes.get_mut(&new_node) {
+            n.set_parent(Some(parent));
+        }
+        self.nodes.remove(&old);
+        true
+    }
+
+    /// Resolves a `NodePath` with a `:subname` chain into the node it names and
+    /// the property value at that subname (Godot
+    /// `Node.get_node_and_resource`).
+    ///
+    /// `"Sprite:texture"` yields the `Sprite` node and its `texture` value;
+    /// a path with no `:` yields the node and `Variant::Nil`, which is what
+    /// Godot returns when the path names no resource.
+    ///
+    /// ⚠️ Only the FIRST subname is resolved. Godot returns the remaining path
+    /// as a third element for deeper chains (`"Sprite:texture:size"`); that
+    /// third element is not modelled here — see the completion report.
+    pub fn get_node_and_resource(&self, from: NodeId, path: &str) -> Option<(NodeId, Variant)> {
+        let (node_path, subname) = match path.split_once(':') {
+            Some((n, s)) => (n, Some(s)),
+            None => (path, None),
+        };
+        // An empty node part means "this node", as `":texture"` does in Godot.
+        let target = if node_path.is_empty() {
+            from
+        } else {
+            self.get_node_or_null(from, node_path)?
+        };
+        let value = match subname {
+            // Only the first component; a deeper chain resolves its head.
+            Some(s) => {
+                let first = s.split(':').next().unwrap_or(s);
+                self.nodes
+                    .get(&target)
+                    .map(|n| n.get_property(first))
+                    .unwrap_or(Variant::Nil)
+            }
+            None => Variant::Nil,
+        };
+        Some((target, value))
+    }
+
+    /// The relative `NodePath` from `from` to `to` (Godot `Node.get_path_to`).
+    ///
+    /// `".."` for each level up to the common ancestor, then the names down to
+    /// the target: a sibling is `"../Other"`, a descendant is `"Child/Grand"`,
+    /// and a node's path to itself is `"."`.
+    ///
+    /// `None` when the two are in different trees — Godot errors there, and a
+    /// silently wrong path would be worse than no path.
+    pub fn get_path_to(&self, from: NodeId, to: NodeId) -> Option<String> {
+        if from == to {
+            return Some(".".to_string());
+        }
+        // Root-to-self chains, root first.
+        let chain = |mut id: NodeId| -> Vec<NodeId> {
+            let mut out = vec![id];
+            while let Some(p) = self.nodes.get(&id).and_then(|n| n.parent()) {
+                out.push(p);
+                id = p;
+            }
+            out.reverse();
+            out
+        };
+        let (a, b) = (chain(from), chain(to));
+        if a.first() != b.first() {
+            return None;
+        }
+        // Longest shared prefix ends at the common ancestor.
+        let shared = a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count();
+        let mut parts: Vec<String> = vec!["..".to_string(); a.len() - shared];
+        for id in &b[shared..] {
+            parts.push(
+                self.nodes
+                    .get(id)
+                    .map(|n| n.name().to_string())
+                    .unwrap_or_default(),
+            );
+        }
+        Some(parts.join("/"))
+    }
+
+    /// Whether `a` comes after `b` in tree order (Godot `Node.is_greater_than`).
+    ///
+    /// "Tree order" is the depth-first walk the scene uses for processing and
+    /// drawing, so this answers "does `a` run after `b`". Unknown nodes are
+    /// `false` rather than a panic, matching the rest of this API.
+    pub fn is_greater_than(&self, a: NodeId, b: NodeId) -> bool {
+        let order = self.all_nodes_in_tree_order();
+        let (ia, ib) = (
+            order.iter().position(|n| *n == a),
+            order.iter().position(|n| *n == b),
+        );
+        match (ia, ib) {
+            (Some(x), Some(y)) => x > y,
+            _ => false,
+        }
+    }
+
+    /// The subtree as newline-separated paths relative to `root`
+    /// (Godot `Node.get_tree_string`).
+    ///
+    /// The root itself is `"."`, matching [`Self::get_path_to`], so every line
+    /// is a path you can feed straight back to `get_node`.
+    pub fn get_tree_string(&self, root: NodeId) -> String {
+        let mut out = vec![".".to_string()];
+        for id in self.descendants(root) {
+            if let Some(p) = self.get_path_to(root, id) {
+                out.push(p);
+            }
+        }
+        out.join("\n")
+    }
+
+    /// The subtree drawn with box characters (Godot
+    /// `Node.get_tree_string_pretty`).
+    ///
+    /// ⚠️ The prefix bookkeeping is the whole job: a child of a *last* sibling
+    /// continues under blank space, a child of any other sibling continues under
+    /// `"│  "`. Getting that wrong is what makes hand-rolled tree printers show
+    /// stray trailing pipes.
+    pub fn get_tree_string_pretty(&self, root: NodeId) -> String {
+        let mut out = String::new();
+        let name = self
+            .nodes
+            .get(&root)
+            .map(|n| n.name().to_string())
+            .unwrap_or_default();
+        out.push_str(&name);
+        out.push('\n');
+        self.pretty_children(root, "", &mut out);
+        out
+    }
+
+    fn pretty_children(&self, parent: NodeId, prefix: &str, out: &mut String) {
+        let children: Vec<NodeId> = match self.nodes.get(&parent) {
+            Some(n) => n.children().to_vec(),
+            None => return,
+        };
+        let last = children.len().saturating_sub(1);
+        for (i, child) in children.iter().enumerate() {
+            let is_last = i == last;
+            out.push_str(prefix);
+            out.push_str(if is_last { "┗╸" } else { "┣╸" });
+            out.push_str(
+                &self
+                    .nodes
+                    .get(child)
+                    .map(|n| n.name().to_string())
+                    .unwrap_or_default(),
+            );
+            out.push('\n');
+            let next = format!("{prefix}{}", if is_last { "  " } else { "┃ " });
+            self.pretty_children(*child, &next, out);
         }
     }
 }

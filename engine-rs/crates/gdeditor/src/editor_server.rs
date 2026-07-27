@@ -7536,6 +7536,51 @@ fn world_environment_from_scene(
                         Some("PanoramaSkyMaterial") => SkyMaterial::Panoramic(
                             gdserver3d::sky::PanoramicSkyMaterial::from_properties(props),
                         ),
+                        // A custom `shader_type sky` ShaderMaterial
+                        // (pat-0q2kx.224). Without this arm it fell through to
+                        // `_ => Procedural` below, so a scene with a shader sky
+                        // silently rendered the default procedural one — the
+                        // "unwired" symptom this bead is about.
+                        Some("ShaderMaterial") => {
+                            // `shader = SubResource("Shader_x")` names a sibling
+                            // sub-resource whose `code` holds the source. An
+                            // inline `code` on the material itself is also
+                            // accepted, since the .tscn flattener sometimes
+                            // lands it there.
+                            //
+                            // An `ExtResource` shader (a separate .gdshader file)
+                            // is NOT resolved here — that needs the ext-resource
+                            // path table, and `ShaderSkyMaterial::is_inert()`
+                            // makes the miss fall back to a procedural sky rather
+                            // than render black.
+                            let code = mat_props
+                                .get("shader")
+                                .and_then(resref_id)
+                                .and_then(|sid| scene.sub_resource_props(&sid))
+                                .and_then(|sp| match sp.get("code") {
+                                    Some(gdvariant::Variant::String(c)) => Some(c.clone()),
+                                    _ => None,
+                                })
+                                .or_else(|| match mat_props.get("code") {
+                                    Some(gdvariant::Variant::String(c)) => Some(c.clone()),
+                                    _ => None,
+                                })
+                                .unwrap_or_default();
+
+                            let mut m = gdserver3d::shader::ShaderMaterial3D::new();
+                            m.shader = Some(gdserver3d::shader::Shader3D::new(
+                                gdserver3d::shader::ShaderType3D::Sky,
+                                &code,
+                            ));
+                            for (k, v) in mat_props.iter() {
+                                if let Some(name) = k.strip_prefix("shader_parameter/") {
+                                    if v != &gdvariant::Variant::Nil {
+                                        m.set_shader_parameter(name, v.clone());
+                                    }
+                                }
+                            }
+                            SkyMaterial::Shader(gdserver3d::sky::ShaderSkyMaterial::new(m))
+                        }
                         _ => SkyMaterial::Procedural(
                             gdserver3d::sky::ProceduralSkyMaterial::from_properties(props),
                         ),
@@ -19377,6 +19422,66 @@ environment = SubResource("env1")
                 );
             }
             other => panic!("expected procedural sky, got {other:?}"),
+        }
+    }
+
+    /// pat-0q2kx.224 — a `.tscn` whose `Sky.sky_material` is a **ShaderMaterial**
+    /// resolves to [`SkyMaterial::Shader`] with its `sky()` body parsed and its
+    /// uniform bound.
+    ///
+    /// Before this, `sub_resource_type` fell through to `_ => Procedural`, so a
+    /// shader sky silently rendered as the default procedural one. Asserting the
+    /// variant is the whole point: a Procedural result here is the bug.
+    #[test]
+    fn shader_sky_scene_resolves_to_shader_material() {
+        use gdscene::packed_scene::PackedScene;
+        let tscn = r#"[gd_scene format=3]
+
+[sub_resource type="Shader" id="shd1"]
+code = "shader_type sky; uniform vec4 tint; void sky() { COLOR = vec3(EYEDIR.y, 0.0, 1.0 - EYEDIR.y); }"
+
+[sub_resource type="ShaderMaterial" id="mat1"]
+shader = SubResource("shd1")
+shader_parameter/tint = Color(0.25, 0.5, 0.75, 1)
+
+[sub_resource type="Sky" id="sky1"]
+sky_material = SubResource("mat1")
+
+[sub_resource type="Environment" id="env1"]
+background_mode = 2
+sky = SubResource("sky1")
+
+[node name="World" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("env1")
+"#;
+        gdobject::class_db::register_3d_classes();
+        let scene = PackedScene::from_tscn(tscn).expect("parse tscn");
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        add_packed_scene_to_tree(&mut tree, root, &scene).expect("instantiate");
+
+        let env = world_environment_from_scene(&scene, &tree, None).expect("world env");
+        match env.sky.as_ref().map(|s| &s.material) {
+            Some(gdserver3d::sky::SkyMaterial::Shader(m)) => {
+                assert!(
+                    !m.is_inert(),
+                    "the Shader sub-resource's `code` must reach the material and \
+                     parse — an inert body falls back to a procedural sky"
+                );
+                assert_eq!(
+                    m.material.get_shader_parameter("tint"),
+                    Some(&gdvariant::Variant::Color(gdcore::math::Color::new(
+                        0.25, 0.5, 0.75, 1.0
+                    ))),
+                    "`shader_parameter/tint` must be bound as a uniform value"
+                );
+            }
+            other => panic!(
+                "a ShaderMaterial sky_material must resolve to SkyMaterial::Shader, \
+                 got {other:?}"
+            ),
         }
     }
 

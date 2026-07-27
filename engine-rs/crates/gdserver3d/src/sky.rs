@@ -205,6 +205,46 @@ impl Default for PhysicalSkyMaterial {
     }
 }
 
+/// A `Sky.sky_material` that is a `ShaderMaterial` with `shader_type sky`
+/// (pat-0q2kx.224).
+///
+/// Godot ground truth: `doc/classes/Sky.xml` — `sky_material` accepts a
+/// ShaderMaterial whose `sky()` function writes `COLOR` per direction from
+/// `EYEDIR`/`TIME`/uniforms (`shader_types.cpp`, sky section).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderSkyMaterial {
+    /// The material, carrying the shader source and its parameter values.
+    pub material: crate::shader::ShaderMaterial3D,
+    /// The parsed `sky()` body.
+    ///
+    /// Parsed **once**, when the material is built, rather than per sample: a
+    /// sky is evaluated for every background pixel, so re-parsing the source per
+    /// direction would make a custom sky cost orders of magnitude more than a
+    /// built-in one for identical output.
+    pub body: Vec<crate::shader::FragmentInstruction3D>,
+}
+
+impl ShaderSkyMaterial {
+    /// Builds a shader sky, parsing the material's `sky()` body up front.
+    pub fn new(material: crate::shader::ShaderMaterial3D) -> Self {
+        let body = material
+            .shader
+            .as_ref()
+            .map(|s| crate::shader::parse_sky_body_3d(&s.source_code))
+            .unwrap_or_default();
+        Self { material, body }
+    }
+
+    /// Whether the shader yielded no usable instructions — no shader attached, no
+    /// `sky()` function, or a body the parser understood nothing in.
+    ///
+    /// Callers fall back to a built-in sky rather than rendering black, which is
+    /// what an unparsed body would otherwise produce.
+    pub fn is_inert(&self) -> bool {
+        self.body.is_empty()
+    }
+}
+
 /// The material that defines how a sky dome is rendered.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SkyMaterial {
@@ -214,6 +254,8 @@ pub enum SkyMaterial {
     Panoramic(PanoramicSkyMaterial),
     /// Physically-based atmospheric scattering sky.
     Physical(PhysicalSkyMaterial),
+    /// A custom `shader_type sky` ShaderMaterial (pat-0q2kx.224).
+    Shader(ShaderSkyMaterial),
 }
 
 /// Populates a sky material's optional panorama texture(s) from its stored
@@ -257,6 +299,13 @@ pub fn resolve_sky_material_textures(
                 m.texture = load(&m.panorama_path);
             }
         }
+        // A shader sky has no texture *paths* to resolve: its samplers would come
+        // from `ShaderMaterial` parameters, and sky-pass texture sampling is not
+        // wired yet (the evaluator's `texture()` yields black). Nothing to load —
+        // an explicit arm rather than a catch-all so that adding sky samplers
+        // later fails to compile here instead of silently loading nothing
+        // (pat-0q2kx.224).
+        SkyMaterial::Shader(_) => {}
     }
 }
 
@@ -682,6 +731,40 @@ impl Sky {
                     Variant::String("PhysicalSkyMaterial".into()),
                 ));
                 props.extend(mat.to_properties());
+            }
+            // A custom `shader_type sky` material (pat-0q2kx.224).
+            //
+            // The sibling arms delegate to the material's own `to_properties`,
+            // which `ShaderSkyMaterial` deliberately does not have: what a
+            // ShaderMaterial round-trips is its *shader* plus its uniform values,
+            // not a fixed property list. Rather than invent a format, this emits
+            // the two keys the engine already reads back —
+            // `render_server_3d::resolve_shader_material` consumes `shader_code`
+            // and `shader_parameter/*` — so the trip out and the trip in use one
+            // convention. `sky_material_type` carries Godot's class name, which
+            // is the same string the `.tscn` sub-resource type dispatch matches
+            // on, keeping the round-trip symmetric.
+            SkyMaterial::Shader(mat) => {
+                props.push((
+                    "sky_material_type".into(),
+                    Variant::String("ShaderMaterial".into()),
+                ));
+                if let Some(shader) = &mat.material.shader {
+                    props.push((
+                        "shader_code".into(),
+                        Variant::String(shader.source_code.clone()),
+                    ));
+                }
+                // Sorted: `parameters` is a HashMap, and emitting it in iteration
+                // order would make a saved scene's property order differ between
+                // runs for identical input.
+                let mut names: Vec<&String> = mat.material.parameters.keys().collect();
+                names.sort();
+                for name in names {
+                    if let Some(v) = mat.material.parameters.get(name) {
+                        props.push((format!("shader_parameter/{name}"), v.clone()));
+                    }
+                }
             }
         }
 

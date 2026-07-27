@@ -299,6 +299,110 @@ fn unescape_xml(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
+// ---------------------------------------------------------------------------
+// Script-facing handle registry (GDScript `XMLParser.new()`) — pat-0q2kx.218
+// ---------------------------------------------------------------------------
+
+use crate::id::ObjectId;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
+/// Tag byte in the ObjectId's high byte marking an XMLParser handle. Every
+/// handle family in the engine owns a distinct byte so the interpreter's
+/// `is_*_handle` chain routes a method call to exactly one family.
+const XML_HANDLE_TAG: u64 = 0xA100_0000_0000_0000;
+static NEXT_XML_HANDLE: AtomicU64 = AtomicU64::new(1);
+static XML_HANDLES: Mutex<Option<HashMap<u64, XmlParser>>> = Mutex::new(None);
+
+fn xml_handles() -> std::sync::MutexGuard<'static, Option<HashMap<u64, XmlParser>>> {
+    XML_HANDLES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Returns `true` when `id` was issued by [`XmlParser::new_handle`].
+pub fn is_xml_parser_handle(id: ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == XML_HANDLE_TAG
+}
+
+impl XmlParser {
+    /// Allocates an empty parser in the process-wide handle table, matching
+    /// Godot's `XMLParser.new()` — which yields a parser with no document until
+    /// `open`/`open_buffer` supplies one.
+    pub fn new_handle() -> ObjectId {
+        let seq = NEXT_XML_HANDLE.fetch_add(1, Ordering::Relaxed);
+        let raw = XML_HANDLE_TAG | seq;
+        xml_handles()
+            .get_or_insert_with(HashMap::new)
+            .insert(raw, XmlParser::new(""));
+        ObjectId::from_raw(raw)
+    }
+
+    /// Runs `f` against the live parser for `id`.
+    pub fn with_handle_mut<R>(id: ObjectId, f: impl FnOnce(&mut XmlParser) -> R) -> Option<R> {
+        let mut guard = xml_handles();
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.get_mut(&id.raw()).map(f)
+    }
+
+    /// Drops a handle created by [`new_handle`](Self::new_handle).
+    pub fn close_handle(id: ObjectId) {
+        if let Some(map) = xml_handles().as_mut() {
+            map.remove(&id.raw());
+        }
+    }
+
+    /// `XMLParser.open_buffer(bytes)` — parses a document already in memory,
+    /// replacing whatever this parser held and rewinding to the start.
+    pub fn open_buffer(&mut self, source: &str) {
+        *self = XmlParser::new(source);
+    }
+
+    /// `XMLParser.seek(position)` — repositions the cursor to a character index
+    /// and clears the current node, so the next `read()` starts from there.
+    ///
+    /// Returns `false` when `position` is past the end, which is Godot's
+    /// out-of-range error rather than a silent clamp.
+    pub fn seek(&mut self, position: usize) -> bool {
+        if position > self.chars.len() {
+            return false;
+        }
+        self.pos = position;
+        self.node_type = XmlNodeType::None;
+        self.node_name.clear();
+        self.node_data.clear();
+        self.attributes.clear();
+        self.empty = false;
+        true
+    }
+
+    /// `XMLParser.skip_section()` — reads past the current element's entire
+    /// subtree, leaving the cursor after its closing tag.
+    ///
+    /// A self-closing element (`<a/>`) has no subtree to skip, and calling this
+    /// anywhere other than on an element start is a no-op, both as in Godot.
+    pub fn skip_section(&mut self) {
+        if self.node_type != XmlNodeType::Element || self.empty {
+            return;
+        }
+        let mut depth = 1usize;
+        while depth > 0 && self.read() {
+            match self.node_type {
+                // A self-closing child opens and closes in one node.
+                XmlNodeType::Element if !self.empty => depth += 1,
+                XmlNodeType::ElementEnd => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+
+    /// The current cursor position, for `seek` round-trips.
+    pub fn cursor(&self) -> usize {
+        self.pos
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

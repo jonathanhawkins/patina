@@ -419,6 +419,14 @@ pub enum FloatExpr {
     BuiltinTime,
     /// `UV.x` or `UV.y`.
     UvComponent(UvAxis),
+    /// `SCREEN_UV.x` or `SCREEN_UV.y` — the fragment's position in screen space
+    /// (pat-0q2kx.223).
+    ///
+    /// The renderer has been supplying this all along:
+    /// `gdrender2d/src/draw.rs:870` fills `FragmentContext::screen_uv` for every
+    /// fragment. Nothing could reference it, because the expression parser had
+    /// no `SCREEN_UV` case — a live producer wired to a dead consumer.
+    ScreenUvComponent(UvAxis),
     /// `EYEDIR.x`, `.y` or `.z` — the sky stage's view direction
     /// (pat-nzgdu.139). Evaluates to `0.0` outside a sky shader, where Godot
     /// does not expose this built-in.
@@ -670,6 +678,16 @@ fn parse_float_expr(s: &str) -> FloatExpr {
         return FloatExpr::BuiltinTime;
     }
 
+    // SCREEN_UV must be tested BEFORE UV: a suffix check would be fine here,
+    // but these are exact comparisons and `"SCREEN_UV.x" == "UV.x"` is false —
+    // the ordering matters only if either is ever relaxed to `ends_with`.
+    if s == "SCREEN_UV.x" {
+        return FloatExpr::ScreenUvComponent(UvAxis::X);
+    }
+    if s == "SCREEN_UV.y" {
+        return FloatExpr::ScreenUvComponent(UvAxis::Y);
+    }
+
     if s == "UV.x" {
         return FloatExpr::UvComponent(UvAxis::X);
     }
@@ -740,6 +758,8 @@ pub fn eval_float_expr(
         FloatExpr::BuiltinTime => ctx.time,
         FloatExpr::UvComponent(UvAxis::X) => ctx.uv.0,
         FloatExpr::UvComponent(UvAxis::Y) => ctx.uv.1,
+        FloatExpr::ScreenUvComponent(UvAxis::X) => ctx.screen_uv.0,
+        FloatExpr::ScreenUvComponent(UvAxis::Y) => ctx.screen_uv.1,
         FloatExpr::EyeDirComponent(Vec3Axis::X) => ctx.eyedir.0,
         FloatExpr::EyeDirComponent(Vec3Axis::Y) => ctx.eyedir.1,
         FloatExpr::EyeDirComponent(Vec3Axis::Z) => ctx.eyedir.2,
@@ -874,6 +894,15 @@ fn float_expr_to_wgsl(expr: &FloatExpr, uniforms: &[&str]) -> String {
         FloatExpr::BuiltinTime => "globals.time".to_string(),
         FloatExpr::UvComponent(UvAxis::X) => "UV.x".to_string(),
         FloatExpr::UvComponent(UvAxis::Y) => "UV.y".to_string(),
+        // SCREEN_UV resolves on the CPU path, where the software renderer
+        // supplies it per fragment (gdrender2d/src/draw.rs). This emitter has
+        // no equivalent: the generated WGSL declares `UV` from `in.uv` but
+        // nothing carries screen position, so `SCREEN_UV.x` would be an
+        // undefined identifier and the whole program would fail to compile.
+        // Degrade to 0.0 like EYEDIR below — a GPU/CPU divergence, and the
+        // reason the wgpu path still needs the screen-texture work this bead
+        // describes (pat-0q2kx.223).
+        FloatExpr::ScreenUvComponent(_) => "0.0".to_string(),
         // EYEDIR is a sky-stage built-in with no canvas_item counterpart. This
         // emitter only generates canvas_item programs, so degrade to 0.0 —
         // matching what the CPU interpreter yields outside a sky shader — rather

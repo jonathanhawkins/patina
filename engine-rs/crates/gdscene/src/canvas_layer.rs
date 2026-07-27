@@ -9,7 +9,7 @@
 //! functions that read and write well-known properties on nodes stored in
 //! a [`SceneTree`].
 
-use gdcore::math::Vector2;
+use gdcore::math::{Transform2D, Vector2};
 use gdvariant::Variant;
 
 use crate::node::NodeId;
@@ -107,7 +107,12 @@ pub fn set_follow_viewport_enabled(tree: &mut SceneTree, node_id: NodeId, enable
 /// Gets whether follow-viewport is enabled, defaulting to `false`.
 pub fn get_follow_viewport_enabled(tree: &SceneTree, node_id: NodeId) -> bool {
     tree.get_node(node_id)
-        .map(|n| matches!(n.get_property("follow_viewport_enabled"), Variant::Bool(true)))
+        .map(|n| {
+            matches!(
+                n.get_property("follow_viewport_enabled"),
+                Variant::Bool(true)
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -128,6 +133,34 @@ pub fn get_follow_viewport_scale(tree: &SceneTree, node_id: NodeId) -> f64 {
         .unwrap_or(1.0)
 }
 
+/// The layer's own transform, which pre-multiplies every descendant's
+/// (pat-0q2kx.212).
+///
+/// Mirrors Godot's `CanvasLayer::_update_xform` (`scene/main/canvas_layer.cpp`):
+/// the basis comes from `rotation` and `scale`, and the origin is `offset` —
+/// **not** `position`, which a CanvasLayer does not have. An explicitly assigned
+/// `transform` property wins outright, because Godot's `set_transform` overwrites
+/// the decomposed trio rather than composing with it.
+///
+/// ⚠️ This is the piece that makes a CanvasLayer's placement mean anything.
+/// `node2d::get_global_transform` walks up multiplying each ancestor's *local*
+/// transform, and a CanvasLayer is not a `CanvasItem` — it has no local transform
+/// in that sense — so the walk skips straight past it and the layer reads as
+/// identity. Composition has to restart here.
+pub fn layer_transform(tree: &SceneTree, node_id: NodeId) -> Transform2D {
+    if let Some(node) = tree.get_node(node_id) {
+        if let Variant::Transform2D(t) = node.get_property("transform") {
+            return t;
+        }
+    }
+    Transform2D::from_rotation_scale_skew_origin(
+        get_rotation(tree, node_id) as f32,
+        get_scale(tree, node_id),
+        0.0,
+        get_offset(tree, node_id),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +178,81 @@ mod tests {
     fn layer_default() {
         let (tree, id) = make_tree_with_canvas_layer();
         assert_eq!(get_layer(&tree, id), 1);
+    }
+
+    // -- layer_transform (pat-0q2kx.212) ------------------------------------
+
+    #[test]
+    fn layer_transform_defaults_to_identity() {
+        let (tree, id) = make_tree_with_canvas_layer();
+        assert_eq!(layer_transform(&tree, id), Transform2D::IDENTITY);
+    }
+
+    #[test]
+    fn layer_transform_uses_offset_as_the_origin() {
+        let (mut tree, id) = make_tree_with_canvas_layer();
+        set_offset(&mut tree, id, Vector2::new(50.0, 20.0));
+        let t = layer_transform(&tree, id);
+        // ⚠️ `offset`, not `position` — a CanvasLayer has no `position`, which is
+        // exactly why the Node2D transform walk misses it.
+        assert_eq!(t.origin, Vector2::new(50.0, 20.0));
+        assert_eq!(
+            t.x,
+            Vector2::new(1.0, 0.0),
+            "no rotation means no basis change"
+        );
+    }
+
+    #[test]
+    fn layer_transform_composes_rotation_and_scale() {
+        let (mut tree, id) = make_tree_with_canvas_layer();
+        set_rotation(&mut tree, id, std::f64::consts::FRAC_PI_2);
+        set_scale(&mut tree, id, Vector2::new(2.0, 3.0));
+        let t = layer_transform(&tree, id);
+
+        // A quarter turn sends +X to +Y, scaled by scale.x.
+        assert!(
+            (t.x.x).abs() < 1e-5,
+            "x basis should have no x component: {:?}",
+            t.x
+        );
+        assert!(
+            (t.x.y - 2.0).abs() < 1e-5,
+            "x basis magnitude is scale.x: {:?}",
+            t.x
+        );
+        // …and +Y to -X, scaled by scale.y.
+        assert!(
+            (t.y.x + 3.0).abs() < 1e-5,
+            "y basis is -scale.y on x: {:?}",
+            t.y
+        );
+        assert!(
+            (t.y.y).abs() < 1e-5,
+            "y basis should have no y component: {:?}",
+            t.y
+        );
+    }
+
+    #[test]
+    fn an_explicit_transform_property_wins_over_the_trio() {
+        let (mut tree, id) = make_tree_with_canvas_layer();
+        // Author both spellings; Godot's `set_transform` overwrites the
+        // decomposed trio rather than composing with it, so the explicit one
+        // must win outright — not be multiplied on top.
+        set_offset(&mut tree, id, Vector2::new(50.0, 20.0));
+        set_rotation(&mut tree, id, 1.0);
+        let explicit = Transform2D::translated(Vector2::new(-7.0, 3.0));
+        tree.get_node_mut(id)
+            .unwrap()
+            .set_property("transform", Variant::Transform2D(explicit));
+
+        assert_eq!(
+            layer_transform(&tree, id),
+            explicit,
+            "the explicit `transform` must win outright, with no trace of the \
+             offset/rotation that was also set"
+        );
     }
 
     #[test]
@@ -226,7 +334,9 @@ mod tests {
     fn canvas_layer_with_children() {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        let cl = tree.add_child(root, Node::new("HUD", "CanvasLayer")).unwrap();
+        let cl = tree
+            .add_child(root, Node::new("HUD", "CanvasLayer"))
+            .unwrap();
         let label = tree.add_child(cl, Node::new("Score", "Label")).unwrap();
         let btn = tree.add_child(cl, Node::new("Pause", "Button")).unwrap();
 

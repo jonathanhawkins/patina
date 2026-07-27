@@ -182,6 +182,49 @@ impl GodotProjectFile {
             .collect()
     }
 
+    /// The `[shader_globals]` declarations (pat-0q2kx.225).
+    ///
+    /// Godot writes each global uniform as a dict keyed by its name:
+    ///
+    /// ```text
+    /// [shader_globals]
+    ///
+    /// tint={
+    /// "type": "color",
+    /// "value": Color(1, 0, 0, 1)
+    /// }
+    /// ```
+    ///
+    /// These are what a shader's `global uniform vec4 tint;` binds to, and they
+    /// seed the runtime store that `RenderingServer.global_shader_parameter_*`
+    /// mutates. The section parser already accumulates the multi-line brace
+    /// block into one value, so this only has to pull `type` and `value` back
+    /// out of it.
+    ///
+    /// Entries missing either field are skipped rather than guessed at: a
+    /// global with no declared type cannot be bound to a uniform slot, and
+    /// inventing one would fail later at a place with no connection to the
+    /// malformed `project.godot` line that caused it.
+    pub fn shader_globals(&self) -> Vec<ShaderGlobal> {
+        let Some(section) = self.sections.get("shader_globals") else {
+            return Vec::new();
+        };
+        let mut out: Vec<ShaderGlobal> = section
+            .iter()
+            .filter_map(|(name, raw)| {
+                Some(ShaderGlobal {
+                    name: name.clone(),
+                    type_name: dict_field(raw, "type")?.trim_matches('"').to_string(),
+                    value_literal: dict_field(raw, "value")?,
+                })
+            })
+            .collect();
+        // A HashMap iterates arbitrarily; sort so callers (and tests) see a
+        // stable order.
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
     /// Replaces `[editor_plugins] enabled` with `paths`.
     ///
     /// An empty list writes an empty `PackedStringArray()` rather than removing
@@ -298,6 +341,62 @@ impl ProjectConfig {
 // ---------------------------------------------------------------------------
 // AutoloadEntry
 // ---------------------------------------------------------------------------
+
+/// A `[shader_globals]` declaration from `project.godot` (pat-0q2kx.225).
+///
+/// Godot's global uniforms are project-wide shader parameters: a shader
+/// declaring `global uniform vec4 tint;` reads whatever this section (or a
+/// later `RenderingServer.global_shader_parameter_set`) holds, and every shader
+/// referencing it updates together.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderGlobal {
+    /// The uniform name, e.g. `"tint"`.
+    pub name: String,
+    /// Godot's declared type string — `"color"`, `"vec4"`, `"float"`, … kept as
+    /// written rather than parsed into an enum here, because the authoritative
+    /// type list lives with the shader compiler in `gdserver3d`, not with the
+    /// project-file reader.
+    pub type_name: String,
+    /// The value exactly as authored, e.g. `"Color(1, 0, 0, 1)"`.
+    pub value_literal: String,
+}
+
+/// Extracts `"<field>": <value>` from a Godot inline-dict value.
+///
+/// Deliberately tolerant of the layout Godot actually writes — the block spans
+/// several lines, is not JSON (values are GDScript literals like
+/// `Color(1, 0, 0, 1)`), and the trailing entry has no comma. Scanning for the
+/// quoted key and taking the rest of that logical field handles all three
+/// without a parser.
+fn dict_field(raw: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{field}\"");
+    let start = raw.find(&needle)? + needle.len();
+    let rest = raw[start..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+
+    // The field ends at the first comma that is not inside brackets, or at the
+    // closing brace. Bracket tracking is what keeps `Color(1, 0, 0, 1)` whole.
+    let mut depth = 0i32;
+    let mut end = rest.len();
+    for (i, ch) in rest.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '}' if depth == 0 => {
+                end = i;
+                break;
+            }
+            '}' => depth -= 1,
+            ',' if depth == 0 => {
+                end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let value = rest[..end].trim().trim_end_matches('\n').trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
 
 /// A project autoload entry.
 ///
