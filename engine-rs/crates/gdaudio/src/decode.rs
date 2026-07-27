@@ -296,6 +296,17 @@ pub fn decode_mp3(data: &[u8]) -> Result<AudioBuffer, DecodeError> {
     if !is_mp3(data) {
         return Err(DecodeError::UnsupportedFormat("not mp3".into()));
     }
+    decode_mp3_frames(data)
+}
+
+/// ISO MP3 frame decoding — the half of [`decode_mp3`] that needs a real codec.
+///
+/// Split out so the target gate lives in one place: `minimp3` builds C sources
+/// through `cc`, which the wasm32 build does not carry (pat-u3l8c.112). The
+/// caller has already handled the `PATMP3` fixture and the not-an-MP3 case, so
+/// this only ever sees bytes that claim to be a real stream.
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_mp3_frames(data: &[u8]) -> Result<AudioBuffer, DecodeError> {
     // Real ISO MP3: decode every frame with minimp3, concatenating the
     // interleaved PCM (i16 -> f32 in [-1, 1]). Leading ID3 tags and stray
     // non-frame bytes surface as `SkippedData` and are ignored; decoding stops
@@ -329,6 +340,18 @@ pub fn decode_mp3(data: &[u8]) -> Result<AudioBuffer, DecodeError> {
         sample_rate,
         channels: channels.max(1),
     })
+}
+
+/// wasm32 has no MP3 codec linked in — see the module gate above.
+///
+/// Reported as an ordinary [`DecodeError`] rather than a panic so a project
+/// carrying an `.mp3` still boots in the browser with that one stream silent,
+/// the same way an unsupported format behaves on native.
+#[cfg(target_arch = "wasm32")]
+fn decode_mp3_frames(_data: &[u8]) -> Result<AudioBuffer, DecodeError> {
+    Err(DecodeError::UnsupportedFormat(
+        "ISO MP3 decoding is not available in the web build".into(),
+    ))
 }
 
 /// Procedural audio stream generator (AudioStreamGenerator slice).

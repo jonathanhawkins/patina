@@ -205,8 +205,16 @@ fn character_scene(
     mover_shape.set_property("radius", Variant::Float(10.0));
     tree.add_child(mover_id, mover_shape).unwrap();
 
+    // Spawned clear of the Mover, not on top of it. Both bodies are r=10, so a
+    // shared origin would make the two overlap and the first thing link 3 would
+    // exercise is depenetration between two characters rather than the dispatch
+    // this test is about. x=200 is still well inside the 1000-wide floor, and
+    // the y assertion below is unchanged.
     let mut idler = Node::new("Idler", "CharacterBody2D");
-    idler.set_property("position", Variant::Vector2(gdcore::math::Vector2::ZERO));
+    idler.set_property(
+        "position",
+        Variant::Vector2(gdcore::math::Vector2::new(200.0, 0.0)),
+    );
     idler.set_property("velocity", Variant::Vector2(gdcore::math::Vector2::ZERO));
     let idler_id = tree.add_child(main, idler).unwrap();
     let mut idler_shape = Node::new("CollisionShape", "CollisionShape2D");
@@ -221,7 +229,18 @@ fn character_scene(
         idler_id,
         Box::new(GDScriptNodeInstance::from_source(idler_src, idler_id).unwrap()),
     );
-    (MainLoop::new(tree), mover_id, idler_id)
+
+    // `MainLoop::new` does NOT put bodies into the physics world, and `step`
+    // never does it either — `register_bodies` is the only writer of
+    // `node_to_body` (physics_server.rs), and `process_character_movement`
+    // iterates exactly that map. Without this call the character pass sees an
+    // empty map, so *every* body silently stays at its spawn point no matter
+    // how the dispatch behaves — which is precisely the `(0,0) -> (0,0)` this
+    // test kept reporting. The host is what registers: `patina-runner`
+    // does it at main.rs:369 after loading the scene.
+    let mut ml = MainLoop::new(tree);
+    ml.register_physics_bodies();
+    (ml, mover_id, idler_id)
 }
 
 /// **The acceptance test.** A script that assigns `velocity` and calls
@@ -340,7 +359,9 @@ func _physics_process(delta):
         Box::new(GDScriptNodeInstance::from_source(driver_src, main).unwrap()),
     );
 
+    // See `character_scene`: the character pass only walks registered bodies.
     let mut ml = MainLoop::new(tree);
+    ml.register_physics_bodies();
     for _ in 0..20 {
         ml.step(1.0 / 60.0);
     }
@@ -371,7 +392,9 @@ fn unscripted_character_body_still_auto_moves() {
     body_shape.set_property("radius", Variant::Float(10.0));
     tree.add_child(body_id, body_shape).unwrap();
 
+    // See `character_scene`: the character pass only walks registered bodies.
     let mut ml = MainLoop::new(tree);
+    ml.register_physics_bodies();
     for _ in 0..20 {
         ml.step(1.0 / 60.0);
     }

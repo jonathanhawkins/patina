@@ -72,6 +72,27 @@ fn http_post(port: u16, path: &str, body: &str) -> String {
     String::from_utf8_lossy(&resp).to_string()
 }
 
+/// ⚠️ REQUIRED before any assertion on the 2D render list, and its absence is
+/// SILENT.
+///
+/// `collect_canvas_items` admits a node only if `is_class("CanvasItem")`, which
+/// resolves through ClassDB — and `ClassDB::new()` starts **empty**
+/// (`gdobject/src/class_db.rs`), filled only by the explicit
+/// `register_*_classes()` calls the editor and runner make at startup. Nothing
+/// seeds it lazily. Without this, `Sprite2D` is not known to derive from
+/// `CanvasItem`, the whole scene is filtered out, and the list comes back `[]`.
+///
+/// That reads like "the texture never reached the node" rather than "the scene
+/// was never collected", which is exactly how it presented here: this file's
+/// render-list assertions failed with *"must render as a sprite, not fall
+/// through to a marker"* while the property plumbing under test was fine.
+///
+/// Registration overwrites by class name, so calling it from every test in the
+/// binary is harmless.
+fn register_canvas_classes() {
+    gdobject::class_db::register_2d_classes();
+}
+
 /// Process-unique fixture dir — fixed `/tmp` paths collide across concurrent test
 /// processes in the verifier lane.
 fn unique_dir(tag: &str) -> std::path::PathBuf {
@@ -148,6 +169,7 @@ fn editor_html_wires_resource_picker_actions() {
 /// the texture and a `sub_resource` for the shape.
 #[test]
 fn inspector_resource_assign_e2e() {
+    register_canvas_classes();
     let dir = unique_dir("assign");
     // A real file on disk so the assignment refers to something that exists.
     std::fs::write(dir.join("icon.png"), b"\x89PNG\r\n\x1a\n").unwrap();
@@ -291,6 +313,8 @@ fn inspector_resource_assign_e2e() {
 /// and parks the path in the companion.
 #[test]
 fn a_tscn_ext_resource_texture_reaches_the_render_list() {
+    register_canvas_classes();
+
     const SCENE: &str = r#"[gd_scene load_steps=2 format=3]
 
 [ext_resource type="Texture2D" path="res://art/hero.png" id="1_hero"]
@@ -389,9 +413,13 @@ fn resource_save_as_writes_tres_and_repoints_the_property() {
     // The file exists and is a real .tres naming the class.
     let tres = std::fs::read_to_string(dir.join("shape.tres"))
         .unwrap_or_else(|e| panic!("shape.tres unreadable ({e}); response was:\n{resp}"));
+    // The class must reach the header, and it can only get there by reading the
+    // `__resref__shape` = `RectangleShape2D::<id>` companion — the form the
+    // picker's "New <Type>" actually writes. A route that looked only for a
+    // `Variant::Resource` value would have rejected this with a 400 above.
     assert!(
-        tres.contains("[gd_resource") && tres.contains("RectangleShape2D"),
-        "shape.tres is not a well-formed resource:\n{tres}"
+        tres.contains(r#"[gd_resource type="RectangleShape2D""#),
+        "shape.tres must name the resource's class in its header:\n{tres}"
     );
 
     // THE assertion: the scene now references the file and no longer inlines it.
@@ -407,9 +435,23 @@ fn resource_save_as_writes_tres_and_repoints_the_property() {
     let saved = std::fs::read_to_string(&scene_path)
         .unwrap_or_else(|e| panic!("saved scene unreadable ({e})"));
 
+    // Godot's form specifically — an `[ext_resource]` header plus an
+    // `ExtResource("id")` reference on the property, exactly as an
+    // assign-by-path produces.
+    //
+    // `contains("shape.tres")` alone is NOT enough and used to pass while the
+    // feature was broken: repointing the property at a bare `res://shape.tres`
+    // string puts that text in the file as a plain string property, with no
+    // `[ext_resource]` header at all. Godot would load the property as a String
+    // and the shape would be gone.
     assert!(
-        saved.contains("shape.tres"),
-        "the saved scene must reference the .tres it was saved to:\n{saved}"
+        saved.contains(r#"[ext_resource type="Resource" path="res://shape.tres""#),
+        "the saved scene must carry an [ext_resource] header for the .tres:\n{saved}"
+    );
+    assert!(
+        saved.contains("shape = ExtResource("),
+        "the shape property must be an ExtResource reference, not a bare path \
+         string — a bare path is not a resource reference to Godot:\n{saved}"
     );
     assert!(
         !saved.contains("[sub_resource"),

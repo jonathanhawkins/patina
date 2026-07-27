@@ -858,17 +858,44 @@ pub fn load_resource_pack(
     replace: bool,
     offset: u64,
 ) -> EngineResult<()> {
-    let mut bytes = FileAccess::read_file_bytes(path)?;
+    let bytes = FileAccess::read_file_bytes(path)?;
+    load_resource_pack_from_bytes(label, path, bytes, replace, offset)
+}
+
+/// Mounts a `.pck` over `res://` from bytes already in memory.
+///
+/// This is [`load_resource_pack`] without the filesystem read, for hosts that
+/// obtain the pack some other way — on the web the runtime `fetch`es the `.pck`
+/// over HTTP and hands the `ArrayBuffer` straight here, because
+/// `wasm32-unknown-unknown` has no `std::fs` to read a path from
+/// (pat-u3l8c.113).
+///
+/// `source` names where the bytes came from (a path, a URL) and is used only in
+/// error messages; nothing reads it as a path. Everything else — precedence via
+/// `replace`, the embedded-pack `offset` — matches [`load_resource_pack`],
+/// which is now a thin wrapper over this function so the two cannot drift.
+///
+/// Note that `res://` reads consult mounted packs *before* resolving against a
+/// project root ([`gdcore::file_access::read_file_bytes`]), so a pack mounted
+/// this way serves the whole project with no project root configured and no
+/// filesystem touched at all.
+pub fn load_resource_pack_from_bytes(
+    label: impl Into<String>,
+    source: &str,
+    mut bytes: Vec<u8>,
+    replace: bool,
+    offset: u64,
+) -> EngineResult<()> {
     if offset > 0 {
         if (offset as usize) >= bytes.len() {
             return Err(EngineError::InvalidOperation(format!(
-                "resource pack offset {offset} is past the end of {path}"
+                "resource pack offset {offset} is past the end of {source}"
             )));
         }
         bytes.drain(..offset as usize);
     }
     let mount = PckMount::from_bytes(bytes)
-        .map_err(|e| EngineError::Parse(format!("{path} is not a valid .pck: {e}")))?;
+        .map_err(|e| EngineError::Parse(format!("{source} is not a valid .pck: {e}")))?;
     // Godot's `replace_files` decides precedence rather than whether files are
     // overwritten on disk: a replacing pack is searched before the packs already
     // mounted, a non-replacing one after them.

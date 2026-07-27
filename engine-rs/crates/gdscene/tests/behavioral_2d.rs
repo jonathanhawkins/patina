@@ -497,6 +497,39 @@ fn touch_outside_the_bounds_does_not_press() {
     );
 }
 
+/// `is_pressed` is a bool from the first frame, on a button nothing has ever
+/// touched.
+///
+/// The property used to be written only on the frames the state *flipped*, so a
+/// button that had never been pressed had no `is_pressed` at all and a script
+/// reading it got `Nil` instead of `false`. Godot's
+/// `TouchScreenButton::is_pressed()` returns `false` from the start. This case
+/// pushes no input event whatsoever, which is what separates it from the tests
+/// above — they all reach the button through the event router.
+#[test]
+fn untouched_button_reports_not_pressed() {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    let button = tree
+        .add_child(root, Node::new("B", "TouchScreenButton"))
+        .unwrap();
+    tree.get_node_mut(button)
+        .unwrap()
+        .set_property("texture_size", Variant::Vector2(Vector2::new(64.0, 64.0)));
+
+    let mut ml = MainLoop::new(tree);
+    ml.step(0.016);
+
+    assert_eq!(
+        ml.tree()
+            .get_node(button)
+            .unwrap()
+            .get_property(BUTTON_PRESSED_PROP),
+        Variant::Bool(false),
+        "an untouched button publishes false, not Nil",
+    );
+}
+
 /// The hit test runs in the button's local space, so a moved button is hit
 /// where it appears — not where it was authored.
 #[test]

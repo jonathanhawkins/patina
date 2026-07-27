@@ -2787,6 +2787,17 @@ impl MainLoop {
             self.tree
                 .emit_signal(physics_frame_root, "physics_frame", &[]);
             self.tree.process_internal_physics_frame();
+            // -- raycast phase (pat-u3l8c.49, moved here by pat-0q2kx.32) --
+            // Godot's RayCast2D updates under
+            // `NOTIFICATION_INTERNAL_PHYSICS_PROCESS`
+            // (`scene/2d/physics/ray_cast_2d.cpp`: `set_physics_process_internal`
+            // / the `INTERNAL_PHYSICS_PROCESS` arm), so the cast is already
+            // published by the time any `_physics_process` runs. This used to sit
+            // in the idle section *after* the script phase, which made
+            // `is_colliding()` read false for the whole first frame — the exact
+            // thing this bead is about — and ran it once per frame rather than
+            // once per physics tick.
+            self.process_raycasts();
             // Bind the physics server for the script phase so a
             // `_physics_process` handler can drive `PhysicsServer2D` directly
             // (pat-0q2kx.200). Bracketed tightly around the phase: the tree
@@ -2896,6 +2907,10 @@ impl MainLoop {
             // tested at the position it actually ended up in.
             crate::behavioral_2d::process_remote_transforms(&mut self.tree);
             crate::behavioral_2d::process_visibility_notifiers(&mut self.tree);
+            // Materializes is_pressed on buttons no input event has reached, so
+            // an untouched button reads false rather than Nil. Idempotent, so it
+            // cannot clobber a press routed earlier in this same frame.
+            crate::behavioral_2d::process_touch_screen_buttons(&mut self.tree);
 
             // -- RemoteTransform3D phase (pat-0q2kx.197) --
             // The 3D sibling of the pass above: forwards each RemoteTransform3D's
@@ -2914,11 +2929,6 @@ impl MainLoop {
             // Drive NavigationAgent2D/3D nodes along their computed paths so agents
             // with a target_position advance across frames at runtime.
             self.process_navigation(delta_secs as f32);
-
-            // -- raycast phase (pat-u3l8c.49) --
-            // Cast each RayCast2D against the (already-synced) physics world and
-            // publish is_colliding / collider so scripts can read them this frame.
-            self.process_raycasts();
 
             // -- 3D query-node phase (pat-nzgdu.12) --
             // Drive RayCast3D/ShapeCast3D/SpringArm3D against the synced 3D physics

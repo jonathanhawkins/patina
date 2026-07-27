@@ -15,21 +15,18 @@
 //! AGENTS.md:89 asks for a group, and this file started there — it was moved out
 //! after that placement made the bead unverifiable, not for convenience.
 //!
-//! The verifier truncates a reported test command at 58 characters. The suite's
-//! scoped form,
-//! `cargo nextest run -p gdeditor --test editor_suite_b -E 'test(/^webmidi…/)'`,
-//! is 84 — it would be cut mid-filter and run something other than what was
-//! reported. The only form that survives truncation is the bare
-//! `--test editor_suite_b` (51 chars), which runs all 46 tests in the suite
-//! under nextest's fail-fast. On 2026-07-27 that is exactly what happened: an
-//! unrelated assetlib test failed at 9/46, the run was cancelled, **37 tests
-//! including every one in this file never executed**, and the bead was reopened
-//! for a failure it had no part in.
+//! ⚠️ CORRECTION (2026-07-27): an earlier version of this note claimed the
+//! verifier truncates test commands at 58 characters, and used that to justify
+//! the move. **There is no such cap** — measured across the whole verifier log,
+//! 628 dispatched commands exceed 58 chars and run fine, including the
+//! `-E 'test(/^…/)'` filter form at 105 chars. Do not budget command length.
 //!
-//! `--test midi_e2e` is 45 characters, so the reported command both fits and
-//! actually scopes to this file. The cost is one extra engine link; the benefit
-//! is that a failure here means the MIDI pipeline is broken and nothing else
-//! does. Keep the filename short — that is the whole point.
+//! The move is still right, for the reason that actually held up: the bare
+//! `--test editor_suite_b` runs all 46 tests in that suite under nextest's
+//! fail-fast. On 2026-07-27 an unrelated assetlib test failed at 9/46, the run
+//! was cancelled, **37 tests including every one in this file never executed**,
+//! and the bead was reopened for a failure it had no part in. A dedicated binary
+//! means a failure here implicates the MIDI pipeline and nothing else.
 //!
 //! The harness is lifted from `mouse_mode_pointer_lock_pipeline_test` in this
 //! same suite — real editor server, real Play path, manual clock — so "the
@@ -114,7 +111,20 @@ fn boot_with_script(source: &str) -> (EditorServerHandle, u16, tempfile::TempDir
     tree.add_child(root, main).unwrap();
 
     let mut state = EditorState::new(tree);
-    state.project_root = Some(dir.path().to_string_lossy().to_string());
+    let root = dir.path().to_string_lossy().to_string();
+    // ⚠️ BOTH are required, and setting only the first is silent.
+    //
+    // `state.project_root` is what the filesystem/API routes read, but the PLAY
+    // path resolves `_script_path` against `state.texture_cache.project_root()`
+    // (`editor_server.rs:12971` → `attach_scripts_to_tree`). With only
+    // `state.project_root` set, the script file is looked up under an empty root,
+    // `read_to_string` fails, **no script is attached at all**, and the failure
+    // surfaces far downstream as every script variable being *absent* from
+    // `/api/runtime/node` — which reads like "the property did not carry" rather
+    // than "the script never loaded" (pat-0q2kx.246). That is why no test in this
+    // file had ever passed.
+    state.project_root = Some(root.clone());
+    state.texture_cache.set_project_root(root);
 
     let port = free_port();
     let handle = EditorServerHandle::start(port, state);
@@ -146,47 +156,32 @@ fn runtime_node(port: u16) -> serde_json::Value {
     json_body(&http_get(port, "/api/runtime/node?path=/root/Main"))
 }
 
-/// Searched rather than path-indexed on purpose: this test is about the MIDI
-/// pipeline, not the runtime-node schema, so an unrelated payload reshuffle
-/// should not fail this bead.
+/// Locates a script variable in a `/api/runtime/node` payload.
+///
+/// ⚠️ THE VARIABLE NAME IS A **VALUE**, NOT A KEY. The payload is
+/// `{"properties": [{"name": "ports_count", "value": {"value": 1}}, …]}` — note
+/// the doubled `value`. An earlier version of this helper walked the JSON
+/// looking for a *key* called `ports_count`, which does not exist anywhere in
+/// that shape, so it returned `None` for **every** variable and every assertion
+/// here failed as `None` regardless of what the MIDI pipeline actually did
+/// (pat-0q2kx.246). The reader below mirrors the proven one in
+/// `editor_server.rs` (`read_counter`, ~:23726).
+fn property_value(v: &serde_json::Value, name: &str) -> Option<serde_json::Value> {
+    v.get("properties")?
+        .as_array()?
+        .iter()
+        .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name))?
+        .get("value")?
+        .get("value")
+        .cloned()
+}
+
 fn find_script_var(v: &serde_json::Value, name: &str) -> Option<f64> {
-    match v {
-        serde_json::Value::Object(map) => {
-            for (k, val) in map {
-                if k == name {
-                    if let Some(n) = val.as_f64() {
-                        return Some(n);
-                    }
-                }
-                if let Some(found) = find_script_var(val, name) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        serde_json::Value::Array(items) => items.iter().find_map(|i| find_script_var(i, name)),
-        _ => None,
-    }
+    property_value(v, name)?.as_f64()
 }
 
 fn find_script_str(v: &serde_json::Value, name: &str) -> Option<String> {
-    match v {
-        serde_json::Value::Object(map) => {
-            for (k, val) in map {
-                if k == name {
-                    if let Some(s) = val.as_str() {
-                        return Some(s.to_string());
-                    }
-                }
-                if let Some(found) = find_script_str(val, name) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        serde_json::Value::Array(items) => items.iter().find_map(|i| find_script_str(i, name)),
-        _ => None,
-    }
+    property_value(v, name)?.as_str().map(|s| s.to_string())
 }
 
 const MIDI_GD: &str = "\

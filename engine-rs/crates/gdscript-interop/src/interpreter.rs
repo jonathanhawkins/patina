@@ -2940,7 +2940,13 @@ impl Interpreter {
                             return call_editor_command_palette_static(member, &evaluated_args);
                         }
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "CameraServer") {
-                            return call_cameraserver_static(member, &evaluated_args);
+                            return self.call_cameraserver(member, &evaluated_args);
+                        }
+                        // Image constructors (pat-0q2kx.262) — `Image.create(…)`
+                        // is a static, so it dispatches here rather than through
+                        // the ObjectId instance path.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "Image") {
+                            return call_image_static(member, &evaluated_args);
                         }
                         // EngineDebugger singleton (pat-nzgdu.176) — backed by
                         // the real gdcore::debugger. `is_active()` is false
@@ -7491,6 +7497,9 @@ impl Interpreter {
             if is_camera_feed_handle(*oid) {
                 return call_camera_feed_instance(*oid, method, args);
             }
+            if is_image_handle(*oid) {
+                return call_image_instance(*oid, method, args);
+            }
             if gdplatform::websocket_peer::is_websocket_peer_handle(*oid) {
                 return call_websocket_peer_instance(*oid, method, args);
             }
@@ -7553,6 +7562,11 @@ impl Interpreter {
             }
             if is_regex_match_handle(*oid) {
                 return call_regex_match_instance(*oid, method, args);
+            }
+            // `JavaScriptObject` (pat-u3l8c.115). Free-standing: the call goes
+            // to the browser (or the installed backend), never to the scene.
+            if is_js_object_handle(*oid) {
+                return call_js_object_instance(*oid, method, args);
             }
             // MUST precede the Variant::ObjectId arm below, which resolves ids
             // against the live scene. An EncodedObjectAsID reports its id and
@@ -10997,6 +11011,35 @@ impl Interpreter {
         }
     }
 
+    /// Runs every callback JavaScript has invoked since the last pump, in
+    /// arrival order, and returns how many `Callable`s actually ran
+    /// (pat-u3l8c.115).
+    ///
+    /// `JavaScriptBridge.create_callback` cannot call straight back into the
+    /// interpreter — the JS closure fires while this interpreter is already
+    /// borrowed further up the stack — so the browser side queues invocations
+    /// in `gdplatform::js_bridge` and the host drains them here, at a point
+    /// where `&mut self` is available. Call it once per frame, next to the
+    /// other deferred-work drains.
+    ///
+    /// An invocation whose id has no registered `Callable`, or whose `Callable`
+    /// raises, is dropped rather than propagated: a browser event must not be
+    /// able to abort the frame that happened to pump it.
+    pub fn pump_javascript_callbacks(&mut self) -> usize {
+        let pending = gdplatform::js_bridge::take_callback_invocations();
+        let mut ran = 0usize;
+        for (id, js_args) in pending {
+            let Some(callable) = JS_CALLBACKS.with(|m| m.borrow().get(&id).cloned()) else {
+                continue;
+            };
+            let args: Vec<Variant> = js_args.into_iter().map(js_to_variant).collect();
+            if self.invoke_callable(&callable, &args).is_ok() {
+                ran += 1;
+            }
+        }
+        ran
+    }
+
     /// Invokes a Callable (lambda or method reference).
     fn invoke_callable(
         &mut self,
@@ -11459,6 +11502,80 @@ impl Interpreter {
         let result = self.call_instance_method(instance, setter_name, &[value]);
         self.current_function = previous;
         result
+    }
+
+    /// `CameraServer.<method>(…)` (pat-0q2kx.262).
+    ///
+    /// The registry and every pure-state arm live in the free
+    /// [`call_cameraserver_static`]; `add_feed`/`remove_feed` additionally emit
+    /// a signal, which needs the interpreter to invoke a Callable — so they
+    /// route through here, the same shape as [`Self::call_enginedebugger`].
+    fn call_cameraserver(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        // The feed id must be read BEFORE the state call for `remove_feed`:
+        // afterwards the handle may no longer be in the list, and Godot emits
+        // the id of the feed it actually removed.
+        let feed_id = match method {
+            "add_feed" | "remove_feed" => camera_feed_arg(args, method)
+                .ok()
+                .and_then(|raw| CAMERA_FEEDS.with(|f| f.borrow().get(&raw).map(|s| s.id))),
+            _ => None,
+        };
+        // Whether the feed was actually registered — upstream's `remove_feed`
+        // emits from INSIDE the match loop and returns, so removing a feed that
+        // was never added emits nothing at all.
+        let was_registered = if method == "remove_feed" {
+            camera_feed_arg(args, method)
+                .ok()
+                .map(|raw| CAMERA_SERVER_FEEDS.with(|f| f.borrow().contains(&raw)))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        let result = call_cameraserver_static(method, args)?;
+
+        match method {
+            "add_feed" => {
+                if let Some(id) = feed_id {
+                    self.emit_camera_server_signal("camera_feed_added", &[Variant::Int(id)]);
+                }
+            }
+            "remove_feed" => {
+                if was_registered {
+                    if let Some(id) = feed_id {
+                        self.emit_camera_server_signal("camera_feed_removed", &[Variant::Int(id)]);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(result)
+    }
+
+    /// Invokes every Callable connected to `signal` on `CameraServer`.
+    ///
+    /// The connection list is SNAPSHOTTED and the borrow released before any
+    /// handler runs: a handler that calls `CameraServer.connect()` or
+    /// `add_feed()` re-enters this registry, and dispatching while still inside
+    /// `borrow()` would panic with `BorrowMutError`. Same decide-then-act rule
+    /// as the profiler dispatch in .251.
+    fn emit_camera_server_signal(&mut self, signal: &str, args: &[Variant]) {
+        let targets: Vec<CallableRef> = CAMERA_SERVER_CONNECTIONS.with(|c| {
+            c.borrow()
+                .iter()
+                .filter(|(s, _)| s == signal)
+                .map(|(_, cb)| cb.clone())
+                .collect()
+        });
+        for cb in targets {
+            // A handler that raises must not abort `add_feed` — Godot's
+            // emit_signal does not propagate a callee error to the emitter.
+            let _ = self.invoke_callable(&cb, args);
+        }
     }
 
     /// `EngineDebugger.<method>(…)` (pat-0q2kx.251).
@@ -15256,47 +15373,261 @@ fn call_displayserver_static(method: &str, args: &[Variant]) -> Result<Variant, 
     }
 }
 
+/// The platform layer's JS value type. Aliased because `JsValue` on its own
+/// reads like `wasm_bindgen::JsValue` at every use site, and this one is the
+/// engine-side enum, not the browser handle.
+type BridgeValue = gdplatform::js_bridge::JsValue;
+
+/// Tag bits marking an `ObjectId` as a `JavaScriptObject` handle
+/// (pat-u3l8c.115). Sits alongside the RegEx/JSON/Thread families above; `0x1B`
+/// is free (`0x1A` is Image).
+const JS_OBJECT_HANDLE_TAG: u64 = 0x1B_00_0000_0000_0000;
+
 thread_local! {
     /// Records `JavaScriptBridge` calls (eval code, download names) so headless
-    /// tests / the runner dump can observe them; the wasm build runs the real
-    /// browser calls via web-sys.
+    /// tests / the runner dump can observe them. Kept on every target: it is the
+    /// only observation point for a call whose effect lives in the browser.
     static JS_BRIDGE_LOG: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+
+    /// Script-visible `JavaScriptObject` handles, keyed by raw `ObjectId`. The
+    /// value is the backend's own handle, so the interpreter never has to know
+    /// whether the object behind it is a real `wasm_bindgen::JsValue` or a
+    /// test double's row.
+    static JS_OBJECTS: std::cell::RefCell<HashMap<u64, gdplatform::js_bridge::JsObjectHandle>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_JS_OBJECT: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+
+    /// `Callable`s registered through `JavaScriptBridge.create_callback`, keyed
+    /// by the id handed to the backend. JavaScript invoking the function queues
+    /// that id; [`Interpreter::pump_javascript_callbacks`] runs the `Callable`.
+    static JS_CALLBACKS: std::cell::RefCell<HashMap<u64, CallableRef>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_JS_CALLBACK: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
 }
 
-/// `JavaScriptBridge` singleton (pat-nzgdu.66). The browser bridge only does real
-/// work in a wasm build (web-sys `eval` / `navigator` / download); in headless /
-/// native tests every call resolves without UndefinedFunction and is recorded in
-/// [`JS_BRIDGE_LOG`], with `eval` returning Nil (no native JS engine).
+/// Returns `true` when `id` names a `JavaScriptObject`.
+fn is_js_object_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == JS_OBJECT_HANDLE_TAG
+}
+
+/// Stores a backend handle and returns the script-visible `ObjectId`.
+fn new_js_object_handle(handle: gdplatform::js_bridge::JsObjectHandle) -> gdcore::id::ObjectId {
+    let seq = NEXT_JS_OBJECT.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = JS_OBJECT_HANDLE_TAG | seq;
+    JS_OBJECTS.with(|m| m.borrow_mut().insert(raw, handle));
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Converts a browser value into the script's `Variant`.
+///
+/// `undefined` and `null` both land on `Nil`: GDScript has one absent value, and
+/// Godot's own `JavaScriptObject` conversion does the same. Numbers stay
+/// `Float` even when integral, because JavaScript has exactly one number type
+/// and inferring `int` from `3.0` would make the same expression change Variant
+/// type with its runtime value.
+fn js_to_variant(value: BridgeValue) -> Variant {
+    match value {
+        BridgeValue::Undefined | BridgeValue::Null => Variant::Nil,
+        BridgeValue::Bool(b) => Variant::Bool(b),
+        BridgeValue::Number(n) => Variant::Float(n),
+        BridgeValue::String(s) => Variant::String(s),
+        BridgeValue::ArrayBuffer(bytes) => Variant::PackedByteArray(bytes),
+        BridgeValue::Object(handle) => Variant::ObjectId(new_js_object_handle(handle)),
+    }
+}
+
+/// Converts a script `Variant` into a browser value.
+///
+/// An `Object` that is not one of our JS handles becomes `null` rather than an
+/// error: a scene node has no meaningful JavaScript representation, and Godot
+/// passes such an argument as null too.
+fn variant_to_js(value: &Variant) -> BridgeValue {
+    match value {
+        Variant::Nil => BridgeValue::Null,
+        Variant::Bool(b) => BridgeValue::Bool(*b),
+        Variant::Int(i) => BridgeValue::Number(*i as f64),
+        Variant::Float(f) => BridgeValue::Number(*f),
+        Variant::String(s) => BridgeValue::String(s.clone()),
+        Variant::PackedByteArray(bytes) => BridgeValue::ArrayBuffer(bytes.clone()),
+        Variant::ObjectId(id) => JS_OBJECTS
+            .with(|m| m.borrow().get(&id.raw()).cloned())
+            .map(BridgeValue::Object)
+            .unwrap_or(BridgeValue::Null),
+        other => BridgeValue::String(other.to_string()),
+    }
+}
+
+/// `JavaScriptBridge` singleton (pat-nzgdu.66, made real by pat-u3l8c.115).
+///
+/// Every method routes through [`gdplatform::js_bridge`]: on wasm32 that is the
+/// browser backend (`js-sys` `eval` / `Reflect` / `Blob` download), and off the
+/// web it is the null backend, which reproduces Godot's `JavaScriptBridgeDummy`
+/// — defined, inert values rather than `UndefinedFunction`. The headless return
+/// values are therefore unchanged from before this bead; what changed is that a
+/// web build now reaches real JavaScript instead of the same stub.
 fn call_javascriptbridge_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    use gdplatform::js_bridge as bridge;
     match method {
         "eval" => {
-            if let Some(Variant::String(code)) = args.first() {
-                JS_BRIDGE_LOG.with(|l| l.borrow_mut().push(format!("eval:{code}")));
-            }
-            // No native JS engine: Godot's non-web JavaScriptBridge.eval yields null.
-            Ok(Variant::Nil)
+            let code = match args.first() {
+                Some(Variant::String(code)) => code.clone(),
+                _ => String::new(),
+            };
+            JS_BRIDGE_LOG.with(|l| l.borrow_mut().push(format!("eval:{code}")));
+            // Godot: eval(code, use_global_execution_context := false).
+            let global = matches!(args.get(1), Some(Variant::Bool(true)));
+            // A JS exception is `null` to script code, exactly as Godot's
+            // `JavaScriptBridge.eval` reports a throwing expression.
+            Ok(bridge::with_backend(|b| b.eval(&code, global))
+                .map(js_to_variant)
+                .unwrap_or(Variant::Nil))
         }
         "download_buffer" | "download" => {
-            // Godot: download_buffer(buffer, name, mime). Record the filename.
+            // Godot: download_buffer(buffer, name, mime).
+            let data = match args.first() {
+                Some(Variant::PackedByteArray(bytes)) => bytes.clone(),
+                _ => Vec::new(),
+            };
             let name = match args.get(1) {
                 Some(Variant::String(s)) => s.clone(),
                 _ => String::new(),
             };
+            let mime = match args.get(2) {
+                Some(Variant::String(s)) => s.clone(),
+                _ => "application/octet-stream".to_string(),
+            };
             JS_BRIDGE_LOG.with(|l| l.borrow_mut().push(format!("download:{name}")));
+            let _ = bridge::with_backend(|b| b.download_buffer(&data, &name, &mime));
             Ok(Variant::Nil)
         }
-        "get_interface" | "create_callback" | "create_object" => Ok(Variant::Nil),
-        "force_fs_sync" | "pwa_update" => Ok(Variant::Nil),
-        "pwa_needs_update" => Ok(Variant::Bool(false)),
+        "get_interface" => {
+            let name = match args.first() {
+                Some(Variant::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            JS_BRIDGE_LOG.with(|l| l.borrow_mut().push(format!("get_interface:{name}")));
+            Ok(bridge::with_backend(|b| b.get_interface(&name))
+                .map(js_to_variant)
+                .unwrap_or(Variant::Nil))
+        }
+        "create_object" => {
+            let class = match args.first() {
+                Some(Variant::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            let ctor_args: Vec<BridgeValue> = args[1.min(args.len())..]
+                .iter()
+                .map(variant_to_js)
+                .collect();
+            JS_BRIDGE_LOG.with(|l| l.borrow_mut().push(format!("create_object:{class}")));
+            Ok(
+                bridge::with_backend(|b| b.create_object(&class, &ctor_args))
+                    .map(js_to_variant)
+                    .unwrap_or(Variant::Nil),
+            )
+        }
+        "create_callback" => {
+            // The Callable is parked in JS_CALLBACKS under a fresh id; the
+            // backend hands JavaScript a function that queues that id. Nothing
+            // runs until `pump_javascript_callbacks` drains the queue — see the
+            // gdplatform module docs for why this is not synchronous.
+            let Some(Variant::Callable(callable)) = args.first() else {
+                // Godot returns null for a non-Callable argument rather than
+                // erroring, and so does the dummy.
+                return Ok(Variant::Nil);
+            };
+            let id = NEXT_JS_CALLBACK.with(|n| {
+                let v = n.get();
+                n.set(v + 1);
+                v
+            });
+            JS_CALLBACKS.with(|m| m.borrow_mut().insert(id, (**callable).clone()));
+            JS_BRIDGE_LOG.with(|l| l.borrow_mut().push(format!("create_callback:{id}")));
+            Ok(bridge::with_backend(|b| b.create_callback(id))
+                .map(js_to_variant)
+                .unwrap_or(Variant::Nil))
+        }
+        "force_fs_sync" => {
+            bridge::with_backend(|b| b.force_fs_sync());
+            Ok(Variant::Nil)
+        }
+        "pwa_update" => {
+            let _ = bridge::with_backend(|b| b.pwa_update());
+            Ok(Variant::Nil)
+        }
+        "pwa_needs_update" => Ok(Variant::Bool(bridge::with_backend(|b| {
+            b.pwa_needs_update()
+        }))),
         // pat-nzgdu.146: the ArrayBuffer helpers. Off the web there is no JS
         // heap, so nothing can be a JS buffer and the conversion yields an
         // empty PackedByteArray — defined values rather than an error, matching
         // how the rest of this singleton degrades natively.
-        "is_js_buffer" => Ok(Variant::Bool(false)),
-        "js_buffer_to_packed_byte_array" => Ok(Variant::PackedByteArray(Vec::new())),
+        "is_js_buffer" => {
+            let value = args.first().map(variant_to_js).unwrap_or(BridgeValue::Null);
+            Ok(Variant::Bool(bridge::with_backend(|b| b.is_buffer(&value))))
+        }
+        "js_buffer_to_packed_byte_array" => {
+            let value = args.first().map(variant_to_js).unwrap_or(BridgeValue::Null);
+            Ok(Variant::PackedByteArray(
+                bridge::with_backend(|b| b.buffer_to_bytes(&value)).unwrap_or_default(),
+            ))
+        }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("JavaScriptBridge.{other}"),
         ))),
+    }
+}
+
+/// Method dispatch on a `JavaScriptObject` handle — `js_obj.setItem("k", "v")`.
+///
+/// Godot's `JavaScriptObject` forwards any method name to the underlying JS
+/// object, so there is no name whitelist here; `get`/`set` are carved out
+/// because a JS object reached from GDScript otherwise has no way to read or
+/// write a plain property.
+fn call_js_object_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdplatform::js_bridge as bridge;
+    let Some(handle) = JS_OBJECTS.with(|m| m.borrow().get(&id.raw()).cloned()) else {
+        // The handle table is per-thread and never evicts, so a miss means the
+        // id was forged rather than expired.
+        return Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("JavaScriptObject.{method}"),
+        )));
+    };
+    match method {
+        "get" => {
+            let property = match args.first() {
+                Some(Variant::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            Ok(bridge::with_backend(|b| b.object_get(&handle, &property))
+                .map(js_to_variant)
+                .unwrap_or(Variant::Nil))
+        }
+        "set" => {
+            let property = match args.first() {
+                Some(Variant::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            let value = args.get(1).map(variant_to_js).unwrap_or(BridgeValue::Null);
+            let _ = bridge::with_backend(|b| b.object_set(&handle, &property, value.clone()));
+            Ok(Variant::Nil)
+        }
+        _ => {
+            let call_args: Vec<BridgeValue> = args.iter().map(variant_to_js).collect();
+            Ok(
+                bridge::with_backend(|b| b.object_call(&handle, method, &call_args))
+                    .map(js_to_variant)
+                    .unwrap_or(Variant::Nil),
+            )
+        }
     }
 }
 
@@ -15319,6 +15650,24 @@ struct CameraFeedState {
     name: String,
     position: i64,
     active: bool,
+    /// `CameraFeed.FeedDataType` — NOIMAGE 0, RGB 1, YCBCR 2, YCBCR_SEP 3,
+    /// EXTERNAL 4 (servers/camera/camera_feed.h:47-51). Was hardcoded to 0 at
+    /// the call site; now it tracks what has actually been fed in
+    /// (pat-0q2kx.262).
+    datatype: i64,
+    /// `get_transform`/`set_transform`. ⚠️ The default is a Y-FLIP, not the
+    /// identity: `camera_feed.cpp:160` constructs
+    /// `Transform2D(1, 0, 0, -1, 0, 1)` because camera images arrive with the
+    /// opposite vertical origin. Defaulting to identity would render every
+    /// feed upside-down.
+    transform: gdcore::math::Transform2D,
+    /// Dimensions handed to `set_external(width, height)`, which declares an
+    /// externally-managed texture rather than supplying pixels.
+    external_size: Option<(i64, i64)>,
+    /// Pixels handed to `set_rgb_image`. Stored by VALUE, not as a handle:
+    /// Godot's feed keeps its own `Ref<Image>`, so a later `set_pixel` on the
+    /// caller's image must not retroactively change what the feed is showing.
+    rgb_image: Option<ImageState>,
 }
 
 thread_local! {
@@ -15327,6 +15676,14 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
     /// The CameraServer feed list in add order — `get_feed(idx)` indexes this.
     static CAMERA_SERVER_FEEDS: std::cell::RefCell<Vec<u64>> =
+        std::cell::RefCell::new(Vec::new());
+    /// `CameraServer` signal connections as (signal name, callable)
+    /// (pat-0q2kx.262).
+    ///
+    /// CameraServer is an Object singleton, not a node, so the scene tree's
+    /// node-keyed `connect_signal` cannot represent it as a signal SOURCE —
+    /// hence a registry of its own rather than a reuse of that path.
+    static CAMERA_SERVER_CONNECTIONS: std::cell::RefCell<Vec<(String, CallableRef)>> =
         std::cell::RefCell::new(Vec::new());
     /// Sequence backing both the handle id and the Godot-visible feed id.
     static NEXT_CAMERA_FEED: std::cell::Cell<u64> = std::cell::Cell::new(1);
@@ -17789,6 +18146,16 @@ fn new_camera_feed_handle() -> gdcore::id::ObjectId {
                 // CameraFeed.FEED_UNSPECIFIED
                 position: 0,
                 active: false,
+                // FEED_NOIMAGE until something is actually fed in.
+                datatype: 0,
+                // Y-flipped, matching camera_feed.cpp:160 — NOT the identity.
+                transform: gdcore::math::Transform2D {
+                    x: gdcore::math::Vector2::new(1.0, 0.0),
+                    y: gdcore::math::Vector2::new(0.0, -1.0),
+                    origin: gdcore::math::Vector2::new(0.0, 1.0),
+                },
+                external_size: None,
+                rgb_image: None,
             },
         );
     });
@@ -17950,10 +18317,74 @@ fn call_camera_feed_instance(
                 }
                 Ok(Variant::Nil)
             }
-            // No camera driver: the feed never carries an image, so datatype is
-            // CameraFeed.FEED_NOIMAGE (0), no formats are reported, set_format
-            // fails, and no GPU texture is allocated.
-            "get_datatype" => Ok(Variant::Int(0)),
+            // `get_transform`/`set_transform` (camera_feed.h:104-105).
+            "get_transform" => Ok(Variant::Transform2D(feed.transform)),
+            "set_transform" => match args.first() {
+                Some(Variant::Transform2D(t)) => {
+                    feed.transform = *t;
+                    Ok(Variant::Nil)
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "CameraFeed.set_transform() takes a Transform2D".into(),
+                ))),
+            },
+            // `set_rgb_image(Image)` (camera_feed.h:115). Implementable only
+            // because a script can now construct an Image — see the module note
+            // below.
+            "set_rgb_image" => {
+                let handle = match args.first() {
+                    Some(Variant::ObjectId(oid)) if is_image_handle(*oid) => oid.raw(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "CameraFeed.set_rgb_image() takes an Image".into(),
+                        )))
+                    }
+                };
+                // Copy out of the IMAGES map and let that borrow END before
+                // touching the feed — both maps are thread-locals and a single
+                // combined borrow would be a re-entrancy hazard.
+                let snapshot = IMAGES.with(|m| m.borrow().get(&handle).cloned());
+                let Some(img) = snapshot else {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "CameraFeed.set_rgb_image() got an invalid Image handle".into(),
+                    )));
+                };
+                feed.rgb_image = Some(img);
+                // FEED_RGB = 1 (camera_feed.h:48).
+                feed.datatype = 1;
+                Ok(Variant::Nil)
+            }
+            // `set_external(width, height)` (camera_feed.h:118) declares an
+            // externally-managed texture; it takes two ints and NO Image.
+            "set_external" => {
+                let (w, h) = match (args.first(), args.get(1)) {
+                    (Some(Variant::Int(w)), Some(Variant::Int(h))) => (*w, *h),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "CameraFeed.set_external() takes (width, height)".into(),
+                        )))
+                    }
+                };
+                feed.external_size = Some((w, h));
+                // FEED_EXTERNAL = 4, not 1: the feed carries no RGB pixels of
+                // its own, so reporting FEED_RGB would promise data that is not
+                // there.
+                feed.datatype = 4;
+                Ok(Variant::Nil)
+            }
+            // The size declared by `set_external`, or (0, 0) before one. Godot
+            // exposes this via the texture; kept queryable so the external
+            // declaration is observable at all.
+            "get_external_size" => {
+                let (w, h) = feed.external_size.unwrap_or((0, 0));
+                Ok(Variant::Vector2(gdcore::math::Vector2::new(
+                    w as f32, h as f32,
+                )))
+            }
+            // Reports what has actually been fed in rather than a constant.
+            // Still FEED_NOIMAGE (0) on a fresh feed: there is no camera driver,
+            // so nothing supplies frames on its own.
+            "get_datatype" => Ok(Variant::Int(feed.datatype)),
             "get_formats" => Ok(Variant::Array(Vec::new())),
             "set_format" => Ok(Variant::Bool(false)),
             "get_texture_tex_id" => Ok(Variant::Int(0)),
@@ -17962,6 +18393,214 @@ fn call_camera_feed_instance(
             ))),
         }
     })
+}
+
+// -- Image (pat-0q2kx.262) ----------------------------------------------------
+//
+// A script-reachable `Image`, which did not exist AT ALL before this: `Image`
+// appeared zero times in this file, so `CameraFeed.set_rgb_image(Ref<Image>)`
+// had no argument any script could construct.
+//
+// This is a PORT, not a design: every signature comes from
+// `doc/classes/Image.xml` — `create(width, height, use_mipmaps, format)`,
+// `set_pixel(x, y, color)`, `get_pixel(x, y)`. Scope is deliberately the
+// pixel-buffer surface that CameraFeed needs; the rest of Godot's Image
+// (compression, resizing, format conversion, save/load) is not here.
+
+const IMAGE_HANDLE_TAG: u64 = 0x1A00_0000_0000_0000;
+
+/// `Image.FORMAT_RGBA8` — the default, and the only format whose pixel layout
+/// this buffer actually models.
+const IMAGE_FORMAT_RGBA8: i64 = 5;
+
+/// A script-side `Image`: a flat row-major RGBA buffer.
+#[derive(Debug, Clone)]
+struct ImageState {
+    width: i64,
+    height: i64,
+    format: i64,
+    /// `width * height` pixels, row-major. Straight (non-premultiplied) alpha,
+    /// matching the SVG/PNG importers.
+    pixels: Vec<gdcore::math::Color>,
+}
+
+thread_local! {
+    /// Live `Image` handles, keyed by raw ObjectId.
+    static IMAGES: std::cell::RefCell<HashMap<u64, ImageState>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_IMAGE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Returns `true` when `id` was issued by [`new_image_handle`].
+fn is_image_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == IMAGE_HANDLE_TAG
+}
+
+/// Allocates an `Image` handle backed by a `width * height` transparent buffer.
+///
+/// Dimensions are clamped at zero rather than rejected: Godot's `create` with a
+/// non-positive size errors and returns a null ref, and a negative allocation
+/// here would panic.
+fn new_image_handle(width: i64, height: i64, format: i64) -> gdcore::id::ObjectId {
+    let seq = NEXT_IMAGE.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = IMAGE_HANDLE_TAG | seq;
+    let (w, h) = (width.max(0), height.max(0));
+    IMAGES.with(|m| {
+        m.borrow_mut().insert(
+            raw,
+            ImageState {
+                width: w,
+                height: h,
+                format,
+                pixels: vec![
+                    gdcore::math::Color::new(0.0, 0.0, 0.0, 0.0);
+                    (w as usize).saturating_mul(h as usize)
+                ],
+            },
+        );
+    });
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// The pixels a `CameraFeed` was given by `set_rgb_image`, keyed by the raw
+/// handle — for tests and for whatever eventually renders a CameraTexture.
+pub fn camera_feed_rgb_image(feed: u64) -> Option<(i64, i64, Vec<gdcore::math::Color>)> {
+    CAMERA_FEEDS.with(|f| {
+        f.borrow()
+            .get(&feed)
+            .and_then(|s| s.rgb_image.clone())
+            .map(|img| (img.width, img.height, img.pixels))
+    })
+}
+
+/// `Image.<static>(…)` — the constructors.
+fn call_image_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    match method {
+        // `create` and `create_empty` share a signature; `create` is the older
+        // spelling and Godot keeps both.
+        "create" | "create_empty" => {
+            let w = match args.first() {
+                Some(Variant::Int(v)) => *v,
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Image.create() takes (width, height, use_mipmaps, format)".into(),
+                    )))
+                }
+            };
+            let h = match args.get(1) {
+                Some(Variant::Int(v)) => *v,
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Image.create() takes (width, height, use_mipmaps, format)".into(),
+                    )))
+                }
+            };
+            // `use_mipmaps` is accepted and ignored — there is no mip chain
+            // here, and silently pretending otherwise would be worse than
+            // saying so.
+            let format = match args.get(3) {
+                Some(Variant::Int(v)) => *v,
+                _ => IMAGE_FORMAT_RGBA8,
+            };
+            Ok(Variant::ObjectId(new_image_handle(w, h, format)))
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("Image.{other}"),
+        ))),
+    }
+}
+
+/// `Image` instance methods.
+fn call_image_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let raw = id.raw();
+    IMAGES.with(|m| {
+        let mut map = m.borrow_mut();
+        let img = map.get_mut(&raw).ok_or_else(|| {
+            RuntimeError::new(RuntimeErrorKind::TypeError(
+                "Image handle is invalid".into(),
+            ))
+        })?;
+        match method {
+            "get_width" => Ok(Variant::Int(img.width)),
+            "get_height" => Ok(Variant::Int(img.height)),
+            "get_format" => Ok(Variant::Int(img.format)),
+            "is_empty" => Ok(Variant::Bool(img.pixels.is_empty())),
+            "set_pixel" => {
+                let (x, y) = match (args.first(), args.get(1)) {
+                    (Some(Variant::Int(x)), Some(Variant::Int(y))) => (*x, *y),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Image.set_pixel() takes (x, y, color)".into(),
+                        )))
+                    }
+                };
+                let c = match args.get(2) {
+                    Some(Variant::Color(c)) => *c,
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Image.set_pixel() takes (x, y, color)".into(),
+                        )))
+                    }
+                };
+                // Out of range is a no-op, matching Godot's ERR_FAIL_INDEX —
+                // it does not panic and does not grow the buffer.
+                if x >= 0 && y >= 0 && x < img.width && y < img.height {
+                    let idx = (y * img.width + x) as usize;
+                    if idx < img.pixels.len() {
+                        img.pixels[idx] = c;
+                    }
+                }
+                Ok(Variant::Nil)
+            }
+            "get_pixel" => {
+                let (x, y) = match (args.first(), args.get(1)) {
+                    (Some(Variant::Int(x)), Some(Variant::Int(y))) => (*x, *y),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Image.get_pixel() takes (x, y)".into(),
+                        )))
+                    }
+                };
+                if x < 0 || y < 0 || x >= img.width || y >= img.height {
+                    // Godot returns an unset Color for an out-of-range read.
+                    return Ok(Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 0.0)));
+                }
+                let idx = (y * img.width + x) as usize;
+                Ok(Variant::Color(
+                    img.pixels
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(gdcore::math::Color::new(0.0, 0.0, 0.0, 0.0)),
+                ))
+            }
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("Image.{other}"),
+            ))),
+        }
+    })
+}
+
+/// Reads a signal name argument, accepting either spelling — GDScript writes
+/// `connect("camera_feed_added", ...)` but a `&"..."` literal arrives as a
+/// StringName, and rejecting one of the two would break half the call sites.
+fn camera_signal_name(args: &[Variant], who: &str) -> Result<String, RuntimeError> {
+    match args.first() {
+        Some(Variant::String(s)) => Ok(s.clone()),
+        // `as_str().to_string()`, not `to_string()` — StringName has no
+        // Display impl; this is the idiom every other arm in this file uses.
+        Some(Variant::StringName(s)) => Ok(s.as_str().to_string()),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "CameraServer.{who}() takes a signal name"
+        )))),
+    }
 }
 
 /// Extracts the raw `CameraFeed` handle from an `add_feed`/`remove_feed` arg.
@@ -18083,6 +18722,36 @@ fn call_cameraserver_static(method: &str, args: &[Variant]) -> Result<Variant, R
             let raw = camera_feed_arg(args, "remove_feed")?;
             CAMERA_SERVER_FEEDS.with(|f| f.borrow_mut().retain(|r| *r != raw));
             Ok(Variant::Nil)
+        }
+        // -- signals (pat-0q2kx.262)
+        //
+        // `Object.connect(signal, callable)`. The emission itself needs the
+        // interpreter to invoke a Callable, so it lives in
+        // `Interpreter::call_cameraserver`; only the registry is here.
+        "connect" => {
+            let signal = camera_signal_name(args, "connect")?;
+            let callable = match args.get(1) {
+                Some(Variant::Callable(c)) => (**c).clone(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "CameraServer.connect() takes (signal, Callable)".into(),
+                    )))
+                }
+            };
+            CAMERA_SERVER_CONNECTIONS.with(|c| c.borrow_mut().push((signal, callable)));
+            // Godot's Object.connect returns an Error; OK is 0.
+            Ok(Variant::Int(0))
+        }
+        "disconnect" => {
+            let signal = camera_signal_name(args, "disconnect")?;
+            CAMERA_SERVER_CONNECTIONS.with(|c| c.borrow_mut().retain(|(s, _)| *s != signal));
+            Ok(Variant::Nil)
+        }
+        "is_connected" => {
+            let signal = camera_signal_name(args, "is_connected")?;
+            Ok(Variant::Bool(
+                CAMERA_SERVER_CONNECTIONS.with(|c| c.borrow().iter().any(|(s, _)| *s == signal)),
+            ))
         }
         "set_monitoring_feeds" => {
             if let Some(Variant::Bool(b)) = args.first() {

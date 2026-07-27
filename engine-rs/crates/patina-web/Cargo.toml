@@ -17,9 +17,30 @@ crate-type = ["cdylib", "rlib"]
 # (pat-u3l8c.110-.113).
 gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
+# The engine's real mixer (AudioServer + AudioMixer) plus the web device layer
+# it feeds (gdaudio::WebAudioOutput). Not target-gated: gdaudio's native-only
+# pieces (cpal, minimp3) are gated inside that crate, and keeping it on both
+# targets is what lets the mixer -> ring -> worklet-block path in `audio` be
+# unit-tested on the host instead of only in a browser (pat-u3l8c.112).
+gdaudio = { path = "../gdaudio" }
 
 # Browser bindings are only needed when actually targeting wasm32; keeping them
 # target-gated keeps native `cargo test -p patina-web` dependency-light.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"
+# Canvas rendering (pat-u3l8c.110). `webgl` adds wgpu's WebGL2 backend next to
+# the default WebGPU one so browsers without WebGPU still get an adapter; wgpu
+# itself is reached through `gdrender3d::wgpu` so the versions cannot skew.
+gdrender3d = { path = "../gdrender3d", features = ["webgl"] }
+# `AudioContext`/`BaseAudioContext` are what the audio backend (pat-u3l8c.112)
+# needs: constructing the graph and reading the rate the browser actually chose,
+# which is the rate the mixer output has to be resampled to.
+web-sys = { version = "0.3", features = [
+    "AudioContext",
+    "BaseAudioContext",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Window",
+] }

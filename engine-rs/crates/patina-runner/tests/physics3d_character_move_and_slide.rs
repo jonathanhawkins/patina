@@ -47,12 +47,15 @@ fn unique_project_dir(tag: &str) -> PathBuf {
 /// The wall's near face is x = 4.5; a 0.5m-radius capsule stops at x = 4.
 /// NOTE ON SHAPE AUTHORING: the colliders below use the class-name + dimension
 /// convention (`shape = "BoxShape3D"` with `size` on the node) rather than
-/// `shape = SubResource("...")`. `shape_from_node_3d` matches only bare class
-/// names — it has no `SubResource:<id>` arm, so the 2D sub-resource resolution
-/// (pat-0q2kx.28/.34) has no 3D counterpart yet and a real editor-authored 3D
-/// scene resolves to no shapes at all. That is a separate parity gap, reported
-/// alongside this bead; using the supported convention here keeps THIS test
-/// about character movement rather than about shape loading.
+/// `shape = SubResource("...")`, which keeps THIS test about character movement
+/// rather than about shape loading.
+///
+/// This note used to add that `shape_from_node_3d` had no `SubResource:<id>` arm
+/// and that an editor-authored 3D scene therefore "resolves to no shapes at
+/// all". **That gap has since been closed** — `physics_server_3d.rs` resolves a
+/// `SubResource:` reference through the `__shape__class` companion the packed
+/// scene copies onto the node, mirroring the 2D path. Either convention works
+/// now; this one is simply the more direct to author inline.
 const MAIN_TSCN: &str = r#"[gd_scene load_steps=2 format=3]
 
 [ext_resource type="Script" path="res://player.gd" id="1_player"]

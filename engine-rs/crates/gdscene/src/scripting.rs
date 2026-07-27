@@ -1403,6 +1403,39 @@ impl SceneAccess for SceneTreeAccessor {
                 "platform_velocity",
             ))),
 
+            // -- RayCast2D script API (pat-0q2kx.32) --------------------------
+            //
+            // The interpreter already carries these in `call_method_on`, but
+            // that table is only reached for a call *on another object*
+            // (`$Ray.is_colliding()`). A bare `is_colliding()` — how a script on
+            // the RayCast2D itself writes it, and what Godot's own docs show —
+            // resolves through `call_self_func_or_native`, which tries user
+            // funcs and then lands **here**. Missing from this table, those
+            // names raised `UndefinedFunction` and aborted `_physics_process` at
+            // the first getter, so nothing after it ran.
+            //
+            // Keys match what `raycast2d::store_hit` publishes.
+            "is_colliding" => Some(Variant::Bool(bool_prop(self.tree(), "_hit_colliding"))),
+            "get_collision_point" => {
+                Some(Variant::Vector2(vec2_prop(self.tree(), "_hit_point")))
+            }
+            "get_collision_normal" => {
+                Some(Variant::Vector2(vec2_prop(self.tree(), "_hit_normal")))
+            }
+            "get_collider" => Some(
+                self.tree()
+                    .get_node(nid)
+                    .map(|n| n.get_property("_hit_collider"))
+                    .unwrap_or(Variant::Nil),
+            ),
+            // Godot re-runs the cast immediately so the *same* frame sees the
+            // result; the per-tick pass runs after the script phase, so without
+            // this a script could never observe a hit during `_physics_process`.
+            "force_raycast_update" => {
+                self.force_raycast_update_2d(node);
+                Some(Variant::Nil)
+            }
+
             // -- RigidBody3D force / impulse script API (pat-0q2kx.37) --------
             //
             // A body holds no handle on the PhysicsServer, so these accumulate

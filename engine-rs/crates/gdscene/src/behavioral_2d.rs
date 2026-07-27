@@ -419,6 +419,34 @@ fn touch_button_hit(tree: &SceneTree, id: NodeId, local: Vector2) -> bool {
     false
 }
 
+/// Publishes every `TouchScreenButton`'s [`BUTTON_PRESSED_PROP`] once per
+/// frame, so a button reads `false` before it is ever touched instead of `Nil`.
+///
+/// [`route_touch_screen_buttons`] only runs when an input event arrives, so
+/// without this a scene that has simply never been touched exposes no
+/// `is_pressed` at all and a script reading it gets Nil rather than a bool —
+/// Godot's `TouchScreenButton::is_pressed()` returns `false` from the start.
+///
+/// Re-publishing the value it just read makes this idempotent: it materializes
+/// the default without ever clobbering a press routed earlier in the same
+/// frame, whichever order the two phases run in.
+pub fn process_touch_screen_buttons(tree: &mut SceneTree) {
+    let mut buttons: Vec<NodeId> = Vec::new();
+    for id in tree.all_nodes_in_tree_order() {
+        if let Some(node) = tree.get_node(id) {
+            if node.class_name() == "TouchScreenButton" {
+                buttons.push(id);
+            }
+        }
+    }
+    for id in buttons {
+        let state = bool_prop(tree, id, BUTTON_PRESSED_PROP, false);
+        if let Some(node) = tree.get_node_mut(id) {
+            node.set_property(BUTTON_PRESSED_PROP, Variant::Bool(state));
+        }
+    }
+}
+
 /// Routes a pointer/touch event to `TouchScreenButton` nodes: sets
 /// [`BUTTON_PRESSED_PROP`], emits `pressed` / `released`, and reports the
 /// actions to inject.
@@ -455,6 +483,10 @@ pub fn route_touch_screen_buttons(tree: &mut SceneTree, event: &InputEvent) -> V
         action: String,
     }
     let mut changes: Vec<Change> = Vec::new();
+    // Every button this event reaches republishes its state, whether or not it
+    // moved. Publishing only on a flip left `is_pressed` absent — reading Nil,
+    // not `false` — on any button that had never been pressed.
+    let mut publish: Vec<(NodeId, bool)> = Vec::new();
 
     for id in tree.all_nodes_in_tree_order() {
         let Some(node) = tree.get_node(id) else {
@@ -466,24 +498,29 @@ pub fn route_touch_screen_buttons(tree: &mut SceneTree, event: &InputEvent) -> V
 
         let was_pressed = bool_prop(tree, id, BUTTON_PRESSED_PROP, false);
         let passby = bool_prop(tree, id, "passby_press", false);
+
         // A move only presses a button that opted into passby_press; without it
-        // a drag across the screen must not trip every button it crosses.
-        if pressed.is_none() && !passby {
-            continue;
-        }
+        // a drag across the screen must not trip every button it crosses — it
+        // holds its current state rather than dropping out of the pass, so the
+        // property is still published below.
+        let now_pressed = if pressed.is_none() && !passby {
+            was_pressed
+        } else {
+            let local = node2d::get_global_transform(tree, id)
+                .affine_inverse()
+                .xform(position);
+            let hit = touch_button_hit(tree, id, local);
 
-        let local = node2d::get_global_transform(tree, id)
-            .affine_inverse()
-            .xform(position);
-        let hit = touch_button_hit(tree, id, local);
-
-        let now_pressed = match pressed {
-            // A release anywhere releases a held button — lifting your finger
-            // off the edge must not leave it stuck down.
-            Some(false) => false,
-            Some(true) => hit,
-            None => hit,
+            match pressed {
+                // A release anywhere releases a held button — lifting your
+                // finger off the edge must not leave it stuck down.
+                Some(false) => false,
+                Some(true) => hit,
+                None => hit,
+            }
         };
+
+        publish.push((id, now_pressed));
         if now_pressed == was_pressed {
             continue;
         }
@@ -499,11 +536,16 @@ pub fn route_touch_screen_buttons(tree: &mut SceneTree, event: &InputEvent) -> V
         });
     }
 
+    // Published before any signal fires so a handler reading `is_pressed` sees
+    // the state it is being notified about, not the one it just left.
+    for (id, state) in publish {
+        if let Some(node) = tree.get_node_mut(id) {
+            node.set_property(BUTTON_PRESSED_PROP, Variant::Bool(state));
+        }
+    }
+
     let mut edits = Vec::new();
     for change in changes {
-        if let Some(node) = tree.get_node_mut(change.id) {
-            node.set_property(BUTTON_PRESSED_PROP, Variant::Bool(change.now_pressed));
-        }
         tree.emit_signal(
             change.id,
             if change.now_pressed {

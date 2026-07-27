@@ -25,10 +25,23 @@ pub mod shadow_map;
 #[cfg(test)]
 mod sky_parity_tests;
 pub mod test_adapter;
+/// Re-export of the exact `wgpu` this crate was built against, so downstream
+/// crates (notably `patina-web`) can name `wgpu` types — `SurfaceTarget`, in
+/// particular — without declaring their own `wgpu` dependency and risking a
+/// version skew that would make the types incompatible.
+#[cfg(feature = "gpu")]
+pub use wgpu;
 #[cfg(feature = "gpu")]
 pub mod wgpu_pipeline;
+/// Presentable canvas/window surfaces with async adapter+device acquisition —
+/// the browser render path (pat-u3l8c.110). Separate from [`wgpu_pipeline`],
+/// which is headless and blocks on adapter creation.
+#[cfg(feature = "gpu")]
+pub mod wgpu_surface;
 #[cfg(feature = "gpu")]
 pub use wgpu_pipeline::custom_spatial_module_wgsl;
+#[cfg(feature = "gpu")]
+pub use wgpu_surface::{GpuSurface, SurfaceInitError};
 
 pub use compare::{compare_framebuffers_3d, diff_image_3d, DiffResult3D};
 pub use depth_buffer::DepthBuffer;

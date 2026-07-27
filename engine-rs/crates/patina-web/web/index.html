@@ -1,0 +1,145 @@
+<!doctype html>
+<!--
+  Dev harness for the canvas render path (pat-u3l8c.110) and the WebAudio
+  output backend (pat-u3l8c.112).
+
+  Build the wasm bundle first:
+
+      engine-rs/crates/patina-web/build-web.sh
+
+  then serve THIS directory over HTTP (file:// cannot instantiate wasm):
+
+      python3 -m http.server 8099 --directory engine-rs/crates/patina-web/web
+
+  and open http://localhost:8099/. The status line reports which backend was
+  selected — `BrowserWebGpu` when the browser has WebGPU, `Gl` when it fell
+  back to WebGL2 — which is the observable difference .110 is about.
+
+  For audio (.112): click anywhere (or press a key) to resume the AudioContext,
+  then press "play tone". The `frames pulled` counter rising is the observable
+  proof that the AudioWorkletProcessor is draining the engine mixer's ring;
+  browsers refuse to start audio without that first gesture, so a silent page
+  with a flat counter means the context is still suspended.
+
+  This is a harness, not the shipping export pipeline; that is pat-u3l8c.114.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Patina — canvas render check</title>
+    <style>
+      body {
+        margin: 0;
+        background: #111;
+        color: #eee;
+        font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #status {
+        padding: 8px 12px;
+        white-space: pre-wrap;
+      }
+      #controls {
+        padding: 0 12px 8px;
+      }
+      button {
+        font: inherit;
+        background: #333;
+        color: #eee;
+        border: 1px solid #666;
+        padding: 4px 10px;
+        cursor: pointer;
+      }
+      #patina-canvas {
+        display: block;
+        width: 100vw;
+        height: calc(100vh - 96px);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status">starting…</div>
+    <div id="controls"><button id="tone" disabled>play tone</button></div>
+    <canvas id="patina-canvas"></canvas>
+
+    <script type="module">
+      import init, { startCanvasRenderer, startWebAudio } from "./patina_web.js";
+
+      const status = document.getElementById("status");
+      const toneButton = document.getElementById("tone");
+
+      // A worklet module has to be fetched by URL, so the glue Rust emits is
+      // turned into a Blob URL and imported like any other ES module.
+      const importSource = (source) =>
+        import(URL.createObjectURL(new Blob([source], { type: "text/javascript" })));
+
+      // Returns a getter for the audio status line, or null if audio failed to
+      // start — a page with no audio should still render.
+      async function startAudio() {
+        // 44100 is Godot's audio/driver/mix_rate default; the AudioContext
+        // picks its own rate and the engine resamples to it. The channel count
+        // is the mixer's, reported back as audio.channels.
+        const audio = startWebAudio(44100);
+        const glue = await importSource(audio.workletGlue);
+
+        glue.patinaInstallGestureUnlock(audio.context, () => audio.markUnlocked());
+        // Each time the processor asks, hand it one render quantum mixed by the
+        // engine. This runs on the main thread because that is where the wasm
+        // module lives — the same arrangement Godot's web driver uses.
+        await glue.patinaRegisterWorklet(audio.context, () =>
+          audio.pullBlock(audio.renderQuantum),
+        );
+
+        toneButton.disabled = false;
+        toneButton.addEventListener("click", () => audio.playTone(440, 1.0, 0.4));
+
+        return () =>
+          `audio:   ${audio.contextRate} Hz context / ${audio.mixRate} Hz mix, ` +
+          `${audio.channels}ch\n` +
+          `         ${audio.isUnlocked ? "unlocked" : "SUSPENDED — click or press a key"}, ` +
+          `${audio.framesPulled} frames pulled, ${audio.queuedFrames} queued`;
+      }
+
+      try {
+        await init();
+        const renderer = await startCanvasRenderer("patina-canvas");
+        const renderLines =
+          `backend: ${renderer.backend}\n` +
+          `adapter: ${renderer.adapter}\n` +
+          `format:  ${renderer.format}\n` +
+          `size:    ${renderer.width}x${renderer.height}`;
+
+        // Audio must not take the page down with it: a browser that refuses to
+        // create an AudioContext should still show the render check.
+        let audioLine = () => "audio:   not started";
+        try {
+          audioLine = await startAudio();
+        } catch (err) {
+          audioLine = () => `audio:   failed: ${err}`;
+        }
+
+        // Animate the clear color so a still frame is distinguishable from a
+        // dead loop: a frozen canvas means present() stopped working.
+        const start = performance.now();
+        let skipped = false;
+        const frame = () => {
+          renderer.syncSize();
+          const t = (performance.now() - start) / 1000;
+          const pulse = 0.25 + 0.2 * Math.sin(t);
+          if (!renderer.presentClear(0.05, pulse, 0.35)) {
+            skipped = true;
+          }
+          status.textContent =
+            renderLines +
+            "\n" +
+            audioLine() +
+            (skipped ? "\nframe skipped (surface not ready)" : "");
+          requestAnimationFrame(frame);
+        };
+        requestAnimationFrame(frame);
+      } catch (err) {
+        status.textContent = `failed: ${err}`;
+        throw err;
+      }
+    </script>
+  </body>
+</html>

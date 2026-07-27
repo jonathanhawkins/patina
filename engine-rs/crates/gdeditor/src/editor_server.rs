@@ -6703,6 +6703,22 @@ fn api_assign_resource_property(
 /// Body: `{"node_id": 123, "property": "shape", "class_name": "RectangleShape2D"}`.
 /// The resource is stored as `SubResource("id")` plus the `__resref__<prop>` =
 /// `Class::id` companion the scene saver turns into a `[sub_resource]` section.
+/// The companion-key prefix an inline sub-resource's body is flattened under for
+/// `property`, or `None` for properties whose body is not cached on the node.
+///
+/// Mirrors `scene_saver::companion_prefix_for`, which is private to `gdscene`.
+/// The two MUST agree: the saver rebuilds a `[sub_resource]` body from these
+/// keys, so a prefix that is right here and wrong there would write a `.tres`
+/// with different contents than the scene it replaces.
+fn inline_resource_companion_prefix(property: &str) -> Option<&'static str> {
+    match property {
+        "shape" => Some("__shape__"),
+        "curve" => Some("__curve__"),
+        "material" | "material_override" | "surface_material_override/0" => Some("__material__"),
+        _ => None,
+    }
+}
+
 /// `POST /api/property/resource/save_as` — writes an inline resource out to a
 /// `.tres` and repoints the property at it (pat-0q2kx.13).
 ///
@@ -6758,23 +6774,76 @@ fn api_save_resource_property_as(
     // Only an INLINE resource can be saved out. A property already holding a
     // path has nothing to write, and reporting that plainly beats silently
     // rewriting the file it points at.
-    let current = state
-        .scene_tree
-        .get_node(node_id)
-        .map(|n| n.get_property(&property));
-    let Some(Variant::Resource(res_ref)) = current else {
-        send_error(stream, 400, "property holds no inline resource");
+    let Some(node) = state.scene_tree.get_node(node_id) else {
+        send_error(stream, 404, "node not found");
         return;
+    };
+    let current = node.get_property(&property);
+
+    // An inline resource has TWO representations in this tree, and reading only
+    // the first is what made this route reject its own picker's output:
+    //
+    //   (a) `Variant::Resource(ResourceRef)` — a resource loaded from a file and
+    //       then edited in place by `api_set_resource_property`.
+    //   (b) `SubResource("id")` on the property, `__resref__<prop>` = `Class::id`,
+    //       and the body flattened into `<prefix><key>` companions — which is
+    //       exactly what `api_new_resource_property` ("New <Type>") writes and
+    //       what `.tscn` loading produces. This is the COMMON case: every
+    //       resource the picker creates lands here, never in (a).
+    let (class_name, res_props): (String, Vec<(String, Variant)>) = match &current {
+        Variant::Resource(res_ref) => (
+            res_ref.class_name.clone(),
+            res_ref
+                .properties
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
+        // Already external. Checked BEFORE the companion lookup because a stale
+        // `__resref__` left over from a previous inline value would otherwise
+        // make this route re-save — and overwrite — the file the property
+        // already points at.
+        Variant::String(s) if s.starts_with("ExtResource(") || s.starts_with("res://") => {
+            send_error(stream, 400, "property is already an external resource");
+            return;
+        }
+        Variant::String(_) => {
+            let Variant::String(meta) = node.get_property(&format!("__resref__{property}")) else {
+                send_error(stream, 400, "property holds no inline resource");
+                return;
+            };
+            let Some((class, _id)) = meta.rsplit_once("::") else {
+                send_error(stream, 400, "property holds no inline resource");
+                return;
+            };
+            // `class` is the section's `type=`, not a property of the resource.
+            let prefix = inline_resource_companion_prefix(&property);
+            let props = prefix
+                .map(|prefix| {
+                    node.properties()
+                        .filter_map(|(k, v)| {
+                            let key = k.strip_prefix(prefix)?;
+                            (key != "class").then(|| (key.to_string(), v.clone()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            (class.to_string(), props)
+        }
+        _ => {
+            send_error(stream, 400, "property holds no inline resource");
+            return;
+        }
     };
 
     // `Variant::Resource` carries a `gdvariant::ResourceRef`, while the saver
     // takes a `gdresource::Resource` — different types, and the latter's
     // `properties` map is private, so it is rebuilt through the public setter
     // rather than by struct literal.
-    let mut resource = gdresource::Resource::new(&res_ref.class_name);
+    let mut resource = gdresource::Resource::new(&class_name);
     resource.path = res_path.to_string();
-    for (key, value) in &res_ref.properties {
-        resource.set_property(key.clone(), value.clone());
+    for (key, value) in res_props {
+        resource.set_property(key, value);
     }
     let text = match gdresource::TresSaver::new().save_to_string(&resource) {
         Ok(t) => t,
@@ -6791,19 +6860,35 @@ fn api_save_resource_property_as(
         return;
     }
 
-    // Repoint the property, undoably, at the file just written.
+    // Repoint the property, undoably, at the file just written — in the SAME
+    // shape `api_assign_resource_property` produces, which is the only shape the
+    // saver turns into an `[ext_resource]`: the property holds
+    // `ExtResource("id")` and the resolved path rides in `__extres__<prop>`.
+    // A bare `res://…` string here would round-trip as a plain string property
+    // with no `[ext_resource]` header — the file would be written and the scene
+    // would still not reference it.
+    let tree_root = state.scene_tree.root_id();
+    let used = used_resource_ids(&state.scene_tree, tree_root);
+    let stem = std::path::Path::new(res_path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext_id = next_resource_id(&used, &stem);
     let mut cmd = EditorCommand::SetProperty {
         node_id,
         property: property.clone(),
-        new_value: Variant::String(res_path.to_string()),
-        old_value: Variant::Resource(res_ref),
+        new_value: Variant::String(format!("ExtResource(\"{ext_id}\")")),
+        old_value: current,
     };
     if let Err(e) = cmd.execute(&mut state.scene_tree) {
         send_error(stream, 500, &e.to_string());
         return;
     }
     // Drop the inline sub-resource bookkeeping so the save does not ALSO emit a
-    // `[sub_resource]` for a property that is now an external reference.
+    // `[sub_resource]` for a property that is now an external reference. The
+    // flattened `<prefix>*` body companions stay: they are the physics/render
+    // layer's cache of the shape's geometry and are still accurate, and the
+    // saver already suppresses a `[sub_resource]` body once `__resref__` is Nil.
     if let Some(node) = state.scene_tree.get_node_mut(node_id) {
         node.set_property(&format!("__resref__{property}"), Variant::Nil);
         node.set_property(
@@ -6813,6 +6898,7 @@ fn api_save_resource_property_as(
     }
     state.undo_stack.push(cmd);
     state.redo_stack.clear();
+    state.scene_modified = true;
     state.add_log("info", format!("Saved {property} to {res_path}"));
 
     send_json(stream, &format!(r#"{{"ok":true,"path":"{res_path}"}}"#));

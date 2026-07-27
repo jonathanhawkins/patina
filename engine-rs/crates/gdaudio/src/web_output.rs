@@ -236,6 +236,15 @@ impl AudioOutputStream for WebAudioOutput {
     }
 }
 
+/// Blocks the processor keeps requested-but-not-yet-delivered.
+///
+/// ⚠️ Must be > 1. The host that answers a `need-block` request lives on the
+/// main thread, so a processor that only asks for a replacement *after*
+/// consuming one is always exactly one main-thread turn behind — every time the
+/// page does a long task the graph gets silence. Keeping a few in flight buys
+/// that many render quanta (~8 ms at 3 x 128 frames / 48 kHz) of slack.
+pub const WORKLET_QUEUE_DEPTH: usize = 3;
+
 /// The JS the wasm host evaluates to stand up the worklet (pat-0q2kx.59).
 ///
 /// Registers an `AudioWorkletProcessor` that pulls from the module's ring and
@@ -246,30 +255,51 @@ impl AudioOutputStream for WebAudioOutput {
 /// Emitted as a string rather than a static asset so the contract is
 /// assertable from a native test.
 pub fn audio_worklet_glue(processor_name: &str, channels: u16) -> String {
+    let queue_depth = WORKLET_QUEUE_DEPTH;
     format!(
-        r#"// Patina web audio glue (pat-0q2kx.59)
+        r#"// Patina web audio glue (pat-0q2kx.59, pat-u3l8c.112)
 const PATINA_PROCESSOR = "{processor_name}";
 const PATINA_CHANNELS = {channels};
 
 export function patinaRegisterWorklet(context, pullFrames) {{
   const src = `
+    // A worklet module gets its own global scope, so every value the host side
+    // knows has to be baked into this source rather than referenced.
+    const PATINA_QUEUE_DEPTH = {queue_depth};
+
     class PatinaProcessor extends AudioWorkletProcessor {{
       constructor() {{
         super();
         this._queue = [];
-        this.port.onmessage = (e) => {{ this._queue.push(e.data); }};
+        // Requests posted but not yet answered. Without this the top-up loop
+        // below re-asks for the same blocks every render quantum.
+        this._pending = 0;
+        this.port.onmessage = (e) => {{
+          this._queue.push(e.data);
+          if (this._pending > 0) this._pending--;
+        }};
       }}
       process(inputs, outputs) {{
         const out = outputs[0];
         const block = this._queue.shift();
-        for (let ch = 0; ch < out.length; ch++) {{
+        const want = out.length;
+        for (let ch = 0; ch < want; ch++) {{
           const dst = out[ch];
           for (let i = 0; i < dst.length; i++) {{
-            dst[i] = block ? block[i * out.length + ch] : 0;
+            const idx = i * want + ch;
+            // A short or missing block reads back undefined, which lands in the
+            // Float32Array as NaN and is an audible click; silence is the
+            // correct filler for an underrun.
+            dst[i] = block && idx < block.length ? block[idx] : 0;
           }}
         }}
-        // Ask the host for the next block; the reply lands in onmessage above.
-        this.port.postMessage("need-block");
+        // Keep PATINA_QUEUE_DEPTH blocks queued or in flight. Asking for a
+        // single replacement here would leave the graph one main-thread turn
+        // from silence on every render quantum.
+        while (this._queue.length + this._pending < PATINA_QUEUE_DEPTH) {{
+          this._pending++;
+          this.port.postMessage("need-block");
+        }}
         return true;
       }}
     }}
@@ -373,5 +403,64 @@ mod tests {
         assert!(glue.contains("pointerdown"));
         assert!(glue.contains("keydown"));
         assert!(glue.contains("context.resume()"));
+    }
+
+    /// ⚠️ The processor must keep more than one block requested. Replacing one
+    /// block per `process()` leaves the graph permanently one main-thread turn
+    /// from silence, which is heard as constant crackle rather than as an
+    /// outright failure (pat-u3l8c.112).
+    #[test]
+    fn glue_keeps_several_blocks_in_flight() {
+        assert!(
+            WORKLET_QUEUE_DEPTH > 1,
+            "a depth of 1 is the starvation bug this constant exists to prevent"
+        );
+        let glue = audio_worklet_glue("patina-out", 2);
+        assert!(
+            glue.contains(&format!("PATINA_QUEUE_DEPTH = {WORKLET_QUEUE_DEPTH}")),
+            "the depth must be baked into the worklet source — a worklet module \
+             cannot see the host module's scope"
+        );
+        assert!(
+            glue.contains("this._queue.length + this._pending"),
+            "in-flight requests must be counted, or the top-up loop re-asks every quantum"
+        );
+    }
+
+    /// A short block must read as silence, not `undefined` — an `undefined`
+    /// stored into a `Float32Array` becomes NaN, which is an audible click.
+    #[test]
+    fn glue_pads_a_short_block_with_silence() {
+        let glue = audio_worklet_glue("patina-out", 2);
+        assert!(glue.contains("idx < block.length"));
+    }
+
+    /// ⚠️ The worklet body is carried inside a JS **template literal**, so a
+    /// single backtick anywhere in it — including in a comment — closes the
+    /// literal early and registers a truncated processor. The glue still looks
+    /// plausible as a string and every `contains` assertion above still passes;
+    /// the only symptom is that the browser throws on `addModule` and the page
+    /// is silent. Assert the body actually reaches its `registerProcessor`
+    /// call (pat-u3l8c.112).
+    #[test]
+    fn the_worklet_source_is_not_truncated_by_a_stray_backtick() {
+        let glue = audio_worklet_glue("patina-out", 2);
+        let after_open = glue
+            .split_once("const src = `")
+            .expect("the glue must build a worklet module source")
+            .1;
+        let body = after_open
+            .split_once('`')
+            .expect("the template literal must be closed")
+            .0;
+        assert!(
+            body.contains("registerProcessor"),
+            "a backtick inside the worklet source closed its template literal early — \
+             the browser would register a truncated processor. Body was:\n{body}"
+        );
+        assert!(
+            body.contains("class PatinaProcessor"),
+            "the processor class must live inside the worklet module, not outside it"
+        );
     }
 }

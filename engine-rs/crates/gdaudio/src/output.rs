@@ -5,6 +5,10 @@
 //! - [`CaptureAudioOutput`] — records mixed PCM for tests / offline capture
 //! - [`PlatformAudioOutput`] — real device output via `cpal` (CoreAudio / WASAPI / ALSA)
 
+// Only the cpal-backed device output shares state with a callback thread, and
+// that whole half of the module is gated off on wasm32 — an ungated import here
+// would warn on every web build.
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, Mutex};
 
 use crate::sample::{AudioOutputStream, AudioSampleBuffer, ChannelLayout};
@@ -321,6 +325,9 @@ mod tests {
         );
     }
 
+    /// Native only: `PlatformAudioOutput` is the cpal device layer and does not
+    /// exist on wasm32, where the browser's AudioWorklet is the device instead.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn platform_output_try_open_is_real_backend() {
         // In CI without audio this may fail; that is OK. When it succeeds we

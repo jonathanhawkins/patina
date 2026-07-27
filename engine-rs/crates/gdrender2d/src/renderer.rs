@@ -1477,4 +1477,203 @@ mod tests {
         assert!((pixel.g - 0.5).abs() < 0.01);
         assert!(pixel.r.abs() < 0.01);
     }
+
+    // =======================================================================
+    // Scissor / clip_rect (pat-0q2kx.86)
+    //
+    // `Control.clip_contents` — and therefore ScrollContainer — reaches pixels
+    // through exactly one mechanism: `CanvasItem::clip_rect` becomes
+    // `FrameBuffer::scissor` for the span of that item's command list. The
+    // ScrollContainer end-to-end assertions live in gdscene
+    // (`control_render_test::scroll_container_clips_and_scrolls`), which proves
+    // the whole chain but cannot say *where* a regression is. These pin the
+    // rasterizer's half of it directly.
+    // =======================================================================
+
+    /// The scissor gates the two primitive writes every `draw::` routine funnels
+    /// through, so one check covers rects, circles, lines, textures and text.
+    #[test]
+    fn scissor_discards_writes_outside_the_rect() {
+        let mut fb = FrameBuffer::new(8, 8, Color::BLACK);
+        fb.scissor = Some(Rect2::new(Vector2::new(2.0, 2.0), Vector2::new(4.0, 4.0)));
+
+        fb.set_pixel(3, 3, Color::WHITE);
+        fb.set_pixel(0, 0, Color::WHITE);
+        fb.blend_pixel(4, 4, Color::WHITE);
+        fb.blend_pixel(7, 7, Color::WHITE);
+
+        assert_eq!(
+            fb.get_pixel(3, 3),
+            Color::WHITE,
+            "a set_pixel inside the scissor must land"
+        );
+        // Asserted as "no longer the background" rather than an exact colour:
+        // what is under test is the clip, not the blend equation.
+        assert_ne!(
+            fb.get_pixel(4, 4),
+            Color::BLACK,
+            "a blend_pixel inside the scissor must land"
+        );
+        assert_eq!(
+            fb.get_pixel(0, 0),
+            Color::BLACK,
+            "set_pixel outside the scissor must be discarded, not clamped"
+        );
+        assert_eq!(
+            fb.get_pixel(7, 7),
+            Color::BLACK,
+            "blend_pixel outside the scissor must be discarded too — blending is \
+             the path alpha content takes, and skipping it there would let a \
+             translucent overflow through"
+        );
+    }
+
+    /// Half-open on the far edges, matching `Rect2::has_point`. This is what
+    /// makes a clip rect of exactly the control's size keep the column at
+    /// `position.x + size.x` outside instead of painting one pixel of overflow.
+    #[test]
+    fn scissor_edges_are_half_open() {
+        let mut fb = FrameBuffer::new(8, 8, Color::BLACK);
+        fb.scissor = Some(Rect2::new(Vector2::new(2.0, 2.0), Vector2::new(4.0, 4.0)));
+
+        fb.set_pixel(2, 2, Color::WHITE); // near edge: inside
+        fb.set_pixel(5, 5, Color::WHITE); // last pixel inside
+        fb.set_pixel(6, 6, Color::WHITE); // far edge: outside
+        fb.set_pixel(1, 1, Color::WHITE); // just before the near edge
+
+        assert_eq!(fb.get_pixel(2, 2), Color::WHITE, "the near edge is inside");
+        assert_eq!(
+            fb.get_pixel(5, 5),
+            Color::WHITE,
+            "position + size - 1 is the last pixel inside"
+        );
+        assert_eq!(
+            fb.get_pixel(6, 6),
+            Color::BLACK,
+            "position + size is outside — half-open, or every clipped control \
+             would bleed a pixel"
+        );
+        assert_eq!(fb.get_pixel(1, 1), Color::BLACK, "before the near edge");
+    }
+
+    /// No scissor is every item's default, and must not clip anything.
+    #[test]
+    fn no_scissor_writes_everywhere() {
+        let mut fb = FrameBuffer::new(4, 4, Color::BLACK);
+        assert!(fb.scissor.is_none(), "unclipped is the default");
+        fb.set_pixel(0, 0, Color::WHITE);
+        fb.set_pixel(3, 3, Color::WHITE);
+        assert_eq!(fb.get_pixel(0, 0), Color::WHITE);
+        assert_eq!(fb.get_pixel(3, 3), Color::WHITE);
+    }
+
+    /// End-to-end through `render_frame`: an item whose command overflows its
+    /// `clip_rect` is cut off at the rect. This is the ScrollContainer case with
+    /// the scene layer removed — an oversized child inside a smaller viewport.
+    #[test]
+    fn canvas_item_clip_rect_cuts_off_an_oversized_command() {
+        let mut renderer = SoftwareRenderer::new();
+        let mut vp = Viewport::new(16, 16, Color::BLACK);
+
+        let mut item = CanvasItem::new(CanvasItemId(1));
+        // A 16x16 fill inside an 8x8 clip: the bottom-right quadrant survives
+        // nothing, the top-left quadrant survives whole.
+        item.commands.push(DrawCommand::DrawRect {
+            rect: Rect2::new(Vector2::ZERO, Vector2::new(16.0, 16.0)),
+            color: Color::WHITE,
+            filled: true,
+        });
+        item.set_clip_rect(Rect2::new(Vector2::ZERO, Vector2::new(8.0, 8.0)));
+        vp.add_canvas_item(item);
+
+        let frame = renderer.render_frame(&vp);
+        assert_eq!(
+            frame.pixels[2 * 16 + 2],
+            Color::WHITE,
+            "inside the clip rect the command draws normally"
+        );
+        assert_eq!(
+            frame.pixels[12 * 16 + 12],
+            Color::BLACK,
+            "past the clip rect the same command must not reach the framebuffer"
+        );
+    }
+
+    /// The clip rect is in the item's LOCAL space, so it rides the item's
+    /// transform along with the commands it bounds. A clip that was applied in
+    /// framebuffer space would cut the wrong region for any translated item —
+    /// which is every scrolled control, since scrolling *is* a translation.
+    #[test]
+    fn clip_rect_follows_the_items_transform() {
+        let mut renderer = SoftwareRenderer::new();
+        let mut vp = Viewport::new(16, 16, Color::BLACK);
+
+        let mut item = CanvasItem::new(CanvasItemId(1));
+        item.commands.push(DrawCommand::DrawRect {
+            rect: Rect2::new(Vector2::ZERO, Vector2::new(16.0, 16.0)),
+            color: Color::WHITE,
+            filled: true,
+        });
+        // Same local 8x8 clip as above, but the item is shifted 8px right/down,
+        // so the surviving band is the BOTTOM-RIGHT quadrant this time.
+        item.set_clip_rect(Rect2::new(Vector2::ZERO, Vector2::new(8.0, 8.0)));
+        item.transform = Transform2D::translated(Vector2::new(8.0, 8.0));
+        vp.add_canvas_item(item);
+
+        let frame = renderer.render_frame(&vp);
+        assert_eq!(
+            frame.pixels[12 * 16 + 12],
+            Color::WHITE,
+            "the clip moved with the item, so this quadrant is now inside it"
+        );
+        assert_eq!(
+            frame.pixels[2 * 16 + 2],
+            Color::BLACK,
+            "and the quadrant the untransformed clip covered is now outside — \
+             proving the rect is transformed, not applied in screen space"
+        );
+    }
+
+    /// Items rasterize flat (no draw-order stack), so the scissor has to be
+    /// restored when an item's command list ends. Without that, the first
+    /// clipped control in a scene would silently clip everything drawn after it.
+    #[test]
+    fn clip_rect_does_not_leak_into_the_next_item() {
+        let mut renderer = SoftwareRenderer::new();
+        let mut vp = Viewport::new(16, 16, Color::BLACK);
+
+        let mut clipped = CanvasItem::new(CanvasItemId(1));
+        clipped.commands.push(DrawCommand::DrawRect {
+            rect: Rect2::new(Vector2::ZERO, Vector2::new(16.0, 16.0)),
+            color: Color::rgb(1.0, 0.0, 0.0),
+            filled: true,
+        });
+        clipped.set_clip_rect(Rect2::new(Vector2::ZERO, Vector2::new(8.0, 8.0)));
+        clipped.z_index = 0;
+        vp.add_canvas_item(clipped);
+
+        // Drawn after, unclipped, and covering the region the first item's clip
+        // excluded.
+        let mut unclipped = CanvasItem::new(CanvasItemId(2));
+        unclipped.commands.push(DrawCommand::DrawRect {
+            rect: Rect2::new(Vector2::new(8.0, 8.0), Vector2::new(8.0, 8.0)),
+            color: Color::rgb(0.0, 1.0, 0.0),
+            filled: true,
+        });
+        unclipped.z_index = 1;
+        vp.add_canvas_item(unclipped);
+
+        let frame = renderer.render_frame(&vp);
+        assert_eq!(
+            frame.pixels[12 * 16 + 12],
+            Color::rgb(0.0, 1.0, 0.0),
+            "the second item is unclipped and must paint in full — a leaked \
+             scissor would have discarded this pixel"
+        );
+        assert_eq!(
+            frame.pixels[2 * 16 + 2],
+            Color::rgb(1.0, 0.0, 0.0),
+            "and the first item still drew inside its own clip"
+        );
+    }
 }

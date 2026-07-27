@@ -6071,6 +6071,43 @@ pub fn register_2d_classes() {
                     Variant::Color(gdcore::math::Color::WHITE),
                 ))
                 .property(PropertyInfo::new("z_index", Variant::Int(0)))
+                // pat-0q2kx.39 — the other 12 of CanvasItem's 15 documented
+                // properties. Only visible/modulate/z_index were registered, so
+                // `get_property_list("CanvasItem")` reported that a canvas item
+                // has no `self_modulate`, `z_as_relative`, `y_sort_enabled` or
+                // `clip_children` — the very properties the Play-path render walk
+                // now reads (gdeditor/src/viewport_2d_render.rs via
+                // gdscene::canvas_order). Anything that answers from ClassDB
+                // rather than from the node's own property map — the inspector's
+                // property list, `.tscn` default elision, script `get_property_list`
+                // — could not see them. Defaults are the `default=` attribute of
+                // upstream/godot/doc/classes/CanvasItem.xml; `material` has no
+                // documented default because it is an unset Resource reference.
+                .property(PropertyInfo::new(
+                    "self_modulate",
+                    Variant::Color(gdcore::math::Color::WHITE),
+                ))
+                .property(PropertyInfo::new(
+                    "show_behind_parent",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("top_level", Variant::Bool(false)))
+                .property(PropertyInfo::new("clip_children", Variant::Int(0)))
+                .property(PropertyInfo::new("light_mask", Variant::Int(1)))
+                .property(PropertyInfo::new("visibility_layer", Variant::Int(1)))
+                // `true` is Godot's default and the one that matters: a child's
+                // `z_index` accumulates onto its parent's unless a scene opts out.
+                // Registering `false` here would invert the documented behaviour
+                // for every node that never serializes the property.
+                .property(PropertyInfo::new("z_as_relative", Variant::Bool(true)))
+                .property(PropertyInfo::new("y_sort_enabled", Variant::Bool(false)))
+                .property(PropertyInfo::new("texture_filter", Variant::Int(0)))
+                .property(PropertyInfo::new("texture_repeat", Variant::Int(0)))
+                .property(PropertyInfo::new("material", Variant::Nil))
+                .property(PropertyInfo::new(
+                    "use_parent_material",
+                    Variant::Bool(false),
+                ))
                 // The custom-drawing surface (pat-0q2kx.82). `queue_redraw` was
                 // not registered at all, so `has_method("queue_redraw")` — and
                 // anything else that answers from ClassDB rather than from the

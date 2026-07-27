@@ -12,18 +12,23 @@ lewton = "0.10"
 # Ogg transport demuxing for OggPacketSequence (pat-nzgdu.188); already in the
 # lock as a lewton dependency, so this pins no new version.
 ogg = "0.8"
-# Real ISO MP3 decoding (pat-p0s82.13); Godot uses the same minimp3 decoder.
-minimp3 = "0.6"
 thiserror.workspace = true
 tracing.workspace = true
 
-# cpal drives the native audio device and does not build for wasm32, which is
-# why `patina-web` had to exclude gdaudio entirely (pat-0q2kx.59). Everything
-# else in this crate — mixer, server, decoders, effects — is portable Rust, so
-# gating the device layer here lets the whole audio stack compile to wasm and
-# feed an AudioWorklet instead.
+# Native-only device/codec layer. Everything else in this crate — mixer, server,
+# bus/effects, the wav/ogg decoders — is portable Rust, so gating just these two
+# lets the whole audio stack compile to wasm32 and feed an AudioWorklet instead
+# (pat-0q2kx.59, pat-u3l8c.112).
+#
+# * cpal drives the system audio device and has no wasm32-unknown-unknown backend.
+# * minimp3 wraps the C `minimp3` sources through `cc`, which needs a clang that
+#   can target wasm32; the browser decodes MP3 itself, so the web build reports
+#   `UnsupportedFormat` for ISO MP3 rather than dragging a C toolchain into the
+#   wasm build. The `PATMP3` fixture path stays available on every target.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal = "0.15"
+# Real ISO MP3 decoding (pat-p0s82.13); Godot uses the same minimp3 decoder.
+minimp3 = "0.6"
 
 [dev-dependencies]
 tempfile = "3"

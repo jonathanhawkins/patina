@@ -32,12 +32,24 @@ pub use effects::{
     EffectChain, FilterMode,
 };
 pub use mixer::AudioMixer;
-pub use output::{mix_and_write, CaptureAudioOutput, PlatformAudioError, PlatformAudioOutput};
+pub use output::{mix_and_write, CaptureAudioOutput};
+/// The cpal device backend only exists off wasm32. Re-exporting it
+/// unconditionally is what actually kept this crate from compiling for the web
+/// even after `cpal` itself was target-gated — the `use` resolved to nothing and
+/// failed the build before any browser code was reached (pat-u3l8c.112).
+#[cfg(not(target_arch = "wasm32"))]
+pub use output::{PlatformAudioError, PlatformAudioOutput};
 pub use player::AudioStreamPlayer;
 pub use sample::{AudioOutputStream, AudioSampleBuffer, ChannelLayout, NullAudioOutput};
 pub use server::{AudioServer, PlaybackId};
 pub use stream::{AudioStreamPlayback, LoopMode, PlaybackState};
 pub use wav::{decode_wav, parse_wav_header, WavError, WavHeader};
+/// The web device layer: the ring an `AudioWorkletProcessor` drains, plus the
+/// JS that registers it. Exported on every target so the producer/consumer
+/// contract stays unit-testable natively (pat-0q2kx.59, pat-u3l8c.112).
+pub use web_output::{
+    audio_worklet_glue, resample_interleaved, AudioRingBuffer, WebAudioOutput, WORKLET_QUEUE_DEPTH,
+};
 
 #[cfg(test)]
 mod tests {

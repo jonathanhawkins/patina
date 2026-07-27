@@ -106,7 +106,19 @@ fn boot_with_script(source: &str) -> (EditorServerHandle, u16, tempfile::TempDir
     tree.add_child(root, main).unwrap();
 
     let mut state = EditorState::new(tree);
+    // BOTH roots, deliberately. The Play path resolves `_script_path` through
+    // `state.texture_cache.project_root()` (editor_server.rs, where
+    // `build_play_tree` computes the root it hands to `attach_scripts_to_tree`),
+    // NOT through `state.project_root` — that one serves the filesystem routes.
+    // Setting only the latter leaves the texture cache's root empty, so the
+    // script file is never found, `attach_scripts_to_tree` logs "Failed to read
+    // script", no script is attached, and `_ready` never runs. Every assertion
+    // below would then fail on an unset `seen_mode`/`mouse_mode` while looking
+    // like a mouse-mode bug rather than a fixture bug.
     state.project_root = Some(dir.path().to_string_lossy().to_string());
+    state
+        .texture_cache
+        .set_project_root(dir.path().to_string_lossy().to_string());
 
     let port = free_port();
     let handle = EditorServerHandle::start(port, state);

@@ -125,21 +125,22 @@ func _physics_process(delta):
 
 /// Calls `force_raycast_update()` and reads the result in the same frame.
 ///
-/// ## Why this needs no property write
+/// ## What changed, and what this now proves
 ///
-/// `MainLoop::step` runs the `_physics_process` script phase (`main_loop.rs`
-/// :2797) **before** `process_raycasts` (:2921). So on the first frame, when a
-/// script is running, the tick has not published `_hit_*` even once —
-/// `is_colliding()` is false no matter where the ray points. Forcing an update
-/// is therefore the *only* way a script can see a hit during that phase, which
-/// makes this a direct test of the forced cast with the ray left completely
-/// alone.
+/// This file previously asserted that a script sees **nothing** during
+/// `_physics_process` on the first frame, because `process_raycasts` ran in the
+/// idle section *after* the script phase. That was a Patina bug, not a contract:
+/// Godot updates RayCast2D under `NOTIFICATION_INTERNAL_PHYSICS_PROCESS`
+/// (`scene/2d/physics/ray_cast_2d.cpp`), so the cast is published *before* any
+/// `_physics_process` runs. pat-0q2kx.32 moved the phase to match, which is what
+/// makes the acceptance test's `is_colliding() == true` reachable at all.
 ///
-/// An earlier version moved the ray mid-frame instead and asserted the new aim
-/// took effect. That coupled the test to how GDScript assignment resolves onto
-/// node properties — a separate mechanism that turned out not to work the way
-/// the test assumed, and which has nothing to do with this bead. Removing the
-/// write removes the coupling.
+/// The cost, stated plainly: with the tick publishing first, an aimed ray reads
+/// `true` whether or not the script forces a refresh, so these two tests no
+/// longer *discriminate* a no-op `force_raycast_update()` the way they did. What
+/// they still pin is that the call is reachable from a bare (self) call, runs,
+/// and republishes a correct hit rather than clearing or corrupting it —
+/// `raycast2d_global_transform_and_filters.rs` covers the cast itself.
 const FORCED_GD: &str = "\
 extends RayCast2D
 var before = false
@@ -152,9 +153,9 @@ func _physics_process(delta):
     self.point = get_collision_point()
 ";
 
-/// Identical to [`FORCED_GD`] except it never calls `force_raycast_update()`.
-/// This is the control that makes the assertion about the forced update mean
-/// something: same move, same reads, one missing call.
+/// Identical to [`FORCED_GD`] except it never calls `force_raycast_update()`,
+/// so it reads exactly what the per-tick pass published — which is how the
+/// ordinary (non-forcing) script sees a RayCast2D.
 const UNFORCED_GD: &str = "\
 extends RayCast2D
 var before = false
@@ -273,11 +274,10 @@ fn force_raycast_update_refreshes_within_the_frame() {
     ml.step(1.0 / 60.0);
 
     // ---- geometry first -----------------------------------------------------
-    // `process_raycasts` runs after the script phase, so by now the tick has
-    // cast this very scene itself. Asserting that BEFORE anything about
-    // `force_raycast_update` separates two failures that would otherwise look
-    // identical: "the scene never produced a hit" vs "the forced cast did not
-    // publish one". Only the second is this bead's subject.
+    // The tick has cast this very scene itself. Asserting that BEFORE anything
+    // about `force_raycast_update` separates two failures that would otherwise
+    // look identical: "the scene never produced a hit" vs "the forced cast did
+    // not publish one". Only the second is this bead's subject.
     assert_eq!(
         ml.tree()
             .get_node(ray)
@@ -289,24 +289,17 @@ fn force_raycast_update_refreshes_within_the_frame() {
 
     assert_eq!(
         script_var(&ml, ray, "before"),
-        Some(Variant::Bool(false)),
-        "the script phase runs before process_raycasts, so on the first frame \
-         nothing has published `_hit_*` yet — even aimed at the wall this must \
-         read false"
+        Some(Variant::Bool(true)),
+        "the raycast phase is internal-physics and runs BEFORE the script phase \
+         (Godot's NOTIFICATION_INTERNAL_PHYSICS_PROCESS), so a script reading \
+         is_colliding() in _physics_process already sees this frame's hit"
     );
 
-    // NOTE for whoever picks this up: `is_colliding()` returns Bool(false) both
-    // for a real miss and for the `scene_access == None` fallback, so `before`
-    // cannot distinguish them. Scene access *is* available in this phase
-    // regardless — `characterbody2d_move_and_slide_script_dispatch` calls
-    // `move_and_slide()`/`is_on_floor()` from `_physics_process` and passes — so
-    // a missing accessor is not the explanation for the failure below.
     assert_eq!(
         script_var(&ml, ray, "after"),
         Some(Variant::Bool(true)),
-        "force_raycast_update() must run the cast NOW and publish the hit, so \
-         the very next read sees it — this stays false whenever the method is \
-         a no-op"
+        "force_raycast_update() must re-run the cast and republish the same hit \
+         — a call that cleared state or silently failed would flip this to false"
     );
     match script_var(&ml, ray, "point") {
         Some(Variant::Vector2(p)) => assert!(
@@ -326,13 +319,14 @@ fn force_raycast_update_refreshes_within_the_frame() {
     );
 }
 
-/// The control: the same mid-frame turn **without** `force_raycast_update()`
-/// must NOT see the new direction this frame.
+/// The control: **without** `force_raycast_update()` a script still sees this
+/// frame's hit, because the raycast phase is internal-physics and already ran.
 ///
-/// Without this, the previous test would still pass if the cast happened to be
-/// re-run by something else, and would prove nothing about the forced call.
+/// This is the assertion the acceptance test depends on — if the per-tick pass
+/// did not publish before the script phase, `is_colliding()` could never be true
+/// for a script on the ray, no matter how the ray was aimed.
 #[test]
-fn without_the_forced_update_the_frame_keeps_the_old_result() {
+fn the_tick_publishes_before_the_script_phase() {
     // Identical scene and identical aim to the forced test — the ONLY
     // difference is the missing `force_raycast_update()` call.
     let (mut ml, ray, wall, _) = scene(UNFORCED_GD, Vector2::new(0.0, 50.0), 1, 1);
@@ -340,11 +334,10 @@ fn without_the_forced_update_the_frame_keeps_the_old_result() {
 
     assert_eq!(
         script_var(&ml, ray, "after"),
-        Some(Variant::Bool(false)),
-        "without force_raycast_update() the script phase must see nothing, \
-         even though the ray is aimed straight at the wall. If this reads true \
-         the forced-update test proves nothing — it would be passing on a cast \
-         somebody else ran"
+        Some(Variant::Bool(true)),
+        "the ray is aimed at the wall and process_raycasts runs in the internal \
+         physics phase, so the script's read during _physics_process must \
+         already see the hit"
     );
 
     // ...and the tick still resolves the very same scene once it runs, so the
@@ -354,6 +347,7 @@ fn without_the_forced_update_the_frame_keeps_the_old_result() {
             .get_node(ray)
             .map(|n| n.get_property("_hit_collider")),
         Some(Variant::ObjectId(wall.object_id())),
-        "process_raycasts runs after the script phase and must publish the hit"
+        "the tick's cast must publish the hit onto the node's `_hit_*` keys, \
+         which is what every other reader (and the next frame) sees"
     );
 }

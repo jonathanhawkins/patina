@@ -8,6 +8,13 @@ repository.workspace = true
 [features]
 default = []
 gpu = ["wgpu", "pollster", "bytemuck"]
+# Browser render path (pat-u3l8c.110): compiles wgpu's WebGL2 backend in
+# addition to the default WebGPU one, so `wgpu_surface` can fall back when a
+# browser has no WebGPU. `webgl` is a wgpu *Cargo* feature, so the fallback has
+# to be selected at build time rather than at runtime. Inert on native targets
+# (wgpu's `webgl` cfg alias requires `not(native)`), and off by default, so
+# desktop builds are unaffected.
+webgl = ["gpu", "wgpu/webgl"]
 
 [dependencies]
 gdcore = { path = "../gdcore" }
