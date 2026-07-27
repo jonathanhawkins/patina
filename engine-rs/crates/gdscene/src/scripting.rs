@@ -1515,6 +1515,56 @@ impl SceneAccess for SceneTreeAccessor {
                 Some(Variant::Bool(count > 0))
             }
 
+            // The area-vs-area half of the same surface (pat-0q2kx.112). Only
+            // the bodies half existed, so `get_overlapping_areas()` — Godot's
+            // usual way to ask "which triggers am I inside?" — was unreachable
+            // from script. `_overlapping_areas` is published by
+            // `PhysicsServer::publish_overlapping_areas` alongside the bodies
+            // set, so both answer from the same frame.
+            "get_overlapping_areas" => Some(match self.tree().get_node(nid) {
+                Some(n) => match n.get_property("_overlapping_areas") {
+                    Variant::Array(items) => Variant::Array(items),
+                    _ => Variant::Array(Vec::new()),
+                },
+                None => Variant::Array(Vec::new()),
+            }),
+            "has_overlapping_areas" => {
+                let count = match self.tree().get_node(nid) {
+                    Some(n) => match n.get_property("_overlapping_areas") {
+                        Variant::Array(items) => items.len(),
+                        _ => 0,
+                    },
+                    None => 0,
+                };
+                Some(Variant::Bool(count > 0))
+            }
+
+            // Godot's `overlaps_body(node)` / `overlaps_area(node)` answer from
+            // the same live set rather than recomputing, so these are membership
+            // tests over the published arrays. A missing or non-Object argument
+            // is `false`, as Godot returns for a node that is not overlapping.
+            "overlaps_body" | "overlaps_area" => {
+                let key = if method == "overlaps_body" {
+                    "_overlapping_bodies"
+                } else {
+                    "_overlapping_areas"
+                };
+                let target = match args.first() {
+                    Some(Variant::ObjectId(id)) => *id,
+                    _ => return Some(Variant::Bool(false)),
+                };
+                let found = match self.tree().get_node(nid) {
+                    Some(n) => match n.get_property(key) {
+                        Variant::Array(items) => items
+                            .iter()
+                            .any(|v| matches!(v, Variant::ObjectId(id) if *id == target)),
+                        _ => false,
+                    },
+                    None => false,
+                };
+                Some(Variant::Bool(found))
+            }
+
             // -- Control keyboard focus (pat-0q2kx.84) ------------------------
             // The viewport owns focus, so these are the only way a script can
             // ask "am I focused?" or move focus itself — a UI script that calls

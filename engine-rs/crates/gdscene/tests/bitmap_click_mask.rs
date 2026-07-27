@@ -342,12 +342,30 @@ fn grow_mask_and_polygons_operate_on_the_image_derived_mask() {
         polys[0]
     );
 
-    // Eroding back returns the original bit count.
+    // Eroding by the same radius does NOT undo the dilation — a morphological
+    // closing is not the identity, and Godot erodes at the rect border too.
+    //
+    // `grow_mask` with a negative radius counts anything outside the rect as an
+    // unset bit (upstream/godot/scene/resources/bit_map.cpp:581-588, "Outside of
+    // rectangle counts as bit not set"), so every pixel touching an edge is
+    // eroded along with the dilated column. On this 8x8 mask the radius-1
+    // neighbourhood is the 4 orthogonal neighbours (diagonals are sqrt(2) > 1),
+    // so the survivors are x in 1..=3 and y in 1..=6 — column 0 loses to the
+    // x=-1 edge, rows 0 and 7 to the y edges, and column 4 to the transparent
+    // x=5 — leaving 3 * 6 = 18.
     mask.grow_mask(-1, mask.full_rect());
     assert_eq!(
         mask.get_true_bit_count(),
-        32,
-        "erosion by the same radius undoes the dilation"
+        18,
+        "erosion also eats the rect border, so it cannot restore the original 32"
+    );
+    assert!(
+        mask.get_bit(1, 1) && mask.get_bit(3, 6),
+        "the eroded interior must survive"
+    );
+    assert!(
+        !mask.get_bit(0, 3) && !mask.get_bit(4, 3),
+        "the border column and the dilated column must both be gone"
     );
 }
 

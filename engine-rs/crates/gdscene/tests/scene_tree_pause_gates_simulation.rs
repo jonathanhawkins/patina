@@ -107,9 +107,29 @@ fn scene_tree_pause_gates_simulation() {
     run(&mut ml, 30);
     let moving_y = pos_y(&ml, faller);
     let ticking = time_left(&ml, timer);
+
+    // ⚠️ Split from the movement assertion below ON PURPOSE. "got y=0" cannot
+    // distinguish "the body was never registered with the physics server" from
+    // "it was registered and did not move", and those have completely different
+    // causes — a fixture that forgot `register_physics_bodies()` or whose
+    // `body_type_for_class` lookup missed, versus a real integration or
+    // writeback bug. This bead's recorded failure was exactly `got y=0`, and
+    // that ambiguity is what made it undiagnosable from the verifier tail
+    // alone. Asserting registration first turns one opaque failure into two
+    // that name their own cause.
+    assert!(
+        ml.physics_server().body_for_node(faller).is_some(),
+        "control: the RigidBody2D is not registered with the physics server, so \
+         no assertion below can mean anything — body_count={}. This is a fixture \
+         problem (registration), NOT a physics problem.",
+        ml.physics_server().body_count()
+    );
     assert!(
         moving_y > 0.01,
-        "control: gravity must move the body while unpaused, got y={moving_y}"
+        "control: the body IS registered but gravity did not move it in 30 \
+         frames, got y={moving_y}. Registration is ruled out — look at gravity, \
+         integration, or the sync_from_physics writeback to the node's \
+         `position` property."
     );
     // 30 frames is 0.5s against a 5s period — comfortably clear of both the
     // fire boundary and the wrap, so this reads a genuine mid-countdown value

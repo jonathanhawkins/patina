@@ -1149,6 +1149,10 @@ pub struct MockNetworkPeer {
     inbox: SharedQueue,
     /// Packets sent *by* this peer are pushed into the remote's inbox.
     remote_inbox: SharedQueue,
+    /// When set, only packets addressed to this id reach `remote_inbox`;
+    /// everything else is dropped. `None` (the default) delivers regardless of
+    /// address. See [`set_addressed_delivery`](Self::set_addressed_delivery).
+    deliver_only_to: Option<PeerId>,
 }
 
 impl MockNetworkPeer {
@@ -1159,7 +1163,27 @@ impl MockNetworkPeer {
             status: ConnectionStatus::Connected,
             inbox: Arc::new(Mutex::new(Vec::new())),
             remote_inbox: Arc::new(Mutex::new(Vec::new())),
+            deliver_only_to: None,
         }
+    }
+
+    /// Make this mock honour the `to` address instead of forwarding every
+    /// packet to its single paired remote (pat-0q2kx.94).
+    ///
+    /// The pair created by [`MockNetwork::create_pair`] has exactly one remote
+    /// inbox, so by default `send_packet` ignores `to` — which is fine for
+    /// round-trip tests but makes the double unable to express *addressing*.
+    /// A test that asserts "peer N was skipped" against the default double
+    /// always sees the packet arrive, because it is delivered to the only
+    /// remote there is, whoever it was addressed to.
+    ///
+    /// Opt in per test rather than changing `create_pair`: every existing
+    /// caller relies on unconditional delivery, including paths that address
+    /// `PeerId::SERVER` while paired with a client
+    /// (`MultiplayerAPI::rpc` targets the node authority, defaulting to the
+    /// server), so making routing the default would drop those packets.
+    pub fn set_addressed_delivery(&mut self, to: Option<PeerId>) {
+        self.deliver_only_to = to;
     }
 
     /// Drives the mock's connection status (pat-0q2kx.94).
@@ -1174,7 +1198,14 @@ impl MockNetworkPeer {
 }
 
 impl NetworkPeer for MockNetworkPeer {
-    fn send_packet(&mut self, _to: PeerId, packet: Packet) -> Result<()> {
+    fn send_packet(&mut self, to: PeerId, packet: Packet) -> Result<()> {
+        // Dropping an unaddressed packet is still `Ok`: a real transport does
+        // not error when a datagram has no route, and the caller
+        // (`send_bytes`, `rpc`) fans out over a roster that may name peers this
+        // pair never had.
+        if self.deliver_only_to.is_some_and(|only| only != to) {
+            return Ok(());
+        }
         self.remote_inbox
             .lock()
             .expect("lock poisoned")
@@ -1221,6 +1252,7 @@ impl MockNetwork {
             status: ConnectionStatus::Connected,
             inbox: Arc::clone(&server_inbox),
             remote_inbox: Arc::clone(&client_inbox),
+            deliver_only_to: None,
         };
 
         let client = MockNetworkPeer {
@@ -1228,6 +1260,7 @@ impl MockNetwork {
             status: ConnectionStatus::Connected,
             inbox: Arc::clone(&client_inbox),
             remote_inbox: Arc::clone(&server_inbox),
+            deliver_only_to: None,
         };
 
         (server, client)

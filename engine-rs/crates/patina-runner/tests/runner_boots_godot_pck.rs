@@ -172,6 +172,66 @@ fn patch_pack_overrides_a_file_from_the_base_pack() {
     reset();
 }
 
+/// A patch pack's **removal entry hides a file** from the base pack — the
+/// second half of this bead's acceptance criteria, and the half that had no
+/// end-to-end coverage (pat-0q2kx.134).
+///
+/// `gdresource` unit-tests the parser's removal branch, but nothing proved the
+/// deletion reached `FileAccess` through a real `load_resource_pack` mount —
+/// which is the only thing a shipped patch pack actually does.
+#[test]
+fn patch_pack_removal_entry_hides_a_base_file() {
+    let _lock = BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset();
+
+    let dir = temp_dir("removal");
+    let base_path = dir.join("game.pck");
+    std::fs::write(&base_path, pack_project()).expect("write base");
+    boot_project_from_pck(&base_path, None).expect("boot");
+
+    // Precondition: the base pack supplies the icon.
+    assert!(
+        FileAccess::file_exists("res://icon.png"),
+        "the base pack must supply the icon before the patch hides it",
+    );
+
+    // A patch pack that DELETES the icon and adds an unrelated file. The extra
+    // file keeps this honest: it proves the pack really mounted, so a failure
+    // below is the removal not taking effect rather than the mount silently
+    // doing nothing.
+    let mut patch = PckPacker::new();
+    patch.add_file("res://added.txt", b"ADDED".to_vec());
+    patch.add_removal("res://icon.png");
+    let patch_path = dir.join("removal.pck");
+    std::fs::write(&patch_path, patch.pack().unwrap()).expect("write patch");
+
+    load_resource_pack("removal", patch_path.to_str().unwrap(), true, 0)
+        .expect("load_resource_pack must mount a pack carrying removals");
+
+    assert!(
+        FileAccess::file_exists("res://added.txt"),
+        "the patch pack must have mounted at all",
+    );
+    assert!(
+        !FileAccess::file_exists("res://icon.png"),
+        "a removal entry must hide the base pack's file",
+    );
+    assert!(
+        FileAccess::read_file_bytes("res://icon.png").is_err(),
+        "a hidden path must not still be readable — file_exists and reads must agree",
+    );
+
+    // Unmounting the patch restores it, so the removal is a property of the
+    // mount rather than a destructive edit to the base pack.
+    assert!(unmount_resource_pack("removal"));
+    assert!(
+        FileAccess::file_exists("res://icon.png"),
+        "unmounting the patch must restore the base pack's file",
+    );
+
+    reset();
+}
+
 /// `replace = false` mounts *below* what is already mounted, so the existing
 /// content keeps precedence — Godot's `replace_files = false`.
 #[test]

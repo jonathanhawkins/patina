@@ -1512,11 +1512,39 @@ impl PhysicsServer {
         }
     }
 
+    /// Publishes each `Area2D`'s current area-vs-area overlap set onto its node
+    /// as `_overlapping_areas`, backing the script-facing
+    /// `get_overlapping_areas()` / `has_overlapping_areas()` / `overlaps_area()`
+    /// (pat-0q2kx.112).
+    ///
+    /// The area twin of [`publish_overlapping_bodies`](Self::publish_overlapping_bodies),
+    /// and it uses the same node bridge for the same reason: the script phase
+    /// holds no handle on the physics server. Godot gates area-vs-area detection
+    /// on the TARGET being `monitorable`, and that gate lives inside
+    /// `detect_area_overlaps`, so it is already applied to the set read here —
+    /// an area that opted out of being seen never appears in another area's
+    /// answer.
+    pub fn publish_overlapping_areas(&self, tree: &mut SceneTree) {
+        for (&area_node, &area_id) in &self.node_to_area {
+            let areas: Vec<Variant> = self
+                .area_store
+                .overlapping_areas(area_id)
+                .into_iter()
+                .filter_map(|aid| self.area_to_node.get(&aid).copied())
+                .map(|nid| Variant::ObjectId(nid.object_id()))
+                .collect();
+            if let Some(node) = tree.get_node_mut(area_node) {
+                node.set_property("_overlapping_areas", Variant::Array(areas));
+            }
+        }
+    }
+
     /// Pulls physics body transforms back into the scene tree.
     pub fn sync_from_physics(&self, tree: &mut SceneTree) {
         // The overlap set the last step produced reaches scripts here, on the
         // same tick the enter/exit signals fire.
         self.publish_overlapping_bodies(tree);
+        self.publish_overlapping_areas(tree);
         for (&node_id, &body_id) in &self.node_to_body {
             if let Some(body) = self.world.get_body(body_id) {
                 // Don't write back static body properties (they don't move).

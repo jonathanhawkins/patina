@@ -29,7 +29,27 @@ use gdeditor::viewport_2d_render::{
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::scene_tree::SceneTree;
 
+/// Parses `tscn` into a tree, with ClassDB populated first.
+///
+/// ⚠️ The registration is not optional and is not bookkeeping (pat-0q2kx.212).
+/// `collect_canvas_items` gates every node on `node.is_class("CanvasItem")`
+/// (viewport_2d_render.rs:347), and `Node::is_class` answers a non-exact match
+/// purely from `gdobject::is_parent_class` (node.rs:319). With an empty ClassDB
+/// there is no ColorRect -> CanvasItem chain, so EVERY node is filtered out and
+/// the render list comes back empty — which surfaces as `item_named` panicking
+/// with "Hud is not in the render list", not as anything mentioning classes.
+///
+/// Every test in this file failed that way, and it went unnoticed because both
+/// recorded verifies of this bead died compiling a foreign crate, so the tests
+/// had never actually executed.
+///
+/// Registering here rather than per-test also means these tests run the same
+/// configuration the editor does (`editor_server.rs:836`), which is what makes
+/// the seeded-class-default interaction in `canvas_layer::layer_transform`
+/// reachable from a test at all. nextest gives each test its own process, so the
+/// global registry cannot leak between them.
 fn load(tscn: &str) -> SceneTree {
+    gdobject::class_db::register_2d_classes();
     let scene = PackedScene::from_tscn(tscn).expect("parse tscn");
     let mut tree = SceneTree::new();
     let root = tree.root_id();
@@ -175,5 +195,79 @@ size = Vector2(8, 8)
         (x + 50.0).abs() < 1e-3,
         "a 0.5-scaled following layer must move half as far as the camera: \
          expected -50, got {x}"
+    );
+}
+
+/// Pins the two ClassDB facts the acceptance silently depends on
+/// (pat-0q2kx.212).
+///
+/// Now that `load` registers, the acceptance above runs in the editor's
+/// configuration — but it would still pass if either of these regressed, and
+/// then stop testing what it claims to. Both are one assertion each:
+///
+/// 1. The ColorRect -> CanvasItem chain must resolve, or `collect_canvas_items`
+///    filters every node out and the acceptance dies on "not in the render
+///    list" with nothing pointing at ClassDB.
+/// 2. `transform` must be a *registered* CanvasLayer property. That is what
+///    seeds an identity `transform` onto every layer via
+///    `packed_scene::node_with_class_defaults`, and therefore what makes
+///    `layer_transform`'s skip-identity rule load-bearing rather than
+///    theoretical. If registration ever goes away, the acceptance keeps passing
+///    while the interaction it guards stops existing — this says so instead.
+#[test]
+fn classdb_preconditions_the_acceptance_depends_on() {
+    gdobject::class_db::register_2d_classes();
+
+    assert!(
+        gdobject::is_parent_class("ColorRect", "CanvasItem"),
+        "collect_canvas_items gates on is_class(\"CanvasItem\"), which answers \
+         from ClassDB — without this chain the render list is empty and every \
+         test here fails as \"not in the render list\""
+    );
+    assert!(
+        gdobject::class_db::get_property_list("CanvasLayer")
+            .iter()
+            .any(|p| p.name == "transform"),
+        "`transform` must stay registered: seeding it onto every CanvasLayer is \
+         what makes layer_transform's skip-identity rule matter"
+    );
+}
+
+/// The other half of the rule: a `.tscn` that really does author a non-identity
+/// `transform` still wins over the decomposed trio, as Godot's `set_transform`
+/// does. Skipping identity must not turn into ignoring the property.
+#[test]
+fn an_authored_transform_still_overrides_offset_and_rotation() {
+    const EXPLICIT: &str = r#"[gd_scene format=3]
+
+[node name="Root" type="Node2D"]
+
+[node name="Layer" type="CanvasLayer" parent="."]
+offset = Vector2(50, 20)
+rotation = 0.5
+transform = Transform2D(1, 0, 0, 1, 7, 3)
+
+[node name="Hud" type="ColorRect" parent="Layer"]
+position = Vector2(10, 0)
+size = Vector2(8, 8)
+"#;
+
+    let tree = load(EXPLICIT);
+    let items = collect_canvas_items(&tree);
+    let hud = item_named(&items, &tree, "Hud");
+
+    // The authored matrix is a pure translation of (7, 3), so the child lands at
+    // (17, 3) with no rotation — not at the offset/rotation composition.
+    assert!(
+        (hud.global_transform.origin - Vector2::new(17.0, 3.0)).length() < 1e-3,
+        "an authored non-identity transform must win over offset/rotation, got \
+         {:?}",
+        hud.global_transform.origin
+    );
+    assert!(
+        hud.global_transform.get_rotation().abs() < 1e-3,
+        "the authored transform carries no rotation, so neither should the \
+         child, got {}",
+        hud.global_transform.get_rotation()
     );
 }

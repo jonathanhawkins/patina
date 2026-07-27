@@ -997,6 +997,14 @@ impl MainLoop {
     pub fn process_path_follows(&mut self, dt: f32) {
         use gdcore::math::{Vector2, Vector3};
 
+        /// Shadow of the `progress` this loop last published, used to tell an
+        /// external write apart from its own (pat-0q2kx.104). Underscore-
+        /// prefixed like the engine's other internal node keys
+        /// (`_move_and_slide_requested`).
+        const PF_PUBLISHED_PROGRESS: &str = "_pathfollow_published_progress";
+        /// Shadow of the last published `progress_ratio`.
+        const PF_PUBLISHED_RATIO: &str = "_pathfollow_published_ratio";
+
         struct Update3 {
             id: NodeId,
             progress: f32,
@@ -1006,11 +1014,27 @@ impl MainLoop {
         struct Update2 {
             id: NodeId,
             progress: f32,
+            /// `progress / baked_length`, republished every tick so the two
+            /// views of the position never drift apart (pat-0q2kx.104).
+            progress_ratio: f32,
             pos: Vector2,
             rot: Option<f32>,
         }
         let mut updates3: Vec<Update3> = Vec::new();
         let mut updates2: Vec<Update2> = Vec::new();
+
+        /// A numeric node property as `f32`, defaulting to `0.0` when absent —
+        /// Godot's default for both `h_offset` and `v_offset`. Local because
+        /// the gather loop holds `&Node` directly; the crate's other
+        /// `float_prop` helpers all take `(tree, id, key)` and would need a
+        /// second borrow of the tree here.
+        fn float_property(node: &crate::node::Node, name: &str) -> f32 {
+            match node.get_property(name) {
+                Variant::Float(f) => f as f32,
+                Variant::Int(i) => i as f32,
+                _ => 0.0,
+            }
+        }
 
         // Gather phase: read follow nodes + their parent curves (immutable).
         for id in self.tree.all_nodes_in_tree_order() {
@@ -1107,22 +1131,84 @@ impl MainLoop {
                     curve.add_point(*p);
                 }
                 let rotates = !matches!(node.get_property("rotates"), Variant::Bool(false));
+                let baked_len = curve.baked_length();
+
+                // `progress` and `progress_ratio` are two views of ONE value in
+                // Godot (`progress_ratio == progress / baked_length`), so it
+                // never has to decide between them. Patina stores them as two
+                // separate node properties, which means this loop does — and
+                // "whichever disagrees with the other wins" is not decidable
+                // from their values alone.
+                //
+                // Resolved by remembering what the previous tick published: the
+                // property that no longer matches its shadow is the one the
+                // outside world (script, animation track, `.tscn`) wrote.
+                // `progress` wins ties, since it is what `advance` operates on.
+                //
+                // ⚠️ Without the shadows, writing `progress` directly is undone
+                // on the next tick by the stale ratio published before it.
+                let last_progress = float_property(node, PF_PUBLISHED_PROGRESS);
+                let last_ratio = float_property(node, PF_PUBLISHED_RATIO);
+                let ratio_prop = node.get_property("progress_ratio");
+                let progress = if (progress - last_progress).abs() > 1e-5 {
+                    // `progress` was written externally: it wins.
+                    progress
+                } else if baked_len > 1e-6 {
+                    match ratio_prop {
+                        Variant::Float(_) | Variant::Int(_) => {
+                            let ratio = float_property(node, "progress_ratio");
+                            if (ratio - last_ratio).abs() > 1e-5 {
+                                // `progress_ratio` was written externally.
+                                ratio * baked_len
+                            } else {
+                                progress
+                            }
+                        }
+                        _ => progress,
+                    }
+                } else {
+                    progress
+                };
+
                 let mut follow = PathFollow2D {
                     progress,
                     loop_path,
                     rotates,
                 };
                 follow.advance(&curve, speed * dt);
-                let pos = follow.position_on(&curve);
+                let mut pos = follow.position_on(&curve);
+                let tangent = curve.sample_tangent(follow.progress);
+
+                // `h_offset`/`v_offset` shift the sample off the curve.
+                // Godot applies them in the *rotated* frame when `rotates` is
+                // on (`path_2d.cpp`: `t.translate_local(Vector2(h, v))` on a
+                // transform whose basis is tangent/normal) and in plain x/y
+                // when it is off — so a spaced-out row of followers stays
+                // perpendicular to the path rather than sliding along it.
+                let h_offset = float_property(node, "h_offset");
+                let v_offset = float_property(node, "v_offset");
+                if h_offset != 0.0 || v_offset != 0.0 {
+                    pos = if rotates {
+                        let normal = Vector2::new(-tangent.y, tangent.x);
+                        pos + tangent * h_offset + normal * v_offset
+                    } else {
+                        Vector2::new(pos.x + h_offset, pos.y + v_offset)
+                    };
+                }
+
                 let rot = if rotates {
-                    let t = curve.sample_tangent(follow.progress);
-                    Some(t.y.atan2(t.x))
+                    Some(tangent.y.atan2(tangent.x))
                 } else {
                     None
                 };
                 updates2.push(Update2 {
                     id,
                     progress: follow.progress,
+                    progress_ratio: if baked_len > 1e-6 {
+                        follow.progress / baked_len
+                    } else {
+                        0.0
+                    },
                     pos,
                     rot,
                 });
@@ -1142,6 +1228,15 @@ impl MainLoop {
         for u in updates2 {
             if let Some(node) = self.tree.get_node_mut(u.id) {
                 node.set_property("progress", Variant::Float(u.progress as f64));
+                // Published unconditionally, not only when it changed: a
+                // getter that reads `progress_ratio` before it is ever written
+                // gets `Nil` rather than the real position.
+                node.set_property("progress_ratio", Variant::Float(u.progress_ratio as f64));
+                // Shadows of what was just published, so the next tick can tell
+                // which of the two an external writer touched. Written last and
+                // always, so they can never disagree with the pair above.
+                node.set_property(PF_PUBLISHED_PROGRESS, Variant::Float(u.progress as f64));
+                node.set_property(PF_PUBLISHED_RATIO, Variant::Float(u.progress_ratio as f64));
             }
             crate::node2d::set_position(&mut self.tree, u.id, u.pos);
             if let Some(r) = u.rot {
@@ -3625,7 +3720,14 @@ mod tests {
         for verts in regions {
             let mut r = Node::new("Region", "NavigationRegion2D");
             r.set_property(
-                "navmesh_vertices",
+                // `__navmesh_vertices__`, not `navmesh_vertices`: pat-0q2kx.26
+                // moved region geometry onto the dunder key that `PackedScene`
+                // resolves the NavigationPolygon/NavigationMesh resource onto,
+                // and `process_navigation` reads only that key (:1437, :1498).
+                // These hand-built nodes were left on the old name, so every
+                // region contributed zero polygons and the agent's path length
+                // was 0 rather than the asserted 3.
+                "__navmesh_vertices__",
                 gdvariant::Variant::PackedVector2Array(verts),
             );
             tree.add_child(root, r).unwrap();
@@ -3748,8 +3850,10 @@ mod tests {
             ],
         ] {
             let mut region = Node::new("Region", "NavigationRegion2D");
+            // Dunder key — see the note in
+            // `mainloop_navigation_agent_2d_paths_across_frames`.
             region.set_property(
-                "navmesh_vertices",
+                "__navmesh_vertices__",
                 gdvariant::Variant::PackedVector2Array(verts),
             );
             tree.add_child(root, region).unwrap();
@@ -3841,10 +3945,12 @@ mod tests {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
-        // One flat navmesh polygon on the XZ plane covering the route.
+        // One flat navmesh polygon on the XZ plane covering the route. Dunder
+        // key — see the note in
+        // `mainloop_navigation_agent_2d_paths_across_frames`.
         let mut region = Node::new("Region", "NavigationRegion3D");
         region.set_property(
-            "navmesh_vertices",
+            "__navmesh_vertices__",
             gdvariant::Variant::PackedVector3Array(vec![
                 Vector3::new(-10.0, 0.0, -10.0),
                 Vector3::new(110.0, 0.0, -10.0),

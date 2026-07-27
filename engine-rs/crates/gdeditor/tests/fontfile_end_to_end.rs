@@ -77,8 +77,12 @@ fn fontfile_end_to_end() {
     let path = font_path();
     let imported =
         gdresource::importers::import_font(Path::new(&path)).expect("the bundled .ttf imports");
+    // `class_name` is the resource's own type. `resource_type` is a field on
+    // `ExtResource` (the *reference* to a resource, resource.rs:38), not on
+    // `Resource` itself — naming it here was an E0609, so this test target never
+    // compiled and its assertions have never run.
     assert_eq!(
-        imported.resource_type, "FontFile",
+        imported.class_name, "FontFile",
         "an imported font must be a FontFile resource"
     );
     assert_eq!(

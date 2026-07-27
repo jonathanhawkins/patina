@@ -150,7 +150,30 @@ pub fn get_follow_viewport_scale(tree: &SceneTree, node_id: NodeId) -> f64 {
 pub fn layer_transform(tree: &SceneTree, node_id: NodeId) -> Transform2D {
     if let Some(node) = tree.get_node(node_id) {
         if let Variant::Transform2D(t) = node.get_property("transform") {
-            return t;
+            // ⚠️ An IDENTITY transform is treated as "not authored", not as an
+            // explicit assignment (pat-0q2kx.212).
+            //
+            // `transform` is a registered ClassDB property, and every node built
+            // from a scene or from `SceneTree::create_node` is pre-seeded with
+            // its whole registered default set (packed_scene.rs
+            // `node_with_class_defaults`, scene_tree.rs `create_node`). So in any
+            // process that has called `register_2d_classes()` — which the editor
+            // does at editor_server.rs:836 via `register_editor_classes` — this
+            // property is ALWAYS present and ALWAYS `Transform2D::IDENTITY`
+            // unless a `.tscn` overwrote it. Returning it unconditionally made
+            // the `transform`-wins rule fire for every layer ever created, so
+            // `offset`/`rotation`/`scale` were dead in production while still
+            // working in tests that leave ClassDB empty.
+            //
+            // Skipping identity costs nothing: composing the decomposed trio at
+            // its own defaults (rotation 0, scale 1, offset 0) yields identity
+            // too, so an author who really did write `transform = Transform2D(1,
+            // 0, 0, 1, 0, 0)` gets the same matrix by the other path. And when a
+            // scene sets BOTH spellings, Godot's last-writer-wins makes the
+            // decomposed trio the better guess than a default-valued matrix.
+            if t != Transform2D::IDENTITY {
+                return t;
+            }
         }
     }
     Transform2D::from_rotation_scale_skew_origin(

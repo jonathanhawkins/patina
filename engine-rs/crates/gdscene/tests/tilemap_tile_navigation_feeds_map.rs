@@ -151,35 +151,79 @@ fn layer_without_navigation_sources_contributes_nothing() {
     );
 }
 
-/// An authored tile polygon set on the node drives the runtime gather, not just
-/// the helper — this is the property `PackedScene` would carry.
+/// The authored strip's height. Three quarters of the tile, so the polygon is
+/// clearly NOT the default full-cell rect, yet still strictly contains the
+/// agent's row at `TILE / 2`.
 ///
-/// The polygon here is a half-height strip, so the corridor is still continuous
-/// (adjacent strips share their vertical edge) and the agent still crosses.
-#[test]
-fn authored_tile_polygon_property_reaches_the_runtime_gather() {
+/// It must not be `TILE / 2`: `corridor_scene` puts the agent and the target at
+/// exactly `TILE * 0.5`, so a half-height strip ends precisely ON the agent, and
+/// `NavPolygon::contains_point` is a strict ray-cast that excludes boundary
+/// points. `find_path` then fails to locate a start polygon and returns an empty
+/// path — the strip never had a hole in it, the query point was just sitting on
+/// its edge.
+const STRIP_H: f32 = TILE as f32 * 0.75;
+
+/// Paints the corridor and authors `STRIP_H`-tall navigation strips on the node,
+/// the way a `PackedScene` property would carry them.
+fn authored_strip_scene(target: Vector2) -> (MainLoop, NodeId) {
     let corridor: Vec<(i32, i32)> = (0..6).map(|x| (x, NAV_SOURCE)).collect();
-    let (mut tree, agent) = corridor_scene(&corridor, cell_centre(5));
+    let (mut tree, agent) = corridor_scene(&corridor, target);
     let layer = tree.get_node_by_path("/root/Layer").expect("layer node");
-    let half = TILE as f32 * 0.5;
     if let Some(node) = tree.get_node_mut(layer) {
         node.set_property(
             TILE_NAV_POLYGON,
             Variant::PackedVector2Array(vec![
                 Vector2::new(0.0, 0.0),
                 Vector2::new(TILE as f32, 0.0),
-                Vector2::new(TILE as f32, half),
-                Vector2::new(0.0, half),
+                Vector2::new(TILE as f32, STRIP_H),
+                Vector2::new(0.0, STRIP_H),
             ]),
         );
     }
-    let mut ml = MainLoop::new(tree);
+    (MainLoop::new(tree), agent)
+}
+
+/// An authored tile polygon set on the node drives the runtime gather, not just
+/// the helper — this is the property `PackedScene` would carry.
+///
+/// The strips span the full cell width, so neighbours share their vertical edge
+/// and the corridor still stitches.
+#[test]
+fn authored_tile_polygon_property_reaches_the_runtime_gather() {
+    let (mut ml, agent) = authored_strip_scene(cell_centre(5));
     ml.step(0.1);
 
     assert!(
         ml.nav_agent_path_len_2d(agent) >= 2,
         "an authored per-tile polygon must reach the gather and still stitch \
          across neighbouring cells"
+    );
+}
+
+/// …and the authored polygon is genuinely the one being used.
+///
+/// Without this, the test above passes either way: the *default* for a
+/// navigation-enabled tile is the whole cell rect, which also contains the agent
+/// and also stitches, so ignoring `TILE_NAV_POLYGON` entirely would still look
+/// green. Here the target sits below the authored strip but still inside that
+/// default rect, so a path can only exist if the property was dropped.
+#[test]
+fn a_target_outside_the_authored_strip_is_unreachable() {
+    let below_strip = Vector2::new(
+        cell_centre(5).x,
+        // Between the strip's lower edge and the cell's, so it is outside the
+        // authored polygon and inside the default one.
+        (STRIP_H + TILE as f32) * 0.5,
+    );
+    let (mut ml, agent) = authored_strip_scene(below_strip);
+    ml.step(0.1);
+
+    assert_eq!(
+        ml.nav_agent_path_len_2d(agent),
+        0,
+        "a target below the authored strip must be unreachable — reaching it \
+         would mean the gather fell back to the default whole-cell polygon and \
+         ignored TILE_NAV_POLYGON"
     );
 }
 

@@ -387,7 +387,12 @@ fn failed_and_dropped_connections_are_distinct() {
 #[test]
 fn send_bytes_honours_broadcast_and_except_addressing() {
     let mut api = gdplatform::network::MultiplayerAPI::new();
-    let (server_peer, mut client) = MockNetwork::create_pair(PeerId(2));
+    let (mut server_peer, mut client) = MockNetwork::create_pair(PeerId(2));
+    // The default double forwards every packet to its one remote inbox
+    // regardless of address, so "peer 2 was skipped" could never fail. Make it
+    // honour `to` for this test; peer 3 is on the roster but has no transport,
+    // so packets addressed there are dropped rather than landing on peer 2.
+    server_peer.set_addressed_delivery(Some(PeerId(2)));
     api.set_multiplayer_peer(Box::new(server_peer));
     api.peer_state_mut().add_peer(2);
     api.peer_state_mut().add_peer(3);

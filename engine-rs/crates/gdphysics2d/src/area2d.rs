@@ -560,6 +560,28 @@ impl AreaStore {
         ids
     }
 
+    /// The areas currently overlapping `area`, as of the last
+    /// [`detect_area_overlaps`](Self::detect_area_overlaps) (pat-0q2kx.112).
+    ///
+    /// The area-vs-area twin of
+    /// [`overlapping_bodies`](Self::overlapping_bodies), and it reads the same
+    /// set the `area_entered` / `area_exited` signals were derived from, so a
+    /// script cannot see a different answer from the one the signals just
+    /// reported. The `monitorable` gate is already baked into that set by
+    /// `detect_area_overlaps`, so an area opted out of detection never appears
+    /// here either.
+    pub fn overlapping_areas(&self, area: AreaId) -> Vec<AreaId> {
+        let mut ids: Vec<AreaId> = self
+            .previous_area_overlaps
+            .iter()
+            .filter(|(a, _)| *a == area)
+            .map(|(_, b)| *b)
+            .collect();
+        // The backing set is unordered; sort so a script sees a stable order.
+        ids.sort_by_key(|a| a.0);
+        ids
+    }
+
     pub fn detect_area_overlaps(&mut self) -> Vec<AreaOverlapEvent> {
         let mut current: HashSet<(AreaId, AreaId)> = HashSet::new();
         let mut events = Vec::new();
@@ -925,5 +947,61 @@ mod tests {
         let events = store.detect_area_overlaps();
         assert_eq!(events.len(), 2, "both ordered pairs should exit");
         assert!(events.iter().all(|e| e.state == OverlapState::Exited));
+    }
+
+    /// `overlapping_areas` answers from the same set the enter/exit events were
+    /// derived from, tracks moves, and honours the `monitorable` gate
+    /// (pat-0q2kx.112). Backs the script-facing `get_overlapping_areas()`.
+    #[test]
+    fn overlapping_areas_reports_the_live_set_and_honours_monitorable() {
+        let mut store = AreaStore::new();
+        let a = store.add_area(Area2D::new(
+            AreaId(0),
+            Vector2::ZERO,
+            Shape2D::Circle { radius: 5.0 },
+        ));
+        let b = store.add_area(Area2D::new(
+            AreaId(0),
+            Vector2::new(3.0, 0.0),
+            Shape2D::Circle { radius: 5.0 },
+        ));
+
+        // Before any detection pass the set is empty rather than stale/absent —
+        // Godot returns an empty array, never null.
+        assert!(store.overlapping_areas(a).is_empty());
+
+        store.detect_area_overlaps();
+        assert_eq!(
+            store.overlapping_areas(a),
+            vec![b],
+            "a must see b once they overlap"
+        );
+        assert_eq!(
+            store.overlapping_areas(b),
+            vec![a],
+            "the relation is reported from both sides"
+        );
+
+        // Moving b out empties both answers — the set is live, not cumulative.
+        store.get_area_mut(b).unwrap().position = Vector2::new(100.0, 0.0);
+        store.detect_area_overlaps();
+        assert!(store.overlapping_areas(a).is_empty());
+        assert!(store.overlapping_areas(b).is_empty());
+
+        // Back in range, but b opts out of being seen. Godot gates area-vs-area
+        // detection on the TARGET being monitorable, so a no longer sees b —
+        // while b, which is still monitoring, does see a.
+        store.get_area_mut(b).unwrap().position = Vector2::new(3.0, 0.0);
+        store.get_area_mut(b).unwrap().monitorable = false;
+        store.detect_area_overlaps();
+        assert!(
+            store.overlapping_areas(a).is_empty(),
+            "a non-monitorable area must not appear in another area's overlap set"
+        );
+        assert_eq!(
+            store.overlapping_areas(b),
+            vec![a],
+            "monitorable gates being SEEN, not seeing: b still observes a"
+        );
     }
 }

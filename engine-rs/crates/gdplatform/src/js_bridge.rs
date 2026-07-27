@@ -337,6 +337,10 @@ thread_local! {
     /// Mirror of [`RecordingJsBackend::log`], readable without holding the
     /// backend. See `RecordingJsBackend::record`.
     static RECORDED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+
+    /// Set while a [`with_backend`] call is in flight, so a nested one can be
+    /// rejected instead of silently getting a different backend.
+    static IN_BACKEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Every call a [`RecordingJsBackend`] has served since the last
@@ -380,27 +384,56 @@ pub fn reset_backend() {
     RECORDED.with(|r| r.borrow_mut().clear());
 }
 
+/// Restores the checked-out backend and clears the re-entrancy guard even if
+/// `f` panics, so one failed call cannot leave the bridge permanently wedged
+/// (which is exactly what a `#[should_panic]` test would otherwise do to every
+/// test after it in the same process).
+struct BackendGuard(Option<Box<dyn JsBackend>>);
+
+impl Drop for BackendGuard {
+    fn drop(&mut self) {
+        if let Some(backend) = self.0.take() {
+            BACKEND.with(|b| *b.borrow_mut() = Some(backend));
+        }
+        IN_BACKEND.with(|g| g.set(false));
+    }
+}
+
 /// Runs `f` against the installed backend, installing the default first if
 /// needed.
 ///
-/// The backend is *moved out* of the thread-local for the duration of the call
-/// and put back afterwards. That is what makes a backend safe to call
-/// re-entrantly: a `RefCell` borrow held across `f` would panic the moment a
-/// backend implementation touched the bridge again (which the wasm closure path
-/// does whenever JS calls back into us).
+/// # Not re-entrant
+///
+/// `f` receives `&mut dyn JsBackend`, so a nested call would need a second
+/// `&mut` to the same backend — there is no implementation of this signature
+/// that is re-entrant. Rather than let a nested call silently receive a
+/// *different* (freshly defaulted) backend and drop the installed one's state,
+/// this panics.
+///
+/// That is a real constraint on backend authors, not a formality: a `JsBackend`
+/// method must never call back into the bridge. The wasm callback path is
+/// written to respect it — the `js-sys` closure calls
+/// [`queue_callback_invocation`], which touches only the pending queue, and the
+/// interpreter runs the `Callable` later from `pump_javascript_callbacks`,
+/// outside any `with_backend` frame.
+///
+/// # Panics
+///
+/// If called from inside another `with_backend` call on the same thread.
 pub fn with_backend<R>(f: impl FnOnce(&mut dyn JsBackend) -> R) -> R {
-    let mut backend = BACKEND
+    assert!(
+        !IN_BACKEND.with(|g| g.get()),
+        "js_bridge::with_backend is not re-entrant — a JsBackend must not call \
+         back into the bridge; queue the work instead (see queue_callback_invocation)"
+    );
+    IN_BACKEND.with(|g| g.set(true));
+    let backend = BACKEND
         .with(|b| b.borrow_mut().take())
         .unwrap_or_else(default_backend);
-    let result = f(backend.as_mut());
-    BACKEND.with(|b| {
-        // A backend installed *during* `f` wins: it is the more recent intent.
-        let mut slot = b.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(backend);
-        }
-    });
-    result
+    let mut guard = BackendGuard(Some(backend));
+    // `expect` cannot fire: the guard is only emptied by `Drop`.
+    let backend = guard.0.as_mut().expect("backend is checked out");
+    f(backend.as_mut())
 }
 
 // ---------------------------------------------------------------------------
@@ -937,13 +970,54 @@ mod tests {
         reset_backend();
     }
 
+    /// The installed backend survives an arbitrary number of *sequential*
+    /// calls — it is checked out and put back, not consumed.
+    ///
+    /// This is the guarantee that actually matters: `JavaScriptBridge` calls one
+    /// backend method per script call, so the interpreter leans on the backend
+    /// still being there next time.
     #[test]
-    fn with_backend_is_reentrant() {
-        // The backend is moved out for the duration of the call, so a nested
-        // access must not panic on a double borrow.
+    fn with_backend_restores_the_installed_backend_between_calls() {
+        install(RecordingJsBackend::new().with_eval("keep", JsValue::Bool(true)));
+        for _ in 0..3 {
+            assert_eq!(
+                with_backend(|b| b.eval("keep", false)),
+                Ok(JsValue::Bool(true)),
+                "the installed backend must not be replaced by the default"
+            );
+        }
+        reset_backend();
+    }
+
+    /// Nested access panics rather than silently handing out a *different*
+    /// backend.
+    ///
+    /// An earlier revision moved the backend out and let a nested call default a
+    /// fresh one, which made the inner call answer `Null` and threw away the
+    /// outer backend's state on the way out — wrong answers, no error. `f` gets
+    /// `&mut dyn JsBackend`, so no re-entrant implementation of this signature
+    /// exists; the contract has to be enforced instead of faked.
+    #[test]
+    #[should_panic(expected = "not re-entrant")]
+    fn with_backend_rejects_reentrancy() {
         install(RecordingJsBackend::new().with_eval("inner", JsValue::Bool(true)));
-        let inner = with_backend(|_| with_backend(|b| b.eval("inner", false)));
-        assert_eq!(inner, Ok(JsValue::Bool(true)));
+        with_backend(|_| with_backend(|b| b.eval("inner", false)));
+    }
+
+    /// A panicking `f` must not wedge the bridge: the guard puts the backend
+    /// back, so the next call still sees it.
+    #[test]
+    fn a_panicking_call_leaves_the_backend_installed() {
+        install(RecordingJsBackend::new().with_eval("after", JsValue::Bool(true)));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_backend(|_| -> JsValue { panic!("boom") });
+        }));
+        assert!(panicked.is_err(), "the panic must propagate");
+        assert_eq!(
+            with_backend(|b| b.eval("after", false)),
+            Ok(JsValue::Bool(true)),
+            "the backend must survive a panicking call"
+        );
         reset_backend();
     }
 

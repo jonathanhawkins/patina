@@ -374,6 +374,11 @@ pub struct PckPacker {
     pub alignment: u64,
     /// Files to pack: (path, data).
     files: Vec<(String, Vec<u8>)>,
+    /// Paths this pack *removes* — Godot patch packs carry `PACK_FILE_REMOVAL`
+    /// directory records so an update can delete a file a lower-priority pack
+    /// still contains (`core/io/file_access_pack.cpp`). Held separately from
+    /// `files` because a removal record carries no data section at all.
+    removals: Vec<String>,
 }
 
 impl PckPacker {
@@ -385,6 +390,7 @@ impl PckPacker {
             ver_patch: 1,
             alignment: PCK_DATA_ALIGNMENT,
             files: Vec::new(),
+            removals: Vec::new(),
         }
     }
 
@@ -407,9 +413,32 @@ impl PckPacker {
         self.files.push((path.into(), data));
     }
 
+    /// Marks `path` as *removed* by this pack (pat-0q2kx.134).
+    ///
+    /// This is how Godot ships a patch pack that deletes a file: the directory
+    /// carries a `PACK_FILE_REMOVAL` record with no data, and mounting the pack
+    /// hides that path in every lower-priority pack **and** on disk
+    /// (`core/io/file_access_pack.cpp`).
+    ///
+    /// The reader has always understood these records; the writer could not
+    /// produce one, so a removal could only be exercised by hand-patching the
+    /// flags word of a packed archive. Round-tripping a patch pack through
+    /// Patina therefore silently dropped its deletions.
+    pub fn add_removal(&mut self, path: impl Into<String>) {
+        self.removals.push(path.into());
+    }
+
     /// Returns the number of files queued for packing.
+    ///
+    /// Removal records are counted by [`removal_count`](Self::removal_count),
+    /// not here — they carry no data and are not files.
     pub fn file_count(&self) -> usize {
         self.files.len()
+    }
+
+    /// Returns the number of removal records queued for packing.
+    pub fn removal_count(&self) -> usize {
+        self.removals.len()
     }
 
     /// Packs all added files into a PCK byte vector.
@@ -422,13 +451,23 @@ impl PckPacker {
     /// Writes the packed archive to any writer, using the V2 layout.
     ///
     /// The output matches Godot's reader: a `file_base` header field and a
-    /// per-entry trailing `flags` u32 (always 0 here). `pack_flags` sets
-    /// `PACK_REL_FILEBASE` (as Godot's own writer does) and the directory is
-    /// inline after the reserved area.
+    /// per-entry trailing `flags` u32 — `0` for a normal file, and
+    /// `PACK_FILE_REMOVAL` for a path queued via
+    /// [`add_removal`](Self::add_removal). `pack_flags` sets `PACK_REL_FILEBASE`
+    /// (as Godot's own writer does) and the directory is inline after the
+    /// reserved area.
     pub fn write_to<W: Write + Seek>(&self, writer: &mut W) -> io::Result<()> {
         // -- Compute the directory size to locate the data section --
+        // Removal records sit in the same directory and are the same width as a
+        // file entry; only their data section is absent. Leaving them out here
+        // would put `data_start` inside the directory and corrupt every offset.
         let mut dir_size: u64 = 0;
-        for (path, _) in &self.files {
+        for path in self
+            .files
+            .iter()
+            .map(|(p, _)| p)
+            .chain(self.removals.iter())
+        {
             let padded_len = pad_to_4(path.len());
             // path_len(4) + path(padded) + offset(8) + size(8) + md5(16) + flags(4)
             dir_size += 4 + padded_len as u64 + 8 + 8 + 16 + 4;
@@ -458,7 +497,7 @@ impl PckPacker {
             write_u32(writer, 0)?;
         }
 
-        write_u32(writer, self.files.len() as u32)?;
+        write_u32(writer, (self.files.len() + self.removals.len()) as u32)?;
 
         // -- Write directory entries --
         let mut current_offset = data_start;
@@ -488,6 +527,29 @@ impl PckPacker {
 
             offsets.push(current_offset);
             current_offset = align_up(current_offset + data.len() as u64, self.alignment);
+        }
+
+        // -- Write removal records --
+        //
+        // Same directory-entry layout as a file, but offset and size are 0 and
+        // the flags word carries PACK_FILE_REMOVAL. They are written after the
+        // file entries so `offsets` stays index-aligned with `self.files` for
+        // the data pass below, and they contribute no data section.
+        for path in &self.removals {
+            let path_bytes = path.as_bytes();
+            let padded_len = pad_to_4(path_bytes.len());
+
+            write_u32(writer, padded_len as u32)?;
+            writer.write_all(path_bytes)?;
+            let padding = padded_len - path_bytes.len();
+            if padding > 0 {
+                writer.write_all(&vec![0u8; padding])?;
+            }
+
+            write_u64(writer, 0)?; // offset — a removal has no data
+            write_u64(writer, 0)?; // size
+            writer.write_all(&[0u8; 16])?; // md5
+            write_u32(writer, PACK_FILE_REMOVAL)?;
         }
 
         // -- Write file data --
@@ -1348,6 +1410,46 @@ mod tests {
         );
     }
 
+    /// The writer can emit a patch pack's deletions, and its own reader agrees
+    /// (pat-0q2kx.134).
+    ///
+    /// ⚠️ The file entries must still read back intact. A removal record is the
+    /// same width as a file entry in the directory but contributes no data
+    /// section, so forgetting it in the directory-size pass puts `data_start`
+    /// inside the directory and every file offset is then wrong — which shows up
+    /// as corrupt file bytes, not as a missing removal.
+    #[test]
+    fn packer_emits_a_removal_record_the_reader_accepts() {
+        let mut packer = PckPacker::new();
+        packer.add_file("res://keep.txt", b"KEEP".to_vec());
+        packer.add_removal("res://gone.txt");
+        packer.add_file("res://also.txt", b"ALSO".to_vec());
+        assert_eq!(packer.file_count(), 2, "removals are not files");
+        assert_eq!(packer.removal_count(), 1);
+
+        let bytes = packer.pack().expect("pack");
+        let archive = PckArchive::from_bytes(&bytes).expect("read back");
+
+        // The removal is recorded, and is NOT a readable file.
+        assert!(
+            archive.removed.iter().any(|p| p == "res://gone.txt"),
+            "the removal record must survive the round trip, got {:?}",
+            archive.removed,
+        );
+        assert!(!archive.has_file("res://gone.txt"));
+
+        // Both real files still extract correctly — the offset check.
+        assert_eq!(
+            archive.extract_file(&bytes, "res://keep.txt"),
+            Some(&b"KEEP"[..]),
+        );
+        assert_eq!(
+            archive.extract_file(&bytes, "res://also.txt"),
+            Some(&b"ALSO"[..]),
+            "a removal record between two files must not shift their data offsets",
+        );
+    }
+
     #[test]
     fn truncated_header_after_magic_errors() {
         // Magic present, but the header is cut off before the version fields.
@@ -1844,9 +1946,14 @@ mod mount_tests {
     use super::*;
 
     /// Builds a pck whose directory carries a `PACK_FILE_REMOVAL` record for
-    /// `removed_path`, which `PckPacker` has no API to emit. Written by hand so
-    /// the parser's removal branch is exercised against real bytes rather than a
-    /// synthesised `PckArchive` (pat-0q2kx.134).
+    /// `removed_path`, by hand.
+    ///
+    /// ⚠️ Deliberately NOT switched to [`PckPacker::add_removal`] now that one
+    /// exists. Building the bytes by a route independent of our own writer is
+    /// the point: if the test packed with `add_removal`, the writer and reader
+    /// could agree on a layout Godot does not use and this would still pass.
+    /// `packer_emits_a_removal_record_the_reader_accepts` covers the writer;
+    /// this covers the parser (pat-0q2kx.134).
     fn pack_with_removal(present: (&str, &[u8]), removed_path: &str) -> Vec<u8> {
         // The removal is packed as its own single-entry archive and layered by
         // mount precedence — simpler and far less brittle than splicing an extra

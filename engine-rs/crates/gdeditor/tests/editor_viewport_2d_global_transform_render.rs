@@ -119,20 +119,41 @@ fn editor_viewport_2d_global_transform_render() {
     // Clause (1) already proves the two renders differ at the child's location;
     // this pins the direction — the hidden render is the one missing content,
     // and hiding the PARENT is what removed the CHILD.
-    let solo = {
-        // Same scene with no child at all: the hidden render must match it.
-        let mut t = SceneTree::new();
-        let root = t.root_id();
-        let mut parent = node2d("Parent", Vector2::new(100.0, 100.0));
-        parent.set_property("rotation", Variant::Float(std::f64::consts::FRAC_PI_2));
-        parent.set_property("visible", Variant::Bool(false));
-        t.add_child(root, parent).unwrap();
+    //
+    // ⚠️ The reference render must contain the SAME NODES as `hidden`, differing
+    // only in *which* visibility flag is off. Comparing against a scene with the
+    // child deleted cannot work: `compute_scene_bounds` ignores visibility and
+    // bounds every node with a `position`, so dropping the child moves the
+    // scene centre from (100,125) to (100,100) and the render pass re-centres
+    // the whole image 25px — grid, crosshair and all. `differs_near` then
+    // reports a difference everywhere no matter what the renderer does, so that
+    // form of the assertion fails even against a perfectly correct engine
+    // (it did: this is what the bead's recorded failure was).
+    //
+    // Hiding the CHILD instead keeps the node set — and therefore the bounds and
+    // the centring — identical, so the only thing that can differ near the
+    // child's pixel is whether the child drew.
+    let child_hidden = {
+        let (mut t, child) = rotated_parent_scene(true);
+        t.get_node_mut(child)
+            .expect("child is in the tree")
+            .set_property("visible", Variant::Bool(false));
         render_scene_with_zoom_pan(&t, None, W, H, 1.0, (0.0, 0.0))
     };
     assert!(
-        !differs_near(&hidden, &solo, gx, gy, 8),
-        "a hidden parent must hide its whole subtree — the child still leaves \
-         pixels at ({gx}, {gy}) that a childless scene does not"
+        !differs_near(&hidden, &child_hidden, gx, gy, 8),
+        "a hidden parent must hide its whole subtree — with the parent hidden \
+         the child still leaves pixels at ({gx}, {gy}) that hiding the child \
+         directly removes, so visibility is not inherited down the chain"
+    );
+    // Guard the guard: the two renders above agree near the child only because
+    // neither drew it. If the child never drew in the first place, clause (1)
+    // would have to have failed — so assert the pair really is distinguishable
+    // by comparing the child-hidden render against the fully visible one.
+    assert!(
+        differs_near(&shown, &child_hidden, gx, gy, 8),
+        "hiding the child directly must remove its pixels at ({gx}, {gy}); if it \
+         does not, the comparison above is vacuous"
     );
 
     // -- (3) z_index orders the draw ----------------------------------------

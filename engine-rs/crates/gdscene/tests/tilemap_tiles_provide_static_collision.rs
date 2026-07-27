@@ -135,6 +135,27 @@ fn tilemap_tiles_provide_static_collision() {
         .set_property("tile_map_data", Variant::PackedByteArray(Vec::new()));
     ml.register_physics_bodies();
 
+    // Re-arm the walker's velocity, which is what a `_physics_process` does on
+    // every frame of a real game.
+    //
+    // This is NOT a workaround for a Patina bug: a `CharacterBody2D` gets no
+    // automatic gravity in Godot either — `character_body_2d.cpp` mentions
+    // gravity exactly once, in a comment, and CharacterBody2D.xml not at all.
+    // The script owns `velocity += get_gravity() * delta`, and `move_and_slide`
+    // zeroes it on floor contact (mirrored here at gdphysics2d
+    // `character.rs:466/:485`). Landing therefore left this unscripted walker at
+    // zero velocity, and the auto-move pass skips idle bodies — so without this
+    // line the test would be demanding that the engine own gravity, which would
+    // be a deliberate parity REGRESSION if someone "fixed" it in the engine.
+    //
+    // The assertion below keeps all of its teeth: if erasing the cells had not
+    // actually freed the tile bodies, a re-armed walker would still be stopped
+    // at the row and `fell` would not clear `GROUND_TOP + TILE`.
+    ml.tree_mut()
+        .get_node_mut(walker)
+        .expect("walker still in tree")
+        .set_property("velocity", Variant::Vector2(Vector2::new(0.0, 200.0)));
+
     run(&mut ml, 60);
     let fell = walker_y(&ml, walker);
     assert!(

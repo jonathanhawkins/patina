@@ -58,6 +58,42 @@ progress = 0.0
 path_speed = 40.0
 "#;
 
+/// A dead-straight Curve2D from (0,0) to (0,100) — zero handles, so the bake is
+/// a line of arc length 100 and every sampled position is exact. `path_speed` is
+/// omitted (defaults to 0) so `progress` only moves when a test moves it.
+///
+/// `{h}`/`{v}`/`{rot}`/`{extra}` are filled by [`follow_tscn`].
+const STRAIGHT_TSCN: &str = r#"[gd_scene load_steps=2 format=3]
+
+[sub_resource type="Curve2D" id="Curve2D_S"]
+_data = {
+"points": PackedVector2Array(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100)
+}
+
+[node name="Main" type="Node2D"]
+
+[node name="Path" type="Path2D" parent="."]
+curve = SubResource("Curve2D_S")
+
+[node name="Follow" type="PathFollow2D" parent="Path"]
+rotates = {rot}
+h_offset = {h}
+v_offset = {v}
+{extra}
+"#;
+
+/// Builds the straight-path scene with the given PathFollow2D properties.
+fn follow_tscn(rot: bool, h: f32, v: f32, extra: &str) -> String {
+    STRAIGHT_TSCN
+        .replace("{rot}", if rot { "true" } else { "false" })
+        .replace("{h}", &format!("{h:?}"))
+        .replace("{v}", &format!("{v:?}"))
+        .replace("{extra}", extra)
+}
+
+/// The curve in [`STRAIGHT_TSCN`] has this arc length.
+const STRAIGHT_LEN: f32 = 100.0;
+
 fn tree_from(tscn: &str) -> SceneTree {
     let scene = PackedScene::from_tscn(tscn).expect("parse tscn");
     let mut tree = SceneTree::new();
@@ -149,6 +185,123 @@ fn pathfollow2d_curve2d_scene_wiring() {
     assert!(
         later.x <= 101.0 && later.y <= 101.0,
         "the follower must stay on the authored curve, got {later:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PathFollow2D's Godot property surface (pat-0q2kx.104 item 2)
+// ---------------------------------------------------------------------------
+
+/// `progress_ratio` positions the follower as a fraction of the baked length,
+/// which is how animation tracks and scripts usually drive a PathFollow.
+#[test]
+fn progress_ratio_places_the_follower_along_the_curve() {
+    let tree = tree_from(&follow_tscn(false, 0.0, 0.0, "progress_ratio = 0.5"));
+    let follow = node(&tree, "/root/Main/Path/Follow");
+
+    let mut ml = MainLoop::new(tree);
+    ml.step(0.1);
+
+    let p = position_of(ml.tree(), follow);
+    assert!(
+        (p - Vector2::new(0.0, STRAIGHT_LEN * 0.5)).length() < 0.5,
+        "progress_ratio = 0.5 must sit at the curve's midpoint, got {p:?}",
+    );
+    // And it must write through to `progress`, the value `advance` operates on.
+    let progress = ml.tree().get_node(follow).unwrap().get_property("progress");
+    assert!(
+        matches!(progress, Variant::Float(f) if (f as f32 - STRAIGHT_LEN * 0.5).abs() < 0.5),
+        "progress_ratio must write through to progress x baked_length, got {progress:?}",
+    );
+}
+
+/// The ratio is republished every tick, so reading it back never yields `Nil`
+/// and it always agrees with `progress`.
+#[test]
+fn progress_ratio_is_published_and_agrees_with_progress() {
+    let tree = tree_from(&follow_tscn(false, 0.0, 0.0, "progress = 25.0"));
+    let follow = node(&tree, "/root/Main/Path/Follow");
+
+    let mut ml = MainLoop::new(tree);
+    ml.step(0.1);
+
+    let n = ml.tree().get_node(follow).unwrap();
+    let ratio = n.get_property("progress_ratio");
+    assert!(
+        matches!(ratio, Variant::Float(f) if (f as f32 - 0.25).abs() < 0.01),
+        "progress 25 of 100 must publish progress_ratio 0.25, got {ratio:?}",
+    );
+}
+
+/// ⚠️ REGRESSION: writing `progress` directly must not be undone by the ratio
+/// the previous tick published.
+///
+/// `progress` and `progress_ratio` are one value behind two accessors in Godot,
+/// so it never has to choose. Patina stores two properties, and a driver that
+/// simply trusts whichever disagrees with the other will read last tick's stale
+/// ratio and snap the follower back — silently reverting every direct
+/// `progress` write after the first frame.
+#[test]
+fn a_direct_progress_write_beats_the_previously_published_ratio() {
+    let tree = tree_from(&follow_tscn(false, 0.0, 0.0, "progress = 0.0"));
+    let follow = node(&tree, "/root/Main/Path/Follow");
+
+    let mut ml = MainLoop::new(tree);
+    // Tick 1 publishes progress_ratio = 0.0.
+    ml.step(0.1);
+    assert!(position_of(ml.tree(), follow).length() < 0.5);
+
+    // A script now moves the follower by writing `progress` only.
+    ml.tree_mut()
+        .get_node_mut(follow)
+        .unwrap()
+        .set_property("progress", Variant::Float(75.0));
+    ml.step(0.1);
+
+    let p = position_of(ml.tree(), follow);
+    assert!(
+        (p - Vector2::new(0.0, 75.0)).length() < 0.5,
+        "a direct `progress` write must win over the stale published ratio; \
+         got {p:?} (a snap back toward the origin means the ratio won)",
+    );
+}
+
+/// With `rotates = false`, Godot applies the offsets on plain x/y
+/// (`path_2d.cpp`: `pos.x += h_offset; pos.y += v_offset`).
+#[test]
+fn h_and_v_offset_shift_the_follower_in_plain_axes_when_not_rotating() {
+    let tree = tree_from(&follow_tscn(false, 7.0, -3.0, "progress_ratio = 0.5"));
+    let follow = node(&tree, "/root/Main/Path/Follow");
+
+    let mut ml = MainLoop::new(tree);
+    ml.step(0.1);
+
+    let p = position_of(ml.tree(), follow);
+    assert!(
+        (p - Vector2::new(7.0, STRAIGHT_LEN * 0.5 - 3.0)).length() < 0.5,
+        "without rotation the offsets are plain x/y, got {p:?}",
+    );
+}
+
+/// ⚠️ With `rotates = true` the offsets are applied in the **curve's** frame —
+/// `h` along the tangent, `v` along the normal (`path_2d.cpp` translates the
+/// rotated transform locally). On a path heading +Y that is a different point
+/// than the plain-axes case, which is the whole distinction: a row of followers
+/// offset sideways must stay perpendicular to the path, not drift along it.
+#[test]
+fn offsets_follow_the_curve_frame_when_rotating() {
+    let tree = tree_from(&follow_tscn(true, 7.0, -3.0, "progress_ratio = 0.5"));
+    let follow = node(&tree, "/root/Main/Path/Follow");
+
+    let mut ml = MainLoop::new(tree);
+    ml.step(0.1);
+
+    // Tangent is +Y = (0,1); normal is (-t.y, t.x) = (-1,0).
+    // pos + tangent*h + normal*v = (0,50) + (0,7) + (3,0) = (3,57).
+    let p = position_of(ml.tree(), follow);
+    assert!(
+        (p - Vector2::new(3.0, STRAIGHT_LEN * 0.5 + 7.0)).length() < 0.5,
+        "rotating offsets must be tangent/normal relative, got {p:?}",
     );
 }
 

@@ -122,6 +122,12 @@ fn area2d_rotation_queries_and_angular_damp() {
         body(&mut tree, root, "Ball", Vector2::new(0.0, 40.0), 4.0);
 
         let mut ml = MainLoop::new(tree);
+        // `register_physics_bodies` is what populates `node_to_area` --
+        // `PhysicsServer::register_bodies` (physics_server.rs:906) registers both
+        // bodies AND Area2D nodes (:998), and `MainLoop::step` never calls it. Without
+        // this the area map is empty, no overlap is ever detected, and every
+        // `overlap_count` below reads 0 (pat-0q2kx.112 / same trap as pat-0q2kx.16).
+        ml.register_physics_bodies();
         ml.step(1.0 / 60.0);
         assert_eq!(
             overlap_count(&ml, bar),
@@ -144,6 +150,8 @@ fn area2d_rotation_queries_and_angular_damp() {
         body(&mut tree, root, "Ball", Vector2::new(0.0, 40.0), 4.0);
 
         let mut ml = MainLoop::new(tree);
+        // Registers bodies AND areas -- see the note at the first call site.
+        ml.register_physics_bodies();
         ml.step(1.0 / 60.0);
         assert_eq!(
             overlap_count(&ml, bar),
@@ -166,6 +174,8 @@ fn area2d_rotation_queries_and_angular_damp() {
         let ball = body(&mut tree, root, "Ball", Vector2::ZERO, 4.0);
 
         let mut ml = MainLoop::new(tree);
+        // Registers bodies AND areas -- see the note at the first call site.
+        ml.register_physics_bodies();
         ml.step(1.0 / 60.0);
         assert_eq!(
             overlap_count(&ml, zone),
@@ -207,6 +217,8 @@ fn area2d_rotation_queries_and_angular_damp() {
             set(&mut tree, ball, "angular_velocity", Variant::Float(10.0));
 
             let mut ml = MainLoop::new(tree);
+            // Registers bodies AND areas -- see the note at the first call site.
+            ml.register_physics_bodies();
             for _ in 0..30 {
                 ml.step(1.0 / 60.0);
             }
@@ -237,12 +249,24 @@ fn area2d_rotation_queries_and_angular_damp() {
     // -- (d) point gravity follows the area ----------------------------------
     {
         let (mut tree, root) = new_scene();
+        // 800x800, i.e. half-extent 400 — sized so the ball is still inside
+        // after the area is moved to y = -400 below.
+        //
+        // An area only affects bodies *inside* it: `AreaStore` gates every
+        // override on `shape.contains_point` (gdphysics2d/src/area2d.rs:281),
+        // exactly as Godot does. At the original 400x400 (half-extent 200) the
+        // moved well spanned y in [-600, -200] while the ball sat at y ~ -50,
+        // so the REPLACE override stopped applying and the ball simply resumed
+        // falling under default gravity — the assertion below read 360, which
+        // is 980 * 21/60, not a frozen attractor. At 800x800 the moved well
+        // spans y in [-800, 0], the ball stays inside, and the assertion tests
+        // the attractor's position rather than the containment check.
         let well = area(
             &mut tree,
             root,
             "Well",
             Vector2::ZERO,
-            Vector2::new(400.0, 400.0),
+            Vector2::new(800.0, 800.0),
         );
         // 3 == SPACE_OVERRIDE_REPLACE.
         set(&mut tree, well, "gravity_space_override", Variant::Int(3));
@@ -251,6 +275,8 @@ fn area2d_rotation_queries_and_angular_damp() {
         let ball = body(&mut tree, root, "Ball", Vector2::new(0.0, -50.0), 4.0);
 
         let mut ml = MainLoop::new(tree);
+        // Registers bodies AND areas -- see the note at the first call site.
+        ml.register_physics_bodies();
         ml.step(1.0 / 60.0);
         // The attractor sits at the area's origin, so a body above it is pulled
         // DOWN (+y).
@@ -339,6 +365,8 @@ func _on_area_entered(other):
         );
 
         let mut ml = MainLoop::new(tree);
+        // Registers bodies AND areas -- see the note at the first call site.
+        ml.register_physics_bodies();
         for _ in 0..3 {
             ml.step(1.0 / 60.0);
         }

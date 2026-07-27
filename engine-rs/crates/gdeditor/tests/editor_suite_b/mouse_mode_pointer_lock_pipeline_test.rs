@@ -260,20 +260,33 @@ func _input(event):
 /// Written as a search rather than a fixed path because this test is about the
 /// input pipeline, not about the runtime-state schema — pinning the schema here
 /// would make an unrelated payload change fail this bead's test.
+///
+/// The variable name is a **value**, not a key. Entries look like
+///
+/// ```json
+/// {"name":"rel_x","type":"Float","type_name":"","value":{"type":"Float","value":7.0}}
+/// ```
+///
+/// so `name` never appears as a key anywhere in the payload, and `value` is
+/// doubled — the outer one is a typed wrapper, the number is one level further
+/// in. Searching for a key called `rel_x` (as this did) matches nothing, ever,
+/// and every lookup returns `None` no matter how well the pipeline works.
 fn find_script_var(v: &serde_json::Value, name: &str) -> Option<f64> {
     match v {
         serde_json::Value::Object(map) => {
-            for (k, val) in map {
-                if k == name {
+            // A property entry: `name` identifies it, `value` carries the datum.
+            if map.get("name").and_then(|n| n.as_str()) == Some(name) {
+                if let Some(val) = map.get("value") {
+                    // Unwrap the typed wrapper if present, else read it directly.
+                    if let Some(n) = val.get("value").and_then(|inner| inner.as_f64()) {
+                        return Some(n);
+                    }
                     if let Some(n) = val.as_f64() {
                         return Some(n);
                     }
                 }
-                if let Some(found) = find_script_var(val, name) {
-                    return Some(found);
-                }
             }
-            None
+            map.values().find_map(|val| find_script_var(val, name))
         }
         serde_json::Value::Array(items) => items.iter().find_map(|i| find_script_var(i, name)),
         _ => None,

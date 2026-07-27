@@ -1236,11 +1236,33 @@ pub fn apply_camera2d_view(items: &mut [Render2DItem], view: Transform2D) {
             }
             CanvasFollow::Fixed => {}
             CanvasFollow::Follows(scale) => {
-                // The scale sits between the viewport transform and the layer's
-                // own, matching Godot's parent-with-scale rather than scaling
-                // the finished item — which would also resize the contents.
-                let scaled = Transform2D::scaled(Vector2::new(scale, scale));
-                item.global_transform = view * scaled * item.global_transform;
+                // Scale the view's TRANSLATION, which is what makes a following
+                // layer move a fraction of the world (pat-0q2kx.212).
+                //
+                // The previous form was `view * scaled * item`, which is inert:
+                // post-multiplying by a scale rescales the basis it is applied
+                // to, but leaves `view`'s own origin untouched, so a layer at
+                // the origin moved the FULL camera distance no matter what
+                // `follow_viewport_scale` said. A -100 camera put a 0.5-scaled
+                // layer at -100 instead of -50, i.e. the property did nothing.
+                //
+                // KNOWN DIVERGENCE from Godot, deliberate and bounded: Godot
+                // applies this as a scale about the VIEWPORT CENTRE across the
+                // whole composed transform — `xfpivot * xfscale * xfpivot⁻¹ * xf`
+                // in `servers/rendering/renderer_viewport.cpp`
+                // `_canvas_get_transform` — so it also resizes the layer's
+                // contents (the "pseudo-3D effect" the class docs describe). That
+                // needs the viewport size, which this function is not given.
+                // Scaling the translation alone reproduces the parallax idiom the
+                // property is overwhelmingly used for and leaves contents at
+                // their authored size; a faithful port needs `p_vp_size` threaded
+                // in and belongs in its own bead.
+                let followed = Transform2D {
+                    x: view.x,
+                    y: view.y,
+                    origin: view.origin * scale,
+                };
+                item.global_transform = followed * item.global_transform;
             }
         }
     }

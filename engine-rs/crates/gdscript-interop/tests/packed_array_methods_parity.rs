@@ -49,12 +49,22 @@ fn packed_array_methods_parity() {
         "ints.append(20)",
         "ints.sort()",
         "var bytes = PackedByteArray()",
+        // Sized before encoding: Godot's `encode_double` is
+        // `ERR_FAIL_COND(p_offset < 0 || p_offset > size - 8)` and never grows
+        // the buffer (variant_call.cpp:1135). Encoding into an empty array is a
+        // silent no-op, which made `decode_double` read back 0.0 (pat-0q2kx.147).
+        "bytes.resize(8)",
         "bytes.encode_double(0, 3.5)",
         "var floats = PackedFloat32Array()",
         "floats.append(1.5)",
         "floats.append(-2.25)",
         "var round_tripped = floats.to_byte_array().to_float32_array()",
         "var vars = PackedByteArray()",
+        // Same rule for `encode_var`, which returns -1 rather than growing when
+        // `p_offset + len > size` (variant_call.cpp:1150). 64 bytes is ample for
+        // a one-entry Dictionary; `decode_var` reads the length from the encoded
+        // header, so the trailing zeros are ignored.
+        "vars.resize(64)",
         "vars.encode_var(0, {\"hp\": 7})",
         "return [ints.get(0), ints.get(1), ints.get(2), ints.bsearch(20), \
          bytes.decode_double(0), round_tripped.get(0), round_tripped.get(1), \
@@ -168,10 +178,23 @@ fn insert_remove_reverse_fill_and_append_array() {
 
 /// The integer codecs round-trip at their declared widths, and a signed decode
 /// sees the sign the encode wrote.
+///
+/// The buffer is `resize`d up front because Godot's `encode_*` never grows it:
+/// `func_PackedByteArray_encode_u8` is
+/// `ERR_FAIL_COND(p_offset < 0 || p_offset > int64_t(size) - 1)` before it
+/// writes (`core/variant/variant_call.cpp:1071`), and the docs say "The array
+/// must have at least 1 byte of space, starting at the offset"
+/// (`doc/classes/PackedByteArray.xml`). This test used to start from an empty
+/// array and assert the buffer grew to 19 — behaviour Godot does not have — so
+/// it failed against a faithful implementation (pat-0q2kx.147).
+///
+/// The offsets tile the buffer exactly: u8 at 0, s16 at 1..3, u32 at 3..7,
+/// s64 at 7..15, f32 at 15..19.
 #[test]
 fn byte_array_integer_codecs_round_trip() {
     let got = items(run(&[
         "var b = PackedByteArray()",
+        "b.resize(19)",
         "b.encode_u8(0, 200)",
         "b.encode_s16(1, -300)",
         "b.encode_u32(3, 70000)",
@@ -189,7 +212,43 @@ fn byte_array_integer_codecs_round_trip() {
     assert_eq!(
         got[5],
         Variant::Int(19),
-        "encoding past the end grows the buffer to fit"
+        "the buffer keeps the size it was given"
+    );
+}
+
+/// Encoding outside the buffer is a silent no-op, as Godot's `ERR_FAIL_COND`
+/// makes it: the array neither grows nor changes, and no error is raised.
+///
+/// This is the half the previous version of the test above got backwards, so it
+/// is worth asserting directly rather than leaving it implied by a `size()`
+/// check.
+#[test]
+fn encoding_past_the_end_is_a_no_op() {
+    let got = items(run(&[
+        "var b = PackedByteArray()",
+        "b.resize(2)",
+        "b.encode_u8(0, 7)",
+        // Every one of these is out of range for a 2-byte buffer.
+        "b.encode_u8(2, 99)",
+        "b.encode_u8(-1, 99)",
+        "b.encode_u32(0, 99)",
+        "return [b.size(), b.decode_u8(0), b.decode_u8(1)]",
+    ]));
+
+    assert_eq!(
+        got[0],
+        Variant::Int(2),
+        "an out-of-range encode must not grow the buffer",
+    );
+    assert_eq!(
+        got[1],
+        Variant::Int(7),
+        "the in-range write still stands after the rejected ones",
+    );
+    assert_eq!(
+        got[2],
+        Variant::Int(0),
+        "a rejected wide encode must not have written a partial value",
     );
 }
 

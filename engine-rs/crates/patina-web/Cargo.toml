@@ -28,6 +28,15 @@ gdaudio = { path = "../gdaudio" }
 # target-gated keeps native `cargo test -p patina-web` dependency-light.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
+# Required by `#[wasm_bindgen]` on an `async fn`: the macro expands to a
+# `wasm_bindgen_futures::future_to_promise` call, so the crate must be a direct
+# dependency even though no code here names it. `canvas.rs`'s
+# `start_canvas_renderer` (pat-u3l8c.110) is async and shipped without it, which
+# broke `cargo check -p patina-web --target wasm32-unknown-unknown` with E0433
+# ("unresolved module or unlinked crate `wasm_bindgen_futures`") — the native
+# build never sees it, so nothing caught it until a wasm check was actually run
+# (pat-u3l8c.112).
+wasm-bindgen-futures = "0.4"
 console_error_panic_hook = "0.1"
 # Canvas rendering (pat-u3l8c.110). `webgl` adds wgpu's WebGL2 backend next to
 # the default WebGPU one so browsers without WebGPU still get an adapter; wgpu

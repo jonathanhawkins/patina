@@ -317,6 +317,40 @@ fn render_scene_inner(
                 let scaled_size = Vector2::new(size.x * z, size.y * z);
                 draw_control_rect(&mut fb, pos, scaled_size, COLOR_CONTROL);
             }
+            // A ColorRect is a solid block of its own `color`, not a marker
+            // (pat-0q2kx.102). Without this arm it fell to the `_` case below
+            // and drew a 2px COLOR_DEFAULT dot: `size` and `color` were both
+            // ignored, so two stacked rects were byte-identical however they
+            // were ordered — which made the z-order half of this bead
+            // unobservable in edit mode even though the z sort above is
+            // correct.
+            //
+            // The Play view already draws it properly
+            // (`viewport_2d_render.rs` -> `Render2DKind::ColorRect`), so this
+            // was the two-views-disagree bug this bead exists to close. Same
+            // defaults as that path: `color` absent -> white, matching Godot's
+            // `ColorRect.color` default.
+            "ColorRect" => {
+                // Read `size` directly rather than through `extract_size`: that
+                // helper substitutes a 40x20 MARKER size when the property is
+                // absent, which is right for the Control/Label/Button glyphs
+                // but wrong here — an unsized ColorRect draws nothing in Godot,
+                // and inventing a block would put pixels on screen that Play
+                // does not draw.
+                let size = match node.get_property("size") {
+                    Variant::Vector2(v) => v,
+                    _ => Vector2::ZERO,
+                };
+                let color = match node.get_property("color") {
+                    Variant::Color(c) => c,
+                    _ => Color::WHITE,
+                };
+                draw::fill_rect(
+                    &mut fb,
+                    Rect2::new(pos, Vector2::new(size.x * z, size.y * z)),
+                    color,
+                );
+            }
             "Node" => {
                 // Skip root node, draw small circle for others.
                 if node.parent().is_some() {
