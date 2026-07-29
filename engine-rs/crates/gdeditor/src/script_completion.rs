@@ -781,7 +781,11 @@ mod tests {
         assert!(items
             .iter()
             .any(|i| i.label == "my_speed" && i.kind == CompletionKind::Variable));
-        assert_eq!(items[0].kind, CompletionKind::Variable, "locals rank highest");
+        assert_eq!(
+            items[0].kind,
+            CompletionKind::Variable,
+            "locals rank highest"
+        );
         // A class member matching the prefix is offered.
         assert!(items
             .iter()
@@ -800,7 +804,9 @@ mod tests {
             .any(|i| i.label == "func" && i.kind == CompletionKind::Keyword));
 
         // --- Members after `.` (and no keywords in dot completion) ---
-        let dot = engine.complete(&CompletionContext::dot_access("AC_Child", "AC_Child", "get"));
+        let dot = engine.complete(&CompletionContext::dot_access(
+            "AC_Child", "AC_Child", "get",
+        ));
         assert!(dot
             .iter()
             .any(|i| i.label == "get_velocity" && i.kind == CompletionKind::Method));
@@ -814,8 +820,15 @@ mod tests {
         // User typed "var v = m" with the caret right after the "m".
         let line = "var v = m";
         let (new_line, new_caret) = apply_completion(line, line.len(), ctx.prefix.len(), chosen);
-        assert_eq!(new_line, "var v = move_and_slide", "accepting inserts the label");
-        assert_eq!(new_caret, new_line.len(), "caret lands after the inserted text");
+        assert_eq!(
+            new_line, "var v = move_and_slide",
+            "accepting inserts the label"
+        );
+        assert_eq!(
+            new_caret,
+            new_line.len(),
+            "caret lands after the inserted text"
+        );
 
         // Mid-line insertion replaces only the typed prefix, keeping the suffix.
         let (mid_line, mid_caret) = apply_completion("m + 1", 1, 1, chosen);

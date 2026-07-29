@@ -28,9 +28,7 @@ impl HelpMenuAction {
     pub fn url(&self) -> Option<&'static str> {
         match self {
             HelpMenuAction::OnlineDocs => Some("https://docs.patinaengine.com"),
-            HelpMenuAction::ReportABug => {
-                Some("https://github.com/patinaengine/patina/issues/new")
-            }
+            HelpMenuAction::ReportABug => Some("https://github.com/patinaengine/patina/issues/new"),
             HelpMenuAction::SearchHelp | HelpMenuAction::About => None,
         }
     }

@@ -52,13 +52,18 @@ fn unhandled_input_dispatched_via_main_loop() {
         .unwrap();
 
     // Records that the virtual ran and what the event payload carried.
+    //
+    // pat-s3rrv.14 changed what `event` IS: it used to be a Dictionary whose
+    // `keycode` was the name string "A", which no Godot code compares against.
+    // It is now a real `InputEventKey` object whose `keycode` is the int
+    // `KEY_A == 65`, read with Godot's own member syntax.
     let listener_src = "\
 extends Node
 var saw = false
-var keycode = \"\"
+var keycode = 0
 func _unhandled_input(event):
     self.saw = true
-    self.keycode = event[\"keycode\"]
+    self.keycode = event.keycode
 ";
     tree.attach_script(
         listener_id,
@@ -76,7 +81,8 @@ func _unhandled_input(event):
     );
     assert_eq!(
         script_var(&ml, listener_id, "keycode"),
-        Some(Variant::String("A".to_string())),
+        // KEY_A. Godot's InputEventKey.keycode is an int, not a name string.
+        Some(Variant::Int(65)),
         "_unhandled_input must receive the real event, not an empty placeholder",
     );
 

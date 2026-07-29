@@ -392,14 +392,17 @@ impl EngineBootstrap {
     }
 
     fn init_servers(&self) -> Result<(), BootError> {
-        // ClassDB is populated by explicit registration calls (register_class,
-        // register_3d_classes, etc.). PhysicsServer, RenderingServer, etc. are
-        // created on demand. In headless/test mode ClassDB may be empty — that's
-        // valid. The caller is responsible for registering classes before loading
-        // scenes that reference them.
+        // Populate ClassDB, mirroring Godot's `register_scene_types()` inside
+        // its server-init phase (upstream/godot/main/main.cpp) — PhysicsServer,
+        // RenderingServer etc. remain on-demand (pat-s3rrv.7).
         //
-        // This phase validates the ClassDB is accessible (no lock poisoning).
-        let _count = gdobject::class_db::class_count();
+        // This phase used to only *read* `class_count()` to prove the lock was
+        // not poisoned, on the documented assumption that "the caller is
+        // responsible for registering classes". No caller ever was: the runner
+        // booted every game against an all-but-empty ClassDB, so scene loading
+        // seeded no class defaults at all. Registering here makes
+        // `EngineBootstrap::run_all` self-sufficient the way Godot's boot is.
+        gdobject::class_db::register_all_classes();
         Ok(())
     }
 
@@ -584,6 +587,17 @@ impl EngineBootstrap {
         })?;
 
         let mut main_loop = MainLoop::new(tree);
+
+        // Tell the audio bridge where `res://` lives. Godot resolves every
+        // `res://` path against the project directory, never the process CWD
+        // (`ProjectSettings::globalize_path`), so a game launched from any
+        // working directory loads the same assets. The bridge's `set_base_dir`
+        // had ZERO production callers — only tests — so it fell back to a
+        // CWD-relative path and a project launched from outside its own
+        // directory was silently mute (pat-s3rrv.5).
+        main_loop
+            .audio_bridge_mut()
+            .set_base_dir(self.config.project_dir.clone());
 
         // Wire the mixer output to a real sink. Godot's runner opens an audio
         // driver at startup and pulls mixed frames into it every callback;

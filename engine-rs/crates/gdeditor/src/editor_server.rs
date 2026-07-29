@@ -598,6 +598,10 @@ pub struct EditorState {
     /// drag transforms the whole multi-selection together (Godot parity), not
     /// just the primary. Captured in `gizmo/begin`, cleared in `gizmo/end`.
     pub gizmo_drag_starts_3d: Vec<(NodeId, gdcore::math3d::Transform3D)>,
+    /// The in-progress per-node gizmo *handle* drag — the one that edits a
+    /// node's shape rather than its transform (pat-s3rrv.10). `None` when no
+    /// handle drag is active.
+    pub handle_drag_3d: Option<HandleDrag3D>,
     /// The project's audio bus layout, edited by the bottom-panel Audio editor
     /// (pat audio parity). Starts with a single `Master` bus.
     pub audio_bus_layout: crate::audio_bus_layout::AudioBusLayout,
@@ -833,7 +837,12 @@ pub fn default_editor_viewport_3d() -> crate::viewport_3d::Viewport3D {
 impl EditorState {
     /// Creates a new editor state with the given scene tree.
     pub fn new(tree: SceneTree) -> Self {
-        gdobject::class_db::register_editor_classes();
+        // The same entry point the runner boots through (pat-s3rrv.7), so the
+        // editor and a running game resolve classes against one identical
+        // table. `register_editor_classes` covered six of the eight families;
+        // this adds the root-window and viewport chains the editor was also
+        // missing. Idempotent, so re-entering the editor costs nothing.
+        gdobject::class_db::register_all_classes();
         // The @tool EditorPlugin scripting classes (pat-0q2kx.241). Seeded here
         // rather than only in tests so a plugin script's `extends EditorDock`
         // resolves against the running editor.
@@ -975,6 +984,7 @@ impl EditorState {
             gizmo_drag_start_3d: None,
             gizmo_snap_active_3d: false,
             gizmo_drag_starts_3d: Vec::new(),
+            handle_drag_3d: None,
             audio_bus_layout: crate::audio_bus_layout::AudioBusLayout::new(),
             theme_editor: crate::theme_editor::ThemeEditor::new(),
             theme_file: None,
@@ -1025,6 +1035,24 @@ impl EditorState {
     /// for the engine-owned [`MainLoop`].
     pub fn build_engine_input_map(&self) -> gdplatform::InputMap {
         let mut map = gdplatform::InputMap::new();
+        // Godot's InputMap is seeded with the builtin `ui_*` actions before any
+        // project action is read (upstream/godot/core/input/input_map.cpp
+        // `load_default`), which is what makes Ctrl+C / Ctrl+Z / Shift+Tab work
+        // inside a running game without the project declaring them
+        // (pat-s3rrv.15).
+        //
+        // Without this the editor's engine map held ONLY the editor's own
+        // string bindings, so the modifier-bound builtins had no
+        // `KeyWithModifiers` entry to match against — forwarding the browser's
+        // real modifier bits (the other half of this bead) would still have
+        // resolved nothing.
+        //
+        // Installed first so the editor's own actions layer on top: `add_action`
+        // is `entry(..).or_default()` and `action_add_event` pushes, so a
+        // project action sharing a builtin name *adds* a binding rather than
+        // replacing the builtin — matching Godot, where a project override
+        // extends the default action.
+        map.install_builtin_ui_actions();
         for (action, keys) in &self.input_map {
             map.add_action(action, 0.0);
             for key_name in keys {
@@ -2367,6 +2395,18 @@ fn handle_connection(
             api_viewport_3d_gizmo_update(state, &req.body, &mut stream)
         }
         ("POST", "/api/viewport/3d/gizmo/end") => api_viewport_3d_gizmo_end(state, &mut stream),
+        // Per-node gizmo handles: edit the node's SHAPE, not its transform
+        // (pat-s3rrv.10).
+        ("GET", "/api/viewport/3d/handles") => {
+            api_viewport_3d_handles(state, &req.query, &mut stream)
+        }
+        ("POST", "/api/viewport/3d/handle/begin") => {
+            api_viewport_3d_handle_begin(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/3d/handle/update") => {
+            api_viewport_3d_handle_update(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/viewport/3d/handle/end") => api_viewport_3d_handle_end(state, &mut stream),
         ("POST", "/api/viewport/3d/frame") => api_viewport_3d_frame(state, &mut stream),
         ("POST", "/api/viewport/3d/view_preset") => {
             api_viewport_3d_view_preset(state, &req.body, &mut stream)
@@ -2717,10 +2757,10 @@ fn handle_connection(
         ("GET", "/api/filesystem/tree") => api_filesystem_tree(&req.query, &mut stream),
         ("GET", "/api/filesystem/dir") => api_filesystem_dir(&req.query, &mut stream),
         // pat-vyko1: Import settings
-        ("GET", "/api/import_settings") => api_get_import_settings(&req.query, &mut stream),
-        ("POST", "/api/import_settings") => api_set_import_settings(&req.body, &mut stream),
+        ("GET", "/api/import_settings") => api_get_import_settings(state, &req.query, &mut stream),
+        ("POST", "/api/import_settings") => api_set_import_settings(state, &req.body, &mut stream),
         // pat-h5s93: reimport the selected resource with current settings
-        ("POST", "/api/reimport") => api_reimport(&req.body, &mut stream),
+        ("POST", "/api/reimport") => api_reimport(state, &req.body, &mut stream),
         // pat-bc0tv: Shader Editor source read/save
         ("GET", "/api/shader_source") => api_get_shader_source(state, &req.query, &mut stream),
         ("POST", "/api/shader_source") => api_save_shader_source(state, &req.body, &mut stream),
@@ -9201,6 +9241,457 @@ fn api_viewport_3d_gizmo_end(state: &Arc<Mutex<EditorState>>, stream: &mut TcpSt
     send_json(stream, r#"{"ok":true}"#);
 }
 
+// ---------------------------------------------------------------------------
+// Per-node 3D gizmo handles (pat-s3rrv.10)
+// ---------------------------------------------------------------------------
+//
+// Godot gives every selected 3D node its own gizmo with draggable handles that
+// edit the node's SHAPE rather than its transform: box face handles on a
+// CollisionShape3D (`collision_shape_3d_gizmo_plugin.cpp` via `Gizmo3DHelper`)
+// and a range handle on an OmniLight3D (`light_3d_gizmo_plugin.cpp`).
+//
+// Patina had the parity-exact geometry in `viewport_3d_handles.rs` with ZERO
+// non-test callers and no route to reach it, so the served 3D viewport offered
+// only the shared transform gizmo. These three endpoints are that missing
+// wiring; the math itself stays in the ported module.
+
+/// What kind of node gizmo a selection exposes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleKind3D {
+    /// `CollisionShape3D` holding a `BoxShape3D`: six face handles.
+    Box,
+    /// `OmniLight3D`: a single range handle.
+    OmniRange,
+}
+
+/// An in-progress handle drag, capturing everything needed to (a) recompute the
+/// shape from the drag start on every update and (b) restore the pre-drag state
+/// so the undo step records a real `old_value`.
+///
+/// Godot resolves each drag frame from the state at drag START, not from the
+/// last frame's result — accumulating would make the box creep as the mouse
+/// jitters. That is why the initial size/transform are captured here rather
+/// than re-read during `update`.
+#[derive(Debug, Clone)]
+pub struct HandleDrag3D {
+    /// The node being edited.
+    pub node_id: NodeId,
+    /// Which handle (a box face id 0..6, or 0 for the omni range).
+    pub handle: usize,
+    /// Which gizmo the handle belongs to.
+    pub kind: HandleKind3D,
+    /// Box size at drag start.
+    pub initial_size: gdcore::math::Vector3,
+    /// Omni range at drag start.
+    pub initial_range: f32,
+    /// The node's global transform at drag start.
+    pub initial_transform: gdcore::math3d::Transform3D,
+    /// The stored `__shape__size` at drag start, restored before the undo step
+    /// is captured.
+    pub initial_size_prop: Variant,
+    /// The name and value of the node's stored placement property (`transform`
+    /// or `position`) at drag start — a non-symmetric box drag re-centres the
+    /// node, so the position edit is part of the same undoable action.
+    pub initial_place_prop: (String, Variant),
+}
+
+/// Reads the node's stored placement property, matching what
+/// [`set_node_world_origin`] writes: a node loaded with a full `transform`
+/// keeps using it, otherwise `position`.
+fn place_prop_of(tree: &SceneTree, node_id: NodeId) -> (String, Variant) {
+    let node = match tree.get_node(node_id) {
+        Some(n) => n,
+        None => return ("position".to_string(), Variant::Nil),
+    };
+    match node.get_property("transform") {
+        Variant::Transform3D(t) => ("transform".to_string(), Variant::Transform3D(t)),
+        _ => ("position".to_string(), node.get_property("position")),
+    }
+}
+
+/// Classifies a node's gizmo, with the geometry it exposes.
+///
+/// Returns `None` for a node with no node gizmo — a plain `Node3D`, or a
+/// `CollisionShape3D` whose shape is not a box — which the route reports as
+/// `editable:false` rather than an error, mirroring the 2D
+/// `/api/viewport/shape_handles`.
+fn node_gizmo_kind(
+    tree: &SceneTree,
+    node_id: NodeId,
+) -> Option<(HandleKind3D, Vec<(String, gdcore::math::Vector3)>)> {
+    let node = tree.get_node(node_id)?;
+    match node.class_name() {
+        "CollisionShape3D" => {
+            // The shape class comes from the flattened companion a loaded scene
+            // leaves behind, or straight off `shape` for a hand-built node.
+            let shape_class = match node.get_property("__shape__class") {
+                Variant::String(c) => c,
+                _ => match node.get_property("shape") {
+                    Variant::String(c) if !c.starts_with("SubResource") => c,
+                    _ => String::new(),
+                },
+            };
+            if shape_class != "BoxShape3D" {
+                return None;
+            }
+            let size = match node.get_property("__shape__size") {
+                Variant::Vector3(v) => v,
+                _ => return None,
+            };
+            let names = ["+x", "-x", "+y", "-y", "+z", "-z"];
+            let handles = crate::viewport_3d_handles::box_get_handles(size)
+                .into_iter()
+                .enumerate()
+                .map(|(i, local)| (names[i].to_string(), local))
+                .collect();
+            Some((HandleKind3D::Box, handles))
+        }
+        "OmniLight3D" => {
+            let range = match node.get_property("omni_range") {
+                Variant::Float(f) => f as f32,
+                Variant::Int(i) => i as f32,
+                // Godot's OmniLight3D.omni_range default.
+                _ => 5.0,
+            };
+            // Godot puts the omni range handle on +X at the range distance
+            // (`light_3d_gizmo_plugin.cpp` pushes `Vector3(r, 0, 0)`).
+            Some((
+                HandleKind3D::OmniRange,
+                vec![(
+                    "range".to_string(),
+                    gdcore::math::Vector3::new(range, 0.0, 0.0),
+                )],
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// `GET /api/viewport/3d/handles?node_id=` — the node-gizmo handles for a 3D
+/// node, projected to viewport pixels so the client can draw and hit-test them.
+///
+/// The projection happens here because only the server has the editor camera;
+/// the client would otherwise need a duplicate of the whole view/projection
+/// chain just to place six dots.
+fn api_viewport_3d_handles(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let Some(raw) = query_param(query, "node_id").and_then(|v| v.parse::<u64>().ok()) else {
+        send_error(stream, 400, "missing node_id");
+        return;
+    };
+    let s = state.lock().unwrap();
+    let Some(node_id) = find_node_by_raw_id(&s.scene_tree, raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    let Some((kind, handles)) = node_gizmo_kind(&s.scene_tree, node_id) else {
+        send_json(stream, r#"{"ok":true,"editable":false,"handles":[]}"#);
+        return;
+    };
+    let xform = gdscene::node3d::get_global_transform(&s.scene_tree, node_id);
+    let kind_name = match kind {
+        HandleKind3D::Box => "box",
+        HandleKind3D::OmniRange => "omni_range",
+    };
+    let items: Vec<String> = handles
+        .iter()
+        .enumerate()
+        .map(|(id, (name, local))| {
+            let world = xform.xform(*local);
+            let (px, py) = s.editor_viewport_3d.world_to_screen(world);
+            // A handle behind the camera can project to a non-finite pixel, and
+            // `NaN`/`inf` are not JSON — the response would fail to parse rather
+            // than merely misplace a dot.
+            let fin = |v: f32| if v.is_finite() { v } else { 0.0 };
+            format!(
+                r#"{{"id":{id},"name":"{name}","x":{},"y":{},"world":[{},{},{}]}}"#,
+                fin(px),
+                fin(py),
+                world.x,
+                world.y,
+                world.z
+            )
+        })
+        .collect();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"editable":true,"kind":"{kind_name}","handles":[{}]}}"#,
+            items.join(",")
+        ),
+    );
+}
+
+/// `POST /api/viewport/3d/handle/begin` — starts a handle drag on `node_id`'s
+/// handle `handle`. The client hit-tests in the DOM (each handle is a dot), so
+/// the handle id arrives explicitly rather than being re-derived from the pixel.
+fn api_viewport_3d_handle_begin(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let Some(parsed) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let handle = parsed
+        .get("handle")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(u64::MAX) as usize;
+    let mut state = state.lock().unwrap();
+    let st = &mut *state;
+    // Fall back to the current selection so the route matches how the transform
+    // gizmo behaves when the client omits the id.
+    let node_id = match parsed
+        .get("node_id")
+        .and_then(|v| v.as_u64())
+        .and_then(|raw| find_node_by_raw_id(&st.scene_tree, raw))
+        .or(st.selected_node)
+    {
+        Some(n) => n,
+        None => {
+            send_json(stream, r#"{"dragging":false}"#);
+            return;
+        }
+    };
+    let Some((kind, handles)) = node_gizmo_kind(&st.scene_tree, node_id) else {
+        send_json(stream, r#"{"dragging":false}"#);
+        return;
+    };
+    if handle >= handles.len() {
+        send_json(stream, r#"{"dragging":false}"#);
+        return;
+    }
+    let node = match st.scene_tree.get_node(node_id) {
+        Some(n) => n,
+        None => {
+            send_json(stream, r#"{"dragging":false}"#);
+            return;
+        }
+    };
+    let initial_size = match node.get_property("__shape__size") {
+        Variant::Vector3(v) => v,
+        _ => gdcore::math::Vector3::ZERO,
+    };
+    let initial_range = match node.get_property("omni_range") {
+        Variant::Float(f) => f as f32,
+        Variant::Int(i) => i as f32,
+        _ => 5.0,
+    };
+    st.handle_drag_3d = Some(HandleDrag3D {
+        node_id,
+        handle,
+        kind,
+        initial_size,
+        initial_range,
+        initial_transform: gdscene::node3d::get_global_transform(&st.scene_tree, node_id),
+        initial_size_prop: node.get_property("__shape__size"),
+        initial_place_prop: place_prop_of(&st.scene_tree, node_id),
+    });
+    send_json(stream, &format!(r#"{{"dragging":true,"handle":{handle}}}"#));
+}
+
+/// `POST /api/viewport/3d/handle/update` — resolves the cursor to a new shape
+/// and writes it live, so the viewport follows the drag.
+///
+/// `symmetric` is Godot's Alt modifier (resize about the centre instead of
+/// moving one face); `snap` applies the editor's translate snap.
+fn api_viewport_3d_handle_update(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let Some(parsed) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let x = parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let y = parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let symmetric = parsed
+        .get("symmetric")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let want_snap = parsed
+        .get("snap")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mut state = state.lock().unwrap();
+    let st = &mut *state;
+    let Some(drag) = st.handle_drag_3d.clone() else {
+        send_json(stream, r#"{"ok":false,"dragging":false}"#);
+        return;
+    };
+    let snap_step = if want_snap || st.editor_viewport_3d.use_snap {
+        Some(st.editor_viewport_3d.snap_translate)
+    } else {
+        None
+    };
+
+    // The drag point is the point on the handle's own axis closest to the mouse
+    // ray — Godot's `get_closest_points_between_segments` against an axis
+    // segment. Solving in WORLD space and transforming back keeps the math
+    // correct for a rotated or nested node.
+    let ray = st.editor_viewport_3d.screen_to_ray(x, y);
+    let inv = drag.initial_transform.inverse();
+
+    match drag.kind {
+        HandleKind3D::Box => {
+            let (axis, _) = crate::viewport_3d_handles::box_handle_axis_sign(drag.handle);
+            let mut local_axis = gdcore::math::Vector3::ZERO;
+            match axis {
+                0 => local_axis.x = 1.0,
+                1 => local_axis.y = 1.0,
+                _ => local_axis.z = 1.0,
+            }
+            let world_axis = drag.initial_transform.basis.xform(local_axis);
+            let t = crate::viewport_3d::ray_closest_to_line(
+                &ray,
+                drag.initial_transform.origin,
+                world_axis,
+            );
+            let world_point = gdcore::math::Vector3::new(
+                drag.initial_transform.origin.x + world_axis.x * t,
+                drag.initial_transform.origin.y + world_axis.y * t,
+                drag.initial_transform.origin.z + world_axis.z * t,
+            );
+            let ra = inv.xform(world_point);
+            let (new_size, new_world_origin) = crate::viewport_3d_handles::box_set_handle(
+                drag.initial_size,
+                &drag.initial_transform,
+                drag.handle,
+                ra,
+                symmetric,
+                snap_step,
+            );
+            if let Some(node) = st.scene_tree.get_node_mut(drag.node_id) {
+                node.set_property("__shape__size", Variant::Vector3(new_size));
+            }
+            set_node_world_origin(&mut st.scene_tree, drag.node_id, new_world_origin);
+        }
+        HandleKind3D::OmniRange => {
+            // The range handle rides +X; its distance from the light IS the range.
+            let world_axis = drag
+                .initial_transform
+                .basis
+                .xform(gdcore::math::Vector3::new(1.0, 0.0, 0.0));
+            let t = crate::viewport_3d::ray_closest_to_line(
+                &ray,
+                drag.initial_transform.origin,
+                world_axis,
+            );
+            let range = t.max(0.0);
+            if let Some(node) = st.scene_tree.get_node_mut(drag.node_id) {
+                node.set_property("omni_range", Variant::Float(f64::from(range)));
+            }
+        }
+    }
+    send_json(stream, r#"{"ok":true,"dragging":true}"#);
+}
+
+/// `POST /api/viewport/3d/handle/end` — commits the handle drag as ONE undo step.
+///
+/// `update` wrote the shape live, so the node currently holds the last mid-drag
+/// value. The pre-drag state is restored first and the commands re-executed, or
+/// each command would capture the final drag frame as its `old_value` and undo
+/// would appear to do nothing — the same trap `gizmo/end` documents.
+fn api_viewport_3d_handle_end(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    let Some(drag) = state.handle_drag_3d.take() else {
+        send_json(stream, r#"{"ok":true,"committed":false}"#);
+        return;
+    };
+
+    // Snapshot what the drag produced, then rewind to the drag-start values.
+    let node_id = drag.node_id;
+    let (final_size, final_place, final_range) = match state.scene_tree.get_node(node_id) {
+        Some(n) => (
+            n.get_property("__shape__size"),
+            n.get_property(&drag.initial_place_prop.0),
+            n.get_property("omni_range"),
+        ),
+        None => {
+            send_json(stream, r#"{"ok":true,"committed":false}"#);
+            return;
+        }
+    };
+    // Rewind ONLY what this gizmo edits. Restoring every property unconditionally
+    // would write an `omni_range` onto a CollisionShape3D (and a `__shape__size`
+    // onto a light) — invented properties that the saver would then persist into
+    // the .tscn.
+    if let Some(node) = state.scene_tree.get_node_mut(node_id) {
+        match drag.kind {
+            HandleKind3D::Box => {
+                node.set_property("__shape__size", drag.initial_size_prop.clone());
+                node.set_property(
+                    &drag.initial_place_prop.0,
+                    drag.initial_place_prop.1.clone(),
+                );
+            }
+            HandleKind3D::OmniRange => {
+                node.set_property("omni_range", Variant::Float(f64::from(drag.initial_range)));
+            }
+        }
+    }
+
+    // The (property, final value) pairs this drag actually changed. A click that
+    // resized nothing contributes none, so it does not litter the history.
+    let mut edits: Vec<(String, Variant)> = Vec::new();
+    match drag.kind {
+        HandleKind3D::Box => {
+            if final_size != drag.initial_size_prop {
+                edits.push(("__shape__size".to_string(), final_size));
+            }
+            if final_place != drag.initial_place_prop.1 {
+                edits.push((drag.initial_place_prop.0.clone(), final_place));
+            }
+        }
+        HandleKind3D::OmniRange => {
+            let unchanged = match &final_range {
+                Variant::Float(f) => (*f as f32 - drag.initial_range).abs() < 1e-6,
+                _ => true,
+            };
+            if !unchanged {
+                edits.push(("omni_range".to_string(), final_range));
+            }
+        }
+    }
+
+    let mut steps: Vec<EditorCommand> = Vec::new();
+    for (property, new_value) in edits {
+        let mut cmd = EditorCommand::SetProperty {
+            node_id,
+            property,
+            new_value,
+            old_value: Variant::Nil,
+        };
+        // `execute` captures the (now restored) pre-drag value as `old_value`,
+        // which is what makes the undo below restore the drag start rather than
+        // the last mid-drag frame.
+        if cmd.execute(&mut state.scene_tree).is_ok() {
+            steps.push(cmd);
+        }
+    }
+
+    if !steps.is_empty() {
+        // One drag is one undo step even though a box resize writes both the
+        // size and the re-centred position — Ctrl+Z must not peel them apart.
+        let cmd = if steps.len() == 1 {
+            steps.pop().expect("len checked")
+        } else {
+            EditorCommand::Group {
+                label: "Resize gizmo handle".to_string(),
+                commands: steps,
+            }
+        };
+        state.undo_stack.push(cmd);
+        state.redo_stack.clear();
+        state.scene_modified = true;
+        send_json(stream, r#"{"ok":true,"committed":true}"#);
+        return;
+    }
+    send_json(stream, r#"{"ok":true,"committed":false}"#);
+}
+
 /// `POST /api/viewport/3d/frame` — frames the selected node (Godot's "F"): moves
 /// the camera focus to the node and pulls in to a fit distance, keeping the
 /// current orientation. With no selection it frames the world origin.
@@ -9577,7 +10068,7 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("GET", "/api/shader_source", "[\"path\"]", "null", "{\"type\":\"object\",\"properties\":{\"path\":\"string\",\"source\":\"string\"}}"),
     ("POST", "/api/shader_source", "[]", "{\"path\":\"string\",\"source\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/shader_validate", "[]", "{\"source\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"bool\",\"errors\":\"array\",\"warnings\":\"array\"}}"),
-    ("POST", "/api/reimport", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"reimported\":\"string\"}}"),
+    ("POST", "/api/reimport", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"reimported\":\"string\",\"output\":\"string\"}}"),
     ("GET", "/api/filesystem/file_info", "[\"path\"]", "null", "{\"type\":\"object\",\"properties\":{\"abs_path\":\"string\",\"uid\":\"string\",\"dependencies\":\"array\",\"owners\":\"array\"}}"),
     ("GET", "/api/filesystem/tree", "[\"path?\"]", "null", "{\"type\":\"object\",\"properties\":{\"tree\":\"array\"}}"),
     ("GET", "/api/filesystem/dir", "[\"path?\"]", "null", "{\"type\":\"object\",\"properties\":{\"files\":\"array\"}}"),
@@ -13222,9 +13713,30 @@ fn advance_running_main_loop(state: &mut EditorState) -> u64 {
     // push_event(). The bridge in MainLoop::step() converts it to the
     // script-facing InputSnapshot automatically. We still set a manual
     // snapshot as a fallback for any keys that didn't map to a typed Key.
+    //
+    // ⚠️ That fallback has to be conditional (pat-s3rrv.15). `MainLoop::step`
+    // runs its bridge only `if !self.tree.has_input_snapshot()`
+    // (gdscene/src/main_loop.rs:2688), so setting a manual snapshot
+    // *unconditionally* — as this did — suppressed the engine bridge on every
+    // frame. Scripts then saw only this string-keyed snapshot, which has no
+    // notion of modifiers, so `Input.is_action_just_pressed("ui_copy")` could
+    // never be true no matter how faithfully the browser's Ctrl bit was
+    // forwarded. The comment above always described a fallback; the code was an
+    // override.
+    //
+    // So: hand over the manual snapshot only when it carries a key the engine
+    // could not type, which is the case it was written for. Otherwise stay out
+    // of the way and let the engine's own `InputState` — the one that ran the
+    // `KeyCombo` modifier test — reach the scripts.
+    let untyped_key_pressed = state
+        .pressed_keys
+        .iter()
+        .any(|name| gdplatform::input::Key::from_name(name).is_none());
     let input_snapshot = state.make_input_snapshot();
     if let Some(ref mut main_loop) = state.run_main_loop {
-        main_loop.set_input(input_snapshot);
+        if untyped_key_pressed {
+            main_loop.set_input(input_snapshot);
+        }
         let output = main_loop.step(delta);
         state.runtime_frame_count = output.frame_count;
         // Record one frame per step while Movie Maker is active (this runs for
@@ -14214,15 +14726,29 @@ fn api_input_key_down(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         state.just_pressed_keys.insert(key.clone());
     }
     state.pressed_keys.insert(key.clone());
+    // The browser's real modifier state, as Godot's web platform layer reads it
+    // off the KeyboardEvent (upstream/godot/platform/web/js/libs/library_godot_input.js
+    // forwards `e.shiftKey`/`ctrlKey`/`altKey`/`metaKey` into
+    // `InputEventWithModifiers`) — pat-s3rrv.15.
+    //
+    // These were hard-coded `false` here, which quietly killed **every**
+    // modifier-bound builtin action in the only interactive runtime:
+    // `KeyCombo::modifiers_satisfied_by` (gdplatform/src/input.rs:1285) is
+    // consulted on each press, so `ui_copy` (Ctrl+C), `ui_undo` (Ctrl+Z),
+    // `ui_focus_prev` (Shift+Tab) and the rest could never match. Nothing else
+    // on the path was broken — the action resolution and the press/echo
+    // bookkeeping were already correct — so reading the three flags off the
+    // request is the whole fix.
+    let modifier = |name: &str| v[name].as_bool().unwrap_or(false);
     // Route through engine-owned InputState when MainLoop is active.
     if let Some(ref mut main_loop) = state.run_main_loop {
         if let Some(typed_key) = gdplatform::input::Key::from_name(&key) {
             main_loop.push_event(gdplatform::InputEvent::Key {
                 key: typed_key,
                 pressed: true,
-                shift: false,
-                ctrl: false,
-                alt: false,
+                shift: modifier("shift"),
+                ctrl: modifier("ctrl"),
+                alt: modifier("alt"),
             });
         }
     }
@@ -14251,15 +14777,21 @@ fn api_input_key_up(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     };
     state.pressed_keys.remove(&key);
     state.just_released_keys.insert(key.clone());
+    // Modifiers on the release too (pat-s3rrv.15). Godot only applies the
+    // modifier test to a *press* — `gdplatform/src/input.rs:1283-1288` lets a
+    // release match regardless, so the action can drop even when the user let
+    // go of Ctrl before the key — but the flags are still carried so a consumer
+    // reading the event sees what the browser actually reported.
+    let modifier = |name: &str| v[name].as_bool().unwrap_or(false);
     // Route through engine-owned InputState when MainLoop is active.
     if let Some(ref mut main_loop) = state.run_main_loop {
         if let Some(typed_key) = gdplatform::input::Key::from_name(&key) {
             main_loop.push_event(gdplatform::InputEvent::Key {
                 key: typed_key,
                 pressed: false,
-                shift: false,
-                ctrl: false,
-                alt: false,
+                shift: modifier("shift"),
+                ctrl: modifier("ctrl"),
+                alt: modifier("alt"),
             });
         }
     }
@@ -19017,7 +19549,7 @@ fn api_filesystem_dir(query: &str, stream: &mut TcpStream) {
 // ---------------------------------------------------------------------------
 
 /// `GET /api/import_settings` — returns import settings for a resource.
-fn api_get_import_settings(query: &str, stream: &mut TcpStream) {
+fn api_get_import_settings(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
     // pat-h5s93: derive the importer ("Import As:"), its presets, and the
     // editable import options from the selected resource's extension, mirroring
     // Godot's ImportDock (_update_options). No path / a non-importable file
@@ -19056,12 +19588,32 @@ fn api_get_import_settings(query: &str, stream: &mut TcpStream) {
         ImportResourceType::Shader => "Shader",
         ImportResourceType::Script => "Script",
     };
+    // What the asset is ACTUALLY set to wins over the importer default: Godot's
+    // `ImportDock::_update_options` shows the values stored in the asset's
+    // `.import` `[params]`, so a dock that always rendered defaults could never
+    // show an edit it had just saved (pat-s3rrv.2).
+    let stored: std::collections::HashMap<String, String> = {
+        let root = fs_project_root(state);
+        resolve_res_path(&root, &path)
+            .ok()
+            .map(|source| import_sidecar_path(&source))
+            .and_then(|sidecar| gdresource::importers::load_import_file(&sidecar).ok())
+            .and_then(|f| f.params().cloned())
+            .unwrap_or_default()
+    };
     let opt = |name: &str, label: &str, ty: &str, value: String, choices: &[&str]| -> String {
         let choices_json = choices
             .iter()
             .map(|c| format!("\"{}\"", c.replace('"', "\\\"")))
             .collect::<Vec<_>>()
             .join(",");
+        // The sidecar stores INI literals; re-encode them as the JSON type the
+        // dock's control expects, so a stored `false` arrives as a JSON bool
+        // rather than the string "false" (which a checkbox reads as truthy).
+        let value = match stored.get(name) {
+            Some(raw) => import_option_json_value(ty, raw),
+            None => value,
+        };
         format!(
             r#"{{"name":"{name}","label":"{label}","type":"{ty}","value":{value},"choices":[{choices_json}]}}"#
         )
@@ -19188,18 +19740,137 @@ fn api_get_import_settings(query: &str, stream: &mut TcpStream) {
     );
 }
 
-/// `POST /api/import_settings` — updates import settings for a resource.
-fn api_set_import_settings(body: &str, stream: &mut TcpStream) {
-    // Accept and acknowledge the option change (persisting to a `.import`
-    // sidecar is future work; the dock applies on Reimport).
-    let _ = parse_json_body(body);
-    send_json(stream, r#"{"ok":true}"#);
+/// Re-encodes an INI literal from a `.import` `[params]` entry as the JSON value
+/// the dock's control for `ty` expects.
+///
+/// Falls back to the quoted string form when the stored text does not parse as
+/// the declared type, so a hand-edited sidecar renders as text instead of
+/// producing malformed JSON.
+fn import_option_json_value(ty: &str, raw: &str) -> String {
+    let raw = raw.trim();
+    match ty {
+        "bool" => match raw {
+            "true" | "false" => raw.to_string(),
+            _ => "false".to_string(),
+        },
+        "int" => match raw.parse::<i64>() {
+            Ok(v) => v.to_string(),
+            Err(_) => "0".to_string(),
+        },
+        "float" => match raw.parse::<f64>() {
+            Ok(v) if v.is_finite() => v.to_string(),
+            _ => "0.0".to_string(),
+        },
+        _ => serde_json::Value::String(raw.to_string()).to_string(),
+    }
+}
+
+/// Converts a JSON option value from the dock into the INI literal stored in
+/// `[params]`.
+///
+/// The dock's number/enum/text controls POST their value as a JSON *string*
+/// (`ctrl.value`), while checkboxes POST a real bool; both land here, and the
+/// sidecar writer decides quoting from the literal's shape.
+fn import_option_ini_value(value: Option<&serde_json::Value>) -> String {
+    match value {
+        Some(serde_json::Value::Bool(b)) => b.to_string(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Null) | None => String::new(),
+        Some(other) => other.to_string(),
+    }
+}
+
+/// Godot's importer id for a resource type — the `[remap] importer` value a
+/// real `.import` carries (`upstream/godot/editor/import/*`).
+fn godot_importer_id(rty: crate::import_settings::ImportResourceType) -> &'static str {
+    use crate::import_settings::ImportResourceType as T;
+    match rty {
+        T::Texture => "texture",
+        T::Audio => "wav",
+        T::Scene | T::Mesh => "scene",
+        T::Font => "font_data_dynamic",
+        T::Shader => "glsl",
+        T::Script => "script",
+    }
+}
+
+/// `POST /api/import_settings` — persists one import option into the asset's
+/// `.import` sidecar (pat-s3rrv.2).
+///
+/// Body: `{"path":"res://...","option":"mipmaps","value":false}` — the shape the
+/// dock's option controls POST on every change. Mirrors Godot's
+/// `ImportDock::_reimport_and_cleanup`, which writes the edited values into
+/// `[params]`; the edit lands on disk immediately, so a later GET (or a real
+/// Godot editor opening the project) reads it back.
+///
+/// This used to parse the body and drop it — the dock looked live and changed
+/// nothing.
+fn api_set_import_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    use crate::import_settings::ImportResourceType;
+    let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
+    let path = p.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let option = p.get("option").and_then(|v| v.as_str()).unwrap_or("");
+    if path.is_empty() || option.is_empty() {
+        send_error(stream, 400, "missing path or option");
+        return;
+    }
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let rty = match ImportResourceType::from_extension(&ext) {
+        Some(t) => t,
+        None => {
+            send_error(stream, 400, "resource is not importable");
+            return;
+        }
+    };
+
+    let root = fs_project_root(state);
+    let source = match resolve_res_path(&root, path) {
+        Ok(p) => p,
+        Err(why) => {
+            send_sandbox_violation(stream, why);
+            return;
+        }
+    };
+
+    let sidecar = import_sidecar_path(&source);
+    let mut sc = gdresource::importers::load_import_file(&sidecar).unwrap_or_default();
+    // A sidecar the dock brings into existence must still name its importer and
+    // source, or the asset reads as never-imported the next time anything opens
+    // the project.
+    if sc.importer().is_none() {
+        sc.set_remap("importer", godot_importer_id(rty));
+    }
+    if sc.source_file().is_none() {
+        sc.set_dep("source_file", path);
+    }
+    sc.set_param(option, import_option_ini_value(p.get("value")));
+
+    match gdresource::importers::save_import_file(&sidecar, &sc) {
+        Ok(()) => send_json(
+            stream,
+            &format!(
+                r#"{{"ok":true,"path":"{}","option":"{}"}}"#,
+                path.replace('"', "\\\""),
+                option.replace('"', "\\\"")
+            ),
+        ),
+        Err(e) => send_error(stream, 500, &format!("cannot write .import sidecar: {e}")),
+    }
 }
 
 /// `POST /api/reimport` — reimport the given resource(s) with current settings.
-/// Body: `{"path":"res://..."}`. Acknowledges with the path so the dock can
-/// confirm. Mirrors Godot's ImportDock `Reimport` button.
-fn api_reimport(body: &str, stream: &mut TcpStream) {
+/// Body: `{"path":"res://..."}`. Mirrors Godot's ImportDock `Reimport` button.
+///
+/// A 3D source asset (`.gltf`/`.glb`/`.obj`) actually runs through the scene
+/// format importers and lands as a `PackedScene` under `.godot/imported/`; the
+/// response carries that path in `"output"` (pat-s3rrv.3). Other importable
+/// types still just acknowledge.
+fn api_reimport(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     use crate::import_settings::ImportResourceType;
     let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
     let path = p.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -19216,13 +19887,156 @@ fn api_reimport(body: &str, stream: &mut TcpStream) {
         send_error(stream, 400, "resource is not importable");
         return;
     }
+
+    let escaped = path.replace('"', "\\\"");
+    let registry = crate::import::default_scene_importer_registry();
+    if registry.find_importer(&ext).is_some() {
+        let project_root = fs_project_root(state);
+        let source = match path.strip_prefix("res://") {
+            Some(rel) => project_root.join(rel),
+            None => std::path::PathBuf::from(path),
+        };
+        match crate::import::import_scene_to_packed_scene(&registry, &source, &project_root) {
+            Ok(out) => {
+                send_json(
+                    stream,
+                    &format!(
+                        r#"{{"ok":true,"reimported":"{escaped}","output":"{}"}}"#,
+                        out.display().to_string().replace('"', "\\\"")
+                    ),
+                );
+            }
+            Err(e) => {
+                send_error(stream, 400, &format!("import failed: {e}"));
+            }
+        }
+        return;
+    }
+
+    // A texture source runs the real image importer: decode the source, write a
+    // `.ctex` under `.godot/imported/`, and rewrite the sidecar's `[remap]` so
+    // the artifact is what `load()` resolves from here on (pat-s3rrv.2).
+    //
+    // A source that is not on disk falls through to the plain acknowledgement
+    // below rather than erroring — the dock can be pointed at a path before the
+    // project has one, and Godot reports that as a no-op too.
+    if matches!(ext.as_str(), "png" | "webp") {
+        let project_root = fs_project_root(state);
+        if let Ok(source) = resolve_res_path(&project_root, path) {
+            if source.is_file() {
+                match reimport_texture(&project_root, path, &source, &ext) {
+                    Ok(artifact) => {
+                        {
+                            // The cache keys on the source path, so the next
+                            // draw must not hand back the pre-reimport pixels.
+                            let mut s = state.lock().unwrap();
+                            s.texture_cache.invalidate(path);
+                        }
+                        send_json(
+                            stream,
+                            &format!(
+                                r#"{{"ok":true,"reimported":"{escaped}","output":"{}"}}"#,
+                                artifact.replace('"', "\\\"")
+                            ),
+                        );
+                    }
+                    Err(e) => send_error(stream, 400, &format!("import failed: {e}")),
+                }
+                return;
+            }
+        }
+    }
+
     send_json(
         stream,
-        &format!(
-            r#"{{"ok":true,"reimported":"{}"}}"#,
-            path.replace('"', "\\\"")
-        ),
+        &format!(r#"{{"ok":true,"reimported":"{escaped}"}}"#),
     );
+}
+
+/// Runs the texture importer for `res_path`: decodes the source image, writes an
+/// uncompressed `.ctex` artifact under `.godot/imported/`, and rewrites the
+/// asset's `.import` sidecar so `[remap] path` names that artifact.
+///
+/// Mirrors `EditorFileSystem::_reimport_file` + `ResourceImporterTexture::_save_ctex`,
+/// including Godot's `<file name>-<md5(res path)>.<ext>` artifact naming, so an
+/// artifact Patina writes lands where a Godot-authored one would and
+/// `gdresource`'s existing remap resolution finds it unchanged.
+///
+/// Returns the artifact's `res://` path.
+fn reimport_texture(
+    project_root: &std::path::Path,
+    res_path: &str,
+    source: &std::path::Path,
+    ext: &str,
+) -> Result<String, String> {
+    let data = std::fs::read(source).map_err(|e| format!("cannot read source: {e}"))?;
+    let decoded = match ext {
+        "webp" => gdresource::importers::import_webp_bytes(&data, source),
+        _ => gdresource::importers::import_image_bytes(&data, source),
+    }
+    .map_err(|e| format!("cannot decode source: {e}"))?;
+
+    let dim = |key: &str| match decoded.get_property(key) {
+        Some(Variant::Int(v)) if *v >= 0 => Ok(*v as u32),
+        _ => Err(format!("source image has no {key}")),
+    };
+    let (width, height) = (dim("width")?, dim("height")?);
+
+    let pixels = match decoded.get_property("pixels") {
+        Some(Variant::Array(px)) => px,
+        _ => return Err("source image has no pixel data to import".into()),
+    };
+    let mut rgba = Vec::with_capacity(pixels.len() * 4);
+    for v in pixels {
+        let c = match v {
+            Variant::Color(c) => *c,
+            _ => return Err("decoded pixel is not a Color".into()),
+        };
+        for channel in [c.r, c.g, c.b, c.a] {
+            rgba.push((channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+        }
+    }
+
+    let file_name = source
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let digest: String = gdcore::crypto::md5(res_path.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let artifact_rel = format!(".godot/imported/{file_name}-{digest}.ctex");
+    let artifact_abs = project_root.join(&artifact_rel);
+    if let Some(parent) = artifact_abs.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create imported dir: {e}"))?;
+    }
+    let encoded = gdresource::ctex::save_ctex_image_rgba8(width, height, &rgba)
+        .map_err(|e| format!("cannot encode artifact: {e}"))?;
+    std::fs::write(&artifact_abs, &encoded).map_err(|e| format!("cannot write artifact: {e}"))?;
+
+    // Rewrite the sidecar last: until the artifact exists on disk, a `[remap]`
+    // pointing at it would make the source unloadable.
+    let artifact_res = format!("res://{artifact_rel}");
+    let sidecar = import_sidecar_path(source);
+    let mut sc = gdresource::importers::load_import_file(&sidecar).unwrap_or_default();
+    sc.set_remap("importer", "texture");
+    sc.set_remap("type", "CompressedTexture2D");
+    sc.set_remap("path", artifact_res.clone());
+    sc.set_dep("source_file", res_path);
+    sc.set_dep("dest_files", format!("[\"{artifact_res}\"]"));
+    gdresource::importers::save_import_file(&sidecar, &sc)
+        .map_err(|e| format!("cannot write .import sidecar: {e}"))?;
+
+    Ok(artifact_res)
+}
+
+/// The `.import` sidecar beside a source asset: `<full file name>.import`,
+/// e.g. `hero.png` -> `hero.png.import` (the extension is kept, so `hero.png`
+/// and `hero.svg` do not collide).
+fn import_sidecar_path(source: &std::path::Path) -> std::path::PathBuf {
+    let mut os = source.as_os_str().to_os_string();
+    os.push(".import");
+    std::path::PathBuf::from(os)
 }
 
 // ---------------------------------------------------------------------------

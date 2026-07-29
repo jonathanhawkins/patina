@@ -113,6 +113,9 @@ mod tests {
         // Toggling the rest off clears the draw set.
         overlays.toggle(CanvasOverlay::VisibilityRect);
         overlays.set(CanvasOverlay::YSortPreview, false);
-        assert!(overlays.active().is_empty(), "no overlays drawn once all are off");
+        assert!(
+            overlays.active().is_empty(),
+            "no overlays drawn once all are off"
+        );
     }
 }

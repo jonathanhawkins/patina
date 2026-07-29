@@ -32,7 +32,11 @@ pub struct ConnectDialog {
 impl ConnectDialog {
     /// Opens the dialog to connect `signal` from `source_node`, choosing a
     /// target among `scene_nodes`.
-    pub fn new(source_node: impl Into<String>, signal: impl Into<String>, scene_nodes: &[&str]) -> Self {
+    pub fn new(
+        source_node: impl Into<String>,
+        signal: impl Into<String>,
+        scene_nodes: &[&str],
+    ) -> Self {
         Self {
             source_node: source_node.into(),
             signal: signal.into(),

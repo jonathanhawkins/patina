@@ -2177,6 +2177,30 @@ impl MainLoop {
         &mut self.audio_bridge
     }
 
+    /// Runs `node`'s enter-tree/`_ready` lifecycle with the script-facing
+    /// servers bound (pat-s3rrv.6).
+    ///
+    /// In Godot the servers are global singletons, so `_ready()` reaches them
+    /// exactly like `_process()` does — `AudioServer.set_bus_volume_db(...)` in
+    /// `_ready` is the standard options-menu idiom. Patina binds the servers by
+    /// address for the duration of a script phase, and `_ready` runs through
+    /// `LifecycleManager::enter_tree`, which is driven by the *host* rather
+    /// than by [`Self::step`] — so a bare `enter_tree` leaves those singletons
+    /// unbound and the call silently no-ops. Hosts that want Godot's behavior
+    /// call this instead of `LifecycleManager::enter_tree` directly.
+    ///
+    /// The bracket is as tight as the per-phase ones: `&mut self` means the
+    /// bridge cannot move while the address is installed.
+    pub fn enter_tree_with_scripts(&mut self, node: NodeId) {
+        self.tree
+            .set_script_physics_server(&mut self.physics_server);
+        self.tree
+            .set_script_audio_server(self.audio_bridge.server_mut());
+        crate::lifecycle::LifecycleManager::enter_tree(&mut self.tree, node);
+        self.tree.clear_script_audio_server();
+        self.tree.clear_script_physics_server();
+    }
+
     /// Registers physics bodies from the scene tree.
     ///
     /// Call this after loading a scene to populate the physics world.
@@ -2900,7 +2924,12 @@ impl MainLoop {
             // the next thing to touch the server is the following tick's step.
             self.tree
                 .set_script_physics_server(&mut self.physics_server);
+            // Same bracket for the audio server: `AudioServer.set_bus_volume_db`
+            // from a `_physics_process` handler is ordinary Godot (pat-s3rrv.6).
+            self.tree
+                .set_script_audio_server(self.audio_bridge.server_mut());
             self.tree.process_physics_frame_with_scripts(physics_dt);
+            self.tree.clear_script_audio_server();
             self.tree.clear_script_physics_server();
             // -- interpolation capture (pat-0q2kx.219) --
             // End of the tick: record the transforms this tick settled on,
@@ -3073,7 +3102,13 @@ impl MainLoop {
         // (pat-0q2kx.200).
         self.tree
             .set_script_physics_server(&mut self.physics_server);
+        // Likewise for `AudioServer`: a `_process` handler ducking a bus or
+        // polling a peak meter is the common case, and the mix that reads the
+        // result happens later in this same frame (pat-s3rrv.6).
+        self.tree
+            .set_script_audio_server(self.audio_bridge.server_mut());
         self.tree.process_frame_with_scripts(delta_secs);
+        self.tree.clear_script_audio_server();
         self.tree.clear_script_physics_server();
 
         // -- coroutine resume phase (pat-nzgdu.6) --

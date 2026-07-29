@@ -322,7 +322,9 @@ mod tests {
         );
         assert_eq!(docs.len(), 1);
         assert_eq!(docs.active_index(), Some(0));
-        docs.active_mut().unwrap().set_content("[gd_scene]\nname=\"Main\"\n");
+        docs.active_mut()
+            .unwrap()
+            .set_content("[gd_scene]\nname=\"Main\"\n");
         assert!(docs.active().unwrap().is_dirty());
 
         // Save As persists the active scene to disk at the chosen path.
@@ -339,7 +341,9 @@ mod tests {
         assert!(!docs.active().unwrap().is_dirty(), "saving clears dirty");
 
         // Editing then Save persists to the existing path (no new path needed).
-        docs.active_mut().unwrap().set_content("[gd_scene]\nname=\"Main2\"\n");
+        docs.active_mut()
+            .unwrap()
+            .set_content("[gd_scene]\nname=\"Main2\"\n");
         let cmd = docs.dispatch(SceneMenuAction::Save, None).unwrap();
         assert_eq!(cmd, SceneCommand::Saved(main_path.clone()));
         assert_eq!(
@@ -367,14 +371,20 @@ mod tests {
             .unwrap();
         assert_eq!(cmd, SceneCommand::Opened(other_path.clone()));
         assert_eq!(docs.len(), 3);
-        assert_eq!(docs.active().unwrap().content(), "[gd_scene]\nname=\"Other\"\n");
+        assert_eq!(
+            docs.active().unwrap().content(),
+            "[gd_scene]\nname=\"Other\"\n"
+        );
 
         // Revert Scene reloads the active scene from disk, dropping edits.
         docs.active_mut().unwrap().set_content("dirty edits");
         assert!(docs.active().unwrap().is_dirty());
         let cmd = docs.dispatch(SceneMenuAction::RevertScene, None).unwrap();
         assert_eq!(cmd, SceneCommand::Reverted(other_path.clone()));
-        assert_eq!(docs.active().unwrap().content(), "[gd_scene]\nname=\"Other\"\n");
+        assert_eq!(
+            docs.active().unwrap().content(),
+            "[gd_scene]\nname=\"Other\"\n"
+        );
         assert!(!docs.active().unwrap().is_dirty(), "revert clears dirty");
 
         // Save All writes every document that has a path (main + other; the

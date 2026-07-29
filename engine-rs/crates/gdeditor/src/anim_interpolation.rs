@@ -58,9 +58,16 @@ impl ValueTrack {
     /// Adds a key at `time` with `value` and interpolation `interp`, keeping
     /// keys sorted by time.
     pub fn add_key(&mut self, time: f32, value: f32, interp: Interpolation) {
-        self.keys.push(ValueKey { time, value, interp });
-        self.keys
-            .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+        self.keys.push(ValueKey {
+            time,
+            value,
+            interp,
+        });
+        self.keys.sort_by(|a, b| {
+            a.time
+                .partial_cmp(&b.time)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     /// The number of keys.

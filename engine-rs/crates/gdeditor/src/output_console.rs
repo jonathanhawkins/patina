@@ -183,7 +183,9 @@ mod tests {
         assert!(!console.is_severity_visible(OutputSeverity::Warning));
         let visible = console.visible_lines();
         assert_eq!(visible.len(), 3, "the one warning line is hidden");
-        assert!(visible.iter().all(|l| l.severity != OutputSeverity::Warning));
+        assert!(visible
+            .iter()
+            .all(|l| l.severity != OutputSeverity::Warning));
         // Hidden lines are still captured.
         assert_eq!(console.len(), 4);
 

@@ -233,10 +233,7 @@ mod tests {
         assert_eq!(stats.properties, vec!["hp".to_string(), "mp".to_string()]);
         assert_eq!(stats.subgroups.len(), 1);
         assert_eq!(stats.subgroups[0].name, "Regen");
-        assert_eq!(
-            stats.subgroups[0].properties,
-            vec!["hp_regen".to_string()]
-        );
+        assert_eq!(stats.subgroups[0].properties, vec!["hp_regen".to_string()]);
         assert_eq!(layout.groups[1].name, "Combat");
         assert_eq!(layout.groups[1].properties, vec!["attack".to_string()]);
 
@@ -282,7 +279,10 @@ mod tests {
 
         assert_eq!(layout.toggle_subgroup("Stats", "Regen"), Some(true));
         let visible = layout.visible_properties();
-        assert!(visible.contains(&"hp".to_string()), "group member stays visible");
+        assert!(
+            visible.contains(&"hp".to_string()),
+            "group member stays visible"
+        );
         assert!(
             !visible.contains(&"hp_regen".to_string()),
             "collapsed subgroup hides its own members"

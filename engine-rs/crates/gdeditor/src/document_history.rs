@@ -90,12 +90,18 @@ impl DocumentHistories {
 
     /// Whether `doc` has any actions to undo.
     pub fn can_undo(&self, doc: usize) -> bool {
-        self.histories.get(doc).map(|h| h.can_undo()).unwrap_or(false)
+        self.histories
+            .get(doc)
+            .map(|h| h.can_undo())
+            .unwrap_or(false)
     }
 
     /// Whether `doc` has any actions to redo.
     pub fn can_redo(&self, doc: usize) -> bool {
-        self.histories.get(doc).map(|h| h.can_redo()).unwrap_or(false)
+        self.histories
+            .get(doc)
+            .map(|h| h.can_redo())
+            .unwrap_or(false)
     }
 
     /// The number of undoable actions in `doc`'s history (0 if out of range).

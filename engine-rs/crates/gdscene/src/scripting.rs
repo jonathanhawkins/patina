@@ -765,6 +765,36 @@ impl SceneTreeAccessor {
         Some(unsafe { &mut *(addr as *mut crate::physics_server::PhysicsServer) })
     }
 
+    /// The audio server bound to the tree for this script phase, or `None` when
+    /// nothing is driving audio (pat-s3rrv.6).
+    ///
+    /// Read off the tree for the same reason as [`Self::physics`]: the accessor
+    /// already holds the tree pointer, so every existing construction site keeps
+    /// working unchanged.
+    fn audio(&self) -> Option<&gdaudio::AudioServer> {
+        let addr = self.tree().script_audio_addr();
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: `set_script_audio_server` stored the address of a live
+        // `AudioServer` owned by `MainLoop`'s `AudioServerBridge`, and its
+        // caller clears it before that server can move or drop. The server is a
+        // sibling of the tree, never inside it, so this borrow cannot alias the
+        // tree pointer.
+        Some(unsafe { &*(addr as *const gdaudio::AudioServer) })
+    }
+
+    /// Mutable counterpart of [`Self::audio`].
+    fn audio_mut(&mut self) -> Option<&mut gdaudio::AudioServer> {
+        let addr = self.tree().script_audio_addr();
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: As in `audio`, plus: we hold `&mut self`, so no other accessor
+        // can hand out a second reference to the same server.
+        Some(unsafe { &mut *(addr as *mut gdaudio::AudioServer) })
+    }
+
     // -- Tween step plumbing (pat-0q2kx.4) ----------------------------------
 
     /// Appends a step to the tween, returning `None` if it no longer exists.
@@ -956,6 +986,76 @@ fn builtin_property_default(class_name: &str, prop: &str) -> Option<Variant> {
     }
 }
 
+// -- AnimationNodeStateMachinePlayback handles (pat-s3rrv.1) ----------------
+//
+// Godot hands a script an *object* for `parameters/playback`, which it then
+// calls methods on: `$AnimationTree.get("parameters/playback").travel("run")`.
+// Patina has no engine-side Object for that, so the read mints a tagged
+// `ObjectId` naming (AnimationTree node, graph-node name) and
+// `animation_tree_playback_call` resolves it back on every call. The tag byte
+// keeps a playback id from ever colliding with a node id, and the table is
+// deduped by address so re-reading `parameters/playback` returns the same
+// handle each frame — as it does in Godot, where the playback is one object.
+
+/// Tag byte marking an `ObjectId` as a state-machine playback handle. Distinct
+/// from every other handle family's tag (see the `*_HANDLE_TAG` constants in
+/// `gdscript-interop`).
+const PLAYBACK_HANDLE_TAG: u64 = 0xA5_00_0000_0000_0000;
+
+thread_local! {
+    /// Live playback handles: raw id -> (AnimationTree node id, graph-node name).
+    /// The name is empty for the tree root's own machine.
+    static PLAYBACK_HANDLES: std::cell::RefCell<HashMap<u64, (u64, String)>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_PLAYBACK_HANDLE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Returns `true` when `raw` was issued by [`playback_handle_for`].
+fn is_playback_handle(raw: u64) -> bool {
+    raw & 0xFF00_0000_0000_0000 == PLAYBACK_HANDLE_TAG
+}
+
+/// The handle naming `(node, sm_name)`, minting one on first use.
+fn playback_handle_for(node: u64, sm_name: &str) -> u64 {
+    PLAYBACK_HANDLES.with(|m| {
+        let mut map = m.borrow_mut();
+        if let Some((raw, _)) = map
+            .iter()
+            .find(|(_, (n, name))| *n == node && name == sm_name)
+        {
+            return *raw;
+        }
+        let seq = NEXT_PLAYBACK_HANDLE.with(|n| {
+            let v = n.get();
+            n.set(v + 1);
+            v
+        });
+        let raw = PLAYBACK_HANDLE_TAG | seq;
+        map.insert(raw, (node, sm_name.to_string()));
+        raw
+    })
+}
+
+/// The `(node, sm_name)` a handle names, or `None` when it names no playback.
+fn playback_handle_target(raw: u64) -> Option<(u64, String)> {
+    if !is_playback_handle(raw) {
+        return None;
+    }
+    PLAYBACK_HANDLES.with(|m| m.borrow().get(&raw).cloned())
+}
+
+/// Splits a Godot playback parameter path into the graph-node name it
+/// addresses: `parameters/playback` -> `Some("")` (the graph root) and
+/// `parameters/Foo/playback` -> `Some("Foo")` (a nested machine). `None` when
+/// `path` is not a playback path at all.
+fn playback_param_name(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("parameters/")?;
+    match rest {
+        "playback" => Some(""),
+        _ => rest.strip_suffix("/playback"),
+    }
+}
+
 impl SceneAccess for SceneTreeAccessor {
     fn get_node(&self, from: u64, path: &str) -> Option<u64> {
         let from_id = NodeId::from_object_id(ObjectId::from_raw(from));
@@ -1015,6 +1115,20 @@ impl SceneAccess for SceneTreeAccessor {
         // (pat-0q2kx.2).
         if prop.starts_with("parameters/") {
             if let Some(anim_tree) = self.tree().get_animation_tree(nid) {
+                // `parameters/playback` is an object, not a stored value: it is
+                // how every Godot state-machine game steers the graph
+                // (`get("parameters/playback").travel("run")`). Answer with a
+                // handle the interpreter routes back through
+                // `animation_tree_playback_call` (pat-s3rrv.1). Checked before
+                // the params map so a scene that happens to have written that
+                // key cannot shadow the object.
+                if let Some(sm_name) = playback_param_name(prop) {
+                    if anim_tree.state_machine(sm_name).is_some() {
+                        return Variant::ObjectId(ObjectId::from_raw(playback_handle_for(
+                            node, sm_name,
+                        )));
+                    }
+                }
                 if let Some(value) = anim_tree.get_parameter(prop) {
                     return value;
                 }
@@ -2061,6 +2175,212 @@ impl SceneAccess for SceneTreeAccessor {
         self.tree_mut().request_node_ready(nid);
     }
 
+    // -- AudioServer singleton (pat-s3rrv.6) --------------------------------
+    //
+    // Every one of these addresses the live `AudioServer` that `MainLoop`'s
+    // `AudioServerBridge` mixes with each frame, bound by address for the
+    // duration of the script phase. Nothing bound (a bare accessor, or a script
+    // running outside a `MainLoop` phase) leaves the trait defaults in force.
+    //
+    // Godot indexes buses with a signed int and tolerates a bad index by doing
+    // nothing, so every method funnels through `usize::try_from` and reports
+    // failure instead of panicking on a negative or out-of-range bus.
+
+    fn audio_get_bus_index(&self, name: &str) -> i64 {
+        self.audio()
+            .and_then(|a| a.mixer().get_bus_by_name(name))
+            .map_or(-1, |i| i as i64)
+    }
+
+    fn audio_get_bus_count(&self) -> i64 {
+        self.audio().map_or(0, |a| a.mixer().bus_count() as i64)
+    }
+
+    fn audio_get_bus_name(&self, idx: i64) -> Option<String> {
+        let i = usize::try_from(idx).ok()?;
+        self.audio()?
+            .mixer()
+            .get_bus(i)
+            .map(|b| b.name().to_string())
+    }
+
+    fn audio_set_bus_name(&mut self, idx: i64, name: &str) -> bool {
+        let Ok(i) = usize::try_from(idx) else {
+            return false;
+        };
+        let name = name.to_string();
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(bus) => {
+                bus.set_name(name);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn audio_set_bus_volume_db(&mut self, idx: i64, db: f32) -> bool {
+        let Ok(i) = usize::try_from(idx) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(bus) => {
+                bus.set_volume_db(db);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn audio_get_bus_volume_db(&self, idx: i64) -> Option<f32> {
+        let i = usize::try_from(idx).ok()?;
+        self.audio()?.mixer().get_bus(i).map(|b| b.volume_db())
+    }
+
+    fn audio_set_bus_mute(&mut self, idx: i64, mute: bool) -> bool {
+        let Ok(i) = usize::try_from(idx) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(bus) => {
+                bus.set_mute(mute);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn audio_is_bus_mute(&self, idx: i64) -> bool {
+        usize::try_from(idx)
+            .ok()
+            .and_then(|i| self.audio()?.mixer().get_bus(i).map(|b| b.is_mute()))
+            .unwrap_or(false)
+    }
+
+    fn audio_set_bus_solo(&mut self, idx: i64, solo: bool) -> bool {
+        let Ok(i) = usize::try_from(idx) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(bus) => {
+                bus.set_solo(solo);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn audio_is_bus_solo(&self, idx: i64) -> bool {
+        usize::try_from(idx)
+            .ok()
+            .and_then(|i| self.audio()?.mixer().get_bus(i).map(|b| b.is_solo()))
+            .unwrap_or(false)
+    }
+
+    fn audio_set_bus_bypass_effects(&mut self, idx: i64, bypass: bool) -> bool {
+        let Ok(i) = usize::try_from(idx) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(bus) => {
+                bus.set_bypass(bypass);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn audio_is_bus_bypassing_effects(&self, idx: i64) -> bool {
+        usize::try_from(idx)
+            .ok()
+            .and_then(|i| self.audio()?.mixer().get_bus(i).map(|b| b.is_bypass()))
+            .unwrap_or(false)
+    }
+
+    fn audio_get_bus_peak_volume_left_db(&self, idx: i64, channel: i64) -> f32 {
+        let (Ok(i), Ok(c)) = (usize::try_from(idx), usize::try_from(channel)) else {
+            return -200.0;
+        };
+        self.audio()
+            .map_or(-200.0, |a| a.get_bus_peak_volume_left_db(i, c))
+    }
+
+    fn audio_get_bus_peak_volume_right_db(&self, idx: i64, channel: i64) -> f32 {
+        let (Ok(i), Ok(c)) = (usize::try_from(idx), usize::try_from(channel)) else {
+            return -200.0;
+        };
+        self.audio()
+            .map_or(-200.0, |a| a.get_bus_peak_volume_right_db(i, c))
+    }
+
+    fn audio_set_playback_speed_scale(&mut self, scale: f32) -> bool {
+        self.audio_mut()
+            .map(|a| a.set_playback_speed_scale(scale))
+            .is_some()
+    }
+
+    fn audio_get_playback_speed_scale(&self) -> f32 {
+        self.audio().map_or(1.0, |a| a.playback_speed_scale())
+    }
+
+    fn audio_get_mix_rate(&self) -> f32 {
+        self.audio()
+            .map_or(44_100.0, |a| a.output_sample_rate() as f32)
+    }
+
+    /// Godot's `add_bus(at_position)` inserts a bus named "New Bus"; a negative
+    /// or out-of-range position appends. The mixer only appends, so a positional
+    /// insert is an append followed by a move.
+    ///
+    /// `AudioMixer::move_bus` *panics* on index 0 (the master bus cannot be
+    /// displaced), so position 0 is clamped to an append rather than allowed to
+    /// take down the engine from a script.
+    fn audio_add_bus(&mut self, at_position: i64) -> bool {
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        let mixer = audio.mixer_mut();
+        let added = mixer.add_bus("New Bus");
+        if let Ok(target) = usize::try_from(at_position) {
+            if target >= 1 && target < added {
+                mixer.move_bus(added, target);
+            }
+        }
+        true
+    }
+
+    /// `AudioMixer::remove_bus` *panics* on index 0 or out of range. Godot
+    /// refuses to remove the master bus and ignores a bad index, so both are
+    /// reported as failure here instead of reaching the assert.
+    fn audio_remove_bus(&mut self, idx: i64) -> bool {
+        let Ok(i) = usize::try_from(idx) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        let mixer = audio.mixer_mut();
+        if i == 0 || i >= mixer.bus_count() {
+            return false;
+        }
+        mixer.remove_bus(i);
+        true
+    }
+
     // -- Object metadata (pat-nzgdu.30) -------------------------------------
     // Meta is Object-level state stored in the Node's own meta bag (distinct
     // from the script/property namespace used above).
@@ -2312,6 +2632,91 @@ impl SceneAccess for SceneTreeAccessor {
 
     fn multiplayer_refuses_new_connections(&self) -> bool {
         self.tree().get_multiplayer().refuse_new_connections()
+    }
+
+    /// `SceneMultiplayer.disconnect_peer(id)` (pat-s3rrv.18) — routed through
+    /// the peer state the transports share, so the peer really leaves
+    /// `get_peers()` rather than only being marked.
+    fn multiplayer_disconnect_peer(&mut self, id: i64) -> bool {
+        self.tree_mut()
+            .get_multiplayer_mut()
+            .peer_state_mut()
+            .disconnect_peer(id as i32)
+    }
+
+    /// `SceneMultiplayer.clear()` — forgets the connected peers and any queued
+    /// events. The assigned transport stays, matching Godot: `clear` resets the
+    /// API's bookkeeping, it does not unassign the peer.
+    fn multiplayer_clear(&mut self) {
+        let api = self.tree_mut().get_multiplayer_mut();
+        for id in api.get_peers() {
+            api.peer_state_mut().disconnect_peer(id);
+        }
+        let _ = api.take_events();
+    }
+
+    fn multiplayer_set_auth_callback(&mut self, callback: Variant) {
+        self.tree_mut().set_multiplayer_auth_callback(callback);
+    }
+
+    fn multiplayer_get_auth_callback(&self) -> Variant {
+        self.tree().multiplayer_auth_callback()
+    }
+
+    /// `SceneMultiplayer.send_auth(id, data)` — the payload goes out on the
+    /// live transport, so it only succeeds while a peer is assigned.
+    fn multiplayer_send_auth(&mut self, id: i64, data: Vec<u8>) -> bool {
+        let api = self.tree_mut().get_multiplayer_mut();
+        let Some(peer) = api.peer_mut() else {
+            return false;
+        };
+        peer.send_packet(
+            gdplatform::network::PeerId(id.max(0) as u32),
+            gdplatform::network::Packet {
+                sender: gdplatform::network::PeerId(0),
+                channel: 0,
+                data,
+                transfer_mode: gdplatform::network::TransferMode::Reliable,
+            },
+        )
+        .is_ok()
+    }
+
+    /// The node the per-frame multiplayer drain emits its signals on
+    /// (pat-s3rrv.18).
+    ///
+    /// `poll_multiplayer_with_delta` emits all eight connection signals on the
+    /// scene root (`scene_tree.rs`, the `emit_signal(root, …)` at the end of the
+    /// event drain), so binding `multiplayer.peer_connected` to that same object
+    /// makes `.connect(cb)` land on the store the emission already reaches.
+    ///
+    /// Godot hangs these off the `MultiplayerAPI` object rather than the root;
+    /// the only observable difference is `signal.get_object()`, and routing to
+    /// the real emitter is what makes the callback actually fire.
+    fn multiplayer_signal_object(&self) -> u64 {
+        self.tree().root_id().raw()
+    }
+
+    /// `multiplayer.multiplayer_peer = peer` (pat-s3rrv.16).
+    ///
+    /// Takes the peer OUT of the process-wide handle table and hands ownership
+    /// to the tree's `MultiplayerAPI`, which is what makes the existing
+    /// per-frame `poll_multiplayer_with_delta` start driving it. Assigning the
+    /// same handle twice fails the second time — by then the tree owns the peer
+    /// and the slot is empty, which is the honest answer rather than silently
+    /// installing a second peer.
+    fn multiplayer_set_peer(&mut self, handle: u64) -> bool {
+        let id = ObjectId::from_raw(handle);
+        if !gdplatform::multiplayer_peer_handles::is_multiplayer_peer_handle(id) {
+            return false;
+        }
+        let Some(peer) = gdplatform::multiplayer_peer_handles::take_multiplayer_peer(id) else {
+            return false;
+        };
+        self.tree_mut()
+            .get_multiplayer_mut()
+            .set_multiplayer_peer(peer);
+        true
     }
 
     // -- cursor shape (pat-0q2kx.90) ----------------------------------------
@@ -2924,6 +3329,77 @@ impl SceneAccess for SceneTreeAccessor {
         );
     }
 
+    // -- AnimationNodeStateMachinePlayback (pat-s3rrv.1) --------------------
+
+    fn animation_tree_playback_call(
+        &mut self,
+        handle: u64,
+        method: &str,
+        args: &[Variant],
+    ) -> Option<Variant> {
+        let (node, sm_name) = playback_handle_target(handle)?;
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+
+        // `get_current_length` is the one method that needs the clip library
+        // rather than the machine, so read it before the mutable borrow.
+        if method == "get_current_length" {
+            let tree = self.tree().get_animation_tree(nid)?;
+            let sm = tree.state_machine(&sm_name)?;
+            return Some(Variant::Float(sm.current_length(&tree.animations)));
+        }
+
+        let sm = self
+            .tree_mut()
+            .get_animation_tree_mut(nid)?
+            .state_machine_mut(&sm_name)?;
+
+        match method {
+            // Godot: travel(to_node, reset_on_teleport = true). The path is
+            // walked by `advance` over the following frames, using each hop's
+            // declared crossfade — a travel is not an instant jump.
+            "travel" => {
+                let target = variant_string(args.first()?)?;
+                sm.travel(&target);
+                Some(Variant::Nil)
+            }
+            "start" => {
+                let target = variant_string(args.first()?)?;
+                let reset = match args.get(1) {
+                    Some(Variant::Bool(b)) => *b,
+                    Some(Variant::Int(i)) => *i != 0,
+                    // Godot's default.
+                    _ => true,
+                };
+                sm.start(&target, reset);
+                Some(Variant::Nil)
+            }
+            "next" | "travel_to_next_blend" => {
+                sm.next_state();
+                Some(Variant::Nil)
+            }
+            "stop" => {
+                sm.stop();
+                Some(Variant::Nil)
+            }
+            "is_playing" => Some(Variant::Bool(sm.is_playing())),
+            "get_current_node" => Some(Variant::String(sm.current_node().to_string())),
+            "get_travel_path" => Some(Variant::Array(
+                sm.travel_path_remaining()
+                    .iter()
+                    .map(|s| Variant::String(s.clone()))
+                    .collect(),
+            )),
+            // Godot answers an empty StringName when no fade is in flight.
+            "get_fading_from_node" => Some(Variant::String(
+                sm.fading_from_node().unwrap_or_default().to_string(),
+            )),
+            "get_current_play_position" => Some(Variant::Float(sm.current_play_position())),
+            // Not a playback method: fall through so the interpreter reports it
+            // rather than swallowing a typo as a no-op.
+            _ => None,
+        }
+    }
+
     // -- Tween (pat-0q2kx.4) -----------------------------------------------
 
     fn create_tween(&mut self, node: u64) -> Option<u64> {
@@ -3154,6 +3630,343 @@ impl SceneAccess for SceneTreeAccessor {
             Err(_) => {}
         }
         Some(node_id.raw())
+    }
+
+    // -- AStar2D / AStar3D / AStarGrid2D (pat-s3rrv.19) --------------------
+    //
+    // `crate::astar` has been a complete, unit-tested pathfinder since
+    // pat-p0s82, with ClassDB metadata registered — and zero callers. The
+    // instances live here rather than in the interpreter's handle tables
+    // because `gdscript-interop` cannot name a `gdscene` type (this crate
+    // depends on it, not the reverse), so the trait is the inversion seam.
+
+    fn astar_new(&mut self, class_name: &str) -> Option<u64> {
+        ASTAR_REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            let seq = reg.next_seq;
+            reg.next_seq += 1;
+            let raw = gdscript_interop::bindings::ASTAR_HANDLE_TAG | seq;
+            match class_name {
+                "AStar2D" => {
+                    reg.astar2d.insert(raw, crate::astar::AStar2D::new());
+                }
+                "AStar3D" => {
+                    reg.astar3d.insert(raw, crate::astar::AStar3D::new());
+                }
+                "AStarGrid2D" => {
+                    reg.grid.insert(raw, crate::astar::AStarGrid2D::new());
+                }
+                _ => return None,
+            }
+            Some(raw)
+        })
+    }
+
+    fn astar_call(&mut self, handle: u64, method: &str, args: &[Variant]) -> Option<Variant> {
+        ASTAR_REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            if let Some(a) = reg.astar2d.get_mut(&handle) {
+                return astar_call_2d(a, method, args);
+            }
+            if let Some(a) = reg.astar3d.get_mut(&handle) {
+                return astar_call_3d(a, method, args);
+            }
+            if let Some(g) = reg.grid.get_mut(&handle) {
+                return astar_call_grid(g, method, args);
+            }
+            None
+        })
+    }
+}
+
+/// Live AStar objects, keyed by the handle the interpreter carries.
+#[derive(Default)]
+struct AStarRegistry {
+    astar2d: std::collections::HashMap<u64, crate::astar::AStar2D>,
+    astar3d: std::collections::HashMap<u64, crate::astar::AStar3D>,
+    grid: std::collections::HashMap<u64, crate::astar::AStarGrid2D>,
+    next_seq: u64,
+}
+
+thread_local! {
+    static ASTAR_REGISTRY: std::cell::RefCell<AStarRegistry> =
+        std::cell::RefCell::new(AStarRegistry {
+            next_seq: 1,
+            ..Default::default()
+        });
+}
+
+fn astar_int(args: &[Variant], i: usize) -> i64 {
+    match args.get(i) {
+        Some(Variant::Int(v)) => *v,
+        Some(Variant::Float(f)) => *f as i64,
+        _ => 0,
+    }
+}
+
+fn astar_f32(args: &[Variant], i: usize, default: f32) -> f32 {
+    match args.get(i) {
+        Some(Variant::Float(f)) => *f as f32,
+        Some(Variant::Int(v)) => *v as f32,
+        _ => default,
+    }
+}
+
+/// Godot defaults `bidirectional` to `true` on connect/disconnect/are_connected.
+fn astar_bool(args: &[Variant], i: usize, default: bool) -> bool {
+    match args.get(i) {
+        Some(Variant::Bool(b)) => *b,
+        _ => default,
+    }
+}
+
+fn astar_v2(args: &[Variant], i: usize) -> gdcore::math::Vector2 {
+    match args.get(i) {
+        Some(Variant::Vector2(v)) => *v,
+        _ => gdcore::math::Vector2::new(0.0, 0.0),
+    }
+}
+
+fn astar_v3(args: &[Variant], i: usize) -> gdcore::math::Vector3 {
+    match args.get(i) {
+        Some(Variant::Vector3(v)) => *v,
+        _ => gdcore::math::Vector3::new(0.0, 0.0, 0.0),
+    }
+}
+
+/// A `Vector2i` cell id. Scripts also spell these as integer-valued `Vector2`s.
+fn astar_v2i(args: &[Variant], i: usize) -> gdcore::math::Vector2i {
+    match args.get(i) {
+        Some(Variant::Vector2i(v)) => *v,
+        Some(Variant::Vector2(v)) => gdcore::math::Vector2i::new(v.x as i32, v.y as i32),
+        _ => gdcore::math::Vector2i::new(0, 0),
+    }
+}
+
+/// The half of the AStar surface that does not mention the vector type.
+/// Returns `None` for methods handled by the per-dimension wrappers.
+fn astar_call_shared<V: crate::astar::AStarVector>(
+    a: &mut crate::astar::AStar<V>,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    match method {
+        "has_point" => Some(Variant::Bool(a.has_point(astar_int(args, 0)))),
+        "remove_point" => {
+            a.remove_point(astar_int(args, 0));
+            Some(Variant::Nil)
+        }
+        "get_point_count" => Some(Variant::Int(a.get_point_count() as i64)),
+        "get_point_ids" => Some(Variant::PackedInt64Array(a.get_point_ids())),
+        "get_point_weight_scale" => Some(Variant::Float(
+            a.get_point_weight_scale(astar_int(args, 0)).unwrap_or(0.0) as f64,
+        )),
+        "set_point_weight_scale" => {
+            a.set_point_weight_scale(astar_int(args, 0), astar_f32(args, 1, 1.0));
+            Some(Variant::Nil)
+        }
+        "set_point_disabled" => {
+            a.set_point_disabled(astar_int(args, 0), astar_bool(args, 1, true));
+            Some(Variant::Nil)
+        }
+        "is_point_disabled" => Some(Variant::Bool(a.is_point_disabled(astar_int(args, 0)))),
+        "connect_points" => {
+            a.connect_points(
+                astar_int(args, 0),
+                astar_int(args, 1),
+                astar_bool(args, 2, true),
+            );
+            Some(Variant::Nil)
+        }
+        "disconnect_points" => {
+            a.disconnect_points(
+                astar_int(args, 0),
+                astar_int(args, 1),
+                astar_bool(args, 2, true),
+            );
+            Some(Variant::Nil)
+        }
+        "are_points_connected" => Some(Variant::Bool(a.are_points_connected(
+            astar_int(args, 0),
+            astar_int(args, 1),
+            astar_bool(args, 2, true),
+        ))),
+        "get_point_connections" => Some(Variant::PackedInt64Array(
+            a.get_point_connections(astar_int(args, 0)),
+        )),
+        "get_id_path" => Some(Variant::PackedInt64Array(
+            a.get_id_path(astar_int(args, 0), astar_int(args, 1)),
+        )),
+        "clear" => {
+            a.clear();
+            Some(Variant::Nil)
+        }
+        _ => None,
+    }
+}
+
+fn astar_call_2d(a: &mut crate::astar::AStar2D, method: &str, args: &[Variant]) -> Option<Variant> {
+    match method {
+        "add_point" => {
+            a.add_point(
+                astar_int(args, 0),
+                astar_v2(args, 1),
+                astar_f32(args, 2, 1.0),
+            );
+            Some(Variant::Nil)
+        }
+        "get_point_position" => Some(
+            a.get_point_position(astar_int(args, 0))
+                .map(Variant::Vector2)
+                .unwrap_or(Variant::Nil),
+        ),
+        "set_point_position" => {
+            a.set_point_position(astar_int(args, 0), astar_v2(args, 1));
+            Some(Variant::Nil)
+        }
+        "get_point_path" => Some(Variant::PackedVector2Array(
+            a.get_point_path(astar_int(args, 0), astar_int(args, 1)),
+        )),
+        "get_closest_point" => Some(Variant::Int(
+            a.get_closest_point(astar_v2(args, 0), astar_bool(args, 1, false)),
+        )),
+        _ => astar_call_shared(a, method, args),
+    }
+}
+
+fn astar_call_3d(a: &mut crate::astar::AStar3D, method: &str, args: &[Variant]) -> Option<Variant> {
+    match method {
+        "add_point" => {
+            a.add_point(
+                astar_int(args, 0),
+                astar_v3(args, 1),
+                astar_f32(args, 2, 1.0),
+            );
+            Some(Variant::Nil)
+        }
+        "get_point_position" => Some(
+            a.get_point_position(astar_int(args, 0))
+                .map(Variant::Vector3)
+                .unwrap_or(Variant::Nil),
+        ),
+        "set_point_position" => {
+            a.set_point_position(astar_int(args, 0), astar_v3(args, 1));
+            Some(Variant::Nil)
+        }
+        "get_point_path" => Some(Variant::PackedVector3Array(
+            a.get_point_path(astar_int(args, 0), astar_int(args, 1)),
+        )),
+        "get_closest_point" => Some(Variant::Int(
+            a.get_closest_point(astar_v3(args, 0), astar_bool(args, 1, false)),
+        )),
+        _ => astar_call_shared(a, method, args),
+    }
+}
+
+/// Godot's `AStarGrid2D.DiagonalMode` enum values (doc/classes/AStarGrid2D.xml).
+fn astar_diagonal_mode(v: i64) -> crate::astar::DiagonalMode {
+    match v {
+        1 => crate::astar::DiagonalMode::Never,
+        2 => crate::astar::DiagonalMode::AtLeastOneWalkable,
+        3 => crate::astar::DiagonalMode::OnlyIfNoObstacles,
+        _ => crate::astar::DiagonalMode::Always,
+    }
+}
+
+/// Godot's `AStarGrid2D.Heuristic` enum values.
+fn astar_heuristic(v: i64) -> crate::astar::Heuristic {
+    match v {
+        1 => crate::astar::Heuristic::Manhattan,
+        2 => crate::astar::Heuristic::Octile,
+        3 => crate::astar::Heuristic::Chebyshev,
+        _ => crate::astar::Heuristic::Euclidean,
+    }
+}
+
+fn astar_call_grid(
+    g: &mut crate::astar::AStarGrid2D,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    match method {
+        // `set_region(position, size)`; Godot's `region` property is a Rect2i,
+        // which Patina's Variant does not model, so the two-vector spelling is
+        // what a script uses here.
+        "set_region" => {
+            g.set_region(astar_v2i(args, 0), astar_v2i(args, 1));
+            Some(Variant::Nil)
+        }
+        "get_size" => Some(Variant::Vector2i(g.get_region().1)),
+        "set_size" => {
+            let (pos, _) = g.get_region();
+            g.set_region(pos, astar_v2i(args, 0));
+            Some(Variant::Nil)
+        }
+        "set_cell_size" => {
+            g.set_cell_size(astar_v2(args, 0));
+            Some(Variant::Nil)
+        }
+        "set_offset" => {
+            g.set_offset(astar_v2(args, 0));
+            Some(Variant::Nil)
+        }
+        "set_diagonal_mode" => {
+            g.set_diagonal_mode(astar_diagonal_mode(astar_int(args, 0)));
+            Some(Variant::Nil)
+        }
+        "set_default_compute_heuristic" => {
+            g.set_default_compute_heuristic(astar_heuristic(astar_int(args, 0)));
+            Some(Variant::Nil)
+        }
+        "set_default_estimate_heuristic" => {
+            g.set_default_estimate_heuristic(astar_heuristic(astar_int(args, 0)));
+            Some(Variant::Nil)
+        }
+        "set_jumping_enabled" => {
+            g.set_jumping_enabled(astar_bool(args, 0, true));
+            Some(Variant::Nil)
+        }
+        "update" => {
+            g.update();
+            Some(Variant::Nil)
+        }
+        "is_in_bounds" => Some(Variant::Bool(
+            g.is_in_bounds(astar_int(args, 0) as i32, astar_int(args, 1) as i32),
+        )),
+        "is_in_boundsv" => Some(Variant::Bool(g.is_in_boundsv(astar_v2i(args, 0)))),
+        "set_point_solid" => {
+            g.set_point_solid(astar_v2i(args, 0), astar_bool(args, 1, true));
+            Some(Variant::Nil)
+        }
+        "is_point_solid" => Some(Variant::Bool(g.is_point_solid(astar_v2i(args, 0)))),
+        "fill_solid_region" => {
+            g.fill_solid_region(
+                astar_v2i(args, 0),
+                astar_v2i(args, 1),
+                astar_bool(args, 2, true),
+            );
+            Some(Variant::Nil)
+        }
+        "set_point_weight_scale" => {
+            g.set_point_weight_scale(astar_v2i(args, 0), astar_f32(args, 1, 1.0));
+            Some(Variant::Nil)
+        }
+        "get_point_weight_scale" => Some(Variant::Float(
+            g.get_point_weight_scale(astar_v2i(args, 0)) as f64,
+        )),
+        "get_point_position" => Some(Variant::Vector2(g.get_point_position(astar_v2i(args, 0)))),
+        // Godot returns a typed Vector2i array; Patina has no PackedVector2iArray,
+        // so the cells come back as a plain Array of Vector2i.
+        "get_id_path" => Some(Variant::Array(
+            g.get_id_path(astar_v2i(args, 0), astar_v2i(args, 1))
+                .into_iter()
+                .map(Variant::Vector2i)
+                .collect(),
+        )),
+        "get_point_path" => Some(Variant::PackedVector2Array(
+            g.get_point_path(astar_v2i(args, 0), astar_v2i(args, 1)),
+        )),
+        _ => None,
     }
 }
 

@@ -1317,8 +1317,12 @@ pub struct SpawnPacket {
 pub struct SyncPacket {
     /// Net id of the synchronized root (0 when unset).
     pub net_id: u32,
-    /// Property name → string-encoded value pairs.
-    pub properties: Vec<(String, String)>,
+    /// Property name → replicated [`Variant`] value (pat-s3rrv.17).
+    ///
+    /// These are real Variants, so a `Vector3`, `Color` or `bool` survives the
+    /// round trip with its type intact. They were `String` before, which only
+    /// `Vector2` had a spelling for.
+    pub properties: Vec<(String, Variant)>,
 }
 
 /// Encode a spawn notification for multiplayer transport.
@@ -1368,19 +1372,40 @@ pub fn decode_spawn_packet(data: &[u8]) -> Option<SpawnPacket> {
 }
 
 /// Encode a property-sync packet for multiplayer transport.
-pub fn encode_sync_packet(net_id: u32, properties: &[(String, String)]) -> Vec<u8> {
-    let mut out = Vec::new();
+pub fn encode_sync_packet(net_id: u32, properties: &[(String, Variant)]) -> Vec<u8> {
+    // Values travel as **binary Variants**, as Godot's
+    // `SceneReplicationInterface` sends them (pat-s3rrv.17). They used to be
+    // stringified, which silently flattened the type: only `Vector2` had a
+    // hand-rolled `"x,y"` spelling, and everything else — `Vector3`, `Color`,
+    // `bool`, `int` — arrived on the far peer as a `Variant::String` that no
+    // longer matched the property it was written to.
+    //
+    // The length-prefixed framing is unchanged; only the bytes between the
+    // prefixes are now a Variant.
+    //
+    // ⚠️ Entries are built first and counted after. A value that fails to encode
+    // is skipped, so writing `properties.len()` up front would claim more
+    // entries than the body carries and desync `decode_sync_packet` for every
+    // remaining property in the packet.
+    let mut body = Vec::new();
+    let mut written: u16 = 0;
+    for (name, value) in properties {
+        let Ok(vb) = gdvariant::binary::encode_variant(value) else {
+            continue;
+        };
+        let nb = name.as_bytes();
+        body.extend_from_slice(&(nb.len() as u16).to_be_bytes());
+        body.extend_from_slice(nb);
+        body.extend_from_slice(&(vb.len() as u16).to_be_bytes());
+        body.extend_from_slice(&vb);
+        written = written.saturating_add(1);
+    }
+
+    let mut out = Vec::with_capacity(1 + 4 + 2 + body.len());
     out.push(REPLICATION_KIND_SYNC);
     out.extend_from_slice(&net_id.to_be_bytes());
-    out.extend_from_slice(&(properties.len() as u16).to_be_bytes());
-    for (name, value) in properties {
-        let nb = name.as_bytes();
-        let vb = value.as_bytes();
-        out.extend_from_slice(&(nb.len() as u16).to_be_bytes());
-        out.extend_from_slice(nb);
-        out.extend_from_slice(&(vb.len() as u16).to_be_bytes());
-        out.extend_from_slice(vb);
-    }
+    out.extend_from_slice(&written.to_be_bytes());
+    out.extend_from_slice(&body);
     out
 }
 
@@ -1411,7 +1436,11 @@ pub fn decode_sync_packet(data: &[u8]) -> Option<SyncPacket> {
         if data.len() < i + value_len {
             return None;
         }
-        let value = String::from_utf8(data[i..i + value_len].to_vec()).ok()?;
+        // Binary Variant, not UTF-8 (pat-s3rrv.17). `decode_variant` reports how
+        // many bytes it consumed; the length prefix is authoritative for framing,
+        // so `i` advances by that regardless and one malformed value cannot
+        // desync the properties after it.
+        let (value, _consumed) = gdvariant::binary::decode_variant(&data[i..i + value_len]).ok()?;
         i += value_len;
         properties.push((name, value));
     }
@@ -1584,7 +1613,7 @@ pub struct MultiplayerSynchronizer {
     /// Net id of the synchronized instance.
     pub net_id: u32,
     /// Current property values (authority-side writes / remote applies).
-    property_values: HashMap<String, String>,
+    property_values: HashMap<String, Variant>,
     /// Last time (ms) a sync packet was emitted (`0` = never).
     last_sync_ms: u64,
     /// Per-peer visibility overrides (Godot per-peer visibility). A peer absent
@@ -1692,21 +1721,22 @@ impl MultiplayerSynchronizer {
         self.net_id = net_id;
     }
 
-    /// Write a property value on the authority (string-encoded for transport).
-    pub fn set_property_value(&mut self, name: &str, value: impl Into<String>) {
+    /// Write a property value on the authority, as the [`Variant`] it will be
+    /// replicated as (pat-s3rrv.17).
+    pub fn set_property_value(&mut self, name: &str, value: Variant) {
         if !self.properties_to_sync.iter().any(|p| p == name) {
             self.properties_to_sync.push(name.to_string());
         }
-        self.property_values.insert(name.to_string(), value.into());
+        self.property_values.insert(name.to_string(), value);
     }
 
     /// Read a property value, if set.
-    pub fn get_property_value(&self, name: &str) -> Option<&str> {
-        self.property_values.get(name).map(|s| s.as_str())
+    pub fn get_property_value(&self, name: &str) -> Option<&Variant> {
+        self.property_values.get(name)
     }
 
     /// Snapshot of all currently held property values in registration order.
-    pub fn property_snapshot(&self) -> Vec<(String, String)> {
+    pub fn property_snapshot(&self) -> Vec<(String, Variant)> {
         self.properties_to_sync
             .iter()
             .filter_map(|name| {
@@ -1961,7 +1991,7 @@ mod tests {
     #[test]
     fn synchronizer_hidden_peer_gets_no_sync() {
         let mut sync = MultiplayerSynchronizer::new(0);
-        sync.set_property_value("position", "10,20");
+        sync.set_property_value("position", Variant::Float(10.0));
         let mut peer = MockNetworkPeer::new(PeerId::SERVER);
 
         // Visible → a forced poll sends a packet.
@@ -2327,7 +2357,7 @@ mod tests {
         assert!(decode_raw_packet(&spawn).is_none(), "spawn is not raw");
         assert!(decode_spawn_packet(&spawn).is_some(), "spawn still decodes");
 
-        let sync = encode_sync_packet(1, &[("hp".into(), "5".into())]);
+        let sync = encode_sync_packet(1, &[("hp".into(), Variant::Int(5))]);
         assert!(decode_rpc_packet(&sync).is_none(), "sync is not an RPC");
         assert!(decode_raw_packet(&sync).is_none(), "sync is not raw");
         assert!(decode_sync_packet(&sync).is_some(), "sync still decodes");
@@ -2435,7 +2465,7 @@ mod tests {
         let mut auth_sync = MultiplayerSynchronizer::new(0);
         auth_sync.net_id = 7;
         auth_sync.add_property("position");
-        auth_sync.set_property_value("position", "10,20");
+        auth_sync.set_property_value("position", Variant::Float(10.0));
         let mut remote_sync = MultiplayerSynchronizer::new(0);
         remote_sync.add_property("position");
         {
@@ -2450,7 +2480,10 @@ mod tests {
             .apply_sync_packet(&sync_packets[0])
             .expect("sync");
         assert_eq!(applied.net_id, 7);
-        assert_eq!(remote_sync.get_property_value("position"), Some("10,20"));
+        assert_eq!(
+            remote_sync.get_property_value("position"),
+            Some(&Variant::Float(10.0))
+        );
     }
 
     #[test]
@@ -2534,7 +2567,7 @@ mod tests {
         let (mut server, mut client) = MockNetwork::create_pair(PeerId(2));
         let mut auth = MultiplayerSynchronizer::new(0);
         auth.set_net_id(42);
-        auth.set_property_value("position", "1.0,2.0");
+        auth.set_property_value("position", Variant::Float(1.5));
         assert!(auth
             .poll_outbound(&mut server, PeerId(2), 100, true)
             .unwrap());
@@ -2544,7 +2577,10 @@ mod tests {
         let mut remote = MultiplayerSynchronizer::new(0);
         let applied = remote.apply_sync_packet(&packets[0]).unwrap();
         assert_eq!(applied.net_id, 42);
-        assert_eq!(remote.get_property_value("position"), Some("1.0,2.0"));
+        assert_eq!(
+            remote.get_property_value("position"),
+            Some(&Variant::Float(1.5))
+        );
         assert_eq!(remote.get_net_id(), 42);
     }
 
@@ -2552,7 +2588,7 @@ mod tests {
     fn synchronizer_respects_interval() {
         let (mut server, mut client) = MockNetwork::create_pair(PeerId(2));
         let mut auth = MultiplayerSynchronizer::new(100);
-        auth.set_property_value("position", "0,0");
+        auth.set_property_value("position", Variant::Float(0.0));
         assert!(auth
             .poll_outbound(&mut server, PeerId(2), 10, false)
             .unwrap());

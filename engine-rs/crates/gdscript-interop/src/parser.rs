@@ -279,6 +279,16 @@ pub enum Stmt {
         return_type: Option<String>,
         /// Function body.
         body: Vec<Stmt>,
+        /// Source line each statement in `body` starts on, index-aligned with
+        /// it (pat-0q2kx.253).
+        ///
+        /// Carried beside `body` rather than on `Stmt` itself: a `line` field on
+        /// every variant would touch ~130 construction and match sites in this
+        /// file alone, and a `Stmt::Line(n)` marker variant would raise E0004 at
+        /// every exhaustive match in the workspace — including
+        /// `gdscene/src/scripting.rs`. A parallel vector is additive and stays
+        /// inside this crate.
+        body_lines: Vec<usize>,
         /// Whether this is a static function.
         is_static: bool,
         /// Annotations applied to the function, e.g. `@rpc(...)` (pat-u3l8c.75).
@@ -614,17 +624,56 @@ impl Parser {
         }
     }
 
-    /// Parses a type hint, handling `Array[ElementType]` syntax.
+    /// Parses a type hint: a possibly qualified name followed by optional
+    /// bracketed type parameters.
+    ///
+    /// Handles every shape Godot's `GDScriptParser::parse_type` accepts for a
+    /// declared type (upstream/godot/modules/gdscript/gdscript_parser.cpp):
+    ///
+    /// - plain — `int`, `Node2D`
+    /// - qualified — `MyClass.State`, `Enums.Kind.Sub`
+    /// - typed container — `Array[int]`
+    /// - typed dictionary (Godot 4.4) — `Dictionary[String, int]`
+    /// - nested — `Array[Array[int]]`, `Dictionary[String, Array[int]]`
+    ///
+    /// The previous implementation special-cased exactly one shape
+    /// (`Array[<ident>]`), so `var d: Dictionary[String, int] = {}` left the
+    /// `[` unconsumed and the declaration parsed into garbage, `Array[Array[T]]`
+    /// failed on the inner `Array`, and `MyClass.State` silently truncated to
+    /// `MyClass`.
+    ///
+    /// The hint is returned in Godot's own spelling, so a round-trip through
+    /// the parser reproduces the source text.
     fn parse_type_hint(&mut self) -> Result<String, ParseError> {
-        let base = self.eat_ident()?;
-        if base == "Array" && self.check(&Token::LBracket) {
-            self.advance(); // consume `[`
-            let element_type = self.eat_ident()?;
-            self.expect(&Token::RBracket)?;
-            Ok(format!("Array[{element_type}]"))
-        } else {
-            Ok(base)
+        let mut name = self.eat_ident()?;
+
+        // Qualified names: each `.` continues the path.
+        while self.check(&Token::Dot) {
+            self.advance(); // consume `.`
+            let segment = self.eat_ident()?;
+            name.push('.');
+            name.push_str(&segment);
         }
+
+        if !self.check(&Token::LBracket) {
+            return Ok(name);
+        }
+
+        self.advance(); // consume `[`
+        let mut params: Vec<String> = Vec::new();
+        loop {
+            // Recursion is what makes `Array[Array[int]]` and
+            // `Dictionary[String, Array[int]]` work.
+            params.push(self.parse_type_hint()?);
+            if self.check(&Token::Comma) {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+        self.expect(&Token::RBracket)?;
+
+        Ok(format!("{name}[{}]", params.join(", ")))
     }
 
     fn parse_var_decl_with_annotations(
@@ -1084,12 +1133,13 @@ impl Parser {
         };
 
         self.expect(&Token::Colon)?;
-        let body = self.parse_block()?;
+        let (body, body_lines) = self.parse_block_with_lines()?;
         Ok(Stmt::FuncDef {
             name,
             params,
             return_type,
             body,
+            body_lines,
             is_static,
             annotations,
         })
@@ -1263,18 +1313,38 @@ impl Parser {
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        self.parse_block_with_lines().map(|(stmts, _)| stmts)
+    }
+
+    /// [`parse_block`](Self::parse_block) that also reports the source line each
+    /// statement started on, index-aligned with the returned statements
+    /// (pat-0q2kx.253).
+    ///
+    /// The line is sampled *before* `parse_stmt` consumes anything, so it is the
+    /// line the statement opens on rather than wherever it happened to end.
+    fn parse_block_with_lines(&mut self) -> Result<(Vec<Stmt>, Vec<usize>), ParseError> {
         self.skip_newlines();
         self.expect(&Token::Indent)?;
         let mut stmts = Vec::new();
+        let mut lines = Vec::new();
         self.skip_newlines();
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
+            lines.push(self.current_line());
             stmts.push(self.parse_stmt()?);
             self.skip_newlines();
         }
         if self.check(&Token::Dedent) {
             self.advance();
         }
-        Ok(stmts)
+        Ok((stmts, lines))
+    }
+
+    /// 1-based source line of the token about to be parsed, or 0 past the end.
+    ///
+    /// 0 is the same "unknown" sentinel `Interpreter::current_line` starts at,
+    /// and the backtrace's source-line lookup already guards on `> 0`.
+    fn current_line(&self) -> usize {
+        self.tokens.get(self.pos).map(|ts| ts.line).unwrap_or(0)
     }
 
     // --- Expression parsing (precedence climbing) ---
@@ -3291,5 +3361,113 @@ mod tests {
         } else {
             panic!("expected VarDecl");
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Typed declarations (pat-s3rrv.8) — `parse_type_hint`
+    // -----------------------------------------------------------------
+
+    /// Returns the type hint of the first statement, which must be a `var`.
+    fn var_hint(src: &str) -> Option<String> {
+        match &parse(src)[0] {
+            Stmt::VarDecl { type_hint, .. } => type_hint.clone(),
+            other => panic!("expected a VarDecl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_dictionary_declaration_parses() {
+        // Godot 4.4's typed Dictionary. This previously left `[` unconsumed,
+        // so the whole declaration parsed into garbage.
+        assert_eq!(
+            var_hint("var d: Dictionary[String, int] = {}\n").as_deref(),
+            Some("Dictionary[String, int]")
+        );
+    }
+
+    #[test]
+    fn nested_typed_array_declaration_parses() {
+        assert_eq!(
+            var_hint("var g: Array[Array[int]] = []\n").as_deref(),
+            Some("Array[Array[int]]")
+        );
+        assert_eq!(
+            var_hint("var m: Dictionary[String, Array[int]] = {}\n").as_deref(),
+            Some("Dictionary[String, Array[int]]")
+        );
+    }
+
+    #[test]
+    fn qualified_type_name_is_not_truncated() {
+        // `MyClass.State` used to truncate to `MyClass`, leaving `.State`
+        // to derail the rest of the statement.
+        assert_eq!(
+            var_hint("var s: MyClass.State = null\n").as_deref(),
+            Some("MyClass.State")
+        );
+        assert_eq!(
+            var_hint("var k: Enums.Kind.Sub = null\n").as_deref(),
+            Some("Enums.Kind.Sub")
+        );
+    }
+
+    #[test]
+    fn plain_and_single_typed_hints_still_parse() {
+        assert_eq!(var_hint("var x: int = 1\n").as_deref(), Some("int"));
+        assert_eq!(
+            var_hint("var a: Array[int] = []\n").as_deref(),
+            Some("Array[int]")
+        );
+        assert_eq!(
+            var_hint("var n: Node2D = null\n").as_deref(),
+            Some("Node2D")
+        );
+    }
+
+    #[test]
+    fn typed_hints_parse_in_params_and_return_types() {
+        let stmts = parse(
+            "func f(d: Dictionary[String, int], a: Array[Array[int]]) -> Array[int]:\n    return []\n",
+        );
+        match &stmts[0] {
+            Stmt::FuncDef {
+                params,
+                return_type,
+                ..
+            } => {
+                assert_eq!(
+                    params[0].type_hint.as_deref(),
+                    Some("Dictionary[String, int]")
+                );
+                assert_eq!(params[1].type_hint.as_deref(), Some("Array[Array[int]]"));
+                assert_eq!(return_type.as_deref(), Some("Array[int]"));
+            }
+            other => panic!("expected a FuncDef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn qualified_type_name_works_in_is_and_as() {
+        // `is`/`as` take the same type expression as a declaration, so the
+        // qualified form must reach them too.
+        assert!(matches!(
+            parse_expr_str("x is MyClass.State"),
+            Expr::TypeTest { ref type_name, .. } if type_name == "MyClass.State"
+        ));
+        assert!(matches!(
+            parse_expr_str("x as Array[int]"),
+            Expr::Cast { ref type_name, .. } if type_name == "Array[int]"
+        ));
+    }
+
+    #[test]
+    fn subscript_after_a_typed_cast_still_parses_as_indexing() {
+        // The `[` that follows a *parenthesised* cast is indexing, not a type
+        // parameter — the type hint must stop at the `)`.
+        let expr = parse_expr_str("(data as Array)[0]");
+        assert!(
+            matches!(expr, Expr::Index { .. }),
+            "expected an Index expression, got {expr:?}"
+        );
     }
 }

@@ -126,7 +126,10 @@ impl SceneTreeModel {
         }
 
         // Non-empty: parent is the selection, falling back to the root.
-        let parent = self.selected.or(self.root).expect("non-empty scene has a root");
+        let parent = self
+            .selected
+            .or(self.root)
+            .expect("non-empty scene has a root");
         self.nodes.push(NodeRec {
             name: name.into(),
             parent: Some(parent),

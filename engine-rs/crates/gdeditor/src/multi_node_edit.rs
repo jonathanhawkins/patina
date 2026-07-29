@@ -118,12 +118,18 @@ mod tests {
         let mut undo = UndoRedoManager::new(64);
 
         // No selection → no edit, no undo entry.
-        let applied = commit_multi_node_property(&mut tree, &mut undo, &[], "z_index", Variant::Int(1));
+        let applied =
+            commit_multi_node_property(&mut tree, &mut undo, &[], "z_index", Variant::Int(1));
         assert_eq!(applied, 0);
-        assert_eq!(undo.undo_count(), 0, "an empty selection pushes no undo step");
+        assert_eq!(
+            undo.undo_count(),
+            0,
+            "an empty selection pushes no undo step"
+        );
 
         // A single real node still works and records one undo step.
-        let applied = commit_multi_node_property(&mut tree, &mut undo, &[a], "z_index", Variant::Int(9));
+        let applied =
+            commit_multi_node_property(&mut tree, &mut undo, &[a], "z_index", Variant::Int(9));
         assert_eq!(applied, 1);
         assert_eq!(
             tree.get_node(a).unwrap().get_property("z_index"),

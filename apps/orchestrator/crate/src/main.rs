@@ -469,14 +469,14 @@ fn apply_recommendations(report: &planner::PlanReport) {
             continue;
         }
 
-        let labels = rec.labels.join(",");
+        let labels = sanitize_labels(&rec.labels).join(",");
         let priority = rec.priority.to_string();
         let description = format!(
             "IMPLEMENT the feature: {}\n\nAcceptance: {}\n\n[planner-key: {}]",
             rec.title, acceptance, rec.gate_key
         );
 
-        let create_args = vec![
+        let mut create_args = vec![
             "create",
             "--title",
             rec.title.as_str(),
@@ -484,12 +484,15 @@ fn apply_recommendations(report: &planner::PlanReport) {
             "task",
             "--priority",
             priority.as_str(),
-            "--labels",
-            labels.as_str(),
             "--description",
             description.as_str(),
             "--silent",
         ];
+        // Sanitizing can empty the list; a bare `--labels ""` is not valid.
+        if !labels.is_empty() {
+            create_args.push("--labels");
+            create_args.push(labels.as_str());
+        }
 
         let id_raw = match br::run_br_public(&create_args) {
             Ok(out) => out,
@@ -1662,6 +1665,47 @@ fn sync_coordinator_discovery_file(config: &config::Config) {
     }
 }
 
+/// `br` rejects any label longer than this ("Validation failed: label: exceeds
+/// 50 characters") and the failure kills the whole `br create`, silently
+/// dropping the planner's bead from the queue.
+const MAX_LABEL_LEN: usize = 50;
+
+/// Coerce planner-supplied label text into something `br` will accept: keep
+/// only `[alnum-_:]`, then cap at [`MAX_LABEL_LEN`]. Returns `None` when
+/// nothing usable survives.
+///
+/// The cap matters because planners sometimes emit a whole sentence as a
+/// "label"; stripping spaces and punctuation turns it into one long run that
+/// clears the charset check but trips the length check. Truncating is safe —
+/// labels are grouping keys, not content — and a truncated label is far better
+/// than a dropped bead. Trailing separators are trimmed so a cut mid-word
+/// doesn't leave a dangling `-`/`_`/`:`.
+fn sanitize_label(raw: &str) -> Option<String> {
+    let filtered: String = raw
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == ':')
+        .collect();
+    // Truncate on a char boundary — `filtered` may hold multi-byte alphanumerics.
+    let capped: String = filtered.chars().take(MAX_LABEL_LEN).collect();
+    let trimmed = capped.trim_end_matches(['-', '_', ':']);
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Sanitize, drop empties, and de-duplicate a planner's label list.
+fn sanitize_labels<'a>(raw: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for label in raw.into_iter().filter_map(|l| sanitize_label(l)) {
+        if !out.contains(&label) {
+            out.push(label);
+        }
+    }
+    out
+}
+
 /// Crate names cited as `crates/<name>/` paths in bead text — conservative
 /// (path-anchored) so prose mentions don't produce false crate labels.
 fn crate_labels_from_text(text: &str) -> Vec<String> {
@@ -1830,17 +1874,9 @@ fn auto_create_beads_from_planner(recommendations: &[planner::Recommendation]) -
             acceptance = rec.acceptance_command,
             key = rec.gate_key,
         );
-        // Sanitize labels: br only allows alphanumeric, hyphen, underscore, colon
-        let mut label_set: Vec<String> = rec
-            .labels
-            .iter()
-            .map(|l| {
-                l.chars()
-                    .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == ':')
-                    .collect::<String>()
-            })
-            .filter(|l| !l.is_empty())
-            .collect();
+        // Sanitize labels: br only allows alphanumeric, hyphen, underscore,
+        // colon, and rejects anything over MAX_LABEL_LEN.
+        let mut label_set: Vec<String> = sanitize_labels(&rec.labels);
         // Derive crate:<name> labels from crate paths in the rec so the
         // coordinator's collision-aware picker knows what the bead touches.
         for krate in crate_labels_from_text(&format!("{} {}", rec.title, description)) {
@@ -2129,6 +2165,56 @@ mod tests {
             vec!["gdscene".to_string(), "gdrender2d".to_string()]
         );
         assert!(super::crate_labels_from_text("no paths here").is_empty());
+    }
+
+    /// A planner that emits a whole sentence as a "label" must not kill the
+    /// `br create`. Stripping spaces and punctuation leaves one long run that
+    /// clears br's charset check but trips its 50-char limit — the observed
+    /// failure that dropped beads from the queue on 2026-07-27. The label is
+    /// truncated to the cap instead, and the cut never leaves a dangling
+    /// separator.
+    #[test]
+    fn test_sanitize_label_caps_length_of_a_sentence_label() {
+        let sentence = "Next — remaining surfaces (enumerate from source, then implement)";
+        let label = super::sanitize_label(sentence).expect("sentence yields a usable label");
+        assert!(
+            label.chars().count() <= super::MAX_LABEL_LEN,
+            "label {label:?} is {} chars, over the br limit",
+            label.chars().count()
+        );
+        assert_eq!(label, "Nextremainingsurfacesenumeratefromsourcethenimplem");
+        assert!(!label.ends_with(['-', '_', ':']));
+
+        // Short, already-legal labels pass through untouched.
+        assert_eq!(
+            super::sanitize_label("editor-parity-visual-fidelity").as_deref(),
+            Some("editor-parity-visual-fidelity")
+        );
+        // Nothing usable survives => no label, rather than an empty one.
+        assert_eq!(super::sanitize_label("!!! ???"), None);
+        // A cut landing on a separator trims it rather than emitting `foo-`.
+        let cut_on_hyphen = format!("{}-tail", "a".repeat(super::MAX_LABEL_LEN - 1));
+        assert_eq!(
+            super::sanitize_label(&cut_on_hyphen).as_deref(),
+            Some("a".repeat(super::MAX_LABEL_LEN - 1).as_str())
+        );
+    }
+
+    /// The list form drops unusable labels and de-duplicates entries that
+    /// collapse onto each other after sanitizing (e.g. two sentences sharing a
+    /// 50-char prefix) — duplicate `--labels` entries are noise for br.
+    #[test]
+    fn test_sanitize_labels_dedupes_and_drops_empties() {
+        let raw = vec![
+            "editor parity".to_string(),
+            "!!!".to_string(),
+            "editor-parity".to_string(),
+            "editor parity".to_string(),
+        ];
+        assert_eq!(
+            super::sanitize_labels(&raw),
+            vec!["editorparity".to_string(), "editor-parity".to_string()]
+        );
     }
 
     /// Gardener cadence: interval 0 disables; never-ran fires; a recent run

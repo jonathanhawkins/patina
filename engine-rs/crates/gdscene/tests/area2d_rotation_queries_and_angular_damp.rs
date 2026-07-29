@@ -89,6 +89,20 @@ fn overlap_count(ml: &MainLoop, area_id: NodeId) -> usize {
     }
 }
 
+/// The area-vs-area twin of [`overlap_count`], reading the property
+/// `Area2D.get_overlapping_areas()` answers from (pat-0q2kx.112).
+fn area_overlap_count(ml: &MainLoop, area_id: NodeId) -> usize {
+    match ml
+        .tree()
+        .get_node(area_id)
+        .unwrap()
+        .get_property("_overlapping_areas")
+    {
+        Variant::Array(items) => items.len(),
+        _ => 0,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The bead's acceptance test
 // ---------------------------------------------------------------------------
@@ -192,6 +206,54 @@ fn area2d_rotation_queries_and_angular_damp() {
             overlap_count(&ml, zone),
             0,
             "leaving the area must clear the published overlap set"
+        );
+    }
+
+    // -- (b2) the AREA-vs-area half of the same query surface ----------------
+    //
+    // Only the bodies half was ever published, so `get_overlapping_areas()` —
+    // Godot's usual way for a trigger to ask which other triggers it is inside
+    // — read an absent property and always answered empty (pat-0q2kx.112).
+    {
+        let (mut tree, root) = new_scene();
+        let zone = area(
+            &mut tree,
+            root,
+            "Zone",
+            Vector2::ZERO,
+            Vector2::new(40.0, 40.0),
+        );
+        let other = area(
+            &mut tree,
+            root,
+            "Other",
+            Vector2::new(10.0, 0.0),
+            Vector2::new(40.0, 40.0),
+        );
+
+        let mut ml = MainLoop::new(tree);
+        ml.register_physics_bodies();
+        ml.step(1.0 / 60.0);
+        assert_eq!(
+            area_overlap_count(&ml, zone),
+            1,
+            "an overlapping area must appear in _overlapping_areas — this is \
+             what Area2D.get_overlapping_areas() reads"
+        );
+
+        // `monitorable` gates being SEEN, not seeing: with it off, `zone` no
+        // longer finds `other`, but `other` still finds `zone`.
+        set(ml.tree_mut(), other, "monitorable", Variant::Bool(false));
+        ml.step(1.0 / 60.0);
+        assert_eq!(
+            area_overlap_count(&ml, zone),
+            0,
+            "a non-monitorable area must vanish from another area's query"
+        );
+        assert_eq!(
+            area_overlap_count(&ml, other),
+            1,
+            "monitorable gates being seen, not seeing — `other` still sees `zone`"
         );
     }
 

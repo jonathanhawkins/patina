@@ -178,7 +178,11 @@ mod tests {
             menu.dispatch(ProjectMenuAction::ReloadCurrentProject),
             ProjectCommand::ReloadedProject(1)
         );
-        assert_eq!(menu.reload_count(), 1, "Reload Current Project reloaded once");
+        assert_eq!(
+            menu.reload_count(),
+            1,
+            "Reload Current Project reloaded once"
+        );
         // Reloading again advances the count.
         assert_eq!(
             menu.dispatch(ProjectMenuAction::ReloadCurrentProject),

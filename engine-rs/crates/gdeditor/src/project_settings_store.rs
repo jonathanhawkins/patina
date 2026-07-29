@@ -73,12 +73,12 @@ impl ProjectSettings {
 
     /// Reloads a settings store: built-in `defaults` plus the overrides parsed
     /// from `project.godot` contents.
-    pub fn from_godot(
-        defaults: BTreeMap<String, String>,
-        cfg: &str,
-    ) -> serde_json::Result<Self> {
+    pub fn from_godot(defaults: BTreeMap<String, String>, cfg: &str) -> serde_json::Result<Self> {
         let overrides: BTreeMap<String, String> = serde_json::from_str(cfg)?;
-        Ok(Self { defaults, overrides })
+        Ok(Self {
+            defaults,
+            overrides,
+        })
     }
 }
 
@@ -88,7 +88,10 @@ mod tests {
 
     fn defaults() -> BTreeMap<String, String> {
         let mut d = BTreeMap::new();
-        d.insert("application/config/name".to_string(), "Untitled".to_string());
+        d.insert(
+            "application/config/name".to_string(),
+            "Untitled".to_string(),
+        );
         d.insert("display/window/size/width".to_string(), "1152".to_string());
         d
     }
@@ -102,13 +105,19 @@ mod tests {
         ps.set_default("display/window/size/width", "1152");
 
         // Defaults are returned until overridden.
-        assert_eq!(ps.get("application/config/name").as_deref(), Some("Untitled"));
+        assert_eq!(
+            ps.get("application/config/name").as_deref(),
+            Some("Untitled")
+        );
         assert!(ps.is_default("application/config/name"));
         assert!(!ps.has_override("application/config/name"));
 
         // Change a setting (records an override).
         ps.set("application/config/name", "My Game");
-        assert_eq!(ps.get("application/config/name").as_deref(), Some("My Game"));
+        assert_eq!(
+            ps.get("application/config/name").as_deref(),
+            Some("My Game")
+        );
         assert!(ps.has_override("application/config/name"));
 
         // Add a brand-new custom setting.
@@ -124,13 +133,22 @@ mod tests {
 
         // Reopen: defaults from the engine, overrides from the file.
         let mut reloaded = ProjectSettings::from_godot(defaults(), &cfg).expect("loads");
-        assert_eq!(reloaded.get("application/config/name").as_deref(), Some("My Game"));
-        assert_eq!(reloaded.get("display/window/size/width").as_deref(), Some("1152"));
+        assert_eq!(
+            reloaded.get("application/config/name").as_deref(),
+            Some("My Game")
+        );
+        assert_eq!(
+            reloaded.get("display/window/size/width").as_deref(),
+            Some("1152")
+        );
         assert_eq!(reloaded.get("my/custom/flag").as_deref(), Some("true"));
 
         // Reverting a built-in setting restores its default.
         assert!(reloaded.revert("application/config/name"));
-        assert_eq!(reloaded.get("application/config/name").as_deref(), Some("Untitled"));
+        assert_eq!(
+            reloaded.get("application/config/name").as_deref(),
+            Some("Untitled")
+        );
         assert!(!reloaded.has_override("application/config/name"));
 
         // Reverting a custom setting (no default) removes it entirely.

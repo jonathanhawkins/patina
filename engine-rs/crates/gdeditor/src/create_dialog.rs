@@ -367,7 +367,11 @@ impl ClassTreeNode {
 
     /// Total number of classes in this subtree, including this node.
     pub fn node_count(&self) -> usize {
-        1 + self.children.iter().map(ClassTreeNode::node_count).sum::<usize>()
+        1 + self
+            .children
+            .iter()
+            .map(ClassTreeNode::node_count)
+            .sum::<usize>()
     }
 
     /// Finds the node for `class_name` within this subtree (including self).
@@ -1373,24 +1377,43 @@ mod tests {
         assert!(!tree.is_leaf(), "the root has subclasses");
 
         // Direct children nest by inheritance, sorted by name.
-        let kids: Vec<&str> = tree.children().iter().map(ClassTreeNode::class_name).collect();
+        let kids: Vec<&str> = tree
+            .children()
+            .iter()
+            .map(ClassTreeNode::class_name)
+            .collect();
         assert_eq!(kids, vec!["Control", "Node2D", "Node3D"]);
 
         // Nesting continues: Node2D's subclasses.
         let node2d = tree.find("Node2D").expect("Node2D is under Node");
-        let n2: Vec<&str> = node2d.children().iter().map(ClassTreeNode::class_name).collect();
+        let n2: Vec<&str> = node2d
+            .children()
+            .iter()
+            .map(ClassTreeNode::class_name)
+            .collect();
         assert_eq!(n2, vec!["AnimatedSprite2D", "Sprite2D"]);
 
         // Control's subclasses, and a deeper single-child branch.
         let control = tree.find("Control").expect("Control is under Node");
-        let c: Vec<&str> = control.children().iter().map(ClassTreeNode::class_name).collect();
+        let c: Vec<&str> = control
+            .children()
+            .iter()
+            .map(ClassTreeNode::class_name)
+            .collect();
         assert_eq!(c, vec!["Button", "Label"]);
         let node3d = tree.find("Node3D").expect("Node3D is under Node");
-        let n3: Vec<&str> = node3d.children().iter().map(ClassTreeNode::class_name).collect();
+        let n3: Vec<&str> = node3d
+            .children()
+            .iter()
+            .map(ClassTreeNode::class_name)
+            .collect();
         assert_eq!(n3, vec!["MeshInstance3D"]);
 
         // The tree expands all the way to leaf types.
-        assert!(tree.find("Sprite2D").unwrap().is_leaf(), "Sprite2D is a leaf");
+        assert!(
+            tree.find("Sprite2D").unwrap().is_leaf(),
+            "Sprite2D is a leaf"
+        );
         assert!(tree.find("MeshInstance3D").unwrap().is_leaf());
         assert!(tree.find("Button").unwrap().is_leaf());
 
@@ -1399,7 +1422,10 @@ mod tests {
 
         // Classes outside the Node hierarchy are not in the tree.
         assert!(tree.find("Resource").is_none(), "Resource is not a Node");
-        assert!(tree.find("Object").is_none(), "Object is Node's parent, not a child");
+        assert!(
+            tree.find("Object").is_none(),
+            "Object is Node's parent, not a child"
+        );
 
         // Rooting at an unregistered base type yields no tree.
         assert!(d.class_tree("DoesNotExist").is_none());
@@ -1407,7 +1433,11 @@ mod tests {
         // The tree can also be built rooted at an arbitrary registered base.
         let from_object = d.class_tree("Object").expect("Object is registered");
         assert_eq!(from_object.class_name(), "Object");
-        assert_eq!(from_object.node_count(), 11, "Object roots the full hierarchy");
+        assert_eq!(
+            from_object.node_count(),
+            11,
+            "Object roots the full hierarchy"
+        );
     }
 
     /// Acceptance (pat-o773t): typing in the search box incrementally filters
@@ -1432,12 +1462,19 @@ mod tests {
             .iter()
             .map(FilteredClassNode::class_name)
             .collect();
-        assert_eq!(kids, vec!["Node2D"], "only the branch leading to matches is kept");
+        assert_eq!(
+            kids,
+            vec!["Node2D"],
+            "only the branch leading to matches is kept"
+        );
         let node2d = tree.find("Node2D").expect("Node2D ancestor kept");
         assert!(!node2d.is_match(), "Node2D is an ancestor, not a match");
 
         // Non-matching branches are pruned entirely.
-        assert!(tree.find("Node3D").is_none(), "Node3D has no matching descendant");
+        assert!(
+            tree.find("Node3D").is_none(),
+            "Node3D has no matching descendant"
+        );
         assert!(tree.find("Control").is_none());
 
         // Both matches are present, are leaves of the filtered tree, and carry
@@ -1454,15 +1491,27 @@ mod tests {
         let sprite = tree.find("Sprite2D").expect("Sprite2D matched");
         assert!(sprite.is_match());
         let (s, e) = sprite.match_span().expect("matched node has a span");
-        assert_eq!(&sprite.class_name()[s..e], "Sprite", "highlight covers the match");
+        assert_eq!(
+            &sprite.class_name()[s..e],
+            "Sprite",
+            "highlight covers the match"
+        );
 
-        let animated = tree.find("AnimatedSprite2D").expect("AnimatedSprite2D matched");
+        let animated = tree
+            .find("AnimatedSprite2D")
+            .expect("AnimatedSprite2D matched");
         let (s2, e2) = animated.match_span().expect("matched node has a span");
         assert_eq!(&animated.class_name()[s2..e2], "Sprite");
-        assert_eq!((s2, e2), (8, 14), "span is offset past the 'Animated' prefix");
+        assert_eq!(
+            (s2, e2),
+            (8, 14),
+            "span is offset past the 'Animated' prefix"
+        );
 
         // Matching is case-insensitive: "SPRITE" filters the same way.
-        let upper = d.base_filtered_class_tree("SPRITE").expect("case-insensitive match");
+        let upper = d
+            .base_filtered_class_tree("SPRITE")
+            .expect("case-insensitive match");
         assert_eq!(upper.node_count(), 4);
 
         // A match whose own children don't match becomes a filtered leaf, but
@@ -1470,12 +1519,21 @@ mod tests {
         let only_node2d = d
             .base_filtered_class_tree("node2d")
             .expect("'node2d' matches Node2D");
-        assert_eq!(only_node2d.node_count(), 2, "Node (context) + Node2D (match)");
+        assert_eq!(
+            only_node2d.node_count(),
+            2,
+            "Node (context) + Node2D (match)"
+        );
         let m = only_node2d.find("Node2D").unwrap();
-        assert!(m.is_match() && m.is_leaf(), "Node2D matches; its non-matching kids are pruned");
+        assert!(
+            m.is_match() && m.is_leaf(),
+            "Node2D matches; its non-matching kids are pruned"
+        );
 
         // An empty query is a no-op filter: the whole tree, with no highlights.
-        let unfiltered = d.base_filtered_class_tree("").expect("empty query keeps the tree");
+        let unfiltered = d
+            .base_filtered_class_tree("")
+            .expect("empty query keeps the tree");
         assert_eq!(unfiltered.node_count(), 9, "the full Node subtree");
         assert!(
             unfiltered.find("Sprite2D").unwrap().match_span().is_none(),
@@ -1598,7 +1656,10 @@ mod tests {
         assert!(!d.is_favorite("Sprite2D"));
 
         // Toggling favorite on a type adds it to the Favorites section.
-        assert!(d.toggle_favorite("Sprite2D"), "toggle returns the new (on) state");
+        assert!(
+            d.toggle_favorite("Sprite2D"),
+            "toggle returns the new (on) state"
+        );
         assert!(d.is_favorite("Sprite2D"));
         let entries = d.favorite_entries();
         let favs: Vec<&str> = entries.iter().map(|e| e.class_name.as_str()).collect();
@@ -1620,7 +1681,10 @@ mod tests {
         assert_eq!(favs, vec!["Sprite2D", "Button"]);
 
         // Toggling an already-favorited type off removes it from the section.
-        assert!(!d.toggle_favorite("Sprite2D"), "toggle returns the new (off) state");
+        assert!(
+            !d.toggle_favorite("Sprite2D"),
+            "toggle returns the new (off) state"
+        );
         assert!(!d.is_favorite("Sprite2D"));
         let entries = d.favorite_entries();
         let favs: Vec<&str> = entries.iter().map(|e| e.class_name.as_str()).collect();
@@ -1636,7 +1700,11 @@ mod tests {
         assert!(d.is_favorite("Button"), "favorite survived reopen");
         let entries = d.favorite_entries();
         let favs: Vec<&str> = entries.iter().map(|e| e.class_name.as_str()).collect();
-        assert_eq!(favs, vec!["Button"], "Favorites section persisted across reopen");
+        assert_eq!(
+            favs,
+            vec!["Button"],
+            "Favorites section persisted across reopen"
+        );
     }
 
     #[test]
@@ -1910,7 +1978,10 @@ mod tests {
             assert!(c.category.is_none());
         }
         let sprite = classes.iter().find(|c| c.class_name == "Sprite2D").unwrap();
-        assert_eq!(sprite.description.as_deref(), Some("General-purpose sprite node."));
+        assert_eq!(
+            sprite.description.as_deref(),
+            Some("General-purpose sprite node.")
+        );
     }
 
     #[test]
@@ -2143,7 +2214,10 @@ mod tests {
 
         let mut d2 = CreateNodeDialog::new();
         d2.set_persist_dir(Some(dir.clone()));
-        assert_eq!(d2.favorites(), ["Sprite2D".to_string(), "Label".to_string()]);
+        assert_eq!(
+            d2.favorites(),
+            ["Sprite2D".to_string(), "Label".to_string()]
+        );
         assert_eq!(d2.recent(), ["Node2D".to_string(), "Button".to_string()]);
 
         // Unregistered classes in the files are dropped on load, like

@@ -104,13 +104,24 @@ mod tests {
 
         // Lines fall on offset + multiples of step, within the visible range.
         let v = grid.vertical_lines(0.0, 40.0);
-        assert_eq!(positions(&v), vec![5.0, 15.0, 25.0, 35.0], "vertical lines honor step + offset");
+        assert_eq!(
+            positions(&v),
+            vec![5.0, 15.0, 25.0, 35.0],
+            "vertical lines honor step + offset"
+        );
         let h = grid.horizontal_lines(0.0, 25.0);
-        assert_eq!(positions(&h), vec![5.0, 15.0, 25.0], "horizontal lines honor step + offset");
+        assert_eq!(
+            positions(&h),
+            vec![5.0, 15.0, 25.0],
+            "horizontal lines honor step + offset"
+        );
 
         // The line on the origin (offset) is primary; the next few are not.
         assert!(v[0].primary, "the line at the offset origin is primary");
-        assert!(!v[1].primary && !v[2].primary && !v[3].primary, "intermediate lines are minor");
+        assert!(
+            !v[1].primary && !v[2].primary && !v[3].primary,
+            "intermediate lines are minor"
+        );
 
         // Changing the step changes the spacing.
         grid.step = 20.0;
@@ -123,8 +134,14 @@ mod tests {
         // Toggling visibility off hides every line.
         grid.set_visible(false);
         assert!(!grid.is_visible());
-        assert!(grid.vertical_lines(0.0, 40.0).is_empty(), "hidden grid draws no vertical lines");
-        assert!(grid.horizontal_lines(0.0, 40.0).is_empty(), "hidden grid draws no horizontal lines");
+        assert!(
+            grid.vertical_lines(0.0, 40.0).is_empty(),
+            "hidden grid draws no vertical lines"
+        );
+        assert!(
+            grid.horizontal_lines(0.0, 40.0).is_empty(),
+            "hidden grid draws no horizontal lines"
+        );
     }
 
     /// Primary lines recur at the configured interval.
@@ -139,6 +156,10 @@ mod tests {
         // Indices 0..=9 → positions 0,10,...,90; primaries at i = 0, 4, 8.
         let v = grid.vertical_lines(0.0, 95.0);
         let primaries: Vec<f32> = v.iter().filter(|l| l.primary).map(|l| l.position).collect();
-        assert_eq!(primaries, vec![0.0, 40.0, 80.0], "primary lines every 4th step");
+        assert_eq!(
+            primaries,
+            vec![0.0, 40.0, 80.0],
+            "primary lines every 4th step"
+        );
     }
 }

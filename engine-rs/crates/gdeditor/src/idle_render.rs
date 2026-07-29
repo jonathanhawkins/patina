@@ -79,7 +79,10 @@ impl ViewportRenderSignature {
             selected: state.selected_node.map(|n| n.raw()),
             selected_multi: state.selected_nodes.iter().map(|n| n.raw()).collect(),
             zoom_bits: state.viewport_zoom.to_bits(),
-            pan_bits: (state.viewport_pan.0.to_bits(), state.viewport_pan.1.to_bits()),
+            pan_bits: (
+                state.viewport_pan.0.to_bits(),
+                state.viewport_pan.1.to_bits(),
+            ),
             render_w: state.render_width,
             render_h: state.render_height,
             cam_bits: [

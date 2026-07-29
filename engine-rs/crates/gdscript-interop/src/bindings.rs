@@ -293,6 +293,21 @@ impl InputEventSpec {
     }
 }
 
+/// Tag bits marking an `ObjectId` minted by [`SceneAccess::astar_new`]
+/// (pat-s3rrv.19).
+///
+/// Shared between the two crates so the interpreter can route a method call to
+/// [`SceneAccess::astar_call`] on the id alone, without consulting the scene
+/// layer for every `ObjectId` it dispatches. That matters for correctness as
+/// well as cost: `clear`, `update` and `get_point_position` collide with verbs
+/// the interpreter already routes off an `ObjectId`.
+pub const ASTAR_HANDLE_TAG: u64 = 0xA1_00_0000_0000_0000;
+
+/// Returns `true` when `raw` is an AStar handle (see [`ASTAR_HANDLE_TAG`]).
+pub fn is_astar_handle(raw: u64) -> bool {
+    raw & 0xFF00_0000_0000_0000 == ASTAR_HANDLE_TAG
+}
+
 /// Trait providing scene-tree operations to a running script.
 ///
 /// The engine crate (`gdscene`) implements this trait on an accessor that wraps
@@ -656,6 +671,64 @@ pub trait SceneAccess {
     /// Chainable setters return the tween handle itself so GDScript's fluent
     /// `create_tween().tween_property(...).set_trans(...)` works.
     fn tween_call(&mut self, _tween: u64, _method: &str, _args: &[Variant]) -> Option<Variant> {
+        None
+    }
+
+    // -- AnimationNodeStateMachinePlayback (pat-s3rrv.1) --------------------
+
+    /// Dispatch an `AnimationNodeStateMachinePlayback` method against the
+    /// handle a script got from `AnimationTree.get("parameters/playback")` —
+    /// how every Godot state-machine game steers its graph
+    /// (`playback.travel("run")`).
+    ///
+    /// Godot's surface: `travel`, `start`, `next`, `stop`, `is_playing`,
+    /// `get_current_node`, `get_travel_path`, `get_current_play_position`,
+    /// `get_current_length`, `get_fading_from_node`.
+    ///
+    /// Returns `None` when `handle` names no playback (or `method` is not one
+    /// of its methods), so the caller falls through to ordinary node
+    /// semantics — necessary because `stop` / `start` / `next` collide with the
+    /// `AnimationPlayer` and `AudioStreamPlayer` verbs the interpreter also
+    /// routes off an `ObjectId`.
+    fn animation_tree_playback_call(
+        &mut self,
+        _handle: u64,
+        _method: &str,
+        _args: &[Variant],
+    ) -> Option<Variant> {
+        None
+    }
+
+    // -- AStar2D / AStar3D / AStarGrid2D (pat-s3rrv.19) --------------------
+    //
+    // `gdscene::astar` has carried a complete, unit-tested pathfinder since
+    // pat-p0s82 and ClassDB registers all three classes — but nothing ever
+    // called it, and `AStar2D.new()` raised a TypeError, so the engine was
+    // unreachable from any game script.
+    //
+    // The bead proposed owning `gdscene::astar::AStar<…>` in the interpreter's
+    // own handle tables. That cannot compile: `gdscene` depends on
+    // `gdscript-interop` (gdscene/Cargo.toml:14), not the reverse, so naming a
+    // `gdscene` type here is a dependency cycle. This trait is the existing
+    // inversion seam — the same one `animation_tree_playback_call` uses — so
+    // the scene layer owns the instances and the interpreter only forwards.
+
+    /// Constructs an AStar object of `class_name` (`"AStar2D"`, `"AStar3D"` or
+    /// `"AStarGrid2D"`) and returns its handle, tagged with
+    /// [`ASTAR_HANDLE_TAG`].
+    ///
+    /// Returns `None` when the scene layer provides no pathfinder, so the
+    /// interpreter falls through to its usual unknown-class error rather than
+    /// handing back a handle that answers nothing.
+    fn astar_new(&mut self, _class_name: &str) -> Option<u64> {
+        None
+    }
+
+    /// Calls `method` on the AStar object behind `handle`.
+    ///
+    /// Returns `None` when `handle` names no live AStar object, so the caller
+    /// falls through to ordinary node semantics.
+    fn astar_call(&mut self, _handle: u64, _method: &str, _args: &[Variant]) -> Option<Variant> {
         None
     }
 
@@ -1124,6 +1197,183 @@ pub trait SceneAccess {
 
     /// Reads back `multiplayer.refuse_new_connections`.
     fn multiplayer_refuses_new_connections(&self) -> bool {
+        false
+    }
+
+    // -- SceneMultiplayer method surface (pat-s3rrv.18) ---------------------
+    //
+    // ClassDB advertises `send_bytes` / `set_auth_callback` / `get_auth_callback`
+    // / `send_auth` / `complete_auth` / `get_authenticating_peers` /
+    // `disconnect_peer` / `clear` on SceneMultiplayer, but the interpreter
+    // implemented ten methods total and answered `UndefinedFunction` for the
+    // rest — so the reflection surface promised more than the runtime could
+    // serve. These are the hooks behind the missing ones.
+
+    /// `SceneMultiplayer.disconnect_peer(id)` — drops the peer, which must then
+    /// be gone from `get_peers()`.
+    fn multiplayer_disconnect_peer(&mut self, _id: i64) -> bool {
+        false
+    }
+
+    /// `SceneMultiplayer.clear()` — forgets every connected peer and any queued
+    /// events, leaving the assigned transport in place (Godot clears the API's
+    /// bookkeeping, not the peer).
+    fn multiplayer_clear(&mut self) {}
+
+    /// `SceneMultiplayer.set_auth_callback(callable)`.
+    fn multiplayer_set_auth_callback(&mut self, _callback: Variant) {}
+
+    /// `SceneMultiplayer.get_auth_callback()` — `Nil` when none is set.
+    fn multiplayer_get_auth_callback(&self) -> Variant {
+        Variant::Nil
+    }
+
+    /// `SceneMultiplayer.send_auth(id, data)` — sends the auth payload to a peer
+    /// that is still authenticating.
+    fn multiplayer_send_auth(&mut self, _id: i64, _data: Vec<u8>) -> bool {
+        false
+    }
+
+    /// The object the multiplayer connection signals are emitted on, so
+    /// `multiplayer.peer_connected.connect(cb)` can bind (pat-s3rrv.18).
+    ///
+    /// Godot puts `peer_connected` / `peer_disconnected` / `connected_to_server`
+    /// / `connection_failed` / `server_disconnected` (plus SceneMultiplayer's
+    /// `peer_packet` / `peer_authenticating` / `peer_authentication_failed`) on
+    /// the `MultiplayerAPI` object, and `multiplayer.<signal>.connect(...)` is
+    /// THE idiom for joining a session. Patina emits all eight — but on the
+    /// scene root, and `multiplayer` was only a method-call receiver, so the
+    /// idiom had no binding path at all.
+    ///
+    /// Returning the emitting object's id lets the existing `Signal` machinery
+    /// do the rest: `.connect` registers on that object's signal store, which is
+    /// exactly where the per-frame drain already emits. `0` means no host.
+    fn multiplayer_signal_object(&self) -> u64 {
+        0
+    }
+
+    /// `multiplayer.multiplayer_peer = peer` — adopts the peer behind `handle`
+    /// into the tree's `MultiplayerAPI` (pat-s3rrv.16).
+    ///
+    /// Godot's three-line opener (`var p = X.new()` / `p.create_server(port)` /
+    /// `multiplayer.multiplayer_peer = p`) had no path in Patina at all: no
+    /// `MultiplayerPeer` subclass was script-constructible and `MultiplayerAPI`
+    /// had no script-facing setter, so every green multiplayer test injected
+    /// the peer from Rust.
+    ///
+    /// The handle is CONSUMED — `MultiplayerAPI` takes the peer by value, so it
+    /// leaves the process-wide table. Returns `false` when the handle names no
+    /// live peer (already assigned, released, or never issued).
+    fn multiplayer_set_peer(&mut self, _handle: u64) -> bool {
+        false
+    }
+
+    // -- AudioServer, server-side API (pat-s3rrv.6) -------------------------
+    //
+    // Godot's `AudioServer` is a global singleton (`servers/audio/audio_server.cpp`)
+    // that games use to duck buses, drive VU meters and scale playback speed:
+    // `AudioServer.set_bus_volume_db(AudioServer.get_bus_index("Music"), db)`.
+    // Patina's mixer runs every frame inside `MainLoop`'s `AudioServerBridge`,
+    // so these hooks address THAT live server rather than creating a second one.
+    //
+    // The defaults describe a host with no audio server bound: index lookups
+    // report "no such bus", mutators report failure, and meters read the dB
+    // floor — a script under a bare interpreter degrades instead of panicking.
+
+    /// `AudioServer.get_bus_index(name)` — `-1` when no bus has that name.
+    fn audio_get_bus_index(&self, _name: &str) -> i64 {
+        -1
+    }
+
+    /// `AudioServer.get_bus_count()`.
+    fn audio_get_bus_count(&self) -> i64 {
+        0
+    }
+
+    /// `AudioServer.get_bus_name(idx)` — `None` when the index is out of range.
+    fn audio_get_bus_name(&self, _idx: i64) -> Option<String> {
+        None
+    }
+
+    /// `AudioServer.set_bus_name(idx, name)`.
+    fn audio_set_bus_name(&mut self, _idx: i64, _name: &str) -> bool {
+        false
+    }
+
+    /// `AudioServer.set_bus_volume_db(idx, db)`.
+    fn audio_set_bus_volume_db(&mut self, _idx: i64, _db: f32) -> bool {
+        false
+    }
+
+    /// `AudioServer.get_bus_volume_db(idx)` — `None` when out of range.
+    fn audio_get_bus_volume_db(&self, _idx: i64) -> Option<f32> {
+        None
+    }
+
+    /// `AudioServer.set_bus_mute(idx, mute)`.
+    fn audio_set_bus_mute(&mut self, _idx: i64, _mute: bool) -> bool {
+        false
+    }
+
+    /// `AudioServer.is_bus_mute(idx)`.
+    fn audio_is_bus_mute(&self, _idx: i64) -> bool {
+        false
+    }
+
+    /// `AudioServer.set_bus_solo(idx, solo)`.
+    fn audio_set_bus_solo(&mut self, _idx: i64, _solo: bool) -> bool {
+        false
+    }
+
+    /// `AudioServer.is_bus_solo(idx)`.
+    fn audio_is_bus_solo(&self, _idx: i64) -> bool {
+        false
+    }
+
+    /// `AudioServer.set_bus_bypass_effects(idx, bypass)`.
+    fn audio_set_bus_bypass_effects(&mut self, _idx: i64, _bypass: bool) -> bool {
+        false
+    }
+
+    /// `AudioServer.is_bus_bypassing_effects(idx)`.
+    fn audio_is_bus_bypassing_effects(&self, _idx: i64) -> bool {
+        false
+    }
+
+    /// `AudioServer.get_bus_peak_volume_left_db(bus, channel)`, in dB.
+    ///
+    /// Godot reports a floor rather than failing — the meters poll every frame.
+    fn audio_get_bus_peak_volume_left_db(&self, _idx: i64, _channel: i64) -> f32 {
+        -200.0
+    }
+
+    /// `AudioServer.get_bus_peak_volume_right_db(bus, channel)`, in dB.
+    fn audio_get_bus_peak_volume_right_db(&self, _idx: i64, _channel: i64) -> f32 {
+        -200.0
+    }
+
+    /// `AudioServer.set_playback_speed_scale(scale)`.
+    fn audio_set_playback_speed_scale(&mut self, _scale: f32) -> bool {
+        false
+    }
+
+    /// `AudioServer.get_playback_speed_scale()` — Godot's default is 1.0.
+    fn audio_get_playback_speed_scale(&self) -> f32 {
+        1.0
+    }
+
+    /// `AudioServer.get_mix_rate()` — the output sample rate in Hz.
+    fn audio_get_mix_rate(&self) -> f32 {
+        44_100.0
+    }
+
+    /// `AudioServer.add_bus(at_position)` — `at_position < 0` appends.
+    fn audio_add_bus(&mut self, _at_position: i64) -> bool {
+        false
+    }
+
+    /// `AudioServer.remove_bus(idx)`.
+    fn audio_remove_bus(&mut self, _idx: i64) -> bool {
         false
     }
 

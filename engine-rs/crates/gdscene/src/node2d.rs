@@ -70,7 +70,26 @@ pub fn get_scale(tree: &SceneTree, node_id: NodeId) -> Vector2 {
 /// Composes a local [`Transform2D`] from the node's position, rotation, and scale.
 ///
 /// The composition order matches Godot: translate * rotate * scale.
+///
+/// A `CanvasLayer` contributes IDENTITY (pat-0q2kx.212). It is not a
+/// `CanvasItem`: in Godot its `offset`/`rotation`/`scale` describe the *layer's
+/// canvas*, which children are drawn relative to, and they are applied once by
+/// [`crate::canvas_layer::layer_transform`]. This walk happens to read the same
+/// property NAMES off any node it passes, so a layer's `rotation`/`scale` were
+/// being counted a SECOND time here — a layer with `rotation = 0.5` rotated its
+/// children twice, and one that also carried an explicit `transform` mixed the
+/// authored matrix with a rotation the authored matrix was supposed to replace.
+///
+/// The doc on `layer_transform` asserted this walk "skips straight past" a
+/// CanvasLayer. It did not — nothing here ever looked at the class. This is that
+/// claim made true.
 pub fn get_local_transform(tree: &SceneTree, node_id: NodeId) -> Transform2D {
+    if tree
+        .get_node(node_id)
+        .is_some_and(|n| n.is_class("CanvasLayer"))
+    {
+        return Transform2D::IDENTITY;
+    }
     let pos = get_position(tree, node_id);
     let rot = get_rotation(tree, node_id);
     let scl = get_scale(tree, node_id);
@@ -1230,5 +1249,56 @@ mod tests {
         set_modulate(&mut tree, id, red);
         let n = tree.get_node(id).unwrap();
         assert_eq!(n.get_property("modulate"), Variant::Color(red));
+    }
+
+    // -- CanvasLayer ancestors (pat-0q2kx.212) ------------------------------
+
+    /// A `CanvasLayer` must contribute nothing to the 2D walk.
+    ///
+    /// It is not a `CanvasItem`; its `offset`/`rotation`/`scale` describe the
+    /// layer's own canvas and are applied once by
+    /// `canvas_layer::layer_transform`. This walk reads property NAMES off
+    /// whatever node it passes, so before the fix a layer's rotation was counted
+    /// a second time here and every child of a rotated layer was rotated twice.
+    #[test]
+    fn canvas_layer_contributes_identity_to_the_walk() {
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let mut layer = Node::new("HUD", "CanvasLayer");
+        // The same property names a Node2D would answer to. A CanvasLayer really
+        // does carry `rotation`/`scale` — that is exactly why the walk picked
+        // them up.
+        layer.set_property("rotation", Variant::Float(FRAC_PI_2 as f64));
+        layer.set_property("scale", Variant::Vector2(Vector2::new(3.0, 3.0)));
+        let layer_id = tree.add_child(root, layer).unwrap();
+
+        assert_eq!(
+            get_local_transform(&tree, layer_id),
+            Transform2D::IDENTITY,
+            "a CanvasLayer's own rotation/scale must not enter the 2D walk"
+        );
+    }
+
+    /// The consequence that actually bit: a child of a rotated layer keeps its
+    /// authored local position, instead of being rotated by the layer twice.
+    #[test]
+    fn a_child_of_a_rotated_canvas_layer_is_not_pre_rotated() {
+        let mut tree = make_tree();
+        let root = tree.root_id();
+        let mut layer = Node::new("HUD", "CanvasLayer");
+        layer.set_property("rotation", Variant::Float(FRAC_PI_2 as f64));
+        let layer_id = tree.add_child(root, layer).unwrap();
+
+        let child = Node::new("Bar", "Node2D");
+        let child_id = tree.add_child(layer_id, child).unwrap();
+        set_position(&mut tree, child_id, Vector2::new(10.0, 0.0));
+
+        let origin = get_global_transform(&tree, child_id).origin;
+        assert!(
+            approx_vec(origin, Vector2::new(10.0, 0.0)),
+            "the layer's rotation belongs to layer_transform, not to this walk — \
+             a quarter turn applied here would put the child near (0, 10); got \
+             {origin:?}"
+        );
     }
 }

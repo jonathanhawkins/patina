@@ -12204,6 +12204,265 @@ fn register_navigation_resource_classes() {
     }
 }
 
+/// Populates the whole ClassDB — every `register_*_classes` table — the way
+/// Godot's `register_core_types()` / `register_scene_types()` do before any
+/// MainLoop runs (upstream/godot/core/register_core_types.cpp,
+/// scene/register_scene_types.cpp). One entry point so the runner, the web
+/// runtime and the editor share exactly one table (pat-s3rrv.7).
+///
+/// **Why this exists:** the per-family `register_*_classes` functions were only
+/// ever called by the editor, so a booted *game* had nothing but
+/// `Object -> Node -> Viewport -> Window`. Every consumer that seeds from
+/// ClassDB therefore saw an empty database: `packed_scene::node_with_class_defaults`
+/// and `SceneTree::create_node` seed node defaults from
+/// [`get_property_list`], so a `.tscn`-loaded `Sprite2D` booted with no
+/// `visible`/`modulate`/`scale`; `ClassDB.class_exists("Sprite2D")` was false;
+/// and [`property_can_revert`] answered false for everything.
+///
+/// Idempotent: every table guards each registration on [`class_exists`], so
+/// calling this twice (or after a partial registration) is a no-op the second
+/// time. That is what lets the editor keep calling it on top of a runner boot.
+///
+/// ⚠️ Order matters. [`register_root_window_chain`] runs first so
+/// `Object`/`Node` exist before any table registers a class that names them as
+/// a parent — an inheritance chain stops at the first unregistered base, so a
+/// `Sprite2D` registered above a missing `Node` would resolve a truncated chain.
+/// Registers the `InputEvent` class family (pat-s3rrv.14).
+///
+/// Godot models input as an 18-class `RefCounted` hierarchy
+/// (`core/input/input_event.h`), and every ported project type-tests against it:
+/// `if event is InputEventKey and event.keycode == KEY_W`. Patina registered
+/// NONE of them — `grep '"InputEvent' class_db.rs` returned zero hits across all
+/// 21 `register_*` functions — so the type test could not resolve and every
+/// ported `_input` body was dead code.
+///
+/// The chain and property lists come from `extension_api.json`; the inheritance
+/// is what makes `event is InputEvent` true for a concrete key event, so the
+/// intermediate abstract classes are registered rather than flattened.
+pub fn register_input_event_classes() {
+    if !class_exists("Object") {
+        register_class(object_class());
+    }
+    if !class_exists("RefCounted") {
+        register_class(ClassRegistration::new("RefCounted").parent("Object"));
+    }
+
+    // -- the abstract spine ------------------------------------------------
+    if !class_exists("InputEvent") {
+        register_class(
+            ClassRegistration::new("InputEvent")
+                .parent("RefCounted")
+                .abstract_class()
+                .property(PropertyInfo::new("device", Variant::Int(0))),
+        );
+    }
+    if !class_exists("InputEventFromWindow") {
+        register_class(
+            ClassRegistration::new("InputEventFromWindow")
+                .parent("InputEvent")
+                .abstract_class()
+                .property(PropertyInfo::new("window_id", Variant::Int(0))),
+        );
+    }
+    if !class_exists("InputEventWithModifiers") {
+        register_class(
+            ClassRegistration::new("InputEventWithModifiers")
+                .parent("InputEventFromWindow")
+                .abstract_class()
+                .property(PropertyInfo::new(
+                    "command_or_control_autoremap",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new("alt_pressed", Variant::Bool(false)))
+                .property(PropertyInfo::new("shift_pressed", Variant::Bool(false)))
+                .property(PropertyInfo::new("ctrl_pressed", Variant::Bool(false)))
+                .property(PropertyInfo::new("meta_pressed", Variant::Bool(false))),
+        );
+    }
+    if !class_exists("InputEventMouse") {
+        register_class(
+            ClassRegistration::new("InputEventMouse")
+                .parent("InputEventWithModifiers")
+                .abstract_class()
+                .property(PropertyInfo::new("button_mask", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "position",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "global_position",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                )),
+        );
+    }
+
+    // -- concrete events ---------------------------------------------------
+    if !class_exists("InputEventKey") {
+        register_class(
+            ClassRegistration::new("InputEventKey")
+                .parent("InputEventWithModifiers")
+                .property(PropertyInfo::new("pressed", Variant::Bool(false)))
+                // Godot's keycodes are ints (`KEY_W == 87`), which is the whole
+                // point of this bead: Patina used to report the name string.
+                .property(PropertyInfo::new("keycode", Variant::Int(0)))
+                .property(PropertyInfo::new("physical_keycode", Variant::Int(0)))
+                .property(PropertyInfo::new("key_label", Variant::Int(0)))
+                .property(PropertyInfo::new("unicode", Variant::Int(0)))
+                .property(PropertyInfo::new("location", Variant::Int(0)))
+                .property(PropertyInfo::new("echo", Variant::Bool(false))),
+        );
+    }
+    if !class_exists("InputEventMouseButton") {
+        register_class(
+            ClassRegistration::new("InputEventMouseButton")
+                .parent("InputEventMouse")
+                .property(PropertyInfo::new("factor", Variant::Float(1.0)))
+                .property(PropertyInfo::new("button_index", Variant::Int(0)))
+                .property(PropertyInfo::new("canceled", Variant::Bool(false)))
+                .property(PropertyInfo::new("pressed", Variant::Bool(false)))
+                .property(PropertyInfo::new("double_click", Variant::Bool(false))),
+        );
+    }
+    if !class_exists("InputEventMouseMotion") {
+        register_class(
+            ClassRegistration::new("InputEventMouseMotion")
+                .parent("InputEventMouse")
+                .property(PropertyInfo::new(
+                    "tilt",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("pressure", Variant::Float(0.0)))
+                .property(PropertyInfo::new("pen_inverted", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "relative",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "screen_relative",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "velocity",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "screen_velocity",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                )),
+        );
+    }
+    if !class_exists("InputEventJoypadButton") {
+        register_class(
+            ClassRegistration::new("InputEventJoypadButton")
+                .parent("InputEvent")
+                .property(PropertyInfo::new("button_index", Variant::Int(0)))
+                .property(PropertyInfo::new("pressure", Variant::Float(0.0)))
+                .property(PropertyInfo::new("pressed", Variant::Bool(false))),
+        );
+    }
+    if !class_exists("InputEventJoypadMotion") {
+        register_class(
+            ClassRegistration::new("InputEventJoypadMotion")
+                .parent("InputEvent")
+                .property(PropertyInfo::new("axis", Variant::Int(0)))
+                .property(PropertyInfo::new("axis_value", Variant::Float(0.0))),
+        );
+    }
+    if !class_exists("InputEventScreenTouch") {
+        register_class(
+            ClassRegistration::new("InputEventScreenTouch")
+                .parent("InputEventFromWindow")
+                .property(PropertyInfo::new("index", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "position",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("canceled", Variant::Bool(false)))
+                .property(PropertyInfo::new("pressed", Variant::Bool(false)))
+                .property(PropertyInfo::new("double_tap", Variant::Bool(false))),
+        );
+    }
+    if !class_exists("InputEventScreenDrag") {
+        register_class(
+            ClassRegistration::new("InputEventScreenDrag")
+                .parent("InputEventFromWindow")
+                .property(PropertyInfo::new("index", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "tilt",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("pressure", Variant::Float(0.0)))
+                .property(PropertyInfo::new("pen_inverted", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "position",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "relative",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "screen_relative",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "velocity",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "screen_velocity",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                )),
+        );
+    }
+    if !class_exists("InputEventAction") {
+        register_class(
+            ClassRegistration::new("InputEventAction")
+                .parent("InputEvent")
+                .property(PropertyInfo::new("action", Variant::String(String::new())))
+                .property(PropertyInfo::new("pressed", Variant::Bool(false)))
+                .property(PropertyInfo::new("strength", Variant::Float(1.0)))
+                .property(PropertyInfo::new("event_index", Variant::Int(-1))),
+        );
+    }
+    // Registered alongside the twelve because `input_event_to_variant` emits
+    // this class name for a decoded MIDI message (pat-0q2kx.246); leaving it
+    // out would make `event is InputEventMIDI` the one type test that fails.
+    if !class_exists("InputEventMIDI") {
+        register_class(
+            ClassRegistration::new("InputEventMIDI")
+                .parent("InputEvent")
+                .property(PropertyInfo::new("channel", Variant::Int(0)))
+                .property(PropertyInfo::new("message", Variant::Int(0)))
+                .property(PropertyInfo::new("pitch", Variant::Int(0)))
+                .property(PropertyInfo::new("velocity", Variant::Int(0)))
+                .property(PropertyInfo::new("instrument", Variant::Int(0)))
+                .property(PropertyInfo::new("pressure", Variant::Int(0)))
+                .property(PropertyInfo::new("controller_number", Variant::Int(0)))
+                .property(PropertyInfo::new("controller_value", Variant::Int(0))),
+        );
+    }
+}
+
+pub fn register_all_classes() {
+    // Base chain first: Object -> Node -> Viewport -> Window.
+    register_root_window_chain();
+    register_viewport_classes();
+    register_2d_classes();
+    register_3d_classes();
+    register_audio_classes();
+    register_io_classes();
+    register_networking_classes();
+    register_navigation_classes();
+    // The InputEvent hierarchy (pat-s3rrv.14): scripts type-test against it
+    // with `event is InputEventKey`, which cannot resolve unless the chain is
+    // in ClassDB.
+    register_input_event_classes();
+    // Registers the editor-only classes on top; its own fan-out to the six
+    // tables above is a no-op by the time it runs.
+    register_editor_classes();
+}
+
 pub fn register_editor_classes() {
     register_2d_classes();
     register_3d_classes();
@@ -12839,7 +13098,107 @@ pub fn register_editor_classes() {
         );
     }
 
+    register_editor_filesystem_classes();
     register_resource_importer_classes();
+}
+
+/// Registers Godot's editor filesystem service classes (pat-0q2kx.167).
+///
+/// `EditorFileSystem` and `FileSystemDock` are implemented natively in
+/// `gdeditor/src/filesystem.rs` but were absent from ClassDB, so a `@tool`
+/// script could not reach them at all — `EditorInterface.get_resource_filesystem()`
+/// had no class to hand back.
+///
+/// Every signature here comes from `upstream/godot/doc/classes/*.xml`, not from
+/// the Patina implementation, because the two do not line up: Patina's
+/// `EditorFileSystem::scan()` returns a count while Godot's returns void, and
+/// Patina has no `EditorFileSystemDirectory` type at all. ClassDB describes
+/// GODOT's surface — that is what a ported script expects to find.
+///
+/// ⚠️ Parents are load-bearing and were NOT taken from the bead description,
+/// which is wrong on two counts against 4.6.1: `EditorFileSystem` inherits
+/// `Node` (the bead says Object), and `FileSystemDock` inherits `EditorDock`
+/// (the bead says VBoxContainer). Registering against a base that is not itself
+/// registered silently truncates the inheritance chain, so `FileSystemDock`
+/// (needs `EditorDock`) and `EditorFileDialog` (needs `FileDialog`) are
+/// deliberately NOT registered here — both bases are still missing.
+fn register_editor_filesystem_classes() {
+    // -- EditorFileSystem — the scanning service itself (inherits Node) --
+    if !class_exists("EditorFileSystem") {
+        register_class(
+            ClassRegistration::new("EditorFileSystem")
+                .parent("Node")
+                .method(MethodInfo::new("get_file_type", 1))
+                .method(MethodInfo::new("get_filesystem", 0))
+                .method(MethodInfo::new("get_filesystem_path", 1))
+                .method(MethodInfo::new("get_scanning_progress", 0))
+                .method(MethodInfo::new("is_scanning", 0))
+                .method(MethodInfo::new("reimport_files", 1))
+                .method(MethodInfo::new("scan", 0))
+                .method(MethodInfo::new("scan_sources", 0))
+                .method(MethodInfo::new("update_file", 1))
+                .signal(SignalInfo::new("filesystem_changed"))
+                .signal(SignalInfo::new("resources_reimported"))
+                .signal(SignalInfo::new("resources_reimporting"))
+                .signal(SignalInfo::new("resources_reload"))
+                .signal(SignalInfo::new("script_classes_updated"))
+                .signal(SignalInfo::new("sources_changed")),
+        );
+    }
+
+    // -- EditorFileSystemDirectory — one node of the scanned tree --
+    // This is what `get_filesystem()` returns and what a script walks to
+    // enumerate the project, so it is the half that makes the service usable.
+    if !class_exists("EditorFileSystemDirectory") {
+        register_class(
+            ClassRegistration::new("EditorFileSystemDirectory")
+                .parent("Object")
+                .method(MethodInfo::new("find_dir_index", 1))
+                .method(MethodInfo::new("find_file_index", 1))
+                .method(MethodInfo::new("get_file", 1))
+                .method(MethodInfo::new("get_file_count", 0))
+                .method(MethodInfo::new("get_file_import_is_valid", 1))
+                .method(MethodInfo::new("get_file_path", 1))
+                .method(MethodInfo::new("get_file_script_class_extends", 1))
+                .method(MethodInfo::new("get_file_script_class_name", 1))
+                .method(MethodInfo::new("get_file_type", 1))
+                .method(MethodInfo::new("get_name", 0))
+                .method(MethodInfo::new("get_parent", 0))
+                .method(MethodInfo::new("get_path", 0))
+                .method(MethodInfo::new("get_subdir", 1))
+                .method(MethodInfo::new("get_subdir_count", 0)),
+        );
+    }
+
+    // -- EditorPaths — editor data/config/cache locations --
+    if !class_exists("EditorPaths") {
+        register_class(
+            ClassRegistration::new("EditorPaths")
+                .parent("Object")
+                .method(MethodInfo::new("get_cache_dir", 0))
+                .method(MethodInfo::new("get_config_dir", 0))
+                .method(MethodInfo::new("get_data_dir", 0))
+                .method(MethodInfo::new("get_project_settings_dir", 0))
+                .method(MethodInfo::new("get_self_contained_file", 0))
+                .method(MethodInfo::new("is_self_contained", 0)),
+        );
+    }
+
+    // -- EditorResourcePreview — thumbnail service (inherits Node) --
+    // `queue_resource_preview` really does take 4 args in 4.6.1
+    // (path, receiver, receiver_func, userdata); the same for the edited form.
+    if !class_exists("EditorResourcePreview") {
+        register_class(
+            ClassRegistration::new("EditorResourcePreview")
+                .parent("Node")
+                .method(MethodInfo::new("add_preview_generator", 1))
+                .method(MethodInfo::new("check_for_invalidation", 1))
+                .method(MethodInfo::new("queue_edited_resource_preview", 4))
+                .method(MethodInfo::new("queue_resource_preview", 4))
+                .method(MethodInfo::new("remove_preview_generator", 1))
+                .signal(SignalInfo::new("preview_invalidated")),
+        );
+    }
 }
 
 /// Registers Godot's `ResourceImporter` family (pat-nzgdu.166).

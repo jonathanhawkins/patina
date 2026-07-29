@@ -94,7 +94,12 @@ mod tests {
         let indented = spaces.indent(&original);
         assert_eq!(
             indented,
-            vec!["    func _ready():", "        var hp = 10", "", "        return hp"]
+            vec![
+                "    func _ready():",
+                "        var hp = 10",
+                "",
+                "        return hp"
+            ]
         );
 
         // Unindent removes exactly one level, restoring the original (round-trip).

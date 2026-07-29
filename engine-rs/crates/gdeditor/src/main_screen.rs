@@ -281,7 +281,10 @@ mod tests {
 
         // Re-selecting the already-active mode is a no-op (no view change).
         let mode = switcher.active();
-        assert!(!switcher.select(mode), "re-selecting active mode does nothing");
+        assert!(
+            !switcher.select(mode),
+            "re-selecting active mode does nothing"
+        );
         assert_eq!(switcher.active(), mode);
     }
 
@@ -350,14 +353,23 @@ mod tests {
             (EditorMode::Script, MainView::ScriptEditor, "script_editor"),
             (EditorMode::Spatial3D, MainView::Spatial3D, "spatial_editor"),
             (EditorMode::AssetLib, MainView::AssetLibBrowser, "asset_lib"),
-            (EditorMode::Canvas2D, MainView::Canvas2D, "canvas_item_editor"),
+            (
+                EditorMode::Canvas2D,
+                MainView::Canvas2D,
+                "canvas_item_editor",
+            ),
         ];
         for (mode, view, id) in cases {
             let changed = pane.route_to(mode);
             assert!(changed, "routing to {} re-mounts a component", mode.label());
             assert_eq!(pane.active_mode(), mode);
             let comp = pane.routed_component();
-            assert_eq!(comp.view, view, "main pane routes to {}'s view", mode.label());
+            assert_eq!(
+                comp.view,
+                view,
+                "main pane routes to {}'s view",
+                mode.label()
+            );
             assert_eq!(comp.component_id, id);
             // The routed component is always consistent with the switcher.
             assert_eq!(comp.view, pane.switcher().main_view());

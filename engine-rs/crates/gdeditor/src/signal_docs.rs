@@ -43,7 +43,8 @@ impl SignalDocs {
 
     /// Whether documentation exists for `class::signal`.
     pub fn has_doc(&self, class: &str, signal: &str) -> bool {
-        self.docs.contains_key(&(class.to_string(), signal.to_string()))
+        self.docs
+            .contains_key(&(class.to_string(), signal.to_string()))
     }
 
     /// The text to render in the details area / tooltip for `class::signal`:

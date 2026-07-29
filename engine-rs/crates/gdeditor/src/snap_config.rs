@@ -131,13 +131,20 @@ mod tests {
             config.snap_position(Vector2::new(23.0, 26.0)),
             "reloaded config applies the same snapping behavior"
         );
-        assert_eq!(reloaded.snap_rotation_deg(50.0), config.snap_rotation_deg(50.0));
+        assert_eq!(
+            reloaded.snap_rotation_deg(50.0),
+            config.snap_rotation_deg(50.0)
+        );
         assert_eq!(reloaded.snap_scale(0.3), config.snap_scale(0.3));
 
         // Defaults are sane and a zero step disables that axis of snapping.
         let mut no_grid = SnapConfig::default();
         no_grid.grid_step = 0.0;
         let p = Vector2::new(13.3, 7.7);
-        assert_eq!(no_grid.snap_position(p), p, "a zero grid step disables grid snap");
+        assert_eq!(
+            no_grid.snap_position(p),
+            p,
+            "a zero grid step disables grid snap"
+        );
     }
 }

@@ -198,11 +198,29 @@ mod tests {
                 args: vec!["idle".to_string()],
             }
         ));
-        assert!(anim.insert_key(a, 0.0, KeyValue::Audio { stream: "res://sfx.wav".to_string() }));
-        assert!(anim.insert_key(n, 0.0, KeyValue::Animation { animation: "jump".to_string() }));
+        assert!(anim.insert_key(
+            a,
+            0.0,
+            KeyValue::Audio {
+                stream: "res://sfx.wav".to_string()
+            }
+        ));
+        assert!(anim.insert_key(
+            n,
+            0.0,
+            KeyValue::Animation {
+                animation: "jump".to_string()
+            }
+        ));
 
         // A key whose payload doesn't match the track type is rejected.
-        assert!(!anim.insert_key(v, 1.0, KeyValue::Audio { stream: "x".to_string() }));
+        assert!(!anim.insert_key(
+            v,
+            1.0,
+            KeyValue::Audio {
+                stream: "x".to_string()
+            }
+        ));
         assert!(!anim.insert_key(t, 1.0, KeyValue::Value("oops".to_string())));
         // Inserting onto a missing track fails.
         assert!(!anim.insert_key(99, 0.0, KeyValue::Value("x".to_string())));

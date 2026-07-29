@@ -151,7 +151,11 @@ mod tests {
 
         // Closing the dirty tab prompts to save — it is not removed yet.
         assert_eq!(tabs.request_close(main), CloseOutcome::PromptSave);
-        assert_eq!(tabs.len(), 1, "a dirty tab stays until the prompt is resolved");
+        assert_eq!(
+            tabs.len(),
+            1,
+            "a dirty tab stays until the prompt is resolved"
+        );
 
         // Cancel keeps the tab open.
         assert!(!tabs.resolve_close(main, SavePromptChoice::Cancel));

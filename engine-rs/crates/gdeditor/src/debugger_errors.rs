@@ -111,7 +111,10 @@ impl DebuggerErrorsTab {
 
     /// The number of entries matching `severity`.
     pub fn count_of(&self, severity: ErrorSeverity) -> usize {
-        self.entries.iter().filter(|e| e.severity == severity).count()
+        self.entries
+            .iter()
+            .filter(|e| e.severity == severity)
+            .count()
     }
 
     /// Activates (jumps to source for) the entry at `index`: selects it and
@@ -156,7 +159,11 @@ mod tests {
         assert!(tab.last_navigation().is_none());
 
         // A runtime error appears with its message and source location.
-        tab.report_error("Invalid get index 'x' on null instance", "res://player.gd", 42);
+        tab.report_error(
+            "Invalid get index 'x' on null instance",
+            "res://player.gd",
+            42,
+        );
         tab.report_warning("Unused variable 'tmp'", "res://enemy.gd", 8);
 
         assert_eq!(tab.count(), 2);

@@ -182,8 +182,22 @@ mod tests {
         assert_eq!(anim.frame_at(0.75), 0); // 3.0 % 3 = 0 (wrap)
 
         // A single-frame or zero-speed animation never advances.
-        assert_eq!(TileAnimation { frames: 1, fps: 10.0 }.frame_at(5.0), 0);
-        assert_eq!(TileAnimation { frames: 4, fps: 0.0 }.frame_at(5.0), 0);
+        assert_eq!(
+            TileAnimation {
+                frames: 1,
+                fps: 10.0
+            }
+            .frame_at(5.0),
+            0
+        );
+        assert_eq!(
+            TileAnimation {
+                frames: 4,
+                fps: 0.0
+            }
+            .frame_at(5.0),
+            0
+        );
     }
 
     #[test]
@@ -192,9 +206,10 @@ mod tests {
         let mut data = TileMapData::new(tileset_with_source(1));
         let mut layer = TileMapLayer::new("ground");
         // Cell (1,0) uses atlas column 2 (BLUE) via atlas_coords (2,0).
-        layer
-            .cells
-            .insert(Vector2i::new(1, 0), TileData::with_atlas(1, Vector2i::new(2, 0), 0));
+        layer.cells.insert(
+            Vector2i::new(1, 0),
+            TileData::with_atlas(1, Vector2i::new(2, 0), 0),
+        );
         data.add_layer(layer);
 
         let mut fb = FrameBuffer::new(8, 4, Color::BLACK);
@@ -213,14 +228,22 @@ mod tests {
         let mut data = TileMapData::new(tileset_with_source(1));
         let mut layer = TileMapLayer::new("ground");
         // Cell (0,0) uses atlas column 0 (RED).
-        layer
-            .cells
-            .insert(Vector2i::new(0, 0), TileData::with_atlas(1, Vector2i::new(0, 0), 0));
+        layer.cells.insert(
+            Vector2i::new(0, 0),
+            TileData::with_atlas(1, Vector2i::new(0, 0), 0),
+        );
         data.add_layer(layer);
 
         let mut fb = FrameBuffer::new(8, 8, Color::BLACK);
         // Shift the whole map down-right by (4, 2) px.
-        render_tilemap(&mut fb, &data, &atlas, Vector2::new(4.0, 2.0), 0.0, &HashMap::new());
+        render_tilemap(
+            &mut fb,
+            &data,
+            &atlas,
+            Vector2::new(4.0, 2.0),
+            0.0,
+            &HashMap::new(),
+        );
 
         // Origin shifted → the tile lands at x[4,6), y[2,4).
         assert_eq!(fb.get_pixel(4, 2), red());
@@ -237,16 +260,19 @@ mod tests {
         // Layer added FIRST but with the HIGHER z_index: RED at (0,0).
         let mut top = TileMapLayer::new("top");
         top.z_index = 1;
-        top.cells
-            .insert(Vector2i::new(0, 0), TileData::with_atlas(1, Vector2i::new(0, 0), 0)); // RED
+        top.cells.insert(
+            Vector2i::new(0, 0),
+            TileData::with_atlas(1, Vector2i::new(0, 0), 0),
+        ); // RED
         data.add_layer(top);
 
         // Layer added SECOND but with the LOWER z_index: BLUE at (0,0).
         let mut bottom = TileMapLayer::new("bottom");
         bottom.z_index = 0;
-        bottom
-            .cells
-            .insert(Vector2i::new(0, 0), TileData::with_atlas(1, Vector2i::new(2, 0), 0)); // BLUE
+        bottom.cells.insert(
+            Vector2i::new(0, 0),
+            TileData::with_atlas(1, Vector2i::new(2, 0), 0),
+        ); // BLUE
         data.add_layer(bottom);
 
         let mut fb = FrameBuffer::new(4, 4, Color::BLACK);
@@ -264,9 +290,10 @@ mod tests {
         let mut data = TileMapData::new(tileset_with_source(1));
         let mut layer = TileMapLayer::new("hidden");
         layer.enabled = false;
-        layer
-            .cells
-            .insert(Vector2i::new(0, 0), TileData::with_atlas(1, Vector2i::new(0, 0), 0));
+        layer.cells.insert(
+            Vector2i::new(0, 0),
+            TileData::with_atlas(1, Vector2i::new(0, 0), 0),
+        );
         data.add_layer(layer);
 
         let mut fb = FrameBuffer::new(4, 4, Color::BLACK);
@@ -283,13 +310,20 @@ mod tests {
         let mut data = TileMapData::new(tileset_with_source(2));
         let mut layer = TileMapLayer::new("anim");
         // Base atlas_coords (0,0): frame 0 = col0 (RED), frame 1 = col1 (GREEN).
-        layer
-            .cells
-            .insert(Vector2i::new(0, 0), TileData::with_atlas(2, Vector2i::new(0, 0), 0));
+        layer.cells.insert(
+            Vector2i::new(0, 0),
+            TileData::with_atlas(2, Vector2i::new(0, 0), 0),
+        );
         data.add_layer(layer);
 
         let mut anims = HashMap::new();
-        anims.insert(2, TileAnimation { frames: 2, fps: 10.0 });
+        anims.insert(
+            2,
+            TileAnimation {
+                frames: 2,
+                fps: 10.0,
+            },
+        );
 
         // time = 0 → frame 0 → RED.
         let mut fb0 = FrameBuffer::new(4, 4, Color::BLACK);
@@ -313,15 +347,18 @@ mod tests {
         let mut data = TileMapData::new(tileset_with_source(1));
         let mut layer = TileMapLayer::new("ground");
         // A row of three distinct tiles.
-        layer
-            .cells
-            .insert(Vector2i::new(0, 0), TileData::with_atlas(1, Vector2i::new(0, 0), 0)); // RED
-        layer
-            .cells
-            .insert(Vector2i::new(1, 0), TileData::with_atlas(1, Vector2i::new(1, 0), 0)); // GREEN
-        layer
-            .cells
-            .insert(Vector2i::new(2, 0), TileData::with_atlas(1, Vector2i::new(3, 0), 0)); // YELLOW
+        layer.cells.insert(
+            Vector2i::new(0, 0),
+            TileData::with_atlas(1, Vector2i::new(0, 0), 0),
+        ); // RED
+        layer.cells.insert(
+            Vector2i::new(1, 0),
+            TileData::with_atlas(1, Vector2i::new(1, 0), 0),
+        ); // GREEN
+        layer.cells.insert(
+            Vector2i::new(2, 0),
+            TileData::with_atlas(1, Vector2i::new(3, 0), 0),
+        ); // YELLOW
         data.add_layer(layer);
 
         let mut fb = FrameBuffer::new(8, 4, Color::BLACK);

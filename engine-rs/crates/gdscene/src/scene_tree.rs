@@ -51,6 +51,45 @@ pub struct DeferredCall {
     pub args: Vec<Variant>,
 }
 
+/// Reads a `.tscn` path-ish property as a plain string (pat-s3rrv.17).
+///
+/// `spawn_path` / `root_path` are `NodePath` in Godot and a `.tscn` writes them
+/// as `NodePath("../Foo")`, but a hand-built scene or a test may set the same
+/// property as a bare `String` — both spellings mean the same path, so both are
+/// accepted. Anything else (notably `Nil`, which is what an unset property reads
+/// back as) yields `None` so the caller can fall back to a default rather than
+/// registering an empty path that silently matches nothing.
+fn variant_as_path_string(value: &Variant) -> Option<String> {
+    match value {
+        Variant::NodePath(p) => Some(p.to_string()),
+        Variant::String(s) if !s.is_empty() => Some(s.clone()),
+        Variant::StringName(s) if !s.as_str().is_empty() => Some(s.as_str().to_string()),
+        _ => None,
+    }
+}
+
+/// Scene-replication state owned by a [`SceneTree`] (pat-s3rrv.17).
+///
+/// Godot keeps this inside `SceneReplicationInterface`, registered per node via
+/// `MultiplayerAPI::object_configuration_add`. Grouped into one struct here so
+/// adding replication touches a single `SceneTree` field rather than four.
+///
+/// `registered` is what makes registration idempotent: `register_replication_nodes`
+/// re-scans the tree whenever nodes may have been added, and a
+/// `MultiplayerSynchronizer` must not lose its accumulated property values (or
+/// its `last_sync_ms` interval clock) just because the scan ran again.
+#[derive(Debug, Default)]
+struct ReplicationState {
+    /// Applies inbound spawn/sync packets to the live tree.
+    replicator: crate::multiplayer::MultiplayerReplicator,
+    /// `MultiplayerSpawner` node -> its replication config.
+    spawners: HashMap<NodeId, gdplatform::network::MultiplayerSpawner>,
+    /// `MultiplayerSynchronizer` node -> its replication config.
+    synchronizers: HashMap<NodeId, gdplatform::network::MultiplayerSynchronizer>,
+    /// Nodes already registered, so a re-scan does not reset their state.
+    registered: HashSet<NodeId>,
+}
+
 /// One-shot timer created by [`SceneTree::create_timer`] (Godot SceneTreeTimer).
 #[derive(Debug, Clone)]
 pub struct SceneTreeTimer {
@@ -160,6 +199,12 @@ pub struct SceneTree {
     /// Control that received the most recent mouse press. A release only counts
     /// as a click when it lands on this same control, as in Godot.
     gui_press_target: Option<NodeId>,
+    /// Godot's `Viewport::gui.mouse_focus` (viewport.cpp:1916): the control that
+    /// captured the pointer on press. While it is set, motion and the release
+    /// are routed HERE rather than re-hit-tested (viewport.cpp:2070-2075) —
+    /// which is what makes button drag-off/drag-back, and every draggable
+    /// Control, work at all (pat-s3rrv.12).
+    gui_mouse_focus: Option<NodeId>,
     /// The Control holding keyboard focus (Godot's `Viewport::gui.key_focus`).
     /// Clicking a focusable Control grabs it (pat-0q2kx.21).
     focus_owner: Option<NodeId>,
@@ -182,6 +227,16 @@ pub struct SceneTree {
     /// pointer is only ever installed for the duration of a script phase by
     /// [`SceneTree::set_script_physics_server`].
     script_physics: usize,
+    /// Address of the `AudioServer` scripts reach through the `AudioServer`
+    /// singleton, installed for the duration of a script phase
+    /// (pat-s3rrv.6). A `usize` for the same `Send` reason as
+    /// [`Self::script_physics`]; see [`SceneTree::set_script_audio_server`].
+    script_audio: usize,
+    /// `SceneMultiplayer.set_auth_callback(cb)` — the script Callable consulted
+    /// when a peer authenticates (pat-s3rrv.18). Held on the tree rather than
+    /// in `MultiplayerAPI` because only the scene layer can invoke a script
+    /// Callable; `gdplatform` has no interpreter.
+    multiplayer_auth_callback: Variant,
     /// `Input` mutations issued by scripts this frame — `action_press`,
     /// `set_mouse_mode`, `warp_mouse`, joypad rumble. The tree cannot apply them
     /// itself (the engine `InputState` belongs to the frame owner, `MainLoop`),
@@ -229,6 +284,16 @@ pub struct SceneTree {
     /// per frame via [`poll_multiplayer`](Self::poll_multiplayer); inbound RPCs
     /// are dispatched to their target node's script.
     multiplayer: MultiplayerAPI,
+    /// Scene-replication state for the `MultiplayerSpawner` /
+    /// `MultiplayerSynchronizer` nodes in this tree (pat-s3rrv.17).
+    ///
+    /// Godot registers each of these nodes with the MultiplayerAPI as it enters
+    /// the tree (`object_configuration_add`, multiplayer_spawner.cpp
+    /// `_notification(NOTIFICATION_POST_ENTER_TREE)`); this is the equivalent
+    /// registry, keyed by the node that owns each config so a poll can find the
+    /// live node again. Populated by
+    /// [`register_replication_nodes`](Self::register_replication_nodes).
+    replication: ReplicationState,
     /// Method names declared `@rpc(..., "call_local", ...)`, which Godot also
     /// executes on the sending peer (pat-0q2kx.79).
     rpc_call_local: std::collections::HashSet<String>,
@@ -303,11 +368,14 @@ impl SceneTree {
             video_players: HashMap::new(),
             hovered_control: None,
             gui_press_target: None,
+            gui_mouse_focus: None,
             focus_owner: None,
             tweens: HashMap::new(),
             scripts: HashMap::new(),
             input_snapshot: None,
             script_physics: 0,
+            script_audio: 0,
+            multiplayer_auth_callback: Variant::Nil,
             pending_input_commands: Vec::new(),
             input_mouse_mode: 0,
             cursor_shape: 0,
@@ -323,6 +391,7 @@ impl SceneTree {
             trace_frame: 0,
             paused: false,
             multiplayer: MultiplayerAPI::new(),
+            replication: ReplicationState::default(),
             rpc_call_local: std::collections::HashSet::new(),
             pending_scene: None,
             should_quit: false,
@@ -433,6 +502,168 @@ impl SceneTree {
         &mut self.multiplayer
     }
 
+    /// Registers every `MultiplayerSpawner` / `MultiplayerSynchronizer` node in
+    /// the tree with this tree's replication state (pat-s3rrv.17).
+    ///
+    /// Godot does this per node as it enters the tree
+    /// (`MultiplayerAPI::object_configuration_add`, called from
+    /// `_notification(NOTIFICATION_POST_ENTER_TREE)` in multiplayer_spawner.cpp
+    /// / multiplayer_synchronizer.cpp). Patina instantiates these classes from a
+    /// `.tscn` as plain `Node`s with a property bag, so the equivalent is a scan
+    /// that reads those properties into the gdplatform config objects.
+    ///
+    /// Idempotent: a node already registered is skipped, so re-scanning never
+    /// discards a synchronizer's accumulated property values or resets its
+    /// `last_sync_ms` interval clock. Safe to call every frame.
+    pub fn register_replication_nodes(&mut self) {
+        use gdplatform::network::{MultiplayerSpawner, MultiplayerSynchronizer};
+
+        // Read-then-write in two phases: the scan borrows the node arena
+        // immutably, and inserting into `self.replication` needs it mutably.
+        enum Pending {
+            Spawner {
+                spawn_path: String,
+                spawn_limit: u32,
+                scenes: Vec<String>,
+            },
+            Synchronizer {
+                root_path: String,
+                interval_ms: u32,
+            },
+        }
+
+        let mut pending: Vec<(NodeId, Pending)> = Vec::new();
+        for id in self.all_nodes_in_tree_order() {
+            if self.replication.registered.contains(&id) {
+                continue;
+            }
+            let Some(node) = self.get_node(id) else {
+                continue;
+            };
+            match node.class_name() {
+                "MultiplayerSpawner" => {
+                    // `_spawnable_scenes` is how the `.tscn` carries the
+                    // `spawnable_scenes` array; a single `spawn_path` scene is
+                    // also accepted so a minimal scene needs no array.
+                    let scenes = match node.get_property("_spawnable_scenes") {
+                        Variant::Array(items) => items
+                            .iter()
+                            .filter_map(variant_as_path_string)
+                            .collect::<Vec<_>>(),
+                        other => variant_as_path_string(&other).into_iter().collect(),
+                    };
+                    pending.push((
+                        id,
+                        Pending::Spawner {
+                            spawn_path: variant_as_path_string(&node.get_property("spawn_path"))
+                                .unwrap_or_default(),
+                            spawn_limit: match node.get_property("spawn_limit") {
+                                Variant::Int(i) if i > 0 => i as u32,
+                                _ => 0,
+                            },
+                            scenes,
+                        },
+                    ));
+                }
+                "MultiplayerSynchronizer" => {
+                    // Godot stores `replication_interval` in **seconds**;
+                    // gdplatform's synchronizer counts milliseconds.
+                    let interval_ms = match node.get_property("replication_interval") {
+                        Variant::Float(f) if f > 0.0 => (f * 1000.0) as u32,
+                        Variant::Int(i) if i > 0 => (i as u32).saturating_mul(1000),
+                        _ => 0,
+                    };
+                    pending.push((
+                        id,
+                        Pending::Synchronizer {
+                            root_path: variant_as_path_string(&node.get_property("root_path"))
+                                .unwrap_or_default(),
+                            interval_ms,
+                        },
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        for (id, cfg) in pending {
+            match cfg {
+                Pending::Spawner {
+                    spawn_path,
+                    spawn_limit,
+                    scenes,
+                } => {
+                    let mut spawner = MultiplayerSpawner::new(spawn_limit);
+                    spawner.set_spawn_path(spawn_path);
+                    for scene in scenes {
+                        spawner.add_spawnable_scene(scene);
+                    }
+                    self.replication.spawners.insert(id, spawner);
+                }
+                Pending::Synchronizer {
+                    root_path,
+                    interval_ms,
+                } => {
+                    let mut sync = MultiplayerSynchronizer::new(interval_ms);
+                    sync.set_root_path(root_path);
+                    self.replication.synchronizers.insert(id, sync);
+                }
+            }
+            self.replication.registered.insert(id);
+        }
+    }
+
+    /// Applies decoded inbound replication frames to this tree (pat-s3rrv.17).
+    ///
+    /// Godot's `SceneReplicationInterface` instantiates the spawned scene under
+    /// the remote spawner's `spawn_path` and writes synchronized properties onto
+    /// the live node; this is the same, with the `.tscn` fetched through the
+    /// real resource loader rather than a caller-supplied closure.
+    fn apply_replication_packets(
+        &mut self,
+        spawns: Vec<gdplatform::network::SpawnPacket>,
+        syncs: Vec<gdplatform::network::SyncPacket>,
+    ) {
+        // The replicator lives inside `self`, and its methods take `&mut SceneTree`
+        // — so it has to come out for the duration of the call or the two
+        // mutable borrows overlap. `MultiplayerReplicator: Default`, so the
+        // placeholder left behind is an empty map, and it is put back below
+        // (including on the early-return-free paths) so the `net_id -> NodeId`
+        // mapping survives across frames.
+        let mut replicator = std::mem::take(&mut self.replication.replicator);
+
+        // Inbound spawns land under the mirrored `spawn_path`. Godot resolves
+        // that path on the *receiving* peer's own spawner node, so a client
+        // whose scene puts the spawner elsewhere still parents correctly.
+        let spawn_parent = self.replication_spawn_parent();
+        for spawn in spawns {
+            replicator.apply_spawn(self, spawn_parent, &spawn, |path| {
+                gdcore::file_access::FileAccess::read_file_string(path).ok()
+            });
+        }
+        for sync in syncs {
+            replicator.apply_sync(self, &sync);
+        }
+
+        self.replication.replicator = replicator;
+    }
+
+    /// The node an inbound spawn should be parented under: the `spawn_path` of
+    /// the first registered `MultiplayerSpawner`, falling back to the tree root
+    /// when the scene declares no spawner or the path does not resolve.
+    fn replication_spawn_parent(&self) -> NodeId {
+        for (spawner_id, spawner) in &self.replication.spawners {
+            let path = spawner.get_spawn_path();
+            if path.is_empty() {
+                continue;
+            }
+            if let Some(target) = self.get_node_or_null(*spawner_id, path) {
+                return target;
+            }
+        }
+        self.root_id
+    }
+
     /// Polls the multiplayer transport once (call once per frame) and dispatches
     /// every decoded inbound RPC to its target node's script method.
     ///
@@ -451,17 +682,74 @@ impl SceneTree {
     /// `multiplayer.peer_connected.connect(...)` binds. Before this, the API
     /// tracked peers with no signal mechanism at all, so a script could not
     /// learn that anyone had joined.
+    /// Invokes the `SceneMultiplayer` auth callback for a peer that is
+    /// authenticating (pat-s3rrv.18).
+    ///
+    /// Godot's signature is `func _auth(id: int, data: PackedByteArray)`. The
+    /// payload is empty when the peer sent none — Godot passes the bytes it
+    /// received, which for a peer that simply connected is nothing.
+    ///
+    /// Only `Callable(object, "method")` is dispatchable here: a lambda's body
+    /// lives in the interpreter, and the tree has no way to run one outside a
+    /// script call frame. A lambda callback is therefore ignored rather than
+    /// silently reported as run.
+    fn run_multiplayer_auth_callback(&mut self, peer_id: i32) {
+        let callback = self.multiplayer_auth_callback.clone();
+        let Variant::Callable(callable) = callback else {
+            return;
+        };
+        let gdvariant::CallableRef::Method { target_id, method } = callable.inner_callable() else {
+            return;
+        };
+        let (target_id, method) = (*target_id, method.clone());
+        let args = vec![
+            Variant::Int(i64::from(peer_id)),
+            Variant::PackedByteArray(Vec::new()),
+        ];
+        let node = NodeId::from_object_id(gdcore::id::ObjectId::from_raw(target_id));
+        let _ = self.call_script_method(node, &method, &args);
+    }
+
     pub fn poll_multiplayer_with_delta(&mut self, delta: f32) {
         use gdplatform::network::MultiplayerEvent;
 
         // Age the auth timers before polling, so a peer that ran out this frame
         // fails in the same drain rather than one frame late.
         self.multiplayer.poll_auth(delta);
-        // Non-RPC, non-raw packets (spawn/sync/etc.) are left for higher layers.
-        let _other = self.multiplayer.poll();
+        // Scene replication: SPAWN/SYNC frames (pat-s3rrv.17).
+        //
+        // These used to be bound to `_other` and dropped on the floor every
+        // frame with the comment "left for higher layers" — but no higher layer
+        // existed: `MultiplayerReplicator` had zero callers outside its own
+        // tests, so a spawn or sync that arrived over the wire reached nothing.
+        let other = self.multiplayer.poll();
+        let mut spawns = Vec::new();
+        let mut syncs = Vec::new();
+        for packet in &other {
+            // Spawn first: both decoders are tagged by a leading kind byte, so
+            // a frame can only match one, and trying spawn first mirrors the
+            // order the two arrive in for a newly replicated node.
+            if let Some(spawn) = gdplatform::network::decode_spawn_packet(&packet.data) {
+                spawns.push(spawn);
+            } else if let Some(sync) = gdplatform::network::decode_sync_packet(&packet.data) {
+                syncs.push(sync);
+            }
+        }
+        if !spawns.is_empty() || !syncs.is_empty() {
+            self.apply_replication_packets(spawns, syncs);
+        }
 
         let root = self.root_id;
         for event in self.multiplayer.take_events() {
+            // Godot runs `SceneMultiplayer`'s auth callback as the peer starts
+            // authenticating — BEFORE `peer_connected`, which only fires once
+            // the script accepts with `complete_auth` (pat-s3rrv.18). Invoked
+            // here rather than at the signal layer because the callback is a
+            // decision point, not a notification: `set_auth_callback` had no
+            // effect at all before this.
+            if let MultiplayerEvent::PeerAuthenticating(id) = event {
+                self.run_multiplayer_auth_callback(id);
+            }
             let (signal, args): (&str, Vec<Variant>) = match event {
                 MultiplayerEvent::PeerConnected(id) => {
                     ("peer_connected", vec![Variant::Int(id as i64)])
@@ -795,6 +1083,41 @@ impl SceneTree {
     /// The bound script-facing physics server address, or 0 when none is bound.
     pub(crate) fn script_physics_addr(&self) -> usize {
         self.script_physics
+    }
+
+    /// Binds `server` as the audio server that scripts reach through the
+    /// `AudioServer` singleton for the duration of a script phase
+    /// (pat-s3rrv.6).
+    ///
+    /// Same contract as [`SceneTree::set_script_physics_server`]: the caller
+    /// must call [`SceneTree::clear_script_audio_server`] before `server` can
+    /// move or drop. `MainLoop` owns the tree and the `AudioServerBridge` as
+    /// sibling fields and brackets each script phase with these two calls, so
+    /// the address cannot dangle. With nothing bound, `AudioServer` calls
+    /// report failure rather than reaching a stale pointer.
+    pub fn set_script_audio_server(&mut self, server: &mut gdaudio::AudioServer) {
+        self.script_audio = server as *mut gdaudio::AudioServer as usize;
+    }
+
+    /// Unbinds the script-facing audio server. Always call this before the
+    /// bound server moves or drops.
+    pub fn clear_script_audio_server(&mut self) {
+        self.script_audio = 0;
+    }
+
+    /// The bound script-facing audio server address, or 0 when none is bound.
+    pub(crate) fn script_audio_addr(&self) -> usize {
+        self.script_audio
+    }
+
+    /// The `SceneMultiplayer` auth callback a script registered, or `Nil`.
+    pub fn multiplayer_auth_callback(&self) -> Variant {
+        self.multiplayer_auth_callback.clone()
+    }
+
+    /// Sets (or clears, with `Nil`) the auth callback (pat-s3rrv.18).
+    pub fn set_multiplayer_auth_callback(&mut self, callback: Variant) {
+        self.multiplayer_auth_callback = callback;
     }
 
     /// Returns `true` if an input snapshot is currently set.
@@ -3230,6 +3553,33 @@ impl SceneTree {
         }
     }
 
+    /// Rewrites a mouse payload's `position` into `node_id`'s local space,
+    /// mirroring Godot's `Viewport::_gui_input_event` localizer
+    /// (`viewport.cpp:2078-2088`).
+    ///
+    /// A script's `_gui_input` must see coordinates relative to its own control:
+    /// a control at (100, 50) clicked at viewport (120, 60) reads (20, 10).
+    ///
+    /// `global_position` is deliberately left in viewport space — that is what
+    /// Godot's `InputEventMouse.global_position` means, and localizing both
+    /// would make the two properties indistinguishable. A payload carrying
+    /// neither (a key event) passes through untouched.
+    fn localize_gui_payload(&self, node_id: NodeId, payload: &Variant) -> Variant {
+        let origin = crate::control::get_global_position(self, node_id);
+        match payload {
+            Variant::Resource(res) => {
+                let mut out = res.clone();
+                if let Some(Variant::Vector2(p)) = out.properties.get("position") {
+                    let local = gdcore::math::Vector2::new(p.x - origin.x, p.y - origin.y);
+                    out.properties
+                        .insert("position".to_string(), Variant::Vector2(local));
+                }
+                Variant::Resource(out)
+            }
+            other => other.clone(),
+        }
+    }
+
     /// The GUI stage of [`push_input`](Self::push_input): hit-tests Controls and
     /// delivers the event to the one under the cursor (pat-0q2kx.18).
     ///
@@ -3276,11 +3626,24 @@ impl SceneTree {
             self.hovered_control = hit;
         }
 
+        // Pointer capture (pat-s3rrv.12). Godot's viewport routes every motion
+        // and the release to the control that took `gui.mouse_focus` on press,
+        // instead of re-hit-testing under the cursor — otherwise dragging off a
+        // button silently re-targets whatever is underneath, and no Control can
+        // implement a drag at all. Hover bookkeeping above still follows the
+        // real cursor, as it does in Godot.
+        let captured = match event {
+            Ev::MouseMotion { .. } | Ev::MouseButton { pressed: false, .. } => self.gui_mouse_focus,
+            _ => None,
+        };
+        let hit = captured.filter(|id| self.nodes.contains_key(id)).or(hit);
+
         let Some(hit) = hit else {
             // A press over empty space clears any in-flight press so a later
             // release elsewhere cannot be mistaken for a click.
             if matches!(event, Ev::MouseButton { pressed: true, .. }) {
                 self.gui_press_target = None;
+                self.gui_mouse_focus = None;
             }
             return;
         };
@@ -3290,8 +3653,16 @@ impl SceneTree {
         // the walk (it consumed the event).
         let mut target = Some(hit);
         while let Some(node_id) = target {
-            self.call_script_with_access(node_id, "_gui_input", std::slice::from_ref(payload));
-            self.emit_signal(node_id, "gui_input", std::slice::from_ref(payload));
+            // Godot hands `_gui_input` an event localized to the *receiving*
+            // control (`localizer.xform(mpos)`, viewport.cpp:2078-2088), so the
+            // payload is rebuilt per delivery rather than shared: the same click
+            // reads different coordinates at each level of the PASS chain
+            // (pat-s3rrv.13). Patina forwarded the one viewport-space payload,
+            // so every `event.position` a script saw was off by the control's
+            // own offset.
+            let local = self.localize_gui_payload(node_id, payload);
+            self.call_script_with_access(node_id, "_gui_input", std::slice::from_ref(&local));
+            self.emit_signal(node_id, "gui_input", std::slice::from_ref(&local));
             if self.input_handled {
                 return;
             }
@@ -3347,11 +3718,28 @@ impl SceneTree {
             return;
         }
 
-        if let Ev::MouseButton { pressed, .. } = event {
+        if let Ev::MouseButton {
+            pressed, button, ..
+        } = event
+        {
             let is_button = crate::control::node_is_base_button(self, hit);
             let disabled = crate::control::is_disabled(self, hit);
+            // Godot numbers mouse buttons from 1 and builds `button_mask` as
+            // `1 << (index - 1)`; a button outside the mask is ignored ENTIRELY
+            // — no `button_down`, no press bookkeeping — which is why a
+            // right-click on a default Button does nothing (pat-s3rrv.12).
+            let button_index = match button {
+                gdplatform::input::MouseButton::Left => 1,
+                gdplatform::input::MouseButton::Right => 2,
+                gdplatform::input::MouseButton::Middle => 3,
+                _ => 0,
+            };
+            if is_button && !crate::control::button_mask_accepts(self, hit, button_index) {
+                return;
+            }
             if *pressed {
                 self.gui_press_target = Some(hit);
+                self.gui_mouse_focus = Some(hit);
                 // Godot grabs focus on press for FOCUS_CLICK/FOCUS_ALL controls;
                 // clicking a non-focusable one drops focus entirely
                 // (pat-0q2kx.21).
@@ -3362,6 +3750,17 @@ impl SceneTree {
                 }
                 if is_button && !disabled {
                     self.emit_signal(hit, "button_down", &[]);
+                    // ACTION_MODE_BUTTON_PRESS fires on the DOWN edge instead of
+                    // the release (`base_button.cpp::on_action_event`), so a
+                    // button configured that way acts before the mouse comes up.
+                    if crate::control::button_action_mode(self, hit)
+                        == crate::control::ACTION_MODE_BUTTON_PRESS
+                    {
+                        crate::control::fire_button_action(self, hit);
+                        // Godot clears the press attempt after a press-mode
+                        // action so the coming release cannot fire it twice.
+                        self.gui_press_target = None;
+                    }
                 }
                 // Item views act on the press, not the release: Godot's
                 // ItemList/TabBar `gui_input` handlers run under
@@ -3372,11 +3771,27 @@ impl SceneTree {
             } else {
                 // A click only counts when press and release land on the same
                 // control, as in Godot — dragging off a button cancels it.
+                //
+                // With the pointer captured, `hit` IS the pressed control even
+                // when the cursor left its rect, so "did the release happen
+                // inside?" is a separate geometric question — Godot's
+                // `pressing_inside`. `keep_pressed_outside` waives it.
                 let same = self.gui_press_target == Some(hit);
+                let inside = crate::control::control_at_point(self, position) == Some(hit)
+                    || crate::control::keeps_pressed_outside(self, hit);
                 self.gui_press_target = None;
+                self.gui_mouse_focus = None;
                 if is_button && !disabled && same {
+                    // `button_up` reports the physical release and fires even
+                    // when the pointer wandered off; only the ACTION is gated on
+                    // still being inside.
                     self.emit_signal(hit, "button_up", &[]);
-                    self.emit_signal(hit, "pressed", &[]);
+                    if inside
+                        && crate::control::button_action_mode(self, hit)
+                            != crate::control::ACTION_MODE_BUTTON_PRESS
+                    {
+                        crate::control::fire_button_action(self, hit);
+                    }
                 }
             }
         }
@@ -3486,11 +3901,23 @@ impl SceneTree {
                 if crate::control::node_is_base_button(self, owner)
                     && !crate::control::is_disabled(self, owner)
                 {
+                    // The action itself runs through the same path a click takes,
+                    // so a keyboard-activated CheckBox toggles and emits
+                    // `toggled` exactly like a clicked one (pat-s3rrv.12) — and
+                    // an ACTION_MODE_BUTTON_PRESS button fires on the down edge
+                    // here too.
+                    let press_mode = crate::control::button_action_mode(self, owner)
+                        == crate::control::ACTION_MODE_BUTTON_PRESS;
                     if *pressed {
                         self.emit_signal(owner, "button_down", &[]);
+                        if press_mode {
+                            crate::control::fire_button_action(self, owner);
+                        }
                     } else {
                         self.emit_signal(owner, "button_up", &[]);
-                        self.emit_signal(owner, "pressed", &[]);
+                        if !press_mode {
+                            crate::control::fire_button_action(self, owner);
+                        }
                     }
                     self.input_handled = true;
                 }
@@ -4357,17 +4784,59 @@ fn apply_root_motion_delta(node: &mut Node, delta: &crate::animation::RootMotion
 // singleton dispatch was under concurrent edit at authoring time.)
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Converts an [`InputEvent`](gdplatform::input::InputEvent) into the Dictionary
-/// a script's input virtual receives as its `event` argument.
+/// Converts an [`InputEvent`](gdplatform::input::InputEvent) into the
+/// `InputEvent` **object** a script's input virtual receives (pat-s3rrv.14).
 ///
-/// Godot passes a real `InputEvent` object; Patina has no Variant type for one
-/// yet, so each event is described by a Dictionary carrying a `type` tag plus
-/// that variant's payload (e.g. `{"type": "key", "keycode": "A", "pressed": true}`).
-/// Scripts read it with `event["keycode"]`.
+/// Godot's `Viewport::push_input` delivers a RefCounted `InputEvent` subclass,
+/// and every ported project is written against that: `if event is
+/// InputEventKey and event.keycode == KEY_W`. Patina used to hand scripts a
+/// plain Dictionary with ad-hoc keys and the WRONG TYPES — `keycode` was the
+/// name string `"W"` where Godot's is the int `KEY_W == 87`, and `button` was
+/// the Rust debug string `"Left"` where Godot exposes `button_index ==
+/// MOUSE_BUTTON_LEFT == 1`. No real Godot code compares against either, so
+/// every ported `_input` body was silently dead.
+///
+/// Each event now becomes a `Variant::Resource` carrying the Godot CLASS NAME
+/// and Godot PROPERTY NAMES/TYPES. That is what makes both halves work with no
+/// new Variant kind: the interpreter's `is` operator already answers from
+/// `ResourceRef::class_name`, and member access already reads
+/// `ResourceRef::properties`.
+fn input_event_object(class_name: &str, props: Vec<(&str, Variant)>) -> Variant {
+    let mut properties = std::collections::HashMap::new();
+    for (k, v) in props {
+        properties.insert(k.to_string(), v);
+    }
+    // BUILD FIX (BlackSnow, not the author of this fn): `Variant::Resource`
+    // holds a `Box<ResourceRef>` (gdvariant/src/variant.rs:272), so this needs
+    // the `Box::new`. Without it the whole `gdscene` lib failed E0308 and every
+    // gdscene bead in the verify lane FAILed behind it. Reverting this is fine
+    // if the boxing moves — the shape of the fix is all that matters here.
+    Variant::Resource(Box::new(gdvariant::ResourceRef {
+        // Input events are synthesized, not loaded from disk; Godot's own
+        // `InputEvent.resource_path` is likewise empty.
+        path: String::new(),
+        class_name: class_name.to_string(),
+        properties,
+    }))
+}
+
+/// The four `InputEventWithModifiers` flags every key/mouse event carries.
+///
+/// `meta_pressed` has no source in Patina's event enum yet, so it is reported
+/// as `false` rather than omitted — a script reading `event.meta_pressed` must
+/// get a bool, not `Nil`.
+fn modifier_props(shift: bool, ctrl: bool, alt: bool) -> Vec<(&'static str, Variant)> {
+    vec![
+        ("alt_pressed", Variant::Bool(alt)),
+        ("shift_pressed", Variant::Bool(shift)),
+        ("ctrl_pressed", Variant::Bool(ctrl)),
+        ("meta_pressed", Variant::Bool(false)),
+    ]
+}
+
 pub(crate) fn input_event_to_variant(event: &gdplatform::input::InputEvent) -> Variant {
     use gdplatform::input::InputEvent as Ev;
 
-    let mut d = gdvariant::Dictionary::new();
     match event {
         Ev::Key {
             key,
@@ -4376,63 +4845,117 @@ pub(crate) fn input_event_to_variant(event: &gdplatform::input::InputEvent) -> V
             ctrl,
             alt,
         } => {
-            d.insert("type", "key");
-            d.insert("keycode", key.name());
-            d.insert("pressed", *pressed);
-            d.insert("shift", *shift);
-            d.insert("ctrl", *ctrl);
-            d.insert("alt", *alt);
+            let code = key.to_godot_keycode();
+            let mut props = vec![
+                ("pressed", Variant::Bool(*pressed)),
+                ("keycode", Variant::Int(code)),
+                // Patina has one key identity, so the physical key and the
+                // label agree with the keycode. Godot separates them for
+                // non-QWERTY layouts; reporting the same value keeps every
+                // comparison a script can write true rather than Nil.
+                ("physical_keycode", Variant::Int(code)),
+                ("key_label", Variant::Int(code)),
+                ("unicode", Variant::Int(0)),
+                ("location", Variant::Int(0)),
+                ("echo", Variant::Bool(false)),
+                ("device", Variant::Int(0)),
+            ];
+            props.extend(modifier_props(*shift, *ctrl, *alt));
+            input_event_object("InputEventKey", props)
         }
         Ev::MouseButton {
             button,
             pressed,
             position,
         } => {
-            d.insert("type", "mouse_button");
-            d.insert("button", format!("{button:?}"));
-            d.insert("pressed", *pressed);
-            d.insert("position", *position);
+            let mut props = vec![
+                ("button_index", Variant::Int(button.to_godot_index())),
+                ("pressed", Variant::Bool(*pressed)),
+                ("canceled", Variant::Bool(false)),
+                ("double_click", Variant::Bool(false)),
+                ("factor", Variant::Float(1.0)),
+                ("position", Variant::Vector2(*position)),
+                ("global_position", Variant::Vector2(*position)),
+                (
+                    "button_mask",
+                    Variant::Int(if *pressed { button.to_godot_mask() } else { 0 }),
+                ),
+                ("device", Variant::Int(0)),
+            ];
+            props.extend(modifier_props(false, false, false));
+            input_event_object("InputEventMouseButton", props)
         }
         Ev::MouseMotion { position, relative } => {
-            d.insert("type", "mouse_motion");
-            d.insert("position", *position);
-            d.insert("relative", *relative);
+            let mut props = vec![
+                ("position", Variant::Vector2(*position)),
+                ("global_position", Variant::Vector2(*position)),
+                ("relative", Variant::Vector2(*relative)),
+                ("screen_relative", Variant::Vector2(*relative)),
+                ("velocity", Variant::Vector2(gdcore::math::Vector2::ZERO)),
+                (
+                    "screen_velocity",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ),
+                ("pressure", Variant::Float(0.0)),
+                ("tilt", Variant::Vector2(gdcore::math::Vector2::ZERO)),
+                ("pen_inverted", Variant::Bool(false)),
+                ("button_mask", Variant::Int(0)),
+                ("device", Variant::Int(0)),
+            ];
+            props.extend(modifier_props(false, false, false));
+            input_event_object("InputEventMouseMotion", props)
         }
         Ev::GamepadButton {
             button,
             pressed,
             gamepad_id,
-        } => {
-            d.insert("type", "gamepad_button");
-            d.insert("button", format!("{button:?}"));
-            d.insert("pressed", *pressed);
-            d.insert("gamepad_id", *gamepad_id as i64);
-        }
+        } => input_event_object(
+            "InputEventJoypadButton",
+            vec![
+                // BUILD FIX (BlackSnow, not the author): `GamepadButton::to_godot_index`
+                // returns `Option<i64>`, unlike the same-named `MouseButton` method a
+                // few arms up which returns a bare `i64` — easy to conflate, and it was
+                // E0308 here. `None` occurs only for `LeftTrigger`/`RightTrigger`, which
+                // Godot models as analog AXES rather than buttons, so `-1` is not an
+                // invented sentinel: it is Godot's own `JOY_BUTTON_INVALID`.
+                (
+                    "button_index",
+                    Variant::Int(button.to_godot_index().unwrap_or(-1)),
+                ),
+                ("pressed", Variant::Bool(*pressed)),
+                ("pressure", Variant::Float(0.0)),
+                ("device", Variant::Int(*gamepad_id as i64)),
+            ],
+        ),
         Ev::GamepadAxis {
             axis,
             value,
             gamepad_id,
-        } => {
-            d.insert("type", "gamepad_axis");
-            d.insert("axis", format!("{axis:?}"));
-            d.insert("value", *value);
-            d.insert("gamepad_id", *gamepad_id as i64);
-        }
+        } => input_event_object(
+            "InputEventJoypadMotion",
+            vec![
+                ("axis", Variant::Int(axis.to_godot_index())),
+                ("axis_value", Variant::Float(f64::from(*value))),
+                ("device", Variant::Int(*gamepad_id as i64)),
+            ],
+        ),
         Ev::ScreenTouch {
             index,
             position,
             pressed,
             double_tap,
             canceled,
-        } => {
-            d.insert("type", "screen_touch");
-            d.insert("index", *index as i64);
-            d.insert("position", *position);
-            d.insert("pressed", *pressed);
-            // Godot's InputEventScreenTouch exposes both (pat-0q2kx.93).
-            d.insert("double_tap", *double_tap);
-            d.insert("canceled", *canceled);
-        }
+        } => input_event_object(
+            "InputEventScreenTouch",
+            vec![
+                ("index", Variant::Int(*index as i64)),
+                ("position", Variant::Vector2(*position)),
+                ("pressed", Variant::Bool(*pressed)),
+                ("double_tap", Variant::Bool(*double_tap)),
+                ("canceled", Variant::Bool(*canceled)),
+                ("device", Variant::Int(0)),
+            ],
+        ),
         Ev::ScreenDrag {
             index,
             position,
@@ -4440,26 +4963,35 @@ pub(crate) fn input_event_to_variant(event: &gdplatform::input::InputEvent) -> V
             velocity,
             pressure,
             tilt,
-        } => {
-            d.insert("type", "screen_drag");
-            d.insert("index", *index as i64);
-            d.insert("position", *position);
-            d.insert("relative", *relative);
-            d.insert("velocity", *velocity);
-            // Pen fields from InputEventScreenDrag (pat-0q2kx.93).
-            d.insert("pressure", *pressure);
-            d.insert("tilt", *tilt);
-        }
+        } => input_event_object(
+            "InputEventScreenDrag",
+            vec![
+                ("index", Variant::Int(*index as i64)),
+                ("position", Variant::Vector2(*position)),
+                ("relative", Variant::Vector2(*relative)),
+                ("screen_relative", Variant::Vector2(*relative)),
+                ("velocity", Variant::Vector2(*velocity)),
+                ("screen_velocity", Variant::Vector2(*velocity)),
+                ("pressure", Variant::Float(f64::from(*pressure))),
+                ("tilt", Variant::Vector2(*tilt)),
+                ("pen_inverted", Variant::Bool(false)),
+                ("device", Variant::Int(0)),
+            ],
+        ),
         Ev::Action {
             action,
             pressed,
             strength,
-        } => {
-            d.insert("type", "action");
-            d.insert("action", action.clone());
-            d.insert("pressed", *pressed);
-            d.insert("strength", *strength);
-        }
+        } => input_event_object(
+            "InputEventAction",
+            vec![
+                ("action", Variant::String(action.clone())),
+                ("pressed", Variant::Bool(*pressed)),
+                ("strength", Variant::Float(f64::from(*strength))),
+                ("event_index", Variant::Int(-1)),
+                ("device", Variant::Int(0)),
+            ],
+        ),
         // Godot `InputEventMIDI` (pat-0q2kx.246). Every field is present on
         // every message, matching Godot's single concrete class — a script
         // switches on `message` first, exactly as it would there.
@@ -4473,22 +5005,29 @@ pub(crate) fn input_event_to_variant(event: &gdplatform::input::InputEvent) -> V
             instrument,
             pressure,
             device,
-        } => {
-            d.insert("type", "midi");
-            d.insert("channel", i64::from(*channel));
-            // The @GlobalScope `MIDI_MESSAGE_*` integer, so a script can write
-            // `event.message == MIDI_MESSAGE_NOTE_ON` and have it hold.
-            d.insert("message", i64::from(*message));
-            d.insert("pitch", i64::from(*pitch));
-            d.insert("velocity", i64::from(*velocity));
-            d.insert("controller_number", i64::from(*controller_number));
-            d.insert("controller_value", i64::from(*controller_value));
-            d.insert("instrument", i64::from(*instrument));
-            d.insert("pressure", i64::from(*pressure));
-            d.insert("device", i64::from(*device));
-        }
+        } => input_event_object(
+            "InputEventMIDI",
+            vec![
+                ("channel", Variant::Int(i64::from(*channel))),
+                // The @GlobalScope `MIDI_MESSAGE_*` integer, so a script can
+                // write `event.message == MIDI_MESSAGE_NOTE_ON`.
+                ("message", Variant::Int(i64::from(*message))),
+                ("pitch", Variant::Int(i64::from(*pitch))),
+                ("velocity", Variant::Int(i64::from(*velocity))),
+                (
+                    "controller_number",
+                    Variant::Int(i64::from(*controller_number)),
+                ),
+                (
+                    "controller_value",
+                    Variant::Int(i64::from(*controller_value)),
+                ),
+                ("instrument", Variant::Int(i64::from(*instrument))),
+                ("pressure", Variant::Int(i64::from(*pressure))),
+                ("device", Variant::Int(i64::from(*device))),
+            ],
+        ),
     }
-    Variant::Dictionary(d)
 }
 
 /// Godot `String.match`-style wildcard test used by `find_child`/`find_children`:

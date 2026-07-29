@@ -37,19 +37,75 @@ pub struct HighlightSpan {
 
 /// GDScript keywords.
 const KEYWORDS: &[&str] = &[
-    "if", "elif", "else", "for", "while", "match", "break", "continue", "pass",
-    "return", "class", "class_name", "extends", "is", "as", "self", "tool",
-    "signal", "func", "static", "const", "enum", "var", "onready", "export",
-    "breakpoint", "preload", "yield", "await", "assert", "void", "and", "or",
-    "not", "in", "true", "false", "null",
+    "if",
+    "elif",
+    "else",
+    "for",
+    "while",
+    "match",
+    "break",
+    "continue",
+    "pass",
+    "return",
+    "class",
+    "class_name",
+    "extends",
+    "is",
+    "as",
+    "self",
+    "tool",
+    "signal",
+    "func",
+    "static",
+    "const",
+    "enum",
+    "var",
+    "onready",
+    "export",
+    "breakpoint",
+    "preload",
+    "yield",
+    "await",
+    "assert",
+    "void",
+    "and",
+    "or",
+    "not",
+    "in",
+    "true",
+    "false",
+    "null",
 ];
 
 /// Built-in GDScript types.
 const TYPES: &[&str] = &[
-    "bool", "int", "float", "String", "StringName", "NodePath", "Vector2",
-    "Vector2i", "Vector3", "Vector3i", "Rect2", "Transform2D", "Transform3D",
-    "Color", "Array", "Dictionary", "Callable", "Signal", "Object", "Node",
-    "Node2D", "Node3D", "Resource", "PackedScene", "Variant", "RID", "Basis",
+    "bool",
+    "int",
+    "float",
+    "String",
+    "StringName",
+    "NodePath",
+    "Vector2",
+    "Vector2i",
+    "Vector3",
+    "Vector3i",
+    "Rect2",
+    "Transform2D",
+    "Transform3D",
+    "Color",
+    "Array",
+    "Dictionary",
+    "Callable",
+    "Signal",
+    "Object",
+    "Node",
+    "Node2D",
+    "Node3D",
+    "Resource",
+    "PackedScene",
+    "Variant",
+    "RID",
+    "Basis",
     "Quaternion",
 ];
 
@@ -122,7 +178,11 @@ pub fn highlight(source: &str) -> Vec<HighlightSpan> {
                 i += 1;
             }
             if let Some(kind) = classify_word(&source[start..i]) {
-                spans.push(HighlightSpan { start, end: i, kind });
+                spans.push(HighlightSpan {
+                    start,
+                    end: i,
+                    kind,
+                });
             }
         } else {
             i += 1;
@@ -218,7 +278,10 @@ mod tests {
     fn spans_are_ordered_and_disjoint() {
         let spans = highlight("var x = 1 # c\n");
         for pair in spans.windows(2) {
-            assert!(pair[0].end <= pair[1].start, "spans are ordered and disjoint");
+            assert!(
+                pair[0].end <= pair[1].start,
+                "spans are ordered and disjoint"
+            );
         }
         // A `#` inside a string is part of the string, not a comment.
         let s = highlight("var s = \"# not a comment\"");

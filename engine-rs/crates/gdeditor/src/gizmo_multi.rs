@@ -130,12 +130,18 @@ mod tests {
         assert!(undo.is_dirty(), "the transform marks the scene dirty");
 
         // The single entry undoes/redoes the whole selection in one step.
-        assert!(undo.undo().is_some(), "one undo reverses the whole transform");
+        assert!(
+            undo.undo().is_some(),
+            "one undo reverses the whole transform"
+        );
         assert_eq!(undo.undo_count(), 0);
         assert!(undo.can_redo());
         assert!(!undo.is_dirty(), "undo returns to the saved (clean) state");
 
-        assert!(undo.redo().is_some(), "one redo reapplies the whole transform");
+        assert!(
+            undo.redo().is_some(),
+            "one redo reapplies the whole transform"
+        );
         assert_eq!(undo.undo_count(), 1);
         assert!(undo.is_dirty(), "redo re-dirties the scene");
     }
@@ -148,8 +154,8 @@ mod tests {
 
         let pivot = Vector2::new(5.0, 5.0);
         let nodes = vec![
-            GizmoNode::new(1, pivot),                       // on the pivot
-            GizmoNode::new(2, Vector2::new(15.0, 5.0)),     // 10px to the right
+            GizmoNode::new(1, pivot),                   // on the pivot
+            GizmoNode::new(2, Vector2::new(15.0, 5.0)), // 10px to the right
         ];
         let mut undo = UndoRedoManager::new(64);
 

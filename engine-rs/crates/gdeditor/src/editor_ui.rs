@@ -5887,6 +5887,10 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   var shapeHandles = [];   // [{handle, x, y}] in node-local pixels
   var curvePoints = [];    // [[x, y], ...] in node-local pixels
   var handleDrag = null;   // {kind:'shape'|'point', handle, index}
+  // pat-s3rrv.10: the 3D node-gizmo handles (box faces, light range) for the
+  // current selection, as the server projected them: [{id, name, x, y}] in
+  // viewport-image pixels.
+  var handles3D = [];
 
   // Node-local -> viewport-image pixels. The 2D editor viewport is unscaled and
   // origin-aligned, so a node's own position is the only offset.
@@ -5909,7 +5913,12 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     host.innerHTML = '';
     shapeHandles = [];
     curvePoints = [];
-    if (selectedNodeId === null || selectedNodeId === undefined || editorMode === '3d') return;
+    handles3D = [];
+    if (selectedNodeId === null || selectedNodeId === undefined) return;
+    // pat-s3rrv.10: in 3D the server owns both the handle geometry and its
+    // screen projection (only it has the editor camera), so that path is its
+    // own fetch rather than a local node-local -> pixel mapping.
+    if (editorMode === '3d') { await refresh3DHandles(host); return; }
 
     var shapes = await api('GET', '/api/viewport/shape_handles?node_id=' + selectedNodeId);
     if (shapes && shapes.editable) shapeHandles = shapes.handles || [];
@@ -5945,6 +5954,47 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         ev.stopPropagation(); ev.preventDefault();
         if (ev.button === 2) { removeCurvePoint(i); return; }
         handleDrag = { kind: 'point', index: i };
+      });
+      host.appendChild(dot);
+    });
+  }
+
+  // -- 3D node gizmo handles (pat-s3rrv.10) ---------------------------------
+  //
+  // Godot draws a per-node gizmo on the selected 3D node — box face handles on a
+  // CollisionShape3D, a range handle on an OmniLight3D — and dragging one edits
+  // the SHAPE, not the transform. Patina had the parity-exact math
+  // (`viewport_3d_handles.rs`) with zero callers and no route: the served 3D
+  // viewport offered only the shared transform gizmo.
+  //
+  // The server projects each handle to viewport pixels with the editor camera,
+  // so the client just places dots and posts the drag. Hit-testing is the DOM's
+  // (each dot has pointer-events:auto), which is why the mousedown below stops
+  // propagation — otherwise `begin3DLeft` would also start a gizmo/box-select.
+  async function refresh3DHandles(host) {
+    var res = await api('GET', '/api/viewport/3d/handles?node_id=' + selectedNodeId);
+    if (!res || !res.editable) return;
+    handles3D = res.handles || [];
+    var rect = viewportImg ? viewportImg.getBoundingClientRect() : null;
+    var scaleX = rect && viewportImg.naturalWidth ? rect.width / viewportImg.naturalWidth : 1;
+    var scaleY = rect && viewportImg.naturalHeight ? rect.height / viewportImg.naturalHeight : 1;
+    handles3D.forEach(function(h) {
+      var dot = document.createElement('div');
+      dot.className = 'gizmo3d-handle';
+      dot.title = 'Drag to edit ' + (h.name || 'handle');
+      dot.style.cssText = 'position:absolute;width:9px;height:9px;margin:-5px 0 0 -5px;border:1px solid #000;'
+        + 'border-radius:50%;pointer-events:auto;cursor:pointer;background:#ffb020;'
+        + 'left:' + (h.x * scaleX) + 'px;top:' + (h.y * scaleY) + 'px;';
+      dot.addEventListener('mousedown', function(ev) {
+        ev.stopPropagation(); ev.preventDefault();
+        var body = viewportCoords(ev);
+        body.node_id = selectedNodeId;
+        body.handle = h.id;
+        nav3D.active = true; nav3D.kind = 'handle'; nav3D.moved = false;
+        nav3D.lastX = ev.clientX; nav3D.lastY = ev.clientY;
+        api('POST', '/api/viewport/3d/handle/begin', body).then(function(r) {
+          if (!r || !r.dragging) { nav3D.kind = 'idle'; nav3D.active = false; }
+        });
       });
       host.appendChild(dot);
     });
@@ -6212,6 +6262,16 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       sendNavDelta('/api/viewport/3d/fly/look', dx, dy);
       return;
     }
+    // pat-s3rrv.10: a node-gizmo handle drag resizes the shape. Alt is Godot's
+    // symmetric-resize modifier (the box grows about its centre instead of
+    // moving one face), so it has to ride along with every update.
+    if (nav3D.kind === 'handle') {
+      var hc = viewportCoords(e);
+      hc.symmetric = !!e.altKey;
+      hc.snap = !!(e.ctrlKey || e.metaKey);
+      api('POST', '/api/viewport/3d/handle/update', hc);
+      return;
+    }
     if (nav3D.gizmoPending) return;             // awaiting gizmo hit-test result
     if (nav3D.kind === 'gizmo' || nav3D.gizmo) {
       api('POST', '/api/viewport/3d/gizmo/update', viewportCoords(e));
@@ -6229,6 +6289,18 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     vp3dSetSmooth(false);   // camera stopped → back to crisp full-res display
     if (kind === 'ruler') { endRuler(e); return; }
     if (kind === 'listselect') { showListSelectPopup(e); return; }
+    // pat-s3rrv.10: commit the handle drag as one undo step, then re-read the
+    // scene — the shape size AND the re-centred position both changed — and
+    // re-project the handles, which have moved with the new size.
+    if (kind === 'handle') {
+      api('POST', '/api/viewport/3d/handle/end', {}).then(function() {
+        refreshViewport();
+        fetchScene();
+        if (selectedNodeId) fetchSelected();
+        refreshSubEditorHandles();
+      });
+      return;
+    }
     if (wasGizmo) {
       api('POST', '/api/viewport/3d/gizmo/end', {}).then(function() {
         fetchScene(); if (selectedNodeId) fetchSelected();
@@ -10483,12 +10555,38 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var tag = document.activeElement ? document.activeElement.tagName : '';
       if ((tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') && !GAME_KEYS.has(e.key)) return;
       if (GAME_KEYS.has(e.key)) e.preventDefault();
-      api('POST', '/api/runtime/input/key_down', { key: e.key });
+      // Forward the browser's real key event, not just its logical key
+      // (pat-s3rrv.15). Godot's web platform layer reads exactly these off the
+      // KeyboardEvent (upstream/godot/platform/web/js/libs/library_godot_input.js):
+      // shiftKey/ctrlKey/altKey/metaKey become the InputEventWithModifiers
+      // flags, `code` the physical_keycode, `location` the key location and
+      // `repeat` the echo flag. Posting only `e.key` left the server with no
+      // choice but to report every modifier as released, which made Ctrl+C,
+      // Ctrl+Z, Shift+Tab and every other modifier-bound `ui_*` action
+      // unreachable inside a running game.
+      api('POST', '/api/runtime/input/key_down', {
+        key: e.key,
+        code: e.code,
+        location: e.location,
+        repeat: e.repeat,
+        shift: e.shiftKey,
+        ctrl: e.ctrlKey,
+        alt: e.altKey,
+        meta: e.metaKey
+      });
     };
     gameInputKeyupHandler = function(e) {
       if (!runtimeRunning) return;
       if (e.key === 'F5' || e.key === 'F6' || e.key === 'F7' || e.key === 'F8') return;
-      api('POST', '/api/runtime/input/key_up', { key: e.key });
+      api('POST', '/api/runtime/input/key_up', {
+        key: e.key,
+        code: e.code,
+        location: e.location,
+        shift: e.shiftKey,
+        ctrl: e.ctrlKey,
+        alt: e.altKey,
+        meta: e.metaKey
+      });
     };
     document.addEventListener('keydown', gameInputKeydownHandler, true);
     document.addEventListener('keyup', gameInputKeyupHandler, true);

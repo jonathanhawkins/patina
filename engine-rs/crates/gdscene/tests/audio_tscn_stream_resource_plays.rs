@@ -154,14 +154,28 @@ fn audio_tscn_missing_stream_file_warns_and_stays_silent() {
         ml
     });
 
-    // The failure is reported rather than swallowed...
+    // The failure is reported rather than swallowed. pat-s3rrv.5 raised this
+    // from WARN to ERROR: a default runner log shows errors, and a stream that
+    // never loaded is indistinguishable from a correct player with a quiet clip
+    // unless the failure is visible. It is also retained on the bridge itself,
+    // asserted below.
     assert!(
-        logs.contains("WARN"),
-        "a missing stream file must warn, not fail silently; logs were:\n{logs}"
+        logs.contains("ERROR"),
+        "a missing stream file must be reported as an error, not fail silently; \
+         logs were:\n{logs}"
     );
     assert!(
         logs.contains("absent.wav"),
-        "the warning must name the file that failed to load; logs were:\n{logs}"
+        "the report must name the file that failed to load; logs were:\n{logs}"
+    );
+    assert!(
+        ml.audio_bridge()
+            .stream_errors()
+            .iter()
+            .any(|e| e.contains("absent.wav")),
+        "the failure must also survive on the bridge for the runner to surface; \
+         got: {:?}",
+        ml.audio_bridge().stream_errors(),
     );
     // ...and nothing pretends to be playing.
     assert_eq!(

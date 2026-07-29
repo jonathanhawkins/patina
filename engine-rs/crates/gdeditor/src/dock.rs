@@ -347,8 +347,10 @@ fn node_visible(tree: &SceneTree, id: NodeId) -> bool {
 fn node_locked(tree: &SceneTree, id: NodeId) -> bool {
     tree.get_node(id)
         .map(|n| {
-            matches!(n.get_property("_edit_lock_"), gdvariant::Variant::Bool(true))
-                || matches!(n.get_property("_locked"), gdvariant::Variant::Bool(true))
+            matches!(
+                n.get_property("_edit_lock_"),
+                gdvariant::Variant::Bool(true)
+            ) || matches!(n.get_property("_locked"), gdvariant::Variant::Bool(true))
         })
         .unwrap_or(false)
 }
@@ -566,8 +568,10 @@ impl SceneTreeDock {
 
         // Edit-lock badge: honor the Godot-canonical `_edit_lock_` meta and the
         // legacy `_locked` flag.
-        let locked = matches!(node.get_property("_edit_lock_"), gdvariant::Variant::Bool(true))
-            || matches!(node.get_property("_locked"), gdvariant::Variant::Bool(true));
+        let locked = matches!(
+            node.get_property("_edit_lock_"),
+            gdvariant::Variant::Bool(true)
+        ) || matches!(node.get_property("_locked"), gdvariant::Variant::Bool(true));
 
         let instance_source = match node.get_property("_instance_source") {
             gdvariant::Variant::String(s) if !s.is_empty() => Some(s.clone()),
@@ -860,8 +864,12 @@ mod tests {
         // canonical `set_unique_name_in_owner` flag, not a stale property.
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        let a = tree.add_child(root, Node::new("ContainerA", "Node")).unwrap();
-        let b = tree.add_child(root, Node::new("ContainerB", "Node")).unwrap();
+        let a = tree
+            .add_child(root, Node::new("ContainerA", "Node"))
+            .unwrap();
+        let b = tree
+            .add_child(root, Node::new("ContainerB", "Node"))
+            .unwrap();
         let foo1 = tree.add_child(a, Node::new("Foo", "Node")).unwrap();
         let foo2 = tree.add_child(b, Node::new("Foo", "Node")).unwrap();
         for n in [a, b, foo1, foo2] {
@@ -891,22 +899,22 @@ mod tests {
             let ind = &dock.find_entry(n).unwrap().indicators;
             assert!(ind.is_unique_name);
             assert!(ind.unique_name_collision);
-            assert!(ind
-                .warnings
-                .iter()
-                .any(|w| w.severity == WarningSeverity::Warning
-                    && w.message.contains("unique name")));
+            assert!(ind.warnings.iter().any(
+                |w| w.severity == WarningSeverity::Warning && w.message.contains("unique name")
+            ));
         }
 
         // Clearing one flag resolves the collision on both.
         tree.set_unique_name_in_owner(foo2, false);
         dock.refresh(&tree);
         assert!(!dock.find_entry(foo2).unwrap().indicators.is_unique_name);
-        assert!(!dock
-            .find_entry(foo1)
-            .unwrap()
-            .indicators
-            .unique_name_collision);
+        assert!(
+            !dock
+                .find_entry(foo1)
+                .unwrap()
+                .indicators
+                .unique_name_collision
+        );
     }
 
     #[test]
@@ -1604,7 +1612,9 @@ mod tests {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let n2d = tree.add_child(root, Node::new("Body", "Node2D")).unwrap();
-        let sprite = tree.add_child(n2d, Node::new("Sprite", "Sprite2D")).unwrap();
+        let sprite = tree
+            .add_child(n2d, Node::new("Sprite", "Sprite2D"))
+            .unwrap();
         let cam3d = tree.add_child(root, Node::new("Cam", "Camera3D")).unwrap();
         let mesh = tree
             .add_child(root, Node::new("Mesh", "MeshInstance3D"))
@@ -1644,7 +1654,10 @@ mod tests {
         expect(&dock, custom, "HeroBody2D", IconColorCategory::Node2D);
 
         // No row is left iconless: every entry's icon name tracks its class.
-        assert!(dock.entries().len() >= 8, "all nodes (incl. root) get a row");
+        assert!(
+            dock.entries().len() >= 8,
+            "all nodes (incl. root) get a row"
+        );
         for e in dock.entries() {
             assert_eq!(
                 e.icon.icon_name, e.class_name,
@@ -1742,7 +1755,10 @@ mod tests {
         assert_eq!(s.instance_badge_source(), None);
 
         // Instanced node: instance badge with its source, no script badge.
-        let i = &dock.find_entry(instanced).expect("instanced row").indicators;
+        let i = &dock
+            .find_entry(instanced)
+            .expect("instanced row")
+            .indicators;
         assert!(i.has_instance_badge());
         assert_eq!(i.instance_badge_source(), Some("res://enemy.tscn"));
         assert!(!i.has_script_badge());

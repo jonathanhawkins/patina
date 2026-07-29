@@ -80,11 +80,8 @@ mod tests {
         }
 
         // Rotate drag: snaps to the 45° angle step.
-        let rotated = snap_gizmo_transform(
-            GizmoTransform::Rotate(50.0_f32.to_radians()),
-            start,
-            &snap,
-        );
+        let rotated =
+            snap_gizmo_transform(GizmoTransform::Rotate(50.0_f32.to_radians()), start, &snap);
         match rotated {
             GizmoTransform::Rotate(rad) => {
                 assert!(
@@ -121,12 +118,24 @@ mod tests {
         let start = Vector2::new(5.0, 5.0);
 
         let t = GizmoTransform::Translate(Vector2::new(23.0, 7.0));
-        assert_eq!(snap_gizmo_transform(t, start, &snap), t, "no grid snap when disabled");
+        assert_eq!(
+            snap_gizmo_transform(t, start, &snap),
+            t,
+            "no grid snap when disabled"
+        );
 
         let r = GizmoTransform::Rotate(50.0_f32.to_radians());
-        assert_eq!(snap_gizmo_transform(r, start, &snap), r, "no rotation snap when disabled");
+        assert_eq!(
+            snap_gizmo_transform(r, start, &snap),
+            r,
+            "no rotation snap when disabled"
+        );
 
         let s = GizmoTransform::Scale(0.3, 0.62);
-        assert_eq!(snap_gizmo_transform(s, start, &snap), s, "no scale snap when disabled");
+        assert_eq!(
+            snap_gizmo_transform(s, start, &snap),
+            s,
+            "no scale snap when disabled"
+        );
     }
 }

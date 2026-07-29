@@ -67,9 +67,7 @@ impl BezierCurve {
     /// Inserts a key at `(time, value)` with flat handles, keeping keys ordered
     /// by time. Returns the index of the inserted key.
     pub fn add_key(&mut self, time: f64, value: f64) -> usize {
-        let idx = self
-            .keys
-            .partition_point(|k| k.time < time);
+        let idx = self.keys.partition_point(|k| k.time < time);
         self.keys.insert(idx, BezierKey::new(time, value));
         idx
     }

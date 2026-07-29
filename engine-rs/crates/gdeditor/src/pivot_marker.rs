@@ -50,7 +50,10 @@ impl PivotMarker {
     /// The pivot's offset from the node's origin. Zero when the pivot sits on
     /// the origin; rotation/scale operate about `node_origin + pivot_offset`.
     pub fn pivot_offset(&self) -> Vector2 {
-        Vector2::new(self.pivot.x - self.node_origin.x, self.pivot.y - self.node_origin.y)
+        Vector2::new(
+            self.pivot.x - self.node_origin.x,
+            self.pivot.y - self.node_origin.y,
+        )
     }
 
     /// Enables or disables pivot-edit mode.
@@ -96,22 +99,44 @@ mod tests {
         let mut marker = PivotMarker::new(origin);
 
         // The marker is drawn at the node's origin, with no pivot offset yet.
-        assert_eq!(marker.marker_position(), origin, "marker renders at the node origin");
+        assert_eq!(
+            marker.marker_position(),
+            origin,
+            "marker renders at the node origin"
+        );
         assert_eq!(marker.node_origin(), origin);
-        assert_eq!(marker.pivot_offset(), Vector2::ZERO, "pivot starts on the origin");
+        assert_eq!(
+            marker.pivot_offset(),
+            Vector2::ZERO,
+            "pivot starts on the origin"
+        );
 
         // Outside pivot-edit mode, dragging the marker does nothing.
         assert!(!marker.is_edit_mode());
-        assert!(!marker.drag_to(Vector2::new(200.0, 200.0)), "no pivot move without edit mode");
-        assert_eq!(marker.marker_position(), origin, "pivot unchanged outside edit mode");
+        assert!(
+            !marker.drag_to(Vector2::new(200.0, 200.0)),
+            "no pivot move without edit mode"
+        );
+        assert_eq!(
+            marker.marker_position(),
+            origin,
+            "pivot unchanged outside edit mode"
+        );
 
         // Enter pivot-edit mode and drag the marker to a new world point.
         marker.set_edit_mode(true);
         let new_pivot = Vector2::new(170.0, 130.0);
-        assert!(marker.drag_to(new_pivot), "pivot-edit drag relocates the pivot");
+        assert!(
+            marker.drag_to(new_pivot),
+            "pivot-edit drag relocates the pivot"
+        );
 
         // The pivot relocated to the drag point...
-        assert_eq!(marker.marker_position(), new_pivot, "marker follows the pivot drag");
+        assert_eq!(
+            marker.marker_position(),
+            new_pivot,
+            "marker follows the pivot drag"
+        );
         assert_eq!(
             marker.pivot_offset(),
             Vector2::new(50.0, 50.0),

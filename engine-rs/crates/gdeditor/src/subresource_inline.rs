@@ -67,9 +67,7 @@ pub fn commit_subresource_property(
         Variant::Resource(res) => *res,
         _ => return false,
     };
-    resource
-        .properties
-        .insert(sub_property.to_string(), value);
+    resource.properties.insert(sub_property.to_string(), value);
     node.set_property(property, Variant::Resource(Box::new(resource)));
     true
 }
@@ -98,7 +96,9 @@ mod tests {
     fn inspector_subresource_inline_edit_persists() {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        let id = tree.add_child(root, Node::new("Sprite", "Sprite2D")).unwrap();
+        let id = tree
+            .add_child(root, Node::new("Sprite", "Sprite2D"))
+            .unwrap();
         tree.get_node_mut(id).unwrap().set_property(
             "material",
             Variant::Resource(Box::new(material_with_subprops())),

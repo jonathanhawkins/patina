@@ -127,7 +127,10 @@ mod tests {
 
         // Selecting an entry opens it and moves it to the front.
         let opened = recent.select(2).expect("entry at index 2 exists");
-        assert_eq!(opened, "res://Player.tscn", "select returns the opened path");
+        assert_eq!(
+            opened, "res://Player.tscn",
+            "select returns the opened path"
+        );
         assert_eq!(
             recent.entries()[0],
             "res://Player.tscn",

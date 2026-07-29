@@ -83,7 +83,11 @@ mod tests {
         // Activating new-scene adds an untitled tab and focuses it.
         let first = workspace.new_scene();
         assert_eq!(workspace.tab_count(), 1, "a tab was added");
-        assert_eq!(workspace.active_index(), Some(first), "the new scene is active");
+        assert_eq!(
+            workspace.active_index(),
+            Some(first),
+            "the new scene is active"
+        );
         let tab = workspace.tab(first).expect("new tab exists");
         assert!(tab.untitled, "the new scene is untitled");
         assert_eq!(workspace.active_title(), Some("untitled"));

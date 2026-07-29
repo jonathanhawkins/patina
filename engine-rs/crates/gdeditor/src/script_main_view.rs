@@ -460,7 +460,9 @@ impl ScriptMainView {
 /// malformed buffer still renders (as plain, unhighlighted text) rather than
 /// breaking the pane.
 fn highlight_source(source: &str) -> Vec<HighlightSpan> {
-    SyntaxHighlighter::new().highlight(source).unwrap_or_default()
+    SyntaxHighlighter::new()
+        .highlight(source)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -488,15 +490,24 @@ mod tests {
         // A scripted node but not in SCRIPT mode → still the empty prompt: the
         // code pane only takes over the central area in SCRIPT mode.
         let wrong_mode = ScriptMainView::compose(MainView::Canvas2D, Some((path, src)));
-        assert!(!wrong_mode.is_editor(), "code pane only shows in SCRIPT mode");
+        assert!(
+            !wrong_mode.is_editor(),
+            "code pane only shows in SCRIPT mode"
+        );
 
         // SCRIPT mode + scripted node → an editable, highlighted pane.
         let mut view = ScriptMainView::compose(MainView::ScriptEditor, Some((path, src)));
-        assert!(view.is_editor(), "scripted node in SCRIPT mode shows the editor");
+        assert!(
+            view.is_editor(),
+            "scripted node in SCRIPT mode shows the editor"
+        );
         let pane = view.pane().expect("editor pane present");
         assert_eq!(pane.path(), path, "pane edits the node's script");
         assert_eq!(pane.source(), src, "pane shows the node's source");
-        assert!(pane.is_editable(), "the code pane is editable, not a preview");
+        assert!(
+            pane.is_editable(),
+            "the code pane is editable, not a preview"
+        );
         assert!(!pane.is_dirty(), "a freshly opened script is clean");
 
         // The pane is syntax-highlighted: GDScript keywords are classified.
@@ -515,7 +526,9 @@ mod tests {
         assert_eq!(pane.source(), edited, "edits update the buffer");
         assert!(pane.is_dirty(), "an edit marks the pane dirty");
         assert!(
-            pane.highlight().iter().any(|s| s.kind == HighlightKind::Keyword),
+            pane.highlight()
+                .iter()
+                .any(|s| s.kind == HighlightKind::Keyword),
             "the edited buffer is re-highlighted"
         );
 
@@ -524,7 +537,10 @@ mod tests {
         let (save_path, save_source) = view.pane_mut().unwrap().save();
         assert_eq!(save_path, path, "save targets the node's script path");
         assert_eq!(save_source, edited, "save persists the edited buffer");
-        assert!(!view.pane().unwrap().is_dirty(), "saving clears the dirty flag");
+        assert!(
+            !view.pane().unwrap().is_dirty(),
+            "saving clears the dirty flag"
+        );
 
         // A no-op edit (same text) doesn't re-dirty a saved buffer.
         view.pane_mut().unwrap().edit(edited);
@@ -558,10 +574,17 @@ mod tests {
             path: path.to_string(),
             source: src.to_string(),
         }));
-        assert!(view.is_editor(), "opening a scripted node shows the code pane");
+        assert!(
+            view.is_editor(),
+            "opening a scripted node shows the code pane"
+        );
         let pane = view.pane().expect("code pane present");
         assert_eq!(pane.path(), path, "the pane opens the node's script path");
-        assert_eq!(pane.source(), src, "the pane shows the node's script source");
+        assert_eq!(
+            pane.source(),
+            src,
+            "the pane shows the node's script source"
+        );
         assert!(pane.is_editable(), "the opened script is editable");
         assert!(!pane.is_dirty(), "a freshly opened script starts clean");
         assert!(
@@ -595,11 +618,15 @@ mod tests {
         // ...on their correct 1-based source lines (multi-line highlighting):
         // a keyword on the first line, and at least one on a later line.
         assert!(
-            spans.iter().any(|s| s.kind == HighlightKind::Keyword && s.line == 1),
+            spans
+                .iter()
+                .any(|s| s.kind == HighlightKind::Keyword && s.line == 1),
             "a keyword is highlighted on line 1"
         );
         assert!(
-            spans.iter().any(|s| s.kind == HighlightKind::Keyword && s.line > 1),
+            spans
+                .iter()
+                .any(|s| s.kind == HighlightKind::Keyword && s.line > 1),
             "keywords on later lines are highlighted too"
         );
         // No span points past the gutter.
@@ -628,7 +655,11 @@ mod tests {
             .unwrap()
             .edit("extends Node\nfunc _ready():\n\tpass\n");
         let pane = view.pane().unwrap();
-        assert_eq!(pane.line_count(), 4, "line count follows edits (3 newlines => 4)");
+        assert_eq!(
+            pane.line_count(),
+            4,
+            "line count follows edits (3 newlines => 4)"
+        );
         assert_eq!(pane.line_numbers(), vec![1, 2, 3, 4]);
         assert!(
             pane.highlight()
@@ -660,8 +691,15 @@ mod tests {
         // Editing the buffer marks it dirty and updates the contents.
         let edited = "extends Node2D\n\nvar speed := 200\n\nfunc _ready():\n\tprint(speed)\n";
         view.pane_mut().unwrap().edit(edited);
-        assert!(view.pane().unwrap().is_dirty(), "editing marks the buffer dirty");
-        assert_eq!(view.pane().unwrap().source(), edited, "the buffer holds the edits");
+        assert!(
+            view.pane().unwrap().is_dirty(),
+            "editing marks the buffer dirty"
+        );
+        assert_eq!(
+            view.pane().unwrap().source(),
+            edited,
+            "the buffer holds the edits"
+        );
 
         // Saving returns the (res:// path, edited source) for the editor to
         // write back, and clears the dirty flag.
@@ -671,17 +709,32 @@ mod tests {
             save_path.starts_with("res://"),
             "the save target is a res:// resource path: {save_path}"
         );
-        assert_eq!(save_source, edited, "save persists the edited buffer contents");
-        assert!(!view.pane().unwrap().is_dirty(), "saving clears the dirty flag");
+        assert_eq!(
+            save_source, edited,
+            "save persists the edited buffer contents"
+        );
+        assert!(
+            !view.pane().unwrap().is_dirty(),
+            "saving clears the dirty flag"
+        );
 
         // Re-editing after a save dirties the buffer again; saving it once more
         // returns the new contents and re-clears the flag.
         let edited2 = "extends Node\n";
         view.pane_mut().unwrap().edit(edited2);
-        assert!(view.pane().unwrap().is_dirty(), "a post-save edit dirties again");
+        assert!(
+            view.pane().unwrap().is_dirty(),
+            "a post-save edit dirties again"
+        );
         let (_p2, save_source2) = view.pane_mut().unwrap().save();
-        assert_eq!(save_source2, edited2, "the second save persists the latest contents");
-        assert!(!view.pane().unwrap().is_dirty(), "the second save clears the flag");
+        assert_eq!(
+            save_source2, edited2,
+            "the second save persists the latest contents"
+        );
+        assert!(
+            !view.pane().unwrap().is_dirty(),
+            "the second save clears the flag"
+        );
     }
 
     /// Acceptance (pat-yxe4s.4): the code pane offers autocomplete (keywords +
@@ -701,7 +754,10 @@ mod tests {
         // Declared locals are collected for completion.
         let locals = view.pane().unwrap().local_variables();
         assert!(locals.contains(&"speed".to_string()), "locals: {locals:?}");
-        assert!(locals.contains(&"spawn_point".to_string()), "locals: {locals:?}");
+        assert!(
+            locals.contains(&"spawn_point".to_string()),
+            "locals: {locals:?}"
+        );
 
         // Prefix "sp" surfaces both local variables.
         let sp = view.pane().unwrap().autocomplete("sp");
@@ -748,8 +804,15 @@ mod tests {
                 !pane.highlight().is_empty(),
                 "the replaced buffer is re-highlighted"
             );
-            assert!(pane.find("speed").is_empty(), "find no longer matches 'speed'");
-            assert_eq!(pane.find("velocity").len(), 3, "find now matches 'velocity'");
+            assert!(
+                pane.find("speed").is_empty(),
+                "find no longer matches 'speed'"
+            );
+            assert_eq!(
+                pane.find("velocity").len(),
+                3,
+                "find now matches 'velocity'"
+            );
         }
         // Replacing a missing query is a no-op.
         let none = view.pane_mut().unwrap().replace_all("speed", "x");
@@ -786,8 +849,14 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].name, "player.gd");
         assert_eq!(list[1].name, "enemy.gd");
-        assert!(!list[0].active && list[1].active, "the second script is active");
-        assert!(!list[0].dirty && !list[1].dirty, "freshly opened scripts are clean");
+        assert!(
+            !list[0].active && list[1].active,
+            "the second script is active"
+        );
+        assert!(
+            !list[0].dirty && !list[1].dirty,
+            "freshly opened scripts are clean"
+        );
 
         // Switch back to the first script by index.
         assert!(open.switch_to(0));
@@ -799,14 +868,21 @@ mod tests {
         assert_eq!(open.active_index(), Some(1));
         assert!(!open.switch_to_path("res://scripts/missing.gd"));
         assert!(!open.switch_to(9));
-        assert_eq!(open.active_index(), Some(1), "failed switches don't move active");
+        assert_eq!(
+            open.active_index(),
+            Some(1),
+            "failed switches don't move active"
+        );
 
         // Editing the active script marks its switcher entry dirty.
         open.active_mut()
             .unwrap()
             .edit("extends Node2D\nvar hp := 10\n");
         assert!(open.open_list()[1].dirty, "the edited script shows dirty");
-        assert!(!open.open_list()[0].dirty, "the untouched script stays clean");
+        assert!(
+            !open.open_list()[0].dirty,
+            "the untouched script stays clean"
+        );
 
         // Re-opening an already-open script switches to it without duplicating
         // and keeps its existing buffer (doesn't clobber with the new source).

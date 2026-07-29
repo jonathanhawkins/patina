@@ -242,6 +242,55 @@ fn build_raw_texture(
     Arc::new(res)
 }
 
+/// Encodes tightly-packed RGBA8 pixels as an uncompressed `.ctex`
+/// (`DATA_FORMAT_IMAGE` / `IMG_FORMAT_RGBA8`) — the inverse of
+/// [`load_ctex_bytes`]'s image arm (pat-s3rrv.2).
+///
+/// Nothing in the engine could *write* an import artifact before this: every
+/// `.godot/imported/*.ctex` Patina resolved had to have been produced by a real
+/// Godot editor, so a project authored in Patina had no artifacts at all. The
+/// header is the same 48 bytes the reader consumes, so a round-trip through
+/// `load_ctex_bytes` returns the pixels it was given.
+///
+/// Errors when `rgba` is not exactly `width * height * 4` bytes, rather than
+/// writing a header whose declared extent the payload cannot satisfy.
+pub fn save_ctex_image_rgba8(width: u32, height: u32, rgba: &[u8]) -> EngineResult<Vec<u8>> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| EngineError::Parse(".ctex image size overflow".into()))?;
+    if rgba.len() != expected {
+        return Err(EngineError::Parse(format!(
+            ".ctex RGBA8 payload is {} bytes but {width}x{height} needs {expected}",
+            rgba.len()
+        )));
+    }
+    // `w`/`h` are u16 in the inner image header, so the format itself caps a
+    // texture at 65535 on a side.
+    if width > u16::MAX as u32 || height > u16::MAX as u32 {
+        return Err(EngineError::Unsupported(format!(
+            ".ctex dimensions {width}x{height} exceed the format's 65535 limit"
+        )));
+    }
+
+    let mut d = Vec::with_capacity(48 + rgba.len());
+    d.extend_from_slice(CTEX_MAGIC);
+    d.extend_from_slice(&1u32.to_le_bytes()); // format version
+    d.extend_from_slice(&width.to_le_bytes()); // original width
+    d.extend_from_slice(&height.to_le_bytes()); // original height
+    d.extend_from_slice(&0u32.to_le_bytes()); // FORMAT_BIT_* flags
+    d.extend_from_slice(&0u32.to_le_bytes()); // mipmap limit
+    d.extend_from_slice(&[0u8; 12]); // reserved (3 x u32)
+
+    d.extend_from_slice(&CTEX_DATA_FORMAT_IMAGE.to_le_bytes());
+    d.extend_from_slice(&(width as u16).to_le_bytes());
+    d.extend_from_slice(&(height as u16).to_le_bytes());
+    d.extend_from_slice(&0u32.to_le_bytes()); // no extra mip levels
+    d.extend_from_slice(&IMG_FORMAT_RGBA8.to_le_bytes());
+    d.extend_from_slice(rgba);
+    Ok(d)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +506,81 @@ mod tests {
         for len in 0..raw_full.len() {
             let _ = load_ctex_bytes(&raw_full[..len], Path::new("t.ctex"));
         }
+    }
+
+    // -- save_ctex_image_rgba8 (pat-s3rrv.2) ---------------------------------
+
+    /// The writer's output must be readable by this module's own loader, with
+    /// every pixel intact — that round-trip is the whole contract, since the
+    /// artifacts it produces are what `import_image`'s remap path later reads.
+    #[test]
+    fn saved_ctex_round_trips_through_the_loader() {
+        let raw: [u8; 16] = [
+            255, 0, 0, 255, // red
+            0, 255, 0, 255, // green
+            0, 0, 255, 255, // blue
+            255, 255, 255, 0, // transparent white
+        ];
+        let encoded = save_ctex_image_rgba8(2, 2, &raw).expect("2x2 RGBA8 encodes");
+        assert_eq!(&encoded[..4], CTEX_MAGIC, "artifact must carry GST2 magic");
+
+        let res = load_ctex_bytes(&encoded, Path::new("out.ctex")).expect("round-trips");
+        assert_eq!(res.class_name, "Texture2D");
+        assert_eq!(res.get_property("width"), Some(&Variant::Int(2)));
+        assert_eq!(res.get_property("height"), Some(&Variant::Int(2)));
+        assert_eq!(
+            res.get_property("format"),
+            Some(&Variant::String("RGBA".into()))
+        );
+
+        let pixels = match res.get_property("pixels") {
+            Some(Variant::Array(px)) => px.clone(),
+            other => panic!("expected a pixels Array, got {other:?}"),
+        };
+        assert_eq!(pixels.len(), 4);
+        let at = |i: usize| match &pixels[i] {
+            Variant::Color(c) => *c,
+            other => panic!("pixel {i} is not a Color: {other:?}"),
+        };
+        // Channel-exact within one 8-bit step, in order, including alpha —
+        // a writer that transposed or dropped a channel fails here.
+        let near = |a: f32, b: f32| (a - b).abs() < 0.005;
+        assert!(near(at(0).r, 1.0) && near(at(0).g, 0.0) && near(at(0).b, 0.0));
+        assert!(near(at(1).r, 0.0) && near(at(1).g, 1.0) && near(at(1).b, 0.0));
+        assert!(near(at(2).r, 0.0) && near(at(2).g, 0.0) && near(at(2).b, 1.0));
+        assert!(
+            near(at(3).a, 0.0),
+            "alpha must survive the round-trip, got {}",
+            at(3).a
+        );
+    }
+
+    /// A payload that does not match the declared extent is rejected rather
+    /// than written — a short artifact would fail far away, inside the loader.
+    #[test]
+    fn saved_ctex_rejects_a_mismatched_payload() {
+        let err = save_ctex_image_rgba8(2, 2, &[0u8; 12])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("12 bytes"), "got: {err}");
+        assert!(save_ctex_image_rgba8(1, 1, &[0u8; 4]).is_ok(), "1x1 is fine");
+        // Zero-sized is consistent (0 bytes) and must encode rather than error.
+        assert!(save_ctex_image_rgba8(0, 0, &[]).is_ok());
+    }
+
+    /// The inner header stores the extent as u16, so anything larger cannot be
+    /// represented — say so instead of silently truncating the dimensions.
+    #[test]
+    fn saved_ctex_rejects_dimensions_beyond_u16() {
+        // Correctly sized, so this reaches the dimension check rather than
+        // tripping the payload-length guard first.
+        let payload = vec![0u8; 70_000 * 4];
+        let err = save_ctex_image_rgba8(70_000, 1, &payload)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("65535"),
+            "oversized dimensions must be refused by the u16 guard, got: {err}"
+        );
     }
 }

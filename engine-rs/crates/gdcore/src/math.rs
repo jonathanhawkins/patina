@@ -34,6 +34,16 @@ impl Vector2i {
     pub const LEFT: Self = Self { x: -1, y: 0 };
     /// The right direction `(1, 0)`.
     pub const RIGHT: Self = Self { x: 1, y: 0 };
+    /// The component-wise minimum — Godot's `Vector2i.MIN`.
+    pub const MIN: Self = Self {
+        x: i32::MIN,
+        y: i32::MIN,
+    };
+    /// The component-wise maximum — Godot's `Vector2i.MAX`.
+    pub const MAX: Self = Self {
+        x: i32::MAX,
+        y: i32::MAX,
+    };
 
     /// Creates a new integer vector.
     pub const fn new(x: i32, y: i32) -> Self {
@@ -100,6 +110,18 @@ impl Vector3i {
     pub const FORWARD: Self = Self { x: 0, y: 0, z: -1 };
     /// The back direction `(0, 0, 1)`.
     pub const BACK: Self = Self { x: 0, y: 0, z: 1 };
+    /// The component-wise minimum — Godot's `Vector3i.MIN`.
+    pub const MIN: Self = Self {
+        x: i32::MIN,
+        y: i32::MIN,
+        z: i32::MIN,
+    };
+    /// The component-wise maximum — Godot's `Vector3i.MAX`.
+    pub const MAX: Self = Self {
+        x: i32::MAX,
+        y: i32::MAX,
+        z: i32::MAX,
+    };
 
     /// Creates a new integer vector.
     pub const fn new(x: i32, y: i32, z: i32) -> Self {
@@ -154,6 +176,12 @@ impl Vector2 {
     pub const LEFT: Self = Self { x: -1.0, y: 0.0 };
     /// The right direction `(1, 0)`.
     pub const RIGHT: Self = Self { x: 1.0, y: 0.0 };
+    /// The infinity vector — Godot's `Vector2.INF`, used as a "no result"
+    /// sentinel by the geometry helpers.
+    pub const INF: Self = Self {
+        x: f32::INFINITY,
+        y: f32::INFINITY,
+    };
 
     /// Creates a new vector.
     pub const fn new(x: f32, y: f32) -> Self {
@@ -295,6 +323,71 @@ impl Vector3 {
     };
     /// The forward direction `(0, 0, -1)`.
     pub const FORWARD: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: -1.0,
+    };
+    /// The back direction `(0, 0, 1)`.
+    pub const BACK: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 1.0,
+    };
+    /// The left direction `(-1, 0, 0)`.
+    pub const LEFT: Self = Self {
+        x: -1.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    /// The right direction `(1, 0, 0)`.
+    pub const RIGHT: Self = Self {
+        x: 1.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    /// The infinity vector — Godot's `Vector3.INF`, used as a "no hit" sentinel
+    /// by the raycast/geometry helpers.
+    pub const INF: Self = Self {
+        x: f32::INFINITY,
+        y: f32::INFINITY,
+        z: f32::INFINITY,
+    };
+
+    // Model-space direction constants (`upstream/godot/core/math/vector3.h`).
+    // These describe the axes of an imported *model*, which faces +Z, and so
+    // are deliberately NOT the same as the world-space FORWARD/BACK above.
+    /// Model-space left `(1, 0, 0)`.
+    pub const MODEL_LEFT: Self = Self {
+        x: 1.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    /// Model-space right `(-1, 0, 0)`.
+    pub const MODEL_RIGHT: Self = Self {
+        x: -1.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    /// Model-space top `(0, 1, 0)`.
+    pub const MODEL_TOP: Self = Self {
+        x: 0.0,
+        y: 1.0,
+        z: 0.0,
+    };
+    /// Model-space bottom `(0, -1, 0)`.
+    pub const MODEL_BOTTOM: Self = Self {
+        x: 0.0,
+        y: -1.0,
+        z: 0.0,
+    };
+    /// Model-space front `(0, 0, 1)`.
+    pub const MODEL_FRONT: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 1.0,
+    };
+    /// Model-space rear `(0, 0, -1)`.
+    pub const MODEL_REAR: Self = Self {
         x: 0.0,
         y: 0.0,
         z: -1.0,

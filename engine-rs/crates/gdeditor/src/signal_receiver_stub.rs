@@ -74,8 +74,7 @@ mod tests {
         assert!(after.ends_with("\n\nfunc _on_button_pressed():\n\tpass\n"));
 
         // A signal with parameters produces a correctly-signatured stub.
-        let after2 =
-            append_receiver(&after, "_on_area_entered", &["area"]).expect("stub appended");
+        let after2 = append_receiver(&after, "_on_area_entered", &["area"]).expect("stub appended");
         assert!(after2.contains("func _on_area_entered(area):\n\tpass"));
 
         // Multiple parameters are comma-separated.

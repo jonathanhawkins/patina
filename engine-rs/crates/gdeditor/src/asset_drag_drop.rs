@@ -1042,7 +1042,9 @@ mod tests {
             property_name: "texture".into(),
         });
         assert!(dd.can_drop());
-        let done = dd.drop().expect("texture -> texture property should be valid");
+        let done = dd
+            .drop()
+            .expect("texture -> texture property should be valid");
         assert_eq!(done.action, DropAction::AssignProperty);
         assert_eq!(done.res_path, "res://icon.png");
 

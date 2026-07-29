@@ -10,7 +10,11 @@ use gdobject::RefCountedBase;
 
 #[test]
 fn refcounted_reference_lifecycle_test() {
-    // Isolate the thread-local alive registry from any other test in the binary.
+    // Isolate the alive registry from any other test in the binary. The registry
+    // is PROCESS-global as of pat-0q2kx.163 (it was thread-local), so this clear
+    // is no longer scoped to the calling thread — it is safe here only because
+    // this binary holds exactly one test. Adding a second test to this file that
+    // registers objects would make the two race.
     weak_ref::clear_alive_registry();
 
     // A fresh RefCounted starts with exactly one reference (`RefCounted.new()`).

@@ -1618,7 +1618,13 @@ impl Viewport3D {
 ///
 /// The axis line passes through `line_origin` in direction `line_dir`.
 /// Returns the signed distance along the axis direction from `line_origin`.
-fn ray_closest_to_line(ray: &Ray3D, line_origin: Vector3, line_dir: Vector3) -> f32 {
+///
+/// `pub(crate)` since pat-s3rrv.10: the node-gizmo handle drag needs the same
+/// ray-vs-axis solve the transform gizmo uses. Godot's `box_set_handle` takes
+/// the point on the handle's axis closest to the mouse ray
+/// (`get_closest_points_between_segments`), so re-deriving it in the server
+/// would be a second copy of this formula that could drift from this one.
+pub(crate) fn ray_closest_to_line(ray: &Ray3D, line_origin: Vector3, line_dir: Vector3) -> f32 {
     // We want the closest point between two lines:
     //   P = ray.origin + s * ray.direction
     //   Q = line_origin + t * line_dir

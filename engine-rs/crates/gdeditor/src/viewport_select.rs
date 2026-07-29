@@ -263,7 +263,10 @@ mod tests {
 
         // Toggle-clicking the same node again removes it.
         sel.click(&items, 15.0, 15.0, ClickModifier::Toggle);
-        assert!(!sel.is_selected(b), "toggle-click removes an already-selected node");
+        assert!(
+            !sel.is_selected(b),
+            "toggle-click removes an already-selected node"
+        );
         assert!(sel.is_selected(c));
 
         // Clicking empty space clears the selection.

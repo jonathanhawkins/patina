@@ -169,7 +169,9 @@ impl MultiDocModel {
 
     /// The index of the open document with the given path, if one is open.
     pub fn index_of_path(&self, path: &str) -> Option<usize> {
-        self.docs.iter().position(|d| d.path.as_deref() == Some(path))
+        self.docs
+            .iter()
+            .position(|d| d.path.as_deref() == Some(path))
     }
 
     /// Opens `doc`, focusing it and returning its index.
@@ -338,7 +340,11 @@ mod tests {
         let a_again = docs.open(scene("Main", Some("res://main.tscn")));
         assert_eq!(a_again, a, "re-open returns the existing index");
         assert_eq!(docs.len(), 3, "no duplicate tab created");
-        assert_eq!(docs.active_index(), Some(a), "re-open focuses the existing doc");
+        assert_eq!(
+            docs.active_index(),
+            Some(a),
+            "re-open focuses the existing doc"
+        );
 
         // Switching changes the active tab; an out-of-range switch is rejected.
         assert!(docs.switch_to(b));
@@ -392,9 +398,17 @@ mod tests {
         // New Scene adds an empty active document + tab.
         let i = docs.new_scene();
         assert_eq!(docs.len(), 1, "a new tab was added");
-        assert_eq!(docs.active_index(), Some(i), "the new scene is the active tab");
+        assert_eq!(
+            docs.active_index(),
+            Some(i),
+            "the new scene is the active tab"
+        );
         let doc = docs.active().expect("active document present");
-        assert_eq!(doc.kind, DocumentKind::Scene, "New Scene creates a scene document");
+        assert_eq!(
+            doc.kind,
+            DocumentKind::Scene,
+            "New Scene creates a scene document"
+        );
         assert_eq!(doc.path, None, "an empty new scene is unsaved (no path)");
         assert!(!doc.dirty, "a freshly created scene starts clean");
         assert!(
@@ -407,8 +421,16 @@ mod tests {
         let j = docs.new_scene();
         assert_ne!(i, j, "each New Scene is a distinct tab");
         assert_eq!(docs.len(), 2, "each New Scene adds its own tab");
-        assert_eq!(docs.active_index(), Some(j), "the latest new scene is active");
-        assert_eq!(docs.get(j).unwrap().path, None, "the second new scene is also empty");
+        assert_eq!(
+            docs.active_index(),
+            Some(j),
+            "the latest new scene is active"
+        );
+        assert_eq!(
+            docs.get(j).unwrap().path,
+            None,
+            "the second new scene is also empty"
+        );
         // Distinct untitled scenes get distinct titles.
         assert_ne!(
             docs.get(i).unwrap().title,
@@ -426,8 +448,16 @@ mod tests {
         let before = docs.len();
         let k = docs.new_scene();
         assert_eq!(docs.len(), before + 1, "New Scene opens a brand-new tab");
-        assert_eq!(docs.active_index(), Some(k), "the new empty scene is active");
-        assert_eq!(docs.active().unwrap().path, None, "the new scene is empty (unsaved)");
+        assert_eq!(
+            docs.active_index(),
+            Some(k),
+            "the new empty scene is active"
+        );
+        assert_eq!(
+            docs.active().unwrap().path,
+            None,
+            "the new scene is empty (unsaved)"
+        );
     }
 
     /// Acceptance (pat-w1ub4.4): switching tabs swaps the active document's
@@ -454,7 +484,10 @@ mod tests {
         let b = docs.open(scene("Level", Some("res://level.tscn")));
         {
             let st = docs.active_state().expect("B is active");
-            assert!(st.selection.is_empty(), "a new document starts with no selection");
+            assert!(
+                st.selection.is_empty(),
+                "a new document starts with no selection"
+            );
             assert_eq!(
                 st.viewport,
                 ViewportState::default(),
@@ -474,23 +507,39 @@ mod tests {
 
         // Switching to A swaps the active tree and restores A's state.
         assert!(docs.switch_to(a));
-        assert_eq!(docs.active().unwrap().title, "Main", "active tree is scene A");
+        assert_eq!(
+            docs.active().unwrap().title,
+            "Main",
+            "active tree is scene A"
+        );
         let sa = docs.active_state().unwrap();
         assert_eq!(sa.selection, vec![10, 11], "A's selection is restored");
         assert_eq!(
             sa.viewport,
-            ViewportState { pan_x: 100.0, pan_y: 50.0, zoom: 2.0 },
+            ViewportState {
+                pan_x: 100.0,
+                pan_y: 50.0,
+                zoom: 2.0
+            },
             "A's viewport framing is restored"
         );
 
         // Switching to B swaps to B's tree and its own selection + viewport.
         assert!(docs.switch_to(b));
-        assert_eq!(docs.active().unwrap().title, "Level", "active tree is scene B");
+        assert_eq!(
+            docs.active().unwrap().title,
+            "Level",
+            "active tree is scene B"
+        );
         let sb = docs.active_state().unwrap();
         assert_eq!(sb.selection, vec![42], "B's selection is restored");
         assert_eq!(
             sb.viewport,
-            ViewportState { pan_x: -20.0, pan_y: 0.0, zoom: 0.5 },
+            ViewportState {
+                pan_x: -20.0,
+                pan_y: 0.0,
+                zoom: 0.5
+            },
             "B's viewport framing is restored"
         );
 
@@ -532,12 +581,18 @@ mod tests {
         // Cancel keeps it open and still dirty.
         assert!(!docs.resolve_close(idx, SavePromptChoice::Cancel));
         assert_eq!(docs.len(), 1);
-        assert!(docs.get(idx).unwrap().dirty, "cancel leaves the edits unsaved");
+        assert!(
+            docs.get(idx).unwrap().dirty,
+            "cancel leaves the edits unsaved"
+        );
 
         // Save clears the dirty flag and closes it — the last close leaves an
         // empty editor.
         assert!(docs.resolve_close(idx, SavePromptChoice::Save));
-        assert!(docs.is_empty(), "closing the last document leaves an empty editor");
+        assert!(
+            docs.is_empty(),
+            "closing the last document leaves an empty editor"
+        );
         assert_eq!(docs.active_index(), None);
 
         // Discard closes a dirty document without saving; the editor is empty
@@ -546,7 +601,10 @@ mod tests {
         docs.set_dirty(c, true);
         assert_eq!(docs.request_close(c), CloseOutcome::NeedsSavePrompt);
         assert!(docs.resolve_close(c, SavePromptChoice::Discard));
-        assert!(docs.is_empty(), "discard-closing the last document empties the editor");
+        assert!(
+            docs.is_empty(),
+            "discard-closing the last document empties the editor"
+        );
         assert_eq!(docs.active_index(), None);
 
         // Requesting close of an out-of-range index is a harmless no-op.

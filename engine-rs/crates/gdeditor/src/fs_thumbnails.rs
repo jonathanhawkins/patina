@@ -178,7 +178,10 @@ mod tests {
             .thumbnail("icon.png", FileKind::Texture, b"\x89PNG-v2-edited", 2)
             .unwrap();
         assert_eq!(refreshed.source_version, 2);
-        assert_ne!(refreshed.signature, tex_sig_v1, "edit refreshes the thumbnail");
+        assert_ne!(
+            refreshed.signature, tex_sig_v1,
+            "edit refreshes the thumbnail"
+        );
         assert_eq!(cache.generation_count(), 3);
 
         // The dock reads the refreshed thumbnail back.

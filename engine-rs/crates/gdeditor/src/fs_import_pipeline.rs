@@ -94,11 +94,7 @@ impl ImportPipeline {
 
     /// Reads a per-asset import setting.
     pub fn setting(&self, path: &str, key: &str) -> Option<&str> {
-        self.assets
-            .get(path)?
-            .settings
-            .get(key)
-            .map(String::as_str)
+        self.assets.get(path)?.settings.get(key).map(String::as_str)
     }
 
     /// Edits a per-asset import setting, marking the asset stale (a settings
@@ -189,7 +185,10 @@ mod tests {
         // Processing stale imports imports it; the dock now shows Imported.
         assert_eq!(pipe.process_stale(), 1);
         assert_eq!(pipe.status("art/hero.png"), Some(ImportStatus::Imported));
-        assert_eq!(pipe.asset("art/hero.png").unwrap().imported_version, Some(1));
+        assert_eq!(
+            pipe.asset("art/hero.png").unwrap().imported_version,
+            Some(1)
+        );
         assert_eq!(pipe.reimport_count(), 1);
         assert!(!pipe.is_stale("art/hero.png"));
 
@@ -212,7 +211,10 @@ mod tests {
         // After processing, it's imported at the new version.
         assert_eq!(pipe.process_stale(), 1);
         assert_eq!(pipe.status("art/hero.png"), Some(ImportStatus::Imported));
-        assert_eq!(pipe.asset("art/hero.png").unwrap().imported_version, Some(2));
+        assert_eq!(
+            pipe.asset("art/hero.png").unwrap().imported_version,
+            Some(2)
+        );
         assert_eq!(pipe.reimport_count(), 3);
 
         // A no-op source change (same version already imported) is not stale.

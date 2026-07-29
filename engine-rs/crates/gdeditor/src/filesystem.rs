@@ -157,15 +157,82 @@ impl EditorFileSystem {
         self.uid_map.len()
     }
 
-    /// Lists the immediate children of a `res://` directory.
+    /// Lists the immediate children of a `res://` directory (pat-0q2kx.167).
     ///
-    /// Stub that satisfies the asset-browser API surface used by the editor
-    /// integration test file. The full implementation (sort order, hidden /
-    /// ignored filtering, error mapping) belongs to the asset-browser bead;
-    /// this entry point exists so the test target compiles for adjacent
-    /// beads (e.g. `viewport_frame_stream`).
-    pub fn list_dir(&self, _res_path: &str) -> EngineResult<Vec<DirChild>> {
-        Ok(Vec::new())
+    /// This is what a script walks: `EditorFileSystem.get_filesystem()` hands
+    /// back a directory and the script descends it with `get_subdir` /
+    /// `get_file_count` / `get_file_path`
+    /// (`upstream/godot/editor/file_system/editor_file_system.cpp`).
+    ///
+    /// ⚠️ This returned `Ok(Vec::new())` unconditionally, ignoring its own
+    /// argument. Every caller therefore saw a project with no files in it and
+    /// no error — the asset browser rendered empty and a directory walk
+    /// terminated immediately, which looks like "the project is empty" rather
+    /// than like a missing implementation.
+    ///
+    /// Ordering and filtering follow Godot's dock:
+    ///
+    /// * directories first, then files, each alphabetically — Godot groups
+    ///   folders above files rather than interleaving them;
+    /// * dot-entries are skipped, matching [`scan_dir`](Self::scan_dir), so
+    ///   `.godot/` and `.import/` do not appear as project content. Skipping
+    ///   them here and not there (or vice versa) would make `list_dir` and
+    ///   [`files`](Self::files) disagree about what the project contains.
+    ///
+    /// A path that is missing, or is a file rather than a directory, is an
+    /// error rather than an empty list: "no children" and "not a directory"
+    /// are different answers, and collapsing them is what made the stub
+    /// invisible.
+    pub fn list_dir(&self, res_path: &str) -> EngineResult<Vec<DirChild>> {
+        let dir = self.resolve_res_path(res_path).ok_or_else(|| {
+            EngineError::InvalidOperation(format!(
+                "list_dir expects a res:// path, got '{res_path}'"
+            ))
+        })?;
+        if !dir.is_dir() {
+            return Err(EngineError::InvalidOperation(format!(
+                "'{res_path}' is not a directory"
+            )));
+        }
+
+        let mut children = Vec::new();
+        for entry in std::fs::read_dir(&dir).map_err(EngineError::Io)? {
+            let entry = entry.map_err(EngineError::Io)?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                // A non-UTF-8 name has no `res://` spelling, so a script could
+                // not address it anyway.
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            let is_directory = path.is_dir();
+            let icon = if is_directory {
+                FileIcon::Directory
+            } else {
+                FileIcon::from_extension(path.extension().and_then(|e| e.to_str()).unwrap_or(""))
+            };
+            let Some(child_res_path) = self.to_res_path(&path) else {
+                continue;
+            };
+            children.push(DirChild {
+                name: name.to_string(),
+                is_directory,
+                icon,
+                res_path: child_res_path,
+            });
+        }
+
+        // `read_dir` order is filesystem-defined and differs between machines,
+        // so sort explicitly — otherwise the dock's row order (and any test
+        // asserting it) is non-deterministic.
+        children.sort_by(|a, b| {
+            b.is_directory
+                .cmp(&a.is_directory)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(children)
     }
 }
 
@@ -827,6 +894,142 @@ mod tests {
         assert!(count >= 4); // project.godot, 2 tscn, icon.png
     }
 
+    // -- list_dir (pat-0q2kx.167) -------------------------------------------
+    //
+    // The directory walk a `@tool` script performs through
+    // `EditorFileSystem.get_filesystem()`. `list_dir` previously returned an
+    // empty Vec for every input, so the walk terminated at the root and the
+    // project looked empty rather than unimplemented.
+
+    /// The root lists its immediate children — and ONLY its immediate
+    /// children. A recursive result would make a script's own descent
+    /// re-visit everything it already saw.
+    #[test]
+    fn list_dir_returns_immediate_children_only() {
+        let (_dir, fs) = make_project();
+        let children = fs.list_dir("res://").expect("root is a directory");
+
+        let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"scenes"), "got {names:?}");
+        assert!(names.contains(&"icon.png"), "got {names:?}");
+        assert!(
+            !names.contains(&"main.tscn"),
+            "main.tscn is nested inside scenes/ and must not appear at the root: {names:?}"
+        );
+    }
+
+    /// ⚠️ The regression this exists to catch: an empty result is what the
+    /// stub returned, and it is indistinguishable from an empty project
+    /// unless something asserts real content came back.
+    #[test]
+    fn list_dir_is_not_empty_for_a_populated_project() {
+        let (_dir, fs) = make_project();
+        assert!(
+            !fs.list_dir("res://").unwrap().is_empty(),
+            "a project with files must not list as empty"
+        );
+    }
+
+    /// Godot's dock groups folders above files; `read_dir` order is
+    /// filesystem-defined, so this must be explicit or row order varies by
+    /// machine.
+    #[test]
+    fn list_dir_sorts_directories_first_then_alphabetically() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("zeta")).unwrap();
+        std::fs::create_dir_all(dir.path().join("alpha")).unwrap();
+        std::fs::write(dir.path().join("b.gd"), "").unwrap();
+        std::fs::write(dir.path().join("a.gd"), "").unwrap();
+        let fs = EditorFileSystem::new(dir.path());
+
+        let names: Vec<String> = fs
+            .list_dir("res://")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, vec!["alpha", "zeta", "a.gd", "b.gd"]);
+    }
+
+    /// Dot-entries are skipped, and skipped the SAME way `scan` skips them —
+    /// otherwise `list_dir` and `files()` disagree about the project's
+    /// contents.
+    #[test]
+    fn list_dir_skips_dot_entries_like_scan_does() {
+        let (dir, mut fs) = make_project();
+        std::fs::create_dir_all(dir.path().join(".godot")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "").unwrap();
+
+        let names: Vec<String> = fs
+            .list_dir("res://")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert!(!names.iter().any(|n| n.starts_with('.')), "got {names:?}");
+
+        fs.scan().unwrap();
+        assert!(
+            !fs.files().iter().any(|p| p.starts_with(".godot")),
+            "scan must agree with list_dir about dot-entries"
+        );
+    }
+
+    /// Children carry a usable `res://` path and a type-derived icon — the two
+    /// fields a script and the dock actually consume.
+    #[test]
+    fn list_dir_children_carry_res_paths_and_icons() {
+        let (_dir, fs) = make_project();
+        let children = fs.list_dir("res://").unwrap();
+
+        let scenes = children.iter().find(|c| c.name == "scenes").unwrap();
+        assert!(scenes.is_directory);
+        assert_eq!(scenes.icon, FileIcon::Directory);
+        assert_eq!(scenes.res_path, "res://scenes");
+
+        let icon = children.iter().find(|c| c.name == "icon.png").unwrap();
+        assert!(!icon.is_directory);
+        assert_eq!(icon.icon, FileIcon::Texture);
+        assert_eq!(icon.res_path, "res://icon.png");
+
+        // And that res:// path round-trips back into a listable directory.
+        let nested: Vec<String> = fs
+            .list_dir(&scenes.res_path)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(nested, vec!["main.tscn", "player.tscn"]);
+    }
+
+    /// "Not a directory" and "no children" are different answers; the stub
+    /// collapsed both into an empty Vec, which is why it went unnoticed.
+    #[test]
+    fn list_dir_errors_on_a_file_or_a_missing_path() {
+        let (_dir, fs) = make_project();
+        assert!(
+            fs.list_dir("res://icon.png").is_err(),
+            "a file is not a directory"
+        );
+        assert!(
+            fs.list_dir("res://nope/").is_err(),
+            "missing path must error"
+        );
+        assert!(
+            fs.list_dir("/etc").is_err(),
+            "a non-res:// path has no project-relative meaning"
+        );
+    }
+
+    /// An empty directory lists empty *successfully* — the one case where an
+    /// empty Vec is the right answer.
+    #[test]
+    fn list_dir_on_an_empty_directory_succeeds_with_no_children() {
+        let (dir, fs) = make_project();
+        std::fs::create_dir_all(dir.path().join("empty")).unwrap();
+        assert!(fs.list_dir("res://empty").unwrap().is_empty());
+    }
+
     #[test]
     fn files_by_extension() {
         let (_dir, mut fs) = make_project();
@@ -1189,7 +1392,10 @@ mod tests {
         let mut pruned = FileSystemDock::new(EditorFileSystem::new(dir.path()));
         pruned.refresh().unwrap();
         assert!(pruned.is_favorite("res://scenes"));
-        assert!(!pruned.is_favorite("res://gone_dir"), "dead favorite pruned");
+        assert!(
+            !pruned.is_favorite("res://gone_dir"),
+            "dead favorite pruned"
+        );
         let rewritten = std::fs::read_to_string(&fav_file).unwrap();
         assert!(!rewritten.contains("gone_dir"), "prune rewrites the file");
     }
@@ -1212,8 +1418,15 @@ mod tests {
 
         // Land on a split mode and confirm it's on disk.
         dock.cycle_display_mode(); // -> VSplit
-        let mode_file = dir.path().join(".godot").join("editor").join("fs_display_mode");
-        assert_eq!(std::fs::read_to_string(&mode_file).unwrap().trim(), "vsplit");
+        let mode_file = dir
+            .path()
+            .join(".godot")
+            .join("editor")
+            .join("fs_display_mode");
+        assert_eq!(
+            std::fs::read_to_string(&mode_file).unwrap().trim(),
+            "vsplit"
+        );
 
         // A fresh dock at the same root reloads the persisted mode.
         let mut reloaded = FileSystemDock::new(EditorFileSystem::new(dir.path()));
@@ -1260,11 +1473,23 @@ mod tests {
             .unwrap();
         assert!(dock.select(dir_idx));
         let da = dock.context_menu_actions();
-        for expected in [Open, CopyPath, CopyAbsolutePath, Rename, Duplicate, Delete, ShowInFileManager, New] {
+        for expected in [
+            Open,
+            CopyPath,
+            CopyAbsolutePath,
+            Rename,
+            Duplicate,
+            Delete,
+            ShowInFileManager,
+            New,
+        ] {
             assert!(da.contains(&expected), "folder menu missing {expected:?}");
         }
         for absent in [EditDependencies, ViewOwners, CopyUid] {
-            assert!(!da.contains(&absent), "folder menu should not have {absent:?}");
+            assert!(
+                !da.contains(&absent),
+                "folder menu should not have {absent:?}"
+            );
         }
         // Directory entries carry a trailing slash in their res_path.
         assert_eq!(dock.context_action_target(), Some("res://scenes/"));

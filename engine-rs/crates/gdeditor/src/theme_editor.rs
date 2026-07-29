@@ -1366,7 +1366,10 @@ mod tests {
             tres.contains("Button/constants/h_separation = 8"),
             "got:\n{tres}"
         );
-        assert!(tres.contains("Label/font_sizes/font_size = 16"), "got:\n{tres}");
+        assert!(
+            tres.contains("Label/font_sizes/font_size = 16"),
+            "got:\n{tres}"
+        );
         // It must be INI/tres, not the JSON that serde derives on the struct.
         assert!(!tres.contains('{'), "must not be JSON: {tres}");
     }
@@ -1396,7 +1399,10 @@ mod tests {
             Color::new(0.25, 0.5, 0.75, 1.0)
         );
         assert!(
-            matches!(loaded.get_item("Button", "icon_modulate"), Some(ThemeItem::IconColor(_))),
+            matches!(
+                loaded.get_item("Button", "icon_modulate"),
+                Some(ThemeItem::IconColor(_))
+            ),
             "icon color keeps its distinct variant across the round trip"
         );
         assert_eq!(loaded.resolve_constant("Label", "outline_size", 0), -3);

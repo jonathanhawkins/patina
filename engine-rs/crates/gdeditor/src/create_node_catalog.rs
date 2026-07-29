@@ -67,8 +67,7 @@ mod tests {
         // Every core 2D node is registered and instantiates as itself.
         for name in CORE_2D_NODES {
             assert!(class_db::class_exists(name), "{name} is registered");
-            let obj = class_db::instantiate(name)
-                .unwrap_or_else(|| panic!("{name} instantiates"));
+            let obj = class_db::instantiate(name).unwrap_or_else(|| panic!("{name} instantiates"));
             assert_eq!(obj.get_class(), *name, "{name} instantiates as itself");
         }
 

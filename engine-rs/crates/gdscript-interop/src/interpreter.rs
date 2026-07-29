@@ -163,6 +163,38 @@ fn load_text_resource(path: &str) -> Option<ResourceRef> {
     })
 }
 
+/// Loads a resource through the engine-wide format loaders
+/// (`gdresource::importers::UnifiedLoader`) so a script's `load()` sees the
+/// same bytes the editor and the renderer do: `.import` sidecars are followed
+/// to their compiled `.godot/imported/*.ctex` artifact and the registered
+/// decoder fills in the real properties (pat-s3rrv.4).
+///
+/// Before this, `load("res://icon.png")` guessed `Texture2D` from the
+/// extension and handed back an EMPTY property map, so `width`/`height`/
+/// `pixels` were all Nil and an imported project whose source PNG had been
+/// removed resolved to nothing at all.
+///
+/// Returns `None` when no loader claims the extension or the file fails to
+/// decode, leaving the caller on its extension-guess placeholder so
+/// unregistered types do not regress.
+fn load_via_format_loaders(path: &str) -> Option<ResourceRef> {
+    // `UnifiedLoader` resolves `res://` itself, and falls back to a
+    // root-relative path the same way `resource_fs_path` does when no project
+    // root is configured.
+    let root = gdcore::file_access::project_root().unwrap_or_default();
+    let resource = gdresource::importers::UnifiedLoader::new(root)
+        .load(path)
+        .ok()?;
+    Some(ResourceRef {
+        path: path.to_string(),
+        class_name: resource.class_name.clone(),
+        properties: resource
+            .properties()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    })
+}
+
 /// Source location for error reporting.
 #[derive(Debug, Clone)]
 pub struct SourceLocation {
@@ -515,6 +547,10 @@ pub struct FuncDef {
     pub defaults: Vec<Option<Expr>>,
     /// Function body statements.
     pub body: Vec<Stmt>,
+    /// Source line each statement in `body` starts on, index-aligned with it
+    /// (pat-0q2kx.253). Empty when the function was built without line info,
+    /// in which case frames report line 0 exactly as they did before.
+    pub body_lines: Vec<usize>,
     /// Whether this is a static function.
     pub is_static: bool,
     /// Annotations declared on the function, e.g. `@rpc("any_peer", ...)`.
@@ -528,15 +564,22 @@ pub struct FuncDef {
 
 impl FuncDef {
     /// Constructs a `FuncDef` from parsed [`FuncParam`]s.
+    ///
+    /// Carries no line table, so frames built from it report line 0 — the
+    /// pre-pat-0q2kx.253 behaviour. Callers that have the parser's
+    /// `body_lines` should use [`from_params_annotated`](Self::from_params_annotated).
     pub fn from_params(params: &[FuncParam], body: &[Stmt], is_static: bool) -> Self {
-        Self::from_params_annotated(params, body, is_static, &[])
+        Self::from_params_annotated(params, body, &[], is_static, &[])
     }
 
     /// [`from_params`](Self::from_params) that also keeps the function's
-    /// annotations.
+    /// annotations and its per-statement source lines.
+    ///
+    /// `body_lines` is index-aligned with `body`; pass `&[]` when unknown.
     pub fn from_params_annotated(
         params: &[FuncParam],
         body: &[Stmt],
+        body_lines: &[usize],
         is_static: bool,
         annotations: &[Annotation],
     ) -> Self {
@@ -544,6 +587,7 @@ impl FuncDef {
             params: params.iter().map(|p| p.name.clone()).collect(),
             defaults: params.iter().map(|p| p.default.clone()).collect(),
             body: body.to_vec(),
+            body_lines: body_lines.to_vec(),
             is_static,
             annotations: annotations.to_vec(),
         }
@@ -947,13 +991,20 @@ impl Interpreter {
                 name,
                 params,
                 body,
+                body_lines,
                 is_static,
                 annotations,
                 ..
             } => {
                 self.function_registry.insert(
                     name.clone(),
-                    FuncDef::from_params_annotated(params, body, *is_static, annotations),
+                    FuncDef::from_params_annotated(
+                        params,
+                        body,
+                        body_lines,
+                        *is_static,
+                        annotations,
+                    ),
                 );
                 Ok(None)
             }
@@ -1671,6 +1722,24 @@ impl Interpreter {
                 self.write_place(object, container)
             }
             Expr::MemberAccess { object, member } => {
+                // `multiplayer.multiplayer_peer = peer` (pat-s3rrv.16) — the
+                // canonical Godot opener. Checked here for the same reason as
+                // `Engine` below: `multiplayer` is not a variable, so the value
+                // paths would fail to evaluate it and the assignment would be
+                // silently lost. Godot's `MultiplayerAPI` adopts the peer, which
+                // is what starts the per-frame poll driving it.
+                if matches!(object.as_ref(), Expr::Ident(n) if n == "multiplayer")
+                    && member == "multiplayer_peer"
+                {
+                    let handle = match &rhs {
+                        Variant::ObjectId(oid) => oid.raw(),
+                        _ => 0,
+                    };
+                    if let Some(access) = self.scene_access.as_mut() {
+                        access.multiplayer_set_peer(handle);
+                    }
+                    return Ok(());
+                }
                 // `Engine.time_scale = 0.5` (pat-0q2kx.121). Checked before the
                 // value paths below because `Engine` is not a variable: those
                 // paths would fail to evaluate it and the write would be lost.
@@ -2048,19 +2117,34 @@ impl Interpreter {
     /// (pat-0q2kx.253).
     fn capture_script_backtraces(&mut self, args: &[Variant]) -> Result<Variant, RuntimeError> {
         let include_variables = matches!(args.first(), Some(Variant::Bool(true)));
+        // Where execution actually is, for the innermost frame (pat-0q2kx.253).
+        //
+        // A frame's `source_location` is snapshotted in `call_user_func_impl`
+        // when the frame is *pushed* and never updated, so it holds the line of
+        // the CALL SITE in that function's caller. For every outer frame that is
+        // exactly right — a caller's current line is the call it is sitting on.
+        // For the innermost frame it is not: that function has run on past its
+        // entry, and Godot reports the line it is executing now. `current_line`
+        // is that line, maintained per statement by the function-body loops.
+        let innermost_line = self.current_line as i64;
+        let depth = self.call_stack_frames.len();
         let frames: Vec<crate::script_backtrace::BacktraceFrame> = self
             .call_stack_frames
             .iter()
-            .map(|f| crate::script_backtrace::BacktraceFrame {
+            .enumerate()
+            .map(|(i, f)| crate::script_backtrace::BacktraceFrame {
                 function: f.function_name.clone(),
                 // `SourceLocation` carries line and column but no file, so this
                 // is empty until a script path is threaded through.
                 file: String::new(),
-                line: f
-                    .source_location
-                    .as_ref()
-                    .map(|l| l.line as i64)
-                    .unwrap_or(0),
+                line: if i + 1 == depth {
+                    innermost_line
+                } else {
+                    f.source_location
+                        .as_ref()
+                        .map(|l| l.line as i64)
+                        .unwrap_or(0)
+                },
                 // `include_variables` is accepted but yields nothing: honestly
                 // populating these needs the per-frame environment scope chain,
                 // which `call_stack_frames` does not record. An empty list is
@@ -2763,6 +2847,8 @@ impl Interpreter {
                         Variant::Float(f) => Ok(Variant::Float(-f)),
                         Variant::Vector2(v) => Ok(Variant::Vector2(-v)),
                         Variant::Vector3(v) => Ok(Variant::Vector3(-v)),
+                        Variant::Vector2i(v) => Ok(Variant::Vector2i(-v)),
+                        Variant::Vector3i(v) => Ok(Variant::Vector3i(-v)),
                         _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                             "cannot negate {}",
                             val.variant_type()
@@ -2829,6 +2915,19 @@ impl Interpreter {
                             }
                             return self.call_self_func_or_native(member, &evaluated_args);
                         }
+                        // Static constructors on the builtin vector types —
+                        // `Vector2.from_angle(a)` (pat-s3rrv.9). These arrive as
+                        // a call on a TYPE NAME rather than on a value, so they
+                        // never reached `call_method_on` and were undefined.
+                        if let Expr::Ident(type_name) = object.as_ref() {
+                            if let Some(result) = crate::variant_math::vector_static_call(
+                                type_name,
+                                member,
+                                &evaluated_args,
+                            ) {
+                                return result;
+                            }
+                        }
                         // Handle Input singleton: Input.is_action_pressed(), etc.
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "Input") {
                             return self.call_input_method(member, &evaluated_args);
@@ -2847,6 +2946,11 @@ impl Interpreter {
                         // script can drive without nodes (pat-0q2kx.200).
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "PhysicsServer2D") {
                             return self.call_physics_server_2d_method(member, &evaluated_args);
+                        }
+                        // AudioServer singleton: the live mixer's buses, meters
+                        // and playback speed (pat-s3rrv.6).
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "AudioServer") {
+                            return self.call_audio_server_method(member, &evaluated_args);
                         }
                         // InputMap singleton: runtime rebinding (pat-0q2kx.89).
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "InputMap") {
@@ -2939,6 +3043,22 @@ impl Interpreter {
                         {
                             return call_editor_command_palette_static(member, &evaluated_args);
                         }
+                        // EditorPaths (pat-0q2kx.167) — the editor's data /
+                        // config / cache directories. ClassDB registration
+                        // describes the class; this is what makes a script's
+                        // `EditorPaths.get_cache_dir()` actually resolve.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "EditorPaths") {
+                            return call_editor_paths_static(member, &evaluated_args);
+                        }
+                        // EditorInterface (pat-0q2kx.167). The registered
+                        // EditorFileSystem/EditorFileSystemDirectory classes
+                        // described a surface no script could actually reach —
+                        // `EditorInterface` did not exist as a name at all, so
+                        // `EditorInterface.get_resource_filesystem()` failed
+                        // before any of the registration mattered.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "EditorInterface") {
+                            return call_editor_interface_static(member, &evaluated_args);
+                        }
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "CameraServer") {
                             return self.call_cameraserver(member, &evaluated_args);
                         }
@@ -2969,6 +3089,21 @@ impl Interpreter {
                                         gdresource::ConfigFile::new_handle(),
                                     ));
                                 }
+                                // `RefCounted.new()` (pat-0q2kx.163). The
+                                // counting semantics already existed in
+                                // gdobject; what was missing was any way for a
+                                // script to NAME an instance, so the whole
+                                // class was unreachable from GDScript.
+                                //
+                                // Godot's RefCounted is the base of Resource and
+                                // of every `extends RefCounted` script class, so
+                                // this arm is also what makes those constructible
+                                // as plain counted objects.
+                                if class_name == "RefCounted" {
+                                    return Ok(Variant::ObjectId(
+                                        gdobject::refcounted_handle::new_refcounted_handle(),
+                                    ));
+                                }
                                 // The RefCounted IO classes (pat-0q2kx.218).
                                 // Their engines all existed; only `.new()` and
                                 // the method dispatch were missing.
@@ -2989,6 +3124,23 @@ impl Interpreter {
                                 if class_name == "XMLParser" {
                                     return Ok(Variant::ObjectId(
                                         gdcore::xml_parser::XmlParser::new_handle(),
+                                    ));
+                                }
+                                // MultiplayerPeer transports (pat-s3rrv.16).
+                                // Godot's opener is `var p = X.new()` +
+                                // `p.create_server(port)` +
+                                // `multiplayer.multiplayer_peer = p`; the
+                                // transports were fully implemented in
+                                // `gdplatform` with no script path to any of
+                                // them.
+                                if class_name == "OfflineMultiplayerPeer" {
+                                    return Ok(Variant::ObjectId(
+                                        gdplatform::multiplayer_peer_handles::new_offline_multiplayer_peer_handle(),
+                                    ));
+                                }
+                                if class_name == "WebSocketMultiplayerPeer" {
+                                    return Ok(Variant::ObjectId(
+                                        gdplatform::multiplayer_peer_handles::new_ws_multiplayer_peer_handle(),
                                     ));
                                 }
                                 if class_name == "ZIPReader" {
@@ -3037,6 +3189,25 @@ impl Interpreter {
                                 }
                                 if class_name == "RandomNumberGenerator" {
                                     return Ok(Variant::ObjectId(new_rng_handle()));
+                                }
+                                // AStar2D/AStar3D/AStarGrid2D are RefCounted
+                                // (extension_api.json is_refcounted=true). The
+                                // pathfinder itself lives in `gdscene::astar`,
+                                // which this crate cannot name — gdscene depends
+                                // on gdscript-interop, not the reverse — so the
+                                // scene layer owns the instance and hands back a
+                                // tagged handle (pat-s3rrv.19).
+                                if matches!(
+                                    class_name.as_str(),
+                                    "AStar2D" | "AStar3D" | "AStarGrid2D"
+                                ) {
+                                    if let Some(access) = self.scene_access.as_mut() {
+                                        if let Some(raw) = access.astar_new(class_name.as_str()) {
+                                            return Ok(Variant::ObjectId(
+                                                gdcore::id::ObjectId::from_raw(raw),
+                                            ));
+                                        }
+                                    }
                                 }
                                 // RegEx is RefCounted — `RegEx.new().compile(p)`
                                 // is the standard idiom (pat-0q2kx.165). The
@@ -3156,9 +3327,35 @@ impl Interpreter {
                 }
                 // Handle static type member access (Vector2.ZERO, etc.)
                 if let Expr::Ident(type_name) = object.as_ref() {
+                    // A script's own `enum Name { … }` wins over the built-in
+                    // static tables and over @GlobalScope: it is the most
+                    // specific scope, exactly as Godot resolves an identifier
+                    // against the script's members first (pat-s3rrv.11).
+                    if let Some(v) = self.class_enum_member(type_name, member)? {
+                        return Ok(v);
+                    }
                     if let Some(v) = try_static_member(type_name, member) {
                         return Ok(v);
                     }
+                }
+                // `multiplayer.peer_connected` is a Signal value, not a property
+                // (pat-s3rrv.18). Resolved here because `multiplayer` is not a
+                // variable — `eval_expr` below would fail on the identifier, so
+                // the canonical `multiplayer.peer_connected.connect(_on_peer)`
+                // had no path at all. Bound to the object the per-frame drain
+                // actually emits on, so `.connect` lands where the emission is.
+                if matches!(object.as_ref(), Expr::Ident(n) if n == "multiplayer")
+                    && MULTIPLAYER_SIGNALS.contains(&member.as_str())
+                {
+                    let source = self
+                        .scene_access
+                        .as_ref()
+                        .map(|a| a.multiplayer_signal_object())
+                        .unwrap_or(0);
+                    return Ok(Variant::Signal {
+                        object_id: source,
+                        name: member.clone(),
+                    });
                 }
                 let obj = self.eval_expr(object)?;
                 // ObjectId property access via scene_access
@@ -3362,6 +3559,42 @@ impl Interpreter {
         }
     }
 
+    /// Resolves `EnumName.MEMBER` against the running script's own
+    /// `enum EnumName { … }` declarations (pat-s3rrv.11).
+    ///
+    /// `ClassDef::enums` was written at parse time and read by nothing, so the
+    /// standard GDScript state-machine idiom — `enum State { IDLE, RUN }` then
+    /// `State.IDLE` — fell through to the @GlobalScope enum resolver and died
+    /// with `UndefinedVariable`.
+    ///
+    /// Three outcomes, and the middle one is the point:
+    /// - not one of this script's enums → `Ok(None)`, caller falls through to
+    ///   the built-in static tables and then to ordinary identifier resolution;
+    /// - a known enum with a member it does not declare → **`Err`**. It must
+    ///   not fall through: `State` is also bound as a Dictionary constant, so a
+    ///   fall-through would read the missing key back as `Nil` and
+    ///   `State.WALK` would silently compare equal to nothing instead of
+    ///   failing. Godot rejects it outright, with this wording.
+    /// - a hit → the variant's integer.
+    ///
+    /// Reads `self_instance`, so it resolves in any function reached from a
+    /// method call — the enum stays visible inside a nested `call_user_func`,
+    /// which does not seed class members into scope of its own.
+    fn class_enum_member(&self, name: &str, member: &str) -> Result<Option<Variant>, RuntimeError> {
+        let Some(instance) = self.self_instance.as_ref() else {
+            return Ok(None);
+        };
+        let Some(variants) = instance.class_def.enums.get(name) else {
+            return Ok(None);
+        };
+        match variants.get(member) {
+            Some(value) => Ok(Some(Variant::Int(*value))),
+            None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "Cannot find member \"{member}\" in enum \"{name}\"."
+            )))),
+        }
+    }
+
     /// Set of built-in *value* type names understood by `is`/`as` (as opposed
     /// to native/script class names, which reference objects).
     fn is_builtin_type_name(type_name: &str) -> bool {
@@ -3414,7 +3647,13 @@ impl Interpreter {
             "Object" => matches!(v, Variant::ObjectId(_) | Variant::Resource(_)),
             other => {
                 if let Variant::Resource(r) = v {
+                    // Exact class, or any ancestor of it. The inheritance walk
+                    // is what makes `event is InputEvent` true for a concrete
+                    // `InputEventKey` (pat-s3rrv.14) — and `res is Resource`
+                    // true for any loaded resource — instead of only the leaf
+                    // name matching, which is not how Godot's `is` behaves.
                     r.class_name.as_str() == other
+                        || gdobject::class_db::is_parent_class(&r.class_name, other)
                 } else {
                     // Native/script class checks on live nodes aren't tracked
                     // as Variant types; fall back to a type-name string match.
@@ -3502,6 +3741,10 @@ impl Interpreter {
             (Variant::String(a), Variant::String(b)) => Ok(Variant::String(format!("{a}{b}"))),
             (Variant::Vector2(a), Variant::Vector2(b)) => Ok(Variant::Vector2(*a + *b)),
             (Variant::Vector3(a), Variant::Vector3(b)) => Ok(Variant::Vector3(*a + *b)),
+            // The int vectors stay integral rather than promoting to float —
+            // that is the whole point of a grid coordinate (pat-s3rrv.9).
+            (Variant::Vector2i(a), Variant::Vector2i(b)) => Ok(Variant::Vector2i(*a + *b)),
+            (Variant::Vector3i(a), Variant::Vector3i(b)) => Ok(Variant::Vector3i(*a + *b)),
             _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "cannot add {} and {}",
                 lhs.variant_type(),
@@ -3518,6 +3761,8 @@ impl Interpreter {
             (Variant::Float(a), Variant::Int(b)) => Ok(Variant::Float(a - *b as f64)),
             (Variant::Vector2(a), Variant::Vector2(b)) => Ok(Variant::Vector2(*a - *b)),
             (Variant::Vector3(a), Variant::Vector3(b)) => Ok(Variant::Vector3(*a - *b)),
+            (Variant::Vector2i(a), Variant::Vector2i(b)) => Ok(Variant::Vector2i(*a - *b)),
+            (Variant::Vector3i(a), Variant::Vector3i(b)) => Ok(Variant::Vector3i(*a - *b)),
             _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "cannot subtract {} from {}",
                 rhs.variant_type(),
@@ -4288,6 +4533,19 @@ impl Interpreter {
                         // path-only placeholder below.
                         if path.ends_with(".tres") || path.ends_with(".res") {
                             if let Some(loaded) = load_text_resource(path) {
+                                return Ok(Some(Variant::Resource(Box::new(loaded))));
+                            }
+                        }
+                        // Everything else goes through the registered format
+                        // loaders, which follow `.import` remaps and decode the
+                        // file, so `load("res://icon.png").width` is the
+                        // artifact's real extent rather than Nil (pat-s3rrv.4).
+                        //
+                        // Scenes stay on the placeholder path below: instancing
+                        // reads `PackedScene` back off the `class_name`, and the
+                        // tscn loader reports the root node's type instead.
+                        if !(path.ends_with(".tscn") || path.ends_with(".scn")) {
+                            if let Some(loaded) = load_via_format_loaders(path) {
                                 return Ok(Some(Variant::Resource(Box::new(loaded))));
                             }
                         }
@@ -5356,6 +5614,18 @@ impl Interpreter {
                 // (SceneAccess); a freed node reports invalid even though its id
                 // is non-nil. Non-object args keep the plain non-nil heuristic.
                 let valid = match &args[0] {
+                    // A script-created RefCounted is not in the scene tree, so
+                    // the SceneAccess route cannot answer for it — and the
+                    // no-scene fallback below says `true` unconditionally, which
+                    // would report a released object as still valid
+                    // (pat-0q2kx.163). Its liveness lives in the process-global
+                    // alive-objects registry instead, which is the same one
+                    // `WeakRef::get_ref` consults.
+                    Variant::ObjectId(oid)
+                        if gdobject::refcounted_handle::is_refcounted_handle(*oid) =>
+                    {
+                        gdobject::weak_ref::is_object_alive(*oid)
+                    }
                     Variant::ObjectId(oid) => match &self.scene_access {
                         Some(access) => access.is_object_alive(oid.raw()),
                         // No scene to consult -> assume the id is valid (legacy).
@@ -6227,8 +6497,15 @@ impl Interpreter {
 
         let mut return_val = Variant::Nil;
         let body = func.body.clone();
+        // Index-aligned with `body`; empty when the function was built without
+        // line info, in which case `current_line` keeps its previous value
+        // rather than being clobbered with 0 (pat-0q2kx.253).
+        let body_lines = func.body_lines.clone();
         let mut i = 0;
         while i < body.len() {
+            if let Some(&line) = body_lines.get(i) {
+                self.current_line = line;
+            }
             match self.exec_stmt(&body[i])? {
                 Some(ControlFlow::Return(v)) => {
                     return_val = v.unwrap_or(Variant::Nil);
@@ -7281,8 +7558,301 @@ impl Interpreter {
                     .map(|a| a.multiplayer_refuses_new_connections())
                     .unwrap_or(false),
             )),
+            // -- the rest of the SceneMultiplayer surface (pat-s3rrv.18) ----
+            // ClassDB advertised all of these; the interpreter answered
+            // `UndefinedFunction` for every one, so reflection promised a
+            // surface the runtime could not serve.
+            "disconnect_peer" => {
+                let id = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => 0,
+                };
+                Ok(Variant::Bool(
+                    self.scene_access
+                        .as_mut()
+                        .is_some_and(|a| a.multiplayer_disconnect_peer(id)),
+                ))
+            }
+            "clear" => {
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.multiplayer_clear();
+                }
+                Ok(Variant::Nil)
+            }
+            "set_auth_callback" => {
+                let cb = args.first().cloned().unwrap_or(Variant::Nil);
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.multiplayer_set_auth_callback(cb);
+                }
+                Ok(Variant::Nil)
+            }
+            "get_auth_callback" => Ok(self
+                .scene_access
+                .as_ref()
+                .map(|a| a.multiplayer_get_auth_callback())
+                .unwrap_or(Variant::Nil)),
+            "send_auth" => {
+                let id = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => 0,
+                };
+                let data = match args.get(1) {
+                    Some(Variant::PackedByteArray(b)) => b.clone(),
+                    Some(Variant::String(s)) => s.as_bytes().to_vec(),
+                    _ => Vec::new(),
+                };
+                Ok(Variant::Bool(
+                    self.scene_access
+                        .as_mut()
+                        .is_some_and(|a| a.multiplayer_send_auth(id, data)),
+                ))
+            }
+            // `multiplayer.set_multiplayer_peer(p)` — the method spelling of the
+            // property assignment below (pat-s3rrv.16). Godot exposes both.
+            "set_multiplayer_peer" => {
+                let handle = match args.first() {
+                    Some(Variant::ObjectId(oid)) => oid.raw(),
+                    _ => 0,
+                };
+                let ok = self
+                    .scene_access
+                    .as_mut()
+                    .is_some_and(|a| a.multiplayer_set_peer(handle));
+                let _ = ok;
+                Ok(Variant::Nil)
+            }
             other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                 format!("multiplayer.{other}"),
+            ))),
+        }
+    }
+
+    /// `AudioServer.*` — the global audio singleton (pat-s3rrv.6).
+    ///
+    /// Godot's `AudioServer` (`servers/audio/audio_server.cpp`) is how a game
+    /// reaches the mixer without nodes: ducking a bus from an options menu,
+    /// driving a VU meter, scaling playback speed. Patina's mixer already runs
+    /// every frame inside `MainLoop`'s `AudioServerBridge`; these arms address
+    /// that same live server through `SceneAccess` rather than standing up a
+    /// second one.
+    ///
+    /// Bus indices are signed in Godot and a bad index is ignored rather than
+    /// fatal, so out-of-range values fall through to the trait's "not bound"
+    /// answers instead of raising.
+    fn call_audio_server_method(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        let arity = |want: usize| -> Result<(), RuntimeError> {
+            if args.len() == want {
+                Ok(())
+            } else {
+                Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "AudioServer.{method}() takes {want} argument(s), got {}",
+                    args.len()
+                ))))
+            }
+        };
+        /// Bus indices arrive as `Int`; a `Float` is tolerated because
+        /// arithmetic on one yields a float (`get_bus_index("x") + 1`).
+        fn idx_arg(args: &[Variant], i: usize) -> i64 {
+            match args.get(i) {
+                Some(Variant::Int(v)) => *v,
+                Some(Variant::Float(f)) => *f as i64,
+                _ => -1,
+            }
+        }
+        /// Bus names are `String` in GDScript, but Godot's own signature takes a
+        /// `StringName`, so `&"Music"` is legal too. Anything else names no bus
+        /// and falls through to the "no such bus" answers.
+        fn str_arg(args: &[Variant], i: usize) -> String {
+            match args.get(i) {
+                Some(Variant::String(s)) => s.clone(),
+                Some(Variant::StringName(s)) => s.as_str().to_string(),
+                _ => String::new(),
+            }
+        }
+        fn bool_arg(args: &[Variant], i: usize) -> bool {
+            matches!(args.get(i), Some(Variant::Bool(true)))
+        }
+
+        match method {
+            // -- bus lookup ---------------------------------------------------
+            "get_bus_index" => {
+                arity(1)?;
+                let name = str_arg(args, 0);
+                Ok(Variant::Int(self.scene_access.as_ref().map_or(-1, |a| {
+                    a.audio_get_bus_index(&name)
+                })))
+            }
+            "get_bus_count" => {
+                arity(0)?;
+                Ok(Variant::Int(
+                    self.scene_access.as_ref().map_or(0, |a| a.audio_get_bus_count()),
+                ))
+            }
+            "get_bus_name" => {
+                arity(1)?;
+                let idx = idx_arg(args, 0);
+                Ok(self
+                    .scene_access
+                    .as_ref()
+                    .and_then(|a| a.audio_get_bus_name(idx))
+                    .map_or(Variant::String(String::new()), Variant::String))
+            }
+            "set_bus_name" => {
+                arity(2)?;
+                let idx = idx_arg(args, 0);
+                let name = str_arg(args, 1);
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_set_bus_name(idx, &name);
+                }
+                Ok(Variant::Nil)
+            }
+
+            // -- volume / routing ---------------------------------------------
+            "set_bus_volume_db" => {
+                arity(2)?;
+                let idx = idx_arg(args, 0);
+                let db = float_arg(args, 1) as f32;
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_set_bus_volume_db(idx, db);
+                }
+                Ok(Variant::Nil)
+            }
+            "get_bus_volume_db" => {
+                arity(1)?;
+                let idx = idx_arg(args, 0);
+                Ok(Variant::Float(
+                    self.scene_access
+                        .as_ref()
+                        .and_then(|a| a.audio_get_bus_volume_db(idx))
+                        .unwrap_or(0.0) as f64,
+                ))
+            }
+            "set_bus_mute" => {
+                arity(2)?;
+                let (idx, on) = (idx_arg(args, 0), bool_arg(args, 1));
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_set_bus_mute(idx, on);
+                }
+                Ok(Variant::Nil)
+            }
+            "is_bus_mute" => {
+                arity(1)?;
+                let idx = idx_arg(args, 0);
+                Ok(Variant::Bool(
+                    self.scene_access
+                        .as_ref()
+                        .is_some_and(|a| a.audio_is_bus_mute(idx)),
+                ))
+            }
+            "set_bus_solo" => {
+                arity(2)?;
+                let (idx, on) = (idx_arg(args, 0), bool_arg(args, 1));
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_set_bus_solo(idx, on);
+                }
+                Ok(Variant::Nil)
+            }
+            "is_bus_solo" => {
+                arity(1)?;
+                let idx = idx_arg(args, 0);
+                Ok(Variant::Bool(
+                    self.scene_access
+                        .as_ref()
+                        .is_some_and(|a| a.audio_is_bus_solo(idx)),
+                ))
+            }
+            "set_bus_bypass_effects" => {
+                arity(2)?;
+                let (idx, on) = (idx_arg(args, 0), bool_arg(args, 1));
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_set_bus_bypass_effects(idx, on);
+                }
+                Ok(Variant::Nil)
+            }
+            "is_bus_bypassing_effects" => {
+                arity(1)?;
+                let idx = idx_arg(args, 0);
+                Ok(Variant::Bool(
+                    self.scene_access
+                        .as_ref()
+                        .is_some_and(|a| a.audio_is_bus_bypassing_effects(idx)),
+                ))
+            }
+
+            // -- meters -------------------------------------------------------
+            "get_bus_peak_volume_left_db" => {
+                arity(2)?;
+                let (idx, ch) = (idx_arg(args, 0), idx_arg(args, 1));
+                Ok(Variant::Float(self.scene_access.as_ref().map_or(
+                    -200.0,
+                    |a| a.audio_get_bus_peak_volume_left_db(idx, ch),
+                ) as f64))
+            }
+            "get_bus_peak_volume_right_db" => {
+                arity(2)?;
+                let (idx, ch) = (idx_arg(args, 0), idx_arg(args, 1));
+                Ok(Variant::Float(self.scene_access.as_ref().map_or(
+                    -200.0,
+                    |a| a.audio_get_bus_peak_volume_right_db(idx, ch),
+                ) as f64))
+            }
+
+            // -- global playback ----------------------------------------------
+            "set_playback_speed_scale" => {
+                arity(1)?;
+                let scale = float_arg(args, 0) as f32;
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_set_playback_speed_scale(scale);
+                }
+                Ok(Variant::Nil)
+            }
+            "get_playback_speed_scale" => {
+                arity(0)?;
+                Ok(Variant::Float(
+                    self.scene_access
+                        .as_ref()
+                        .map_or(1.0, |a| a.audio_get_playback_speed_scale())
+                        as f64,
+                ))
+            }
+            "get_mix_rate" => {
+                arity(0)?;
+                Ok(Variant::Float(
+                    self.scene_access
+                        .as_ref()
+                        .map_or(44_100.0, |a| a.audio_get_mix_rate()) as f64,
+                ))
+            }
+
+            // -- bus layout ----------------------------------------------------
+            // Godot's `add_bus(at_position := -1)` has a default argument.
+            "add_bus" => {
+                if args.len() > 1 {
+                    arity(1)?;
+                }
+                let at = if args.is_empty() { -1 } else { idx_arg(args, 0) };
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_add_bus(at);
+                }
+                Ok(Variant::Nil)
+            }
+            "remove_bus" => {
+                arity(1)?;
+                let idx = idx_arg(args, 0);
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_remove_bus(idx);
+                }
+                Ok(Variant::Nil)
+            }
+
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("AudioServer.{other}"),
             ))),
         }
     }
@@ -7497,17 +8067,39 @@ impl Interpreter {
             if is_camera_feed_handle(*oid) {
                 return call_camera_feed_instance(*oid, method, args);
             }
+            if gdobject::refcounted_handle::is_refcounted_handle(*oid) {
+                return call_refcounted_instance(*oid, method, args);
+            }
+            if is_editor_fs_handle(*oid) {
+                return call_editor_fs_instance(*oid, method, args);
+            }
+            if is_editor_fs_dir_handle(*oid) {
+                return call_editor_fs_dir_instance(*oid, method, args);
+            }
             if is_image_handle(*oid) {
                 return call_image_instance(*oid, method, args);
             }
             if gdplatform::websocket_peer::is_websocket_peer_handle(*oid) {
                 return call_websocket_peer_instance(*oid, method, args);
             }
+            if gdplatform::multiplayer_peer_handles::is_multiplayer_peer_handle(*oid) {
+                return call_multiplayer_peer_instance(*oid, method, args);
+            }
             if is_stream_peer_handle(*oid) {
                 return call_stream_peer_instance(*oid, method, args);
             }
             if is_rng_handle(*oid) {
                 return call_rng_instance(*oid, method, args);
+            }
+            // AStar objects live in the scene layer (pat-s3rrv.19); forward on
+            // the handle tag. A `None` means the handle died, so fall through
+            // rather than swallowing the call.
+            if crate::bindings::is_astar_handle(oid.raw()) {
+                if let Some(access) = self.scene_access.as_mut() {
+                    if let Some(v) = access.astar_call(oid.raw(), method, args) {
+                        return Ok(v);
+                    }
+                }
             }
             if is_undo_redo_handle(*oid) {
                 // UndoRedo applies its recorded property writes through the
@@ -7584,6 +8176,14 @@ impl Interpreter {
             // swallow the call and set `playing` on a nonexistent node.
             if let Some(ref mut access) = self.scene_access {
                 if let Some(result) = access.tween_call(oid.raw(), method, args) {
+                    return Ok(result);
+                }
+                // `AnimationTree.get("parameters/playback")` hands back a
+                // playback object; its `stop`/`start`/`next` share names with
+                // the AnimationPlayer and AudioStreamPlayer arms below, so it
+                // must resolve first or `playback.stop()` would set `playing`
+                // on the AnimationTree node instead (pat-s3rrv.1).
+                if let Some(result) = access.animation_tree_playback_call(oid.raw(), method, args) {
                     return Ok(result);
                 }
             }
@@ -8000,6 +8600,96 @@ impl Interpreter {
                         ret = self.invoke_callable(&callable, &[ret, elem.clone()])?;
                     }
                     Ok(ret)
+                }
+                // find_custom / rfind_custom / bsearch_custom (pat-s3rrv.8).
+                // Godot's predicate-driven searches; the plain `find`/`rfind`/
+                // `bsearch` above compare by value, these call back into script.
+                "find_custom" => {
+                    Self::require_args_range("find_custom", args, 1, 2)?;
+                    let callable = extract_callable(&args[0])?;
+                    let from = if args.len() >= 2 {
+                        to_int(&args[1])?
+                    } else {
+                        0
+                    };
+                    // Godot bails on a negative start rather than clamping it —
+                    // `find_custom` has no from-the-end addressing, unlike
+                    // `rfind_custom` (core/variant/array.cpp `Array::find_custom`).
+                    if from < 0 || arr.is_empty() {
+                        return Ok(Variant::Int(-1));
+                    }
+                    for (i, elem) in arr.iter().enumerate().skip(from as usize) {
+                        if self
+                            .invoke_callable(&callable, &[elem.clone()])?
+                            .is_truthy()
+                        {
+                            return Ok(Variant::Int(i as i64));
+                        }
+                    }
+                    Ok(Variant::Int(-1))
+                }
+                "rfind_custom" => {
+                    Self::require_args_range("rfind_custom", args, 1, 2)?;
+                    let callable = extract_callable(&args[0])?;
+                    if arr.is_empty() {
+                        return Ok(Variant::Int(-1));
+                    }
+                    let len = arr.len() as i64;
+                    let mut from = if args.len() >= 2 {
+                        to_int(&args[1])?
+                    } else {
+                        -1
+                    };
+                    // A negative start is relative to the end; anything still
+                    // out of bounds falls back to the last element
+                    // (core/variant/array.cpp `Array::rfind_custom`).
+                    if from < 0 {
+                        from += len;
+                    }
+                    if from < 0 || from >= len {
+                        from = len - 1;
+                    }
+                    for i in (0..=from as usize).rev() {
+                        if self
+                            .invoke_callable(&callable, &[arr[i].clone()])?
+                            .is_truthy()
+                        {
+                            return Ok(Variant::Int(i as i64));
+                        }
+                    }
+                    Ok(Variant::Int(-1))
+                }
+                "bsearch_custom" => {
+                    Self::require_args_range("bsearch_custom", args, 2, 3)?;
+                    let callable = extract_callable(&args[1])?;
+                    // `before` picks which end of a run of equal elements the
+                    // insertion point lands on (SortArray::bisect); it also
+                    // decides the comparator's argument order.
+                    let before = !matches!(args.get(2), Some(Variant::Bool(false)));
+                    let (mut lo, mut hi) = (0usize, arr.len());
+                    while lo < hi {
+                        let mid = (lo + hi) / 2;
+                        if before {
+                            let less = self
+                                .invoke_callable(&callable, &[arr[mid].clone(), args[0].clone()])?
+                                .is_truthy();
+                            if less {
+                                lo = mid + 1;
+                            } else {
+                                hi = mid;
+                            }
+                        } else {
+                            let less = self
+                                .invoke_callable(&callable, &[args[0].clone(), arr[mid].clone()])?
+                                .is_truthy();
+                            if less {
+                                hi = mid;
+                            } else {
+                                lo = mid + 1;
+                            }
+                        }
+                    }
+                    Ok(Variant::Int(lo as i64))
                 }
                 "sort_custom" => {
                     Self::require_args("sort_custom", args, 1)?;
@@ -8539,6 +9229,53 @@ impl Interpreter {
                         ))),
                     }
                 }
+                // sort / recursive_equal (pat-s3rrv.8).
+                "sort" => {
+                    Self::require_args("sort", args, 0)?;
+                    // Godot sorts the entries in place, ascending by key
+                    // (core/variant/dictionary.cpp `Dictionary::sort`).
+                    let mut pairs: Vec<(Variant, Variant)> =
+                        d.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    pairs.sort_by(|a, b| variant_cmp(&a.0, &b.0));
+                    let mut sorted = gdvariant::Dictionary::with_capacity(pairs.len());
+                    for (k, v) in pairs {
+                        sorted.insert(k, v);
+                    }
+                    self.write_place(object_expr, Variant::Dictionary(sorted))?;
+                    Ok(Variant::Nil)
+                }
+                "recursive_equal" => {
+                    Self::require_args_range("recursive_equal", args, 1, 2)?;
+                    let Variant::Dictionary(other) = &args[0] else {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "recursive_equal() arg must be dictionary".into(),
+                        )));
+                    };
+                    // Godot returns `true` once the recursion budget is spent
+                    // rather than reporting inequality, so a self-referential
+                    // dictionary terminates instead of recursing forever
+                    // (dictionary.cpp:277; Variant::MAX_RECURSION_DEPTH = 1024).
+                    let depth = if args.len() >= 2 {
+                        to_int(&args[1])?
+                    } else {
+                        0
+                    };
+                    if depth > 1024 {
+                        return Ok(Variant::Bool(true));
+                    }
+                    if d.len() != other.len() {
+                        return Ok(Variant::Bool(false));
+                    }
+                    // Patina's `Variant: PartialEq` is already a deep structural
+                    // compare, so per-key equality is the recursive step.
+                    for (key, value) in d.iter() {
+                        match other.get(key.clone()) {
+                            Some(other_value) if other_value == value => {}
+                            _ => return Ok(Variant::Bool(false)),
+                        }
+                    }
+                    Ok(Variant::Bool(true))
+                }
                 "get" => {
                     if args.is_empty() || args.len() > 2 {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -8636,9 +9373,13 @@ impl Interpreter {
                         ))),
                     }
                 }
-                _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
-                    format!("Vector2.{method}"),
-                ))),
+                // The full Godot method surface — move_toward, rotated, slide,
+                // reflect, snapped, abs/floor/round, … — lives in
+                // `variant_math::vector_method` (pat-s3rrv.9). The eight arms
+                // above predate it and still win, so their behaviour is
+                // unchanged; everything else used to raise UndefinedFunction
+                // here and abort the running script.
+                _ => crate::variant_math::vector_method(&Variant::Vector2(*v), method, args),
             },
             Variant::Vector3(v) => match method {
                 "length" => Ok(Variant::Float(v.length() as f64)),
@@ -8699,10 +9440,16 @@ impl Interpreter {
                         ))),
                     }
                 }
-                _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
-                    format!("Vector3.{method}"),
-                ))),
+                // See the Vector2 arm: the rest of Godot's surface lives in
+                // `variant_math::vector_method` (pat-s3rrv.9).
+                _ => crate::variant_math::vector_method(&Variant::Vector3(*v), method, args),
             },
+            // The int vectors had NO arm here at all, so every method on one
+            // fell through to the "cannot call method on" error far below —
+            // `Vector2i(4, 4).abs()` was a runtime abort (pat-s3rrv.9).
+            Variant::Vector2i(_) | Variant::Vector3i(_) => {
+                crate::variant_math::vector_method(obj, method, args)
+            }
             // The affine builtins delegate to `variant_math`, which forwards to
             // the already-tested `gdcore` implementations (pat-0q2kx.50).
             Variant::Rect2(_)
@@ -11256,6 +12003,7 @@ impl Interpreter {
                     name,
                     params,
                     body,
+                    body_lines,
                     is_static,
                     annotations,
                     ..
@@ -11264,7 +12012,13 @@ impl Interpreter {
                     // registers with the MultiplayerAPI (pat-0q2kx.79).
                     class_def.methods.insert(
                         name.clone(),
-                        FuncDef::from_params_annotated(params, body, *is_static, annotations),
+                        FuncDef::from_params_annotated(
+                            params,
+                            body,
+                            body_lines,
+                            *is_static,
+                            annotations,
+                        ),
                     );
                 }
                 Stmt::VarDecl {
@@ -11308,6 +12062,10 @@ impl Interpreter {
                                 params: vec![param.clone()],
                                 defaults: vec![None],
                                 body: body.clone(),
+                                // Property accessors are parsed as a bare
+                                // statement list with no line table, so their
+                                // frames report line 0 (pat-0q2kx.253).
+                                body_lines: Vec::new(),
                                 is_static: false,
                                 // A property accessor body is not a declared
                                 // function, so it carries no annotations.
@@ -11324,6 +12082,10 @@ impl Interpreter {
                                 params: vec![],
                                 defaults: vec![],
                                 body: body.clone(),
+                                // Property accessors are parsed as a bare
+                                // statement list with no line table, so their
+                                // frames report line 0 (pat-0q2kx.253).
+                                body_lines: Vec::new(),
                                 is_static: false,
                                 // A property accessor body is not a declared
                                 // function, so it carries no annotations.
@@ -11391,6 +12153,7 @@ impl Interpreter {
                                 name,
                                 params,
                                 body,
+                                body_lines,
                                 is_static,
                                 annotations,
                                 ..
@@ -11400,6 +12163,7 @@ impl Interpreter {
                                     FuncDef::from_params_annotated(
                                         params,
                                         body,
+                                        body_lines,
                                         *is_static,
                                         annotations,
                                     ),
@@ -11704,14 +12468,47 @@ impl Interpreter {
             let val = self.eval_expr(expr)?;
             self.environment.define_const(name.clone(), val);
         }
+        // Seed each named `enum Name { … }` as a Dictionary constant, the way
+        // Godot exposes a named enum as a class member (pat-s3rrv.11).
+        //
+        // `Name.MEMBER` does NOT come from here — it is resolved against
+        // `class_def.enums` in the `MemberAccess` arm, so that an unknown
+        // member can raise instead of reading back `Nil`. What this binding
+        // buys is the enum used *as a value*: `State.values()`, `State.keys()`,
+        // `State.size()` and `for k in State` are all just Dictionary
+        // operations once the name resolves to one.
+        //
+        // Anonymous enums are unaffected — their variants were already folded
+        // into `class_def.constants` at parse time and are seeded by the loop
+        // above.
+        for (enum_name, variants) in &instance.class_def.enums {
+            let mut dict = Dictionary::new();
+            // Sorted by value so `values()` reads in declaration order for the
+            // ordinary `A, B, C` enum; `enums` is a HashMap, so without this
+            // the order would vary run to run.
+            let mut pairs: Vec<(&String, &i64)> = variants.iter().collect();
+            pairs.sort_by_key(|(name, value)| (**value, (*name).clone()));
+            for (variant_name, value) in pairs {
+                dict.insert(Variant::String(variant_name.clone()), Variant::Int(*value));
+            }
+            self.environment
+                .define_const(enum_name.clone(), Variant::Dictionary(dict));
+        }
 
         // Push an inner scope for the method body so that local `var`
         // declarations correctly shadow instance properties / parameters.
         self.environment.push_scope();
         let mut return_val = Variant::Nil;
         let body = func.body.clone();
+        // Index-aligned with `body`; empty when the function was built without
+        // line info, in which case `current_line` keeps its previous value
+        // rather than being clobbered with 0 (pat-0q2kx.253).
+        let body_lines = func.body_lines.clone();
         let mut i = 0;
         while i < body.len() {
+            if let Some(&line) = body_lines.get(i) {
+                self.current_line = line;
+            }
             match self.exec_stmt(&body[i])? {
                 Some(ControlFlow::Return(v)) => {
                     return_val = v.unwrap_or(Variant::Nil);
@@ -11887,6 +12684,17 @@ fn index_into(container: &Variant, idx: &Variant) -> Result<Variant, RuntimeErro
         (Variant::Dictionary(d), key) => d.get(key).cloned().ok_or_else(|| {
             RuntimeError::new(RuntimeErrorKind::UndefinedVariable(key.to_string_lossy()))
         }),
+        // Godot's `Object` supports `obj["prop"]` alongside `obj.prop`, and an
+        // unknown name answers `null` rather than erroring — the same contract
+        // the member-access path already implements for resources. Added with
+        // the InputEvent object family (pat-s3rrv.14) so scripts written
+        // against the older dictionary-shaped event, `event["keycode"]`, keep
+        // reading the same value now that `event` is a real object.
+        (Variant::Resource(r), key) => Ok(r
+            .properties
+            .get(&key.to_string_lossy())
+            .cloned()
+            .unwrap_or(Variant::Nil)),
         (Variant::String(s), Variant::Int(i)) => {
             let index = if *i < 0 {
                 (s.len() as i64 + i) as usize
@@ -13992,7 +14800,7 @@ fn uniform_type_name(t: &gdserver2d::shader::UniformType) -> String {
 }
 
 fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
-    use gdcore::math::{Color, Vector2, Vector3};
+    use gdcore::math::{Color, Vector2, Vector2i, Vector3, Vector3i};
     match type_name {
         "Vector2" => match member {
             "ZERO" => Some(Variant::Vector2(Vector2::ZERO)),
@@ -14001,14 +14809,54 @@ fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
             "DOWN" => Some(Variant::Vector2(Vector2::DOWN)),
             "LEFT" => Some(Variant::Vector2(Vector2::LEFT)),
             "RIGHT" => Some(Variant::Vector2(Vector2::RIGHT)),
+            "INF" => Some(Variant::Vector2(Vector2::INF)),
             _ => None,
         },
+        // `Vector3.LEFT`/`RIGHT`/`BACK`/`INF` and the six MODEL_* directions
+        // were all unavailable — the float Vector3 type itself did not define
+        // them (pat-s3rrv.9). MODEL_* describes an imported model's own axes
+        // (it faces +Z), so it is deliberately not the same as FORWARD/BACK.
         "Vector3" => match member {
             "ZERO" => Some(Variant::Vector3(Vector3::ZERO)),
             "ONE" => Some(Variant::Vector3(Vector3::ONE)),
             "UP" => Some(Variant::Vector3(Vector3::UP)),
             "DOWN" => Some(Variant::Vector3(Vector3::DOWN)),
             "FORWARD" => Some(Variant::Vector3(Vector3::FORWARD)),
+            "BACK" => Some(Variant::Vector3(Vector3::BACK)),
+            "LEFT" => Some(Variant::Vector3(Vector3::LEFT)),
+            "RIGHT" => Some(Variant::Vector3(Vector3::RIGHT)),
+            "INF" => Some(Variant::Vector3(Vector3::INF)),
+            "MODEL_LEFT" => Some(Variant::Vector3(Vector3::MODEL_LEFT)),
+            "MODEL_RIGHT" => Some(Variant::Vector3(Vector3::MODEL_RIGHT)),
+            "MODEL_TOP" => Some(Variant::Vector3(Vector3::MODEL_TOP)),
+            "MODEL_BOTTOM" => Some(Variant::Vector3(Vector3::MODEL_BOTTOM)),
+            "MODEL_FRONT" => Some(Variant::Vector3(Vector3::MODEL_FRONT)),
+            "MODEL_REAR" => Some(Variant::Vector3(Vector3::MODEL_REAR)),
+            _ => None,
+        },
+        // The int vectors had no constants at all.
+        "Vector2i" => match member {
+            "ZERO" => Some(Variant::Vector2i(Vector2i::ZERO)),
+            "ONE" => Some(Variant::Vector2i(Vector2i::ONE)),
+            "UP" => Some(Variant::Vector2i(Vector2i::UP)),
+            "DOWN" => Some(Variant::Vector2i(Vector2i::DOWN)),
+            "LEFT" => Some(Variant::Vector2i(Vector2i::LEFT)),
+            "RIGHT" => Some(Variant::Vector2i(Vector2i::RIGHT)),
+            "MIN" => Some(Variant::Vector2i(Vector2i::MIN)),
+            "MAX" => Some(Variant::Vector2i(Vector2i::MAX)),
+            _ => None,
+        },
+        "Vector3i" => match member {
+            "ZERO" => Some(Variant::Vector3i(Vector3i::ZERO)),
+            "ONE" => Some(Variant::Vector3i(Vector3i::ONE)),
+            "UP" => Some(Variant::Vector3i(Vector3i::UP)),
+            "DOWN" => Some(Variant::Vector3i(Vector3i::DOWN)),
+            "LEFT" => Some(Variant::Vector3i(Vector3i::LEFT)),
+            "RIGHT" => Some(Variant::Vector3i(Vector3i::RIGHT)),
+            "FORWARD" => Some(Variant::Vector3i(Vector3i::FORWARD)),
+            "BACK" => Some(Variant::Vector3i(Vector3i::BACK)),
+            "MIN" => Some(Variant::Vector3i(Vector3i::MIN)),
+            "MAX" => Some(Variant::Vector3i(Vector3i::MAX)),
             _ => None,
         },
         "Color" => match member {
@@ -14344,7 +15192,25 @@ static ENGINE_SINGLETONS: OnceLock<Mutex<HashMap<String, Variant>>> = OnceLock::
 /// Built-in singleton names this interpreter actually dispatches (the `Ident`
 /// arms in `eval_expr`'s call path). `Engine.has_singleton` answers true for
 /// these without any registration.
+/// The signals `MultiplayerAPI` / `SceneMultiplayer` emit, which a script binds
+/// with `multiplayer.<name>.connect(cb)` (pat-s3rrv.18).
+///
+/// The first five are Godot's `MultiplayerAPI` connection signals; the last
+/// three are `SceneMultiplayer`'s. Kept as one list because Patina emits all
+/// eight from the same per-frame drain.
+const MULTIPLAYER_SIGNALS: &[&str] = &[
+    "peer_connected",
+    "peer_disconnected",
+    "connected_to_server",
+    "connection_failed",
+    "server_disconnected",
+    "peer_packet",
+    "peer_authenticating",
+    "peer_authentication_failed",
+];
+
 const BUILTIN_SINGLETONS: &[&str] = &[
+    "AudioServer",
     "CameraServer",
     "ClassDB",
     "DisplayServer",
@@ -18168,6 +19034,80 @@ fn new_camera_feed_handle() -> gdcore::id::ObjectId {
 /// Mirrors Godot's `WebSocketPeer` surface (modules/websocket/websocket_peer.cpp)
 /// over the platform's RFC 6455 client. Packets come back as `PackedByteArray`
 /// for binary and `String` for text, matching `get_packet` / `was_string_packet`.
+/// `MultiplayerPeer.*` on a handle from `OfflineMultiplayerPeer.new()` /
+/// `WebSocketMultiplayerPeer.new()` (pat-s3rrv.16).
+///
+/// Godot's transport-setup calls live on the peer itself — `create_server`,
+/// `create_client`, `poll`, `close` — and the identity/status getters are what a
+/// script polls afterwards. Both return Godot's own values: `create_*` answer an
+/// `Error` int (`OK == 0`), and `get_connection_status` the
+/// `CONNECTION_DISCONNECTED/CONNECTING/CONNECTED` enum (0/1/2).
+fn call_multiplayer_peer_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdplatform::multiplayer_peer_handles::with_multiplayer_peer;
+
+    // Godot's @GlobalScope `Error`: OK = 0, FAILED = 1.
+    const OK: i64 = 0;
+    const FAILED: i64 = 1;
+
+    let int_arg = |i: usize| -> i64 {
+        match args.get(i) {
+            Some(Variant::Int(v)) => *v,
+            Some(Variant::Float(f)) => *f as i64,
+            _ => 0,
+        }
+    };
+    let str_arg = |i: usize| -> String {
+        match args.get(i) {
+            Some(Variant::String(s)) => s.clone(),
+            Some(Variant::StringName(s)) => s.as_str().to_string(),
+            _ => String::new(),
+        }
+    };
+
+    // A handle that no longer resolves is one the tree has adopted (or that was
+    // released). Godot answers a freed Ref with null rather than erroring.
+    let result = with_multiplayer_peer(id, |peer| -> Result<Variant, RuntimeError> {
+        match method {
+            "create_server" => {
+                let port = int_arg(0).clamp(0, i64::from(u16::MAX)) as u16;
+                Ok(Variant::Int(match peer.create_server(port) {
+                    Ok(()) => OK,
+                    Err(_) => FAILED,
+                }))
+            }
+            "create_client" => {
+                let url = str_arg(0);
+                Ok(Variant::Int(match peer.create_client(&url) {
+                    Ok(()) => OK,
+                    Err(_) => FAILED,
+                }))
+            }
+            "poll" => {
+                peer.poll();
+                Ok(Variant::Nil)
+            }
+            "close" => {
+                peer.close();
+                Ok(Variant::Nil)
+            }
+            "get_unique_id" => Ok(Variant::Int(peer.get_unique_id())),
+            "get_connection_status" => Ok(Variant::Int(peer.get_connection_status())),
+            "is_server" => Ok(Variant::Bool(peer.is_server())),
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("MultiplayerPeer.{other}"),
+            ))),
+        }
+    });
+    match result {
+        Some(r) => r,
+        None => Ok(Variant::Nil),
+    }
+}
+
 fn call_websocket_peer_instance(
     id: gdcore::id::ObjectId,
     method: &str,
@@ -18393,6 +19333,261 @@ fn call_camera_feed_instance(
             ))),
         }
     })
+}
+
+// -- EditorFileSystem / EditorFileSystemDirectory (pat-0q2kx.167) -------------
+
+/// `EditorFileSystem`, the scanning service. One per editor, so one handle.
+const EDITOR_FS_HANDLE_TAG: u64 = 0xEE00_0000_0000_0000;
+/// One node of the scanned tree — what `get_filesystem()` hands back.
+const EDITOR_FS_DIR_HANDLE_TAG: u64 = 0xEF00_0000_0000_0000;
+
+thread_local! {
+    /// Directory handles keyed by raw id, each holding its `res://` path, plus
+    /// the reverse index so the same directory always answers to one id.
+    ///
+    /// Nothing is scanned up front: Godot's EditorFileSystem caches a scan, but
+    /// the observable contract a script depends on is "what is on disk now", and
+    /// enumerating lazily through `DirAccess` keeps the two from drifting.
+    static EDITOR_FS_DIRS: std::cell::RefCell<(HashMap<u64, String>, HashMap<String, u64>)> =
+        std::cell::RefCell::new((HashMap::new(), HashMap::new()));
+}
+
+fn is_editor_fs_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == EDITOR_FS_HANDLE_TAG
+}
+
+fn is_editor_fs_dir_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == EDITOR_FS_DIR_HANDLE_TAG
+}
+
+/// Interns `res_path` as a directory handle, reusing the id if it already has
+/// one so `get_subdir(0) == get_subdir(0)` across calls.
+fn editor_fs_dir_handle(res_path: &str) -> gdcore::id::ObjectId {
+    EDITOR_FS_DIRS.with(|cell| {
+        let (by_id, by_path) = &mut *cell.borrow_mut();
+        if let Some(raw) = by_path.get(res_path) {
+            return gdcore::id::ObjectId::from_raw(*raw);
+        }
+        let raw = EDITOR_FS_DIR_HANDLE_TAG | (by_id.len() as u64 + 1);
+        by_id.insert(raw, res_path.to_string());
+        by_path.insert(res_path.to_string(), raw);
+        gdcore::id::ObjectId::from_raw(raw)
+    })
+}
+
+fn editor_fs_dir_path(id: gdcore::id::ObjectId) -> Option<String> {
+    EDITOR_FS_DIRS.with(|cell| cell.borrow().0.get(&id.raw()).cloned())
+}
+
+/// Normalises a directory `res://` path to Godot's form: always a trailing
+/// slash, so `get_path()` on the root reads `res://` and a child reads
+/// `res://scenes/`. Concatenating a child name onto it is then unambiguous.
+fn editor_fs_dir_normalize(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed == "res:/" || trimmed.is_empty() || trimmed == "res:" {
+        "res://".to_string()
+    } else {
+        format!("{trimmed}/")
+    }
+}
+
+/// `EditorInterface.<member>()` — the statics a `@tool` script reaches the
+/// editor through.
+fn call_editor_interface_static(member: &str, _args: &[Variant]) -> Result<Variant, RuntimeError> {
+    match member {
+        // Godot returns the EditorFileSystem singleton.
+        "get_resource_filesystem" => Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(
+            EDITOR_FS_HANDLE_TAG | 1,
+        ))),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("EditorInterface.{other}"),
+        ))),
+    }
+}
+
+fn call_editor_fs_instance(
+    _id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    match method {
+        // The root of the scanned tree — the entry point for a walk.
+        "get_filesystem" => Ok(Variant::ObjectId(editor_fs_dir_handle("res://"))),
+        // Godot resolves an arbitrary path to its directory node; `null` when it
+        // is not a directory, which is what a script tests before walking.
+        "get_filesystem_path" => match args.first() {
+            Some(Variant::String(p)) => {
+                let normalized = editor_fs_dir_normalize(p);
+                match gdcore::file_access::DirAccess::get_directories_at(&normalized) {
+                    Ok(_) => Ok(Variant::ObjectId(editor_fs_dir_handle(&normalized))),
+                    Err(_) => Ok(Variant::Nil),
+                }
+            }
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                "EditorFileSystem.get_filesystem_path() takes a path string".into(),
+            ))),
+        },
+        // Patina scans on demand rather than in a background pass, so a scan is
+        // already complete by the time a script could observe it.
+        "is_scanning" => Ok(Variant::Bool(false)),
+        "get_scanning_progress" => Ok(Variant::Float(1.0)),
+        "scan" | "scan_sources" | "update_file" | "reimport_files" => Ok(Variant::Nil),
+        "get_class" => Ok(Variant::String("EditorFileSystem".into())),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("EditorFileSystem.{other}"),
+        ))),
+    }
+}
+
+/// The directory-walk API (`doc/classes/EditorFileSystemDirectory.xml`).
+///
+/// Subdirectories and files are read live through `DirAccess`, which already
+/// applies Godot's filtering — hidden entries and `.import` sidecars stay out of
+/// `get_files`, so a script sees the project the way the editor presents it
+/// rather than the raw disk listing.
+fn call_editor_fs_dir_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let path = editor_fs_dir_path(id).ok_or_else(|| {
+        RuntimeError::new(RuntimeErrorKind::TypeError(
+            "EditorFileSystemDirectory handle is invalid".into(),
+        ))
+    })?;
+    let dirs = gdcore::file_access::DirAccess::get_directories_at(&path).unwrap_or_default();
+    let files = gdcore::file_access::DirAccess::get_files_at(&path).unwrap_or_default();
+    let index = |args: &[Variant]| -> Option<usize> {
+        match args.first() {
+            Some(Variant::Int(i)) if *i >= 0 => Some(*i as usize),
+            _ => None,
+        }
+    };
+
+    match method {
+        "get_path" => Ok(Variant::String(path.clone())),
+        // Godot's `get_name` is the directory's own name, empty at the root.
+        "get_name" => Ok(Variant::String(
+            path.trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .filter(|_| path != "res://")
+                .unwrap_or_default()
+                .to_string(),
+        )),
+        "get_subdir_count" => Ok(Variant::Int(dirs.len() as i64)),
+        "get_subdir" => match index(args) {
+            // Out of range yields null rather than an error: a script that walks
+            // with a stale count should degrade, not abort mid-traversal.
+            Some(i) if i < dirs.len() => Ok(Variant::ObjectId(editor_fs_dir_handle(&format!(
+                "{path}{}/",
+                dirs[i]
+            )))),
+            Some(_) => Ok(Variant::Nil),
+            None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                "EditorFileSystemDirectory.get_subdir() takes an index".into(),
+            ))),
+        },
+        "get_file_count" => Ok(Variant::Int(files.len() as i64)),
+        "get_file" => match index(args) {
+            Some(i) if i < files.len() => Ok(Variant::String(files[i].clone())),
+            Some(_) => Ok(Variant::Nil),
+            None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                "EditorFileSystemDirectory.get_file() takes an index".into(),
+            ))),
+        },
+        "get_file_path" => match index(args) {
+            Some(i) if i < files.len() => Ok(Variant::String(format!("{path}{}", files[i]))),
+            Some(_) => Ok(Variant::Nil),
+            None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                "EditorFileSystemDirectory.get_file_path() takes an index".into(),
+            ))),
+        },
+        // `null` at the root, matching Godot — that is the walk's termination
+        // condition when climbing.
+        "get_parent" => {
+            if path == "res://" {
+                return Ok(Variant::Nil);
+            }
+            let trimmed = path.trim_end_matches('/');
+            let parent = match trimmed.rfind('/') {
+                Some(i) if i > "res:/".len() => editor_fs_dir_normalize(&trimmed[..i]),
+                _ => "res://".to_string(),
+            };
+            Ok(Variant::ObjectId(editor_fs_dir_handle(&parent)))
+        }
+        "get_class" => Ok(Variant::String("EditorFileSystemDirectory".into())),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("EditorFileSystemDirectory.{other}"),
+        ))),
+    }
+}
+
+// -- RefCounted (pat-0q2kx.163) -----------------------------------------------
+
+/// Godot's EXPLICIT `RefCounted` API, dispatched on a handle minted by
+/// `RefCounted.new()`.
+///
+/// The counting itself lives in `gdobject::refcounted_handle`, next to the
+/// alive-objects registry `weakref` reads, so releasing the last reference makes
+/// an existing `WeakRef` report gone without any bookkeeping here.
+///
+/// ⚠️ This is the explicit half only. Godot ALSO drops a reference when a
+/// binding leaves scope, and that is not implemented: an object stays alive
+/// until a script calls `unreference()`. Erring toward a leak is deliberate —
+/// the alternative half-measure (decrementing in `pop_scope`) frees objects out
+/// from under other scripts, because `impl Clone for Interpreter` duplicates the
+/// whole `Environment` without incrementing anything. See the pat-0q2kx.163
+/// notes for the RAII design that fixes it properly.
+fn call_refcounted_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdobject::refcounted_handle as rc;
+
+    let missing = || {
+        RuntimeError::new(RuntimeErrorKind::TypeError(
+            "RefCounted handle is invalid (already released?)".into(),
+        ))
+    };
+
+    match method {
+        "get_reference_count" => rc::get_reference_count(id)
+            .map(|c| Variant::Int(c as i64))
+            .ok_or_else(missing),
+        // Godot returns whether a reference was taken.
+        "reference" => Ok(Variant::Bool(rc::reference(id))),
+        // …and whether that release freed the object.
+        "unreference" => Ok(Variant::Bool(rc::unreference(id))),
+        "init_ref" => Ok(Variant::Bool(rc::init_ref(id))),
+        // `Object.get_instance_id()` works on a RefCounted too, and is what a
+        // script passes to `weakref`/`is_instance_valid`.
+        "get_instance_id" => Ok(Variant::Int(id.raw() as i64)),
+        // `weakref(r)` returns the id unchanged (see the `weakref` builtin), so
+        // `w.get_ref()` lands here on the referent itself. Re-query liveness
+        // rather than answering from the handle we were called on: that is the
+        // whole contract of a weak reference, and it is why release has to
+        // unregister from the global registry.
+        "get_ref" => Ok(if gdobject::weak_ref::is_object_alive(id) {
+            Variant::ObjectId(id)
+        } else {
+            Variant::Nil
+        }),
+        "is_class" => match args.first() {
+            Some(Variant::String(name)) => {
+                Ok(Variant::Bool(name == "RefCounted" || name == "Object"))
+            }
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                "RefCounted.is_class() takes a string".into(),
+            ))),
+        },
+        "get_class" => Ok(Variant::String("RefCounted".into())),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("RefCounted.{other}"),
+        ))),
+    }
 }
 
 // -- Image (pat-0q2kx.262) ----------------------------------------------------
@@ -18630,6 +19825,54 @@ fn camera_feed_arg(args: &[Variant], who: &str) -> Result<u64, RuntimeError> {
 ///
 /// Writes land in [`crate::editor_commands`], a process-global store the editor
 /// server reads when answering `GET /api/commands`.
+/// `EditorPaths` — the editor's own data/config/cache directories, as a
+/// `@tool` script sees them (pat-0q2kx.167).
+///
+/// Godot exposes these through `EditorInterface.get_editor_paths()`, and a
+/// plugin uses them to decide where to keep its own state
+/// (`upstream/godot/editor/editor_paths.cpp`; `doc/classes/EditorPaths.xml`).
+/// The class was registered in ClassDB by the first pass of this bead, but
+/// registration only describes a surface — nothing routed a call to it, so a
+/// script naming `EditorPaths` still got `UndefinedFunction`.
+///
+/// Every directory delegates to `gdplatform::os`, exactly as `OS.get_data_dir`
+/// and friends already do (see [`call_os_static`]). Answering from a second
+/// source would let `EditorPaths.get_cache_dir()` and `OS.get_cache_dir()`
+/// disagree about the same directory, which is the kind of split a plugin
+/// discovers only when its state goes missing.
+///
+/// Free-standing rather than a method on the interpreter because none of these
+/// touch interpreter state — the same reason
+/// [`call_editor_command_palette_static`] is free.
+fn call_editor_paths_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    match method {
+        "get_data_dir" => Ok(Variant::String(gdplatform::os::data_dir())),
+        "get_config_dir" => Ok(Variant::String(gdplatform::os::config_dir())),
+        "get_cache_dir" => Ok(Variant::String(gdplatform::os::cache_dir())),
+        // Godot returns the per-project settings directory — `.godot/` inside
+        // the project, which is where a project's editor-local state lives.
+        // Derived from the res:// root rather than from the user-wide config
+        // dir: two projects open in the same editor must not share it.
+        "get_project_settings_dir" => {
+            let root = gdcore::file_access::project_root()
+                .map(|p| p.join(".godot").display().to_string())
+                .unwrap_or_default();
+            Ok(Variant::String(root))
+        }
+        // `is_self_contained`/`get_self_contained_file` describe an editor
+        // shipped as a portable folder. Patina has no self-contained mode, and
+        // Godot's own answer in that case is false/"" rather than an error.
+        "is_self_contained" => Ok(Variant::Bool(false)),
+        "get_self_contained_file" => Ok(Variant::String(String::new())),
+        _ => {
+            let _ = args;
+            Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("EditorPaths.{method}()"),
+            )))
+        }
+    }
+}
+
 fn call_editor_command_palette_static(
     method: &str,
     args: &[Variant],
@@ -25433,6 +26676,7 @@ match x:
         );
     }
 
+    #[test]
     #[test]
     fn os_singleton_query_methods() {
         // pat-nzgdu.65 (interpreter slice): OS singleton query methods resolve

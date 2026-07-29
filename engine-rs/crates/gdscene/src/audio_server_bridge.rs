@@ -73,6 +73,11 @@ pub struct AudioServerBridge {
     last_mix: Vec<f32>,
     /// Half the viewport width in canvas units, for 2D panning.
     screen_half_width: f32,
+    /// Streams that named a file the bridge could not load, in the order they
+    /// failed. A silent player is indistinguishable from a correct one, so the
+    /// failure has to survive past the log line for the runner and tests to
+    /// see it (pat-s3rrv.5).
+    stream_errors: Vec<String>,
 }
 
 impl AudioServerBridge {
@@ -88,6 +93,7 @@ impl AudioServerBridge {
             frame_accumulator: 0.0,
             last_mix: Vec::new(),
             screen_half_width: DEFAULT_SCREEN_HALF_WIDTH,
+            stream_errors: Vec::new(),
         }
     }
 
@@ -145,12 +151,39 @@ impl AudioServerBridge {
         self.server.active_stream_count()
     }
 
+    /// Stream files this bridge named but failed to load, oldest first.
+    ///
+    /// Godot surfaces a load failure; a Patina player that cannot find its
+    /// stream just stays silent, which reads exactly like a correct player with
+    /// a quiet clip. Keeping the failures lets the runner report them and lets
+    /// tests assert the difference (pat-s3rrv.5).
+    pub fn stream_errors(&self) -> &[String] {
+        &self.stream_errors
+    }
+
+    /// Resolves a `res://` (or bare) stream path against the project root.
+    ///
+    /// Godot resolves `res://` against the directory holding `project.godot`,
+    /// never the process CWD (`ProjectSettings::globalize_path`). With no base
+    /// dir set this fell back to a CWD-relative path, so a project launched
+    /// from anywhere but its own directory loaded no audio at all. The ancestor
+    /// walk mirrors the runner's own `resolve_res_path` so loose-file layouts —
+    /// a scene in a subdirectory naming assets from the repo root — still
+    /// resolve (pat-s3rrv.5).
     fn resolve_stream_path(&self, raw: &str) -> PathBuf {
         let stripped = raw.strip_prefix("res://").unwrap_or(raw);
-        match &self.base_dir {
-            Some(base) => base.join(stripped),
-            None => PathBuf::from(stripped),
+        let Some(base) = &self.base_dir else {
+            return PathBuf::from(stripped);
+        };
+        for ancestor in base.ancestors() {
+            let candidate = ancestor.join(stripped);
+            if candidate.exists() {
+                return candidate;
+            }
         }
+        // Nothing on disk: return the canonical location so the failure names
+        // the path the project actually declared.
+        base.join(stripped)
     }
 
     /// Syncs audio player nodes and mixes `delta` seconds of audio.
@@ -471,11 +504,20 @@ impl AudioServerBridge {
                 // player just stayed silent. Report it (pat-0q2kx.6).
                 match self.importer.load_buffer(&path) {
                     Ok(buffer) => player.set_stream(buffer),
-                    Err(err) => tracing::warn!(
-                        path = %path.display(),
-                        error = %err,
-                        "AudioStreamPlayer stream failed to load; the player will be silent"
-                    ),
+                    Err(err) => {
+                        // `warn!` alone is invisible in a default runner log, so
+                        // a missing asset presented as plain silence. Raise it
+                        // to `error!` and retain it (pat-s3rrv.5).
+                        tracing::error!(
+                            path = %path.display(),
+                            error = %err,
+                            "AudioStreamPlayer stream failed to load; the player will be silent"
+                        );
+                        self.stream_errors.push(format!(
+                            "AudioStreamPlayer stream failed to load: {} ({err})",
+                            path.display()
+                        ));
+                    }
                 }
             }
         }

@@ -34,6 +34,7 @@ pub mod tcp_multiplayer;
 pub mod thread;
 pub mod time;
 pub mod webrtc_peer;
+pub mod multiplayer_peer_handles;
 pub mod websocket_multiplayer;
 pub mod websocket_peer;
 pub mod window;
@@ -86,6 +87,11 @@ pub use signing::{
 pub use stream_peer_tcp::{StreamPeerTCP, StreamPeerTcpError, StreamPeerTcpStatus};
 pub use tcp_multiplayer::TcpMultiplayerPeer;
 pub use time::Timer;
+pub use multiplayer_peer_handles::{
+    is_multiplayer_peer_handle, new_multiplayer_peer_handle, new_offline_multiplayer_peer_handle,
+    new_ws_multiplayer_peer_handle, release_multiplayer_peer_handle, take_multiplayer_peer,
+    with_multiplayer_peer, MultiplayerPeerHandle,
+};
 pub use websocket_peer::{Frame, Opcode, WebSocketError, WebSocketPeer, WebSocketState, WriteMode};
 pub use window::{HeadlessWindow, WindowConfig, WindowEvent, WindowId, WindowManager};
 

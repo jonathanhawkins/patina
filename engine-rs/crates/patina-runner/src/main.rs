@@ -356,6 +356,12 @@ fn run_project_from_godot(arg_path: &Path, args: &Args) {
     );
 
     let mut main_loop = MainLoop::new(tree);
+    // `res://` audio paths resolve against the project directory, not the CWD
+    // (pat-s3rrv.5) — without this the runner loads no audio unless it happens
+    // to be launched from inside the project.
+    main_loop
+        .audio_bridge_mut()
+        .set_base_dir(project_dir.clone());
     // pat-nzgdu.15: honor project.godot physics config (tick rate + 2D/3D
     // gravity) before running any frames, mirroring Godot's boot.
     main_loop.configure_from_project_settings(&booted.settings);
@@ -488,6 +494,11 @@ fn main() {
 
     // Create the main loop and run frames.
     let mut main_loop = MainLoop::new(tree);
+    // `res://` audio paths resolve against the project directory, not the CWD
+    // (pat-s3rrv.5).
+    main_loop
+        .audio_bridge_mut()
+        .set_base_dir(project_dir.clone());
     let frame_trace = run_main_loop(&mut main_loop, args.frames, args.delta, args.trace_frames);
 
     tracing::info!(

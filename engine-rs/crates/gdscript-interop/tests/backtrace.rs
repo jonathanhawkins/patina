@@ -206,3 +206,60 @@ func check():
         "the first capture must still name its own frame after the second",
     );
 }
+
+/// A frame reports the **exact** line the statement it is executing starts on,
+/// not merely a non-zero one.
+///
+/// `frame_metadata_and_out_of_range_indices` only asserts `get_frame_line(0) > 0`.
+/// That is satisfiable by accident: before pat-0q2kx.253 every frame reported 0,
+/// and the cheapest way to make it pass would have been to hardcode any constant.
+/// On a one-line function body even a correct-looking fix cannot be distinguished
+/// from `return 1`.
+///
+/// So this pins two different capture sites in one script, several lines apart,
+/// and checks each against the line its own `return` sits on. The literals below
+/// are counted from the `extends Node` line as line 1.
+#[test]
+fn frame_line_is_the_line_of_the_executing_statement() {
+    //  1: extends Node
+    //  2:
+    //  3: func early():
+    //  4:     return Engine.capture_script_backtraces()
+    //  5:
+    //  6: func late():
+    //  7:     var padding = 1
+    //  8:     padding += 1
+    //  9:     return Engine.capture_script_backtraces()
+    // 10:
+    // 11: func check():
+    let src = "\
+extends Node
+
+func early():
+    return Engine.capture_script_backtraces()
+
+func late():
+    var padding = 1
+    padding += 1
+    return Engine.capture_script_backtraces()
+
+func check():
+    return [early()[0].get_frame_line(0), late()[0].get_frame_line(0)]
+";
+    let v = array(call_check(src));
+    assert_eq!(
+        v[0],
+        Variant::Int(4),
+        "early()'s only statement is the return on line 4",
+    );
+    assert_eq!(
+        v[1],
+        Variant::Int(9),
+        "late() captures on line 9, after two padding statements — a frame that \
+         reported its function's first line, or any constant, would fail here",
+    );
+    assert_ne!(
+        v[0], v[1],
+        "two capture sites must not report the same line"
+    );
+}

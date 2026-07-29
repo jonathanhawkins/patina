@@ -8,44 +8,59 @@
 //! let the caller resolve it through whatever registry owns the object
 //! (e.g. `SceneTree::get_node`).
 
-use std::cell::RefCell;
 use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 
 use gdcore::id::ObjectId;
 use gdvariant::Variant;
 
 // ---------------------------------------------------------------------------
-// Global alive-objects registry (thread-local)
+// Global alive-objects registry (process-global)
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    static ALIVE_OBJECTS: RefCell<HashSet<ObjectId>> = RefCell::new(HashSet::new());
+/// Process-global, **not** thread-local (pat-0q2kx.163).
+///
+/// Object liveness is a property of the object, not of the thread that happens
+/// to ask. This was a `thread_local!`, which meant every thread saw its own
+/// empty registry: the editor server registers a node on its request thread,
+/// and a `weakref` resolved from any other thread reported the object dead —
+/// or, worse, an object freed on one thread still read as alive on another.
+/// `is_instance_valid()` was therefore answerable only from the thread that
+/// created the object.
+///
+/// Same `OnceLock<Mutex<_>>` shape the rest of this crate uses for
+/// process-global state (`class_db::db`, `movie_writer::registry`), so the
+/// locking discipline matches its neighbours.
+fn alive_objects() -> &'static Mutex<HashSet<ObjectId>> {
+    static ALIVE_OBJECTS: OnceLock<Mutex<HashSet<ObjectId>>> = OnceLock::new();
+    ALIVE_OBJECTS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 /// Registers an object as alive. Call when a node/object is created or
 /// added to the scene tree.
 pub fn register_object(id: ObjectId) {
-    ALIVE_OBJECTS.with(|set| {
-        set.borrow_mut().insert(id);
-    });
+    alive_objects().lock().unwrap().insert(id);
 }
 
 /// Unregisters an object (marks it as dead). Call when a node/object is
 /// freed or removed from the scene tree.
 pub fn unregister_object(id: ObjectId) {
-    ALIVE_OBJECTS.with(|set| {
-        set.borrow_mut().remove(&id);
-    });
+    alive_objects().lock().unwrap().remove(&id);
 }
 
 /// Returns `true` if the object with the given ID is currently alive.
 pub fn is_object_alive(id: ObjectId) -> bool {
-    ALIVE_OBJECTS.with(|set| set.borrow().contains(&id))
+    alive_objects().lock().unwrap().contains(&id)
 }
 
 /// Clears the entire alive-objects registry. Intended for test isolation.
+///
+/// ⚠️ Now that the registry is process-global, this clears it for EVERY thread.
+/// A test that calls it while another test is running in the same process can
+/// make that test see its own live objects as freed, so tests which both clear
+/// and assert liveness must not run concurrently with each other.
 pub fn clear_alive_registry() {
-    ALIVE_OBJECTS.with(|set| set.borrow_mut().clear());
+    alive_objects().lock().unwrap().clear();
 }
 
 /// A weak (non-owning) reference to a Godot Object.
@@ -202,5 +217,49 @@ mod tests {
         assert_eq!(wr.get_ref(), Some(id));
         unregister_object(id);
         assert_eq!(wr.get_ref(), None);
+    }
+
+    /// Liveness is a property of the OBJECT, not of the asking thread
+    /// (pat-0q2kx.163).
+    ///
+    /// The registry used to be `thread_local!`, so each thread saw its own
+    /// empty set: an object registered on one thread read as dead everywhere
+    /// else, and a free on one thread was invisible to the others. That made
+    /// `weakref` / `is_instance_valid` unusable from the multi-threaded editor
+    /// server, where the thread that creates a node is rarely the one that
+    /// later asks about it.
+    ///
+    /// Deliberately does NOT call `clear_alive_registry` — the registry is now
+    /// shared, so clearing it here could free another test's objects out from
+    /// under it. Fresh `ObjectId::next()` values keep this test independent
+    /// without touching anyone else's entries.
+    #[test]
+    fn liveness_is_visible_across_threads() {
+        let id = ObjectId::next();
+        register_object(id);
+
+        // Registered on THIS thread — another thread must agree it is alive.
+        let seen_alive = std::thread::spawn(move || is_object_alive(id))
+            .join()
+            .expect("reader thread panicked");
+        assert!(
+            seen_alive,
+            "an object registered on one thread must read as alive on another; \
+             a thread-local registry reports false here"
+        );
+
+        // And a free performed on ANOTHER thread must be visible back here.
+        std::thread::spawn(move || unregister_object(id))
+            .join()
+            .expect("writer thread panicked");
+        assert!(
+            !is_object_alive(id),
+            "a free on another thread must be observable from this one"
+        );
+        assert_eq!(
+            WeakRef::new(id).get_ref(),
+            None,
+            "get_ref() must follow the shared registry, not a per-thread view"
+        );
     }
 }

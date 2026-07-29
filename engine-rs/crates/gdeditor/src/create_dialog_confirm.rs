@@ -89,7 +89,10 @@ mod tests {
         let target = best_match(&dialog).expect("Camera search has a match");
 
         let result = double_click(&mut dialog, &target).expect("double-click instantiates");
-        assert_eq!(result.class_name, target, "double-click instantiates that type");
+        assert_eq!(
+            result.class_name, target,
+            "double-click instantiates that type"
+        );
         assert!(!dialog.is_visible(), "double-click closes the dialog");
 
         // --- The Create button instantiates the current selection ---
@@ -114,8 +117,14 @@ mod tests {
         dialog.open();
         dialog.set_search("ZzNoSuchTypeZz");
 
-        assert!(best_match(&dialog).is_none(), "no match for a gibberish query");
-        assert!(confirm_best_match(&mut dialog).is_none(), "nothing to confirm");
+        assert!(
+            best_match(&dialog).is_none(),
+            "no match for a gibberish query"
+        );
+        assert!(
+            confirm_best_match(&mut dialog).is_none(),
+            "nothing to confirm"
+        );
         assert!(dialog.is_visible(), "the dialog stays open with no match");
     }
 }

@@ -139,7 +139,11 @@ mod tests {
 
         // Hitting a breakpoint populates the stack (innermost first).
         panel.hit_breakpoint(vec![
-            frame("_physics_process", 42, &[("velocity", "Vector2(0, 0)"), ("speed", "300")]),
+            frame(
+                "_physics_process",
+                42,
+                &[("velocity", "Vector2(0, 0)"), ("speed", "300")],
+            ),
             frame("_run_step", 17, &[("dt", "0.016")]),
             frame("_ready", 5, &[("self", "Player")]),
         ]);

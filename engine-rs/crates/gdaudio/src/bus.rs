@@ -119,6 +119,16 @@ impl AudioBus {
         &self.name
     }
 
+    /// Rename the bus (`AudioServer.set_bus_name`) — pat-s3rrv.6.
+    ///
+    /// Buses are addressed by name elsewhere (a player's `bus` property, a
+    /// bus send target), so renaming one re-points every lookup that resolves
+    /// through [`AudioMixer::get_bus_by_name`](crate::mixer::AudioMixer::get_bus_by_name),
+    /// exactly as in Godot.
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+
     /// Return the current volume in decibels.
     pub fn volume_db(&self) -> f32 {
         self.volume_db

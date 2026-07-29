@@ -69,7 +69,10 @@ mod tests {
         let doc = docs.active().expect("active document");
         assert_eq!(doc.kind, DocumentKind::Scene);
         assert_eq!(doc.path.as_deref(), Some("res://main.tscn"));
-        assert_eq!(doc.title, "Main", "title is the loaded scene's root node name");
+        assert_eq!(
+            doc.title, "Main",
+            "title is the loaded scene's root node name"
+        );
 
         // Re-opening the same scene focuses the existing tab — no duplicate.
         let again = docs

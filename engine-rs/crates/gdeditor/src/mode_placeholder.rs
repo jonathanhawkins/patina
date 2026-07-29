@@ -128,7 +128,10 @@ mod tests {
         // Through the main pane: routing to an implemented mode mounts the real
         // view; routing to a partial mode (AssetLib) shows the placeholder.
         let mut pane = MainPane::new();
-        assert!(!pane.pane_content().is_placeholder(), "2D default is a real view");
+        assert!(
+            !pane.pane_content().is_placeholder(),
+            "2D default is a real view"
+        );
 
         assert!(pane.route_to(EditorMode::Spatial3D));
         match pane.pane_content() {
@@ -138,7 +141,10 @@ mod tests {
 
         assert!(pane.route_to(EditorMode::AssetLib));
         let content = pane.pane_content();
-        assert!(content.is_placeholder(), "AssetLib renders a placeholder pane");
+        assert!(
+            content.is_placeholder(),
+            "AssetLib renders a placeholder pane"
+        );
         if let PaneContent::Placeholder(p) = content {
             assert_eq!(p.view, MainView::AssetLibBrowser);
         }

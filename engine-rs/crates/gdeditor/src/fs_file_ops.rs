@@ -167,7 +167,10 @@ mod tests {
         fs.add_file("res://two.tscn", "also res://a.tres twice: res://a.tres");
 
         assert!(fs.move_file("res://a.tres", "res://sub/a.tres"));
-        assert_eq!(fs.read("res://one.tscn"), Some("uses res://sub/a.tres here"));
+        assert_eq!(
+            fs.read("res://one.tscn"),
+            Some("uses res://sub/a.tres here")
+        );
         assert_eq!(
             fs.read("res://two.tscn"),
             Some("also res://sub/a.tres twice: res://sub/a.tres")

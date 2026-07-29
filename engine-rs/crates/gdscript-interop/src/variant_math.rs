@@ -20,7 +20,7 @@
 //! forms with `*_local` as the right-multiply counterparts, and `Rect2.has_point`
 //! is inclusive at `position` and exclusive at `end`.
 
-use gdcore::math::{Rect2, Transform2D, Vector2, Vector3};
+use gdcore::math::{Rect2, Transform2D, Vector2, Vector2i, Vector3, Vector3i};
 use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
 use gdvariant::Variant;
 
@@ -1047,4 +1047,650 @@ fn xform_aabb(t: Transform3D, a: Aabb) -> Aabb {
         max = Vector3::new(max.x.max(c.x), max.y.max(c.y), max.z.max(c.z));
     }
     Aabb::new(min, max - min)
+}
+
+// ---------------------------------------------------------------------------
+// Vector2 / Vector3 / Vector2i / Vector3i method surface (pat-s3rrv.9)
+// ---------------------------------------------------------------------------
+//
+// The interpreter's own tables implemented 8 Vector2 methods and 7 Vector3
+// methods, and nothing at all for the int vectors — `Variant::Vector2i` had no
+// arm in `call_method_on`. So `velocity.move_toward(...)`, `dir.rotated(...)`
+// and `pos.snapped(...)` — what a real game calls every frame — raised
+// `UndefinedFunction` and aborted the running script.
+//
+// Semantics come from `upstream/godot/core/math/vector2.h` / `vector3.h`, not
+// from intuition, because several of these are easy to get subtly wrong:
+// `reflect` is Godot's `2 * n * dot(n) - v` (a mirror about `n`, which is why
+// `bounce` is exactly its negation), `angle_to_point` is `(to - self).angle()`
+// as of Godot 4 (it was the opposite direction in 3.x), `snapped` rounds half
+// away from zero via `floor(v / step + 0.5)`, and `sign` maps zero to zero
+// where Rust's `f32::signum` answers ±1 for ±0.0.
+
+/// Godot's `CMP_EPSILON` (`core/math/math_defs.h`).
+const CMP_EPSILON: f32 = 0.00001;
+
+/// Godot's `SIGN`: zero maps to zero, unlike `f32::signum`.
+fn sign_f(v: f32) -> f32 {
+    if v < 0.0 {
+        -1.0
+    } else if v > 0.0 {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn sign_i(v: i32) -> i32 {
+    match v.cmp(&0) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Greater => 1,
+        std::cmp::Ordering::Equal => 0,
+    }
+}
+
+/// Godot's `Math::snapped`: `floor(value / step + 0.5) * step`, a no-op when
+/// `step` is zero.
+fn snap_f(value: f32, step: f32) -> f32 {
+    if step != 0.0 {
+        (value / step + 0.5).floor() * step
+    } else {
+        value
+    }
+}
+
+fn snap_i(value: i32, step: i32) -> i32 {
+    if step != 0 {
+        let v = value as f64 / step as f64;
+        ((v + 0.5).floor() as i32).saturating_mul(step)
+    } else {
+        value
+    }
+}
+
+/// Godot's `Math::fposmod` — the result carries the sign of `y`, which
+/// `f32::rem_euclid` does not do for a negative modulus.
+fn fposmod(x: f32, y: f32) -> f32 {
+    let mut value = x % y;
+    if (value < 0.0 && y > 0.0) || (value > 0.0 && y < 0.0) {
+        value += y;
+    }
+    value
+}
+
+/// Godot's `Math::is_equal_approx` — a relative tolerance with an absolute
+/// floor, so values near zero still compare sanely.
+fn is_equal_approx_f(a: f32, b: f32) -> bool {
+    if a == b {
+        return true;
+    }
+    let tolerance = (CMP_EPSILON * a.abs()).max(CMP_EPSILON);
+    (a - b).abs() < tolerance
+}
+
+fn arg_vec2i(args: &[Variant], idx: usize, ctx: &str) -> Result<Vector2i, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::Vector2i(v)) => Ok(*v),
+        other => Err(type_error(format!(
+            "{ctx} expects a Vector2i for argument {idx}, got {}",
+            describe(other)
+        ))),
+    }
+}
+
+fn arg_vec3i(args: &[Variant], idx: usize, ctx: &str) -> Result<Vector3i, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::Vector3i(v)) => Ok(*v),
+        other => Err(type_error(format!(
+            "{ctx} expects a Vector3i for argument {idx}, got {}",
+            describe(other)
+        ))),
+    }
+}
+
+fn arg_int(args: &[Variant], idx: usize, ctx: &str) -> Result<i32, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::Int(i)) => Ok(*i as i32),
+        Some(Variant::Float(f)) => Ok(*f as i32),
+        Some(Variant::Bool(b)) => Ok(*b as i32),
+        other => Err(type_error(format!(
+            "{ctx} expects an int for argument {idx}, got {}",
+            describe(other)
+        ))),
+    }
+}
+
+/// Dispatches a method call on any of the four vector Variants.
+///
+/// Returns `UndefinedFunction("<Type>.<method>")` for a name this table does not
+/// implement, so the caller can surface exactly the error Godot would.
+pub(crate) fn vector_method(
+    value: &Variant,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    match value {
+        Variant::Vector2(v) => vector2_method(*v, method, args),
+        Variant::Vector3(v) => vector3_method(*v, method, args),
+        Variant::Vector2i(v) => vector2i_method(*v, method, args),
+        Variant::Vector3i(v) => vector3i_method(*v, method, args),
+        other => Err(type_error(format!(
+            "`{method}` is not a vector method (called on {})",
+            describe(Some(other))
+        ))),
+    }
+}
+
+fn vector2_method(v: Vector2, method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    let ctx = format!("Vector2.{method}()");
+    let vec = |x: f32, y: f32| -> Result<Variant, RuntimeError> {
+        Ok(Variant::Vector2(Vector2::new(x, y)))
+    };
+    match method {
+        // -- component-wise unary ------------------------------------------
+        "abs" => vec(v.x.abs(), v.y.abs()),
+        "sign" => vec(sign_f(v.x), sign_f(v.y)),
+        "floor" => vec(v.x.floor(), v.y.floor()),
+        "ceil" => vec(v.x.ceil(), v.y.ceil()),
+        "round" => vec(v.x.round(), v.y.round()),
+        "orthogonal" => vec(v.y, -v.x),
+
+        // -- scalar queries -------------------------------------------------
+        "aspect" => Ok(Variant::Float((v.x / v.y) as f64)),
+        "distance_squared_to" => {
+            let o = arg_vec2(args, 0, &ctx)?;
+            let d = v - o;
+            Ok(Variant::Float(d.length_squared() as f64))
+        }
+        "angle_to" => {
+            let o = arg_vec2(args, 0, &ctx)?;
+            Ok(Variant::Float(v.cross(o).atan2(v.dot(o)) as f64))
+        }
+        // Godot 4: the angle of the vector POINTING AT `to`, i.e. `(to - self)`.
+        "angle_to_point" => {
+            let o = arg_vec2(args, 0, &ctx)?;
+            Ok(Variant::Float((o - v).angle() as f64))
+        }
+        "max_axis_index" => Ok(Variant::Int(if v.x < v.y { 1 } else { 0 })),
+        "min_axis_index" => Ok(Variant::Int(if v.x < v.y { 0 } else { 1 })),
+        "is_normalized" => Ok(Variant::Bool(is_equal_approx_f(v.length_squared(), 1.0))),
+        "is_zero_approx" => {
+            Ok(Variant::Bool(v.x.abs() < CMP_EPSILON && v.y.abs() < CMP_EPSILON))
+        }
+        "is_finite" => Ok(Variant::Bool(v.x.is_finite() && v.y.is_finite())),
+        "is_equal_approx" => {
+            let o = arg_vec2(args, 0, &ctx)?;
+            Ok(Variant::Bool(
+                is_equal_approx_f(v.x, o.x) && is_equal_approx_f(v.y, o.y),
+            ))
+        }
+
+        // -- vector results -------------------------------------------------
+        "direction_to" => {
+            let o = arg_vec2(args, 0, &ctx)?;
+            Ok(Variant::Vector2((o - v).normalized()))
+        }
+        "rotated" => {
+            let a = arg_num(args, 0, &ctx)?;
+            let (s, c) = (a.sin(), a.cos());
+            vec(v.x * c - v.y * s, v.x * s + v.y * c)
+        }
+        "project" => {
+            let o = arg_vec2(args, 0, &ctx)?;
+            let denom = o.length_squared();
+            if denom == 0.0 {
+                return Ok(Variant::Vector2(Vector2::ZERO));
+            }
+            Ok(Variant::Vector2(o * (v.dot(o) / denom)))
+        }
+        // A mirror about `n`; `bounce` is its negation (Godot defines it that way).
+        "reflect" => {
+            let n = arg_vec2(args, 0, &ctx)?;
+            Ok(Variant::Vector2(n * (2.0 * v.dot(n)) - v))
+        }
+        "bounce" => {
+            let n = arg_vec2(args, 0, &ctx)?;
+            Ok(Variant::Vector2(-(n * (2.0 * v.dot(n)) - v)))
+        }
+        "slide" => {
+            let n = arg_vec2(args, 0, &ctx)?;
+            Ok(Variant::Vector2(v - n * v.dot(n)))
+        }
+        "limit_length" => {
+            let len = if args.is_empty() {
+                1.0
+            } else {
+                arg_num(args, 0, &ctx)?
+            };
+            let l = v.length();
+            if l > 0.0 && len < l {
+                Ok(Variant::Vector2(v / l * len))
+            } else {
+                Ok(Variant::Vector2(v))
+            }
+        }
+        "move_toward" => {
+            let to = arg_vec2(args, 0, &ctx)?;
+            let delta = arg_num(args, 1, &ctx)?;
+            let vd = to - v;
+            let len = vd.length();
+            if len <= delta || len < CMP_EPSILON {
+                Ok(Variant::Vector2(to))
+            } else {
+                Ok(Variant::Vector2(v + vd / len * delta))
+            }
+        }
+        "snapped" => {
+            let step = arg_vec2(args, 0, &ctx)?;
+            vec(snap_f(v.x, step.x), snap_f(v.y, step.y))
+        }
+        "snappedf" => {
+            let step = arg_num(args, 0, &ctx)?;
+            vec(snap_f(v.x, step), snap_f(v.y, step))
+        }
+        "clamp" => {
+            let lo = arg_vec2(args, 0, &ctx)?;
+            let hi = arg_vec2(args, 1, &ctx)?;
+            vec(v.x.clamp(lo.x, hi.x), v.y.clamp(lo.y, hi.y))
+        }
+        "clampf" => {
+            let lo = arg_num(args, 0, &ctx)?;
+            let hi = arg_num(args, 1, &ctx)?;
+            vec(v.x.clamp(lo, hi), v.y.clamp(lo, hi))
+        }
+        "min" => {
+            let o = arg_vec2(args, 0, &ctx)?;
+            vec(v.x.min(o.x), v.y.min(o.y))
+        }
+        "max" => {
+            let o = arg_vec2(args, 0, &ctx)?;
+            vec(v.x.max(o.x), v.y.max(o.y))
+        }
+        "minf" => {
+            let s = arg_num(args, 0, &ctx)?;
+            vec(v.x.min(s), v.y.min(s))
+        }
+        "maxf" => {
+            let s = arg_num(args, 0, &ctx)?;
+            vec(v.x.max(s), v.y.max(s))
+        }
+        "posmod" => {
+            let m = arg_num(args, 0, &ctx)?;
+            vec(fposmod(v.x, m), fposmod(v.y, m))
+        }
+        "posmodv" => {
+            let m = arg_vec2(args, 0, &ctx)?;
+            vec(fposmod(v.x, m.x), fposmod(v.y, m.y))
+        }
+        "slerp" => {
+            let to = arg_vec2(args, 0, &ctx)?;
+            let w = arg_num(args, 1, &ctx)?;
+            let (start_sq, end_sq) = (v.length_squared(), to.length_squared());
+            if start_sq == 0.0 || end_sq == 0.0 {
+                // A zero-length end point has no direction to rotate towards,
+                // so Godot falls back to a plain lerp rather than dividing by
+                // zero.
+                return Ok(Variant::Vector2(v.lerp(to, w)));
+            }
+            let start_len = start_sq.sqrt();
+            let result_len = start_len + (end_sq.sqrt() - start_len) * w;
+            let angle = v.cross(to).atan2(v.dot(to)) * w;
+            let (s, c) = (angle.sin(), angle.cos());
+            let rotated = Vector2::new(v.x * c - v.y * s, v.x * s + v.y * c);
+            Ok(Variant::Vector2(rotated * (result_len / start_len)))
+        }
+        _ => Err(undefined_method("Vector2", method)),
+    }
+}
+
+fn vector3_method(v: Vector3, method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    let ctx = format!("Vector3.{method}()");
+    let vec = |x: f32, y: f32, z: f32| -> Result<Variant, RuntimeError> {
+        Ok(Variant::Vector3(Vector3::new(x, y, z)))
+    };
+    match method {
+        "abs" => vec(v.x.abs(), v.y.abs(), v.z.abs()),
+        "sign" => vec(sign_f(v.x), sign_f(v.y), sign_f(v.z)),
+        "floor" => vec(v.x.floor(), v.y.floor(), v.z.floor()),
+        "ceil" => vec(v.x.ceil(), v.y.ceil(), v.z.ceil()),
+        "round" => vec(v.x.round(), v.y.round(), v.z.round()),
+
+        "distance_squared_to" => {
+            let o = arg_vec3(args, 0, &ctx)?;
+            Ok(Variant::Float((v - o).length_squared() as f64))
+        }
+        "angle_to" => {
+            let o = arg_vec3(args, 0, &ctx)?;
+            Ok(Variant::Float(
+                v.cross(o).length().atan2(v.dot(o)) as f64
+            ))
+        }
+        // Godot returns the axis INDEX (0=X, 1=Y, 2=Z), not the component.
+        "max_axis_index" => Ok(Variant::Int(if v.x < v.y {
+            if v.y < v.z {
+                2
+            } else {
+                1
+            }
+        } else if v.x < v.z {
+            2
+        } else {
+            0
+        })),
+        "min_axis_index" => Ok(Variant::Int(if v.x < v.y {
+            if v.x < v.z {
+                0
+            } else {
+                2
+            }
+        } else if v.y < v.z {
+            1
+        } else {
+            2
+        })),
+        "is_normalized" => Ok(Variant::Bool(is_equal_approx_f(v.length_squared(), 1.0))),
+        "is_zero_approx" => Ok(Variant::Bool(
+            v.x.abs() < CMP_EPSILON && v.y.abs() < CMP_EPSILON && v.z.abs() < CMP_EPSILON,
+        )),
+        "is_finite" => Ok(Variant::Bool(
+            v.x.is_finite() && v.y.is_finite() && v.z.is_finite(),
+        )),
+        "is_equal_approx" => {
+            let o = arg_vec3(args, 0, &ctx)?;
+            Ok(Variant::Bool(
+                is_equal_approx_f(v.x, o.x)
+                    && is_equal_approx_f(v.y, o.y)
+                    && is_equal_approx_f(v.z, o.z),
+            ))
+        }
+
+        "direction_to" => {
+            let o = arg_vec3(args, 0, &ctx)?;
+            Ok(Variant::Vector3((o - v).normalized()))
+        }
+        // Godot builds a rotation basis from the axis and transforms the vector
+        // (`Basis(p_axis, p_angle).xform(*this)`). `from_axis_angle` lives on
+        // Quaternion, not Basis — Basis reaches it via `from_quaternion`.
+        "rotated" => {
+            let axis = arg_vec3(args, 0, &ctx)?;
+            let angle = arg_num(args, 1, &ctx)?;
+            Ok(Variant::Vector3(
+                Basis::from_quaternion(Quaternion::from_axis_angle(axis, angle)).xform(v),
+            ))
+        }
+        "project" => {
+            let o = arg_vec3(args, 0, &ctx)?;
+            let denom = o.length_squared();
+            if denom == 0.0 {
+                return Ok(Variant::Vector3(Vector3::ZERO));
+            }
+            Ok(Variant::Vector3(o * (v.dot(o) / denom)))
+        }
+        "reflect" => {
+            let n = arg_vec3(args, 0, &ctx)?;
+            Ok(Variant::Vector3(n * (2.0 * v.dot(n)) - v))
+        }
+        "bounce" => {
+            let n = arg_vec3(args, 0, &ctx)?;
+            Ok(Variant::Vector3(-(n * (2.0 * v.dot(n)) - v)))
+        }
+        "slide" => {
+            let n = arg_vec3(args, 0, &ctx)?;
+            Ok(Variant::Vector3(v - n * v.dot(n)))
+        }
+        "limit_length" => {
+            let len = if args.is_empty() {
+                1.0
+            } else {
+                arg_num(args, 0, &ctx)?
+            };
+            let l = v.length();
+            if l > 0.0 && len < l {
+                Ok(Variant::Vector3(v / l * len))
+            } else {
+                Ok(Variant::Vector3(v))
+            }
+        }
+        "move_toward" => {
+            let to = arg_vec3(args, 0, &ctx)?;
+            let delta = arg_num(args, 1, &ctx)?;
+            let vd = to - v;
+            let len = vd.length();
+            if len <= delta || len < CMP_EPSILON {
+                Ok(Variant::Vector3(to))
+            } else {
+                Ok(Variant::Vector3(v + vd / len * delta))
+            }
+        }
+        "snapped" => {
+            let step = arg_vec3(args, 0, &ctx)?;
+            vec(
+                snap_f(v.x, step.x),
+                snap_f(v.y, step.y),
+                snap_f(v.z, step.z),
+            )
+        }
+        "snappedf" => {
+            let step = arg_num(args, 0, &ctx)?;
+            vec(snap_f(v.x, step), snap_f(v.y, step), snap_f(v.z, step))
+        }
+        "clamp" => {
+            let lo = arg_vec3(args, 0, &ctx)?;
+            let hi = arg_vec3(args, 1, &ctx)?;
+            vec(
+                v.x.clamp(lo.x, hi.x),
+                v.y.clamp(lo.y, hi.y),
+                v.z.clamp(lo.z, hi.z),
+            )
+        }
+        "clampf" => {
+            let lo = arg_num(args, 0, &ctx)?;
+            let hi = arg_num(args, 1, &ctx)?;
+            vec(v.x.clamp(lo, hi), v.y.clamp(lo, hi), v.z.clamp(lo, hi))
+        }
+        "min" => {
+            let o = arg_vec3(args, 0, &ctx)?;
+            vec(v.x.min(o.x), v.y.min(o.y), v.z.min(o.z))
+        }
+        "max" => {
+            let o = arg_vec3(args, 0, &ctx)?;
+            vec(v.x.max(o.x), v.y.max(o.y), v.z.max(o.z))
+        }
+        "minf" => {
+            let s = arg_num(args, 0, &ctx)?;
+            vec(v.x.min(s), v.y.min(s), v.z.min(s))
+        }
+        "maxf" => {
+            let s = arg_num(args, 0, &ctx)?;
+            vec(v.x.max(s), v.y.max(s), v.z.max(s))
+        }
+        "posmod" => {
+            let m = arg_num(args, 0, &ctx)?;
+            vec(fposmod(v.x, m), fposmod(v.y, m), fposmod(v.z, m))
+        }
+        "posmodv" => {
+            let m = arg_vec3(args, 0, &ctx)?;
+            vec(fposmod(v.x, m.x), fposmod(v.y, m.y), fposmod(v.z, m.z))
+        }
+        _ => Err(undefined_method("Vector3", method)),
+    }
+}
+
+fn vector2i_method(v: Vector2i, method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    let ctx = format!("Vector2i.{method}()");
+    let vec = |x: i32, y: i32| -> Result<Variant, RuntimeError> {
+        Ok(Variant::Vector2i(Vector2i::new(x, y)))
+    };
+    // Godot computes the int vectors' lengths in double precision.
+    let len_sq = (v.x as f64) * (v.x as f64) + (v.y as f64) * (v.y as f64);
+    match method {
+        "abs" => vec(v.x.abs(), v.y.abs()),
+        "sign" => vec(sign_i(v.x), sign_i(v.y)),
+        "length" => Ok(Variant::Float(len_sq.sqrt())),
+        "length_squared" => Ok(Variant::Int(len_sq as i64)),
+        "aspect" => Ok(Variant::Float(v.x as f64 / v.y as f64)),
+        "max_axis_index" => Ok(Variant::Int(if v.x < v.y { 1 } else { 0 })),
+        "min_axis_index" => Ok(Variant::Int(if v.x < v.y { 0 } else { 1 })),
+        "distance_to" => {
+            let o = arg_vec2i(args, 0, &ctx)?;
+            let (dx, dy) = ((o.x - v.x) as f64, (o.y - v.y) as f64);
+            Ok(Variant::Float((dx * dx + dy * dy).sqrt()))
+        }
+        "distance_squared_to" => {
+            let o = arg_vec2i(args, 0, &ctx)?;
+            let (dx, dy) = ((o.x - v.x) as i64, (o.y - v.y) as i64);
+            Ok(Variant::Int(dx * dx + dy * dy))
+        }
+        "snapped" => {
+            let step = arg_vec2i(args, 0, &ctx)?;
+            vec(snap_i(v.x, step.x), snap_i(v.y, step.y))
+        }
+        "snappedi" => {
+            let step = arg_int(args, 0, &ctx)?;
+            vec(snap_i(v.x, step), snap_i(v.y, step))
+        }
+        "clamp" => {
+            let lo = arg_vec2i(args, 0, &ctx)?;
+            let hi = arg_vec2i(args, 1, &ctx)?;
+            vec(v.x.clamp(lo.x, hi.x), v.y.clamp(lo.y, hi.y))
+        }
+        "clampi" => {
+            let lo = arg_int(args, 0, &ctx)?;
+            let hi = arg_int(args, 1, &ctx)?;
+            vec(v.x.clamp(lo, hi), v.y.clamp(lo, hi))
+        }
+        "min" => {
+            let o = arg_vec2i(args, 0, &ctx)?;
+            vec(v.x.min(o.x), v.y.min(o.y))
+        }
+        "max" => {
+            let o = arg_vec2i(args, 0, &ctx)?;
+            vec(v.x.max(o.x), v.y.max(o.y))
+        }
+        "mini" => {
+            let s = arg_int(args, 0, &ctx)?;
+            vec(v.x.min(s), v.y.min(s))
+        }
+        "maxi" => {
+            let s = arg_int(args, 0, &ctx)?;
+            vec(v.x.max(s), v.y.max(s))
+        }
+        _ => Err(undefined_method("Vector2i", method)),
+    }
+}
+
+fn vector3i_method(v: Vector3i, method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    let ctx = format!("Vector3i.{method}()");
+    let vec = |x: i32, y: i32, z: i32| -> Result<Variant, RuntimeError> {
+        Ok(Variant::Vector3i(Vector3i::new(x, y, z)))
+    };
+    let len_sq =
+        (v.x as f64) * (v.x as f64) + (v.y as f64) * (v.y as f64) + (v.z as f64) * (v.z as f64);
+    match method {
+        "abs" => vec(v.x.abs(), v.y.abs(), v.z.abs()),
+        "sign" => vec(sign_i(v.x), sign_i(v.y), sign_i(v.z)),
+        "length" => Ok(Variant::Float(len_sq.sqrt())),
+        "length_squared" => Ok(Variant::Int(len_sq as i64)),
+        "max_axis_index" => Ok(Variant::Int(if v.x < v.y {
+            if v.y < v.z {
+                2
+            } else {
+                1
+            }
+        } else if v.x < v.z {
+            2
+        } else {
+            0
+        })),
+        "min_axis_index" => Ok(Variant::Int(if v.x < v.y {
+            if v.x < v.z {
+                0
+            } else {
+                2
+            }
+        } else if v.y < v.z {
+            1
+        } else {
+            2
+        })),
+        "distance_to" => {
+            let o = arg_vec3i(args, 0, &ctx)?;
+            let (dx, dy, dz) = (
+                (o.x - v.x) as f64,
+                (o.y - v.y) as f64,
+                (o.z - v.z) as f64,
+            );
+            Ok(Variant::Float((dx * dx + dy * dy + dz * dz).sqrt()))
+        }
+        "distance_squared_to" => {
+            let o = arg_vec3i(args, 0, &ctx)?;
+            let (dx, dy, dz) = (
+                (o.x - v.x) as i64,
+                (o.y - v.y) as i64,
+                (o.z - v.z) as i64,
+            );
+            Ok(Variant::Int(dx * dx + dy * dy + dz * dz))
+        }
+        "snapped" => {
+            let step = arg_vec3i(args, 0, &ctx)?;
+            vec(
+                snap_i(v.x, step.x),
+                snap_i(v.y, step.y),
+                snap_i(v.z, step.z),
+            )
+        }
+        "snappedi" => {
+            let step = arg_int(args, 0, &ctx)?;
+            vec(snap_i(v.x, step), snap_i(v.y, step), snap_i(v.z, step))
+        }
+        "clamp" => {
+            let lo = arg_vec3i(args, 0, &ctx)?;
+            let hi = arg_vec3i(args, 1, &ctx)?;
+            vec(
+                v.x.clamp(lo.x, hi.x),
+                v.y.clamp(lo.y, hi.y),
+                v.z.clamp(lo.z, hi.z),
+            )
+        }
+        "clampi" => {
+            let lo = arg_int(args, 0, &ctx)?;
+            let hi = arg_int(args, 1, &ctx)?;
+            vec(v.x.clamp(lo, hi), v.y.clamp(lo, hi), v.z.clamp(lo, hi))
+        }
+        "min" => {
+            let o = arg_vec3i(args, 0, &ctx)?;
+            vec(v.x.min(o.x), v.y.min(o.y), v.z.min(o.z))
+        }
+        "max" => {
+            let o = arg_vec3i(args, 0, &ctx)?;
+            vec(v.x.max(o.x), v.y.max(o.y), v.z.max(o.z))
+        }
+        "mini" => {
+            let s = arg_int(args, 0, &ctx)?;
+            vec(v.x.min(s), v.y.min(s), v.z.min(s))
+        }
+        "maxi" => {
+            let s = arg_int(args, 0, &ctx)?;
+            vec(v.x.max(s), v.y.max(s), v.z.max(s))
+        }
+        _ => Err(undefined_method("Vector3i", method)),
+    }
+}
+
+/// Static constructors on the vector types: `Vector2.from_angle(a)`.
+///
+/// Godot exposes these as static methods on the builtin, so they arrive as a
+/// call on a *type name* rather than on a value.
+pub(crate) fn vector_static_call(
+    type_name: &str,
+    method: &str,
+    args: &[Variant],
+) -> Option<Result<Variant, RuntimeError>> {
+    match (type_name, method) {
+        ("Vector2", "from_angle") => {
+            let ctx = "Vector2.from_angle()";
+            Some(arg_num(args, 0, ctx).map(|a| Variant::Vector2(Vector2::new(a.cos(), a.sin()))))
+        }
+        _ => None,
+    }
 }

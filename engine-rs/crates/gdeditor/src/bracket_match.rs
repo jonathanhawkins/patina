@@ -261,7 +261,7 @@ mod tests {
         //   f(0) ((1) a(2) [(3) 0(4) ](5) )(6)
         assert_eq!(matching_pair("f(a[0])", 4), Some((3, 5))); // after '[' -> ']'
         assert_eq!(matching_pair("f(a[0])", 2), Some((1, 6))); // after '(' -> outer ')'
-        // No bracket adjacent to the caret -> None.
+                                                               // No bracket adjacent to the caret -> None.
         assert_eq!(matching_pair("foo()", 1), None);
         // Brackets inside a string literal are ignored when matching.
         //   p(0) ((1) "(2) )(3) "(4) )(5)  -> '(' matches the ')' at 5, not 3.

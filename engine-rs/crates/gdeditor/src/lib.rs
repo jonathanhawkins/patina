@@ -61,6 +61,9 @@ pub mod editor_settings_store;
 pub mod editor_ui;
 pub mod environment_preview;
 pub mod export_dialog;
+pub mod export_groups;
+pub mod export_layout;
+pub mod export_presets;
 pub mod filesystem;
 pub mod find_in_files;
 pub mod find_replace;
@@ -68,21 +71,18 @@ pub mod fs_file_ops;
 pub mod fs_import_pipeline;
 pub mod fs_thumbnails;
 pub mod gdscript_highlight;
-pub mod group_dialog;
-pub mod idle_render;
-pub mod import;
-pub mod import_settings;
-pub mod export_groups;
-pub mod export_layout;
-pub mod export_presets;
 pub mod gizmo_multi;
 pub mod gizmo_snap;
 pub mod goto_definition;
 pub mod goto_line;
 pub mod grid_display;
 pub mod grid_snapping;
+pub mod group_dialog;
 pub mod guides;
 pub mod help_menu_commands;
+pub mod idle_render;
+pub mod import;
+pub mod import_settings;
 pub mod indent_block;
 pub mod input_map;
 pub mod inspector;
@@ -103,19 +103,16 @@ pub mod numeric_expression;
 pub mod open_recent;
 pub mod open_scene;
 pub mod open_scripts_panel;
-pub mod pivot_marker;
-pub mod property_undo;
-pub mod subresource_inline;
-pub mod viewport_select;
-pub mod viewport_toolbar;
 pub mod output_console;
 pub mod output_panel;
+pub mod pivot_marker;
 pub mod play_custom_scene;
 pub mod plugin_manager;
 pub mod profiler_panel;
 pub mod project_menu_commands;
 pub mod project_settings_dialog;
 pub mod project_settings_store;
+pub mod property_undo;
 pub mod save_normalize;
 pub mod scene_editor;
 pub mod scene_menu_commands;
@@ -132,7 +129,6 @@ pub mod script_main_view;
 pub mod script_outline;
 pub mod settings;
 pub mod shader_editor;
-pub mod snap_config;
 pub mod signal_connect_advanced;
 pub mod signal_connect_dialog;
 pub mod signal_connection_edit;
@@ -141,6 +137,8 @@ pub mod signal_docs;
 pub mod signal_goto_method;
 pub mod signal_receiver_stub;
 pub mod signals_tree;
+pub mod snap_config;
+pub mod subresource_inline;
 pub mod texture_cache;
 pub mod theme_editor;
 pub mod tilemap_editor;
@@ -157,6 +155,8 @@ pub mod viewport_3d_handles;
 pub mod viewport_3d_overlay;
 pub mod viewport_3d_render;
 pub mod viewport_3d_select;
+pub mod viewport_select;
+pub mod viewport_toolbar;
 
 use gdscene::node::{Node, NodeId};
 use gdscene::SceneTree;
@@ -202,10 +202,11 @@ pub use find_replace::{
     SearchMatch, SearchMode,
 };
 pub use import::{
-    AnimationLoopMode, EditorSceneFormatImporter, EditorScenePostImport, FbxSceneImporter,
-    GltfSceneImporter, ImportPipeline, ImportedAnimation, ImportedResource, ImportedScene,
-    ImportedSceneNode, ObjSceneImporter, ResourceImporter, SceneFormatImporterRegistry,
-    SceneImportOptions, TresImporter, TscnImporter,
+    default_scene_importer_registry, import_scene_to_packed_scene, imported_scene_to_tscn,
+    split_name_suffix, AnimationLoopMode, EditorSceneFormatImporter, EditorScenePostImport,
+    FbxSceneImporter, GltfSceneImporter, ImportPipeline, ImportedAnimation, ImportedAnimationTrack,
+    ImportedResource, ImportedScene, ImportedSceneNode, NodeNameSuffix, ObjSceneImporter,
+    ResourceImporter, SceneFormatImporterRegistry, SceneImportOptions, TresImporter, TscnImporter,
 };
 pub use inspector::{
     coerce_variant, validate_variant, CustomPropertyEditor, EditorHint, EditorInspectorPlugin,
@@ -703,8 +704,10 @@ fn capture_subtree(tree: &SceneTree, id: NodeId) -> Option<CapturedNode> {
     let node = tree.get_node(id)?;
     let name = node.name().to_string();
     let class_name = node.class_name().to_string();
-    let props: Vec<(String, Variant)> =
-        node.properties().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let props: Vec<(String, Variant)> = node
+        .properties()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let child_ids = node.children().to_vec();
     let children = child_ids
         .iter()
@@ -1922,7 +1925,11 @@ mod tests {
         // Selecting B in the scene tree moves the selection but the pinned
         // inspector keeps showing A.
         editor.select_node(b);
-        assert_eq!(editor.selected_node(), Some(b), "tree selection follows to B");
+        assert_eq!(
+            editor.selected_node(),
+            Some(b),
+            "tree selection follows to B"
+        );
         assert_eq!(
             editor.inspected_node(),
             Some(a),

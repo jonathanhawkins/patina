@@ -212,6 +212,26 @@ fn boot_from_project_text(
 ) -> Result<BootedProject, String> {
     let project_root = project_root.to_path_buf();
 
+    // (0) Populate ClassDB before ANYTHING loads a scene (pat-s3rrv.7).
+    //
+    // Godot fills ClassDB in `register_core_types()`/`register_scene_types()`
+    // before the MainLoop exists, so every class default, method and signal is
+    // queryable from frame 0. Patina only ever registered from the editor, so a
+    // booted game had `Object -> Node -> Viewport -> Window` and nothing else.
+    //
+    // This must run ahead of the scene load below, not beside it: the loader
+    // seeds each node's defaults from `class_db::get_property_list()`
+    // (gdscene `packed_scene::node_with_class_defaults` / `SceneTree::create_node`),
+    // and that read happens once, as the node is built. Registering afterwards
+    // populates the database but leaves every already-loaded node bare — the
+    // failure would look like a ClassDB bug rather than an ordering bug.
+    //
+    // Every boot entry point (`boot_project`, `boot_project_with_user_root`,
+    // `boot_project_from_pck`) funnels through here, so this is the one call
+    // site that covers all of them. Idempotent, so a host that already
+    // registered (the editor) pays nothing.
+    gdobject::class_db::register_all_classes();
+
     // (1) Parse project.godot for scene/autoloads/input and for ProjectSettings.
     let loader = ProjectLoader::from_text(&project_root, content)
         .map_err(|e| format!("failed to parse project.godot: {e}"))?;

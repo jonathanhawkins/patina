@@ -71,22 +71,17 @@ impl MultiplayerReplicator {
             return false;
         };
         for (name, value) in &packet.properties {
-            node.set_property(name, decode_property_value(value));
+            // The packet already carries real Variants (pat-s3rrv.17), so the
+            // value is written through untouched. This used to run a
+            // `decode_property_value` guess over a stringified payload, which
+            // could only recover `Vector2` from an `"x,y"` spelling and handed
+            // back `Variant::String` for everything else — so a replicated
+            // `Vector3`, `Color` or `bool` landed on the node as a string and
+            // silently mismatched the property it was written to.
+            node.set_property(name, value.clone());
         }
         true
     }
-}
-
-/// Decodes a string-encoded synchronized value into a [`Variant`]. A `"x,y"`
-/// pair decodes to a `Vector2` (the encoding `MultiplayerSynchronizer` uses for
-/// positions); anything else stays a string.
-fn decode_property_value(raw: &str) -> Variant {
-    if let Some((x, y)) = raw.split_once(',') {
-        if let (Ok(x), Ok(y)) = (x.trim().parse::<f32>(), y.trim().parse::<f32>()) {
-            return Variant::Vector2(gdcore::math::Vector2::new(x, y));
-        }
-    }
-    Variant::String(raw.to_string())
 }
 
 #[cfg(test)]
@@ -141,7 +136,10 @@ mod tests {
 
         let sync = SyncPacket {
             net_id,
-            properties: vec![("position".to_string(), "10,20".to_string())],
+            properties: vec![(
+                "position".to_string(),
+                Variant::Vector2(gdcore::math::Vector2::new(10.0, 20.0)),
+            )],
         };
         assert!(repl.apply_sync(&mut tree, &sync), "node found and updated");
         assert_eq!(
@@ -156,7 +154,10 @@ mod tests {
         let mut repl = MultiplayerReplicator::new();
         let sync = SyncPacket {
             net_id: 999,
-            properties: vec![("position".to_string(), "1,2".to_string())],
+            properties: vec![(
+                "position".to_string(),
+                Variant::Vector2(gdcore::math::Vector2::new(1.0, 2.0)),
+            )],
         };
         assert!(
             !repl.apply_sync(&mut tree, &sync),
@@ -193,7 +194,21 @@ mod tests {
         // Host authority sets a synced property; wire it to the peer.
         let mut host_sync = MultiplayerSynchronizer::new(0);
         host_sync.set_net_id(req.net_id);
-        host_sync.set_property_value("position", "10,20");
+        host_sync.set_property_value(
+            "position",
+            Variant::Vector2(gdcore::math::Vector2::new(10.0, 20.0)),
+        );
+        // ⚠️ The property that proves the payload is a real Variant. The old
+        // string codec had exactly one spelling — `"x,y"` → `Vector2` — so a
+        // `Vector3` could not survive it: it would arrive as
+        // `Variant::String("...")` and mismatch the property. If the transport
+        // ever regresses to strings, this assertion fails while the `position`
+        // one above still passes.
+        host_sync.set_property_value(
+            "velocity",
+            Variant::Vector3(gdcore::math::Vector3::new(1.0, 2.0, 3.0)),
+        );
+        host_sync.set_property_value("alive", Variant::Bool(true));
         let sync = decode_sync_packet(&encode_sync_packet(
             host_sync.get_net_id(),
             &host_sync.property_snapshot(),
@@ -205,6 +220,17 @@ mod tests {
         assert_eq!(
             peer_tree.get_node(node).unwrap().get_property("position"),
             Variant::Vector2(gdcore::math::Vector2::new(10.0, 20.0))
+        );
+        assert_eq!(
+            peer_tree.get_node(node).unwrap().get_property("velocity"),
+            Variant::Vector3(gdcore::math::Vector3::new(1.0, 2.0, 3.0)),
+            "a Vector3 must survive the wire — the string codec could not \
+             represent one, so this is what proves the payload is a Variant"
+        );
+        assert_eq!(
+            peer_tree.get_node(node).unwrap().get_property("alive"),
+            Variant::Bool(true),
+            "a bool must arrive as a bool, not as the string \"true\""
         );
     }
 }

@@ -296,7 +296,10 @@ mod tests {
         assert_eq!(bar.len(), 3);
 
         // Close acts on the targeted tab only.
-        assert_eq!(bar.apply_menu(TabMenuAction::Close, b), TabMenuOutcome::Closed);
+        assert_eq!(
+            bar.apply_menu(TabMenuAction::Close, b),
+            TabMenuOutcome::Closed
+        );
         assert_eq!(bar.len(), 2);
         assert_eq!(bar.labels(), vec!["Main.tscn", "Enemy.tscn"]);
 
@@ -328,10 +331,16 @@ mod tests {
         let y = bar2.open("B");
         let z = bar2.open("C"); // C is active
         assert_eq!(bar2.active_id(), Some(z));
-        assert_eq!(bar2.apply_menu(TabMenuAction::Close, z), TabMenuOutcome::Closed);
+        assert_eq!(
+            bar2.apply_menu(TabMenuAction::Close, z),
+            TabMenuOutcome::Closed
+        );
         // Active falls back to a valid remaining tab.
         assert!(bar2.active_id() == Some(y) || bar2.active_id() == Some(x));
-        assert!(bar2.active_tab().is_some(), "active index stays valid after close");
+        assert!(
+            bar2.active_tab().is_some(),
+            "active index stays valid after close"
+        );
     }
 
     /// Acceptance (pat-8iwh0): dragging a tab to a new position reorders the tab

@@ -99,7 +99,10 @@ mod tests {
         // A trailing comment after the colon still counts as a block opener.
         assert_eq!(spaces.indent_for_new_line("    if y: # guard"), "        ");
         // A colon inside a comment does NOT open a block.
-        assert_eq!(spaces.indent_for_new_line("    var z = 1 # ratio a:b"), "    ");
+        assert_eq!(
+            spaces.indent_for_new_line("    var z = 1 # ratio a:b"),
+            "    "
+        );
 
         // Tab indent style.
         let tabs = AutoIndenter::new(IndentStyle::Tabs);

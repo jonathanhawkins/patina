@@ -107,7 +107,10 @@ mod tests {
 
         // Selecting another known type swaps the text.
         panel.select("Camera2D");
-        assert_eq!(panel.text(), "Controls what part of the 2D world is visible.");
+        assert_eq!(
+            panel.text(),
+            "Controls what part of the 2D world is visible."
+        );
         assert!(panel.has_description());
 
         // An unknown type renders the graceful placeholder (but stays selected).

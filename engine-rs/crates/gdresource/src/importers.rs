@@ -673,6 +673,141 @@ impl ImportFile {
     pub fn import_path(&self) -> Option<&str> {
         self.remap.get("path").map(|s| s.as_str())
     }
+
+    /// The `[params]` section — the importer's editable options.
+    ///
+    /// Godot's ImportDock reads these to show what each option is *currently*
+    /// set to and writes edits back here (pat-s3rrv.2). An asset that has
+    /// never been imported has no section yet.
+    pub fn params(&self) -> Option<&HashMap<String, String>> {
+        self.other_sections.get("params")
+    }
+
+    /// A single `[params]` entry.
+    pub fn param(&self, key: &str) -> Option<&str> {
+        self.params()?.get(key).map(|s| s.as_str())
+    }
+
+    /// Sets a `[params]` entry, creating the section when the asset has never
+    /// been imported.
+    pub fn set_param(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.other_sections
+            .entry("params".to_string())
+            .or_default()
+            .insert(key.into(), value.into());
+    }
+
+    /// Sets a `[remap]` entry (`importer`, `type`, `uid`, `path`).
+    pub fn set_remap(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.remap.insert(key.into(), value.into());
+    }
+
+    /// Sets a `[deps]` entry (`source_file`, `dest_files`).
+    pub fn set_dep(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.deps.insert(key.into(), value.into());
+    }
+}
+
+/// Formats a parsed value back into an INI literal.
+///
+/// [`parse_import_file`] strips the quotes off string values, so the writer has
+/// to decide which ones Godot would have written bare. Anything that reads as a
+/// Godot literal — a bool, `null`, a number, an array/dictionary, a `&`-prefixed
+/// StringName, or a constructor call like `Vector2(1, 2)` — is emitted bare;
+/// everything else is quoted. `res://` and `uid://` values are strings in
+/// Godot's own output, so they take the quoted branch.
+fn format_ini_value(value: &str) -> String {
+    let v = value.trim();
+    let looks_like_ctor = match v.split_once('(') {
+        Some((head, _)) => {
+            v.ends_with(')')
+                && !head.is_empty()
+                && head
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        None => false,
+    };
+    let bare = matches!(v, "true" | "false" | "null")
+        || v.parse::<f64>().is_ok()
+        || v.starts_with('[')
+        || v.starts_with('{')
+        || v.starts_with('&')
+        || looks_like_ctor;
+    if bare {
+        v.to_string()
+    } else {
+        format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+/// Orders a section's keys: the `lead` names first (when present), then the
+/// rest alphabetically.
+///
+/// `ImportFile` stores sections in a `HashMap`, whose iteration order varies
+/// per process. Without this a rewrite would shuffle every line and each save
+/// would show up as a whole-file diff.
+fn ordered_keys<'a>(map: &'a HashMap<String, String>, lead: &[&str]) -> Vec<&'a String> {
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    let mut out: Vec<&String> = Vec::with_capacity(keys.len());
+    for name in lead {
+        if let Some(k) = keys.iter().find(|k| k.as_str() == *name) {
+            out.push(k);
+        }
+    }
+    for k in keys {
+        if !lead.contains(&k.as_str()) {
+            out.push(k);
+        }
+    }
+    out
+}
+
+/// Re-emits an [`ImportFile`] as a Godot `.import` sidecar.
+///
+/// Round-trips through [`parse_import_file`]: `[remap]` leads with its identity
+/// keys, then `[deps]`, then the remaining sections alphabetically (so
+/// `[params]` lands last, as Godot writes it).
+pub fn serialize_import_file(file: &ImportFile) -> String {
+    let mut out = String::from("[remap]\n\n");
+    for key in ordered_keys(&file.remap, &["importer", "type", "uid", "path"]) {
+        let value = format_ini_value(&file.remap[key]);
+        out.push_str(&format!("{key}={value}\n"));
+    }
+
+    if !file.deps.is_empty() {
+        out.push_str("\n[deps]\n\n");
+        for key in ordered_keys(&file.deps, &["source_file", "dest_files"]) {
+            let value = format_ini_value(&file.deps[key]);
+            out.push_str(&format!("{key}={value}\n"));
+        }
+    }
+
+    let mut sections: Vec<&String> = file.other_sections.keys().collect();
+    sections.sort();
+    for section in sections {
+        let entries = &file.other_sections[section];
+        if entries.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n[{section}]\n\n"));
+        for key in ordered_keys(entries, &[]) {
+            let value = format_ini_value(&entries[key]);
+            out.push_str(&format!("{key}={value}\n"));
+        }
+    }
+    out
+}
+
+/// Writes an `.import` sidecar to disk, creating parent directories.
+pub fn save_import_file(path: &Path, file: &ImportFile) -> EngineResult<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(EngineError::Io)?;
+        }
+    }
+    std::fs::write(path, serialize_import_file(file)).map_err(EngineError::Io)
 }
 
 /// Parses a `.import` sidecar file (INI-like format).
@@ -1646,6 +1781,101 @@ antialiased=true
         assert_eq!(
             s.get_property("shader_type"),
             Some(&Variant::String("sky".into()))
+        );
+    }
+
+    // -- .import writing (pat-s3rrv.2) ---------------------------------------
+
+    /// A real Godot-authored sidecar must survive parse -> serialize -> parse
+    /// with every section intact. Nothing could write one of these before, so
+    /// the round-trip is what proves the editor won't corrupt a project it
+    /// didn't create.
+    #[test]
+    fn import_file_round_trips_through_the_writer() {
+        let original = "\
+[remap]
+
+importer=\"texture\"
+type=\"CompressedTexture2D\"
+uid=\"uid://bx7q\"
+path=\"res://.godot/imported/hero.png-9f2.ctex\"
+
+[deps]
+
+source_file=\"res://hero.png\"
+dest_files=[\"res://.godot/imported/hero.png-9f2.ctex\"]
+
+[params]
+
+compress/mode=0
+mipmaps/generate=true
+process/hdr_as_srgb=false
+svg/scale=1.0
+";
+        let parsed = parse_import_file(original).expect("fixture parses");
+        let round = parse_import_file(&serialize_import_file(&parsed)).expect("re-parses");
+
+        assert_eq!(round.importer(), Some("texture"));
+        assert_eq!(round.resource_type(), Some("CompressedTexture2D"));
+        assert_eq!(round.uid(), Some("uid://bx7q"));
+        assert_eq!(
+            round.import_path(),
+            Some("res://.godot/imported/hero.png-9f2.ctex")
+        );
+        assert_eq!(round.source_file(), Some("res://hero.png"));
+        assert_eq!(round.param("compress/mode"), Some("0"));
+        assert_eq!(round.param("mipmaps/generate"), Some("true"));
+        assert_eq!(round.param("svg/scale"), Some("1.0"));
+    }
+
+    /// Godot writes paths and uids quoted but bools/numbers/arrays bare. Emitting
+    /// a bool as `"false"` would make Godot read the option as a *string*, which
+    /// is how a sidecar silently stops matching its own importer.
+    #[test]
+    fn writer_quotes_strings_and_leaves_literals_bare() {
+        let mut f = ImportFile::default();
+        f.set_remap("importer", "texture");
+        f.set_remap("path", "res://.godot/imported/a.ctex");
+        f.set_param("mipmaps", "false");
+        f.set_param("max_size", "0");
+        f.set_param("lossy_quality", "0.7");
+        f.set_param("dest", "[\"res://a.ctex\"]");
+        f.set_param("label", "My Texture");
+
+        let out = serialize_import_file(&f);
+        assert!(out.contains("importer=\"texture\""), "strings quoted:\n{out}");
+        assert!(
+            out.contains("path=\"res://.godot/imported/a.ctex\""),
+            "res:// paths stay quoted:\n{out}"
+        );
+        assert!(out.contains("mipmaps=false"), "bools bare:\n{out}");
+        assert!(out.contains("max_size=0"), "ints bare:\n{out}");
+        assert!(out.contains("lossy_quality=0.7"), "floats bare:\n{out}");
+        assert!(out.contains("dest=[\"res://a.ctex\"]"), "arrays bare:\n{out}");
+        assert!(
+            out.contains("label=\"My Texture\""),
+            "free text quoted:\n{out}"
+        );
+    }
+
+    /// `[params]` is created on demand: an asset the dock touches before it has
+    /// ever been imported still gets a well-formed sidecar.
+    #[test]
+    fn set_param_creates_the_section_and_writes_to_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sidecar = dir.path().join("hero.png.import");
+
+        let mut f = ImportFile::default();
+        assert!(f.params().is_none(), "no [params] before the first edit");
+        f.set_remap("importer", "texture");
+        f.set_param("mipmaps", "false");
+        save_import_file(&sidecar, &f).expect("writes");
+
+        let text = std::fs::read_to_string(&sidecar).expect("sidecar on disk");
+        assert!(text.contains("[params]"), "section emitted:\n{text}");
+        assert_eq!(
+            load_import_file(&sidecar).expect("reloads").param("mipmaps"),
+            Some("false"),
         );
     }
 }

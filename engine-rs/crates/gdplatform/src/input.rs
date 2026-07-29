@@ -100,6 +100,100 @@ pub enum Key {
 }
 
 impl Key {
+    /// The Godot `KEY_*` keycode for this key (pat-s3rrv.14).
+    ///
+    /// Inverse of [`godot_keycode_to_key`], and generated FROM that table so the
+    /// two cannot drift: `InputEventKey.keycode` is an int in Godot
+    /// (`KEY_W == 87`), and every ported project compares against the `KEY_*`
+    /// constants. Patina used to hand scripts the key's *name* string ("W"),
+    /// which no real Godot code ever compares against.
+    ///
+    /// Godot's non-printable keys live above `1 << 22` (`KEY_ESCAPE` =
+    /// 4194305), which is why the codes below are not contiguous.
+    pub fn to_godot_keycode(self) -> i64 {
+        match self {
+            Key::Space => 32,
+            Key::Quote => 39,
+            Key::Comma => 44,
+            Key::Minus => 45,
+            Key::Period => 46,
+            Key::Slash => 47,
+            Key::Num0 => 48,
+            Key::Num1 => 49,
+            Key::Num2 => 50,
+            Key::Num3 => 51,
+            Key::Num4 => 52,
+            Key::Num5 => 53,
+            Key::Num6 => 54,
+            Key::Num7 => 55,
+            Key::Num8 => 56,
+            Key::Num9 => 57,
+            Key::Semicolon => 59,
+            Key::Equal => 61,
+            Key::A => 65,
+            Key::B => 66,
+            Key::C => 67,
+            Key::D => 68,
+            Key::E => 69,
+            Key::F => 70,
+            Key::G => 71,
+            Key::H => 72,
+            Key::I => 73,
+            Key::J => 74,
+            Key::K => 75,
+            Key::L => 76,
+            Key::M => 77,
+            Key::N => 78,
+            Key::O => 79,
+            Key::P => 80,
+            Key::Q => 81,
+            Key::R => 82,
+            Key::S => 83,
+            Key::T => 84,
+            Key::U => 85,
+            Key::V => 86,
+            Key::W => 87,
+            Key::X => 88,
+            Key::Y => 89,
+            Key::Z => 90,
+            Key::BracketLeft => 91,
+            Key::Backslash => 92,
+            Key::BracketRight => 93,
+            Key::QuoteLeft => 96,
+            Key::Escape => 4194305,
+            Key::Tab => 4194306,
+            Key::Backspace => 4194308,
+            Key::Enter => 4194309,
+            Key::Insert => 4194311,
+            Key::Delete => 4194312,
+            Key::Home => 4194317,
+            Key::End => 4194318,
+            Key::Left => 4194319,
+            Key::Up => 4194320,
+            Key::Right => 4194321,
+            Key::Down => 4194322,
+            Key::PageUp => 4194323,
+            Key::PageDown => 4194324,
+            Key::Shift => 4194325,
+            Key::Ctrl => 4194326,
+            Key::Alt => 4194328,
+            Key::CapsLock => 4194329,
+            Key::F1 => 4194332,
+            Key::F2 => 4194333,
+            Key::F3 => 4194334,
+            Key::F4 => 4194335,
+            Key::F5 => 4194336,
+            Key::F6 => 4194337,
+            Key::F7 => 4194338,
+            Key::F8 => 4194339,
+            Key::F9 => 4194340,
+            Key::F10 => 4194341,
+            Key::F11 => 4194342,
+            Key::F12 => 4194343,
+            Key::Menu => 4194370,
+        }
+    }
+
     /// Returns the string name for this key, matching the names used by
     /// GDScript's `Input.is_action_pressed()` and the editor's key event strings.
     pub fn name(self) -> &'static str {
@@ -291,6 +385,31 @@ pub enum MouseButton {
     Middle,
     WheelUp,
     WheelDown,
+}
+
+impl MouseButton {
+    /// The Godot `MOUSE_BUTTON_*` index for this button (pat-s3rrv.14).
+    ///
+    /// Godot numbers them from 1 (`MOUSE_BUTTON_LEFT` = 1, RIGHT = 2, MIDDLE =
+    /// 3, WHEEL_UP = 4, WHEEL_DOWN = 5) and exposes the value as
+    /// `InputEventMouseButton.button_index`. Patina used to hand scripts the
+    /// Rust debug string ("Left"), which no Godot code compares against.
+    pub fn to_godot_index(self) -> i64 {
+        match self {
+            MouseButton::Left => 1,
+            MouseButton::Right => 2,
+            MouseButton::Middle => 3,
+            MouseButton::WheelUp => 4,
+            MouseButton::WheelDown => 5,
+        }
+    }
+
+    /// The `button_mask` bit this button contributes
+    /// (`MOUSE_BUTTON_MASK_LEFT` = 1 << 0, etc.), as carried by
+    /// `InputEventMouse.button_mask`.
+    pub fn to_godot_mask(self) -> i64 {
+        1 << (self.to_godot_index() - 1)
+    }
 }
 
 // ---------------------------------------------------------------------------

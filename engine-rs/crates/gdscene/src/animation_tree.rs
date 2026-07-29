@@ -448,6 +448,10 @@ pub struct StateMachine {
     /// (crossfading) once any active transition completes; empty when not
     /// travelling.
     travel_queue: Vec<String>,
+    /// Godot `AnimationNodeStateMachinePlayback::stop()` — set by a script and
+    /// cleared by `start`/`travel`. Stored inverted so the derived `Default`
+    /// (and therefore every existing hand-built machine) keeps playing.
+    stopped: bool,
 }
 
 impl StateMachine {
@@ -508,6 +512,7 @@ impl StateMachine {
         match self.travel_path(target) {
             Some(path) => {
                 self.travel_queue = path;
+                self.stopped = false;
                 true
             }
             None => false,
@@ -517,6 +522,339 @@ impl StateMachine {
     /// `true` while a queued travel path is still being walked.
     pub fn is_travelling(&self) -> bool {
         !self.travel_queue.is_empty()
+    }
+
+    // -- AnimationNodeStateMachinePlayback surface (pat-s3rrv.1) ------------
+    //
+    // The methods a GDScript reaches through `parameters/playback`. `travel`
+    // above is the one that already existed; the rest complete the object so a
+    // game can steer the graph the way every Godot state-machine game does.
+
+    /// Godot `AnimationNodeStateMachinePlayback::start(node, reset = true)` —
+    /// teleports to `node` immediately, without walking the transition graph.
+    /// Any queued travel and any in-flight crossfade are discarded (a `start`
+    /// is a hard cut, not a blend). With `reset`, the incoming state's clips
+    /// restart from zero.
+    ///
+    /// Returns `false` when `node` names no state, leaving the machine untouched.
+    pub fn start(&mut self, node: &str, reset: bool) -> bool {
+        if !self.states.contains_key(node) {
+            return false;
+        }
+        self.travel_queue.clear();
+        self.transition = None;
+        self.stopped = false;
+        self.current = node.to_string();
+        if reset {
+            if let Some(n) = self.states.get_mut(node) {
+                reset_node_time(n);
+            }
+        }
+        true
+    }
+
+    /// Godot `AnimationNodeStateMachinePlayback::next()` (named `next_state`
+    /// here so it is not mistaken for `Iterator::next`) — takes the next hop of
+    /// the queued travel path right now instead of waiting for the current
+    /// crossfade to finish. The hop still uses its declared crossfade, matching
+    /// how `advance` would have taken it.
+    ///
+    /// Returns `false` when nothing is queued.
+    pub fn next_state(&mut self) -> bool {
+        if self.travel_queue.is_empty() {
+            return false;
+        }
+        // Drop the in-flight fade first: `next()` means "stop waiting", so the
+        // hop must not be blocked by the transition guard in `advance`.
+        self.transition = None;
+        let next = self.travel_queue.remove(0);
+        let crossfade = self
+            .transitions
+            .iter()
+            .find(|t| t.from == self.current && t.to == next)
+            .map(|t| t.crossfade)
+            .unwrap_or(0.0);
+        let from_node = self.states.get(&self.current).cloned();
+        let prev_state = std::mem::replace(&mut self.current, next);
+        if let Some(n) = self.states.get_mut(&self.current) {
+            reset_node_time(n);
+        }
+        if crossfade > 0.0 {
+            if let Some(from_node) = from_node {
+                self.transition = Some(ActiveTransition {
+                    from_state: prev_state,
+                    from_node: Box::new(from_node),
+                    elapsed: 0.0,
+                    duration: crossfade,
+                });
+            }
+        }
+        true
+    }
+
+    /// Godot `AnimationNodeStateMachinePlayback::stop()` — halts playback. The
+    /// current state is kept (Godot does not rewind on stop), but `advance` no
+    /// longer moves time, takes transitions, or walks the travel path.
+    pub fn stop(&mut self) {
+        self.stopped = true;
+        self.travel_queue.clear();
+    }
+
+    /// Godot `AnimationNodeStateMachinePlayback::is_playing()`.
+    pub fn is_playing(&self) -> bool {
+        !self.stopped
+    }
+
+    /// Godot `AnimationNodeStateMachinePlayback::get_current_node()`.
+    pub fn current_node(&self) -> &str {
+        &self.current
+    }
+
+    /// Godot `AnimationNodeStateMachinePlayback::get_travel_path()` — the hops
+    /// still to be walked, in order. Empty when not travelling.
+    pub fn travel_path_remaining(&self) -> &[String] {
+        &self.travel_queue
+    }
+
+    /// Godot `AnimationNodeStateMachinePlayback::get_fading_from_node()` — the
+    /// state being crossfaded out of, or `None` when no fade is in flight.
+    pub fn fading_from_node(&self) -> Option<&str> {
+        self.transition.as_ref().map(|t| t.from_state.as_str())
+    }
+
+    /// Godot `AnimationNodeStateMachinePlayback::get_current_play_position()` —
+    /// how far into the current state's clip playback has reached, in seconds.
+    /// `0.0` when the current state holds no clip.
+    pub fn current_play_position(&self) -> f64 {
+        self.states
+            .get(&self.current)
+            .and_then(node_play_position)
+            .unwrap_or(0.0)
+    }
+
+    /// Godot `AnimationNodeStateMachinePlayback::get_current_length()` — the
+    /// length of the current state's clip, resolved against `library`. `0.0`
+    /// when the state holds no clip or the clip is not in the library.
+    pub fn current_length(&self, library: &HashMap<String, Animation>) -> f64 {
+        self.states
+            .get(&self.current)
+            .and_then(|n| node_clip_name(n))
+            .and_then(|name| library.get(name))
+            .map(|a| a.length)
+            .unwrap_or(0.0)
+    }
+}
+
+/// The state machine `node` *is*, seeing through any [`AnimationNode::Named`]
+/// wrapper (the `.tscn` loader wraps graph nodes to make their parameters
+/// addressable, so the root of a state-machine tree is usually a `Named`).
+fn as_state_machine(node: &AnimationNode) -> Option<&StateMachine> {
+    match node {
+        AnimationNode::StateMachine(sm) => Some(sm),
+        AnimationNode::Named { inner, .. } => as_state_machine(inner),
+        _ => None,
+    }
+}
+
+/// Mutable counterpart of [`as_state_machine`].
+fn as_state_machine_mut(node: &mut AnimationNode) -> Option<&mut StateMachine> {
+    match node {
+        AnimationNode::StateMachine(sm) => Some(sm),
+        AnimationNode::Named { inner, .. } => as_state_machine_mut(inner),
+        _ => None,
+    }
+}
+
+/// Walks the graph looking for the state machine addressed by `name` — a graph
+/// node name for a nested machine, or empty for the graph root itself.
+///
+/// A machine can be addressed three ways, all of which Godot writes as
+/// `parameters/<name>/playback`: as a `Named` wrapper, as a state of an
+/// enclosing state machine, or as a node of an enclosing blend tree. All three
+/// are checked, then the search descends.
+fn find_state_machine<'a>(node: &'a AnimationNode, name: &str) -> Option<&'a StateMachine> {
+    if name.is_empty() {
+        return as_state_machine(node);
+    }
+    match node {
+        AnimationNode::Named { name: n, inner } => {
+            if n == name {
+                if let Some(sm) = as_state_machine(inner) {
+                    return Some(sm);
+                }
+            }
+            find_state_machine(inner, name)
+        }
+        AnimationNode::StateMachine(sm) => {
+            if let Some(found) = sm.states.get(name).and_then(as_state_machine) {
+                return Some(found);
+            }
+            sm.states
+                .values()
+                .find_map(|child| find_state_machine(child, name))
+        }
+        AnimationNode::BlendTree(bt) => {
+            if let Some(found) = bt.nodes.get(name).and_then(as_state_machine) {
+                return Some(found);
+            }
+            bt.nodes
+                .values()
+                .find_map(|child| find_state_machine(child, name))
+        }
+        AnimationNode::Transition(t) => t
+            .inputs
+            .iter()
+            .find_map(|(_, child)| find_state_machine(child, name)),
+        AnimationNode::OneShot(one_shot) => find_state_machine(&one_shot.base, name)
+            .or_else(|| find_state_machine(&one_shot.shot, name)),
+        AnimationNode::Blend2 { a, b, .. } => {
+            find_state_machine(a, name).or_else(|| find_state_machine(b, name))
+        }
+        AnimationNode::Blend3 { a, b, c, .. } => find_state_machine(a, name)
+            .or_else(|| find_state_machine(b, name))
+            .or_else(|| find_state_machine(c, name)),
+        AnimationNode::Add2 { base, add, .. } => {
+            find_state_machine(base, name).or_else(|| find_state_machine(add, name))
+        }
+        AnimationNode::Add3 { base, neg, pos, .. } => find_state_machine(base, name)
+            .or_else(|| find_state_machine(neg, name))
+            .or_else(|| find_state_machine(pos, name)),
+        AnimationNode::Sub2 { base, sub, .. } => {
+            find_state_machine(base, name).or_else(|| find_state_machine(sub, name))
+        }
+        AnimationNode::TimeScale { child, .. } | AnimationNode::TimeSeek { child, .. } => {
+            find_state_machine(child, name)
+        }
+        AnimationNode::Animation { .. }
+        | AnimationNode::BlendSpace1D(_)
+        | AnimationNode::BlendSpace2D(_) => None,
+    }
+}
+
+/// Mutable counterpart of [`find_state_machine`].
+///
+/// Each "found it" test runs as a scoped *immutable* reborrow before the
+/// mutable one is taken; writing it as a single mutable walk would need the
+/// hit and the fall-through descent to borrow the same subtree at once.
+fn find_state_machine_mut<'a>(
+    node: &'a mut AnimationNode,
+    name: &str,
+) -> Option<&'a mut StateMachine> {
+    if name.is_empty() {
+        return as_state_machine_mut(node);
+    }
+    match node {
+        AnimationNode::Named { name: n, inner } => {
+            if n == name && as_state_machine(inner).is_some() {
+                return as_state_machine_mut(inner);
+            }
+            find_state_machine_mut(inner, name)
+        }
+        AnimationNode::StateMachine(sm) => {
+            if sm.states.get(name).and_then(as_state_machine).is_some() {
+                return sm.states.get_mut(name).and_then(as_state_machine_mut);
+            }
+            sm.states
+                .values_mut()
+                .find_map(|child| find_state_machine_mut(child, name))
+        }
+        AnimationNode::BlendTree(bt) => {
+            if bt.nodes.get(name).and_then(as_state_machine).is_some() {
+                return bt.nodes.get_mut(name).and_then(as_state_machine_mut);
+            }
+            bt.nodes
+                .values_mut()
+                .find_map(|child| find_state_machine_mut(child, name))
+        }
+        AnimationNode::Transition(t) => t
+            .inputs
+            .iter_mut()
+            .find_map(|(_, child)| find_state_machine_mut(child, name)),
+        AnimationNode::OneShot(one_shot) => {
+            if find_state_machine(&one_shot.base, name).is_some() {
+                return find_state_machine_mut(&mut one_shot.base, name);
+            }
+            find_state_machine_mut(&mut one_shot.shot, name)
+        }
+        AnimationNode::Blend2 { a, b, .. } => {
+            if find_state_machine(a, name).is_some() {
+                return find_state_machine_mut(a, name);
+            }
+            find_state_machine_mut(b, name)
+        }
+        AnimationNode::Blend3 { a, b, c, .. } => {
+            if find_state_machine(a, name).is_some() {
+                return find_state_machine_mut(a, name);
+            }
+            if find_state_machine(b, name).is_some() {
+                return find_state_machine_mut(b, name);
+            }
+            find_state_machine_mut(c, name)
+        }
+        AnimationNode::Add2 { base, add, .. } => {
+            if find_state_machine(base, name).is_some() {
+                return find_state_machine_mut(base, name);
+            }
+            find_state_machine_mut(add, name)
+        }
+        AnimationNode::Add3 { base, neg, pos, .. } => {
+            if find_state_machine(base, name).is_some() {
+                return find_state_machine_mut(base, name);
+            }
+            if find_state_machine(neg, name).is_some() {
+                return find_state_machine_mut(neg, name);
+            }
+            find_state_machine_mut(pos, name)
+        }
+        AnimationNode::Sub2 { base, sub, .. } => {
+            if find_state_machine(base, name).is_some() {
+                return find_state_machine_mut(base, name);
+            }
+            find_state_machine_mut(sub, name)
+        }
+        AnimationNode::TimeScale { child, .. } | AnimationNode::TimeSeek { child, .. } => {
+            find_state_machine_mut(child, name)
+        }
+        AnimationNode::Animation { .. }
+        | AnimationNode::BlendSpace1D(_)
+        | AnimationNode::BlendSpace2D(_) => None,
+    }
+}
+
+/// Playback position of the first clip beneath `node`, for
+/// [`StateMachine::current_play_position`]. A state is normally a single
+/// `AnimationNodeAnimation`, but it may be a `Named` wrapper or a nested graph,
+/// so the leftmost clip is used — that is the one Godot reports for a state.
+fn node_play_position(node: &AnimationNode) -> Option<f64> {
+    match node {
+        AnimationNode::Animation { position, .. } => Some(*position),
+        AnimationNode::Named { inner, .. } => node_play_position(inner),
+        AnimationNode::TimeScale { child, .. } | AnimationNode::TimeSeek { child, .. } => {
+            node_play_position(child)
+        }
+        AnimationNode::Blend2 { a, .. } | AnimationNode::Blend3 { a, .. } => node_play_position(a),
+        AnimationNode::StateMachine(sm) => sm
+            .states
+            .get(&sm.current)
+            .and_then(|n| node_play_position(n)),
+        _ => None,
+    }
+}
+
+/// Clip name of the first clip beneath `node`; the naming counterpart of
+/// [`node_play_position`], used to resolve a length out of the library.
+fn node_clip_name(node: &AnimationNode) -> Option<&str> {
+    match node {
+        AnimationNode::Animation { name, .. } => Some(name.as_str()),
+        AnimationNode::Named { inner, .. } => node_clip_name(inner),
+        AnimationNode::TimeScale { child, .. } | AnimationNode::TimeSeek { child, .. } => {
+            node_clip_name(child)
+        }
+        AnimationNode::Blend2 { a, .. } | AnimationNode::Blend3 { a, .. } => node_clip_name(a),
+        AnimationNode::StateMachine(sm) => {
+            sm.states.get(&sm.current).and_then(|n| node_clip_name(n))
+        }
+        _ => None,
     }
 }
 
@@ -639,6 +977,23 @@ impl AnimationTree {
             Some(Variant::Int(i)) => Some(*i),
             _ => None,
         }
+    }
+
+    /// Resolves the [`StateMachine`] a Godot `parameters/…/playback` path
+    /// addresses (pat-s3rrv.1). `name` is empty for the tree root's own machine
+    /// (`parameters/playback`) and otherwise names a graph node
+    /// (`parameters/<name>/playback`), which is how Godot addresses a nested
+    /// state machine.
+    ///
+    /// `None` when nothing at that address is a state machine.
+    pub fn state_machine(&self, name: &str) -> Option<&StateMachine> {
+        find_state_machine(self.root.as_ref()?, name)
+    }
+
+    /// Mutable counterpart of [`state_machine`](Self::state_machine) — the
+    /// handle a script's `playback.travel(...)` writes through.
+    pub fn state_machine_mut(&mut self, name: &str) -> Option<&mut StateMachine> {
+        find_state_machine_mut(self.root.as_mut()?, name)
     }
 
     /// Advances all time-dependent nodes by `delta` seconds, resolving
@@ -972,6 +1327,12 @@ fn advance_state_machine(
     library: &HashMap<String, Animation>,
     params: EvalParams<'_>,
 ) {
+    // Godot: a stopped playback freezes the machine in place — time does not
+    // advance, transitions do not fire, and the current pose keeps being
+    // sampled (pat-s3rrv.1).
+    if sm.stopped {
+        return;
+    }
     sm.elapsed += delta;
 
     // If no active transition, evaluate outgoing transitions before advancing

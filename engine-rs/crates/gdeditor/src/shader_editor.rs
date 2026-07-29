@@ -812,7 +812,10 @@ impl ShaderEditor {
     /// Renders the bottom shader panel's status line: the active shader's path
     /// plus its compile state (not compiled / compiled OK / error: …).
     pub fn status_line(&self) -> String {
-        let path = self.active().map(|t| t.path.as_str()).unwrap_or("<no shader>");
+        let path = self
+            .active()
+            .map(|t| t.path.as_str())
+            .unwrap_or("<no shader>");
         match &self.compile_status {
             ShaderCompileStatus::Idle => format!("{path} — not compiled"),
             ShaderCompileStatus::Ok => format!("{path} — compiled OK"),
@@ -1278,7 +1281,11 @@ mod tests {
                    void fragment() { ALBEDO = vec3(later(1.0)); }\n\
                    float later(float x) { return x; }\n";
         let v = validate_shader_source(src);
-        assert!(v.ok, "a call before the definition must resolve, got {:?}", v.errors);
+        assert!(
+            v.ok,
+            "a call before the definition must resolve, got {:?}",
+            v.errors
+        );
     }
 
     /// The semantic pass must not mask the existing passes.
@@ -1324,8 +1331,15 @@ void fragment() {
         let path = "res://shaders/broken.gdshader";
         let idx = editor.open(path, "void fragment() {\n    ALBEDO = vec3(1.0);\n}\n");
         assert_eq!(editor.tab_count(), 1, "the edited shader opens as a tab");
-        assert_eq!(editor.active_tab_index(), Some(idx), "the new tab is active");
-        assert!(editor.open_paths().contains(&path), "the tab carries the resource path");
+        assert_eq!(
+            editor.active_tab_index(),
+            Some(idx),
+            "the new tab is active"
+        );
+        assert!(
+            editor.open_paths().contains(&path),
+            "the tab carries the resource path"
+        );
 
         // Compiling surfaces the error (missing shader_type) in the status line.
         let status = editor.compile_active().clone();
@@ -1335,7 +1349,10 @@ void fragment() {
         );
         let line = editor.status_line();
         assert!(line.contains(path), "status line names the shader: {line}");
-        assert!(line.contains("error"), "status line flags the error: {line}");
+        assert!(
+            line.contains("error"),
+            "status line flags the error: {line}"
+        );
         assert!(
             line.contains("shader_type"),
             "status line explains the error: {line}"
@@ -1344,10 +1361,17 @@ void fragment() {
         // A second resource opens as its own tab; a valid shader compiles clean.
         let ok_path = "res://shaders/good.gdshader";
         editor.open(ok_path, SAMPLE_SHADER);
-        assert_eq!(editor.tab_count(), 2, "a second shader opens as another tab");
+        assert_eq!(
+            editor.tab_count(),
+            2,
+            "a second shader opens as another tab"
+        );
         assert_eq!(*editor.compile_active(), ShaderCompileStatus::Ok);
         let ok_line = editor.status_line();
-        assert!(ok_line.contains(ok_path), "status line names the active shader: {ok_line}");
+        assert!(
+            ok_line.contains(ok_path),
+            "status line names the active shader: {ok_line}"
+        );
         assert!(
             ok_line.contains("OK") && !ok_line.contains("error"),
             "valid shader reports success: {ok_line}"
@@ -1509,7 +1533,11 @@ void fragment() {
         assert!(v.ok, "sample shader should validate");
         assert!(v.errors.is_empty());
         // SAMPLE_SHADER references both uniforms, so no unused warnings.
-        assert!(v.warnings.is_empty(), "no unused uniforms in sample: {:?}", v.warnings);
+        assert!(
+            v.warnings.is_empty(),
+            "no unused uniforms in sample: {:?}",
+            v.warnings
+        );
     }
 
     #[test]

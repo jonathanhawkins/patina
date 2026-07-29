@@ -292,10 +292,13 @@ mod tests {
         let music = layout.add_bus("Music");
         assert_eq!(music, 1);
         assert_eq!(layout.len(), 2);
-        assert_eq!(layout.bus(music).unwrap().sends, vec![BusSend {
-            target: MASTER_BUS.to_string(),
-            amount_db: 0.0,
-        }]);
+        assert_eq!(
+            layout.bus(music).unwrap().sends,
+            vec![BusSend {
+                target: MASTER_BUS.to_string(),
+                amount_db: 0.0,
+            }]
+        );
 
         // Adjust its volume.
         assert!(layout.set_volume(music, -6.0));

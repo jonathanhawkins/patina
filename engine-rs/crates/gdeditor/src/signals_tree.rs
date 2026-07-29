@@ -255,7 +255,7 @@ mod tests {
         // Typing narrows the tree to matching signals (substring on name).
         let filtered = tree.filtered("button");
         assert_eq!(filtered.signal_count(), 2); // button_down, button_up
-                                                 // The non-matching class group is dropped entirely.
+                                                // The non-matching class group is dropped entirely.
         assert_eq!(filtered.groups.len(), 1);
         assert_eq!(filtered.groups[0].class, "BaseButton");
 

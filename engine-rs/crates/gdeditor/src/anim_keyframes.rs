@@ -65,8 +65,11 @@ impl KeyframeTrack {
     }
 
     fn sort_keys(&mut self) {
-        self.keys
-            .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+        self.keys.sort_by(|a, b| {
+            a.time
+                .partial_cmp(&b.time)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     /// Inserts a key at the playhead on this (active) track, selecting it

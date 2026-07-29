@@ -154,8 +154,7 @@ mod tests {
 
         // The state persists across a save / reload (e.g. a new editor session).
         let persisted = toggles.to_json();
-        let reloaded =
-            DebugMenuToggles::from_json(&persisted).expect("persisted toggles reload");
+        let reloaded = DebugMenuToggles::from_json(&persisted).expect("persisted toggles reload");
         assert_eq!(reloaded, toggles, "checked state survives persistence");
         assert!(reloaded.is_checked(DebugToggle::VisibleCollisionShapes));
         assert!(reloaded.is_checked(DebugToggle::SynchronizeScriptChanges));

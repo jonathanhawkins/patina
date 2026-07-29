@@ -538,9 +538,65 @@ pub fn get_mouse_filter(tree: &SceneTree, node_id: NodeId) -> MouseFilter {
     tree.get_node(node_id)
         .map(|n| match n.get_property("mouse_filter") {
             Variant::Int(i) => MouseFilter::from_int(i),
-            _ => MouseFilter::Stop,
+            _ => default_mouse_filter(n),
         })
         .unwrap_or(MouseFilter::Stop)
+}
+
+/// The `mouse_filter` a class is born with, for a node that carries no explicit
+/// property (pat-s3rrv.13).
+///
+/// Godot sets these in each class's **constructor** and therefore never
+/// serializes them, so a `.tscn`-authored Label arrives with no `mouse_filter`
+/// at all. Defaulting everything to STOP made that Label swallow every click
+/// meant for whatever sits behind it — the single most visible symptom of this
+/// gap, since a full-rect Label over a Button is an ordinary layout.
+///
+/// Sources: `scene/gui/label.cpp:1477` (IGNORE), `scene/gui/container.cpp:233`
+/// and `scene/gui/texture_rect.cpp:261` (PASS), `scene/gui/panel.cpp:56` (STOP).
+///
+/// Container subclasses are listed by name **as well as** via the `Container`
+/// chain check, because `is_class`'s ancestor lookup goes through ClassDB, which
+/// is not always populated in unit tests — the explicit names keep the default
+/// correct either way.
+fn default_mouse_filter(node: &crate::node::Node) -> MouseFilter {
+    const IGNORE: &[&str] = &[
+        "Label",
+        "RichTextLabel",
+        "Separator",
+        "HSeparator",
+        "VSeparator",
+    ];
+    const PASS: &[&str] = &[
+        "Container",
+        "BoxContainer",
+        "HBoxContainer",
+        "VBoxContainer",
+        "GridContainer",
+        "CenterContainer",
+        "MarginContainer",
+        "PanelContainer",
+        "ScrollContainer",
+        "SplitContainer",
+        "HSplitContainer",
+        "VSplitContainer",
+        "TabContainer",
+        "FlowContainer",
+        "HFlowContainer",
+        "VFlowContainer",
+        "AspectRatioContainer",
+        "SubViewportContainer",
+        "TextureRect",
+        "NinePatchRect",
+        "ColorRect",
+    ];
+    if IGNORE.iter().any(|c| node.is_class(c)) {
+        MouseFilter::Ignore
+    } else if PASS.iter().any(|c| node.is_class(c)) {
+        MouseFilter::Pass
+    } else {
+        MouseFilter::Stop
+    }
 }
 
 /// Returns `true` if `point` lies within the axis-aligned rect at `position`
@@ -700,10 +756,23 @@ fn hit_test_control(
     parent_global: Vector2,
 ) -> Option<NodeId> {
     let (is_ctrl, children) = match tree.get_node(node_id) {
-        Some(n) => (
-            n.is_class("Control") || CONTROL_HIT_CLASSES.contains(&n.class_name()),
-            n.children().to_vec(),
-        ),
+        Some(n) => {
+            // Godot's `_gui_find_control_at_pos` rejects an invisible CanvasItem
+            // outright, before any rect or filter test (viewport.cpp:1819-1861).
+            // Patina never consulted visibility, so a hidden Panel or a closed
+            // menu still swallowed every click over its rect (pat-s3rrv.13).
+            //
+            // The node's OWN flag is the right one here, not `is_visible_in_tree`:
+            // this walk is top-down, so an invisible ancestor has already
+            // returned before we reach its children.
+            if matches!(n.get_property("visible"), Variant::Bool(false)) {
+                return None;
+            }
+            (
+                n.is_class("Control") || CONTROL_HIT_CLASSES.contains(&n.class_name()),
+                n.children().to_vec(),
+            )
+        }
         None => return None,
     };
     let global_pos = if is_ctrl {
@@ -738,9 +807,29 @@ fn hit_test_control(
         child_point =
             global_pos + inverse_control_transform(tree, node_id, child_point - global_pos);
     }
-    for &child in children.iter().rev() {
-        if let Some(hit) = hit_test_control(tree, child, child_point, global_pos) {
-            return Some(hit);
+    // A control that clips its contents cannot be hit *through* — Godot refuses
+    // to descend into children when the point misses the clipper's own rect
+    // (viewport.cpp:1819-1861), because anything out there is not drawn. Patina
+    // read `clip_contents` only in the render pass, so a child scrolled outside
+    // a clipping parent was still clickable where nothing was visible.
+    let clips = is_ctrl
+        && tree
+            .get_node(node_id)
+            .is_some_and(|n| matches!(n.get_property("clip_contents"), Variant::Bool(true)));
+    if !clips || rect_has_point(global_pos, get_size(tree, node_id), child_point) {
+        for &child in children.iter().rev() {
+            // `top_level` detaches a node from its parent's transform, so Godot
+            // excludes it from the parent's hit walk — it is picked up at the
+            // viewport level instead, not underneath this control.
+            if tree
+                .get_node(child)
+                .is_some_and(|n| matches!(n.get_property("top_level"), Variant::Bool(true)))
+            {
+                continue;
+            }
+            if let Some(hit) = hit_test_control(tree, child, child_point, global_pos) {
+                return Some(hit);
+            }
         }
     }
     // A TextureButton's click mask makes the node transparent to clicks over its
@@ -2496,6 +2585,173 @@ pub fn is_disabled(tree: &SceneTree, node_id: NodeId) -> bool {
             _ => false,
         })
         .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
+// BaseButton semantics (pat-s3rrv.12)
+// ---------------------------------------------------------------------------
+//
+// Godot's `BaseButton` (upstream/godot/scene/gui/base_button.cpp) is more than
+// "emit `pressed` on click": it filters by `button_mask`, chooses the firing
+// EDGE with `action_mode`, flips `button_pressed` and emits `toggled(bool)` in
+// `toggle_mode`, and enforces mutual exclusion across a `button_group`.
+//
+// Patina registered every one of those properties in ClassDB and *drew*
+// `button_pressed` (control_render.rs), but nothing ever wrote them — the GUI
+// stage emitted `button_down`/`button_up`/`pressed` for ANY mouse button and
+// knew nothing about toggling. These helpers are that missing half.
+
+/// Godot's `ACTION_MODE_BUTTON_PRESS` — fire on the down edge.
+pub const ACTION_MODE_BUTTON_PRESS: i64 = 0;
+
+/// `MOUSE_BUTTON_MASK_LEFT`: Godot's `button_mask` default, and the reason a
+/// right-click on a Button does nothing at all
+/// (`base_button.cpp` — the event is ignored before any state changes).
+pub const DEFAULT_BUTTON_MASK: i64 = 1;
+
+/// Reads an integer property, falling back to `default` when unset or of
+/// another type.
+fn int_prop_or(tree: &SceneTree, node_id: NodeId, key: &str, default: i64) -> i64 {
+    match tree.get_node(node_id).map(|n| n.get_property(key)) {
+        Some(Variant::Int(i)) => i,
+        Some(Variant::Float(f)) => f as i64,
+        _ => default,
+    }
+}
+
+/// Reads a bool property, defaulting to `false`.
+fn bool_prop_or_false(tree: &SceneTree, node_id: NodeId, key: &str) -> bool {
+    matches!(
+        tree.get_node(node_id).map(|n| n.get_property(key)),
+        Some(Variant::Bool(true))
+    )
+}
+
+/// `BaseButton.button_mask` — which mouse buttons act on this button. Godot
+/// defaults to LEFT only.
+pub fn button_mask(tree: &SceneTree, node_id: NodeId) -> i64 {
+    int_prop_or(tree, node_id, "button_mask", DEFAULT_BUTTON_MASK)
+}
+
+/// Whether `button_index` (1-based, as Godot numbers mouse buttons) is in this
+/// button's mask. Godot builds the mask as `1 << (button_index - 1)`.
+pub fn button_mask_accepts(tree: &SceneTree, node_id: NodeId, button_index: i64) -> bool {
+    if button_index < 1 {
+        return false;
+    }
+    button_mask(tree, node_id) & (1 << (button_index - 1)) != 0
+}
+
+/// `BaseButton.toggle_mode`.
+pub fn button_is_toggle(tree: &SceneTree, node_id: NodeId) -> bool {
+    bool_prop_or_false(tree, node_id, "toggle_mode")
+}
+
+/// `BaseButton.button_pressed` — the toggle state, not "is the mouse down".
+pub fn button_is_pressed(tree: &SceneTree, node_id: NodeId) -> bool {
+    bool_prop_or_false(tree, node_id, "button_pressed")
+}
+
+/// `BaseButton.action_mode`. Godot's default is `ACTION_MODE_BUTTON_RELEASE`
+/// (1) — the click completes on release, which is why dragging off a button
+/// cancels it.
+pub fn button_action_mode(tree: &SceneTree, node_id: NodeId) -> i64 {
+    int_prop_or(tree, node_id, "action_mode", 1)
+}
+
+/// `BaseButton.keep_pressed_outside` — when true the press survives the pointer
+/// leaving the rect, so releasing outside still fires.
+pub fn keeps_pressed_outside(tree: &SceneTree, node_id: NodeId) -> bool {
+    bool_prop_or_false(tree, node_id, "keep_pressed_outside")
+}
+
+/// The button's `button_group`, as the group resource's identity string. Empty
+/// means ungrouped.
+///
+/// A `.tscn` writes `button_group = ExtResource("…")` / `SubResource("…")`, and
+/// the loader leaves that reference text (or resolves it to a path companion),
+/// so any two buttons naming the SAME resource share a group — which is exactly
+/// the comparison Godot's `Ref<ButtonGroup>` equality makes.
+pub fn button_group_of(tree: &SceneTree, node_id: NodeId) -> String {
+    let Some(node) = tree.get_node(node_id) else {
+        return String::new();
+    };
+    match node.get_property("__extres__button_group") {
+        Variant::String(s) if !s.is_empty() => return s,
+        _ => {}
+    }
+    match node.get_property("button_group") {
+        Variant::String(s) => s,
+        _ => String::new(),
+    }
+}
+
+/// Every other button in the tree sharing `node_id`'s `button_group`.
+fn button_group_siblings(tree: &SceneTree, node_id: NodeId) -> Vec<NodeId> {
+    let group = button_group_of(tree, node_id);
+    if group.is_empty() {
+        return Vec::new();
+    }
+    tree.all_nodes_in_tree_order()
+        .into_iter()
+        .filter(|&id| id != node_id)
+        .filter(|&id| node_is_base_button(tree, id))
+        .filter(|&id| button_group_of(tree, id) == group)
+        .collect()
+}
+
+/// Sets `button_pressed` and emits `toggled(pressed)` when it actually changed,
+/// unpressing any group siblings — Godot's `set_pressed` + `_unpress_group`.
+///
+/// Returns whether the state changed. Emitting only on a real change matches
+/// Godot, where `set_pressed` early-returns if the value is already there;
+/// re-emitting would make a grouped click report a spurious `toggled(true)` on
+/// the button that was already on.
+pub fn set_button_pressed(tree: &mut SceneTree, node_id: NodeId, pressed: bool) -> bool {
+    if button_is_pressed(tree, node_id) == pressed {
+        return false;
+    }
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("button_pressed", Variant::Bool(pressed));
+    }
+    if pressed {
+        for sibling in button_group_siblings(tree, node_id) {
+            if button_is_pressed(tree, sibling) {
+                if let Some(node) = tree.get_node_mut(sibling) {
+                    node.set_property("button_pressed", Variant::Bool(false));
+                }
+                tree.emit_signal(sibling, "toggled", &[Variant::Bool(false)]);
+                tree.call_script_with_access(sibling, "_toggled", &[Variant::Bool(false)]);
+            }
+        }
+    }
+    tree.emit_signal(node_id, "toggled", &[Variant::Bool(pressed)]);
+    // `_toggled(bool)` is BaseButton's virtual, alongside the signal
+    // (`GDVIRTUAL_CALL(_toggled, …)`); a subclass script overrides it instead of
+    // connecting to itself.
+    tree.call_script_with_access(node_id, "_toggled", &[Variant::Bool(pressed)]);
+    true
+}
+
+/// Runs the button's action: the toggle flip (if any) followed by `pressed`.
+///
+/// Port of `BaseButton::_pressed()` plus the toggle branch of `on_action_event`
+/// (`base_button.cpp`). A grouped button that is already pressed does NOT
+/// un-toggle — Godot keeps one member of a group active unless the group allows
+/// unpressing.
+pub fn fire_button_action(tree: &mut SceneTree, node_id: NodeId) {
+    if button_is_toggle(tree, node_id) {
+        let currently = button_is_pressed(tree, node_id);
+        let grouped = !button_group_of(tree, node_id).is_empty();
+        let next = if currently && grouped {
+            true
+        } else {
+            !currently
+        };
+        set_button_pressed(tree, node_id, next);
+    }
+    tree.emit_signal(node_id, "pressed", &[]);
+    tree.call_script_with_access(node_id, "_pressed", &[]);
 }
 
 // ===========================================================================

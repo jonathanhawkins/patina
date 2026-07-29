@@ -2632,7 +2632,11 @@ mod tests {
         // Quarter-turn rotation about the pivot orbits the node from 3 o'clock
         // to 12 o'clock: (100,0) -> (0,100).
         let rotated = gizmo.apply_transform_about_pivot(node, GizmoTransform::Rotate(FRAC_PI_2));
-        assert!(rotated.x.abs() < 1e-3, "orbit about pivot, x: {}", rotated.x);
+        assert!(
+            rotated.x.abs() < 1e-3,
+            "orbit about pivot, x: {}",
+            rotated.x
+        );
         assert!(
             (rotated.y - 100.0).abs() < 1e-3,
             "orbit about pivot, y: {}",

@@ -23,6 +23,10 @@ pub mod movie_writer;
 pub mod notification;
 pub mod object;
 pub mod ref_counted;
+/// Script-reachable `RefCounted` instances addressed by `ObjectId`
+/// (pat-0q2kx.163). `ref_counted` supplies the counting semantics; this owns
+/// the instances so GDScript can name one.
+pub mod refcounted_handle;
 pub mod signal;
 pub mod weak_ref;
 

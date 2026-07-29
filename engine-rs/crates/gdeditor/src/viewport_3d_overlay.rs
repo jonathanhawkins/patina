@@ -148,9 +148,15 @@ mod tests {
         assert_eq!(z.end, Vector3::new(0.0, 0.0, 10.0));
 
         // Grid is visible by default and emits lines; the toolbar hides/shows it.
-        assert!(!vp.grid.generate_lines().is_empty(), "grid visible by default");
+        assert!(
+            !vp.grid.generate_lines().is_empty(),
+            "grid visible by default"
+        );
         assert!(!vp.toolbar_toggle_grid(), "toggle hides the grid");
-        assert!(vp.grid.generate_lines().is_empty(), "hidden grid draws no lines");
+        assert!(
+            vp.grid.generate_lines().is_empty(),
+            "hidden grid draws no lines"
+        );
         assert!(vp.toolbar_toggle_grid(), "toggle restores the grid");
         assert!(!vp.grid.generate_lines().is_empty());
 

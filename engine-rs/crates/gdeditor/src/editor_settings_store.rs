@@ -81,7 +81,10 @@ mod tests {
         es.set("interface/theme/preset", "Dark");
         es.set("text_editor/appearance/font_size", "16");
         assert_eq!(es.get("interface/theme/preset").as_deref(), Some("Dark"));
-        assert_eq!(es.get("text_editor/appearance/font_size").as_deref(), Some("16"));
+        assert_eq!(
+            es.get("text_editor/appearance/font_size").as_deref(),
+            Some("16")
+        );
 
         // Binding and rebinding a shortcut applies immediately.
         es.set_shortcut("editor/save_scene", "Ctrl+S");
@@ -92,7 +95,10 @@ mod tests {
         // Persisting and reloading (as on restart) keeps everything.
         let store = es.to_store();
         let reloaded = EditorSettings::from_store(&store).expect("loads");
-        assert_eq!(reloaded.get("interface/theme/preset").as_deref(), Some("Dark"));
+        assert_eq!(
+            reloaded.get("interface/theme/preset").as_deref(),
+            Some("Dark")
+        );
         assert_eq!(
             reloaded.get("text_editor/appearance/font_size").as_deref(),
             Some("16")

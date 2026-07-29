@@ -84,7 +84,10 @@ mod tests {
         // Clicking empty space (a far corner) selects nothing and clears.
         let miss = vp.click_select(&tree, 1.0, 1.0, 1.0);
         assert_eq!(miss, None, "clicking empty space selects nothing");
-        assert!(vp.selection.primary().is_none(), "selection cleared on a miss");
+        assert!(
+            vp.selection.primary().is_none(),
+            "selection cleared on a miss"
+        );
         assert!(!vp.selection.is_selected(a.raw()));
     }
 
@@ -113,13 +116,19 @@ mod tests {
         // A tight rectangle around A's projection selects A only.
         let hits = vp.box_select_hits(&tree, ax - 12.0, ay - 12.0, ax + 12.0, ay + 12.0);
         assert!(hits.contains(&a.raw()), "box around A selects A");
-        assert!(!hits.contains(&b.raw()), "box around A excludes the distant B");
+        assert!(
+            !hits.contains(&b.raw()),
+            "box around A excludes the distant B"
+        );
 
         // Corner order doesn't matter; a rect spanning both projections selects both.
         let (min_x, max_x) = (ax.min(bx) - 12.0, ax.max(bx) + 12.0);
         let (min_y, max_y) = (ay.min(by) - 12.0, ay.max(by) + 12.0);
         let both = vp.box_select_hits(&tree, max_x, max_y, min_x, min_y);
-        assert!(both.contains(&a.raw()) && both.contains(&b.raw()), "wide box selects both");
+        assert!(
+            both.contains(&a.raw()) && both.contains(&b.raw()),
+            "wide box selects both"
+        );
 
         // An empty corner of the screen selects nothing.
         let none = vp.box_select_hits(&tree, 0.0, 0.0, 4.0, 4.0);

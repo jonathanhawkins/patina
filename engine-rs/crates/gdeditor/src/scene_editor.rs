@@ -142,7 +142,9 @@ impl SceneEditor {
     /// script path, recording it for the editor host to act on. Returns the
     /// routed path, or [`EditorError::NoScript`] when the node has no script.
     pub fn open_script(&mut self, node_id: NodeId) -> EditorResult<String> {
-        let path = self.node_script_path(node_id).ok_or(EditorError::NoScript)?;
+        let path = self
+            .node_script_path(node_id)
+            .ok_or(EditorError::NoScript)?;
         self.open_script_path = Some(path.clone());
         Ok(path)
     }
@@ -337,9 +339,7 @@ impl SceneEditor {
         let trimmed = new_name.trim();
         if trimmed.is_empty() {
             return Err(EditorError::Engine(
-                gdcore::error::EngineError::InvalidOperation(
-                    "node name cannot be empty".into(),
-                ),
+                gdcore::error::EngineError::InvalidOperation("node name cannot be empty".into()),
             ));
         }
 
@@ -771,7 +771,10 @@ mod tests {
         // Instanced node carrying a real `.tscn` source, exactly as the
         // InstanceScene command records on the instanced root.
         let mut inst = Node::new("Enemy", "Node2D");
-        inst.set_property("_instance_source", Variant::String("res://enemy.tscn".into()));
+        inst.set_property(
+            "_instance_source",
+            Variant::String("res://enemy.tscn".into()),
+        );
         let inst = tree.add_child(root, inst).unwrap();
         // In-memory instance: generic placeholder → badge shows, not openable.
         let mut mem = Node::new("MemInst", "Node2D");
