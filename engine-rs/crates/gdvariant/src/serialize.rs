@@ -10,8 +10,9 @@
 
 use crate::dictionary::Dictionary;
 use crate::variant::Variant;
-use gdcore::math::{Color, Rect2, Vector2, Vector2i, Vector3, Vector3i};
-use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
+use gdcore::id::Rid;
+use gdcore::math::{Color, Rect2, Rect2i, Vector2, Vector2i, Vector3, Vector3i, Vector4, Vector4i};
+use gdcore::math3d::{Aabb, Basis, Plane, Projection, Quaternion, Transform3D};
 use serde_json::{json, Value};
 
 /// Renders a dictionary key to the string used for a JSON object key. String
@@ -44,6 +45,25 @@ pub fn to_json(v: &Variant) -> Value {
                 "size": [r.size.x, r.size.y]
             }
         }),
+        Variant::Vector4(v) => json!({ "type": "Vector4", "value": [v.x, v.y, v.z, v.w] }),
+        Variant::Vector4i(v) => json!({ "type": "Vector4i", "value": [v.x, v.y, v.z, v.w] }),
+        Variant::Rect2i(r) => json!({
+            "type": "Rect2i",
+            "value": {
+                "position": [r.position.x, r.position.y],
+                "size": [r.size.x, r.size.y]
+            }
+        }),
+        // A Projection serialises as its sixteen cells in the storage order —
+        // column-major, `m[column][row]` — so the JSON is a flat list read back
+        // by the same walk. Naming the columns would invite a reader to treat
+        // them as rows.
+        Variant::Projection(p) => json!({
+            "type": "Projection",
+            "value": p.m.iter().flatten().copied().collect::<Vec<f32>>()
+        }),
+        // An RID is an opaque handle, so the id is all there is to carry.
+        Variant::Rid(rid) => json!({ "type": "RID", "value": rid.id() }),
         Variant::Transform2D(t) => json!({
             "type": "Transform2D",
             "value": {
@@ -155,6 +175,13 @@ pub fn to_json(v: &Variant) -> Value {
                 .collect();
             json!({ "type": "PackedColorArray", "value": flat })
         }
+        Variant::PackedVector4Array(v) => {
+            let flat: Vec<f64> = v
+                .iter()
+                .flat_map(|p| [p.x as f64, p.y as f64, p.z as f64, p.w as f64])
+                .collect();
+            json!({ "type": "PackedVector4Array", "value": flat })
+        }
     }
 }
 
@@ -246,6 +273,54 @@ pub fn from_json(val: &Value) -> Option<Variant> {
                 arr[2].as_f64()? as f32,
             )))
         }
+        "Vector4" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() != 4 {
+                return None;
+            }
+            Some(Variant::Vector4(Vector4::new(
+                arr[0].as_f64()? as f32,
+                arr[1].as_f64()? as f32,
+                arr[2].as_f64()? as f32,
+                arr[3].as_f64()? as f32,
+            )))
+        }
+        "Vector4i" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() != 4 {
+                return None;
+            }
+            Some(Variant::Vector4i(Vector4i::new(
+                arr[0].as_i64()? as i32,
+                arr[1].as_i64()? as i32,
+                arr[2].as_i64()? as i32,
+                arr[3].as_i64()? as i32,
+            )))
+        }
+        "Rect2i" => {
+            let v = obj.get("value")?.as_object()?;
+            let pos = v.get("position")?.as_array()?;
+            let sz = v.get("size")?.as_array()?;
+            if pos.len() != 2 || sz.len() != 2 {
+                return None;
+            }
+            Some(Variant::Rect2i(Rect2i::new(
+                Vector2i::new(pos[0].as_i64()? as i32, pos[1].as_i64()? as i32),
+                Vector2i::new(sz[0].as_i64()? as i32, sz[1].as_i64()? as i32),
+            )))
+        }
+        "Projection" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() != 16 {
+                return None;
+            }
+            let mut m = [[0.0f32; 4]; 4];
+            for (i, cell) in arr.iter().enumerate() {
+                m[i / 4][i % 4] = cell.as_f64()? as f32;
+            }
+            Some(Variant::Projection(Projection { m }))
+        }
+        "RID" => Some(Variant::Rid(Rid::from_raw(obj.get("value")?.as_u64()?))),
         "Rect2" => {
             let v = obj.get("value")?.as_object()?;
             let pos = v.get("position")?.as_array()?;
@@ -501,6 +576,22 @@ pub fn from_json(val: &Value) -> Option<Variant> {
                 ));
             }
             Some(Variant::PackedColorArray(v))
+        }
+        "PackedVector4Array" => {
+            let arr = obj.get("value")?.as_array()?;
+            if arr.len() % 4 != 0 {
+                return None;
+            }
+            let mut v = Vec::with_capacity(arr.len() / 4);
+            for chunk in arr.chunks(4) {
+                v.push(Vector4::new(
+                    chunk[0].as_f64()? as f32,
+                    chunk[1].as_f64()? as f32,
+                    chunk[2].as_f64()? as f32,
+                    chunk[3].as_f64()? as f32,
+                ));
+            }
+            Some(Variant::PackedVector4Array(v))
         }
         _ => None,
     }

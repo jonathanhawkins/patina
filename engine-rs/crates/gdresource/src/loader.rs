@@ -7,8 +7,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gdcore::error::{EngineError, EngineResult};
-use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector2i, Vector3, Vector3i};
-use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
+use gdcore::math::{
+    Color, Rect2, Rect2i, Transform2D, Vector2, Vector2i, Vector3, Vector3i, Vector4, Vector4i,
+};
+use gdcore::math3d::{Aabb, Basis, Plane, Projection, Quaternion, Transform3D};
 use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
 use gdcore::ResourceUid;
@@ -230,15 +232,21 @@ pub fn parse_uid_string(uid_str: &str) -> ResourceUid {
 }
 
 /// Parses a single property value string into a [`Variant`].
-/// Builtin literals `Variant` has no kind for yet, preserved verbatim by
+/// Builtin literals `Variant` has no kind for, preserved verbatim by
 /// [`parse_variant_value`] instead of being dropped or retyped (pat-0q2kx.136).
-pub const UNPARSED_BUILTINS: &[&str] = &[
-    "Vector4i",
-    "Vector4",
-    "Rect2i",
-    "Projection",
-    "PackedVector4Array",
-];
+///
+/// **Now empty.** It used to hold `Vector4`, `Vector4i`, `Rect2i`, `Projection`
+/// and `PackedVector4Array` — the five literals `Variant` could not represent,
+/// which were kept as tagged dictionaries so the saver could re-emit the text
+/// verbatim while nothing could actually *read* them. pat-s3rrv.59 gave all
+/// five real Variant kinds, so they now parse into values like every other
+/// builtin and the placeholder is no longer reached.
+///
+/// The constant and its keys stay because the mechanism is the right answer for
+/// the *next* builtin Godot adds ahead of this port: preserving a literal
+/// losslessly beats dropping it. An empty list simply means nothing is
+/// currently in that position.
+pub const UNPARSED_BUILTINS: &[&str] = &[];
 
 /// Dictionary key naming the builtin a preserved literal came from.
 pub const UNPARSED_TYPE_KEY: &str = "__gd_unparsed_type__";
@@ -476,6 +484,9 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
     if let Some(inner) = try_strip_call(s, "PackedColorArray") {
         return parse_packed_color_array(inner);
     }
+    if let Some(inner) = try_strip_call(s, "PackedVector4Array") {
+        return parse_packed_vector4_array(inner);
+    }
 
     // Vector2i(x, y) — an INTEGER vector, kept integral.
     //
@@ -491,6 +502,77 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
             return Ok(Variant::Vector2i(Vector2i::new(x, y)));
         }
         return Err(EngineError::Parse(format!("invalid Vector2i: {s}")));
+    }
+
+    // Rect2i(x, y, w, h) — the INTEGER rectangle.
+    //
+    // ⚠️ Must be tried before nothing and after `Rect2`: `try_strip_call`
+    // matches on the exact `Name(` prefix, so `Rect2i(...)` never satisfies
+    // `Rect2(` and the two cannot shadow each other. Widening this to a float
+    // `Rect2` would round a TileSet atlas region onto its neighbour, which is
+    // the pat-nzgdu.78 corruption one dimension up.
+    if let Some(inner) = try_strip_call(s, "Rect2i") {
+        let parts = split_args(inner);
+        if parts.len() == 4 {
+            return Ok(Variant::Rect2i(Rect2i::from_components(
+                parse_i32(&parts[0])?,
+                parse_i32(&parts[1])?,
+                parse_i32(&parts[2])?,
+                parse_i32(&parts[3])?,
+            )));
+        }
+        return Err(EngineError::Parse(format!("invalid Rect2i: {s}")));
+    }
+
+    // Vector4i(x, y, z, w) — before Vector4 for readability only; the prefixes
+    // are exact, so order does not decide the match.
+    if let Some(inner) = try_strip_call(s, "Vector4i") {
+        let parts = split_args(inner);
+        if parts.len() == 4 {
+            return Ok(Variant::Vector4i(Vector4i::new(
+                parse_i32(&parts[0])?,
+                parse_i32(&parts[1])?,
+                parse_i32(&parts[2])?,
+                parse_i32(&parts[3])?,
+            )));
+        }
+        return Err(EngineError::Parse(format!("invalid Vector4i: {s}")));
+    }
+
+    // Vector4(x, y, z, w)
+    if let Some(inner) = try_strip_call(s, "Vector4") {
+        let parts = split_args(inner);
+        if parts.len() == 4 {
+            return Ok(Variant::Vector4(Vector4::new(
+                parse_f32(&parts[0])?,
+                parse_f32(&parts[1])?,
+                parse_f32(&parts[2])?,
+                parse_f32(&parts[3])?,
+            )));
+        }
+        return Err(EngineError::Parse(format!("invalid Vector4: {s}")));
+    }
+
+    // Projection(x, y, z, w) — FOUR Vector4 COLUMNS, written flat as sixteen
+    // numbers.
+    //
+    // ⚠️ The sixteen values are column-major (`m[column][row]`), matching both
+    // Godot's storage and `gdcore::math3d::Projection`. Filling row-major here
+    // would transpose every camera matrix, and a transposed projection still
+    // renders — just wrongly — so nothing would catch it downstream.
+    if let Some(inner) = try_strip_call(s, "Projection") {
+        let parts = split_args(inner);
+        if parts.len() == 16 {
+            let mut m = [[0.0f32; 4]; 4];
+            for (i, part) in parts.iter().enumerate() {
+                m[i / 4][i % 4] = parse_f32(part)?;
+            }
+            return Ok(Variant::Projection(Projection { m }));
+        }
+        return Err(EngineError::Parse(format!(
+            "Projection needs 16 floats, got {}: {s}",
+            parts.len()
+        )));
     }
 
     // Vector3i(x, y, z)
@@ -1120,6 +1202,30 @@ fn parse_packed_color_array(s: &str) -> EngineResult<Variant> {
         result.push(Color::new(r, g, b, a));
     }
     Ok(Variant::PackedColorArray(result))
+}
+
+/// Parses a `PackedVector4Array` body (flat quads: `x1, y1, z1, w1, ...`).
+fn parse_packed_vector4_array(s: &str) -> EngineResult<Variant> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Variant::PackedVector4Array(Vec::new()));
+    }
+    let parts = split_args(s);
+    if !parts.len().is_multiple_of(4) {
+        return Err(EngineError::Parse(format!(
+            "PackedVector4Array needs multiple-of-4 floats, got {}",
+            parts.len()
+        )));
+    }
+    let mut result = Vec::with_capacity(parts.len() / 4);
+    for chunk in parts.chunks(4) {
+        let x = parse_f32(&chunk[0])?;
+        let y = parse_f32(&chunk[1])?;
+        let z = parse_f32(&chunk[2])?;
+        let w = parse_f32(&chunk[3])?;
+        result.push(Vector4::new(x, y, z, w));
+    }
+    Ok(Variant::PackedVector4Array(result))
 }
 
 /// Finds the index of the closing quote in a string, starting search at `start`.

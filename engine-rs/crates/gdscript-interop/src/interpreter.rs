@@ -356,6 +356,45 @@ struct Environment {
 }
 
 impl Environment {
+    /// Every visible local, flattened outermost-first so inner scopes shadow
+    /// outer ones — a by-value snapshot for lambda capture (pat-s3rrv.67).
+    ///
+    /// ⚠️ Captures EVERY visible local, not only the identifiers the body
+    /// mentions. Godot captures just the referenced ones, but a lambda can only
+    /// ever read what was in scope, so the observable behaviour is identical
+    /// and this needs no walk over the `Expr`/`Stmt` trees. That matters: an
+    /// exhaustive free-identifier walker breaks the moment anyone adds an AST
+    /// variant, and it would break by SILENTLY missing a capture rather than by
+    /// failing to compile.
+    fn snapshot(&self) -> HashMap<String, Variant> {
+        let mut out = HashMap::new();
+        for scope in &self.scopes {
+            for (name, value) in scope {
+                // ⚠️ Array and Dictionary are deliberately NOT captured.
+                //
+                // In Godot they are REFCOUNTED HANDLES, so a lambda that does
+                // `log.append(x)` mutates the caller's array. Patina still
+                // models them as VALUES (`Variant::Array(Vec<Variant>)`) —
+                // that flip is pat-s3rrv.8 and is not done — so snapshotting
+                // one would hand the lambda a private copy and silently drop
+                // every append. That is the established callback idiom across
+                // this repo's tests, and real scripts use it to observe that a
+                // callback fired at all.
+                //
+                // Leaving them to resolve live is not a workaround, it is the
+                // closer approximation: Godot's semantics are "shared", and
+                // shared-with-the-enclosing-scope is nearer to that than a
+                // detached copy. Once pat-s3rrv.8 lands they can be captured
+                // like everything else, because the handle IS the value.
+                if matches!(value, Variant::Array(_) | Variant::Dictionary(_)) {
+                    continue;
+                }
+                out.insert(name.clone(), value.clone());
+            }
+        }
+        out
+    }
+
     fn new() -> Self {
         Self {
             scopes: vec![HashMap::new()],
@@ -3028,6 +3067,27 @@ impl Interpreter {
                         }
                         // ClassDB reflection singleton (pat-u3l8c.21).
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "ClassDB") {
+                            // `instantiate` is the one arm that needs scene
+                            // access — it builds a live node — so it is handled
+                            // here rather than in the free-function dispatcher
+                            // below, which has no `self` (pat-s3rrv.57).
+                            if member == "instantiate" {
+                                return self.classdb_instantiate(&evaluated_args);
+                            }
+                            // The only two ClassDB methods that take a live
+                            // OBJECT rather than a class name, so they need the
+                            // scene for the same reason `instantiate` does
+                            // (pat-s3rrv.57).
+                            if member == "class_get_property" || member == "class_set_property" {
+                                return self.classdb_object_property(member, &evaluated_args);
+                            }
+                            // Also needs `self`: a static call may be answered
+                            // by a host-owned registry (physics query params),
+                            // which only `scene_access` can reach
+                            // (pat-s3rrv.57).
+                            if member == "class_call_static" {
+                                return self.classdb_call_static(&evaluated_args);
+                            }
                             return call_classdb_static(member, &evaluated_args);
                         }
                         // ProjectSettings singleton (pat-u3l8c.21).
@@ -3315,6 +3375,19 @@ impl Interpreter {
                                 if class_name == "Crypto" {
                                     return Ok(Variant::ObjectId(new_crypto_handle()));
                                 }
+                                // pat-s3rrv.57: an abstract class is a
+                                // DIFFERENT error from an unknown one. Falling
+                                // through to `UndefinedVariable` told the author
+                                // their class name was wrong, when the real
+                                // answer is that Godot refuses to construct it.
+                                // Text matches gdscript_analyzer.cpp:3622.
+                                if gdobject::class_db::is_abstract(class_name) {
+                                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                        format!(
+                                            "Cannot construct abstract class \"{class_name}\"."
+                                        ),
+                                    )));
+                                }
                                 if is_node_class_name(class_name) {
                                     if let Some(ref mut access) = self.scene_access {
                                         if let Some(raw_id) =
@@ -3487,9 +3560,16 @@ impl Interpreter {
                         "g" => Ok(Variant::Float(c.g as f64)),
                         "b" => Ok(Variant::Float(c.b as f64)),
                         "a" => Ok(Variant::Float(c.a as f64)),
-                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
-                            "Color has no member '{member}'"
-                        )))),
+                        // ⚠️ The 8-bit views (`r8`/`g8`/`b8`/`a8`) and the HSV
+                        // decomposition (`h`/`s`/`v`) live in `variant_math`
+                        // (pat-s3rrv.58). This arm used to error for anything
+                        // outside r/g/b/a, so `col.r8` never reached them —
+                        // the four channels shadowed the other ten members.
+                        rest => crate::variant_math::member_get(&obj, rest).ok_or_else(|| {
+                            RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                "Color has no member '{member}'"
+                            )))
+                        }),
                     },
                     Variant::Dictionary(d) => {
                         // Try dictionary key first
@@ -3612,6 +3692,12 @@ impl Interpreter {
                 Ok(Variant::Callable(Box::new(CallableRef::Lambda {
                     params: params.iter().map(|p| p.name.clone()).collect(),
                     body: body_arc,
+                    // Snapshot the enclosing locals HERE, at the moment the
+                    // `func(...)` expression evaluates — that is what "captures
+                    // by value" means, and it is why a lambda stored now and
+                    // invoked three frames later still sees today's values
+                    // (pat-s3rrv.67).
+                    captures: Arc::new(self.environment.snapshot()),
                 })))
             }
 
@@ -3729,6 +3815,160 @@ impl Interpreter {
                 }
             }
         }
+    }
+
+    /// Dispatches an `InputEvent` instance method (pat-s3rrv.14).
+    ///
+    /// Only called for names [`is_input_event_method`] claims, so every arm
+    /// below is reachable and there is no catch-all that could swallow a typo.
+    fn input_event_method(
+        &mut self,
+        res: &gdvariant::ResourceRef,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        let bool_arg = |i: usize| matches!(args.get(i), Some(Variant::Bool(true)));
+        match method {
+            "is_pressed" => Ok(Variant::Bool(ie_is_pressed(res))),
+            "is_released" => Ok(Variant::Bool(ie_is_released(res))),
+            "is_echo" => Ok(Variant::Bool(ie_is_echo(res))),
+            "is_canceled" => Ok(Variant::Bool(ie_bool(res, "canceled"))),
+            "is_action_type" => Ok(Variant::Bool(ie_is_action_type(&res.class_name))),
+            "as_text" => Ok(Variant::String(ie_as_text(res))),
+            "get_device" => Ok(Variant::Int(ie_int(res, "device"))),
+            "get_modifiers_mask" => Ok(Variant::Int(ie_modifiers_mask(res))),
+            // Godot autoremaps this to Meta on macOS; Patina reports Ctrl, the
+            // non-macOS branch, because its event source carries no Meta yet.
+            "is_command_or_control_pressed" => Ok(Variant::Bool(ie_bool(res, "ctrl_pressed"))),
+            "as_text_keycode" => Ok(Variant::String(ie_keycode_text(res, "keycode"))),
+            "as_text_physical_keycode" => {
+                Ok(Variant::String(ie_keycode_text(res, "physical_keycode")))
+            }
+            "as_text_key_label" => Ok(Variant::String(ie_keycode_text(res, "key_label"))),
+            "get_keycode_with_modifiers" => Ok(Variant::Int(
+                ie_int(res, "keycode") | ie_modifiers_mask(res),
+            )),
+            "get_physical_keycode_with_modifiers" => Ok(Variant::Int(
+                ie_int(res, "physical_keycode") | ie_modifiers_mask(res),
+            )),
+            "is_match" => {
+                let other = match args.first() {
+                    Some(Variant::Resource(r)) => r,
+                    // Godot's `is_match` takes a Ref<InputEvent>; anything else
+                    // simply does not match, rather than erroring.
+                    _ => return Ok(Variant::Bool(false)),
+                };
+                // `exact_match` DEFAULTS TO TRUE here — the opposite of every
+                // other method on this class (input_event.cpp `is_match`).
+                let exact = match args.get(1) {
+                    Some(Variant::Bool(b)) => *b,
+                    _ => true,
+                };
+                let same = res.class_name == other.class_name;
+                let matched = match (ie_to_spec(res), ie_to_spec(other)) {
+                    (Some(a), Some(b)) => {
+                        same && a.code == b.code && ie_binding_matches(&a, other, &b, exact)
+                    }
+                    _ => same,
+                };
+                Ok(Variant::Bool(matched))
+            }
+            // -- the InputMap-backed half -----------------------------------
+            "is_action"
+            | "is_action_pressed"
+            | "is_action_released"
+            | "get_action_strength"
+            | "get_action_raw_strength" => {
+                let action = match args.first() {
+                    Some(Variant::String(s)) => s.clone(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "InputEvent.{method}() takes an action name"
+                        ))));
+                    }
+                };
+                // `is_action_pressed(action, allow_echo, exact_match)` puts
+                // exact_match THIRD; every other method here puts it second.
+                let (allow_echo, exact) = if method == "is_action_pressed" {
+                    (bool_arg(1), bool_arg(2))
+                } else {
+                    (false, bool_arg(1))
+                };
+                let status = self.input_event_action_status(res, &action, exact);
+                match method {
+                    "is_action" => Ok(Variant::Bool(status.is_some())),
+                    "is_action_pressed" => Ok(Variant::Bool(match status {
+                        Some((pressed, _)) => pressed && (allow_echo || !ie_is_echo(res)),
+                        None => false,
+                    })),
+                    "is_action_released" => Ok(Variant::Bool(match status {
+                        Some((pressed, _)) => !pressed,
+                        None => false,
+                    })),
+                    // Both strengths answer 0.0 for an event that does not
+                    // match the action at all, not Nil.
+                    _ => Ok(Variant::Float(
+                        status.map(|(_, strength)| strength).unwrap_or(0.0),
+                    )),
+                }
+            }
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("InputEvent.{other}"),
+            ))),
+        }
+    }
+
+    /// Godot's `InputMap::event_get_action_status` — `Some((pressed, strength))`
+    /// when this event matches `action`, `None` when it does not (pat-s3rrv.14).
+    fn input_event_action_status(
+        &mut self,
+        res: &gdvariant::ResourceRef,
+        action: &str,
+        exact: bool,
+    ) -> Option<(bool, f64)> {
+        // An InputEventAction short-circuits: it matches on its own action name
+        // and never consults the map's bindings at all (input_map.cpp
+        // `event_get_action_status`). Missing this would make the events
+        // `Input.parse_input_event` produces match nothing.
+        if res.class_name == "InputEventAction" {
+            if ie_string(res, "action") != action {
+                return None;
+            }
+            let pressed = ie_is_pressed(res);
+            let strength = if pressed {
+                match res.properties.get("strength") {
+                    Some(Variant::Float(f)) => *f,
+                    Some(Variant::Int(i)) => *i as f64,
+                    _ => 1.0,
+                }
+            } else {
+                0.0
+            };
+            return Some((pressed, strength));
+        }
+        let spec = ie_to_spec(res)?;
+        let access = self.scene_access.as_ref()?;
+        let bindings = access.input_map_action_events(action);
+        if bindings.is_empty() {
+            return None;
+        }
+        if !bindings
+            .iter()
+            .any(|b| ie_binding_matches(b, res, &spec, exact))
+        {
+            return None;
+        }
+        let pressed = ie_is_pressed(res);
+        // Digital bindings are full-strength or nothing; an axis reports its
+        // deflection magnitude.
+        let strength = if res.class_name == "InputEventJoypadMotion" {
+            ie_float(res, "axis_value").abs()
+        } else if pressed {
+            1.0
+        } else {
+            0.0
+        };
+        Some((pressed, strength))
     }
 
     /// Implements the `as` operator with Godot semantics: numeric int<->float
@@ -5522,6 +5762,133 @@ impl Interpreter {
                     "Vector3i() takes 0, 1 or 3 arguments".into(),
                 ))),
             },
+            // The four-component builtins, and `Rect2i` / `Projection` / `RID`
+            // (pat-s3rrv.59). Each mirrors Godot's own constructor arities.
+            "Vector4" => match args.len() {
+                0 => Ok(Some(Variant::Vector4(gdcore::math::Vector4::ZERO))),
+                1 => match &args[0] {
+                    Variant::Vector4(v) => Ok(Some(Variant::Vector4(*v))),
+                    Variant::Vector4i(v) => Ok(Some(Variant::Vector4(gdcore::math::Vector4::new(
+                        v.x as f32, v.y as f32, v.z as f32, v.w as f32,
+                    )))),
+                    other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "Vector4() expects a Vector4 or Vector4i, got {}",
+                        other.variant_type()
+                    )))),
+                },
+                4 => Ok(Some(Variant::Vector4(gdcore::math::Vector4::new(
+                    to_float(&args[0])? as f32,
+                    to_float(&args[1])? as f32,
+                    to_float(&args[2])? as f32,
+                    to_float(&args[3])? as f32,
+                )))),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Vector4() takes 0, 1 or 4 arguments".into(),
+                ))),
+            },
+            "Vector4i" => match args.len() {
+                0 => Ok(Some(Variant::Vector4i(gdcore::math::Vector4i::ZERO))),
+                1 => match &args[0] {
+                    // ⚠️ Godot TRUNCATES toward zero here rather than rounding,
+                    // the same rule `Vector2i(Vector2)` follows above.
+                    Variant::Vector4(v) => Ok(Some(Variant::Vector4i(
+                        gdcore::math::Vector4i::new(v.x as i32, v.y as i32, v.z as i32, v.w as i32),
+                    ))),
+                    Variant::Vector4i(v) => Ok(Some(Variant::Vector4i(*v))),
+                    other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "Vector4i() expects a Vector4 or Vector4i, got {}",
+                        other.variant_type()
+                    )))),
+                },
+                4 => Ok(Some(Variant::Vector4i(gdcore::math::Vector4i::new(
+                    to_int(&args[0])? as i32,
+                    to_int(&args[1])? as i32,
+                    to_int(&args[2])? as i32,
+                    to_int(&args[3])? as i32,
+                )))),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Vector4i() takes 0, 1 or 4 arguments".into(),
+                ))),
+            },
+            "Rect2i" => match args.len() {
+                0 => Ok(Some(Variant::Rect2i(gdcore::math::Rect2i::new(
+                    gdcore::math::Vector2i::ZERO,
+                    gdcore::math::Vector2i::ZERO,
+                )))),
+                2 => {
+                    let as_vec2i = |v: &Variant| match v {
+                        Variant::Vector2i(v) => Ok(*v),
+                        Variant::Vector2(v) => {
+                            Ok(gdcore::math::Vector2i::new(v.x as i32, v.y as i32))
+                        }
+                        other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "Rect2i(position, size) expects Vector2i arguments, got {}",
+                            other.variant_type()
+                        )))),
+                    };
+                    Ok(Some(Variant::Rect2i(gdcore::math::Rect2i::new(
+                        as_vec2i(&args[0])?,
+                        as_vec2i(&args[1])?,
+                    ))))
+                }
+                4 => Ok(Some(Variant::Rect2i(
+                    gdcore::math::Rect2i::from_components(
+                        to_int(&args[0])? as i32,
+                        to_int(&args[1])? as i32,
+                        to_int(&args[2])? as i32,
+                        to_int(&args[3])? as i32,
+                    ),
+                ))),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Rect2i() takes 0, 2 or 4 arguments".into(),
+                ))),
+            },
+            // `Projection()` is the IDENTITY, not the zero matrix — Godot's
+            // default-constructed Projection is identity, and a zero one would
+            // collapse everything it transformed to the origin.
+            "Projection" => match args.len() {
+                0 => Ok(Some(Variant::Projection(
+                    gdcore::math3d::Projection::IDENTITY,
+                ))),
+                1 => match &args[0] {
+                    Variant::Projection(p) => Ok(Some(Variant::Projection(*p))),
+                    other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "Projection() expects a Projection, got {}",
+                        other.variant_type()
+                    )))),
+                },
+                // Godot's `Projection(Vector4, Vector4, Vector4, Vector4)` takes
+                // four COLUMNS, in x/y/z/w order.
+                4 => {
+                    let as_vec4 = |v: &Variant| match v {
+                        Variant::Vector4(v) => Ok(*v),
+                        other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "Projection() expects four Vector4 columns, got {}",
+                            other.variant_type()
+                        )))),
+                    };
+                    Ok(Some(Variant::Projection(
+                        gdcore::math3d::Projection::from_columns(
+                            as_vec4(&args[0])?,
+                            as_vec4(&args[1])?,
+                            as_vec4(&args[2])?,
+                            as_vec4(&args[3])?,
+                        ),
+                    )))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Projection() takes 0, 1 or 4 arguments".into(),
+                ))),
+            },
+            // `RID()` builds the INVALID handle. Godot exposes no way to mint a
+            // valid one from script — a real handle only ever comes back from a
+            // *Server call — so there is deliberately no one-argument form.
+            "RID" => match args.len() {
+                0 => Ok(Some(Variant::Rid(gdcore::id::Rid::INVALID))),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "RID() takes no arguments".into(),
+                ))),
+            },
             "Vector3" => {
                 if args.is_empty() {
                     return Ok(Some(Variant::Vector3(gdcore::math::Vector3::ZERO)));
@@ -5546,6 +5913,24 @@ impl Interpreter {
                 0 => Ok(Some(Variant::Color(gdcore::math::Color::new(
                     0.0, 0.0, 0.0, 1.0,
                 )))),
+                // `Color("#ff8800")` / `Color("red")` — Godot's single-argument
+                // constructor takes an HTML colour or a named one
+                // (pat-s3rrv.58). An unparseable string is an ERROR rather than
+                // a silent black: a wrong colour surfaces as a bad-looking
+                // scene hours later, with nothing pointing back to here.
+                1 => match &args[0] {
+                    Variant::String(text) => gdcore::math::Color::from_html(text)
+                        .or_else(|| gdcore::math::Color::named(&text.to_uppercase()))
+                        .map(|c| Some(Variant::Color(c)))
+                        .ok_or_else(|| {
+                            RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                "Color(\"{text}\") is not a valid html or named colour"
+                            )))
+                        }),
+                    other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "Color() takes a String when called with one argument, got {other:?}"
+                    )))),
+                },
                 3 => {
                     let r = to_float(&args[0])? as f32;
                     let g = to_float(&args[1])? as f32;
@@ -5560,7 +5945,7 @@ impl Interpreter {
                     Ok(Some(Variant::Color(gdcore::math::Color::new(r, g, b, a))))
                 }
                 _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                    "Color() takes 0, 3 or 4 arguments".into(),
+                    "Color() takes 0, 1, 3 or 4 arguments".into(),
                 ))),
             },
             // `Rect2(x, y, w, h)` / `Rect2(position, size)` / `Rect2()`, Godot's
@@ -5637,6 +6022,10 @@ impl Interpreter {
             )?)),
             "PackedColorArray" => Ok(Some(build_packed_array(
                 Variant::PackedColorArray(Vec::new()),
+                args,
+            )?)),
+            "PackedVector4Array" => Ok(Some(build_packed_array(
+                Variant::PackedVector4Array(Vec::new()),
                 args,
             )?)),
             "move_toward" => {
@@ -6595,7 +6984,24 @@ impl Interpreter {
             if let Some(&line) = body_lines.get(i) {
                 self.current_line = line;
             }
-            match self.exec_stmt(&body[i])? {
+            // pat-s3rrv.19: a raise must tear down like every other exit from
+            // this loop. `?` here returned without popping the scope,
+            // decrementing `call_depth`, restoring `current_function` or
+            // popping the call-stack frame — so after a caught error the
+            // interpreter carried a leaked scope (stale locals shadowing class
+            // vars), a permanently inflated recursion depth, and a bogus frame
+            // in every subsequent backtrace.
+            let flow = match self.exec_stmt(&body[i]) {
+                Ok(flow) => flow,
+                Err(err) => {
+                    self.environment.pop_scope();
+                    self.call_depth -= 1;
+                    self.current_function = prev_function;
+                    self.call_stack_frames.pop();
+                    return Err(err);
+                }
+            };
+            match flow {
                 Some(ControlFlow::Return(v)) => {
                     return_val = v.unwrap_or(Variant::Nil);
                     break;
@@ -7308,6 +7714,29 @@ impl Interpreter {
                     Ok(Variant::Float(0.0))
                 }
             }
+            // pat-s3rrv.14: `Input.get_action_raw_strength` had NO arm here at
+            // all — the two hits elsewhere in this file are the `InputEvent`
+            // method of the same name, which is a different call.
+            //
+            // ⚠️ It must route to its own accessor, not reuse
+            // `get_action_strength`. The two differ only for ANALOG bindings
+            // once a deadzone applies (`gdplatform::input` documents 0.56 vs
+            // 0.6 for a stick at 0.6 under a 0.1 deadzone); a keyboard reports
+            // the same 1.0 from both, so aliasing them looks correct in every
+            // digital test and diverges only on a gamepad.
+            "get_action_raw_strength" => {
+                if args.len() != 1 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.get_action_raw_strength() takes 1 argument".into(),
+                    )));
+                }
+                let action = Self::input_action_arg("get_action_raw_strength", &args[0])?;
+                if let Some(ref access) = self.scene_access {
+                    Ok(Variant::Float(access.get_action_raw_strength(action) as f64))
+                } else {
+                    Ok(Variant::Float(0.0))
+                }
+            }
             // (`is_action_just_released` is handled with the rest of the
             // `is_action_*` family above, which also accepts Godot's optional
             // `exact_match` argument — pat-0q2kx.92.)
@@ -7543,6 +7972,178 @@ impl Interpreter {
                 format!("Input.{other}"),
             ))),
         }
+    }
+
+    /// `ClassDB.instantiate(class)` — builds a live object from the registry
+    /// (pat-s3rrv.57).
+    ///
+    /// This is the same construction path `ClassName.new()` takes, deliberately:
+    /// Godot's `.new()` *is* `ClassDB::instantiate`, so having the two disagree
+    /// would be its own bug. Node-derived classes go through
+    /// `SceneAccess::create_node`, which seeds ClassDB defaults.
+    ///
+    /// Godot returns `null` rather than raising when a class cannot be built, so
+    /// an unregistered name answers `Nil`. An ABSTRACT class is different: it is
+    /// a registered class the caller asked for by name, and Godot names that
+    /// mistake specifically, so it raises with the same text `.new()` uses.
+    ///
+    /// ⚠️ Non-Node classes answer `Nil` today. The bespoke RefCounted handle
+    /// constructors are keyed by name inside the `.new()` chain and cannot be
+    /// reached generically yet — the same gap the generic `RefCounted` `.new()`
+    /// branch has. Reported rather than papered over with a fake object.
+    /// `ClassDB.class_call_static(class, method, ...)` (pat-s3rrv.57).
+    ///
+    /// Godot dispatches this through the same static-method table that backs
+    /// `ClassName.method(...)` written directly, so the two spellings cannot
+    /// disagree. This delegates to the very handlers the direct spelling uses —
+    /// `variant_math::vector_static_call` for the builtin types, then the
+    /// host's `physics_query_static_call` — rather than growing a second table
+    /// that would drift the first time someone adds a static anywhere.
+    ///
+    /// ⚠️ Divergence, stated deliberately: Godot prints an error and returns
+    /// null when no such static exists. Patina raises instead. A silent null is
+    /// the failure mode this bead exists to remove — the caller cannot tell
+    /// "no such method" from "the method returned null".
+    fn classdb_call_static(&mut self, args: &[Variant]) -> Result<Variant, RuntimeError> {
+        fn name_arg(args: &[Variant], idx: usize) -> Result<String, RuntimeError> {
+            match args.get(idx) {
+                Some(Variant::String(s)) => Ok(s.clone()),
+                Some(Variant::StringName(sn)) => Ok(sn.as_str().to_string()),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "ClassDB.class_call_static() expects (class, method, ...)".into(),
+                ))),
+            }
+        }
+        let class = name_arg(args, 0)?;
+        let method = name_arg(args, 1)?;
+        // Everything past the class and method name is the call's own argument
+        // list — Godot's signature is vararg.
+        let rest: Vec<Variant> = args.iter().skip(2).cloned().collect();
+
+        if let Some(result) = crate::variant_math::vector_static_call(&class, &method, &rest) {
+            return result;
+        }
+        if let Some(ref mut access) = self.scene_access {
+            if let Some(result) = access.physics_query_static_call(&class, &method, &rest) {
+                return Ok(result);
+            }
+        }
+        Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "ClassDB.class_call_static(): no static method \"{method}\" on \"{class}\""
+        ))))
+    }
+
+    fn classdb_instantiate(&mut self, args: &[Variant]) -> Result<Variant, RuntimeError> {
+        let class = match args.first() {
+            Some(Variant::String(s)) => s.clone(),
+            Some(Variant::StringName(sn)) => sn.as_str().to_string(),
+            _ => {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "ClassDB.instantiate() expects a class-name string argument".into(),
+                )))
+            }
+        };
+        if !gdobject::class_db::class_exists(&class) {
+            return Ok(Variant::Nil);
+        }
+        if gdobject::class_db::is_abstract(&class) {
+            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "Cannot construct abstract class \"{class}\"."
+            ))));
+        }
+        if gdobject::class_db::is_parent_class(&class, "Node") {
+            if let Some(ref mut access) = self.scene_access {
+                if let Some(raw_id) = access.create_node(&class, &class) {
+                    return Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw_id)));
+                }
+            }
+            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "ClassDB.instantiate(\"{class}\") requires scene access"
+            ))));
+        }
+        // Every non-Node class: evaluate the expression a script would write,
+        // `ClassName.new()`, rather than restating its ~30 bespoke handle arms
+        // here (pat-s3rrv.57).
+        //
+        // ⚠️ The delegation is the point, not a shortcut. `instantiate` must
+        // return a REAL ConfigFile — one whose `set_value` works — and a bare
+        // refcounted handle would be worse than the Nil this used to return: an
+        // object that exists and answers nothing. A second copy of the arm list
+        // would also go stale the first time someone adds a class to the other
+        // one.
+        //
+        // Godot returns null when a class cannot be constructed rather than
+        // raising, so a registered class with no constructor stays Nil.
+        let construct = Expr::Call {
+            callee: Box::new(Expr::MemberAccess {
+                object: Box::new(Expr::Ident(class)),
+                member: "new".to_string(),
+            }),
+            args: Vec::new(),
+        };
+        Ok(self.eval_expr(&construct).unwrap_or(Variant::Nil))
+    }
+
+    /// `ClassDB.class_get_property(object, name)` and
+    /// `ClassDB.class_set_property(object, name, value)` (pat-s3rrv.57).
+    ///
+    /// Godot's signatures take an `Object`, not a class name — these two are
+    /// the odd pair in an otherwise class-name-only API, which is why they live
+    /// here rather than in the free `call_classdb_static`: reaching a live
+    /// object needs `self.scene_access`.
+    ///
+    /// ⚠️ The object's own property bag is the source of truth here, NOT the
+    /// registered property list. Godot validates against ClassDB, but Patina's
+    /// registry is still incomplete — dozens of classes carry no properties at
+    /// all — so validating would answer Nil for properties the object
+    /// demonstrably has. Reading the bag can be incomplete; it cannot be wrong.
+    fn classdb_object_property(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        let object = match args.first() {
+            Some(Variant::ObjectId(id)) => id.raw(),
+            _ => {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "ClassDB.{method}() expects an object as its first argument"
+                ))))
+            }
+        };
+        let property = match args.get(1) {
+            Some(Variant::String(s)) => s.clone(),
+            Some(Variant::StringName(sn)) => sn.as_str().to_string(),
+            _ => {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "ClassDB.{method}() expects a property-name string"
+                ))))
+            }
+        };
+
+        // Godot answers null from the getter and an Error code from the setter,
+        // so the two disagree about what "cannot do that" looks like.
+        let Some(access) = self.scene_access.as_mut() else {
+            return Ok(match method {
+                "class_get_property" => Variant::Nil,
+                _ => Variant::Int(1),
+            });
+        };
+
+        if method == "class_get_property" {
+            return Ok(access.get_node_property(object, &property));
+        }
+
+        // ⚠️ `set_node_property` has no failure path, so liveness is the only
+        // real signal available for the Error return. Answering OK
+        // unconditionally would make the value meaningless — a script checking
+        // `if err != OK` would never see a failure, including for an object it
+        // already freed.
+        if !access.is_object_alive(object) {
+            return Ok(Variant::Int(1));
+        }
+        let value = args.get(2).cloned().unwrap_or(Variant::Nil);
+        access.set_node_property(object, &property, value);
+        Ok(Variant::Int(0))
     }
 
     /// Dispatches an `InputMap.*` singleton call (pat-0q2kx.89).
@@ -7795,14 +8396,18 @@ impl Interpreter {
             "get_bus_index" => {
                 arity(1)?;
                 let name = str_arg(args, 0);
-                Ok(Variant::Int(self.scene_access.as_ref().map_or(-1, |a| {
-                    a.audio_get_bus_index(&name)
-                })))
+                Ok(Variant::Int(
+                    self.scene_access
+                        .as_ref()
+                        .map_or(-1, |a| a.audio_get_bus_index(&name)),
+                ))
             }
             "get_bus_count" => {
                 arity(0)?;
                 Ok(Variant::Int(
-                    self.scene_access.as_ref().map_or(0, |a| a.audio_get_bus_count()),
+                    self.scene_access
+                        .as_ref()
+                        .map_or(0, |a| a.audio_get_bus_count()),
                 ))
             }
             "get_bus_name" => {
@@ -7900,18 +8505,22 @@ impl Interpreter {
             "get_bus_peak_volume_left_db" => {
                 arity(2)?;
                 let (idx, ch) = (idx_arg(args, 0), idx_arg(args, 1));
-                Ok(Variant::Float(self.scene_access.as_ref().map_or(
-                    -200.0,
-                    |a| a.audio_get_bus_peak_volume_left_db(idx, ch),
-                ) as f64))
+                Ok(Variant::Float(
+                    self.scene_access
+                        .as_ref()
+                        .map_or(-200.0, |a| a.audio_get_bus_peak_volume_left_db(idx, ch))
+                        as f64,
+                ))
             }
             "get_bus_peak_volume_right_db" => {
                 arity(2)?;
                 let (idx, ch) = (idx_arg(args, 0), idx_arg(args, 1));
-                Ok(Variant::Float(self.scene_access.as_ref().map_or(
-                    -200.0,
-                    |a| a.audio_get_bus_peak_volume_right_db(idx, ch),
-                ) as f64))
+                Ok(Variant::Float(
+                    self.scene_access
+                        .as_ref()
+                        .map_or(-200.0, |a| a.audio_get_bus_peak_volume_right_db(idx, ch))
+                        as f64,
+                ))
             }
 
             // -- global playback ----------------------------------------------
@@ -7947,7 +8556,11 @@ impl Interpreter {
                 if args.len() > 1 {
                     arity(1)?;
                 }
-                let at = if args.is_empty() { -1 } else { idx_arg(args, 0) };
+                let at = if args.is_empty() {
+                    -1
+                } else {
+                    idx_arg(args, 0)
+                };
                 if let Some(a) = self.scene_access.as_mut() {
                     a.audio_add_bus(at);
                 }
@@ -8086,22 +8699,65 @@ impl Interpreter {
                 }
                 Ok(Variant::Nil)
             }
-            "action_has_event" | "action_get_events" => {
+            // pat-s3rrv.14: both of these used to IGNORE the event argument.
+            // `action_has_event` answered `count > 0` for any event whatsoever,
+            // and `action_get_events` returned `[null, null, …]` — an array
+            // whose length was right and whose every element was a lie. With
+            // the real bindings mirrored, both can answer properly.
+            "action_has_event" => {
                 let action = action_arg(0)?;
-                let count = self
+                let event = match args.get(1) {
+                    Some(Variant::Resource(r)) if is_input_event_class(&r.class_name) => r,
+                    // Godot's signature is (action, event); without a real event
+                    // there is nothing to look for.
+                    _ => return Ok(Variant::Bool(false)),
+                };
+                let spec = match ie_to_spec(event) {
+                    Some(spec) => spec,
+                    None => return Ok(Variant::Bool(false)),
+                };
+                let bindings = self
                     .scene_access
                     .as_ref()
-                    .map(|a| a.input_map_action_event_count(&action))
-                    .unwrap_or(0);
-                if method == "action_has_event" {
-                    Ok(Variant::Bool(count > 0))
-                } else {
-                    // Real `InputEvent` objects need the InputEvent class family;
-                    // until then the array's length is the honest part of the
-                    // answer, so return that many placeholders rather than
-                    // claiming the action has no events.
-                    Ok(Variant::Array(vec![Variant::Nil; count]))
-                }
+                    .map(|a| a.input_map_action_events(&action))
+                    .unwrap_or_default();
+                Ok(Variant::Bool(
+                    bindings
+                        .iter()
+                        .any(|b| ie_binding_matches(b, event, &spec, true)),
+                ))
+            }
+            "action_get_events" => {
+                let action = action_arg(0)?;
+                let bindings = self
+                    .scene_access
+                    .as_ref()
+                    .map(|a| a.input_map_action_events(&action))
+                    .unwrap_or_default();
+                Ok(Variant::Array(
+                    bindings.iter().map(input_event_from_spec).collect(),
+                ))
+            }
+            // Godot's `InputMap.event_is_action(event, action, exact_match)`.
+            // Repo-wide grep for this name previously returned zero hits.
+            "event_is_action" => {
+                let event = match args.first() {
+                    Some(Variant::Resource(r)) if is_input_event_class(&r.class_name) => r.clone(),
+                    _ => return Ok(Variant::Bool(false)),
+                };
+                let action = match args.get(1) {
+                    Some(Variant::String(s)) => s.clone(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "InputMap.event_is_action() takes (event, action)".into(),
+                        )));
+                    }
+                };
+                let exact = matches!(args.get(2), Some(Variant::Bool(true)));
+                Ok(Variant::Bool(
+                    self.input_event_action_status(&event, &action, exact)
+                        .is_some(),
+                ))
             }
             // Godot re-reads project.godot; Patina's map is installed by the
             // host at boot, so the script-visible effect is already in place.
@@ -8387,10 +9043,43 @@ impl Interpreter {
             // the handle tag. A `None` means the handle died, so fall through
             // rather than swallowing the call.
             if crate::bindings::is_astar_handle(oid.raw()) {
+                let had_access = self.scene_access.is_some();
                 if let Some(access) = self.scene_access.as_mut() {
                     if let Some(v) = access.astar_call(oid.raw(), method, args) {
                         return Ok(v);
                     }
+                }
+                // pat-s3rrv.19: an AStar handle that reaches here did NOT match
+                // its method. Falling through reported it as an unknown *node*
+                // method — a message naming neither AStar nor the handle — and
+                // that mis-attribution is what left this bead undiagnosable for
+                // four passes: every failure looked like a broken constructor.
+                //
+                // Godot raises "Invalid call" naming the class, so erroring here
+                // is the parity behaviour as well as the debuggable one. The
+                // allowlist below still falls through: `get_class` and friends
+                // are Object methods that the general resource/object table
+                // owns, and this arm must not claim them.
+                if !matches!(
+                    method,
+                    "get_class"
+                        | "is_class"
+                        | "free"
+                        | "get_instance_id"
+                        | "has_method"
+                        | "call"
+                        | "callv"
+                        | "get"
+                        | "set"
+                ) {
+                    return Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                        format!(
+                            "AStar.{method}: no such method on handle {:#018x} \
+                             (scene access {})",
+                            oid.raw(),
+                            if had_access { "present" } else { "MISSING" }
+                        ),
+                    )));
                 }
             }
             if is_undo_redo_handle(*oid) {
@@ -9742,6 +10431,17 @@ impl Interpreter {
             Variant::Vector2i(_) | Variant::Vector3i(_) => {
                 crate::variant_math::vector_method(obj, method, args)
             }
+            // Godot's RID exposes exactly two methods (`doc/classes/RID.xml`)
+            // and deliberately no more: the value is an index into a server's
+            // own table, so anything beyond "is it live" and "what is the raw
+            // number" would be meaningless outside that server.
+            Variant::Rid(rid) => match method {
+                "is_valid" => Ok(Variant::Bool(rid.is_valid())),
+                "get_id" => Ok(Variant::Int(rid.id() as i64)),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                    format!("RID.{method}"),
+                ))),
+            },
             // The affine builtins delegate to `variant_math`, which forwards to
             // the already-tested `gdcore` implementations (pat-0q2kx.50).
             Variant::Rect2(_)
@@ -9750,7 +10450,12 @@ impl Interpreter {
             | Variant::Basis(_)
             | Variant::Quaternion(_)
             | Variant::Aabb(_)
-            | Variant::Plane(_) => match crate::variant_math::call_method(obj, method, args) {
+            | Variant::Plane(_)
+            // pat-s3rrv.58: Color's method table lives in `variant_math`
+            // alongside the affine builtins, so it delegates the same way.
+            // Without this arm every `col.darkened(0.2)` fell through to the
+            // catch-all below and errored with "cannot call method on Color".
+            | Variant::Color(_) => match crate::variant_math::call_method(obj, method, args) {
                 Some(result) => result,
                 None => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                     format!("{}.{method}", obj.variant_type()),
@@ -11037,8 +11742,89 @@ impl Interpreter {
                     _ => self.call_object_method(id, method, args),
                 }
             }
+            // NodePath (pat-s3rrv.60). `gdcore::node_path::NodePath` has been
+            // implemented and unit-tested all along; `Variant::NodePath` simply
+            // had NO arm here, so `^"Player:position".get_subname(0)` fell to
+            // the "cannot call method on" catch-all. Real code with no runtime
+            // call path — the decoder was never the gap, the dispatch was.
+            Variant::NodePath(np) => {
+                let idx = |i: usize| -> usize {
+                    match args.get(i) {
+                        Some(Variant::Int(n)) if *n >= 0 => *n as usize,
+                        // A negative or non-integer index cannot address a
+                        // segment; `usize::MAX` makes the `get` miss and the
+                        // method answer emptily, as Godot's does.
+                        _ => usize::MAX,
+                    }
+                };
+                match method {
+                    "is_absolute" => Ok(Variant::Bool(np.is_absolute())),
+                    "is_empty" => Ok(Variant::Bool(np.is_empty())),
+                    "get_name_count" => Ok(Variant::Int(np.get_name_count() as i64)),
+                    "get_subname_count" => Ok(Variant::Int(np.get_subname_count() as i64)),
+                    "get_name" => Ok(Variant::String(
+                        np.get_name(idx(0)).unwrap_or_default().to_string(),
+                    )),
+                    "get_subname" => Ok(Variant::String(
+                        np.get_subname(idx(0)).unwrap_or_default().to_string(),
+                    )),
+                    "get_concatenated_names" => Ok(Variant::String(np.get_concatenated_names())),
+                    "get_concatenated_subnames" => {
+                        Ok(Variant::String(np.get_concatenated_subnames()))
+                    }
+                    "get_as_property_path" => Ok(Variant::NodePath(np.get_as_property_path())),
+                    "slice" => {
+                        let int_at = |i: usize, default: i64| -> i64 {
+                            match args.get(i) {
+                                Some(Variant::Int(n)) => *n,
+                                _ => default,
+                            }
+                        };
+                        // Godot's default `end` is INT32_MAX, i.e. "to the end";
+                        // the clamp inside `slice` turns that into the length.
+                        Ok(Variant::NodePath(
+                            np.slice(int_at(0, 0), int_at(1, i32::MAX as i64)),
+                        ))
+                    }
+                    _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                        format!("NodePath has no method '{method}'"),
+                    ))),
+                }
+            }
             Variant::Callable(callable_ref) => match method {
                 "call" => self.invoke_callable(callable_ref, args),
+                // Godot's `Callable.call_deferred` queues the call to run at the
+                // end of the current frame rather than now (pat-s3rrv.60).
+                //
+                // ⚠️ Only a Method callable can be deferred: `SceneAccess`'s
+                // deferred queue is keyed by (node, method name), so a Lambda
+                // has nothing to enqueue. Running it IMMEDIATELY instead would
+                // be worse than refusing — the whole point of the call is the
+                // ordering guarantee, and silently breaking that produces a
+                // race nobody can see. So it says so.
+                // `Variant::Callable` holds a `Box<CallableRef>`, and a variant
+                // pattern cannot match through the Box — `inner_callable()` is
+                // the idiom the neighbouring arms use, and it also unwraps
+                // Bound/Unbound to find the underlying Method.
+                "call_deferred" => match callable_ref.inner_callable() {
+                    CallableRef::Method { target_id, method } => {
+                        match self.scene_access.as_mut() {
+                            Some(access) => {
+                                access.call_deferred(*target_id, method, args);
+                                Ok(Variant::Nil)
+                            }
+                            None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "Callable.call_deferred() requires scene access".into(),
+                            ))),
+                        }
+                    }
+                    _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Callable.call_deferred() is only supported for a \
+                         Callable(object, \"method\") — a lambda cannot be \
+                         queued on the deferred list yet"
+                            .into(),
+                    ))),
+                },
                 "callv" => {
                     // callv takes a single Array argument
                     if args.len() != 1 {
@@ -11201,6 +11987,16 @@ impl Interpreter {
                     format!("Callable.{method}"),
                 ))),
             },
+            // pat-s3rrv.14: the InputEvent method surface. The guard names the
+            // METHOD as well as the class so anything this arm does not
+            // implement — `get_class`, `get`, `get_path` — still falls through
+            // to the general resource table below rather than erroring here.
+            Variant::Resource(res_ref)
+                if is_input_event_class(&res_ref.class_name)
+                    && is_input_event_method(method) =>
+            {
+                self.input_event_method(res_ref, method, args)
+            }
             Variant::Resource(res_ref) => match method {
                 // `Shader.get_shader_uniform_list()` (pat-0q2kx.144). Godot
                 // returns one Dictionary per declared uniform; `grep` for this
@@ -12275,7 +13071,11 @@ impl Interpreter {
                 // Try to call as a user-defined function
                 self.call_user_func(method, args)
             }
-            CallableRef::Lambda { params, body } => {
+            CallableRef::Lambda {
+                params,
+                body,
+                captures,
+            } => {
                 // Downcast the body back to Vec<Stmt>
                 let body_stmts: &Vec<Stmt> = body.downcast_ref::<Vec<Stmt>>().ok_or_else(|| {
                     RuntimeError::new(RuntimeErrorKind::TypeError("invalid lambda body".into()))
@@ -12287,6 +13087,12 @@ impl Interpreter {
                 }
                 self.call_depth += 1;
                 self.environment.push_scope();
+                // Captures FIRST, then parameters — a parameter sharing a name
+                // with an enclosing local must win, exactly as it does in a
+                // named function (pat-s3rrv.67).
+                for (name, value) in captures.iter() {
+                    self.environment.define(name.clone(), value.clone());
+                }
                 for (i, param) in params.iter().enumerate() {
                     let val = args.get(i).cloned().unwrap_or(Variant::Nil);
                     self.environment.define(param.clone(), val);
@@ -12895,7 +13701,37 @@ impl Interpreter {
             if let Some(&line) = body_lines.get(i) {
                 self.current_line = line;
             }
-            match self.exec_stmt(&body[i])? {
+            // pat-s3rrv.19: a raise must tear down exactly like the normal
+            // exit below. `?` here returned before ANY of it:
+            //
+            //   * `instance.properties` was never written back, so every
+            //     property the method had already assigned was silently
+            //     discarded. Godot keeps them — a script that errors half way
+            //     through `_ready` leaves what it set. It also makes a
+            //     "how far did it get" counter read its initialiser however far
+            //     it got, which is precisely how this bead's acceptance test
+            //     came to report stage 0 and hide the real failure.
+            //   * both scopes leaked, so later calls saw stale locals shadowing
+            //     class vars.
+            //   * `self_instance` kept the errored instance instead of being
+            //     restored to `prev_self`, so the NEXT call could write its
+            //     properties onto the wrong object.
+            //   * `call_depth` was never decremented, so enough caught errors
+            //     would exhaust the recursion budget and fail an unrelated call.
+            let flow = match self.exec_stmt(&body[i]) {
+                Ok(flow) => flow,
+                Err(err) => {
+                    self.environment.pop_scope();
+                    if let Some(ref updated) = self.self_instance {
+                        instance.properties = updated.properties.clone();
+                    }
+                    self.environment.pop_scope();
+                    self.self_instance = prev_self;
+                    self.call_depth -= 1;
+                    return Err(err);
+                }
+            };
+            match flow {
                 Some(ControlFlow::Return(v)) => {
                     return_val = v.unwrap_or(Variant::Nil);
                     break;
@@ -13067,6 +13903,44 @@ fn index_into(container: &Variant, idx: &Variant) -> Result<Variant, RuntimeErro
                     length: a.len(),
                 }))
         }
+        // ⚠️ `proj[i]` yields a whole COLUMN as a Vector4, not a scalar —
+        // Godot's `Projection::operator[]` returns `columns[i]`
+        // (core/math/projection.h). Storage here is column-major, so `m[i]` is
+        // already that column; indexing rows would hand back a transposed
+        // matrix one Vector4 at a time.
+        (Variant::Projection(p), Variant::Int(i)) => {
+            if !(0..4).contains(i) {
+                return Err(RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds {
+                    index: *i,
+                    length: 4,
+                }));
+            }
+            let c = p.m[*i as usize];
+            Ok(Variant::Vector4(gdcore::math::Vector4::new(
+                c[0], c[1], c[2], c[3],
+            )))
+        }
+        // Godot indexes a vector by axis: 0=x, 1=y, 2=z, 3=w.
+        (Variant::Vector4(v), Variant::Int(i)) => match i {
+            0 => Ok(Variant::Float(v.x as f64)),
+            1 => Ok(Variant::Float(v.y as f64)),
+            2 => Ok(Variant::Float(v.z as f64)),
+            3 => Ok(Variant::Float(v.w as f64)),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds {
+                index: *i,
+                length: 4,
+            })),
+        },
+        (Variant::Vector4i(v), Variant::Int(i)) => match i {
+            0 => Ok(Variant::Int(v.x as i64)),
+            1 => Ok(Variant::Int(v.y as i64)),
+            2 => Ok(Variant::Int(v.z as i64)),
+            3 => Ok(Variant::Int(v.w as i64)),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds {
+                index: *i,
+                length: 4,
+            })),
+        },
         (Variant::Dictionary(d), key) => d.get(key).cloned().ok_or_else(|| {
             RuntimeError::new(RuntimeErrorKind::UndefinedVariable(key.to_string_lossy()))
         }),
@@ -15096,60 +15970,269 @@ fn deterministic_randi() -> i64 {
     let c = RNG_STATE.fetch_add(1, Ordering::Relaxed);
     lcg_step(c)
 }
+/// Godot's `String % args` operator (`String::sprintf`).
+///
+/// Ported from `upstream/godot/core/string/ustring.cpp::String::sprintf`
+/// (~5150-5450). Supports `%d %i %o %x %X %f %F %e %E %g %G %s %c %v %%`, the
+/// `-` / `+` / space / `0` flags, a literal or `*` width, a `.precision` that
+/// may also be `*`, and Godot's diagnostic strings.
+///
+/// ⚠️ Godot RETURNS its error text as the formatted string rather than raising,
+/// so `"%d %d" % [1]` evaluates to `"not enough arguments for format string"`.
+/// Patina previously emitted nothing for a missing argument and a bare `%` for
+/// any specifier it did not know, so `"%x" % 255` produced `"%x"`-ish output
+/// and a script had no way to notice.
 fn string_format(fmt: &str, values: &[Variant]) -> String {
-    let mut result = String::new();
-    let mut chars = fmt.chars().peekable();
-    let mut idx = 0;
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            match chars.peek() {
-                Some('%') => {
-                    chars.next();
-                    result.push('%');
-                }
-                Some('s') => {
-                    chars.next();
-                    if idx < values.len() {
-                        result.push_str(&format!("{}", values[idx]));
-                        idx += 1;
-                    }
-                }
-                Some('d') => {
-                    chars.next();
-                    if idx < values.len() {
-                        match &values[idx] {
-                            Variant::Int(ii) => result.push_str(&ii.to_string()),
-                            Variant::Float(ff) => result.push_str(&(*ff as i64).to_string()),
-                            v => result.push_str(&format!("{v}")),
-                        }
-                        idx += 1;
-                    }
-                }
-                Some('f') => {
-                    chars.next();
-                    if idx < values.len() {
-                        match &values[idx] {
-                            Variant::Float(ff) => result.push_str(&format!("{:.6}", ff)),
-                            Variant::Int(ii) => result.push_str(&format!("{:.6}", *ii as f64)),
-                            v => result.push_str(&format!("{v}")),
-                        }
-                        idx += 1;
-                    }
-                }
-                Some('v') => {
-                    chars.next();
-                    if idx < values.len() {
-                        result.push_str(&format!("{}", values[idx]));
-                        idx += 1;
-                    }
-                }
-                _ => result.push('%'),
-            }
-        } else {
-            result.push(c);
-        }
+    match godot_sprintf(fmt, values) {
+        Ok(text) | Err(text) => text,
     }
-    result
+}
+
+/// Godot's diagnostics, verbatim — these are user-visible strings.
+const SPRINTF_NOT_ENOUGH: &str = "not enough arguments for format string";
+const SPRINTF_UNSUPPORTED: &str = "unsupported format character";
+const SPRINTF_TOO_MANY_DOTS: &str = "too many decimal points in format";
+const SPRINTF_STAR_WANTS_NUMBER: &str = "* wants number";
+const SPRINTF_NEEDS_NUMBER: &str = "a number is required";
+const SPRINTF_C_NEEDS_CHAR: &str = "%c requires number or single-character string";
+
+/// Reads a `%d`-style integer argument.
+fn sprintf_int(v: &Variant) -> Option<i64> {
+    match v {
+        Variant::Int(i) => Some(*i),
+        Variant::Float(f) => Some(*f as i64),
+        Variant::Bool(b) => Some(*b as i64),
+        _ => None,
+    }
+}
+
+/// Reads a `%f`-style float argument.
+fn sprintf_float(v: &Variant) -> Option<f64> {
+    match v {
+        Variant::Int(i) => Some(*i as f64),
+        Variant::Float(f) => Some(*f),
+        Variant::Bool(b) => Some(*b as i64 as f64),
+        _ => None,
+    }
+}
+
+/// A signed integer rendered in `base`.
+///
+/// The magnitude is taken through `i128` so `i64::MIN` does not overflow on
+/// negation — the one input where a naive `-v` panics in debug.
+fn sprintf_int_in_base(value: i64, base: u32, upper: bool) -> String {
+    let magnitude = (value as i128).unsigned_abs();
+    let digits = match (base, upper) {
+        (8, _) => format!("{magnitude:o}"),
+        (16, true) => format!("{magnitude:X}"),
+        (16, false) => format!("{magnitude:x}"),
+        _ => format!("{magnitude}"),
+    };
+    if value < 0 {
+        format!("-{digits}")
+    } else {
+        digits
+    }
+}
+
+/// Applies width padding to an already-rendered field.
+///
+/// ⚠️ Zero padding goes AFTER the sign, not before it: `%+05d` on 7 is
+/// `+0007`, never `00+07`. Left-justification always pads with spaces, because
+/// trailing zeros would change the value.
+fn sprintf_pad(body: String, width: usize, left_justified: bool, zeros: bool) -> String {
+    let len = body.chars().count();
+    if len >= width {
+        return body;
+    }
+    let fill = width - len;
+    if left_justified {
+        let mut out = body;
+        out.push_str(&" ".repeat(fill));
+        out
+    } else if zeros {
+        let sign_len = usize::from(body.starts_with('-') || body.starts_with('+'));
+        let (sign, rest) = body.split_at(sign_len);
+        format!("{sign}{}{rest}", "0".repeat(fill))
+    } else {
+        format!("{}{body}", " ".repeat(fill))
+    }
+}
+
+fn godot_sprintf(fmt: &str, values: &[Variant]) -> Result<String, String> {
+    let chars: Vec<char> = fmt.chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+    let mut arg = 0usize;
+
+    while i < chars.len() {
+        if chars[i] != '%' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+
+        // -- flags -----------------------------------------------------------
+        let mut left_justified = false;
+        let mut show_sign = false;
+        let mut pad_zeros = false;
+        loop {
+            match chars.get(i) {
+                Some('-') => left_justified = true,
+                Some('+') => show_sign = true,
+                Some(' ') => {}
+                // A '0' is the zero-pad FLAG only in the leading position; once
+                // width digits have started it is just a digit, which is why
+                // this runs before the width scan rather than inside it.
+                Some('0') => pad_zeros = true,
+                _ => break,
+            }
+            i += 1;
+        }
+
+        // -- width, literal or `*` -------------------------------------------
+        let mut width = 0usize;
+        if chars.get(i) == Some(&'*') {
+            i += 1;
+            let v = values.get(arg).ok_or(SPRINTF_NOT_ENOUGH.to_string())?;
+            arg += 1;
+            width = sprintf_int(v).ok_or(SPRINTF_STAR_WANTS_NUMBER.to_string())? as usize;
+        } else {
+            while let Some(d) = chars.get(i).and_then(|c| c.to_digit(10)) {
+                width = width * 10 + d as usize;
+                i += 1;
+            }
+        }
+
+        // -- .precision, literal or `*` --------------------------------------
+        let mut precision: Option<usize> = None;
+        if chars.get(i) == Some(&'.') {
+            i += 1;
+            if chars.get(i) == Some(&'*') {
+                i += 1;
+                let v = values.get(arg).ok_or(SPRINTF_NOT_ENOUGH.to_string())?;
+                arg += 1;
+                precision =
+                    Some(sprintf_int(v).ok_or(SPRINTF_STAR_WANTS_NUMBER.to_string())? as usize);
+            } else {
+                let mut p = 0usize;
+                while let Some(d) = chars.get(i).and_then(|c| c.to_digit(10)) {
+                    p = p * 10 + d as usize;
+                    i += 1;
+                }
+                precision = Some(p);
+            }
+            // A second '.' is Godot's "too many decimal points" case.
+            if chars.get(i) == Some(&'.') {
+                return Err(SPRINTF_TOO_MANY_DOTS.to_string());
+            }
+        }
+
+        // -- specifier -------------------------------------------------------
+        let Some(&spec) = chars.get(i) else {
+            return Err(SPRINTF_UNSUPPORTED.to_string());
+        };
+        i += 1;
+
+        // `%%` consumes no argument and ignores every flag, as in Godot.
+        if spec == '%' {
+            out.push('%');
+            continue;
+        }
+
+        let value = values.get(arg).ok_or(SPRINTF_NOT_ENOUGH.to_string())?;
+        arg += 1;
+
+        let signed = |body: String, negative: bool| -> String {
+            if show_sign && !negative {
+                format!("+{body}")
+            } else {
+                body
+            }
+        };
+
+        let field = match spec {
+            'd' | 'i' => {
+                let n = sprintf_int(value).ok_or(SPRINTF_NEEDS_NUMBER.to_string())?;
+                signed(n.to_string(), n < 0)
+            }
+            'o' | 'x' | 'X' => {
+                let n = sprintf_int(value).ok_or(SPRINTF_NEEDS_NUMBER.to_string())?;
+                let base = if spec == 'o' { 8 } else { 16 };
+                signed(sprintf_int_in_base(n, base, spec == 'X'), n < 0)
+            }
+            'f' | 'F' => {
+                let n = sprintf_float(value).ok_or(SPRINTF_NEEDS_NUMBER.to_string())?;
+                // Godot's default precision is 6, matching C.
+                signed(
+                    format!("{:.*}", precision.unwrap_or(6), n),
+                    n.is_sign_negative(),
+                )
+            }
+            'e' | 'E' => {
+                let n = sprintf_float(value).ok_or(SPRINTF_NEEDS_NUMBER.to_string())?;
+                let body = format!("{:.*e}", precision.unwrap_or(6), n);
+                // Rust writes `1.5e2`; C and Godot write `1.5e+02`.
+                let body = sprintf_c_exponent(&body);
+                let body = if spec == 'E' {
+                    body.to_uppercase()
+                } else {
+                    body
+                };
+                signed(body, n.is_sign_negative())
+            }
+            'g' | 'G' => {
+                let n = sprintf_float(value).ok_or(SPRINTF_NEEDS_NUMBER.to_string())?;
+                // Shortest representation that round-trips, which is what Rust's
+                // default float Display already produces.
+                let body = format!("{n}");
+                let body = if spec == 'G' {
+                    body.to_uppercase()
+                } else {
+                    body
+                };
+                signed(body, n.is_sign_negative())
+            }
+            'c' => {
+                let ch = match value {
+                    Variant::Int(n) => u32::try_from(*n)
+                        .ok()
+                        .and_then(char::from_u32)
+                        .ok_or(SPRINTF_C_NEEDS_CHAR.to_string())?,
+                    Variant::String(st) if st.chars().count() == 1 => {
+                        st.chars().next().expect("length checked")
+                    }
+                    _ => return Err(SPRINTF_C_NEEDS_CHAR.to_string()),
+                };
+                ch.to_string()
+            }
+            's' | 'v' => format!("{value}"),
+            _ => return Err(SPRINTF_UNSUPPORTED.to_string()),
+        };
+
+        // Zero padding is meaningless for text, and Godot does not apply it
+        // there — `%05s` pads with spaces.
+        let zeros = pad_zeros && !matches!(spec, 's' | 'v' | 'c');
+        out.push_str(&sprintf_pad(field, width, left_justified, zeros));
+    }
+
+    Ok(out)
+}
+
+/// Rewrites Rust's `1.5e2` exponent into C's `1.5e+02`, which is what Godot
+/// prints for `%e`.
+fn sprintf_c_exponent(rendered: &str) -> String {
+    let Some(pos) = rendered.find(['e', 'E']) else {
+        return rendered.to_string();
+    };
+    let (mantissa, exp) = rendered.split_at(pos);
+    let exp = &exp[1..];
+    let (sign, digits) = match exp.strip_prefix('-') {
+        Some(rest) => ('-', rest),
+        None => ('+', exp.strip_prefix('+').unwrap_or(exp)),
+    };
+    format!("{mantissa}e{sign}{:0>2}", digits)
 }
 
 /// Resolves static member access on built-in type names (e.g. `Vector2.ZERO`).
@@ -15185,7 +16268,7 @@ fn uniform_type_name(t: &gdserver2d::shader::UniformType) -> String {
 }
 
 fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
-    use gdcore::math::{Color, Vector2, Vector2i, Vector3, Vector3i};
+    use gdcore::math::{Vector2, Vector2i, Vector3, Vector3i};
     match type_name {
         "Vector2" => match member {
             "ZERO" => Some(Variant::Vector2(Vector2::ZERO)),
@@ -15244,15 +16327,12 @@ fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
             "MAX" => Some(Variant::Vector3i(Vector3i::MAX)),
             _ => None,
         },
-        "Color" => match member {
-            "WHITE" => Some(Variant::Color(Color::WHITE)),
-            "BLACK" => Some(Variant::Color(Color::BLACK)),
-            "TRANSPARENT" => Some(Variant::Color(Color::TRANSPARENT)),
-            "RED" => Some(Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0))),
-            "GREEN" => Some(Variant::Color(Color::new(0.0, 1.0, 0.0, 1.0))),
-            "BLUE" => Some(Variant::Color(Color::new(0.0, 0.0, 1.0, 1.0))),
-            _ => None,
-        },
+        // All 146 Godot colour constants, from the table `gdcore` owns
+        // (pat-s3rrv.58). This arm used to hardcode SIX inline; because match
+        // arms are exclusive, its `None` for anything else never reached the
+        // `_` fallback below, so `Color.YELLOW`, `Color.CYAN`, `Color.ORANGE`
+        // and 140 others resolved to nothing.
+        "Color" => crate::variant_math::static_member("Color", member),
         // `Engine.time_scale`, `Engine.max_fps`, ... (pat-0q2kx.121). Godot
         // exposes the frame-pacing state as singleton properties, which is how
         // scripts actually spell them.
@@ -16088,6 +17168,12 @@ fn os_bool_arg(args: &[Variant], idx: usize, who: &str) -> Result<bool, RuntimeE
 /// `ClassDB` singleton — read-only reflection over the registered class table
 /// (pat-u3l8c.21). Exposes the existing `gdobject::class_db` registry to script.
 fn call_classdb_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    /// Godot's trailing `no_inheritance` flags all default to `false`, and a
+    /// script may simply omit them — so a missing or non-bool argument is the
+    /// default, never an error (pat-s3rrv.57).
+    fn bool_arg(args: &[Variant], idx: usize) -> bool {
+        matches!(args.get(idx), Some(Variant::Bool(true)))
+    }
     fn class_name_arg(args: &[Variant], idx: usize, who: &str) -> Result<String, RuntimeError> {
         match args.get(idx) {
             Some(Variant::String(s)) => Ok(s.clone()),
@@ -16114,6 +17200,179 @@ fn call_classdb_static(method: &str, args: &[Variant]) -> Result<Variant, Runtim
         "get_class_list" => Ok(Variant::PackedStringArray(
             gdobject::class_db::get_class_list(),
         )),
+        // -- pat-s3rrv.57: the reflection arms whose Rust backing already
+        // existed and was reachable from nothing. Each of these has a
+        // `gdobject::class_db` function that had no script caller, so the data
+        // was present and simply unspeakable from GDScript.
+        // pat-s3rrv.57: Godot returns the property's REGISTERED accessor names.
+        //
+        // ⚠️ These are looked up, never derived. Measured against Godot's own
+        // docs, `get_<x>`/`is_<x>`/`has_<x>` matches the real getter for only
+        // 51.7% of the 5371 documented members — `SpriteBase3D.alpha_cut` reads
+        // through `get_alpha_cut_mode`, all six `PhysicsBody3D.axis_lock_*`
+        // share one `get_axis_lock`, and `Light3D.shadow_enabled` uses
+        // `has_shadow`. A name-based rule is wrong for nearly half the API and
+        // wrong invisibly, since the caller cannot tell a guess from a fact.
+        //
+        // An empty string means Patina has not recorded that accessor, which is
+        // also what Godot answers for an unknown class or property.
+        "class_get_property_getter" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_get_property_getter()")?;
+            let prop = class_name_arg(args, 1, "ClassDB.class_get_property_getter()")?;
+            Ok(Variant::String(gdobject::class_db::get_property_getter(
+                &class, &prop,
+            )))
+        }
+        "class_get_property_setter" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_get_property_setter()")?;
+            let prop = class_name_arg(args, 1, "ClassDB.class_get_property_setter()")?;
+            Ok(Variant::String(gdobject::class_db::get_property_setter(
+                &class, &prop,
+            )))
+        }
+        "is_parent_class" => {
+            let class = class_name_arg(args, 0, "ClassDB.is_parent_class()")?;
+            let parent = class_name_arg(args, 1, "ClassDB.is_parent_class()")?;
+            Ok(Variant::Bool(gdobject::class_db::is_parent_class(
+                &class, &parent,
+            )))
+        }
+        // Godot answers this for every class it knows; Patina has no per-class
+        // disable switch, so a registered class is an enabled one.
+        "is_class_enabled" => {
+            let class = class_name_arg(args, 0, "ClassDB.is_class_enabled()")?;
+            Ok(Variant::Bool(gdobject::class_exists(&class)))
+        }
+        // Every class Patina registers is a built-in, so the API type is
+        // `API_CORE` (0). Godot reserves the other values for editor and
+        // extension classes, which do not exist here yet.
+        "class_get_api_type" => {
+            let _ = class_name_arg(args, 0, "ClassDB.class_get_api_type()")?;
+            Ok(Variant::Int(0))
+        }
+        "class_has_integer_constant" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_has_integer_constant()")?;
+            let name = class_name_arg(args, 1, "ClassDB.class_has_integer_constant()")?;
+            Ok(Variant::Bool(
+                gdobject::class_db::get_integer_constant_list(&class)
+                    .iter()
+                    .any(|c| *c == name),
+            ))
+        }
+        // Godot walks the whole registry for descendants; so does this. The
+        // class itself is excluded, matching `ClassDB::get_inheriters_from_class`.
+        "get_inheriters_from_class" => {
+            let base = class_name_arg(args, 0, "ClassDB.get_inheriters_from_class()")?;
+            let out: Vec<String> = gdobject::class_db::get_class_list()
+                .into_iter()
+                .filter(|n| *n != base && gdobject::class_db::is_parent_class(n, &base))
+                .collect();
+            Ok(Variant::PackedStringArray(out))
+        }
+        "class_get_property_list" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_get_property_list()")?;
+            let props = gdobject::class_db::get_property_list(&class)
+                .into_iter()
+                .map(|p| {
+                    let mut d = gdvariant::Dictionary::new();
+                    d.insert("name", Variant::String(p.name));
+                    d.insert("class_name", Variant::String(p.hint_string.clone()));
+                    d.insert(
+                        "type",
+                        Variant::Int(crate::global_constants::variant_type_code(&p.default_value)),
+                    );
+                    d.insert("hint", Variant::Int(p.hint as i64));
+                    d.insert("hint_string", Variant::String(p.hint_string));
+                    d.insert("usage", Variant::Int(p.usage as i64));
+                    Variant::Dictionary(d)
+                })
+                .collect();
+            Ok(Variant::Array(props))
+        }
+        "class_get_property_default_value" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_get_property_default_value()")?;
+            let prop = class_name_arg(args, 1, "ClassDB.class_get_property_default_value()")?;
+            Ok(gdobject::class_db::get_property_list(&class)
+                .into_iter()
+                .find(|p| p.name == prop)
+                .map(|p| p.default_value)
+                .unwrap_or(Variant::Nil))
+        }
+        "class_get_method_list" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_get_method_list()")?;
+            let methods = gdobject::class_db::get_method_list(&class)
+                .into_iter()
+                .map(|m| {
+                    let mut d = gdvariant::Dictionary::new();
+                    let flags = m.godot_flags();
+                    d.insert("name", Variant::String(m.name));
+                    // Each argument is a property dictionary, the same shape
+                    // `class_get_property_list` emits, so a caller can read
+                    // either with one code path (pat-s3rrv.57).
+                    //
+                    // ⚠️ The key is always present even when the registration
+                    // supplied only an arity: Godot's dictionaries always carry
+                    // it, and `m["args"].size()` must not raise. An empty array
+                    // here means "detail not registered", NOT "takes no
+                    // arguments" — `argument_count` is the arity.
+                    let args: Vec<Variant> = m
+                        .arguments
+                        .into_iter()
+                        .map(|p| {
+                            let mut a = gdvariant::Dictionary::new();
+                            a.insert("name", Variant::String(p.name));
+                            a.insert("class_name", Variant::String(p.hint_string.clone()));
+                            a.insert(
+                                "type",
+                                Variant::Int(crate::global_constants::variant_type_code(
+                                    &p.default_value,
+                                )),
+                            );
+                            a.insert("hint", Variant::Int(p.hint as i64));
+                            a.insert("hint_string", Variant::String(p.hint_string));
+                            a.insert("usage", Variant::Int(p.usage as i64));
+                            Variant::Dictionary(a)
+                        })
+                        .collect();
+                    d.insert("args", Variant::Array(args));
+                    d.insert("default_args", Variant::Array(Vec::new()));
+                    // Godot's dict always carries `return`, shaped like one of
+                    // the argument dicts above. An undeclared return serialises
+                    // as a NIL type, which is also what a void method looks
+                    // like — the two are indistinguishable here (pat-s3rrv.57).
+                    let mut ret = gdvariant::Dictionary::new();
+                    let declared = m
+                        .return_value
+                        .unwrap_or_else(|| gdobject::class_db::PropertyInfo::new("", Variant::Nil));
+                    ret.insert("name", Variant::String(declared.name));
+                    ret.insert("class_name", Variant::String(declared.hint_string.clone()));
+                    ret.insert(
+                        "type",
+                        Variant::Int(crate::global_constants::variant_type_code(
+                            &declared.default_value,
+                        )),
+                    );
+                    ret.insert("hint", Variant::Int(declared.hint as i64));
+                    ret.insert("hint_string", Variant::String(declared.hint_string));
+                    ret.insert("usage", Variant::Int(declared.usage as i64));
+                    d.insert("return", Variant::Dictionary(ret));
+                    d.insert("flags", Variant::Int(flags));
+                    Variant::Dictionary(d)
+                })
+                .collect();
+            Ok(Variant::Array(methods))
+        }
+        "class_get_method_argument_count" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_get_method_argument_count()")?;
+            let m = class_name_arg(args, 1, "ClassDB.class_get_method_argument_count()")?;
+            Ok(Variant::Int(
+                gdobject::class_db::get_method_list(&class)
+                    .into_iter()
+                    .find(|info| info.name == m)
+                    .map(|info| info.argument_count as i64)
+                    .unwrap_or(0),
+            ))
+        }
         // -- pat-nzgdu.98: parent / signal / constant / enum reflection ------
         "get_parent_class" => {
             let name = class_name_arg(args, 0, "ClassDB.get_parent_class()")?;
@@ -16144,6 +17403,36 @@ fn call_classdb_static(method: &str, args: &[Variant]) -> Result<Variant, Runtim
                 .collect();
             Ok(Variant::Array(list))
         }
+        // pat-s3rrv.57: a flags enum needs a multi-select in an inspector where a
+        // plain one needs a dropdown, and `EnumInfo` could not tell them apart
+        // until it grew `is_bitfield`. The four registered enums Godot's doc XML
+        // marks `is_bitfield="true"` are flagged at registration.
+        "is_class_enum_bitfield" => {
+            let class = class_name_arg(args, 0, "ClassDB.is_class_enum_bitfield()")?;
+            let name = class_name_arg(args, 1, "ClassDB.is_class_enum_bitfield()")?;
+            Ok(Variant::Bool(gdobject::class_db::is_enum_bitfield(
+                &class,
+                &name,
+                bool_arg(args, 2),
+            )))
+        }
+        // One signal's descriptor. `class_get_signal_list` already existed; the
+        // singular form did not, so a tool that knew the name still had to scan
+        // the whole list. Godot returns an empty Dictionary for an unknown
+        // signal rather than erroring.
+        "class_get_signal" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_get_signal()")?;
+            let name = class_name_arg(args, 1, "ClassDB.class_get_signal()")?;
+            let mut d = Dictionary::new();
+            if let Some(sig) = gdobject::get_signal_list(&class)
+                .into_iter()
+                .find(|s| s.name == name)
+            {
+                d.insert("name", Variant::String(sig.name));
+                d.insert("args", Variant::PackedStringArray(sig.arguments));
+            }
+            Ok(Variant::Dictionary(d))
+        }
         "class_get_integer_constant" => {
             let class = class_name_arg(args, 0, "ClassDB.class_get_integer_constant()")?;
             let name = class_name_arg(args, 1, "ClassDB.class_get_integer_constant()")?;
@@ -16152,27 +17441,55 @@ fn call_classdb_static(method: &str, args: &[Variant]) -> Result<Variant, Runtim
                 gdobject::class_get_integer_constant(&class, &name).unwrap_or(0),
             ))
         }
+        // pat-s3rrv.57: these four take Godot's trailing `no_inheritance`
+        // argument (default false). Dropping it was not a missing feature but a
+        // WRONG ANSWER — `ClassDB.class_get_enum_list("Node2D", true)` asks what
+        // Node2D declares itself and used to get everything Node and Object
+        // declare too, silently.
         "class_get_integer_constant_list" => {
             let class = class_name_arg(args, 0, "ClassDB.class_get_integer_constant_list()")?;
             Ok(Variant::PackedStringArray(
-                gdobject::get_integer_constant_list(&class),
+                gdobject::class_db::get_integer_constant_list_ex(&class, bool_arg(args, 1)),
             ))
         }
         "class_has_enum" => {
             let class = class_name_arg(args, 0, "ClassDB.class_has_enum()")?;
             let name = class_name_arg(args, 1, "ClassDB.class_has_enum()")?;
-            Ok(Variant::Bool(gdobject::class_has_enum(&class, &name)))
+            Ok(Variant::Bool(gdobject::class_db::class_has_enum_ex(
+                &class,
+                &name,
+                bool_arg(args, 2),
+            )))
         }
         "class_get_enum_list" => {
             let class = class_name_arg(args, 0, "ClassDB.class_get_enum_list()")?;
-            Ok(Variant::PackedStringArray(gdobject::get_enum_list(&class)))
+            Ok(Variant::PackedStringArray(
+                gdobject::class_db::get_enum_list_ex(&class, bool_arg(args, 1)),
+            ))
         }
         "class_get_enum_constants" => {
             let class = class_name_arg(args, 0, "ClassDB.class_get_enum_constants()")?;
             let name = class_name_arg(args, 1, "ClassDB.class_get_enum_constants()")?;
-            Ok(Variant::PackedStringArray(gdobject::get_enum_constants(
-                &class, &name,
-            )))
+            Ok(Variant::PackedStringArray(
+                gdobject::class_db::get_enum_constants_ex(&class, &name, bool_arg(args, 2)),
+            ))
+        }
+        // Which enum owns a given constant. Godot returns the empty StringName
+        // when the constant is not part of one, NOT an error — a plain constant
+        // is a normal answer, not a lookup failure.
+        "class_get_integer_constant_enum" => {
+            let class = class_name_arg(args, 0, "ClassDB.class_get_integer_constant_enum()")?;
+            let constant = class_name_arg(args, 1, "ClassDB.class_get_integer_constant_enum()")?;
+            let no_inh = bool_arg(args, 2);
+            let owner = gdobject::class_db::get_enum_list_ex(&class, no_inh)
+                .into_iter()
+                .find(|e| {
+                    gdobject::class_db::get_enum_constants_ex(&class, e, no_inh)
+                        .iter()
+                        .any(|c| *c == constant)
+                })
+                .unwrap_or_default();
+            Ok(Variant::String(owner))
         }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("ClassDB.{other}"),
@@ -22721,7 +24038,15 @@ fn callable_target(v: &Variant, self_node: Option<u64>) -> Option<(u64, String)>
     }
 }
 
-fn is_node_class_name(name: &str) -> bool {
+/// The pre-ClassDB hardcoded list, kept as a FALLBACK (pat-s3rrv.57).
+///
+/// ⚠️ Do not delete this in favour of the ClassDB query alone. ClassDB is a
+/// process-global that is **not populated implicitly** — a unit test, or any
+/// host that never calls a `register_*_classes` entry point, sees it empty, and
+/// a purely ClassDB-driven predicate would answer `false` for everything and
+/// silently un-break `Sprite2D.new()` for those callers. Keeping the literal
+/// list as an OR-ed floor means the generic path can only ever ADD classes.
+fn is_legacy_node_class_name(name: &str) -> bool {
     matches!(
         name,
         "Node"
@@ -22757,6 +24082,420 @@ fn is_node_class_name(name: &str) -> bool {
             | "NavigationAgent2D"
             | "NavigationAgent3D"
     )
+}
+
+/// Whether `name` is a class a script may construct with `.new()` and add to
+/// the tree — asked of ClassDB rather than of a 26-name list (pat-s3rrv.57).
+///
+/// Godot resolves `SomeClass.new()` through `ClassDB::instantiate`, which works
+/// for every non-abstract registered class. Patina answered it from a literal
+/// `matches!`, so `AnimatedSprite2D.new()`, `Line2D.new()`, `VBoxContainer.new()`,
+/// `MeshInstance3D.new()` and hundreds more raised `UndefinedVariable` despite
+/// being registered — the class existed, the script just could not say its name.
+///
+/// The three conditions are Godot's own: registered, not abstract, and derived
+/// from `Node` (the tree-insertable half; RefCounted types are served by the
+/// bespoke handle arms above this call).
+fn is_node_class_name(name: &str) -> bool {
+    if is_legacy_node_class_name(name) {
+        return true;
+    }
+    gdobject::class_db::class_exists(name)
+        && !gdobject::class_db::is_abstract(name)
+        && gdobject::class_db::is_parent_class(name, "Node")
+}
+
+// ---------------------------------------------------------------------------
+// pat-s3rrv.14: the InputEvent instance-method surface.
+//
+// The 17-class family and object delivery landed in earlier passes: a script's
+// `_input(event)` already receives a `Variant::Resource` whose `class_name` is
+// `InputEventKey` / `InputEventMouseButton` / …, and `event is InputEventKey`
+// already type-checks through ClassDB. What had NO implementation anywhere in
+// the workspace was the METHODS — `is_pressed`, `is_echo`, `as_text` and, above
+// all, `event.is_action_pressed("ui_accept")`, which is the single most common
+// line in any Godot `_input` body. They were registered in ClassDB as metadata
+// and dispatched by nothing.
+//
+// Every rule below is transcribed from upstream/godot/core/input/input_event.cpp
+// and input_map.cpp rather than inferred from the method names, because several
+// of them are counter-intuitive: `is_released()` is `!pressed && !canceled`
+// (NOT `!is_pressed()`, so a canceled event is neither), the modifier order in
+// `as_text()` is Ctrl+Alt+Shift+Meta, and an `InputEventAction` short-circuits
+// action matching on its own action name instead of consulting the InputMap's
+// bindings at all.
+// ---------------------------------------------------------------------------
+
+/// The method names the InputEvent arm implements.
+///
+/// Kept as an explicit list rather than a catch-all so a method Patina has not
+/// implemented reaches the general resource table and, failing there, raises —
+/// which is far easier to diagnose than a silent `Nil`.
+fn is_input_event_method(method: &str) -> bool {
+    matches!(
+        method,
+        "is_pressed"
+            | "is_released"
+            | "is_echo"
+            | "is_canceled"
+            | "is_action_type"
+            | "as_text"
+            | "get_device"
+            | "is_action"
+            | "is_action_pressed"
+            | "is_action_released"
+            | "get_action_strength"
+            | "get_action_raw_strength"
+            | "is_match"
+            | "get_modifiers_mask"
+            | "is_command_or_control_pressed"
+            | "as_text_keycode"
+            | "as_text_physical_keycode"
+            | "as_text_key_label"
+            | "get_keycode_with_modifiers"
+            | "get_physical_keycode_with_modifiers"
+    )
+}
+
+/// Godot's `KeyModifierMask` values (upstream/godot/core/os/keyboard.h:249).
+const GODOT_MOD_SHIFT: i64 = 1 << 25;
+const GODOT_MOD_ALT: i64 = 1 << 26;
+const GODOT_MOD_META: i64 = 1 << 27;
+const GODOT_MOD_CTRL: i64 = 1 << 28;
+
+/// Whether `class_name` is somewhere in the InputEvent hierarchy.
+///
+/// Answered from the NAME rather than by walking ClassDB, deliberately: ClassDB
+/// is a process-global that starts empty and a unit test that never calls
+/// `register_all_classes()` would otherwise see every event method silently
+/// stop dispatching. Every class in Godot's hierarchy carries the prefix, and
+/// no class outside it does.
+fn is_input_event_class(class_name: &str) -> bool {
+    class_name.starts_with("InputEvent")
+}
+
+fn ie_bool(res: &gdvariant::ResourceRef, key: &str) -> bool {
+    matches!(res.properties.get(key), Some(Variant::Bool(true)))
+}
+
+fn ie_int(res: &gdvariant::ResourceRef, key: &str) -> i64 {
+    match res.properties.get(key) {
+        Some(Variant::Int(i)) => *i,
+        Some(Variant::Float(f)) => *f as i64,
+        _ => 0,
+    }
+}
+
+fn ie_float(res: &gdvariant::ResourceRef, key: &str) -> f64 {
+    match res.properties.get(key) {
+        Some(Variant::Float(f)) => *f,
+        Some(Variant::Int(i)) => *i as f64,
+        _ => 0.0,
+    }
+}
+
+fn ie_string(res: &gdvariant::ResourceRef, key: &str) -> String {
+    match res.properties.get(key) {
+        Some(Variant::String(s)) => s.clone(),
+        _ => String::new(),
+    }
+}
+
+/// `InputEvent::is_pressed()` — `pressed && !canceled` (input_event.cpp:79).
+fn ie_is_pressed(res: &gdvariant::ResourceRef) -> bool {
+    ie_bool(res, "pressed") && !ie_bool(res, "canceled")
+}
+
+/// `InputEvent::is_released()` — `!pressed && !canceled` (input_event.cpp:83).
+///
+/// Deliberately NOT `!is_pressed()`: a canceled event is neither pressed nor
+/// released, and the two predicates are false together for it.
+fn ie_is_released(res: &gdvariant::ResourceRef) -> bool {
+    !ie_bool(res, "pressed") && !ie_bool(res, "canceled")
+}
+
+/// `InputEvent::is_echo()` — false on the base, `echo` on InputEventKey only
+/// (input_event.cpp:87 / :386).
+fn ie_is_echo(res: &gdvariant::ResourceRef) -> bool {
+    res.class_name == "InputEventKey" && ie_bool(res, "echo")
+}
+
+/// `InputEvent::is_action_type()` — false on the base, overridden to true on
+/// exactly five classes (input_event.h:190/254/324/354/473).
+///
+/// ⚠️ InputEventScreenTouch is NOT one of them, which is easy to assume it is.
+fn ie_is_action_type(class_name: &str) -> bool {
+    matches!(
+        class_name,
+        "InputEventKey"
+            | "InputEventMouseButton"
+            | "InputEventJoypadMotion"
+            | "InputEventJoypadButton"
+            | "InputEventAction"
+    )
+}
+
+/// `InputEventWithModifiers::get_modifiers_mask()` (input_event.cpp).
+fn ie_modifiers_mask(res: &gdvariant::ResourceRef) -> i64 {
+    let mut mask = 0;
+    if ie_bool(res, "ctrl_pressed") {
+        mask |= GODOT_MOD_CTRL;
+    }
+    if ie_bool(res, "shift_pressed") {
+        mask |= GODOT_MOD_SHIFT;
+    }
+    if ie_bool(res, "alt_pressed") {
+        mask |= GODOT_MOD_ALT;
+    }
+    if ie_bool(res, "meta_pressed") {
+        mask |= GODOT_MOD_META;
+    }
+    mask
+}
+
+/// `InputEventWithModifiers::as_text()` — Ctrl, Alt, Shift, Meta in THAT order,
+/// joined with `+` (input_event.cpp:257).
+fn ie_modifier_text(res: &gdvariant::ResourceRef) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if ie_bool(res, "ctrl_pressed") {
+        parts.push("Ctrl");
+    }
+    if ie_bool(res, "alt_pressed") {
+        parts.push("Alt");
+    }
+    if ie_bool(res, "shift_pressed") {
+        parts.push("Shift");
+    }
+    if ie_bool(res, "meta_pressed") {
+        parts.push("Meta");
+    }
+    parts.join("+")
+}
+
+/// Godot's `keycode_get_string` for the keycodes Patina can produce.
+///
+/// ⚠️ Transcribed from upstream/godot/core/os/keyboard.cpp `_keycodes[]`, NOT
+/// from `gdplatform::input::Key::name()`. That method returns BROWSER
+/// `KeyboardEvent.key` names — `"ArrowUp"`, and `" "` for space — where Godot
+/// says `"Up"` and `"Space"`. Reusing it would have produced text that looks
+/// right and matches nothing a Godot project prints.
+fn godot_keycode_name(code: i64) -> String {
+    // Letters and digits are their ASCII selves in Godot's numbering.
+    if (65..=90).contains(&code) || (48..=57).contains(&code) {
+        return ((code as u8) as char).to_string();
+    }
+    let special = match code {
+        32 => "Space",
+        4194305 => "Escape",
+        4194306 => "Tab",
+        4194307 => "Backtab",
+        4194308 => "Backspace",
+        4194309 => "Enter",
+        4194310 => "Kp Enter",
+        4194311 => "Insert",
+        4194312 => "Delete",
+        4194317 => "Home",
+        4194318 => "End",
+        4194319 => "Left",
+        4194320 => "Up",
+        4194321 => "Right",
+        4194322 => "Down",
+        4194323 => "PageUp",
+        4194324 => "PageDown",
+        4194325 => "Shift",
+        4194326 => "Ctrl",
+        4194327 => "Meta",
+        4194328 => "Alt",
+        4194329 => "CapsLock",
+        4194330 => "NumLock",
+        4194331 => "ScrollLock",
+        _ => "",
+    };
+    if !special.is_empty() {
+        return special.to_string();
+    }
+    // F1..F16 run contiguously from SPECIAL|0x1C.
+    if (4194332..=4194347).contains(&code) {
+        return format!("F{}", code - 4194331);
+    }
+    // Anything else keeps its numeric identity rather than inventing a name.
+    format!("{code}")
+}
+
+/// `InputEventKey::as_text_keycode` / `_physical_keycode` / `_key_label`, which
+/// share one shape: the named code, prefixed with the modifier text.
+fn ie_keycode_text(res: &gdvariant::ResourceRef, field: &str) -> String {
+    let code = ie_int(res, field);
+    let kc = if code == 0 {
+        "(unset)".to_string()
+    } else {
+        godot_keycode_name(code)
+    };
+    let mods = ie_modifier_text(res);
+    if mods.is_empty() {
+        kc
+    } else {
+        format!("{mods}+{kc}")
+    }
+}
+
+/// Godot's `_mouse_button_descriptions` (input_event.cpp:810), 1-indexed.
+fn godot_mouse_button_name(index: i64) -> String {
+    match index {
+        1 => "Left Mouse Button".to_string(),
+        2 => "Right Mouse Button".to_string(),
+        3 => "Middle Mouse Button".to_string(),
+        4 => "Mouse Wheel Up".to_string(),
+        5 => "Mouse Wheel Down".to_string(),
+        6 => "Mouse Wheel Left".to_string(),
+        7 => "Mouse Wheel Right".to_string(),
+        8 => "Mouse Thumb Button 1".to_string(),
+        9 => "Mouse Thumb Button 2".to_string(),
+        other => format!("Button #{other}"),
+    }
+}
+
+/// `InputEvent::as_text()` for the classes Patina delivers.
+fn ie_as_text(res: &gdvariant::ResourceRef) -> String {
+    let mods = ie_modifier_text(res);
+    match res.class_name.as_str() {
+        "InputEventKey" => {
+            let kc = godot_keycode_name(ie_int(res, "keycode"));
+            if mods.is_empty() {
+                kc
+            } else {
+                format!("{mods}+{kc}")
+            }
+        }
+        "InputEventMouseButton" => {
+            let prefix = if mods.is_empty() {
+                String::new()
+            } else {
+                format!("{mods}+")
+            };
+            let name = godot_mouse_button_name(ie_int(res, "button_index"));
+            if ie_bool(res, "double_click") {
+                format!("{prefix}{name} (Double Click)")
+            } else {
+                format!("{prefix}{name}")
+            }
+        }
+        "InputEventAction" => {
+            let action = ie_string(res, "action");
+            let state = if ie_is_pressed(res) {
+                "pressed"
+            } else {
+                "released"
+            };
+            format!("Input Action: action={action}, pressed={state}")
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Rebuilds an `InputEvent` object from a binding spec (pat-s3rrv.14).
+///
+/// This is what lets `InputMap.action_get_events` return real events. The
+/// result carries only what a BINDING knows — a binding has no press state, so
+/// `pressed` is false, exactly as Godot's stored binding events are.
+fn input_event_from_spec(spec: &crate::bindings::InputEventSpec) -> Variant {
+    let mut properties = std::collections::HashMap::new();
+    properties.insert("device".to_string(), Variant::Int(0));
+    properties.insert("pressed".to_string(), Variant::Bool(false));
+    properties.insert("canceled".to_string(), Variant::Bool(false));
+    match spec.class.as_str() {
+        "InputEventKey" => {
+            properties.insert("keycode".to_string(), Variant::Int(spec.code));
+            properties.insert("physical_keycode".to_string(), Variant::Int(spec.code));
+            properties.insert("key_label".to_string(), Variant::Int(spec.code));
+            properties.insert("unicode".to_string(), Variant::Int(0));
+            properties.insert("location".to_string(), Variant::Int(0));
+            properties.insert("echo".to_string(), Variant::Bool(false));
+        }
+        "InputEventMouseButton" => {
+            properties.insert("button_index".to_string(), Variant::Int(spec.code));
+            properties.insert("double_click".to_string(), Variant::Bool(false));
+            properties.insert("factor".to_string(), Variant::Float(1.0));
+        }
+        "InputEventJoypadButton" => {
+            properties.insert("button_index".to_string(), Variant::Int(spec.code));
+            properties.insert("pressure".to_string(), Variant::Float(0.0));
+        }
+        "InputEventJoypadMotion" => {
+            properties.insert("axis".to_string(), Variant::Int(spec.code));
+            properties.insert(
+                "axis_value".to_string(),
+                Variant::Float(spec.axis_value as f64),
+            );
+        }
+        _ => {}
+    }
+    properties.insert("shift_pressed".to_string(), Variant::Bool(spec.shift));
+    properties.insert("ctrl_pressed".to_string(), Variant::Bool(spec.ctrl));
+    properties.insert("alt_pressed".to_string(), Variant::Bool(spec.alt));
+    properties.insert("meta_pressed".to_string(), Variant::Bool(false));
+    Variant::Resource(Box::new(gdvariant::ResourceRef {
+        path: String::new(),
+        class_name: spec.class.clone(),
+        properties,
+    }))
+}
+
+/// The binding shape an event presents to InputMap matching, or `None` for an
+/// event kind no action can be bound to (mouse motion, gestures, …).
+fn ie_to_spec(res: &gdvariant::ResourceRef) -> Option<crate::bindings::InputEventSpec> {
+    let (class, code, axis_value) = match res.class_name.as_str() {
+        "InputEventKey" => ("InputEventKey", ie_int(res, "keycode"), 0.0),
+        "InputEventMouseButton" => ("InputEventMouseButton", ie_int(res, "button_index"), 0.0f32),
+        "InputEventJoypadButton" => ("InputEventJoypadButton", ie_int(res, "button_index"), 0.0),
+        "InputEventJoypadMotion" => (
+            "InputEventJoypadMotion",
+            ie_int(res, "axis"),
+            ie_float(res, "axis_value") as f32,
+        ),
+        _ => return None,
+    };
+    Some(crate::bindings::InputEventSpec {
+        class: class.to_string(),
+        code,
+        axis_value,
+        shift: ie_bool(res, "shift_pressed"),
+        ctrl: ie_bool(res, "ctrl_pressed"),
+        alt: ie_bool(res, "alt_pressed"),
+    })
+}
+
+/// Whether `binding` matches `event`, following `InputEvent*::action_match`.
+///
+/// With `exact_match` false — Godot's default — modifiers are IGNORED, so a
+/// plain `W` binding fires for `Ctrl+W`. That is deliberate upstream: it is the
+/// whole reason `exact_match` exists as a parameter.
+fn ie_binding_matches(
+    binding: &crate::bindings::InputEventSpec,
+    event: &gdvariant::ResourceRef,
+    event_spec: &crate::bindings::InputEventSpec,
+    exact_match: bool,
+) -> bool {
+    if binding.class != event_spec.class {
+        return false;
+    }
+    if binding.code != event_spec.code {
+        return false;
+    }
+    if binding.class == "InputEventJoypadMotion" {
+        // A binding only presses on deflection with its own sign
+        // (upstream InputEventJoypadMotion::action_match).
+        if binding.axis_value.signum() != event_spec.axis_value.signum() {
+            return false;
+        }
+    }
+    if exact_match {
+        let want = (binding.shift as i64) * GODOT_MOD_SHIFT
+            + (binding.ctrl as i64) * GODOT_MOD_CTRL
+            + (binding.alt as i64) * GODOT_MOD_ALT;
+        return want == ie_modifiers_mask(event);
+    }
+    true
 }
 
 fn variant_eq(a: &Variant, b: &Variant) -> bool {

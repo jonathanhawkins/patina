@@ -1197,6 +1197,16 @@ pub fn variant_type_code(v: &Variant) -> i64 {
         VariantType::Vector3 => 9,
         VariantType::Vector3i => 10,
         VariantType::Transform2D => 11,
+        // The six kinds pat-s3rrv.59 added. The ordinals are Godot's own
+        // `Variant::Type` ordering (core/variant/variant.h) and match the
+        // `"TYPE_RECT2I" => 8` … `"TYPE_PACKED_VECTOR4_ARRAY" => 38` constants
+        // already declared above — those two tables must agree, or
+        // `typeof(v) == TYPE_VECTOR4` is false for an actual Vector4.
+        VariantType::Rect2i => 8,
+        VariantType::Vector4 => 12,
+        VariantType::Vector4i => 13,
+        VariantType::Projection => 19,
+        VariantType::Rid => 23,
         VariantType::Plane => 14,
         VariantType::Quaternion => 15,
         VariantType::Aabb => 16,
@@ -1223,6 +1233,7 @@ pub fn variant_type_code(v: &Variant) -> i64 {
         VariantType::PackedVector2Array => 35,
         VariantType::PackedVector3Array => 36,
         VariantType::PackedColorArray => 37,
+        VariantType::PackedVector4Array => 38,
     }
 }
 

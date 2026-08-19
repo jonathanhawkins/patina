@@ -907,6 +907,7 @@ impl SoftwareRenderer3D {
                         entry.material.transparency,
                         entry.material.alpha_scissor_threshold,
                         entry.material.depth_draw_mode,
+                        entry.material.blend_mode,
                     );
                 }
             }

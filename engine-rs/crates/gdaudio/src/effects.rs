@@ -31,6 +31,20 @@ pub trait AudioEffect: Send {
     fn magnitude_for_frequency_range(&self, _from_hz: f32, _to_hz: f32) -> Option<f32> {
         None
     }
+
+    /// The Godot class this effect was built from, e.g.
+    /// `"AudioEffectLowPassFilter"` (pat-s3rrv.54).
+    ///
+    /// Distinct from [`name`](Self::name), which stays a short human label and
+    /// is asserted against by existing tests and the editor. SEVEN Godot filter
+    /// classes share one Rust `AudioEffectFilter`, so `name()` alone cannot say
+    /// which slot of a bus holds which effect; this can.
+    ///
+    /// Defaults to `name()` so every existing effect keeps answering something
+    /// sensible without being touched.
+    fn godot_class(&self) -> &str {
+        self.name()
+    }
 }
 
 /// Amplify effect — multiplies the signal by a linear gain derived from dB.
@@ -750,6 +764,12 @@ pub struct AudioEffectFilter {
     pub gain_db: f32,
     /// Per-channel state: `[x1, x2, y1, y2]`.
     state: Vec<[f32; 4]>,
+    /// Which Godot class produced this filter (pat-s3rrv.54).
+    ///
+    /// Godot has seven filter classes over one biquad; the mode alone does not
+    /// round-trip to a class name (LowPass could be `AudioEffectLowPassFilter`
+    /// or one stage of a band limit), so the loader records it.
+    godot_class: &'static str,
 }
 
 impl AudioEffectFilter {
@@ -761,7 +781,15 @@ impl AudioEffectFilter {
             resonance,
             gain_db,
             state: Vec::new(),
+            godot_class: "AudioEffectFilter",
         }
+    }
+
+    /// Tags this filter with the Godot class it was loaded from
+    /// (pat-s3rrv.54).
+    pub fn with_godot_class(mut self, class_name: &'static str) -> Self {
+        self.godot_class = class_name;
+        self
     }
     /// Low-pass filter wrapper.
     pub fn low_pass(cutoff_hz: f32, resonance: f32) -> Self {
@@ -793,9 +821,75 @@ impl AudioEffectFilter {
     }
 }
 
+/// Several [`AudioEffectFilter`] stages in series (pat-s3rrv.54).
+///
+/// Two things in Godot's filter family need more than one biquad:
+///
+/// * **`db` slope.** `FilterDB` selects 6/12/18/24 dB per octave, and one
+///   biquad gives 12 dB/oct. Godot cascades identical stages to steepen the
+///   skirt, so the count is what the enum index selects.
+/// * **`AudioEffectBandLimitFilter`**, which bounds a band from both sides —
+///   a high-pass and a low-pass in series, not a single response.
+///
+/// Ignoring the slope would not fail loudly: the filter still filters, just
+/// with the wrong skirt, which is why it is worth modelling rather than
+/// rounding every class to one biquad.
+pub struct AudioEffectFilterCascade {
+    stages: Vec<AudioEffectFilter>,
+    godot_class: &'static str,
+}
+
+impl AudioEffectFilterCascade {
+    /// `stages` applied in order. Empty is allowed and is a pass-through.
+    pub fn new(stages: Vec<AudioEffectFilter>, godot_class: &'static str) -> Self {
+        Self {
+            stages,
+            godot_class,
+        }
+    }
+
+    /// `count` identical stages of `proto`, for a `db`-slope cascade.
+    pub fn repeated(proto: AudioEffectFilter, count: usize, godot_class: &'static str) -> Self {
+        Self::new(vec![proto; count.max(1)], godot_class)
+    }
+
+    /// How many biquad stages this cascade runs.
+    pub fn stage_count(&self) -> usize {
+        self.stages.len()
+    }
+}
+
+impl AudioEffect for AudioEffectFilterCascade {
+    fn name(&self) -> &str {
+        "Filter"
+    }
+
+    fn godot_class(&self) -> &str {
+        self.godot_class
+    }
+
+    fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
+        // In series: each stage sees the previous stage's output, which is what
+        // makes the skirts add rather than the responses average.
+        for stage in &mut self.stages {
+            stage.process(samples, sample_rate, channels);
+        }
+    }
+
+    fn reset(&mut self) {
+        for stage in &mut self.stages {
+            stage.reset();
+        }
+    }
+}
+
 impl AudioEffect for AudioEffectFilter {
     fn name(&self) -> &str {
         "Filter"
+    }
+
+    fn godot_class(&self) -> &str {
+        self.godot_class
     }
 
     fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {

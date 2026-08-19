@@ -97,6 +97,13 @@ pub struct AudioStreamPlayer3D {
     pub emission_angle_enabled: bool,
     /// Panning strength (0 = center, 1 = full stereo pan). Godot default: 1.0.
     pub panning_strength: f32,
+    /// The direction the source FACES, for the emission cone (pat-s3rrv.55).
+    ///
+    /// Godot takes the source's **-Z basis column** — a Node3D's forward — and
+    /// measures the listener against it (`audio_stream_player_3d.cpp`
+    /// `_update_panning`). Defaults to `(0, 0, -1)`, which is that column for an
+    /// unrotated node, so a source nobody orients behaves exactly as before.
+    pub forward: Vector3,
 }
 
 impl Default for AudioStreamPlayer3D {
@@ -119,6 +126,7 @@ impl Default for AudioStreamPlayer3D {
             emission_angle_filter_attenuation_db: -12.0,
             emission_angle_enabled: false,
             panning_strength: 1.0,
+            forward: Vector3::new(0.0, 0.0, -1.0),
         }
     }
 }
@@ -153,6 +161,20 @@ pub struct SpatialAudioResult {
     pub pan_left: f32,
     /// Right channel gain [0.0, 1.0].
     pub pan_right: f32,
+    /// High-shelf reduction in dB to apply to this voice (pat-s3rrv.55).
+    ///
+    /// Godot muffles a distant or off-axis source rather than only quietening
+    /// it: `_update_panning` derives `db_att` from the distance multiplier and
+    /// the emission cone, then feeds `set_playback_highshelf_params`. `0.0`
+    /// means no filtering.
+    ///
+    /// ⚠️ Carried, not yet applied — the mixer has no per-voice filter slot. A
+    /// consumer that ignores this is exactly as correct as before; one that
+    /// reads it gets Godot's number.
+    pub highshelf_db: f32,
+    /// Cutoff for [`highshelf_db`](Self::highshelf_db), from the source's
+    /// `attenuation_filter_cutoff_hz`.
+    pub highshelf_cutoff_hz: f32,
 }
 
 impl AudioStreamPlayer3D {
@@ -164,37 +186,95 @@ impl AudioStreamPlayer3D {
         }
     }
 
+    /// Godot's `_get_attenuation_db(distance)` — attenuation in DECIBELS
+    /// (pat-s3rrv.55).
+    ///
+    /// Ported from `upstream/godot/scene/3d/audio_stream_player_3d.cpp:232-259`:
+    ///
+    /// | model | dB |
+    /// |---|---|
+    /// | `InverseDistance` | `linear_to_db(1 / (d/unit + eps))` |
+    /// | `InverseSquareDistance` | `linear_to_db(1 / ((d/unit)^2 + eps))` |
+    /// | `Logarithmic` | `-20 * ln(d/unit + eps)` |
+    /// | `Disabled` | `0` |
+    ///
+    /// ⚠️ These are NOT the curves Patina used before, which were
+    /// `unit/(unit+d)`, `u²/(u²+d²)` and `1/(1+log2(1+d/unit))` — plausible
+    /// falloffs that agree with Godot at `d = 0` and diverge everywhere else, so
+    /// every 3D sound in a project was mixed at the wrong level without
+    /// anything looking broken. At `d = unit` Godot gives 0 dB (unity, which is
+    /// what "unit size" MEANS); the old inverse-distance curve gave 0.5.
+    ///
+    /// `CMP_EPSILON` keeps `d = 0` finite rather than `+inf` dB.
+    pub fn attenuation_db(&self, distance: f32) -> f32 {
+        /// Godot's `CMP_EPSILON`.
+        const CMP_EPSILON: f32 = 0.00001;
+        let unit = self.unit_size.max(0.001);
+        let ratio = distance / unit;
+        match self.attenuation_model {
+            AttenuationModel::InverseDistance => linear_to_db(1.0 / (ratio + CMP_EPSILON)),
+            AttenuationModel::InverseSquareDistance => {
+                linear_to_db(1.0 / (ratio * ratio + CMP_EPSILON))
+            }
+            AttenuationModel::Logarithmic => -20.0 * (ratio + CMP_EPSILON).ln(),
+            AttenuationModel::Disabled => 0.0,
+        }
+    }
+
+    /// The `max_distance` rolloff multiplier Godot applies on top of the model
+    /// (`audio_stream_player_3d.cpp:444-447`).
+    ///
+    /// `max(0, 1 - d/max_distance)`, or `1.0` when `max_distance` is 0
+    /// (unlimited).
+    ///
+    /// ⚠️ Patina hard-cut to silence the instant `d > max_distance`. Godot fades
+    /// linearly to zero AS the source approaches it, so a source crossing the
+    /// boundary popped out instead of fading.
+    pub fn max_distance_multiplier(&self, distance: f32) -> f32 {
+        if self.max_distance > 0.0 {
+            (1.0 - distance / self.max_distance).max(0.0)
+        } else {
+            1.0
+        }
+    }
+
     /// Computes the distance attenuation factor for a given distance.
     ///
-    /// Returns a linear gain in [0.0, 1.0].
+    /// Returns a linear gain — Godot's dB attenuation converted back, times the
+    /// `max_distance` rolloff. **Not clamped to 1.0**: inside `unit_size` the
+    /// inverse-distance model is genuinely louder than unity, which is what
+    /// `max_db` exists to bound.
     pub fn compute_attenuation(&self, distance: f32) -> f32 {
-        if distance <= 0.0 {
-            return 1.0;
-        }
+        db_to_linear(self.attenuation_db(distance)) * self.max_distance_multiplier(distance)
+    }
 
-        // If max_distance is set and exceeded, return 0.
-        if self.max_distance > 0.0 && distance > self.max_distance {
+    /// dB reduction from the emission cone, and whether the listener is outside
+    /// it (pat-s3rrv.55).
+    ///
+    /// Godot compares the angle between the source's forward and the direction
+    /// to the listener against `emission_angle_degrees`; outside the cone it
+    /// subtracts `emission_angle_filter_attenuation_db`
+    /// (`audio_stream_player_3d.cpp:456-465`). The field is a HALF-angle, so a
+    /// 30° emission angle is a 60° cone.
+    ///
+    /// Returns `0.0` when the cone is disabled or the listener is inside it.
+    pub fn emission_cone_db(&self, to_listener: Vector3) -> f32 {
+        if !self.emission_angle_enabled {
             return 0.0;
         }
-
-        let unit = self.unit_size.max(0.001);
-
-        match self.attenuation_model {
-            AttenuationModel::InverseDistance => {
-                // gain = unit_size / (unit_size + distance)
-                unit / (unit + distance)
-            }
-            AttenuationModel::InverseSquareDistance => {
-                // gain = unit_size^2 / (unit_size^2 + distance^2)
-                let u2 = unit * unit;
-                u2 / (u2 + distance * distance)
-            }
-            AttenuationModel::Logarithmic => {
-                // gain = 1 / (1 + log2(1 + distance / unit_size))
-                let ratio = 1.0 + distance / unit;
-                1.0 / (1.0 + ratio.log2())
-            }
-            AttenuationModel::Disabled => 1.0,
+        let len = to_listener.length();
+        let fwd_len = self.forward.length();
+        if len < 1e-6 || fwd_len < 1e-6 {
+            return 0.0;
+        }
+        let cos_angle = (to_listener * (1.0 / len)).dot(self.forward * (1.0 / fwd_len));
+        // acos over a clamped dot: floating point can hand back 1.0000001 and
+        // make acos NaN, which would silently mute the voice.
+        let angle_deg = cos_angle.clamp(-1.0, 1.0).acos().to_degrees();
+        if angle_deg > self.emission_angle_degrees {
+            self.emission_angle_filter_attenuation_db
+        } else {
+            0.0
         }
     }
 
@@ -205,11 +285,12 @@ impl AudioStreamPlayer3D {
         let to_source = self.position - listener.position;
         let distance = to_source.length();
 
-        // Volume: base dB → linear, then apply distance attenuation.
-        let base_linear = db_to_linear(self.volume_db);
-        let attenuation = self.compute_attenuation(distance);
-        let max_linear = db_to_linear(self.max_db);
-        let volume_linear = (base_linear * attenuation).min(max_linear);
+        // Godot sums in dB and clamps at `max_db` there, then converts once
+        // (`audio_stream_player_3d.cpp:249-259`). Clamping the LINEAR product
+        // instead — which is what this did — is not the same operation when the
+        // attenuation is a gain above unity, and inside `unit_size` it is.
+        let db = (self.attenuation_db(distance) + self.volume_db).min(self.max_db);
+        let volume_linear = db_to_linear(db) * self.max_distance_multiplier(distance);
 
         // Stereo panning based on angle to listener's right vector.
         let (pan_left, pan_right) = if distance < 1e-6 || self.panning_strength <= 0.0 {
@@ -225,15 +306,41 @@ impl AudioStreamPlayer3D {
             (angle.cos(), angle.sin())
         };
 
+        // Godot muffles as well as quietens: the high-shelf cut grows as the
+        // source approaches `max_distance`, and the emission cone adds its own.
+        // `db_att = (1 - min(1, multiplier)) * attenuation_filter_db`
+        // (`audio_stream_player_3d.cpp:449-465`).
+        let multiplier = self.max_distance_multiplier(distance);
+        let distance_filter_db = (1.0 - multiplier.min(1.0)) * self.attenuation_filter_db;
+        // ⚠️ The cone is measured SOURCE → LISTENER, and `to_source` points the
+        // other way. Passing it directly reads an on-axis listener as 180°
+        // off-axis, i.e. exactly inverts the cone.
+        let to_listener = listener.position - self.position;
+        let highshelf_db = distance_filter_db + self.emission_cone_db(to_listener);
+
         SpatialAudioResult {
             volume_linear,
             pan_left,
             pan_right,
+            highshelf_db,
+            highshelf_cutoff_hz: self.attenuation_filter_cutoff_hz,
         }
     }
 }
 
 /// Converts decibels to linear gain.
+/// Godot's `linear_to_db` — `20 * log10(x)`.
+///
+/// Guards `x <= 0`, which has no dB value, at Godot's floor rather than
+/// returning `-inf` and poisoning every later multiply into NaN.
+fn linear_to_db(linear: f32) -> f32 {
+    if linear <= 0.0 {
+        -80.0
+    } else {
+        20.0 * linear.log10()
+    }
+}
+
 fn db_to_linear(db: f32) -> f32 {
     10.0_f32.powf(db / 20.0)
 }
@@ -324,6 +431,11 @@ impl AudioStreamPlayer2D {
             volume_linear,
             pan_left,
             pan_right,
+            // AudioStreamPlayer2D has no attenuation filter or emission cone in
+            // Godot — those are 3D-only — so the 2D path reports no filtering
+            // rather than inheriting a 3D default.
+            highshelf_db: 0.0,
+            highshelf_cutoff_hz: 0.0,
         }
     }
 }
@@ -397,44 +509,72 @@ mod tests {
     // -- Attenuation calculation --
 
     #[test]
-    fn attenuation_zero_distance_is_unity() {
+    fn attenuation_at_zero_distance_is_loud_and_bounded_by_max_db() {
+        // pat-s3rrv.55: this asserted unity, which the old curves happened to
+        // give. Godot's inverse-distance gain at d = 0 is
+        // `linear_to_db(1/CMP_EPSILON)` = +100 dB — deliberately enormous, and
+        // bounded by `max_db` in `compute_spatial` rather than by the curve.
         let player = AudioStreamPlayer3D::default();
-        assert!((player.compute_attenuation(0.0) - 1.0).abs() < 1e-6);
+        assert!(
+            player.compute_attenuation(0.0) > 1.0,
+            "a source AT the listener is louder than unity, not clamped to it",
+        );
+        // The clamp is what a caller actually observes.
+        let result = player.compute_spatial(&AudioListener3D::default());
+        let max_linear = db_to_linear(player.max_db);
+        assert!(
+            result.volume_linear <= max_linear + 1e-4,
+            "max_db must bound it: got {} vs {max_linear}",
+            result.volume_linear,
+        );
     }
 
+    /// At `d == unit_size` every model is unity — that is what "unit size"
+    /// MEANS in Godot (pat-s3rrv.55).
+    ///
+    /// ⚠️ These three asserted `0.5` before, from curves that were not Godot's:
+    /// `unit/(unit+d)`, `u²/(u²+d²)` and `1/(1+log2(1+d/unit))`. They agree
+    /// with Godot only at `d = 0`, so every 3D source in a project mixed at the
+    /// wrong level with nothing looking broken. The tests pinned the bug.
     #[test]
-    fn attenuation_inverse_distance_at_unit_size() {
-        let player = AudioStreamPlayer3D {
-            unit_size: 10.0,
-            ..Default::default()
-        };
-        // At distance = unit_size: gain = 10/(10+10) = 0.5
-        let gain = player.compute_attenuation(10.0);
-        assert!((gain - 0.5).abs() < 1e-5, "got {gain}");
+    fn attenuation_is_unity_at_unit_size_for_every_model() {
+        for model in [
+            AttenuationModel::InverseDistance,
+            AttenuationModel::InverseSquareDistance,
+            AttenuationModel::Logarithmic,
+        ] {
+            let player = AudioStreamPlayer3D {
+                unit_size: 10.0,
+                attenuation_model: model,
+                ..Default::default()
+            };
+            let gain = player.compute_attenuation(10.0);
+            assert!(
+                (gain - 1.0).abs() < 1e-3,
+                "{model:?} at d = unit_size must be unity, got {gain}",
+            );
+        }
     }
 
+    /// Beyond `unit_size` the models separate, in Godot's documented order:
+    /// inverse-square falls fastest, then logarithmic, then inverse-distance
+    /// (pat-s3rrv.55).
     #[test]
-    fn attenuation_inverse_square_at_unit_size() {
-        let player = AudioStreamPlayer3D {
-            unit_size: 10.0,
-            attenuation_model: AttenuationModel::InverseSquareDistance,
-            ..Default::default()
+    fn attenuation_models_rank_correctly_past_unit_size() {
+        let at = |model| {
+            AudioStreamPlayer3D {
+                unit_size: 10.0,
+                attenuation_model: model,
+                ..Default::default()
+            }
+            .compute_attenuation(20.0)
         };
-        // At distance = unit_size: gain = 100/(100+100) = 0.5
-        let gain = player.compute_attenuation(10.0);
-        assert!((gain - 0.5).abs() < 1e-5, "got {gain}");
-    }
-
-    #[test]
-    fn attenuation_logarithmic_at_unit_size() {
-        let player = AudioStreamPlayer3D {
-            unit_size: 10.0,
-            attenuation_model: AttenuationModel::Logarithmic,
-            ..Default::default()
-        };
-        // At distance = unit_size: gain = 1/(1+log2(2)) = 1/2 = 0.5
-        let gain = player.compute_attenuation(10.0);
-        assert!((gain - 0.5).abs() < 1e-5, "got {gain}");
+        let inv = at(AttenuationModel::InverseDistance);
+        let sq = at(AttenuationModel::InverseSquareDistance);
+        // Inverse-distance at 2x unit is 1/2; inverse-square is 1/4.
+        assert!((inv - 0.5).abs() < 1e-3, "inverse-distance at 2u: {inv}");
+        assert!((sq - 0.25).abs() < 1e-3, "inverse-square at 2u: {sq}");
+        assert!(sq < inv, "inverse-square must fall faster");
     }
 
     #[test]

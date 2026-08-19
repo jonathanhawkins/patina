@@ -119,6 +119,44 @@ impl NodePath {
         self.subnames.join(":")
     }
 
+    /// Returns the concatenated NAME path (e.g. `"Player/Sprite"`), without the
+    /// subnames or the leading slash (pat-s3rrv.60).
+    ///
+    /// Godot's counterpart to [`get_concatenated_subnames`](Self::get_concatenated_subnames);
+    /// the separator is `/` because these are node names, not properties.
+    pub fn get_concatenated_names(&self) -> String {
+        self.names.join("/")
+    }
+
+    /// Godot's `NodePath.slice(begin, end)` — a sub-path over the NAMES
+    /// (pat-s3rrv.60).
+    ///
+    /// Negative indices count from the end, and both bounds are clamped, so
+    /// `slice(1, -1)` drops the first and last name rather than panicking. The
+    /// result keeps this path's `absolute` flag only when it starts at 0 —
+    /// a slice that skips the root is by definition relative.
+    ///
+    /// Subnames ride along only on a slice that reaches the end, mirroring
+    /// Godot: they belong to the LAST name, so a slice that drops it drops them.
+    pub fn slice(&self, begin: i64, end: i64) -> NodePath {
+        let len = self.names.len() as i64;
+        let norm = |i: i64| -> usize {
+            let i = if i < 0 { len + i } else { i };
+            i.clamp(0, len) as usize
+        };
+        let start = norm(begin);
+        let stop = norm(end).max(start);
+        NodePath {
+            names: self.names[start..stop].to_vec(),
+            subnames: if stop == self.names.len() {
+                self.subnames.clone()
+            } else {
+                Vec::new()
+            },
+            absolute: self.absolute && start == 0,
+        }
+    }
+
     /// Returns a new `NodePath` representing only the property subpath.
     ///
     /// For example, if this path is `"Player:position:x"`, this returns

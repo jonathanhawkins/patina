@@ -63,6 +63,14 @@ const CONTROL_CLASSES: &[&str] = &[
     // ClassDB Control chain is unavailable and the arm never runs.
     "LineEdit",
     "ProgressBar",
+    // pat-s3rrv.69 — the Range family. `CONTROL_HIT_CLASSES` already accepted
+    // these, so an authored slider was clickable and focusable while drawing
+    // nothing; without them here `is_control` rejects the node whenever the
+    // ClassDB Control chain is unavailable and the new arms never run.
+    "HSlider",
+    "VSlider",
+    "SpinBox",
+    "TextureProgressBar",
     "CheckBox",
     "CheckButton",
     "OptionButton",
@@ -680,6 +688,25 @@ pub fn font_override_path(tree: &SceneTree, node_id: NodeId) -> Option<String> {
     string_prop(tree, node_id, "__extres__theme_override_fonts/font")
         .or_else(|| string_prop(tree, node_id, "theme_override_fonts/font"))
         .filter(|p| !p.is_empty() && !p.starts_with("ExtResource("))
+}
+
+/// Formats a SpinBox's value the way Godot's embedded LineEdit shows it.
+///
+/// Godot prints as many decimals as `step` implies, so an integer step reads
+/// `50` rather than `50.000000`. A whole-number step with a fractional value
+/// still shows the fraction — the step controls the *display precision*, not a
+/// second round of snapping, which `set_range_value` has already applied.
+fn format_spinbox_value(value: f64, step: f64) -> String {
+    if step >= 1.0 && (value.fract()).abs() < 1e-9 {
+        return format!("{}", value as i64);
+    }
+    // Decimals implied by the step: 0.01 -> 2, 0.1 -> 1.
+    let decimals = if step > 0.0 && step < 1.0 {
+        (-step.log10()).ceil().clamp(0.0, 6.0) as usize
+    } else {
+        2
+    };
+    format!("{value:.decimals$}")
 }
 
 fn string_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<String> {
@@ -1625,6 +1652,239 @@ fn draw_control(
                     rect: fill_rect,
                     color: fill,
                     filled: true,
+                });
+            }
+        }
+        // pat-s3rrv.69: sliders. Geometry comes from `range_controls` — the
+        // same functions the drag path uses — so the grabber cannot be drawn
+        // anywhere other than where clicking it selects.
+        // ⚠️ `slider_class @ (...)` binds the matched string. The scrutinee
+        // here is `class_of(tree, node_id).as_str()`, an unnamed temporary — there
+        // is no `class_name` in scope, and both the theme lookups and the axis
+        // choice need to know WHICH of the two matched.
+        slider_class @ ("HSlider" | "VSlider") => {
+            let axis = match crate::range_controls::slider_axis(slider_class) {
+                Some(a) => a,
+                None => return,
+            };
+            // The track, from the theme's own `slider` stylebox.
+            let track = stylebox_bg(
+                theme,
+                slider_class,
+                "slider",
+                Color::new(0.1, 0.1, 0.1, 1.0),
+            );
+            out.push(DrawCommand::DrawRect {
+                rect,
+                color: track,
+                filled: true,
+            });
+
+            let ratio = control::get_range_ratio(tree, node_id);
+            let local = crate::range_controls::grabber_rect(rect.size, axis, ratio);
+            // `grabber_rect` works in control-local space; shift it onto the
+            // control's global rect for the draw list.
+            let grabber_rect = Rect2::new(
+                Vector2::new(
+                    rect.position.x + local.position.x,
+                    rect.position.y + local.position.y,
+                ),
+                local.size,
+            );
+            let grabber = stylebox_bg(
+                theme,
+                slider_class,
+                "grabber",
+                Color::new(0.8, 0.8, 0.8, 1.0),
+            );
+            out.push(DrawCommand::DrawRect {
+                rect: grabber_rect,
+                color: grabber,
+                filled: true,
+            });
+
+            // Godot draws `tick_count` marks across the track; 0 (the default)
+            // means none, so the loop is skipped entirely rather than drawing a
+            // single degenerate tick.
+            let ticks = num_prop(tree, node_id, "tick_count").unwrap_or(0.0) as i64;
+            if ticks > 1 {
+                let tick_color = theme
+                    .get_color(slider_class, "font_color")
+                    .unwrap_or(Color::new(0.6, 0.6, 0.6, 1.0));
+                let span = crate::range_controls::track_length(rect.size, axis);
+                for i in 0..ticks {
+                    let t = i as f32 / (ticks - 1) as f32;
+                    let (from, to) = match axis {
+                        crate::range_controls::SliderAxis::Horizontal => {
+                            let x = rect.position.x
+                                + crate::range_controls::GRABBER_EXTENT * 0.5
+                                + span * t;
+                            (
+                                Vector2::new(x, rect.position.y),
+                                Vector2::new(x, rect.position.y + rect.size.y),
+                            )
+                        }
+                        crate::range_controls::SliderAxis::Vertical => {
+                            let y = rect.position.y
+                                + crate::range_controls::GRABBER_EXTENT * 0.5
+                                + span * t;
+                            (
+                                Vector2::new(rect.position.x, y),
+                                Vector2::new(rect.position.x + rect.size.x, y),
+                            )
+                        }
+                    };
+                    out.push(DrawCommand::DrawLine {
+                        from,
+                        to,
+                        color: tick_color,
+                        width: 1.0,
+                    });
+                }
+            }
+        }
+        "SpinBox" => {
+            // The field, then the value text, then the two arrows. Godot builds
+            // this from an embedded LineEdit plus arrow buttons; Patina draws it
+            // directly, which is enough for the value to be legible and the
+            // arrows to be hit-testable.
+            let bg = stylebox_bg(
+                theme,
+                "SpinBox",
+                "normal",
+                Color::new(0.15, 0.15, 0.15, 1.0),
+            );
+            out.push(DrawCommand::DrawRect {
+                rect,
+                color: bg,
+                filled: true,
+            });
+            let fg = theme
+                .get_color("SpinBox", "font_color")
+                .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
+
+            // `prefix`/`suffix` bracket the number, which is how a SpinBox shows
+            // units ("50 %"). Godot puts a space between suffix and value.
+            let value = control::get_range_value(tree, node_id);
+            let prefix = string_prop(tree, node_id, "prefix").unwrap_or_default();
+            let suffix = string_prop(tree, node_id, "suffix").unwrap_or_default();
+            let text = format!(
+                "{}{}{}",
+                if prefix.is_empty() {
+                    String::new()
+                } else {
+                    format!("{prefix} ")
+                },
+                format_spinbox_value(value, control::get_range_step(tree, node_id)),
+                if suffix.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {suffix}")
+                },
+            );
+            out.push(DrawCommand::DrawString {
+                text,
+                position: Vector2::new(
+                    rect.position.x + 4.0,
+                    rect.position.y + (rect.size.y - GLYPH_H) * 0.5,
+                ),
+                color: fg,
+                font_size: 1,
+            });
+
+            // Up/down arrows on the right edge, stacked.
+            let arrow_w = 12.0f32.min(rect.size.x * 0.25);
+            let half_h = rect.size.y * 0.5;
+            // ⚠️ `into_iter`, not `iter`: iterating an array of `&str` by
+            // reference yields `&&str`, which does not coerce to the `&str`
+            // `stylebox_bg` takes.
+            for (i, item) in ["up", "down"].into_iter().enumerate() {
+                let arrow = stylebox_bg(theme, "SpinBox", item, Color::new(0.3, 0.3, 0.3, 1.0));
+                out.push(DrawCommand::DrawRect {
+                    rect: Rect2::new(
+                        Vector2::new(
+                            rect.position.x + rect.size.x - arrow_w,
+                            rect.position.y + half_h * i as f32,
+                        ),
+                        Vector2::new(arrow_w, half_h),
+                    ),
+                    color: arrow,
+                    filled: true,
+                });
+            }
+        }
+        "TextureProgressBar" => {
+            let ratio = control::get_range_ratio(tree, node_id);
+            let fill_mode = num_prop(tree, node_id, "fill_mode").unwrap_or(0.0) as i64;
+            let tint = |key: &str| {
+                match tree.get_node(node_id).map(|n| n.get_property(key)) {
+                    Some(Variant::Color(c)) => c,
+                    // The tints MULTIPLY their texture, so white is "unchanged".
+                    // Falling back to transparent or black would hide the bar.
+                    _ => Color::new(1.0, 1.0, 1.0, 1.0),
+                }
+            };
+
+            // `texture_under` is the trough and always covers the whole rect.
+            if let Some(path) = string_prop(tree, node_id, "texture_under") {
+                out.push(DrawCommand::DrawTextureRect {
+                    texture_path: path,
+                    rect,
+                    modulate: tint("tint_under"),
+                });
+            }
+
+            if crate::range_controls::is_radial_fill(fill_mode) {
+                let offset = match tree
+                    .get_node(node_id)
+                    .map(|n| n.get_property("radial_center_offset"))
+                {
+                    Some(Variant::Vector2(v)) => v,
+                    _ => Vector2::new(0.0, 0.0),
+                };
+                let points = crate::range_controls::radial_fill_polygon(
+                    rect,
+                    offset,
+                    num_prop(tree, node_id, "radial_initial_angle").unwrap_or(0.0) as f32,
+                    num_prop(tree, node_id, "radial_fill_degrees").unwrap_or(360.0) as f32,
+                    ratio,
+                    fill_mode == crate::range_controls::FILL_COUNTER_CLOCKWISE,
+                );
+                if points.len() >= 3 {
+                    let color = tint("tint_progress");
+                    out.push(DrawCommand::DrawPolygon {
+                        points,
+                        colors: vec![color],
+                    });
+                }
+            } else {
+                let fill = crate::range_controls::linear_fill_rect(rect, fill_mode, ratio);
+                if fill.size.x > 0.0 && fill.size.y > 0.0 {
+                    match string_prop(tree, node_id, "texture_progress") {
+                        Some(path) => out.push(DrawCommand::DrawTextureRect {
+                            texture_path: path,
+                            rect: fill,
+                            modulate: tint("tint_progress"),
+                        }),
+                        // No texture authored: still emit the filled region, so
+                        // an untextured bar is visible and testable rather than
+                        // silently drawing nothing.
+                        None => out.push(DrawCommand::DrawRect {
+                            rect: fill,
+                            color: tint("tint_progress"),
+                            filled: true,
+                        }),
+                    }
+                }
+            }
+
+            // `texture_over` is drawn last: it is the frame that sits on top of
+            // the fill.
+            if let Some(path) = string_prop(tree, node_id, "texture_over") {
+                out.push(DrawCommand::DrawTextureRect {
+                    texture_path: path,
+                    rect,
+                    modulate: tint("tint_over"),
                 });
             }
         }

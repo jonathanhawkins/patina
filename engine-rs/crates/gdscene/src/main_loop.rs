@@ -2772,6 +2772,11 @@ impl MainLoop {
         self.tree.set_input_connected_joypads_mirror(joypads);
         self.tree
             .set_input_map_mirror(self.input_state.input_map_action_event_counts());
+        // pat-s3rrv.14: the bindings themselves, not just their count — an
+        // event cannot answer `is_action_pressed("ui_accept")` without knowing
+        // what "ui_accept" is bound to.
+        self.tree
+            .set_input_map_binding_mirror(self.input_state.input_map_action_bindings());
     }
 
     /// Returns a reference to the engine-owned [`InputState`].

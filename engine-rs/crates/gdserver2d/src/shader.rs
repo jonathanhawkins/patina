@@ -165,21 +165,16 @@ fn parse_uniform_type(s: &str) -> Option<UniformType> {
 }
 
 /// Best-effort default value parse for simple literals.
+/// pat-s3rrv.36: delegates to the shared parser in `gdresource`, which the 3D
+/// renderer uses too. Both crates carried byte-identical copies that understood
+/// only `true`/`false`/int/float, so a `vec4` default silently became
+/// `Variant::Nil` and the uniform read as zero.
+///
+/// `_utype` stays unused: the literal names its own arity (`vec3(...)` is a
+/// vec3 whatever the declaration says), and trusting the constructor keeps a
+/// mismatched declaration a visible Nil rather than a coerced wrong value.
 fn parse_default_value(s: &str, _utype: UniformType) -> Variant {
-    let s = s.trim();
-    if s == "true" {
-        return Variant::Bool(true);
-    }
-    if s == "false" {
-        return Variant::Bool(false);
-    }
-    if let Ok(i) = s.parse::<i64>() {
-        return Variant::Int(i);
-    }
-    if let Ok(f) = s.parse::<f64>() {
-        return Variant::Float(f);
-    }
-    Variant::Nil
+    gdresource::shader_tokenizer::parse_shader_default_value(s)
 }
 
 // ---------------------------------------------------------------------------

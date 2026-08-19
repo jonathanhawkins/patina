@@ -17,13 +17,17 @@
 //!
 //! # Scope
 //!
-//! Encodes every variant this crate's [`Variant`] enum can represent —
-//! including the nine `Packed*Array` types (ordinals 29–37) and the integer
-//! vectors `Vector2i`/`Vector3i` (ordinals 6/10). Types the enum still
-//! lacks (`Rect2i`, `Vector4`, `Projection`, `RID`, `PackedVector4Array`, …) are reported
-//! as [`VariantDecodeError::UnsupportedType`] on decode and — for the two the
-//! enum *does* carry but the wire format can't round-trip (`Callable`,
-//! `Resource`) — as [`VariantEncodeError::Unsupported`] on encode.
+//! Encodes every variant this crate's [`Variant`] enum can represent — all ten
+//! `Packed*Array` types (ordinals 29–38), the integer vectors
+//! `Vector2i`/`Vector3i` (6/10), and, since pat-s3rrv.59, `Rect2i` (8),
+//! `Vector4`/`Vector4i` (12/13), `Projection` (19) and `RID` (23).
+//!
+//! Only `Callable` (25) and `Signal` (26) are refused, and Godot refuses them
+//! too: each is a live binding to an object rather than data, so there is
+//! nothing to put on the wire. `Resource` is likewise encode-only-refused
+//! here, since decoding one would mean loading a file named by untrusted
+//! bytes. All three report [`VariantEncodeError::Unsupported`] on encode and
+//! [`VariantDecodeError::UnsupportedType`] on decode.
 //!
 //! `OBJECT` is half-supported, exactly as Godot intends: an object encoded as a
 //! bare instance id round-trips through [`Variant::ObjectId`]
@@ -40,9 +44,11 @@ use crate::dictionary::Dictionary;
 
 use thiserror::Error;
 
-use gdcore::id::ObjectId;
-use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector2i, Vector3, Vector3i};
-use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
+use gdcore::id::{ObjectId, Rid};
+use gdcore::math::{
+    Color, Rect2, Rect2i, Transform2D, Vector2, Vector2i, Vector3, Vector3i, Vector4, Vector4i,
+};
+use gdcore::math3d::{Aabb, Basis, Plane, Projection, Quaternion, Transform3D};
 use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
 
@@ -90,18 +96,23 @@ const T_VECTOR2: u32 = 5;
 /// Godot's `Variant::VECTOR2I` — the gap at 6 in this table was always this type.
 const T_VECTOR2I: u32 = 6;
 const T_RECT2: u32 = 7;
+const T_RECT2I: u32 = 8;
 const T_VECTOR3: u32 = 9;
 /// Godot's `Variant::VECTOR3I`.
 const T_VECTOR3I: u32 = 10;
 const T_TRANSFORM2D: u32 = 11;
+const T_VECTOR4: u32 = 12;
+const T_VECTOR4I: u32 = 13;
 const T_PLANE: u32 = 14;
 const T_QUATERNION: u32 = 15;
 const T_AABB: u32 = 16;
 const T_BASIS: u32 = 17;
 const T_TRANSFORM3D: u32 = 18;
+const T_PROJECTION: u32 = 19;
 const T_COLOR: u32 = 20;
 const T_STRING_NAME: u32 = 21;
 const T_NODE_PATH: u32 = 22;
+const T_RID: u32 = 23;
 const T_OBJECT: u32 = 24;
 const T_DICTIONARY: u32 = 27;
 const T_ARRAY: u32 = 28;
@@ -114,6 +125,7 @@ const T_PACKED_STRING_ARRAY: u32 = 34;
 const T_PACKED_VECTOR2_ARRAY: u32 = 35;
 const T_PACKED_VECTOR3_ARRAY: u32 = 36;
 const T_PACKED_COLOR_ARRAY: u32 = 37;
+const T_PACKED_VECTOR4_ARRAY: u32 = 38;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -286,6 +298,49 @@ fn encode_into(value: &Variant, out: &mut Vec<u8>, depth: u32) -> Result<(), Var
             put_u32(out, T_VECTOR2I);
             put_u32(out, v.x as u32);
             put_u32(out, v.y as u32);
+        }
+        // ⚠️ `Rect2i` writes four int32s, NOT reals — `marshalls.cpp:1567`
+        // uses `encode_uint32` throughout, with no `HEADER_DATA_FLAG_64`
+        // branch. Emitting reals here would desync every subsequent field.
+        Variant::Rect2i(r) => {
+            put_u32(out, T_RECT2I);
+            put_u32(out, r.position.x as u32);
+            put_u32(out, r.position.y as u32);
+            put_u32(out, r.size.x as u32);
+            put_u32(out, r.size.y as u32);
+        }
+        Variant::Vector4(v) => {
+            put_u32(out, T_VECTOR4);
+            put_f32(out, v.x);
+            put_f32(out, v.y);
+            put_f32(out, v.z);
+            put_f32(out, v.w);
+        }
+        Variant::Vector4i(v) => {
+            put_u32(out, T_VECTOR4I);
+            put_u32(out, v.x as u32);
+            put_u32(out, v.y as u32);
+            put_u32(out, v.z as u32);
+            put_u32(out, v.w as u32);
+        }
+        // A `Projection` is 16 reals in COLUMN-MAJOR order: `marshalls.cpp:588`
+        // reads `columns[i][j]` at offset `(i * 4 + j)`, and this engine stores
+        // `m[column][row]`, so a straight nested walk is already correct.
+        // Transposing here would silently mirror every camera matrix.
+        Variant::Projection(p) => {
+            put_u32(out, T_PROJECTION);
+            for col in &p.m {
+                for cell in col {
+                    put_f32(out, *cell);
+                }
+            }
+        }
+        // Godot writes a handle as a bare little-endian u64
+        // (`marshalls.cpp:689`). Unlike OBJECT there is no as-id flag: an RID
+        // is already nothing but an id.
+        Variant::Rid(rid) => {
+            put_u32(out, T_RID);
+            out.extend_from_slice(&rid.id().to_le_bytes());
         }
         Variant::Vector3(v) => {
             put_u32(out, T_VECTOR3);
@@ -463,6 +518,16 @@ fn encode_into(value: &Variant, out: &mut Vec<u8>, depth: u32) -> Result<(), Var
             } else {
                 put_u32(out, T_OBJECT | HEADER_DATA_FLAG_OBJECT_AS_ID);
                 out.extend_from_slice(&id.raw().to_le_bytes());
+            }
+        }
+        Variant::PackedVector4Array(v) => {
+            put_u32(out, T_PACKED_VECTOR4_ARRAY);
+            put_u32(out, v.len() as u32);
+            for p in v {
+                put_f32(out, p.x);
+                put_f32(out, p.y);
+                put_f32(out, p.z);
+                put_f32(out, p.w);
             }
         }
         Variant::Callable(_) => return Err(VariantEncodeError::Unsupported(VariantType::Callable)),
@@ -693,6 +758,37 @@ fn decode_from(r: &mut Reader, depth: u32) -> Result<Variant, VariantDecodeError
             let y = r.u32()? as i32;
             Ok(Variant::Vector2i(Vector2i::new(x, y)))
         }
+        T_RECT2I => {
+            let px = r.u32()? as i32;
+            let py = r.u32()? as i32;
+            let sx = r.u32()? as i32;
+            let sy = r.u32()? as i32;
+            Ok(Variant::Rect2i(Rect2i::from_components(px, py, sx, sy)))
+        }
+        T_VECTOR4 => {
+            let x = r.real(flag64)?;
+            let y = r.real(flag64)?;
+            let z = r.real(flag64)?;
+            let w = r.real(flag64)?;
+            Ok(Variant::Vector4(Vector4::new(x, y, z, w)))
+        }
+        T_VECTOR4I => {
+            let x = r.u32()? as i32;
+            let y = r.u32()? as i32;
+            let z = r.u32()? as i32;
+            let w = r.u32()? as i32;
+            Ok(Variant::Vector4i(Vector4i::new(x, y, z, w)))
+        }
+        T_PROJECTION => {
+            let mut m = [[0.0f32; 4]; 4];
+            for col in m.iter_mut() {
+                for cell in col.iter_mut() {
+                    *cell = r.real(flag64)?;
+                }
+            }
+            Ok(Variant::Projection(Projection { m }))
+        }
+        T_RID => Ok(Variant::Rid(Rid::from_raw(r.u64()?))),
         T_VECTOR3 => {
             let x = r.real(flag64)?;
             let y = r.real(flag64)?;
@@ -880,10 +976,22 @@ fn decode_from(r: &mut Reader, depth: u32) -> Result<Variant, VariantDecodeError
             }
             Ok(Variant::PackedColorArray(v))
         }
-        // Recognized Godot types this port does not (yet) support: VECTOR2I(6),
-        // RECT2I(8), VECTOR3I(10), VECTOR4(12), VECTOR4I(13), PROJECTION(19),
-        // RID(23), CALLABLE(25), SIGNAL(26), and PACKED_VECTOR4_ARRAY(38).
-        // OBJECT(24) is handled above: as-id decodes, full-object is refused.
+        T_PACKED_VECTOR4_ARRAY => {
+            let count = decode_container_count(r)? as usize;
+            let mut v = Vec::new();
+            for _ in 0..count {
+                let x = r.real(flag64)?;
+                let y = r.real(flag64)?;
+                let z = r.real(flag64)?;
+                let w = r.real(flag64)?;
+                v.push(Vector4::new(x, y, z, w));
+            }
+            Ok(Variant::PackedVector4Array(v))
+        }
+        // Recognized Godot types this port does not support: CALLABLE(25) and
+        // SIGNAL(26) — both are live object bindings rather than data, which is
+        // why `encode_variant` refuses them too. OBJECT(24) is handled above:
+        // as-id decodes, full-object is refused.
         other => Err(VariantDecodeError::UnsupportedType(other)),
     }
 }

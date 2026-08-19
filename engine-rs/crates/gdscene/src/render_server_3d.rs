@@ -17,7 +17,7 @@ use gdserver3d::instance::{
 use gdserver3d::label3d::Label3D;
 use gdserver3d::light::{Light3D, Light3DId, LightType, OmniShadowMode};
 use gdserver3d::material::{
-    CullMode, DepthDrawMode, Material3D, ShadingMode, StandardMaterial3D, TextureImage,
+    BlendMode, CullMode, DepthDrawMode, Material3D, ShadingMode, StandardMaterial3D, TextureImage,
     TextureSlot, Transparency,
 };
 use gdserver3d::mesh::{Mesh3D, PrimitiveType};
@@ -2138,7 +2138,7 @@ pub fn standard_material_from_props(props: &HashMap<String, Variant>) -> Standar
             _ => ShadingMode::Phong,
         },
         double_sided: matches!(props.get("cull_mode"), Some(Variant::Int(2))),
-        // pat-s3rrv.30: these four were never read, so a `.tscn` authoring
+        // pat-s3rrv.30: these five were never read, so a `.tscn` authoring
         // `transparency = 1` (Alpha) or `cull_mode = 1` (Front) rendered exactly
         // as if it had said nothing at all. `cull_mode` WAS read, but only to
         // answer "is it 2?" — which cannot express Front-culling.
@@ -2154,6 +2154,14 @@ pub fn standard_material_from_props(props: &HashMap<String, Variant>) -> Standar
         depth_draw_mode: match props.get("depth_draw_mode") {
             Some(Variant::Int(v)) => DepthDrawMode::from_godot_int(*v),
             _ => DepthDrawMode::OpaqueOnly,
+        },
+        // `blend_mode` is the last of the four render modes the bead names, and
+        // the one with the most visible consequence: Add and Mul are how every
+        // glow, flame and shadow-decal material is authored, and all of them
+        // composited as plain source-over while this key went unread.
+        blend_mode: match props.get("blend_mode") {
+            Some(Variant::Int(v)) => BlendMode::from_godot_int(*v),
+            _ => BlendMode::Mix,
         },
     }
 }

@@ -46,9 +46,11 @@ pub use file_access::{
     is_dir_access_handle, is_file_access_handle, project_root, resolve_path, set_path_roots,
     user_root, DirAccess, FileAccess, FileMode,
 };
-pub use id::{ClassId, ObjectId, ResourceUid};
-pub use math::{Color, Rect2, Transform2D, Vector2, Vector2i, Vector3, Vector3i};
-pub use math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
+pub use id::{ClassId, ObjectId, ResourceUid, Rid};
+pub use math::{
+    Color, Rect2, Rect2i, Transform2D, Vector2, Vector2i, Vector3, Vector3i, Vector4, Vector4i,
+};
+pub use math3d::{Aabb, Basis, Plane, Projection, Quaternion, Transform3D};
 pub use node_path::NodePath;
 pub use project_settings::{ProjectSettings, SettingsValue};
 pub use string_name::StringName;

@@ -171,8 +171,11 @@ pub fn rasterize_triangle_with_modes(
     transparency: crate::render_modes::Transparency,
     alpha_scissor_threshold: f32,
     depth_draw_mode: crate::render_modes::DepthDrawMode,
+    blend_mode: crate::render_modes::BlendMode,
 ) {
-    use crate::render_modes::{alpha_scissor_discard, is_transparent, writes_depth, Transparency};
+    use crate::render_modes::{
+        alpha_scissor_discard, blend_pixel, is_transparent, writes_depth, Transparency,
+    };
 
     // Opaque materials keep the original path exactly — same ordering, same
     // early depth rejection, so nothing about existing rendering changes.
@@ -255,17 +258,13 @@ pub fn rasterize_triangle_with_modes(
 
             let idx = (uy * width + ux) as usize;
             if blended {
-                // Standard source-over: the destination shows through by
-                // (1 - alpha), which is what "the far quad's colour is visible
-                // through the near one" means in the acceptance.
-                let dst = pixels[idx];
-                let a = color.a.clamp(0.0, 1.0);
-                pixels[idx] = Color::new(
-                    color.r * a + dst.r * (1.0 - a),
-                    color.g * a + dst.g * (1.0 - a),
-                    color.b * a + dst.b * (1.0 - a),
-                    (a + dst.a * (1.0 - a)).clamp(0.0, 1.0),
-                );
+                // pat-s3rrv.30: the blend equation now comes from the
+                // material's `blend_mode` instead of being hardcoded to
+                // source-over. `BlendMode::Mix` reproduces exactly what this
+                // branch did before, so every existing transparency assertion
+                // keeps its meaning; Add/Sub/Mul/PremultAlpha are new
+                // behaviour that previously composited as Mix.
+                pixels[idx] = blend_pixel(blend_mode, color, pixels[idx]);
             } else {
                 pixels[idx] = color;
             }

@@ -119,24 +119,26 @@ pub fn tile_set_from_properties(
             _ => None,
         }
     };
-    let tile_size = vec2i(&format!("{TILE_SET_PREFIX}tile_size"))?;
+    let tile_size = vec2i(TILE_SET_TILE_SIZE)?;
     let mut set = AtlasTileSet::new(tile_size);
     for &id in source_ids {
-        let prefix = format!("{TILE_SET_PREFIX}source_{id}_");
-        let Variant::String(texture_path) = get(&format!("{prefix}texture")) else {
+        // Keys come from `tile_set_source_key` rather than a local `format!`,
+        // so the reader here and the TileSet editor that writes them cannot
+        // drift apart (pat-s3rrv.65).
+        let Variant::String(texture_path) = get(&tile_set_source_key(id, "texture")) else {
             continue;
         };
         // Godot's atlas default is 16x16; a source that omits the property
         // still addresses tiles on that grid.
-        let region =
-            vec2i(&format!("{prefix}texture_region_size")).unwrap_or_else(|| Vector2i::new(16, 16));
+        let region = vec2i(&tile_set_source_key(id, "texture_region_size"))
+            .unwrap_or_else(|| Vector2i::new(16, 16));
         set.sources.insert(
             id,
             TileSetAtlasSource {
                 texture_path,
                 texture_region_size: region,
-                margins: vec2i(&format!("{prefix}margins")).unwrap_or(Vector2i::ZERO),
-                separation: vec2i(&format!("{prefix}separation")).unwrap_or(Vector2i::ZERO),
+                margins: vec2i(&tile_set_source_key(id, "margins")).unwrap_or(Vector2i::ZERO),
+                separation: vec2i(&tile_set_source_key(id, "separation")).unwrap_or(Vector2i::ZERO),
             },
         );
     }
@@ -587,6 +589,74 @@ pub fn tile_navigation_polygons(
 }
 
 // ---------------------------------------------------------------------------
+// Per-tile light occlusion (pat-s3rrv.65)
+// ---------------------------------------------------------------------------
+
+/// Node property listing the tile source ids whose tiles cast 2D shadows.
+///
+/// Godot stores an occlusion polygon per `TileData` under
+/// `occlusion_layer_<n>/polygon`; Patina's `PackedScene` flattens sub-resources
+/// onto the node, so it arrives as this pair — the same shape
+/// [`TILE_NAV_SOURCES`] uses for the navigation layer.
+pub const TILE_OCCLUDER_SOURCES: &str = "__tile_occluder_sources__";
+
+/// Node property holding the **tile-local** occluder polygon, in pixels
+/// relative to the tile's top-left corner. Empty means the whole tile occludes,
+/// which is Godot's default shape for an occlusion-enabled tile.
+pub const TILE_OCCLUDER_POLYGON: &str = "__tile_occluder_polygon__";
+
+/// Builds one occluder polygon per painted, occlusion-enabled cell
+/// (pat-s3rrv.65).
+///
+/// The occlusion twin of [`tile_navigation_polygons`], and deliberately the
+/// same shape: same top-left-relative tile-local polygon, same per-cell
+/// emission, same whole-tile default.
+///
+/// ⚠️ Returned in LAYER-LOCAL space, NOT world space — unlike
+/// `collect_occluders_2d`, whose caller applies the node's global transform.
+/// A `TileMapLayer` under a moving parent has to cast its shadows where the
+/// parent puts it, and the transform is the caller's to apply because only it
+/// knows the node.
+pub fn tile_occluder_polygons(
+    cells: &HashMap<Vector2i, TileData>,
+    tile_size: Vector2i,
+    occluder_sources: &[i32],
+    tile_local_polygon: &[Vector2],
+) -> Vec<Vec<Vector2>> {
+    if occluder_sources.is_empty() || tile_size.x <= 0 || tile_size.y <= 0 {
+        return Vec::new();
+    }
+    // Deterministic order so a shadow pass is reproducible run to run.
+    let mut painted: Vec<(&Vector2i, &TileData)> = cells.iter().collect();
+    painted.sort_by_key(|(cell, _)| (cell.y, cell.x));
+
+    let mut out = Vec::new();
+    for (cell, data) in painted {
+        if !occluder_sources.contains(&data.source_id) {
+            continue;
+        }
+        let corner = Vector2::new(
+            cell.x as f32 * tile_size.x as f32,
+            cell.y as f32 * tile_size.y as f32,
+        );
+        let poly: Vec<Vector2> = if tile_local_polygon.len() >= 3 {
+            tile_local_polygon.iter().map(|v| *v + corner).collect()
+        } else {
+            let w = tile_size.x as f32;
+            let h = tile_size.y as f32;
+            vec![
+                corner,
+                corner + Vector2::new(w, 0.0),
+                corner + Vector2::new(w, h),
+                corner + Vector2::new(0.0, h),
+            ]
+        };
+        out.push(poly);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Per-tile physics polygons (pat-0q2kx.117)
 // ---------------------------------------------------------------------------
 
@@ -618,6 +688,101 @@ pub fn tile_physics_one_way_key(source_id: i32, atlas: Vector2i) -> String {
         "{TILE_PHYSICS_PREFIX}{source_id}_{}_{}_one_way",
         atlas.x, atlas.y
     )
+}
+
+/// Builds one of the flattened atlas-source companion keys, e.g.
+/// `__tile_set__source_3_texture`.
+///
+/// The TileSet editor writes these and [`tile_set_from_properties`] reads them
+/// back. Going through one builder is the point: the two used to be independent
+/// `format!` calls, and a companion the editor writes under a name the loader
+/// does not read is invisible rather than broken — the value survives the save
+/// and simply never reaches the runtime (pat-s3rrv.65).
+pub fn tile_set_source_key(source_id: i32, suffix: &str) -> String {
+    format!("{TILE_SET_PREFIX}source_{source_id}_{suffix}")
+}
+
+/// Node property listing the atlas source ids the flattened tile set declares.
+pub const TILE_SET_SOURCE_IDS: &str = "__tile_set__source_ids";
+
+/// Node property holding the tile set's cell size (`TileSet.tile_size`).
+pub const TILE_SET_TILE_SIZE: &str = "__tile_set__tile_size";
+
+/// Node property listing the tile set's custom data layer names, in index
+/// order — Godot's `TileSet.custom_data_layer_*` (`tile_set.cpp`).
+///
+/// The names matter, not just the count: `TileData.get_custom_data(name)` is
+/// the API a game actually calls, so a layer without a name is unreachable
+/// from script.
+pub const TILE_CUSTOM_DATA_LAYERS: &str = "__tile_custom_data_layers__";
+
+/// Prefix of the flattened per-tile custom data companions. Full keys are
+/// `__tile_custom_data_<source>_<ax>_<ay>_<layer name>`.
+pub const TILE_CUSTOM_DATA_PREFIX: &str = "__tile_custom_data_";
+
+/// Builds the flattened property key holding one tile's value for one custom
+/// data layer.
+pub fn tile_custom_data_key(source_id: i32, atlas: Vector2i, layer: &str) -> String {
+    format!(
+        "{TILE_CUSTOM_DATA_PREFIX}{source_id}_{}_{}_{layer}",
+        atlas.x, atlas.y
+    )
+}
+
+/// Parses a `__tile_physics_<source>_<ax>_<ay>_points` key back into its atlas
+/// coordinate, for the given source only.
+///
+/// The inverse of [`tile_physics_points_key`]. The TileSet editor needs it to
+/// enumerate which tiles of a source have authored collision: the companions
+/// are flat node properties, so the atlas coordinate exists only inside the
+/// key's own text.
+///
+/// Returns `None` for any key that is not this source's points companion —
+/// including the `_one_way` sibling, which shares the prefix.
+pub fn tile_physics_points_atlas(key: &str, source_id: i32) -> Option<Vector2i> {
+    let rest = key.strip_prefix(TILE_PHYSICS_PREFIX)?;
+    let rest = rest.strip_suffix("_points")?;
+    // `<source>_<ax>_<ay>`; ax/ay may be negative, so split from the right and
+    // keep whatever remains as the source id.
+    let (head, ay) = rest.rsplit_once('_')?;
+    let (src, ax) = head.rsplit_once('_')?;
+    if src.parse::<i32>().ok()? != source_id {
+        return None;
+    }
+    Some(Vector2i::new(ax.parse().ok()?, ay.parse().ok()?))
+}
+
+/// Converts an authored collision rect into the 4-point polygon the runtime
+/// consumes.
+///
+/// ⚠️ Tile collision polygons are in tile-local pixels **relative to the tile
+/// centre**, which is Godot's convention and what
+/// `gdphysics2d::tilemap_collision` expects — a full-cell box on a 16×16 tile
+/// is `(-8,-8)…(8,8)`, not `(0,0)…(16,16)`. An editor that wrote corner-origin
+/// points would place every collider a half-tile down and right, which still
+/// collides and so looks almost right.
+///
+/// `rect` is given in the same centred space, so a whole-cell rect is
+/// `Rect2::new((-w/2, -h/2), (w, h))`.
+pub fn collision_rect_polygon(rect: Rect2) -> Vec<Vector2> {
+    let min = rect.position;
+    let max = Vector2::new(rect.position.x + rect.size.x, rect.position.y + rect.size.y);
+    vec![
+        Vector2::new(min.x, min.y),
+        Vector2::new(max.x, min.y),
+        Vector2::new(max.x, max.y),
+        Vector2::new(min.x, max.y),
+    ]
+}
+
+/// The whole-cell collision polygon for a tile of `tile_size`, centred on the
+/// tile — the shape Godot's "add a full-tile collision box" button produces.
+pub fn full_cell_collision_polygon(tile_size: Vector2i) -> Vec<Vector2> {
+    let (w, h) = (tile_size.x as f32, tile_size.y as f32);
+    collision_rect_polygon(Rect2::new(
+        Vector2::new(-w / 2.0, -h / 2.0),
+        Vector2::new(w, h),
+    ))
 }
 
 /// Builds one [`TileCollisionInfo`] per painted cell whose tile carries
@@ -2354,5 +2519,129 @@ mod tests {
         assert_eq!(mask, 0b11111111);
         let tile = resolve_terrain_tile(ts.get_terrain(1).unwrap(), mask);
         assert_eq!(tile, Some((2, Vector2i::new(3, 3))));
+    }
+
+    // -- pat-s3rrv.65: TileSet editor companion keys ------------------------
+
+    #[test]
+    fn collision_polygon_is_centred_on_the_tile() {
+        // ⚠️ The convention the whole feature hangs on. Godot's tile collision
+        // polygons are tile-local and CENTRED, so a full-cell box on a 16×16
+        // tile runs -8..8. Corner-origin points (0..16) would still produce a
+        // collider — offset by half a tile down and right — which reads as
+        // "collision is slightly wrong" rather than as a bug in the editor.
+        let poly = full_cell_collision_polygon(Vector2i::new(16, 16));
+        assert_eq!(
+            poly,
+            vec![
+                Vector2::new(-8.0, -8.0),
+                Vector2::new(8.0, -8.0),
+                Vector2::new(8.0, 8.0),
+                Vector2::new(-8.0, 8.0),
+            ],
+            "a full-cell polygon must be centred; 0..16 here means the editor \
+             would write corner-origin points and every collider would sit a \
+             half-tile off",
+        );
+        // Four points is what `tile_collision_infos` needs to take the polygon
+        // branch at all — it falls back to a whole-cell rect below 3.
+        assert!(poly.len() >= 3);
+    }
+
+    #[test]
+    fn a_partial_collision_rect_keeps_its_own_bounds() {
+        // Half-height box sitting on the tile's lower half — the ordinary
+        // "floor surface" authoring case, and asymmetric so a transposed or
+        // recentred implementation cannot pass by coincidence.
+        let poly =
+            collision_rect_polygon(Rect2::new(Vector2::new(-8.0, 0.0), Vector2::new(16.0, 8.0)));
+        assert_eq!(poly[0], Vector2::new(-8.0, 0.0), "top-left");
+        assert_eq!(poly[2], Vector2::new(8.0, 8.0), "bottom-right");
+    }
+
+    #[test]
+    fn companion_keys_match_what_the_reader_looks_up() {
+        // The editor writes these and `tile_set_from_properties` /
+        // `physics_server` read them. A key written under a name nothing reads
+        // is INVISIBLE, not broken: it survives the save and never reaches the
+        // runtime, so only an exact-string test catches it.
+        assert_eq!(
+            tile_set_source_key(3, "texture"),
+            "__tile_set__source_3_texture"
+        );
+        assert_eq!(
+            tile_physics_points_key(3, Vector2i::new(1, 2)),
+            "__tile_physics_3_1_2_points"
+        );
+        assert_eq!(
+            tile_physics_one_way_key(3, Vector2i::new(1, 2)),
+            "__tile_physics_3_1_2_one_way"
+        );
+        assert_eq!(
+            tile_custom_data_key(3, Vector2i::new(1, 2), "damage"),
+            "__tile_custom_data_3_1_2_damage"
+        );
+    }
+
+    #[test]
+    fn a_points_key_round_trips_back_to_its_atlas_coord() {
+        let key = tile_physics_points_key(4, Vector2i::new(2, 3));
+        assert_eq!(
+            tile_physics_points_atlas(&key, 4),
+            Some(Vector2i::new(2, 3))
+        );
+        // A different source must not claim it.
+        assert_eq!(tile_physics_points_atlas(&key, 5), None);
+        // ⚠️ The `_one_way` sibling shares the whole prefix AND the source and
+        // coordinate fields; only the suffix separates them. Matching it here
+        // would report a phantom tile for every one-way flag.
+        let one_way = tile_physics_one_way_key(4, Vector2i::new(2, 3));
+        assert_eq!(tile_physics_points_atlas(&one_way, 4), None);
+        // Negative atlas coordinates are legal in Godot and must survive the
+        // rsplit — a left-to-right split would read `-1` as the source id.
+        let neg = tile_physics_points_key(4, Vector2i::new(-1, -2));
+        assert_eq!(
+            tile_physics_points_atlas(&neg, 4),
+            Some(Vector2i::new(-1, -2))
+        );
+    }
+
+    #[test]
+    fn a_source_written_with_the_builder_reads_back() {
+        // Round-trips the editor's write path through the loader's read path,
+        // which is the only thing that proves the two agree.
+        let mut props: HashMap<String, Variant> = HashMap::new();
+        props.insert(
+            TILE_SET_TILE_SIZE.to_string(),
+            Variant::Vector2i(Vector2i::new(16, 16)),
+        );
+        props.insert(
+            tile_set_source_key(7, "texture"),
+            Variant::String("res://atlas.png".into()),
+        );
+        props.insert(
+            tile_set_source_key(7, "texture_region_size"),
+            Variant::Vector2i(Vector2i::new(32, 32)),
+        );
+        props.insert(
+            tile_set_source_key(7, "margins"),
+            Variant::Vector2i(Vector2i::new(2, 3)),
+        );
+
+        let set = tile_set_from_properties(|k| props.get(k).cloned().unwrap_or(Variant::Nil), &[7])
+            .expect("a tile set with a tile_size must parse");
+        let src = set.sources.get(&7).expect("source 7 must round-trip");
+        assert_eq!(src.texture_path, "res://atlas.png");
+        assert_eq!(src.texture_region_size, Vector2i::new(32, 32));
+        assert_eq!(src.margins, Vector2i::new(2, 3));
+        // Unwritten separation falls back to Godot's default rather than
+        // dropping the whole source.
+        assert_eq!(src.separation, Vector2i::ZERO);
+
+        // The region maths the atlas grid depends on: source 7's tile (1, 0)
+        // starts after the margin plus one 32px step.
+        let region = src.tile_region(Vector2i::new(1, 0));
+        assert_eq!(region.position, Vector2::new(34.0, 3.0));
+        assert_eq!(region.size, Vector2::new(32.0, 32.0));
     }
 }

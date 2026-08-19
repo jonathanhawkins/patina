@@ -357,7 +357,10 @@ fn effect_from_sub_resource(
     type_name: &str,
     fields: &std::collections::HashMap<String, String>,
 ) -> Option<Box<dyn crate::effects::AudioEffect>> {
-    use crate::effects::{AudioEffectAmplify, AudioEffectFilter, AudioEffectReverb, FilterMode};
+    use crate::effects::{
+        AudioEffectAmplify, AudioEffectCompressor, AudioEffectFilter, AudioEffectFilterCascade,
+        AudioEffectHardLimiter, AudioEffectLimiter, AudioEffectReverb, FilterMode,
+    };
 
     let f = |name: &str, default: f32| -> f32 {
         fields
@@ -366,21 +369,121 @@ fn effect_from_sub_resource(
             .unwrap_or(default)
     };
 
+    // pat-s3rrv.54 — Godot's documented filter defaults
+    // (doc/classes/AudioEffectFilter.xml): cutoff_hz 2000, resonance 1.0,
+    // gain 1.0, db DB_6.
+    //
+    // ⚠️ `resonance` was 0.5 here, which is NOT Godot's default. Nothing pinned
+    // it, so a layout that omits the field has been building a differently
+    // shaped filter than Godot would.
+    let cutoff = f("cutoff_hz", 2000.0);
+    let resonance = f("resonance", 1.0);
+    // `gain` is a LINEAR multiplier in Godot while the shelf constructors take
+    // dB, so 1.0 must mean 0 dB rather than 1 dB. A non-positive gain has no dB
+    // value at all, so it clamps instead of producing -inf.
+    let gain_linear = f("gain", 1.0);
+    let gain_db = if gain_linear > 0.0 {
+        20.0 * gain_linear.log10()
+    } else {
+        0.0
+    };
+    // `db` is an ENUM INDEX (DB_6=0 … DB_24=3), not a dB number. One biquad is
+    // 12 dB/oct; Godot steepens the skirt by cascading identical stages.
+    let stages = (f("db", 0.0) as usize).saturating_add(1).clamp(1, 4);
+
+    // One stage stays a bare filter so the common case allocates nothing extra;
+    // more becomes a cascade. Both carry the Godot class name, because `name()`
+    // is "Filter" for all seven classes and a bus slot has to say which it is.
+    let filter =
+        |proto: AudioEffectFilter, class: &'static str| -> Box<dyn crate::effects::AudioEffect> {
+            if stages > 1 {
+                Box::new(AudioEffectFilterCascade::repeated(proto, stages, class))
+            } else {
+                Box::new(proto.with_godot_class(class))
+            }
+        };
+
     match type_name {
         "AudioEffectAmplify" => Some(Box::new(AudioEffectAmplify::new(f("volume_db", 0.0)))),
         "AudioEffectReverb" => Some(Box::new(AudioEffectReverb::new())),
-        // Godot's cutoff default is 2000 Hz for the low/high-pass family.
-        "AudioEffectLowPassFilter" => Some(Box::new(AudioEffectFilter::low_pass(
-            f("cutoff_hz", 2000.0),
-            f("resonance", 0.5),
+        // pat-s3rrv.54: the whole filter family. The biquad DSP already existed
+        // and was unit-tested; only three of the eight classes could be named
+        // from a bus layout, and the other five were silently dropped.
+        "AudioEffectLowPassFilter" => Some(filter(
+            AudioEffectFilter::low_pass(cutoff, resonance),
+            "AudioEffectLowPassFilter",
+        )),
+        "AudioEffectHighPassFilter" => Some(filter(
+            AudioEffectFilter::high_pass(cutoff, resonance),
+            "AudioEffectHighPassFilter",
+        )),
+        "AudioEffectBandPassFilter" => Some(filter(
+            AudioEffectFilter::band_pass(cutoff, resonance),
+            "AudioEffectBandPassFilter",
+        )),
+        "AudioEffectNotchFilter" => Some(filter(
+            AudioEffectFilter::notch(cutoff, resonance),
+            "AudioEffectNotchFilter",
+        )),
+        "AudioEffectLowShelfFilter" => Some(filter(
+            AudioEffectFilter::low_shelf(cutoff, gain_db),
+            "AudioEffectLowShelfFilter",
+        )),
+        "AudioEffectHighShelfFilter" => Some(filter(
+            AudioEffectFilter::high_shelf(cutoff, gain_db),
+            "AudioEffectHighShelfFilter",
+        )),
+        // Bounded from BOTH sides, so a high-pass and a low-pass in series
+        // rather than any single response; `db` repeats the pair.
+        //
+        // ⚠️ APPROXIMATION, flagged rather than hidden: Godot's BANDLIMIT is its
+        // own mode in `audio_filter_sw.h` and Patina's `FilterMode` has no
+        // equivalent. HP+LP at one corner is the right SHAPE, not a bit-exact
+        // match.
+        "AudioEffectBandLimitFilter" => Some(Box::new(AudioEffectFilterCascade::new(
+            (0..stages)
+                .flat_map(|_| {
+                    [
+                        AudioEffectFilter::high_pass(cutoff, resonance),
+                        AudioEffectFilter::low_pass(cutoff, resonance),
+                    ]
+                })
+                .collect(),
+            "AudioEffectBandLimitFilter",
         ))),
-        "AudioEffectHighPassFilter" => Some(Box::new(AudioEffectFilter::high_pass(
-            f("cutoff_hz", 2000.0),
-            f("resonance", 0.5),
+        // The base class is instantiable in Godot and defaults to a low-pass
+        // response; a layout naming it should not lose its slot.
+        "AudioEffectFilter" => Some(filter(
+            AudioEffectFilter::low_pass(cutoff, resonance),
+            "AudioEffectFilter",
+        )),
+        // pat-s3rrv.53: the dynamics family. The DSP existed and was unit-tested;
+        // without these arms a bus layout naming them built an EMPTY chain, so a
+        // Master bus ending in a compressor silently did nothing.
+        "AudioEffectCompressor" => {
+            // ⚠️ Godot stores attack in MICROSECONDS (`attack_us`, default 20.0)
+            // while the sibling is `release_ms`. `AudioEffectCompressor::new`
+            // takes milliseconds, so this MUST divide by 1000 — passing 20.0
+            // straight through is a 1000x attack time that still runs, just
+            // with an envelope that never catches transients.
+            let mut c = AudioEffectCompressor::new(
+                f("threshold", 0.0),
+                f("ratio", 4.0),
+                f("attack_us", 20.0) / 1000.0,
+                f("release_ms", 250.0),
+            );
+            c.gain_db = f("gain", 0.0);
+            Some(Box::new(c))
+        }
+        "AudioEffectLimiter" => Some(Box::new(AudioEffectLimiter::new(
+            f("ceiling_db", -0.1),
+            f("soft_clip_db", 2.0),
         ))),
-        "AudioEffectBandPassFilter" => Some(Box::new(AudioEffectFilter::band_pass(
-            f("cutoff_hz", 2000.0),
-            f("resonance", 0.5),
+        "AudioEffectHardLimiter" => Some(Box::new(AudioEffectHardLimiter::new(
+            // -0.3 is upstream's HardLimiter default and differs from Limiter's
+            // -0.1 (doc/classes/AudioEffectHardLimiter.xml).
+            f("ceiling_db", -0.3),
+            f("pre_gain_db", 0.0),
         ))),
         _ => None,
     }

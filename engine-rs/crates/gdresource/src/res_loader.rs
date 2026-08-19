@@ -16,8 +16,10 @@ use gdvariant::Dictionary;
 use std::sync::Arc;
 
 use gdcore::error::{EngineError, EngineResult};
-use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector3};
-use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
+use gdcore::math::{
+    Color, Rect2, Rect2i, Transform2D, Vector2, Vector2i, Vector3, Vector3i, Vector4, Vector4i,
+};
+use gdcore::math3d::{Aabb, Basis, Plane, Projection, Quaternion, Transform3D};
 use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
 use gdvariant::Variant;
@@ -133,9 +135,11 @@ pub fn parse_res_header(data: &[u8]) -> EngineResult<ResBinaryHeader> {
 /// [`Variant`] packed types (pat-nzgdu.82).
 ///
 /// Returns an [`EngineError::Unsupported`] for compressed (`RSCC`), big-endian,
-/// newer-than-6 format, and the variant types that still have no `Variant`
-/// counterpart (RID, InputEvent, Callable/Signal, the integer vectors,
-/// Vector4/Projection).
+/// newer-than-6 format, and the three variant types that are live bindings
+/// rather than data (InputEvent, Callable, Signal). The integer vectors,
+/// `Rect2i`, `Vector4`/`Vector4i`, `Projection` and `PackedVector4Array` decode
+/// into real values as of pat-s3rrv.59; an `RID` decodes to the `Int` upstream
+/// yields for it.
 /// All reads are bounds-checked, so truncated or corrupt input yields an
 /// [`EngineError::Parse`] rather than a panic.
 pub fn load_res_binary(data: &[u8], path: &str) -> EngineResult<Arc<Resource>> {
@@ -342,6 +346,18 @@ const V_DOUBLE: u32 = 41;
 const V_STRING_NAME: u32 = 44;
 const V_PACKED_INT64_ARRAY: u32 = 48;
 const V_PACKED_FLOAT64_ARRAY: u32 = 49;
+// ⚠️ These tags are the BINARY RESOURCE format's own numbering
+// (`core/io/resource_format_binary.cpp:47-88`), which is NOT `Variant::Type`.
+// The same `Rect2i` is 46 here and 8 on the `var_to_bytes` wire; reusing the
+// wrong table decodes a file into silently different types rather than failing.
+const V_RID: u32 = 23;
+const V_VECTOR2I: u32 = 45;
+const V_RECT2I: u32 = 46;
+const V_VECTOR3I: u32 = 47;
+const V_VECTOR4: u32 = 50;
+const V_VECTOR4I: u32 = 51;
+const V_PROJECTION: u32 = 52;
+const V_PACKED_VECTOR4_ARRAY: u32 = 53;
 
 // Object reference sub-kinds (within V_OBJECT).
 const OBJECT_EMPTY: u32 = 0;
@@ -741,10 +757,74 @@ impl BinaryResourceReader<'_> {
                 }
                 Ok(Variant::Dictionary(map))
             }
-            // Still unmapped: RID(23), INPUT_EVENT(25), CALLABLE(42), SIGNAL(43),
-            // the *I integer vectors (45/46/47), PACKED_VECTOR4_ARRAY(38),
-            // VECTOR4(50)/VECTOR4I(51)/PROJECTION(52) — none have a Variant
-            // counterpart yet.
+            // The integer vectors and the pat-s3rrv.59 builtins. Before these
+            // arms existed a single such property aborted the whole binary
+            // resource load with `Unsupported`, which is a far worse failure
+            // than the text loader's: one `Rect2i` on a TileSet lost the file.
+            V_VECTOR2I => {
+                let x = self.cur.u32()? as i32;
+                let y = self.cur.u32()? as i32;
+                Ok(Variant::Vector2i(Vector2i::new(x, y)))
+            }
+            V_VECTOR3I => {
+                let x = self.cur.u32()? as i32;
+                let y = self.cur.u32()? as i32;
+                let z = self.cur.u32()? as i32;
+                Ok(Variant::Vector3i(Vector3i::new(x, y, z)))
+            }
+            V_RECT2I => {
+                let px = self.cur.u32()? as i32;
+                let py = self.cur.u32()? as i32;
+                let sx = self.cur.u32()? as i32;
+                let sy = self.cur.u32()? as i32;
+                Ok(Variant::Rect2i(Rect2i::from_components(px, py, sx, sy)))
+            }
+            V_VECTOR4 => {
+                let x = self.real()?;
+                let y = self.real()?;
+                let z = self.real()?;
+                let w = self.real()?;
+                Ok(Variant::Vector4(Vector4::new(x, y, z, w)))
+            }
+            V_VECTOR4I => {
+                let x = self.cur.u32()? as i32;
+                let y = self.cur.u32()? as i32;
+                let z = self.cur.u32()? as i32;
+                let w = self.cur.u32()? as i32;
+                Ok(Variant::Vector4i(Vector4i::new(x, y, z, w)))
+            }
+            V_PROJECTION => {
+                // Sixteen reals, column-major (`m[column][row]`) — the same
+                // order `columns[i][j]` is written in upstream.
+                let mut m = [[0.0f32; 4]; 4];
+                for col in m.iter_mut() {
+                    for cell in col.iter_mut() {
+                        *cell = self.real()?;
+                    }
+                }
+                Ok(Variant::Projection(Projection { m }))
+            }
+            V_PACKED_VECTOR4_ARRAY => {
+                let len = self.packed_len(self.real_size() * 4)?;
+                let mut arr = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let x = self.real()?;
+                    let y = self.real()?;
+                    let z = self.real()?;
+                    let w = self.real()?;
+                    arr.push(Vector4::new(x, y, z, w));
+                }
+                Ok(Variant::PackedVector4Array(arr))
+            }
+            // ⚠️ An RID in a binary resource is FOUR BYTES that decode to an
+            // INT, not to an RID. Upstream is literally `r_v = f->get_32()`
+            // (`resource_format_binary.cpp:389`) — a handle is an index into a
+            // live server's table, so it cannot survive a file, and Godot does
+            // not pretend otherwise. Yielding `Variant::Rid` here would be
+            // tidier and would disagree with every real `.res` Godot writes.
+            V_RID => Ok(Variant::Int(self.cur.u32()? as i64)),
+            // Still unmapped: INPUT_EVENT(25), CALLABLE(42) and SIGNAL(43) —
+            // each is a live binding rather than data.
             other => Err(EngineError::Unsupported(format!(
                 "binary resource variant type {other} is not supported yet"
             ))),

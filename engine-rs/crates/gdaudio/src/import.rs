@@ -106,6 +106,30 @@ pub struct AudioStreamInfo {
     pub duration_secs: f32,
     /// Total number of frames (samples per channel).
     pub frame_count: usize,
+    /// The stream's declared loop, if it carries one (pat-s3rrv.56).
+    ///
+    /// `None` means "play once and stop", which is every stream that does not
+    /// declare otherwise.
+    pub loop_points: Option<StreamLoop>,
+}
+
+/// A stream's declared loop region, in SECONDS.
+///
+/// ⚠️ Seconds, NOT frames, and the conversion happens here on purpose. The WAV
+/// `smpl` chunk and Godot's `AudioStreamWAV.loop_begin`/`loop_end` are in
+/// frames, while [`AudioStreamPlayback::set_loop_begin`] takes seconds — so the
+/// two units meet exactly once, at the point where the sample rate is known.
+/// Passing frames to the playback setters compiles and yields a loop window
+/// hundreds of times too long, which on a short sample is indistinguishable
+/// from no looping at all.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StreamLoop {
+    /// How the region repeats.
+    pub mode: crate::stream::LoopMode,
+    /// First second of the loop region.
+    pub begin_secs: f32,
+    /// Last second of the loop region.
+    pub end_secs: f32,
 }
 
 /// Result of loading an audio file: decoded buffer + metadata.
@@ -233,6 +257,25 @@ pub fn load_audio_file<P: AsRef<Path>>(path: P) -> Result<AudioStreamImport, Imp
         source: e,
     })?;
 
+    // The file's own declared loop. Only WAV carries one Patina can read today:
+    // Ogg `LOOPSTART`/`LOOPLENGTH` comments and the MP3 `loop`/`loop_offset`
+    // resource fields are not parsed yet, so those streams report `None` and
+    // play once — the same as before, rather than a wrong loop.
+    let loop_points = match format {
+        AudioFormat::Wav => crate::wav::parse_wav_header(&data)
+            .ok()
+            .and_then(|h| h.loop_points)
+            .map(|l| {
+                let rate = buffer.sample_rate.max(1) as f32;
+                StreamLoop {
+                    mode: l.mode,
+                    begin_secs: l.begin as f32 / rate,
+                    end_secs: l.end as f32 / rate,
+                }
+            }),
+        AudioFormat::OggVorbis | AudioFormat::Mp3 => None,
+    };
+
     let info = AudioStreamInfo {
         source_path: path.to_path_buf(),
         format,
@@ -240,6 +283,7 @@ pub fn load_audio_file<P: AsRef<Path>>(path: P) -> Result<AudioStreamImport, Imp
         channels: buffer.channels,
         duration_secs: buffer.duration_secs(),
         frame_count: buffer.frame_count(),
+        loop_points,
     };
 
     Ok(AudioStreamImport { buffer, info })

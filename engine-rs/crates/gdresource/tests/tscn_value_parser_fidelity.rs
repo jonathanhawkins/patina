@@ -11,6 +11,7 @@
 //! failed to parse, so a real Godot scene lost properties invisibly and an
 //! editor round-trip persisted the loss.
 
+use gdcore::math::{Rect2i, Vector4, Vector4i};
 use gdresource::loader::{
     object_literal_class, parse_variant_value, parse_variant_value_typed, unparsed_literal,
 };
@@ -64,28 +65,53 @@ fn tscn_value_parser_fidelity() {
         other => panic!("`&\"…\"` must parse as a StringName, got {other:?}"),
     }
 
-    // -- builtins with no `Variant` kind yet ------------------------------
+    // -- the five builtins that used to have no `Variant` kind --------------
     //
-    // Preserved verbatim and tagged, so nothing is lost and a later
-    // core-variant bead can promote them without any data having been dropped.
-    for (literal, ty) in [
-        ("Vector4(1, 2, 3, 4)", "Vector4"),
-        ("Vector4i(1, 2, 3, 4)", "Vector4i"),
-        ("Rect2i(0, 0, 16, 16)", "Rect2i"),
-        ("PackedVector4Array(1, 2, 3, 4)", "PackedVector4Array"),
+    // These parsed into a *tagged dictionary* until pat-s3rrv.59: the literal
+    // was preserved verbatim so the saver could re-emit it, but nothing could
+    // read the value — a script asking for `.x` got a Dictionary. That was
+    // always meant as a holding pattern ("a later core-variant bead can
+    // promote them"), and this is that bead, so the assertions now pin the
+    // real kinds.
+    //
+    // ⚠️ `unparsed_literal` must return `None` for every one of them. A `Some`
+    // here would mean the placeholder path is still winning the race against
+    // the real parse arm, and the value would reach consumers as a Dictionary
+    // that merely *looks* right when printed.
+    assert_eq!(
+        parse("Vector4(1, 2, 3, 4)"),
+        Variant::Vector4(Vector4::new(1.0, 2.0, 3.0, 4.0)),
+    );
+    assert_eq!(
+        parse("Rect2i(0, 0, 16, 16)"),
+        Variant::Rect2i(Rect2i::from_components(0, 0, 16, 16)),
+    );
+    assert_eq!(
+        parse("PackedVector4Array(1, 2, 3, 4)"),
+        Variant::PackedVector4Array(vec![Vector4::new(1.0, 2.0, 3.0, 4.0)]),
+    );
+    for literal in [
+        "Vector4(1, 2, 3, 4)",
+        "Vector4i(1, 2, 3, 4)",
+        "Rect2i(0, 0, 16, 16)",
+        "Projection(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)",
+        "PackedVector4Array(1, 2, 3, 4)",
     ] {
-        let v = parse(literal);
-        let (got_ty, got_lit) = unparsed_literal(&v)
-            .unwrap_or_else(|| panic!("`{literal}` must be preserved as a tagged literal"));
-        assert_eq!(got_ty, ty, "wrong type tag for {literal}");
-        assert_eq!(got_lit, literal, "the literal must survive byte-for-byte");
+        assert_eq!(
+            unparsed_literal(&parse(literal)),
+            None,
+            "`{literal}` is a real Variant kind now — a tagged dictionary here \
+             means the placeholder path still shadows the parse arm",
+        );
     }
 
-    // `Vector4i` must not be swallowed by the `Vector4` prefix — the longer
-    // name is matched first, and this is what proves it.
+    // `Vector4i` must not be swallowed by the `Vector4` prefix. It is the
+    // INTEGER kind that has to come back: a `Variant::Vector4` would still
+    // print as `(1, 2, 3, 4)` while having silently retyped the value, which
+    // is the pat-nzgdu.78 corruption one dimension up.
     assert_eq!(
-        unparsed_literal(&parse("Vector4i(1, 2, 3, 4)")).map(|(t, _)| t),
-        Some("Vector4i"),
+        parse("Vector4i(1, 2, 3, 4)"),
+        Variant::Vector4i(Vector4i::new(1, 2, 3, 4)),
     );
 
     // -- Object(Class, "prop": value) --------------------------------------
@@ -134,21 +160,29 @@ fn tscn_value_parser_fidelity() {
     );
 }
 
-/// A preserved literal must re-emit as its original text, or a load/save
-/// round-trip would write the preservation dictionary into the file — a worse
-/// corruption than the drop it replaced.
+/// A `Projection` literal's sixteen numbers land COLUMN-MAJOR.
+///
+/// This is the one place the round-trip cannot catch its own mistake: a
+/// transposed projection re-saves to the same sixteen numbers in the same
+/// order, so `parse(format(p)) == p` holds perfectly while the matrix
+/// disagrees with Godot. Only an asymmetric literal pins the convention.
 #[test]
-fn preserved_literals_round_trip_through_the_saver() {
-    for literal in [
-        "Vector4(1, 2, 3, 4)",
-        "Rect2i(0, 0, 16, 16)",
-        "Projection(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)",
-    ] {
-        let v = parse(literal);
-        let (_, text) = unparsed_literal(&v).expect("tagged");
-        assert_eq!(
-            text, literal,
-            "the saver re-emits this text verbatim, so it must match the input",
-        );
-    }
+fn projection_literal_is_column_major() {
+    // Columns (1,2,3,4), (5,6,7,8), (9,10,11,12), (13,14,15,16).
+    let v = parse("Projection(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)");
+    let Variant::Projection(p) = v else {
+        panic!("must parse as a Projection, got {v:?}");
+    };
+    assert_eq!(
+        p.m[0],
+        [1.0, 2.0, 3.0, 4.0],
+        "the FIRST four numbers are the x COLUMN (m[0]); getting [1, 5, 9, 13] \
+         here means the literal was read row-major and every camera matrix is \
+         transposed",
+    );
+    assert_eq!(
+        p.m[3],
+        [13.0, 14.0, 15.0, 16.0],
+        "the last four are the w column"
+    );
 }

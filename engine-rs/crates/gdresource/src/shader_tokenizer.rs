@@ -1550,3 +1550,96 @@ uniform LightData main_light;
         assert_eq!(format!("{}", ShaderToken::FloatLit(3.14)), "3.14");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Uniform default literals (pat-s3rrv.36)
+// ---------------------------------------------------------------------------
+
+/// Parses a GDShader uniform's default-value literal into a [`Variant`].
+///
+/// Both renderers had their own copy of this and both understood only
+/// `true`/`false`/int/float, so every vector default silently became
+/// `Variant::Nil` and the uniform read as zero. The repo's own
+/// `fixtures/shaders/water.gdshader:4` is the case:
+///
+/// ```text
+/// uniform vec4 water_color : source_color = vec4(0.1, 0.4, 0.6, 1.0);
+/// ```
+///
+/// That authored blue never reached the shader — it rendered transparent black.
+///
+/// ⚠️ `vec4` yields a [`Variant::Color`], not a would-be `Vector4`. That is not
+/// a convenience: it is the representation the shader evaluators already agree
+/// on — `gdserver3d::shader` maps `Variant::Color -> SV::Vec4` and reads a vec4
+/// uniform's default as `Variant::Color`. `Variant` has no `Vector4` kind at
+/// all until pat-s3rrv.59 lands, so anything else here would read back as Nil
+/// exactly like the bug this replaces.
+///
+/// GLSL's single-argument broadcast (`vec3(1.0)` == `vec3(1.0, 1.0, 1.0)`) is
+/// honoured. Nested constructors such as `vec4(vec3(1.0), 0.5)` are NOT parsed
+/// and return `Nil` — a wrong value here is invisible at runtime, so the
+/// unsupported form stays unsupported rather than guessing.
+pub fn parse_shader_default_value(source: &str) -> gdvariant::Variant {
+    use gdvariant::Variant;
+
+    let s = source.trim();
+    if s == "true" {
+        return Variant::Bool(true);
+    }
+    if s == "false" {
+        return Variant::Bool(false);
+    }
+    // Ints before floats: `parse::<f64>` also accepts "1", and an int uniform
+    // whose default arrived as Float(1.0) compares unequal to Int(1).
+    if let Ok(i) = s.parse::<i64>() {
+        return Variant::Int(i);
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return Variant::Float(f);
+    }
+
+    let (ctor, arity) = if let Some(rest) = s.strip_prefix("vec2") {
+        (rest, 2usize)
+    } else if let Some(rest) = s.strip_prefix("vec3") {
+        (rest, 3)
+    } else if let Some(rest) = s.strip_prefix("vec4") {
+        (rest, 4)
+    } else {
+        return Variant::Nil;
+    };
+
+    let inner = match ctor
+        .trim()
+        .strip_prefix('(')
+        .and_then(|r| r.strip_suffix(')'))
+    {
+        Some(inner) => inner,
+        None => return Variant::Nil,
+    };
+
+    let mut parts: Vec<f32> = Vec::with_capacity(arity);
+    for piece in inner.split(',') {
+        match piece.trim().parse::<f32>() {
+            Ok(v) => parts.push(v),
+            // A component that is not a plain literal (a nested constructor, a
+            // named constant, an expression) makes the whole default unknown.
+            Err(_) => return Variant::Nil,
+        }
+    }
+
+    // GLSL broadcasts a single scalar across every component.
+    if parts.len() == 1 {
+        parts = vec![parts[0]; arity];
+    }
+    if parts.len() != arity {
+        return Variant::Nil;
+    }
+
+    match arity {
+        2 => Variant::Vector2(gdcore::math::Vector2::new(parts[0], parts[1])),
+        3 => Variant::Vector3(gdcore::math::Vector3::new(parts[0], parts[1], parts[2])),
+        _ => Variant::Color(gdcore::math::Color::new(
+            parts[0], parts[1], parts[2], parts[3],
+        )),
+    }
+}

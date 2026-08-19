@@ -1647,6 +1647,26 @@ impl InputState {
         self.input_map.get_or_insert_with(InputMap::new)
     }
 
+    /// Action name → its real bindings (pat-s3rrv.14).
+    ///
+    /// The count mirror below answers "does this action exist and how many
+    /// events feed it". Godot's `InputEvent.is_action_pressed(name)` asks a
+    /// different question — does *this event* match one of that action's
+    /// bindings — and a count cannot answer it. This is the mirror that can.
+    pub fn input_map_action_bindings(&self) -> HashMap<String, Vec<ActionBinding>> {
+        match &self.input_map {
+            Some(map) => map
+                .get_actions()
+                .into_iter()
+                .map(|a| {
+                    let bindings = map.get_bindings(&a).map(<[ActionBinding]>::to_vec);
+                    (a, bindings.unwrap_or_default())
+                })
+                .collect(),
+            None => HashMap::new(),
+        }
+    }
+
     /// Action name → bound-event count, the read mirror a script phase needs for
     /// `InputMap.has_action` / `get_actions` / `action_has_event`.
     pub fn input_map_action_event_counts(&self) -> HashMap<String, usize> {

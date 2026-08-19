@@ -25,17 +25,47 @@ use gdcore::math::{Vector2, Vector2i, Vector3};
 pub trait AStarVector: Copy {
     /// Euclidean distance between two positions.
     fn dist(self, other: Self) -> f32;
+
+    /// The point on the segment `a`-`b` closest to `self` (pat-s3rrv.19).
+    ///
+    /// Needed by [`AStar::get_closest_position_in_segment`], which projects onto
+    /// every enabled segment. The projection parameter is CLAMPED to `0..=1`:
+    /// Godot answers a point on the segment, never on its infinite line, so an
+    /// unclamped projection would return positions outside the graph entirely.
+    fn closest_on_segment(self, a: Self, b: Self) -> Self;
 }
 
 impl AStarVector for Vector2 {
     fn dist(self, other: Self) -> f32 {
         self.distance_to(other)
     }
+
+    fn closest_on_segment(self, a: Self, b: Self) -> Self {
+        let ab = b - a;
+        let len_sq = ab.dot(ab);
+        // A degenerate segment (both endpoints coincident) has no direction to
+        // project onto; its only point is `a`.
+        if len_sq <= f32::EPSILON {
+            return a;
+        }
+        let t = ((self - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+        a + ab * t
+    }
 }
 
 impl AStarVector for Vector3 {
     fn dist(self, other: Self) -> f32 {
         self.distance_to(other)
+    }
+
+    fn closest_on_segment(self, a: Self, b: Self) -> Self {
+        let ab = b - a;
+        let len_sq = ab.dot(ab);
+        if len_sq <= f32::EPSILON {
+            return a;
+        }
+        let t = ((self - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+        a + ab * t
     }
 }
 
@@ -112,6 +142,86 @@ impl<V: AStarVector> AStar<V> {
 
     pub fn get_point_count(&self) -> usize {
         self.points.len()
+    }
+
+    /// The next id with no point on it (`AStar3D::get_available_point_id`,
+    /// pat-s3rrv.19).
+    ///
+    /// Scripts use this to add a point without inventing an id:
+    /// `a.add_point(a.get_available_point_id(), pos)`.
+    ///
+    /// ⚠️ Godot caches a `last_free_id` that only ever moves UP, so after
+    /// removing a low id it may keep returning a higher one. This answers the
+    /// smallest free id instead, which honours the documented contract ("the
+    /// next available point ID with no point associated to it") and reuses ids
+    /// a Godot build would strand. The two agree for the ordinary case of ids
+    /// added densely from zero and never removed.
+    pub fn get_available_point_id(&self) -> i64 {
+        let mut id = 0;
+        while self.points.contains_key(&id) {
+            id += 1;
+        }
+        id
+    }
+
+    /// Pre-allocates room for `num_nodes` points (`AStar3D::reserve_space`).
+    ///
+    /// A hint, exactly as in Godot: it changes no observable graph state, only
+    /// how much allocation a big `add_point` run does.
+    pub fn reserve_space(&mut self, num_nodes: usize) {
+        self.points
+            .reserve(num_nodes.saturating_sub(self.points.len()));
+    }
+
+    /// How many points this graph can hold before reallocating
+    /// (`AStar3D::get_point_capacity`).
+    pub fn get_point_capacity(&self) -> usize {
+        self.points.capacity()
+    }
+
+    /// The position on the nearest *segment* to `point`
+    /// (`AStar3D::get_closest_position_in_segment`, pat-s3rrv.19).
+    ///
+    /// Godot walks every segment whose BOTH endpoints are enabled, projects
+    /// `point` onto it, and keeps the nearest projection
+    /// (`core/math/a_star.cpp`). Two details that the name does not carry, both
+    /// transcribed rather than assumed:
+    ///
+    /// * a segment with a disabled endpoint is skipped entirely — a disabled
+    ///   point removes its edges from consideration, not just itself;
+    /// * the answer is a point ON the segment, so the projection is clamped;
+    ///   an unclamped one would return positions off the end of the graph.
+    ///
+    /// With no eligible segment Godot returns a default-constructed vector, so
+    /// this returns `fallback` — the caller supplies the zero value, since
+    /// [`AStarVector`] cannot name one generically.
+    pub fn get_closest_position_in_segment(&self, point: V, fallback: V) -> V {
+        let mut best: Option<(f32, V)> = None;
+        for (id, p) in &self.points {
+            if p.disabled {
+                continue;
+            }
+            for other in &p.neighbors {
+                // Each undirected pair is reachable from both ends; taking only
+                // the ascending direction visits it once without allocating a
+                // seen-set.
+                if other <= id {
+                    continue;
+                }
+                let Some(q) = self.points.get(other) else {
+                    continue;
+                };
+                if q.disabled {
+                    continue;
+                }
+                let candidate = point.closest_on_segment(p.position, q.position);
+                let d = point.dist(candidate);
+                if best.map(|(bd, _)| d < bd).unwrap_or(true) {
+                    best = Some((d, candidate));
+                }
+            }
+        }
+        best.map(|(_, v)| v).unwrap_or(fallback)
     }
 
     /// All point ids, ascending (deterministic for tests).
@@ -477,6 +587,9 @@ pub struct AStarGrid2D {
     compute_heuristic: Heuristic,
     estimate_heuristic: Heuristic,
     jumping_enabled: bool,
+    /// Godot's `AStarGrid2D` dirty flag (pat-s3rrv.19). Set by every setter
+    /// that changes the grid's SHAPE, cleared by `update()`.
+    dirty: bool,
     /// Per-cell overrides; cells absent here use [`GridCell::default`].
     cells: HashMap<Vector2i, GridCell>,
 }
@@ -498,6 +611,9 @@ impl AStarGrid2D {
             compute_heuristic: Heuristic::Euclidean,
             estimate_heuristic: Heuristic::Euclidean,
             jumping_enabled: false,
+            // A brand-new grid has no region yet, so it needs an `update()`
+            // before it describes anything — Godot starts dirty too.
+            dirty: true,
             cells: HashMap::new(),
         }
     }
@@ -509,6 +625,7 @@ impl AStarGrid2D {
         // Drop overrides that fell outside the new region.
         self.cells
             .retain(|id, _| Self::in_region(position, size, *id));
+        self.dirty = true;
     }
 
     pub fn get_region(&self) -> (Vector2i, Vector2i) {
@@ -517,10 +634,12 @@ impl AStarGrid2D {
 
     pub fn set_cell_size(&mut self, cell_size: Vector2) {
         self.cell_size = cell_size;
+        self.dirty = true;
     }
 
     pub fn set_offset(&mut self, offset: Vector2) {
         self.offset = offset;
+        self.dirty = true;
     }
 
     pub fn set_diagonal_mode(&mut self, mode: DiagonalMode) {
@@ -541,7 +660,23 @@ impl AStarGrid2D {
 
     /// Present for Godot API compatibility. Queries read the region directly, so
     /// no rebuild is required; this is a no-op.
-    pub fn update(&mut self) {}
+    /// Applies pending shape changes (`AStarGrid2D::update`, pat-s3rrv.19).
+    ///
+    /// This was `{}` — a literal no-op — so `is_dirty()` had nothing to answer
+    /// and the documented "change the region, then call update()" sequence was
+    /// unobservable. Patina derives its walkable cells from `region_pos` /
+    /// `region_size` at query time rather than caching a point grid, so there
+    /// is no structure to rebuild here; what `update()` owes the caller is
+    /// clearing the flag, which is the part scripts branch on.
+    pub fn update(&mut self) {
+        self.dirty = false;
+    }
+
+    /// Whether a shape change is pending an [`update`](Self::update)
+    /// (`AStarGrid2D::is_dirty`).
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
 
     fn in_region(pos: Vector2i, size: Vector2i, id: Vector2i) -> bool {
         id.x >= pos.x && id.x < pos.x + size.x && id.y >= pos.y && id.y < pos.y + size.y

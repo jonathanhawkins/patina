@@ -1651,6 +1651,185 @@ pub fn process_skeletons(tree: &mut SceneTree) {
 // Tests
 // ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Script-facing bone API (pat-s3rrv.23)
+// ---------------------------------------------------------------------------
+
+/// Dispatches `Skeleton3D`'s bone methods for a script call.
+///
+/// The 38 functions above have existed and been unit-tested all along, and no
+/// script could reach a single one of them: ClassDB registered `Skeleton3D`
+/// with zero methods, so `class_has_method` answered false and the dispatch
+/// gate rejected every call before it arrived. The registration has since been
+/// filled in — which opened the gate onto **nothing**, because no dispatch was
+/// ever written behind it. This is that dispatch.
+///
+/// Shaped after `navigation_agents::call_agent_method`: returns `None` for any
+/// node that is not a `Skeleton3D` and for any method this table does not
+/// implement, so the general node-method table downstream is reached unchanged.
+///
+/// ⚠️ Godot's bone indices are **signed**, and `-1` is the documented "no such
+/// bone" answer from `find_bone` / `get_bone_parent`. The implementations here
+/// take `usize`, so every index argument is validated against the bone count
+/// before it is narrowed — an out-of-range index returns a Godot-shaped default
+/// rather than panicking on the cast.
+pub fn call_skeleton_method(
+    tree: &mut SceneTree,
+    node: NodeId,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    if tree.get_node(node)?.class_name() != "Skeleton3D" {
+        return None;
+    }
+
+    let count = get_bone_count(tree, node);
+    // A bone index argument, accepted only when it addresses a real bone.
+    let idx = |i: usize| -> Option<usize> {
+        match args.get(i) {
+            Some(Variant::Int(v)) if *v >= 0 && (*v as usize) < count => Some(*v as usize),
+            _ => None,
+        }
+    };
+    let name_arg = |i: usize| -> Option<String> {
+        match args.get(i) {
+            Some(Variant::String(s)) => Some(s.clone()),
+            Some(Variant::StringName(s)) => Some(s.as_str().to_string()),
+            _ => None,
+        }
+    };
+    let vec3_arg = |i: usize| -> Option<Vector3> {
+        match args.get(i) {
+            Some(Variant::Vector3(v)) => Some(*v),
+            _ => None,
+        }
+    };
+
+    match method {
+        "get_bone_count" => Some(Variant::Int(count as i64)),
+        "add_bone" => {
+            let name = name_arg(0)?;
+            Some(Variant::Int(add_bone(tree, node, &name) as i64))
+        }
+        // Godot returns -1 for a name that is not a bone, NOT null: script code
+        // reads `if skel.find_bone("Head") != -1`.
+        "find_bone" => {
+            let name = name_arg(0)?;
+            Some(Variant::Int(
+                find_bone(tree, node, &name).map(|i| i as i64).unwrap_or(-1),
+            ))
+        }
+        "get_bone_name" => Some(Variant::String(
+            idx(0)
+                .and_then(|i| get_bone_name(tree, node, i))
+                .unwrap_or_default(),
+        )),
+        "set_bone_name" => {
+            let (i, name) = (idx(0)?, name_arg(1)?);
+            set_bone_name(tree, node, i, &name);
+            Some(Variant::Nil)
+        }
+        "get_bone_parent" => Some(Variant::Int(
+            idx(0).map(|i| get_bone_parent(tree, node, i)).unwrap_or(-1),
+        )),
+        "set_bone_parent" => {
+            let i = idx(0)?;
+            let parent = match args.get(1) {
+                Some(Variant::Int(v)) => *v,
+                _ => return None,
+            };
+            set_bone_parent(tree, node, i, parent);
+            Some(Variant::Nil)
+        }
+        "get_bone_children" => {
+            let i = idx(0)?;
+            Some(Variant::PackedInt64Array(
+                get_bone_children(tree, node, i as i64)
+                    .into_iter()
+                    .map(|c| c as i64)
+                    .collect(),
+            ))
+        }
+        "get_bone_rest" => Some(Variant::Transform3D(
+            idx(0)
+                .map(|i| get_bone_rest(tree, node, i))
+                .unwrap_or(Transform3D::IDENTITY),
+        )),
+        "set_bone_rest" => {
+            let i = idx(0)?;
+            let rest = match args.get(1) {
+                Some(Variant::Transform3D(t)) => *t,
+                _ => return None,
+            };
+            set_bone_rest(tree, node, i, rest);
+            Some(Variant::Nil)
+        }
+        "get_bone_pose" => Some(Variant::Transform3D(
+            idx(0)
+                .map(|i| get_bone_pose(tree, node, i))
+                .unwrap_or(Transform3D::IDENTITY),
+        )),
+        "get_bone_pose_position" => Some(Variant::Vector3(
+            idx(0)
+                .map(|i| get_bone_pose_position(tree, node, i))
+                .unwrap_or(Vector3::ZERO),
+        )),
+        "get_bone_pose_rotation" => Some(Variant::Quaternion(
+            idx(0)
+                .map(|i| get_bone_pose_rotation(tree, node, i))
+                .unwrap_or(Quaternion::IDENTITY),
+        )),
+        // ⚠️ Scale's neutral value is ONE, not zero — an out-of-range index
+        // answering Vector3::ZERO would read as "this bone is collapsed".
+        "get_bone_pose_scale" => Some(Variant::Vector3(
+            idx(0)
+                .map(|i| get_bone_pose_scale(tree, node, i))
+                .unwrap_or(Vector3::ONE),
+        )),
+        "set_bone_pose_position" => {
+            let (i, v) = (idx(0)?, vec3_arg(1)?);
+            set_bone_pose_position(tree, node, i, v);
+            Some(Variant::Nil)
+        }
+        "set_bone_pose_rotation" => {
+            let i = idx(0)?;
+            let q = match args.get(1) {
+                Some(Variant::Quaternion(q)) => *q,
+                _ => return None,
+            };
+            set_bone_pose_rotation(tree, node, i, q);
+            Some(Variant::Nil)
+        }
+        "set_bone_pose_scale" => {
+            let (i, v) = (idx(0)?, vec3_arg(1)?);
+            set_bone_pose_scale(tree, node, i, v);
+            Some(Variant::Nil)
+        }
+        "get_bone_global_pose" => Some(Variant::Transform3D(
+            idx(0)
+                .map(|i| get_bone_global_pose(tree, node, i))
+                .unwrap_or(Transform3D::IDENTITY),
+        )),
+        "is_bone_enabled" => Some(Variant::Bool(
+            idx(0)
+                .map(|i| is_bone_enabled(tree, node, i))
+                .unwrap_or(false),
+        )),
+        "set_bone_enabled" => {
+            let i = idx(0)?;
+            // Godot's `set_bone_enabled(idx, enabled = true)`.
+            let enabled = match args.get(1) {
+                Some(Variant::Bool(b)) => *b,
+                None => true,
+                _ => return None,
+            };
+            set_bone_enabled(tree, node, i, enabled);
+            Some(Variant::Nil)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1154,6 +1154,9 @@ pub enum PropertyEditor {
     Vector2,
     /// Vector3 editor (three floats).
     Vector3,
+    /// Vector4 editor (four floats), shared by `Vector4` and `Vector4i` the
+    /// same way [`Vector2`](Self::Vector2) is shared with `Vector2i`.
+    Vector4,
     /// Rect2 editor.
     Rect2,
     /// Transform2D editor.
@@ -1222,6 +1225,9 @@ impl PropertyEditor {
             VariantType::Vector3 => Self::Vector3,
             VariantType::Vector3i => Self::Vector3,
             VariantType::Rect2 => Self::Rect2,
+            VariantType::Rect2i => Self::Rect2,
+            VariantType::Vector4 => Self::Vector4,
+            VariantType::Vector4i => Self::Vector4,
             VariantType::Transform2D => Self::Transform2D,
             VariantType::Color => Self::ColorPicker,
             VariantType::Basis => Self::Basis,
@@ -1229,6 +1235,15 @@ impl PropertyEditor {
             VariantType::Quaternion => Self::Quaternion,
             VariantType::Aabb => Self::Aabb,
             VariantType::Plane => Self::Plane,
+            // A Projection is a derived camera matrix, not an authored value —
+            // Godot exports no Projection property and shows no editor for one,
+            // so offering a 16-cell grid would invite editing something the
+            // engine recomputes every frame.
+            VariantType::Projection => Self::None,
+            // An RID is a live server handle whose number means nothing outside
+            // the server that issued it. Same reasoning as Signal below: not an
+            // editable value.
+            VariantType::Rid => Self::None,
             VariantType::ObjectId => Self::ObjectId,
             VariantType::Array => Self::Array,
             VariantType::Dictionary => Self::Dictionary,
@@ -1247,7 +1262,8 @@ impl PropertyEditor {
             | VariantType::PackedStringArray
             | VariantType::PackedVector2Array
             | VariantType::PackedVector3Array
-            | VariantType::PackedColorArray => Self::Array,
+            | VariantType::PackedColorArray
+            | VariantType::PackedVector4Array => Self::Array,
         }
     }
 
@@ -1262,6 +1278,7 @@ impl PropertyEditor {
             Self::TextEdit => "TextEdit",
             Self::Vector2 => "Vector2",
             Self::Vector3 => "Vector3",
+            Self::Vector4 => "Vector4",
             Self::Rect2 => "Rect2",
             Self::Transform2D => "Transform2D",
             Self::ColorPicker => "ColorPicker",

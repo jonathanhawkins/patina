@@ -126,8 +126,26 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
 
 /// Loads a `.ctex` CompressedTexture2D file into a `Texture2D` [`Resource`].
 fn load_ctex_file(path: &Path) -> EngineResult<Arc<Resource>> {
-    let data = std::fs::read(path).map_err(EngineError::Io)?;
-    crate::ctex::load_ctex_bytes(&data, path)
+    // A `.import` sidecar can remap a source image to ANY of the compiled
+    // artifact types, not just a plain `.ctex` — a 2D-array or cubemap import
+    // produces a `GSTL` file with a different extension. Dispatch on that
+    // extension so following a remap lands in the right parser instead of
+    // failing on the magic (pat-s3rrv.48).
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .as_deref()
+    {
+        Some("ctexarray") => crate::ctex::load_ctexarray_file(path),
+        Some("ccube") => crate::ctex::load_ccube_file(path),
+        Some("ccubearray") => crate::ctex::load_ccubearray_file(path),
+        Some("ctex3d") => crate::ctex::load_ctex3d_file(path),
+        _ => {
+            let data = std::fs::read(path).map_err(EngineError::Io)?;
+            crate::ctex::load_ctex_bytes(&data, path)
+        }
+    }
 }
 
 /// Decode PNG bytes into a Texture2D resource (pixels included).
@@ -1595,6 +1613,13 @@ impl ResourceFormatLoader {
         rfl.register_with_params(".webp", import_webp_with_params);
         rfl.register_with_params(".svg", crate::image_svg::import_svg_with_params);
         rfl.register_with_params(".wav", import_wav_with_params);
+        // Layered and volume artifacts (pat-s3rrv.48). Godot's layered texture
+        // importer writes one of these per mode; all four are `GSTL` files that
+        // only their extension tells apart.
+        rfl.register(".ctexarray", crate::ctex::load_ctexarray_file);
+        rfl.register(".ccube", crate::ctex::load_ccube_file);
+        rfl.register(".ccubearray", crate::ctex::load_ccubearray_file);
+        rfl.register(".ctex3d", crate::ctex::load_ctex3d_file);
         rfl
     }
 

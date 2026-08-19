@@ -837,6 +837,13 @@ pub struct StateMachine {
     /// cleared by `start`/`travel`. Stored inverted so the derived `Default`
     /// (and therefore every existing hand-built machine) keeps playing.
     stopped: bool,
+    /// Set for one frame after the current state's clip wraps past its end.
+    ///
+    /// This is what makes [`SwitchMode::AtEnd`] mean anything: such an edge must
+    /// wait for the source animation to finish rather than cutting it off, and
+    /// a wrapped playhead is how a looping clip announces it reached the end
+    /// (pat-s3rrv.1).
+    cycle_completed: bool,
 }
 
 impl StateMachine {
@@ -866,6 +873,12 @@ impl StateMachine {
         queue.push_back(self.current.as_str());
         while let Some(state) = queue.pop_front() {
             for t in &self.transitions {
+                // Godot's path search skips `ADVANCE_MODE_DISABLED` edges
+                // (`_find_next`, animation_node_state_machine.cpp:1073), so a
+                // disabled edge is not a route even for `travel()`.
+                if t.advance_mode == TransitionAdvanceMode::Disabled {
+                    continue;
+                }
                 if t.from == state && t.to != self.current && !pred.contains_key(t.to.as_str()) {
                     pred.insert(t.to.as_str(), state);
                     if t.to == target {
@@ -1248,10 +1261,95 @@ fn node_clip_name(node: &AnimationNode) -> Option<&str> {
 pub struct StateTransition {
     pub from: String,
     pub to: String,
-    /// Name of a bool parameter controlling the transition.
+    /// Name of a bool parameter controlling the transition (Godot
+    /// `advance_condition`, addressed as `parameters/conditions/<name>`).
     pub condition: String,
-    /// Crossfade duration in seconds. 0.0 = instant snap.
+    /// Crossfade duration in seconds (Godot `xfade_time`). 0.0 = instant snap.
     pub crossfade: f64,
+    /// How the destination starts when this edge is taken (Godot
+    /// `switch_mode`). Shares [`SwitchMode`] with `AnimationNodeTransition`,
+    /// which spells the same three values.
+    pub switch_mode: SwitchMode,
+    /// Whether the edge is usable at all, only by `travel()`, or automatically
+    /// (Godot `advance_mode`).
+    pub advance_mode: TransitionAdvanceMode,
+    /// Godot `advance_expression`: a const expression that must also evaluate
+    /// true for an AUTO edge. Stored so it round-trips; **not evaluated** —
+    /// Patina has no `Expression` type, and an expression treated as "always
+    /// true" would fire transitions a real project deliberately gates.
+    /// An edge that carries one is therefore treated as not auto-advancing.
+    pub advance_expression: String,
+    /// Lower wins when several edges out of the same state are eligible (Godot
+    /// `priority`, default 1).
+    pub priority: i32,
+    /// Whether the destination restarts from the beginning (Godot `reset`,
+    /// default **true**).
+    pub reset: bool,
+    /// Godot `break_loop_at_end`: end a looping source clip at the end of its
+    /// current cycle rather than letting it loop again. Only meaningful
+    /// alongside [`SwitchMode::AtEnd`].
+    pub break_loop_at_end: bool,
+    /// Godot `xfade_curve` — the easing curve for the crossfade, as the
+    /// serialized sub-resource id. Stored, not applied: Patina has no `Curve`
+    /// resource, so the crossfade stays linear (see the note on
+    /// [`crate::animation_tree`]).
+    pub xfade_curve: Option<String>,
+}
+
+impl Default for StateTransition {
+    /// Godot's own defaults (`animation_node_state_machine.h:53-63`).
+    ///
+    /// ⚠️ `advance_mode` defaults to `Enabled`, which does **not** auto-advance
+    /// — only `Auto` does. `priority` is 1, not 0, and `reset` is true. A
+    /// derived `Default` would get all three wrong, which is why this is
+    /// written out.
+    fn default() -> Self {
+        Self {
+            from: String::new(),
+            to: String::new(),
+            condition: String::new(),
+            crossfade: 0.0,
+            switch_mode: SwitchMode::Immediate,
+            advance_mode: TransitionAdvanceMode::Enabled,
+            advance_expression: String::new(),
+            priority: 1,
+            reset: true,
+            break_loop_at_end: false,
+            xfade_curve: None,
+        }
+    }
+}
+
+/// Godot `AnimationNodeStateMachineTransition.AdvanceMode`
+/// (`scene/animation/animation_node_state_machine.h:47`).
+///
+/// ⚠️ The distinction that matters: **`Enabled` does not auto-advance.** The
+/// doc XML is explicit — ENABLED is "Only use this transition during
+/// `travel()`", and only AUTO is "Automatically use this transition if the
+/// advance_condition and advance_expression checks are true". Patina used to
+/// take ANY edge whose condition parameter was true, which fired transitions a
+/// Godot project would only reach by travelling (pat-s3rrv.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransitionAdvanceMode {
+    /// `ADVANCE_MODE_DISABLED` (0) — never used, not even by `travel()`.
+    Disabled,
+    /// `ADVANCE_MODE_ENABLED` (1) — usable by `travel()` only. Godot's default.
+    #[default]
+    Enabled,
+    /// `ADVANCE_MODE_AUTO` (2) — taken automatically once its condition holds.
+    Auto,
+}
+
+impl TransitionAdvanceMode {
+    /// Godot's `AdvanceMode` integer (0 = DISABLED, 1 = ENABLED, 2 = AUTO).
+    /// An unknown value falls back to Godot's own default.
+    pub fn from_godot_int(v: i64) -> Self {
+        match v {
+            0 => Self::Disabled,
+            2 => Self::Auto,
+            _ => Self::Enabled,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1791,6 +1889,130 @@ fn advance_node(
     }
 }
 
+/// Picks the edge out of `sm.current` that should fire on its own this frame
+/// (pat-s3rrv.1).
+///
+/// Godot's rules, from `AnimationNodeStateMachinePlayback::_find_next`
+/// (`scene/animation/animation_node_state_machine.cpp:1085-1113`) and
+/// `_check_advance_condition` (:1119):
+///
+/// * `ADVANCE_MODE_DISABLED` edges are skipped entirely.
+/// * `_check_advance_condition` returns **false unless the mode is AUTO** — an
+///   `Enabled` edge is reachable only through `travel()`, however true its
+///   condition is. This is the parity fix: Patina previously fired any edge
+///   whose condition parameter was set.
+/// * An AUTO edge with no `advance_condition` passes the condition check, which
+///   is how "advance as soon as allowed" is expressed.
+/// * Among the eligible edges the **lowest `priority` wins**, and Godot's `<=`
+///   comparison means a later edge beats an earlier one at equal priority.
+fn select_auto_transition(
+    sm: &StateMachine,
+    library: &HashMap<String, Animation>,
+    params: EvalParams<'_>,
+) -> Option<StateTransition> {
+    // Whether the state we would be LEAVING plays a looping clip. Godot reads
+    // this off the `Animation` resource, not off the leaf's timeline options —
+    // and it has to, because Patina's default leaf wraps with `rem_euclid`
+    // whatever the clip's own loop mode says, so the playhead alone cannot
+    // tell a looping clip from a one-shot one.
+    let source_loops = sm
+        .states
+        .get(&sm.current)
+        .and_then(node_clip_name)
+        .and_then(|name| library.get(name))
+        .map(|anim| anim.loop_mode != LoopMode::None)
+        .unwrap_or(false);
+
+    let mut best: Option<&StateTransition> = None;
+    for t in &sm.transitions {
+        if t.from != sm.current {
+            continue;
+        }
+        if t.advance_mode != TransitionAdvanceMode::Auto {
+            continue;
+        }
+        // An expression this engine cannot evaluate must not be treated as
+        // satisfied: doing so would fire an edge the project deliberately gated.
+        if !t.advance_expression.is_empty() {
+            continue;
+        }
+        if !t.condition.is_empty() && !params.condition(&t.condition) {
+            continue;
+        }
+        // `AtEnd` defers until the source clip has played out — the mode exists
+        // precisely so a swing or a landing is never cut mid-arc.
+        if t.switch_mode == SwitchMode::AtEnd {
+            if !sm.cycle_completed {
+                continue;
+            }
+            // ⚠️ A LOOPING source never "ends" unless `break_loop_at_end` says
+            // so. Upstream expresses this through the remaining-time helper
+            // (`animation_tree.h:81` `NodeTimeInfo::get_remain`), which returns
+            // `HUGE_LENGTH` for a looping clip when the flag is false, so the
+            // `remain <= xfade` gate at
+            // `animation_node_state_machine.cpp:1037` can never pass.
+            //
+            // `false` is Godot's DEFAULT, so getting this wrong is not an edge
+            // case: every looping idle/run state with an AtEnd edge left after
+            // one cycle instead of holding. The flag was parsed and stored by
+            // an earlier pass and then consulted by nothing (pat-s3rrv.1).
+            if source_loops && !t.break_loop_at_end {
+                continue;
+            }
+        }
+        // `<=` so the LAST edge wins a priority tie, matching upstream.
+        let wins = match best {
+            None => true,
+            Some(b) => t.priority <= b.priority,
+        };
+        if wins {
+            best = Some(t);
+        }
+    }
+    best.cloned()
+}
+
+/// Switches `sm` onto `t.to`, applying the edge's `switch_mode`, `reset` and
+/// crossfade.
+///
+/// `reset` (Godot's default, true) restarts the destination; `SwitchMode::Sync`
+/// instead carries the source's playback position across so a walk→run swap
+/// keeps the stride in phase, which is the whole point of that mode.
+fn take_transition(sm: &mut StateMachine, t: &StateTransition) {
+    let Some(from_node) = sm.states.get(&sm.current).cloned() else {
+        return;
+    };
+    let carry = node_play_position(&from_node);
+    let prev_state = std::mem::replace(&mut sm.current, t.to.clone());
+
+    if let Some(node) = sm.states.get_mut(&sm.current) {
+        match t.switch_mode {
+            SwitchMode::Sync => {
+                // Carry the playhead. Godot syncs even when `reset` is set —
+                // the sync IS the reset policy for this mode.
+                if let Some(pos) = carry {
+                    seek_node_to(node, pos);
+                } else {
+                    reset_node_time(node);
+                }
+            }
+            _ if t.reset => reset_node_time(node),
+            // `reset = false` leaves the destination wherever it was, so a
+            // state resumed mid-clip picks up where it left off.
+            _ => {}
+        }
+    }
+
+    if t.crossfade > 0.0 {
+        sm.transition = Some(ActiveTransition {
+            from_state: prev_state,
+            from_node: Box::new(from_node),
+            elapsed: 0.0,
+            duration: t.crossfade,
+        });
+    }
+}
+
 fn advance_state_machine(
     sm: &mut StateMachine,
     delta: f64,
@@ -1832,30 +2054,8 @@ fn advance_state_machine(
                     });
                 }
             }
-        } else {
-            let triggered = sm
-                .transitions
-                .iter()
-                .find(|t| t.from == sm.current && params.condition(&t.condition))
-                .cloned();
-
-            if let Some(t) = triggered {
-                if let Some(from_node) = sm.states.get(&sm.current).cloned() {
-                    let prev_state = std::mem::replace(&mut sm.current, t.to.clone());
-                    // Reset the incoming state to start from zero.
-                    if let Some(node) = sm.states.get_mut(&sm.current) {
-                        reset_node_time(node);
-                    }
-                    if t.crossfade > 0.0 {
-                        sm.transition = Some(ActiveTransition {
-                            from_state: prev_state,
-                            from_node: Box::new(from_node),
-                            elapsed: 0.0,
-                            duration: t.crossfade,
-                        });
-                    }
-                }
-            }
+        } else if let Some(t) = select_auto_transition(sm, library, params) {
+            take_transition(sm, &t);
         }
     }
 
@@ -1868,10 +2068,23 @@ fn advance_state_machine(
         }
     }
 
-    // Advance the current state's node.
+    // Advance the current state's node, watching for the clip wrapping past its
+    // end so an `AtEnd` edge can fire on the next frame. A decrease in the
+    // playhead is the wrap: `AnimationNode::Animation` advances with
+    // `rem_euclid`, so a looping clip's position drops back toward zero exactly
+    // when it completes a cycle.
+    let before = sm
+        .states
+        .get(&sm.current)
+        .and_then(|n| node_play_position(n));
     if let Some(node) = sm.states.get_mut(&sm.current) {
         advance_node(node, delta, library, params);
     }
+    let after = sm
+        .states
+        .get(&sm.current)
+        .and_then(|n| node_play_position(n));
+    sm.cycle_completed = matches!((before, after), (Some(b), Some(a)) if a < b);
 }
 
 /// Jumps every `Animation` clip beneath `node` to `time` (pat-0q2kx.53).
@@ -3242,8 +3455,7 @@ mod tests {
         StateTransition {
             from: from.into(),
             to: to.into(),
-            condition: String::new(),
-            crossfade: 0.0,
+            ..Default::default()
         }
     }
 
@@ -3400,7 +3612,10 @@ mod tests {
             from: "idle".into(),
             to: "run".into(),
             condition: "run".into(),
-            crossfade: 0.0,
+            // Godot only auto-advances an AUTO edge; ENABLED (the default) is
+            // reachable through `travel()` alone (pat-s3rrv.1).
+            advance_mode: TransitionAdvanceMode::Auto,
+            ..Default::default()
         });
         tree.set_root(AnimationNode::StateMachine(sm));
         tree

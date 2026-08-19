@@ -99,12 +99,49 @@ pub fn get_local_transform(tree: &SceneTree, node_id: NodeId) -> Transform2D {
 
 /// Computes the global transform by walking the parent chain and multiplying
 /// local transforms from the root downward.
+/// Sets `CanvasItem.top_level` (pat-s3rrv.22).
+///
+/// Stored as the plain `top_level` node property, which is the same key the
+/// `.tscn` parser writes — so a scene that declares `top_level = true` and a
+/// script that sets it at runtime end up in the same place.
+pub fn set_top_level(tree: &mut SceneTree, node_id: NodeId, top_level: bool) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("top_level", Variant::Bool(top_level));
+    }
+}
+
+/// Reads `CanvasItem.top_level`, defaulting to `false` (pat-s3rrv.22).
+///
+/// The 3D side keeps the equivalent in `node3d`, but the flag is a plain node
+/// property with the same name on both, and a 2D module reaching into `node3d`
+/// for it would read as a layering accident rather than a shared convention.
+pub fn is_top_level(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .map(|n| matches!(n.get_property("top_level"), Variant::Bool(true)))
+        .unwrap_or(false)
+}
+
 pub fn get_global_transform(tree: &SceneTree, node_id: NodeId) -> Transform2D {
     // Collect ancestor chain (node -> parent -> ... -> root).
     let mut chain = Vec::new();
     let mut current = node_id;
     loop {
         chain.push(current);
+        // pat-s3rrv.22: `top_level` ends the walk. Godot implements this in
+        // `CanvasItem::get_parent_item`, which returns null for a top-level
+        // item, so `get_global_transform` falls back to the item's OWN
+        // transform (canvas_item.cpp). The node keeps its own local transform —
+        // it is the ancestors above it that stop contributing — so the break
+        // comes AFTER the push.
+        //
+        // ⚠️ This is fixed in `get_global_transform` itself rather than in a
+        // parallel `_top_level` variant, which is how the 3D side did it: a
+        // second function leaves every existing caller silently on the wrong
+        // one, and here the callers are the whole 2D render path
+        // (`viewport_2d_render::collect_canvas_items`), physics and input.
+        if is_top_level(tree, current) {
+            break;
+        }
         match tree.get_node(current).and_then(|n| n.parent()) {
             Some(parent_id) => current = parent_id,
             None => break,
@@ -124,11 +161,17 @@ pub fn get_global_transform(tree: &SceneTree, node_id: NodeId) -> Transform2D {
 /// This computes the inverse of the parent's global transform and applies it
 /// to the desired global position.
 pub fn set_global_position(tree: &mut SceneTree, node_id: NodeId, pos: Vector2) {
-    let parent_global = tree
-        .get_node(node_id)
-        .and_then(|n| n.parent())
-        .map(|pid| get_global_transform(tree, pid))
-        .unwrap_or(Transform2D::IDENTITY);
+    // pat-s3rrv.22: a `top_level` node's global transform IS its local one, so
+    // there is no parent transform to invert — using the parent's here would
+    // write a local position that lands the node somewhere else entirely.
+    let parent_global = if is_top_level(tree, node_id) {
+        Transform2D::IDENTITY
+    } else {
+        tree.get_node(node_id)
+            .and_then(|n| n.parent())
+            .map(|pid| get_global_transform(tree, pid))
+            .unwrap_or(Transform2D::IDENTITY)
+    };
 
     let local_pos = parent_global.affine_inverse().xform(pos);
     set_position(tree, node_id, local_pos);
@@ -150,6 +193,12 @@ pub fn get_global_rotation(tree: &SceneTree, node_id: NodeId) -> f32 {
     let mut current = Some(node_id);
     while let Some(id) = current {
         rotation += get_rotation(tree, id);
+        // pat-s3rrv.22: stop at a `top_level` node, for the same reason the
+        // transform walk does. Summing through it would leave the rotation
+        // disagreeing with the transform this function is supposed to describe.
+        if is_top_level(tree, id) {
+            break;
+        }
         current = tree.get_node(id).and_then(|n| n.parent());
     }
     rotation

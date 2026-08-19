@@ -199,11 +199,13 @@ fn multiplayer_spawner_and_synchronizer_replicate_from_scene() {
     );
 }
 
-/// A spawner announces each child exactly once, however long it lives.
+/// A spawner announces each child exactly once, however long it lives, and a
+/// received child is never announced back.
 ///
-/// Regression guard for the outbound diff: without the `announced` set the poll
-/// would re-announce every existing child on every frame, so the client would
-/// accumulate a new copy of the player each tick.
+/// Regression guard for two distinct ways the outbound diff can run away:
+/// without the `announced` set the poll re-announces every existing child on
+/// every frame, and without marking INBOUND spawns as announced the two peers
+/// bounce the same node back and forth, each side gaining one per frame.
 #[test]
 fn spawner_announces_each_child_only_once() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -235,5 +237,17 @@ fn spawner_announces_each_child_only_once() {
         child_count(client_loop.tree(), "/root/Main/Players"),
         1,
         "20 frames must still yield exactly one replicated child, not one per frame"
+    );
+    // ⚠️ The HOST side is where the echo lands FIRST, and it is a different
+    // failure from the one above. A node the client received is not the
+    // client's to announce: without that guard the client's own outbound diff
+    // sees the freshly applied child as new and announces it back, the host
+    // applies it, the host's diff announces it again — both trees gain one node
+    // per frame. Asserting only the client would still fail, but one frame
+    // later and for a reason that reads like a spawner bug rather than an echo.
+    assert_eq!(
+        child_count(host_loop.tree(), "/root/Main/Players"),
+        1,
+        "the host must not grow either — a received node must never be          re-announced back to its sender"
     );
 }

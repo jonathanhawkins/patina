@@ -105,6 +105,57 @@ impl fmt::Debug for ClassId {
     }
 }
 
+/// A server resource handle, matching Godot's `RID` (`core/templates/rid.h`).
+///
+/// Every `*Server` API — `RenderingServer.mesh_create()`,
+/// `PhysicsServer2D.body_create()`, `AudioServer` bus handles — returns one of
+/// these, and `RID` is a first-class Variant builtin. Patina had **no Rust type
+/// for it at all** (`grep 'struct Rid|type Rid'` across the crates returned
+/// nothing), so a server handle had nowhere to live (pat-s3rrv.59).
+///
+/// Godot's RID is an opaque 64-bit handle whose only guaranteed operations are
+/// `is_valid()`, `get_id()` and comparison — deliberately so, because the value
+/// is an index into a server's own table and means nothing outside it. This
+/// mirrors that: no arithmetic, no ordering beyond `Ord` for use as a map key.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct Rid(u64);
+
+impl Rid {
+    /// The invalid handle — Godot's default-constructed `RID`, whose id is 0.
+    pub const INVALID: Self = Self(0);
+
+    /// Wraps a raw server handle.
+    pub const fn from_raw(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// The raw handle (Godot `RID.get_id`).
+    pub const fn id(self) -> u64 {
+        self.0
+    }
+
+    /// Whether this handle refers to anything (Godot `RID.is_valid`).
+    ///
+    /// Godot treats id 0 as the null handle, which is why `INVALID` is 0 and
+    /// why a freshly defaulted `Rid` is correctly invalid.
+    pub const fn is_valid(self) -> bool {
+        self.0 != 0
+    }
+}
+
+impl fmt::Debug for Rid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Rid({})", self.0)
+    }
+}
+
+impl fmt::Display for Rid {
+    /// Godot prints a RID as `RID(<id>)`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RID({})", self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

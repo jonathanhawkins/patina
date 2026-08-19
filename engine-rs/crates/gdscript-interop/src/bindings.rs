@@ -301,7 +301,20 @@ impl InputEventSpec {
 /// layer for every `ObjectId` it dispatches. That matters for correctness as
 /// well as cost: `clear`, `update` and `get_point_position` collide with verbs
 /// the interpreter already routes off an `ObjectId`.
-pub const ASTAR_HANDLE_TAG: u64 = 0xA1_00_0000_0000_0000;
+///
+/// ⚠️ This was `0xA1`, which is **`gdcore::xml_parser`'s `XML_HANDLE_TAG`** —
+/// byte-for-byte the same tag in a different crate. `call_method_on` checks
+/// `is_xml_parser_handle` before the AStar branch, so every AStar handle was
+/// claimed by XMLParser and every method on it died as
+/// `MethodNotFound("XMLParser.<method>")`. That is why `AStar2D.new()` appeared
+/// to work while *every* method on the result failed, including zero-argument
+/// ones — the constructor and the registry were both correct all along.
+///
+/// A tag byte is a workspace-wide namespace and nothing enforces it, so a new
+/// one must be checked against EVERY crate, not just this one. In use as of
+/// pat-s3rrv.19: 1A 1B 4D 57 5B 6D 6E A1 A2 A3 A4 A5 A6 B9 C1 C2 C3 CA CF DA
+/// E1-EF FA, plus FF as the mask itself.
+pub const ASTAR_HANDLE_TAG: u64 = 0xA7_00_0000_0000_0000;
 
 /// Returns `true` when `raw` is an AStar handle (see [`ASTAR_HANDLE_TAG`]).
 pub fn is_astar_handle(raw: u64) -> bool {
@@ -1169,6 +1182,28 @@ pub trait SceneAccess {
         }
     }
 
+    /// Godot `Input.get_action_raw_strength(action)` — the action's strength
+    /// **ignoring its deadzone**.
+    ///
+    /// ⚠️ Not a synonym for [`get_action_strength`](Self::get_action_strength).
+    /// The two differ only for ANALOG bindings, and only once a deadzone is
+    /// applied: `gdplatform`'s implementation (`input.rs:1900`) documents a
+    /// stick at 0.6 under a 0.1 deadzone reading **0.56** from `strength` and
+    /// **0.6** from raw. Digital bindings report the same 1.0 / 0.0 from both —
+    /// which is exactly why a wrong implementation looks correct on a keyboard
+    /// and only diverges on a gamepad.
+    ///
+    /// The default treats an action as digital, matching
+    /// `get_action_strength`'s default; a runtime accessor that reaches real
+    /// analog state overrides both.
+    fn get_action_raw_strength(&self, action: &str) -> f32 {
+        if self.is_input_action_pressed(action) {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
     /// Godot `Input.get_axis(neg, pos)` == `strength(pos) - strength(neg)`
     /// (pat-nzgdu.9). Derives from [`Self::get_action_strength`], so digital
     /// actions yield `-1.0` / `0.0` / `1.0`.
@@ -1502,6 +1537,17 @@ pub trait SceneAccess {
     /// family; the count is what a script can meaningfully act on today.
     fn input_map_action_event_count(&self, _action: &str) -> usize {
         0
+    }
+
+    /// The events bound to `action`, as specs (pat-s3rrv.14).
+    ///
+    /// This is what `InputEvent.is_action(...)` / `is_action_pressed(...)` need:
+    /// Godot's `InputMap::event_get_action_status` matches the event against an
+    /// action's bindings, and a bound-event COUNT cannot answer that. It also
+    /// lets `InputMap.action_get_events` return real events instead of the
+    /// `[null, null, …]` it has been returning.
+    fn input_map_action_events(&self, _action: &str) -> Vec<InputEventSpec> {
+        Vec::new()
     }
 
     /// Returns the device ids of connected joypads

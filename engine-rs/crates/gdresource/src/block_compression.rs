@@ -3,9 +3,10 @@
 //! Godot's `Image.decompress` / `load_dds_from_buffer` / `load_ktx_from_buffer`
 //! turn S3TC/BCn (and ETC2/ASTC) blocks into RGBA8. This module implements the
 //! most common S3TC families — **BC1** (DXT1), **BC2** (DXT3), **BC3**
-//! (DXT5), **BC4** (`RGTC_R`) and **BC5** (`RGTC_RG`) — as
-//! dependency-free block decoders that the `.ctex`/`.dds`/`.ktx` loaders can
-//! call to populate a Texture2D's `pixels`. Each decoder takes the raw block
+//! (DXT5), **BC4** (`RGTC_R`) and **BC5** (`RGTC_RG`) — plus the **ETC2/EAC**
+//! family Godot's Web export uses (**ETC1**, **ETC2_RGB8**, **ETC2_RGBA8**,
+//! **EAC R11/RG11**), as dependency-free block decoders that the
+//! `.ctex`/`.dds`/`.ktx` loaders can call to populate a Texture2D's `pixels`. Each decoder takes the raw block
 //! stream plus the image dimensions and returns a tightly packed, row-major
 //! RGBA8 buffer (`width * height * 4` bytes). Dimensions need not be multiples
 //! of 4 — edge blocks are clipped to the image bounds, matching how GPUs store
@@ -319,6 +320,413 @@ fn decode_blocks<const BLOCK: usize>(
         }
     }
     Some(out)
+}
+
+// ---------------------------------------------------------------------------
+// ETC2 / EAC (pat-s3rrv.48)
+// ---------------------------------------------------------------------------
+//
+// Ported line-by-line from `upstream/godot/thirdparty/etcpak/DecodeRGB.cpp`,
+// the decoder Godot itself ships — not from the Khronos spec. ETC2's failure
+// mode is silently wrong pixels rather than a compile error, so the port is
+// deliberately a transcription of working code, and every table below is copied
+// from `etcpak/Tables.cpp` rather than recomputed.
+//
+// Covered: ETC1/ETC2 RGB (individual, differential, T, H and planar blocks),
+// ETC2 RGBA8 (the same colour block plus an EAC alpha word), and the EAC
+// R11/RG11 single- and dual-channel formats. Punchthrough (`ETC2_RGB8A1`) and
+// the signed R11S/RG11S variants are NOT here: etcpak carries no decoder for
+// them, so implementing them would mean working from the spec, which is the
+// failure mode this port exists to avoid.
+
+/// `table59T58H` — the T/H mode distance table (etcpak/DecodeRGB.cpp:27).
+const ETC2_TH_DISTANCE: [i32; 8] = [3, 6, 11, 16, 23, 32, 41, 64];
+
+/// `g_table` — the ETC1 intensity modifier table (etcpak/Tables.cpp:3).
+const ETC_INTENSITY: [[i32; 4]; 8] = [
+    [2, 8, -2, -8],
+    [5, 17, -5, -17],
+    [9, 29, -9, -29],
+    [13, 42, -13, -42],
+    [18, 60, -18, -60],
+    [24, 80, -24, -80],
+    [33, 106, -33, -106],
+    [47, 183, -47, -183],
+];
+
+/// `g_alpha` — the EAC modifier table (etcpak/Tables.cpp:70).
+const EAC_MODIFIER: [[i32; 8]; 16] = [
+    [-3, -6, -9, -15, 2, 5, 8, 14],
+    [-3, -7, -10, -13, 2, 6, 9, 12],
+    [-2, -5, -8, -13, 1, 4, 7, 12],
+    [-2, -4, -6, -13, 1, 3, 5, 12],
+    [-3, -6, -8, -12, 2, 5, 7, 11],
+    [-3, -7, -9, -11, 2, 6, 8, 10],
+    [-4, -7, -8, -11, 3, 6, 7, 10],
+    [-3, -5, -8, -11, 2, 4, 7, 10],
+    [-2, -6, -8, -10, 1, 5, 7, 9],
+    [-2, -5, -8, -10, 1, 4, 7, 9],
+    [-2, -4, -8, -10, 1, 3, 7, 9],
+    [-2, -5, -7, -10, 1, 4, 6, 9],
+    [-3, -4, -7, -10, 2, 3, 6, 9],
+    [-1, -2, -3, -10, 0, 1, 2, 9],
+    [-4, -6, -8, -9, 3, 5, 7, 8],
+    [-3, -5, -7, -9, 2, 4, 6, 8],
+];
+
+/// `g_alpha11Mul` — the R11/RG11 multiplier table (etcpak/Tables.cpp:89).
+const EAC_R11_MUL: [i32; 16] = [
+    1, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120,
+];
+
+/// etcpak's `clampu8`: negatives clamp to 0, anything over 255 to 255.
+fn clamp_u8(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
+}
+
+/// `expand6` / `expand7` — replicate the high bits of a 6- or 7-bit planar
+/// component into the low bits (etcpak/DecodeRGB.cpp:32-40).
+fn expand6(v: u32) -> i32 {
+    ((v << 2) | (v >> 4)) as i32
+}
+
+fn expand7(v: u32) -> i32 {
+    ((v << 1) | (v >> 6)) as i32
+}
+
+/// A three-bit two's-complement differential component, the value etcpak
+/// extracts with `(int32_t(d) << 5) >> 29`.
+fn sign_extend_3(v: u64) -> i32 {
+    let v = (v & 0x7) as i32;
+    if v & 0x4 != 0 {
+        v - 8
+    } else {
+        v
+    }
+}
+
+/// etcpak's `ConvertByteOrder` applied to a raw 8-byte block: the low word is a
+/// big-endian read of bytes 0..3 and the high word of bytes 4..7.
+fn etc_block_word(block: &[u8]) -> u64 {
+    let lo = u32::from_be_bytes([block[0], block[1], block[2], block[3]]) as u64;
+    let hi = u32::from_be_bytes([block[4], block[5], block[6], block[7]]) as u64;
+    lo | (hi << 32)
+}
+
+/// One EAC alpha sample for texel `(i, j)` — the `45 - j*3 - i*12` bit walk
+/// shared by every alpha-carrying etcpak decoder.
+fn eac_sample(alpha: u64, base: i32, mul: i32, table: &[i32; 8], i: usize, j: usize) -> u8 {
+    let shift = 45 - (j as i32) * 3 - (i as i32) * 12;
+    let modifier = table[((alpha >> shift) & 0x7) as usize];
+    clamp_u8(base + modifier * mul)
+}
+
+/// Fills in the alpha channel of an already-decoded T/H/planar block, which is
+/// the only thing etcpak's `Decode*Alpha` variants do differently.
+fn apply_eac_alpha(texels: &mut [[u8; 4]; 16], alpha: u64) {
+    let base = (alpha >> 56) as i32;
+    let mul = ((alpha >> 52) & 0xF) as i32;
+    let table = &EAC_MODIFIER[((alpha >> 48) & 0xF) as usize];
+    for j in 0..4 {
+        for i in 0..4 {
+            texels[j * 4 + i][3] = eac_sample(alpha, base, mul, table, i, j);
+        }
+    }
+}
+
+/// The two-bit-per-texel index plane shared by the T and H modes.
+fn th_index(indexes: u32, i: usize, j: usize) -> usize {
+    let hi = (indexes >> (j + i * 4 + 16)) & 0x1;
+    let lo = (indexes >> (j + i * 4)) & 0x1;
+    ((hi << 1) | lo) as usize
+}
+
+/// ETC2 "T" block (etcpak `DecodeT`).
+fn decode_etc2_t(block: u64) -> [[u8; 4]; 16] {
+    let r0 = (block >> 24) & 0x1B;
+    let rh0 = (r0 >> 3) & 0x3;
+    let rl0 = r0 & 0x3;
+    let g0 = (block >> 20) & 0xF;
+    let b0 = (block >> 16) & 0xF;
+
+    let r1 = (block >> 12) & 0xF;
+    let g1 = (block >> 8) & 0xF;
+    let b1 = (block >> 4) & 0xF;
+
+    let cr0 = ((rh0 << 6) | (rl0 << 4) | (rh0 << 2) | rl0) as i32;
+    let cg0 = ((g0 << 4) | g0) as i32;
+    let cb0 = ((b0 << 4) | b0) as i32;
+    let cr1 = ((r1 << 4) | r1) as i32;
+    let cg1 = ((g1 << 4) | g1) as i32;
+    let cb1 = ((b1 << 4) | b1) as i32;
+
+    let codeword = ((((block >> 2) & 0x3) << 1) | (block & 0x1)) as usize;
+    let d = ETC2_TH_DISTANCE[codeword];
+
+    let palette = [
+        [cr0 as u8, cg0 as u8, cb0 as u8, 255],
+        [clamp_u8(cr1 + d), clamp_u8(cg1 + d), clamp_u8(cb1 + d), 255],
+        [cr1 as u8, cg1 as u8, cb1 as u8, 255],
+        [clamp_u8(cr1 - d), clamp_u8(cg1 - d), clamp_u8(cb1 - d), 255],
+    ];
+
+    let indexes = ((block >> 32) & 0xFFFF_FFFF) as u32;
+    let mut out = [[0u8; 4]; 16];
+    for j in 0..4 {
+        for i in 0..4 {
+            out[j * 4 + i] = palette[th_index(indexes, i, j)];
+        }
+    }
+    out
+}
+
+/// ETC2 "H" block (etcpak `DecodeH`).
+fn decode_etc2_h(block: u64) -> [[u8; 4]; 16] {
+    let indexes = ((block >> 32) & 0xFFFF_FFFF) as u32;
+
+    let r0444 = (block >> 27) & 0xF;
+    let g0444 = ((block >> 20) & 0x1) | (((block >> 24) & 0x7) << 1);
+    let b0444 = ((block >> 15) & 0x7) | (((block >> 19) & 0x1) << 3);
+    let r1444 = (block >> 11) & 0xF;
+    let g1444 = (block >> 7) & 0xF;
+    let b1444 = (block >> 3) & 0xF;
+
+    let r0 = ((r0444 << 4) | r0444) as i32;
+    let g0 = ((g0444 << 4) | g0444) as i32;
+    let b0 = ((b0444 << 4) | b0444) as i32;
+    let r1 = ((r1444 << 4) | r1444) as i32;
+    let g1 = ((g1444 << 4) | g1444) as i32;
+    let b1 = ((b1444 << 4) | b1444) as i32;
+
+    // ⚠️ `block & 0x4` is used UNSHIFTED upstream, so it contributes 4 to the
+    // codeword while `block & 0x1` contributes 2 — the two high bits arrive
+    // from bit 2 and bit 0 respectively. Copied as written.
+    let codeword_hi = ((block & 0x1) << 1) | (block & 0x4);
+    let c0 = (r0444 << 8) | (g0444 << 4) | b0444;
+    let c1 = (block >> 3) & ((1 << 12) - 1);
+    let codeword = (codeword_hi | u64::from(c0 >= c1)) as usize;
+    let d = ETC2_TH_DISTANCE[codeword];
+
+    let palette = [
+        [clamp_u8(r0 + d), clamp_u8(g0 + d), clamp_u8(b0 + d), 255],
+        [clamp_u8(r0 - d), clamp_u8(g0 - d), clamp_u8(b0 - d), 255],
+        [clamp_u8(r1 + d), clamp_u8(g1 + d), clamp_u8(b1 + d), 255],
+        [clamp_u8(r1 - d), clamp_u8(g1 - d), clamp_u8(b1 - d), 255],
+    ];
+
+    let mut out = [[0u8; 4]; 16];
+    for j in 0..4 {
+        for i in 0..4 {
+            out[j * 4 + i] = palette[th_index(indexes, i, j)];
+        }
+    }
+    out
+}
+
+/// ETC2 planar block (etcpak `DecodePlanar`, scalar path).
+fn decode_etc2_planar(block: u64) -> [[u8; 4]; 16] {
+    let bv = expand6(((block >> 32) & 0x3F) as u32);
+    let gv = expand7(((block >> 38) & 0x7F) as u32);
+    let rv = expand6(((block >> 45) & 0x3F) as u32);
+    let bh = expand6(((block >> 51) & 0x3F) as u32);
+    let gh = expand7(((block >> 57) & 0x7F) as u32);
+
+    let rh0 = block & 0x01;
+    let rh1 = ((block >> 2) & 0x1F) << 1;
+    let rh = expand6((rh0 | rh1) as u32);
+
+    let bo0 = (block >> 7) & 0x07;
+    let bo1 = ((block >> 11) & 0x3) << 3;
+    let bo2 = ((block >> 16) & 0x1) << 5;
+    let bo = expand6((bo0 | bo1 | bo2) as u32);
+    let go0 = (block >> 17) & 0x3F;
+    let go1 = ((block >> 24) & 0x01) << 6;
+    let go = expand7((go0 | go1) as u32);
+    let ro = expand6(((block >> 25) & 0x3F) as u32);
+
+    let mut out = [[0u8; 4]; 16];
+    for j in 0..4i32 {
+        for i in 0..4i32 {
+            let r = (i * (rh - ro) + j * (rv - ro) + 4 * ro + 2) >> 2;
+            let g = (i * (gh - go) + j * (gv - go) + 4 * go + 2) >> 2;
+            let b = (i * (bh - bo) + j * (bv - bo) + 4 * bo + 2) >> 2;
+            out[(j * 4 + i) as usize] = [clamp_u8(r), clamp_u8(g), clamp_u8(b), 255];
+        }
+    }
+    out
+}
+
+/// Expands the two 16-bit index planes into one 2-bit-per-texel word, the
+/// bit-interleave etcpak does before its texel loop.
+fn etc_index_plane(d: u64) -> u32 {
+    fn spread(v: u32) -> u32 {
+        let v = (v | (v << 8)) & 0x00FF_00FF;
+        let v = (v | (v << 4)) & 0x0F0F_0F0F;
+        let v = (v | (v << 2)) & 0x3333_3333;
+        (v | (v << 1)) & 0x5555_5555
+    }
+    let b1 = ((d >> 32) & 0xFFFF) as u32;
+    let b2 = ((d >> 48) & 0xFFFF) as u32;
+    spread(b1) | (spread(b2) << 1)
+}
+
+/// The shared ETC1/ETC2 colour block (etcpak `DecodeRGBPart` /
+/// `DecodeRGBAPart`). `alpha` is the big-endian EAC word for an RGBA stream.
+fn decode_etc2_color(d: u64, alpha: Option<u64>) -> [[u8; 4]; 16] {
+    let (br, bg, bb);
+    if d & 0x2 != 0 {
+        let r0 = ((d & 0xF800_0000) >> 27) as i32;
+        let g0 = ((d & 0x00F8_0000) >> 19) as i32;
+        let b0 = ((d & 0x0000_F800) >> 11) as i32;
+        let r1 = r0 + sign_extend_3(d >> 24);
+        let g1 = g0 + sign_extend_3(d >> 16);
+        let b1 = b0 + sign_extend_3(d >> 8);
+
+        // The three ETC2 escape modes, in etcpak's order: an out-of-range
+        // differential on R selects T, on G selects H, on B selects planar.
+        if !(0..=31).contains(&r1) {
+            let mut t = decode_etc2_t(d);
+            if let Some(a) = alpha {
+                apply_eac_alpha(&mut t, a);
+            }
+            return t;
+        }
+        if !(0..=31).contains(&g1) {
+            let mut h = decode_etc2_h(d);
+            if let Some(a) = alpha {
+                apply_eac_alpha(&mut h, a);
+            }
+            return h;
+        }
+        if !(0..=31).contains(&b1) {
+            let mut p = decode_etc2_planar(d);
+            if let Some(a) = alpha {
+                apply_eac_alpha(&mut p, a);
+            }
+            return p;
+        }
+
+        br = [(r0 << 3) | (r0 >> 2), (r1 << 3) | (r1 >> 2)];
+        bg = [(g0 << 3) | (g0 >> 2), (g1 << 3) | (g1 >> 2)];
+        bb = [(b0 << 3) | (b0 >> 2), (b1 << 3) | (b1 >> 2)];
+    } else {
+        br = [
+            (((d & 0xF000_0000) >> 24) | ((d & 0xF000_0000) >> 28)) as i32,
+            (((d & 0x0F00_0000) >> 20) | ((d & 0x0F00_0000) >> 24)) as i32,
+        ];
+        bg = [
+            (((d & 0x00F0_0000) >> 16) | ((d & 0x00F0_0000) >> 20)) as i32,
+            (((d & 0x000F_0000) >> 12) | ((d & 0x000F_0000) >> 16)) as i32,
+        ];
+        bb = [
+            (((d & 0x0000_F000) >> 8) | ((d & 0x0000_F000) >> 12)) as i32,
+            (((d & 0x0000_0F00) >> 4) | ((d & 0x0000_0F00) >> 8)) as i32,
+        ];
+    }
+
+    let tcw = [((d & 0xE0) >> 5) as usize, ((d & 0x1C) >> 2) as usize];
+    let mut idx = etc_index_plane(d);
+
+    let eac = alpha.map(|a| {
+        (
+            (a >> 56) as i32,
+            ((a >> 52) & 0xF) as i32,
+            &EAC_MODIFIER[((a >> 48) & 0xF) as usize],
+        )
+    });
+
+    let flip = d & 0x1 != 0;
+    let mut out = [[0u8; 4]; 16];
+    for i in 0..4 {
+        for j in 0..4 {
+            // Flipped blocks split into two horizontal halves (by row),
+            // unflipped into two vertical halves (by column).
+            let sub = if flip { j / 2 } else { i / 2 };
+            let modifier = ETC_INTENSITY[tcw[sub]][(idx & 0x3) as usize];
+            let a = match (alpha, eac) {
+                (Some(word), Some((base, mul, table))) => eac_sample(word, base, mul, table, i, j),
+                _ => 255,
+            };
+            out[j * 4 + i] = [
+                clamp_u8(br[sub] + modifier),
+                clamp_u8(bg[sub] + modifier),
+                clamp_u8(bb[sub] + modifier),
+                a,
+            ];
+            idx >>= 2;
+        }
+    }
+    out
+}
+
+/// One EAC 11-bit channel, decoded to 8 bits (etcpak `DecodeRPart`).
+fn decode_eac_channel(word: u64) -> [u8; 16] {
+    let base = (word >> 56) as i32 * 8 + 4;
+    let mul = ((word >> 52) & 0xF) as usize;
+    let table = &EAC_MODIFIER[((word >> 48) & 0xF) as usize];
+    let mut out = [0u8; 16];
+    for i in 0..4 {
+        for j in 0..4 {
+            let shift = 45 - (j as i32) * 3 - (i as i32) * 12;
+            let modifier = table[((word >> shift) & 0x7) as usize];
+            out[j * 4 + i] = clamp_u8((base + modifier * EAC_R11_MUL[mul]) / 8);
+        }
+    }
+    out
+}
+
+fn decode_etc2_rgb_block(block: &[u8; 8]) -> [[u8; 4]; 16] {
+    decode_etc2_color(etc_block_word(block), None)
+}
+
+fn decode_etc2_rgba_block(block: &[u8; 16]) -> [[u8; 4]; 16] {
+    let alpha = u64::from_be_bytes(block[0..8].try_into().expect("8 bytes"));
+    decode_etc2_color(etc_block_word(&block[8..16]), Some(alpha))
+}
+
+fn decode_eac_r11_block(block: &[u8; 8]) -> [[u8; 4]; 16] {
+    let r = decode_eac_channel(u64::from_be_bytes(*block));
+    let mut out = [[0u8; 4]; 16];
+    for (texel, red) in out.iter_mut().zip(r) {
+        *texel = [red, 0, 0, 255];
+    }
+    out
+}
+
+fn decode_eac_rg11_block(block: &[u8; 16]) -> [[u8; 4]; 16] {
+    let r = decode_eac_channel(u64::from_be_bytes(block[0..8].try_into().expect("8 bytes")));
+    let g = decode_eac_channel(u64::from_be_bytes(
+        block[8..16].try_into().expect("8 bytes"),
+    ));
+    let mut out = [[0u8; 4]; 16];
+    for (n, texel) in out.iter_mut().enumerate() {
+        *texel = [r[n], g[n], 0, 255];
+    }
+    out
+}
+
+/// Decodes an ETC2 RGB8 (or ETC1) stream of `width`x`height` pixels into RGBA8.
+///
+/// Expects `ceil(width/4) * ceil(height/4) * 8` bytes; returns `None` if `data`
+/// is shorter than that.
+pub fn decode_etc2_rgb8(data: &[u8], width: usize, height: usize) -> Option<Vec<u8>> {
+    decode_blocks::<8>(data, width, height, decode_etc2_rgb_block)
+}
+
+/// Decodes an ETC2 RGBA8 stream (EAC alpha word + colour word per block).
+pub fn decode_etc2_rgba8(data: &[u8], width: usize, height: usize) -> Option<Vec<u8>> {
+    decode_blocks::<16>(data, width, height, decode_etc2_rgba_block)
+}
+
+/// Decodes an EAC R11 stream into RGBA8 with the value in red, matching how
+/// Godot decompresses single-channel formats to R8.
+pub fn decode_eac_r11(data: &[u8], width: usize, height: usize) -> Option<Vec<u8>> {
+    decode_blocks::<8>(data, width, height, decode_eac_r11_block)
+}
+
+/// Decodes an EAC RG11 stream into RGBA8 with the two channels in red/green.
+pub fn decode_eac_rg11(data: &[u8], width: usize, height: usize) -> Option<Vec<u8>> {
+    decode_blocks::<16>(data, width, height, decode_eac_rg11_block)
 }
 
 #[cfg(test)]

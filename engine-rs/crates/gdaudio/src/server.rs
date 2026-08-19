@@ -876,7 +876,9 @@ bus/2/send = "Master"
     fn mix_applies_3d_attenuation_and_equal_power_pan() {
         use crate::spatial::{AudioListener3D, AudioStreamPlayer3D};
         use gdcore::math::Vector3;
-        // Source 30 units to the listener's right (unit_size 10 → atten 0.25).
+        // Source 30 units to the listener's right. Godot's inverse-distance
+        // gain is 1/(d/unit) = 1/3 (pat-s3rrv.55 corrected this from 0.25,
+        // which came from the old non-Godot curve unit/(unit+d)).
         let src = AudioStreamPlayer3D::new(Vector3::new(30.0, 0.0, 0.0));
         let res = src.compute_spatial(&AudioListener3D::default());
         assert!(

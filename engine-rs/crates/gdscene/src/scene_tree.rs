@@ -286,6 +286,13 @@ pub struct SceneTree {
     /// map; the frame owner refreshes it, and a script's own mutation updates
     /// it eagerly so add-then-query in one frame is consistent.
     input_map_events: std::collections::HashMap<String, usize>,
+    /// Action name → its real bindings (pat-s3rrv.14).
+    ///
+    /// Kept alongside the count mirror rather than replacing it: the counts are
+    /// authoritative for actions a script added at runtime through
+    /// `InputMap.add_action`, which have no engine bindings yet, and losing that
+    /// distinction would make `has_action` disagree with `get_actions`.
+    input_map_bindings: std::collections::HashMap<String, Vec<gdplatform::input::ActionBinding>>,
     /// The packed scene that was used to load the current scene (if any).
     /// Stored for `reload_current_scene()`.
     current_packed_scene: Option<crate::packed_scene::PackedScene>,
@@ -409,6 +416,7 @@ impl SceneTree {
             cursor_shape: 0,
             input_connected_joypads: Vec::new(),
             input_map_events: std::collections::HashMap::new(),
+            input_map_bindings: std::collections::HashMap::new(),
             current_packed_scene: None,
             current_scene_id: None,
             pending_deletions: Vec::new(),
@@ -689,17 +697,38 @@ impl SceneTree {
         // Inbound spawns land under the mirrored `spawn_path`. Godot resolves
         // that path on the *receiving* peer's own spawner node, so a client
         // whose scene puts the spawner elsewhere still parents correctly.
-        let spawn_parent = self.replication_spawn_parent();
+        let owner = self.replication_spawn_owner();
+        let spawn_parent = owner.map(|(_, parent)| parent).unwrap_or(self.root_id);
+        let mut applied: Vec<NodeId> = Vec::new();
         for spawn in spawns {
-            replicator.apply_spawn(self, spawn_parent, &spawn, |path| {
+            if let Some(id) = replicator.apply_spawn(self, spawn_parent, &spawn, |path| {
                 gdcore::file_access::FileAccess::read_file_string(path).ok()
-            });
+            }) {
+                applied.push(id);
+            }
         }
         for sync in syncs {
             replicator.apply_sync(self, &sync);
         }
 
         self.replication.replicator = replicator;
+
+        // A node this peer received is NOT this peer's to announce. Godot gets
+        // that from authority: only the spawn's authority replicates it. Here
+        // the outbound diff would otherwise see the freshly applied child as
+        // "new" and announce it straight back to the sender, which would apply
+        // it, whose own diff would announce it again — an echo that adds one
+        // node per frame on BOTH trees for as long as the peers are connected.
+        // Marking it announced at birth is what makes replication
+        // one-directional.
+        if let Some((spawner_id, _)) = owner {
+            if !applied.is_empty() {
+                let seen = self.replication.announced.entry(spawner_id).or_default();
+                for id in applied {
+                    seen.insert(id);
+                }
+            }
+        }
     }
 
     /// Peers a replication frame should be addressed to (pat-s3rrv.17).
@@ -921,20 +950,24 @@ impl SceneTree {
         }
     }
 
-    /// The node an inbound spawn should be parented under: the `spawn_path` of
-    /// the first registered `MultiplayerSpawner`, falling back to the tree root
-    /// when the scene declares no spawner or the path does not resolve.
-    fn replication_spawn_parent(&self) -> NodeId {
+    /// The spawner that owns inbound spawns and the node they parent under:
+    /// the first registered `MultiplayerSpawner` whose `spawn_path` resolves.
+    ///
+    /// Returns the spawner's own id too, because the caller must mark what it
+    /// applies as already-announced FOR THAT SPAWNER — see
+    /// `apply_replication_packets`. `None` when the scene declares no spawner
+    /// or no path resolves; the caller then parents at the tree root.
+    fn replication_spawn_owner(&self) -> Option<(NodeId, NodeId)> {
         for (spawner_id, spawner) in &self.replication.spawners {
             let path = spawner.get_spawn_path();
             if path.is_empty() {
                 continue;
             }
             if let Some(target) = self.get_node_or_null(*spawner_id, path) {
-                return target;
+                return Some((*spawner_id, target));
             }
         }
-        self.root_id
+        None
     }
 
     /// Polls the multiplayer transport once (call once per frame) and dispatches
@@ -995,6 +1028,20 @@ impl SceneTree {
         // frame with the comment "left for higher layers" — but no higher layer
         // existed: `MultiplayerReplicator` had zero callers outside its own
         // tests, so a spawn or sync that arrived over the wire reached nothing.
+        //
+        // ⚠️ Registration runs BEFORE the inbound drain, not after. Godot
+        // registers a spawner with the MultiplayerAPI on
+        // `NOTIFICATION_POST_ENTER_TREE`, long before any packet is processed,
+        // and the order matters here for a concrete reason:
+        // `replication_spawn_owner` resolves the mirrored parent by walking
+        // the REGISTERED spawners. On a receiver's very first poll that map is
+        // still empty, so the lookup fell through to its `self.root_id`
+        // fallback and parented the spawned node at the scene ROOT instead of
+        // under `spawn_path`. `multiplayer.poll()` drains the inbox, so the
+        // frame that got this wrong was also the only frame that ever saw the
+        // packet — the node existed, at the wrong path, and every later frame
+        // had nothing left to apply.
+        self.register_replication_nodes();
         let other = self.multiplayer.poll();
         let mut spawns = Vec::new();
         let mut syncs = Vec::new();
@@ -1017,7 +1064,7 @@ impl SceneTree {
             .replication
             .clock_ms
             .saturating_add((delta * 1000.0).max(0.0) as u64);
-        self.register_replication_nodes();
+        // (registration already ran above, before the inbound drain)
         self.poll_replication_spawns();
         self.poll_replication_outbound();
 
@@ -1546,6 +1593,26 @@ impl SceneTree {
     /// after applying queued commands.
     pub fn set_input_map_mirror(&mut self, actions: std::collections::HashMap<String, usize>) {
         self.input_map_events = actions;
+    }
+
+    /// The bindings mirrored for `action` (pat-s3rrv.14).
+    ///
+    /// Empty for an action that exists but has no engine binding — which is a
+    /// real state, not an error: `InputMap.add_action` creates exactly that.
+    pub fn input_map_action_bindings(&self, action: &str) -> &[gdplatform::input::ActionBinding] {
+        self.input_map_bindings
+            .get(action)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Replaces the binding mirror from the engine map (pat-s3rrv.14). Called by
+    /// the frame owner beside [`Self::set_input_map_mirror`].
+    pub fn set_input_map_binding_mirror(
+        &mut self,
+        bindings: std::collections::HashMap<String, Vec<gdplatform::input::ActionBinding>>,
+    ) {
+        self.input_map_bindings = bindings;
     }
 
     /// Records a script's `InputMap.add_action`. An existing action keeps its

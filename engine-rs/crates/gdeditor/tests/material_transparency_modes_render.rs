@@ -22,11 +22,21 @@ use gdeditor::viewport_3d_render::{
 };
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::scene_tree::SceneTree;
+use gdserver3d::material::Transparency;
 
 const W: u32 = 64;
 const H: u32 = 64;
 
 fn load(tscn: &str) -> SceneTree {
+    // ⚠️ ClassDB is NOT populated implicitly, and the 3D render list collects
+    // only **Node3D-derived** nodes — a class-chain query. With an empty
+    // registry `is_class("Node3D")` is false for every node, so `build_render_list`
+    // returns nothing, no item carries a material, and BOTH frames come back
+    // identical (and blank). That reads as "transparency was ignored" when in
+    // fact the scene never rendered. The sibling `gdscene/tests/
+    // material_resource_to_pixels.rs` registers for exactly this reason.
+    gdobject::class_db::register_3d_classes();
+
     let scene = PackedScene::from_tscn(tscn).expect("parse tscn");
     let mut tree = SceneTree::new();
     let root = tree.root_id();
@@ -36,6 +46,30 @@ fn load(tscn: &str) -> SceneTree {
 
 fn viewport() -> Viewport3D {
     Viewport3D::new(W, H)
+}
+
+/// The `Transparency` the render pipeline actually sees for the one item that
+/// carries a material, or `None` if no item carries one at all.
+///
+/// ⚠️ This exists because "0 pixels differed" is ambiguous. It is equally
+/// consistent with *the renderer ignoring transparency* and with *no material
+/// ever reaching the renderer*, and those need opposite fixes. Asserting the
+/// intermediate state first turns one verify round into a definite answer
+/// instead of another guess.
+///
+/// The chain being probed: `.tscn` sub-resource → `packed_scene` flattens it
+/// onto the node as `__material__*` (resolved from `surface_material_override/0`
+/// or the MESH sub-resource's own `material` — a bare `material` key is NOT a
+/// Godot property and resolves to nothing) → `material3d_for_node` →
+/// `Render3DItem.material`.
+fn item_transparency(tscn: &str) -> Option<Transparency> {
+    let tree = load(tscn);
+    let inputs = editor_3d_render_inputs(&viewport(), &tree);
+    inputs
+        .items
+        .iter()
+        .find_map(|i| i.material.as_ref())
+        .map(|m| m.transparency)
 }
 
 /// Software frame as linear `Color`s.
@@ -80,6 +114,20 @@ fn differing(a: &[Color], b: &[Color]) -> usize {
 
 /// A red quad in front of a green one, with `transparency` and albedo alpha
 /// substituted in. `1` = Alpha (blend), `0` = Disabled (opaque control).
+/// ⚠️ The material is attached with `surface_material_override/0`, NOT a bare
+/// `material` property.
+///
+/// `MeshInstance3D` has no `material` member in Godot — `doc/classes/
+/// MeshInstance3D.xml` lists only `mesh`, `skeleton` and `skin`, and overriding
+/// goes through `GeometryInstance3D.material_override` or the per-surface
+/// `surface_material_override/N`. A fixture writing `material = SubResource(..)`
+/// authors a property the engine is right to ignore: `packed_scene`'s
+/// `__material__*` flattening resolves the id from `surface_material_override/0`
+/// or from the MESH sub-resource's own `material`, so a bare `material` key
+/// yields no `__material__*` companions, `material3d_for_node` returns `None`,
+/// and the renderer never sees a material at all. The symptom is
+/// "0 pixels differed", which reads like the renderer ignoring transparency
+/// when in fact nothing was ever attached.
 fn two_quads(transparency: i32, near_alpha: f32) -> String {
     format!(
         r#"[gd_scene load_steps=2 format=3]
@@ -101,7 +149,7 @@ mesh = "primitive:PlaneMesh"
 [node name="Near" type="MeshInstance3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
 mesh = "primitive:PlaneMesh"
-material = SubResource("Near_1")
+surface_material_override/0 = SubResource("Near_1")
 "#
     )
 }
@@ -125,7 +173,7 @@ current = true
 
 [node name="Quad" type="MeshInstance3D" parent="."]
 mesh = "primitive:PlaneMesh"
-material = SubResource("Cut_1")
+surface_material_override/0 = SubResource("Cut_1")
 "#
     )
 }
@@ -157,7 +205,7 @@ current = true
 
 [node name="Cube" type="MeshInstance3D" parent="."]
 mesh = "primitive:BoxMesh"
-material = SubResource("Cull_1")
+surface_material_override/0 = SubResource("Cull_1")
 "#
     )
 }
@@ -181,6 +229,30 @@ fn material_transparency_modes_render() {
              still runs and is asserted in full."
         );
     }
+
+    // -- Case 0: the material reaches the pipeline at all --------------------
+    //
+    // Checked BEFORE any pixel comparison so that a failure below cannot be
+    // misread. If this fails, the bug is in scene loading or material
+    // flattening and the renderer is innocent; if this passes and the pixel
+    // assertions still fail, the renderer really is ignoring the mode.
+    assert_eq!(
+        item_transparency(&two_quads(1, 0.5)),
+        Some(Transparency::Alpha),
+        "the authored StandardMaterial3D must reach Render3DItem.material with \
+         transparency = Alpha. `None` means no item carried a material at all — \
+         `packed_scene` resolves __material__* from surface_material_override/0 \
+         or the mesh sub-resource's own material, so check that the fixture \
+         attaches it by one of those. `Some(Disabled)` means the material \
+         arrived but `transparency` was dropped between the .tscn and \
+         StandardMaterial3D.",
+    );
+    assert_eq!(
+        item_transparency(&two_quads(0, 1.0)),
+        Some(Transparency::Disabled),
+        "the opaque control must also carry a material — otherwise the two runs \
+         differ by more than the property under test",
+    );
 
     // -- Case 1: transparency = Alpha blends the far surface through ----------
     //

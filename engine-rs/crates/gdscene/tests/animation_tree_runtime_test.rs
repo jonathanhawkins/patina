@@ -114,7 +114,14 @@ fn state_machine_drives_node_property_over_time() {
 /// A scene in Godot's own `.tscn` layout: an `AnimationPlayer` holding an
 /// `AnimationLibrary` of two clips, plus an `AnimationTree` whose `tree_root` is
 /// an `AnimationNodeStateMachine` over those clips with a conditional,
-/// crossfading transition (`advance_condition = &"run"`, `xfade_time = 0.5`).
+/// crossfading transition (`advance_condition = &"run"`, `xfade_time = 0.5`,
+/// `advance_mode = 2`).
+///
+/// ⚠️ `advance_mode = 2` (AUTO) is REQUIRED for a condition to fire the edge on
+/// its own — Godot's default of ENABLED means "usable by `travel()` only"
+/// (doc/classes/AnimationNodeStateMachineTransition.xml). The fixture omitted
+/// it while Patina took any edge whose condition was true; pat-s3rrv.1 made the
+/// gate faithful, so the scene now has to say what a real Godot scene says.
 ///
 /// Each clip drives two tracks so the test can tell time-advance from blending:
 /// `x` ramps (idle 0->10, run 0->100) and `y` is held constant (idle 100, run 0),
@@ -169,6 +176,7 @@ xfade_time = 0.0
 [sub_resource type="AnimationNodeStateMachineTransition" id="Trans_run"]
 xfade_time = 0.5
 advance_condition = &"run"
+advance_mode = 2
 
 [sub_resource type="AnimationNodeStateMachine" id="StateMachine_main"]
 states/idle/node = SubResource("Anim_idle")

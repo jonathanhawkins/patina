@@ -1049,17 +1049,19 @@ impl PackedScene {
             // `TileSet.tile_size` is the map's cell size. Godot omits it when it
             // is the 16x16 default, so an absent property is not "no tile set".
             let tile_size = match set_props.get("tile_size") {
-                Some(Variant::Vector2i(v)) => Variant::Vector2i(*v),
-                Some(Variant::Vector2(v)) => {
-                    Variant::Vector2i(gdcore::math::Vector2i::new(v.x as i32, v.y as i32))
-                }
-                _ => Variant::Vector2i(gdcore::math::Vector2i::new(16, 16)),
+                Some(Variant::Vector2i(v)) => *v,
+                Some(Variant::Vector2(v)) => gdcore::math::Vector2i::new(v.x as i32, v.y as i32),
+                _ => gdcore::math::Vector2i::new(16, 16),
             };
-            tmpl.properties
-                .insert(format!("{TILE_SET_PREFIX}tile_size"), tile_size);
+            tmpl.properties.insert(
+                format!("{TILE_SET_PREFIX}tile_size"),
+                Variant::Vector2i(tile_size),
+            );
 
             let mut source_ids: Vec<i32> = Vec::new();
             let mut physics_source_ids: Vec<i32> = Vec::new();
+            let mut nav_source_ids: Vec<i32> = Vec::new();
+            let mut occl_source_ids: Vec<i32> = Vec::new();
             for (key, value) in set_props {
                 // `sources/3 = SubResource("TileSetAtlasSource_x")`
                 let Some(id_str) = key.strip_prefix("sources/") else {
@@ -1107,6 +1109,24 @@ impl PackedScene {
                 if collect_tile_physics(source_id, source_props, &mut tmpl.properties) {
                     physics_source_ids.push(source_id);
                 }
+                if collect_tile_navigation(
+                    source_id,
+                    source_props,
+                    &sub_resource_props,
+                    tile_size,
+                    &mut tmpl.properties,
+                ) {
+                    nav_source_ids.push(source_id);
+                }
+                if collect_tile_occlusion(
+                    source_id,
+                    source_props,
+                    &sub_resource_props,
+                    tile_size,
+                    &mut tmpl.properties,
+                ) {
+                    occl_source_ids.push(source_id);
+                }
             }
             source_ids.sort_unstable();
             tmpl.properties.insert(
@@ -1118,6 +1138,18 @@ impl PackedScene {
             tmpl.properties.insert(
                 crate::tilemap::TILE_PHYSICS_SOURCES.to_string(),
                 Variant::PackedInt32Array(physics_source_ids),
+            );
+            nav_source_ids.sort_unstable();
+            nav_source_ids.dedup();
+            tmpl.properties.insert(
+                crate::tilemap::TILE_NAV_SOURCES.to_string(),
+                Variant::PackedInt32Array(nav_source_ids),
+            );
+            occl_source_ids.sort_unstable();
+            occl_source_ids.dedup();
+            tmpl.properties.insert(
+                crate::tilemap::TILE_OCCLUDER_SOURCES.to_string(),
+                Variant::PackedInt32Array(occl_source_ids),
             );
         }
 
@@ -1719,6 +1751,193 @@ fn extract_header_attrs(header: &str) -> HashMap<String, String> {
 ///
 /// Returns whether the source contributed any collision at all, so the caller
 /// can record it in `__tile_physics_sources__`.
+/// Flattens a `TileSetAtlasSource`'s navigation polygons onto the node
+/// (pat-s3rrv.65). Returns `true` when the source has any.
+///
+/// Mirrors [`collect_tile_physics`], with one difference that is not cosmetic:
+///
+/// ⚠️ **The two families do not share an origin.** Godot authors both relative
+/// to the tile CENTRE, and physics carries over untouched because
+/// `tilemap_to_physics` places the body at that centre. Navigation does not:
+/// [`TILE_NAV_POLYGON`](crate::tilemap::TILE_NAV_POLYGON) is tile-local from the
+/// TOP-LEFT corner, and `tile_navigation_polygons` adds the cell corner to every
+/// point. So half a tile goes back ON here, exactly as the saver takes it off.
+/// Skip the rebasing and the walkable area lands over the tile's top-left
+/// corner — a quarter-tile of overlap per cell, which still produces a
+/// navigable-looking mesh.
+///
+/// ⚠️ Patina's model holds ONE polygon for the whole layer, where Godot holds
+/// one per `TileData`. The first tile in atlas order wins and per-tile variation
+/// is lost; a file that varies its polygon per tile round-trips to the first
+/// one. Widening that is a model change in `tilemap.rs`, not a parsing change.
+/// Flattens a `TileSetAtlasSource`'s occluder polygons onto the node
+/// (pat-s3rrv.65). Returns `true` when the source has any.
+///
+/// ⚠️ TWO key spellings, and Godot writes the LONGER one:
+/// `occlusion_layer_<i>/polygon_<j>/polygon` is what a real save contains, while
+/// the two-component `occlusion_layer_<i>/polygon` is explicitly "Kept for
+/// compatibility" (`tile_set.cpp:6715`). A tile may hold SEVERAL occluder
+/// polygons per layer, which is why the index exists at all — navigation has no
+/// equivalent. Both are accepted here; only the indexed form is written.
+///
+/// The value is a `Ref<OccluderPolygon2D>` either way, so the geometry lives in
+/// a sub-resource under `polygon` and half a tile goes back on, exactly as for
+/// navigation.
+fn collect_tile_occlusion(
+    source_id: i32,
+    source_props: &HashMap<String, Variant>,
+    sub_resource_props: &HashMap<String, HashMap<String, Variant>>,
+    tile_size: gdcore::math::Vector2i,
+    out: &mut HashMap<String, Variant>,
+) -> bool {
+    let half = gdcore::math::Vector2::new(tile_size.x as f32 / 2.0, tile_size.y as f32 / 2.0);
+    let mut found: Vec<(gdcore::math::Vector2i, Vec<gdcore::math::Vector2>)> = Vec::new();
+
+    for (key, value) in source_props {
+        let Some((coords, rest)) = key.split_once('/') else {
+            continue;
+        };
+        let Some((ax, ay)) = coords.split_once(':') else {
+            continue;
+        };
+        let (Ok(ax), Ok(ay)) = (ax.trim().parse::<i32>(), ay.trim().parse::<i32>()) else {
+            continue;
+        };
+        let Some((_alt, layer_rest)) = rest.split_once('/') else {
+            continue;
+        };
+        if !layer_rest.starts_with("occlusion_layer_") || !layer_rest.ends_with("/polygon") {
+            continue;
+        }
+        let Variant::String(reference) = value else {
+            continue;
+        };
+        let Some(id) = reference.strip_prefix("SubResource:") else {
+            continue;
+        };
+        let Some(props) = sub_resource_props.get(id) else {
+            continue;
+        };
+        let points = match props.get("polygon") {
+            Some(Variant::PackedVector2Array(p)) => p.clone(),
+            _ => continue,
+        };
+        if points.len() >= 3 {
+            found.push((gdcore::math::Vector2i::new(ax, ay), points));
+        }
+    }
+
+    if found.is_empty() {
+        return false;
+    }
+    found.sort_by_key(|(a, _)| (a.y, a.x));
+
+    let rebased: Vec<gdcore::math::Vector2> = found[0].1.iter().map(|p| *p + half).collect();
+    let whole_tile = vec![
+        gdcore::math::Vector2::new(0.0, 0.0),
+        gdcore::math::Vector2::new(tile_size.x as f32, 0.0),
+        gdcore::math::Vector2::new(tile_size.x as f32, tile_size.y as f32),
+        gdcore::math::Vector2::new(0.0, tile_size.y as f32),
+    ];
+    if rebased != whole_tile {
+        out.insert(
+            crate::tilemap::TILE_OCCLUDER_POLYGON.to_string(),
+            Variant::PackedVector2Array(rebased),
+        );
+    }
+    true
+}
+
+fn collect_tile_navigation(
+    source_id: i32,
+    source_props: &HashMap<String, Variant>,
+    sub_resource_props: &HashMap<String, HashMap<String, Variant>>,
+    tile_size: gdcore::math::Vector2i,
+    out: &mut HashMap<String, Variant>,
+) -> bool {
+    let half = gdcore::math::Vector2::new(tile_size.x as f32 / 2.0, tile_size.y as f32 / 2.0);
+    // Sorted so "the first tile" is the same tile on every load; a HashMap walk
+    // would pick a different polygon run to run.
+    let mut found: Vec<(gdcore::math::Vector2i, Vec<gdcore::math::Vector2>)> = Vec::new();
+
+    for (key, value) in source_props {
+        // Split `<ax>:<ay>/<alt>/navigation_layer_<n>/polygon`.
+        let Some((coords, rest)) = key.split_once('/') else {
+            continue;
+        };
+        let Some((ax, ay)) = coords.split_once(':') else {
+            continue;
+        };
+        let (Ok(ax), Ok(ay)) = (ax.trim().parse::<i32>(), ay.trim().parse::<i32>()) else {
+            continue;
+        };
+        let Some((_alt, layer_rest)) = rest.split_once('/') else {
+            continue;
+        };
+        if !layer_rest.starts_with("navigation_layer_") || !layer_rest.ends_with("/polygon") {
+            continue;
+        }
+        let points = match value {
+            // ⚠️ The real Godot shape: the key holds a `NavigationPolygon`
+            // RESOURCE, so the value is a SubResource reference and the geometry
+            // lives in that section's `vertices`. Reading only the inline array
+            // below would silently skip every polygon a real Godot project — or
+            // this engine's own saver — writes (pat-s3rrv.65).
+            Variant::String(reference) => {
+                let Some(id) = reference.strip_prefix("SubResource:") else {
+                    continue;
+                };
+                let Some(props) = sub_resource_props.get(id) else {
+                    continue;
+                };
+                match props.get("vertices") {
+                    Some(Variant::PackedVector2Array(p)) => p.clone(),
+                    _ => continue,
+                }
+            }
+            // Tolerated for hand-written scenes and older files: a bare point
+            // array. Godot itself drops these (a PackedVector2Array converts to
+            // a null `Ref<NavigationPolygon>`), so accepting it here is strictly
+            // more forgiving than the engine we are matching.
+            Variant::PackedVector2Array(p) => p.clone(),
+            Variant::Array(items) => items
+                .iter()
+                .filter_map(|v| match v {
+                    Variant::Vector2(p) => Some(*p),
+                    _ => None,
+                })
+                .collect(),
+            _ => continue,
+        };
+        if points.len() >= 3 {
+            found.push((gdcore::math::Vector2i::new(ax, ay), points));
+        }
+    }
+
+    if found.is_empty() {
+        return false;
+    }
+    found.sort_by_key(|(a, _)| (a.y, a.x));
+
+    let rebased: Vec<gdcore::math::Vector2> = found[0].1.iter().map(|p| *p + half).collect();
+    // The whole-tile rect is the default; storing it explicitly would be
+    // indistinguishable in behaviour but would make an unedited tile look
+    // edited on the next save.
+    let whole_tile = vec![
+        gdcore::math::Vector2::new(0.0, 0.0),
+        gdcore::math::Vector2::new(tile_size.x as f32, 0.0),
+        gdcore::math::Vector2::new(tile_size.x as f32, tile_size.y as f32),
+        gdcore::math::Vector2::new(0.0, tile_size.y as f32),
+    ];
+    if rebased != whole_tile {
+        out.insert(
+            crate::tilemap::TILE_NAV_POLYGON.to_string(),
+            Variant::PackedVector2Array(rebased),
+        );
+    }
+    true
+}
+
 fn collect_tile_physics(
     source_id: i32,
     source_props: &HashMap<String, Variant>,

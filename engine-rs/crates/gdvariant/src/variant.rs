@@ -6,8 +6,11 @@
 
 use crate::dictionary::Dictionary;
 use gdcore::id::ObjectId;
-use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector2i, Vector3, Vector3i};
-use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
+use gdcore::id::Rid;
+use gdcore::math::{
+    Color, Rect2, Rect2i, Transform2D, Vector2, Vector2i, Vector3, Vector3i, Vector4, Vector4i,
+};
+use gdcore::math3d::{Aabb, Basis, Plane, Projection, Quaternion, Transform3D};
 use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
 use std::collections::HashMap;
@@ -33,6 +36,20 @@ pub enum CallableRef {
         params: Vec<String>,
         /// Serialised body (stored as opaque bytes; the interpreter casts back).
         body: Arc<dyn std::any::Any + Send + Sync>,
+        /// Enclosing locals captured BY VALUE when the `func(...)` expression
+        /// evaluated (pat-s3rrv.67).
+        ///
+        /// Godot's `GDScriptLambdaCallable` stores the captured Variants and
+        /// rebinds them on every invocation, so a lambda held in an Array, a
+        /// Tween or a signal connection still sees the values from where it was
+        /// written. Patina bound nothing, and invoked the body against whatever
+        /// environment happened to be current at CALL time — so the canonical
+        /// `for i in n: cbs.append(func(): total += i)` read a stale `i`, or
+        /// raised because the name no longer existed.
+        ///
+        /// `Arc` so cloning a Callable stays cheap; the map is never mutated
+        /// after construction, which is what "by value" means here.
+        captures: Arc<HashMap<String, Variant>>,
     },
     /// A callable with extra arguments bound (appended after call-site args).
     Bound {
@@ -178,13 +195,28 @@ pub enum VariantType {
     /// Integer 3D vector (Godot `Vector3i`).
     Vector3i,
     Rect2,
+    /// Integer 2D rectangle (Godot `Rect2i`) — a TileSet atlas region or a
+    /// pixel-exact UI rect, which [`Rect2`](Self::Rect2)'s floats would round
+    /// (pat-s3rrv.59).
+    Rect2i,
     Transform2D,
+    /// 4D float vector (Godot `Vector4`): a shader `vec4`, a homogeneous
+    /// coordinate, a column of a [`Projection`](Self::Projection).
+    Vector4,
+    /// 4D integer vector (Godot `Vector4i`).
+    Vector4i,
     Color,
     Basis,
     Transform3D,
+    /// A 4×4 projection matrix (Godot `Projection`): every camera and XR view
+    /// matrix.
+    Projection,
     Quaternion,
     Aabb,
     Plane,
+    /// An opaque server handle (Godot `RID`) — what every `*Server` API
+    /// returns.
+    Rid,
     ObjectId,
     Array,
     Dictionary,
@@ -202,6 +234,9 @@ pub enum VariantType {
     PackedVector2Array,
     PackedVector3Array,
     PackedColorArray,
+    /// A tightly-packed array of 4D vectors (`PackedVector4Array`, Godot 4.3+):
+    /// skin weights and raw shader data.
+    PackedVector4Array,
 }
 
 /// A dynamically-typed engine value, analogous to Godot's `Variant`.
@@ -233,20 +268,34 @@ pub enum Variant {
     Vector3i(Vector3i),
     /// An axis-aligned 2D rectangle.
     Rect2(Rect2),
+    /// An axis-aligned 2D rectangle with integer bounds (Godot `Rect2i`).
+    Rect2i(Rect2i),
     /// A 2D affine transform.
     Transform2D(Transform2D),
+    /// A 4D vector (Godot `Vector4`).
+    Vector4(Vector4),
+    /// An integer 4D vector (Godot `Vector4i`).
+    Vector4i(Vector4i),
     /// An RGBA color.
     Color(Color),
     /// A 3×3 rotation/scale matrix.
     Basis(Basis),
     /// A 3D affine transform.
     Transform3D(Transform3D),
+    /// A 4×4 projection matrix (Godot `Projection`), stored column-major.
+    Projection(Projection),
     /// A quaternion rotation.
     Quaternion(Quaternion),
     /// An axis-aligned bounding box.
     Aabb(Aabb),
     /// An infinite plane.
     Plane(Plane),
+    /// An opaque server handle (Godot `RID`).
+    ///
+    /// Carried by value rather than boxed: it is a single `u64` and every
+    /// `*Server` call produces one, so an allocation per handle would be a
+    /// real cost.
+    Rid(Rid),
     /// A reference to an engine object by ID.
     ObjectId(ObjectId),
     /// A heterogeneous ordered list.
@@ -288,6 +337,8 @@ pub enum Variant {
     PackedVector3Array(Vec<Vector3>),
     /// A tightly-packed array of colors (`PackedColorArray`).
     PackedColorArray(Vec<Color>),
+    /// A tightly-packed array of 4D vectors (`PackedVector4Array`).
+    PackedVector4Array(Vec<Vector4>),
 }
 
 impl Variant {
@@ -306,13 +357,18 @@ impl Variant {
             Self::Vector3(_) => VariantType::Vector3,
             Self::Vector3i(_) => VariantType::Vector3i,
             Self::Rect2(_) => VariantType::Rect2,
+            Self::Rect2i(_) => VariantType::Rect2i,
             Self::Transform2D(_) => VariantType::Transform2D,
+            Self::Vector4(_) => VariantType::Vector4,
+            Self::Vector4i(_) => VariantType::Vector4i,
             Self::Color(_) => VariantType::Color,
             Self::Basis(_) => VariantType::Basis,
             Self::Transform3D(_) => VariantType::Transform3D,
+            Self::Projection(_) => VariantType::Projection,
             Self::Quaternion(_) => VariantType::Quaternion,
             Self::Aabb(_) => VariantType::Aabb,
             Self::Plane(_) => VariantType::Plane,
+            Self::Rid(_) => VariantType::Rid,
             Self::ObjectId(_) => VariantType::ObjectId,
             Self::Array(_) => VariantType::Array,
             Self::Dictionary(_) => VariantType::Dictionary,
@@ -327,6 +383,7 @@ impl Variant {
             Self::PackedVector2Array(_) => VariantType::PackedVector2Array,
             Self::PackedVector3Array(_) => VariantType::PackedVector3Array,
             Self::PackedColorArray(_) => VariantType::PackedColorArray,
+            Self::PackedVector4Array(_) => VariantType::PackedVector4Array,
             Self::Signal { .. } => VariantType::Signal,
         }
     }
@@ -365,6 +422,7 @@ impl Variant {
             Self::PackedVector2Array(v) => !v.is_empty(),
             Self::PackedVector3Array(v) => !v.is_empty(),
             Self::PackedColorArray(v) => !v.is_empty(),
+            Self::PackedVector4Array(v) => !v.is_empty(),
             _ => true,
         }
     }
@@ -453,6 +511,7 @@ impl Variant {
                 | Self::PackedVector2Array(_)
                 | Self::PackedVector3Array(_)
                 | Self::PackedColorArray(_)
+                | Self::PackedVector4Array(_)
         )
     }
 
@@ -468,6 +527,7 @@ impl Variant {
             Self::PackedVector2Array(v) => v.len(),
             Self::PackedVector3Array(v) => v.len(),
             Self::PackedColorArray(v) => v.len(),
+            Self::PackedVector4Array(v) => v.len(),
             _ => return None,
         })
     }
@@ -491,6 +551,7 @@ impl Variant {
             Self::PackedVector2Array(v) => Variant::Vector2(*v.get(index)?),
             Self::PackedVector3Array(v) => Variant::Vector3(*v.get(index)?),
             Self::PackedColorArray(v) => Variant::Color(*v.get(index)?),
+            Self::PackedVector4Array(v) => Variant::Vector4(*v.get(index)?),
             _ => return None,
         })
     }
@@ -516,6 +577,10 @@ impl Variant {
             },
             Self::PackedColorArray(v) => match value {
                 Variant::Color(x) => set_slot(v, index, *x),
+                _ => false,
+            },
+            Self::PackedVector4Array(v) => match value {
+                Variant::Vector4(x) => set_slot(v, index, *x),
                 _ => false,
             },
             _ => false,
@@ -545,6 +610,10 @@ impl Variant {
                 Variant::Color(x) => v.push(*x),
                 _ => return false,
             },
+            Self::PackedVector4Array(v) => match value {
+                Variant::Vector4(x) => v.push(*x),
+                _ => return false,
+            },
             _ => return false,
         }
         true
@@ -564,6 +633,7 @@ impl Variant {
             Self::PackedVector2Array(v) => v.resize(new_len, Vector2::ZERO),
             Self::PackedVector3Array(v) => v.resize(new_len, Vector3::ZERO),
             Self::PackedColorArray(v) => v.resize(new_len, Color::new(0.0, 0.0, 0.0, 1.0)),
+            Self::PackedVector4Array(v) => v.resize(new_len, Vector4::ZERO),
             _ => return false,
         }
         true
@@ -585,6 +655,7 @@ impl Variant {
             Self::PackedVector2Array(v) => Self::PackedVector2Array(v[b..e].to_vec()),
             Self::PackedVector3Array(v) => Self::PackedVector3Array(v[b..e].to_vec()),
             Self::PackedColorArray(v) => Self::PackedColorArray(v[b..e].to_vec()),
+            Self::PackedVector4Array(v) => Self::PackedVector4Array(v[b..e].to_vec()),
             _ => return None,
         })
     }
@@ -634,6 +705,18 @@ impl Variant {
                 })
                 .flatten()
                 .collect(),
+            Self::PackedVector4Array(v) => v
+                .iter()
+                .flat_map(|p| {
+                    [
+                        p.x.to_le_bytes(),
+                        p.y.to_le_bytes(),
+                        p.z.to_le_bytes(),
+                        p.w.to_le_bytes(),
+                    ]
+                })
+                .flatten()
+                .collect(),
             _ => return None,
         };
         Some(Variant::PackedByteArray(bytes))
@@ -671,6 +754,14 @@ impl Variant {
                 cmp_f32_pair(a.r, a.g, b.r, b.g)
                     .then(f32_cmp(a.b, b.b))
                     .then(f32_cmp(a.a, b.a))
+            }),
+            // Godot sorts a PackedVector4Array lexicographically by component,
+            // the same total order the Vector2/Vector3 arms use extended by one
+            // axis.
+            Self::PackedVector4Array(v) => v.sort_by(|a, b| {
+                cmp_f32_pair(a.x, a.y, b.x, b.y)
+                    .then(f32_cmp(a.z, b.z))
+                    .then(f32_cmp(a.w, b.w))
             }),
             _ => return false,
         }
@@ -766,6 +857,7 @@ impl Variant {
             Self::PackedVector2Array(v) => v.reverse(),
             Self::PackedVector3Array(v) => v.reverse(),
             Self::PackedColorArray(v) => v.reverse(),
+            Self::PackedVector4Array(v) => v.reverse(),
             _ => return false,
         }
         true
@@ -807,6 +899,7 @@ impl Variant {
             Self::PackedVector2Array(v) => v[at..].rotate_right(1),
             Self::PackedVector3Array(v) => v[at..].rotate_right(1),
             Self::PackedColorArray(v) => v[at..].rotate_right(1),
+            Self::PackedVector4Array(v) => v[at..].rotate_right(1),
             _ => return false,
         }
         true
@@ -831,6 +924,7 @@ impl Variant {
             Self::PackedVector2Array(v) => drop(v.remove(index)),
             Self::PackedVector3Array(v) => drop(v.remove(index)),
             Self::PackedColorArray(v) => drop(v.remove(index)),
+            Self::PackedVector4Array(v) => drop(v.remove(index)),
             _ => return false,
         }
         true
@@ -1184,6 +1278,16 @@ impl fmt::Display for Variant {
                 "[P: ({}, {}), S: ({}, {})]",
                 r.position.x, r.position.y, r.size.x, r.size.y
             ),
+            // `Rect2i::operator String` (core/math/rect2i.cpp:36) is the same
+            // `[P: …, S: …]` shape as Rect2 — the components differ, the
+            // envelope does not.
+            Self::Rect2i(r) => write!(
+                f,
+                "[P: ({}, {}), S: ({}, {})]",
+                r.position.x, r.position.y, r.size.x, r.size.y
+            ),
+            Self::Vector4(v) => write!(f, "({}, {}, {}, {})", v.x, v.y, v.z, v.w),
+            Self::Vector4i(v) => write!(f, "({}, {}, {}, {})", v.x, v.y, v.z, v.w),
             Self::Transform2D(t) => write!(
                 f,
                 "[X: ({}, {}), Y: ({}, {}), O: ({}, {})]",
@@ -1211,6 +1315,17 @@ impl fmt::Display for Variant {
                 t.origin.y,
                 t.origin.z
             ),
+            // `Projection::operator String` (core/math/projection.cpp:851)
+            // labels its four COLUMNS X/Y/Z/W, each printed as a Vector4.
+            // Storage is column-major, so `m[c]` is a whole column.
+            Self::Projection(p) => write!(
+                f,
+                "[X: ({}, {}, {}, {}), Y: ({}, {}, {}, {}), Z: ({}, {}, {}, {}), W: ({}, {}, {}, {})]",
+                p.m[0][0], p.m[0][1], p.m[0][2], p.m[0][3],
+                p.m[1][0], p.m[1][1], p.m[1][2], p.m[1][3],
+                p.m[2][0], p.m[2][1], p.m[2][2], p.m[2][3],
+                p.m[3][0], p.m[3][1], p.m[3][2], p.m[3][3],
+            ),
             Self::Quaternion(q) => write!(f, "({}, {}, {}, {})", q.x, q.y, q.z, q.w),
             Self::Aabb(a) => write!(
                 f,
@@ -1222,6 +1337,9 @@ impl fmt::Display for Variant {
                 "[N: ({}, {}, {}), D: {}]",
                 p.normal.x, p.normal.y, p.normal.z, p.d
             ),
+            // `Variant::stringify` (core/variant/variant.cpp:1739) prints a
+            // handle as `RID(<id>)`, NOT the bare number.
+            Self::Rid(r) => write!(f, "RID({})", r.id()),
             Self::ObjectId(id) => write!(f, "<Object#{id}>"),
             Self::Array(a) => write!(f, "[{}]", join_variants(a)),
             // Godot pads a dictionary's braces: `{ "k": v }`.
@@ -1268,6 +1386,14 @@ impl fmt::Display for Variant {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            Self::PackedVector4Array(v) => write!(
+                f,
+                "[{}]",
+                v.iter()
+                    .map(|e| format!("({}, {}, {}, {})", e.x, e.y, e.z, e.w))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Self::Signal { object_id, name } => {
                 write!(f, "Signal(<Object#{object_id}>, \"{name}\")")
             }
@@ -1290,13 +1416,20 @@ impl fmt::Display for VariantType {
             Self::Vector3 => "Vector3",
             Self::Vector3i => "Vector3i",
             Self::Rect2 => "Rect2",
+            Self::Rect2i => "Rect2i",
             Self::Transform2D => "Transform2D",
+            Self::Vector4 => "Vector4",
+            Self::Vector4i => "Vector4i",
             Self::Color => "Color",
             Self::Basis => "Basis",
             Self::Transform3D => "Transform3D",
+            Self::Projection => "Projection",
             Self::Quaternion => "Quaternion",
             Self::Aabb => "AABB",
             Self::Plane => "Plane",
+            // Godot's own type name is the upper-case acronym (`RID`), which
+            // is what `type_string()` and every error message print.
+            Self::Rid => "RID",
             Self::ObjectId => "ObjectId",
             Self::Array => "Array",
             Self::Dictionary => "Dictionary",
@@ -1312,6 +1445,7 @@ impl fmt::Display for VariantType {
             Self::PackedVector2Array => "PackedVector2Array",
             Self::PackedVector3Array => "PackedVector3Array",
             Self::PackedColorArray => "PackedColorArray",
+            Self::PackedVector4Array => "PackedVector4Array",
         };
         write!(f, "{name}")
     }

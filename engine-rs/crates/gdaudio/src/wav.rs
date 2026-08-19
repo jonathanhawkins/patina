@@ -5,6 +5,7 @@
 //! formats, converting all to normalized `f32` samples.
 
 use crate::sample::{AudioSampleBuffer, ChannelLayout};
+use crate::stream::LoopMode;
 
 /// Errors that can occur during WAV decoding.
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +58,28 @@ pub struct WavHeader {
     pub sample_rate: u32,
     /// Bits per sample (8, 16, 24, or 32).
     pub bits_per_sample: u16,
+    /// The file's declared loop, from its `smpl` chunk (pat-s3rrv.56).
+    ///
+    /// `None` when the file carries no `smpl` chunk or declares zero loops —
+    /// the common case, and the behaviour every existing caller already saw.
+    pub loop_points: Option<WavLoop>,
+}
+
+/// A WAV file's first sampler loop, as Godot's `AudioStreamWAV` models it.
+///
+/// ⚠️ `begin`/`end` are in FRAMES, not seconds — that is the unit the RIFF
+/// `smpl` chunk and Godot's `loop_begin`/`loop_end` both use. The playback API
+/// takes SECONDS, so a caller must divide by the sample rate; handing frames
+/// straight to `set_loop_begin` silently produces a loop hundreds of times too
+/// long, which sounds like no loop at all on a short sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WavLoop {
+    /// Loop mode, translated from the WAV loop type.
+    pub mode: LoopMode,
+    /// First frame of the loop region.
+    pub begin: u32,
+    /// Last frame of the loop region.
+    pub end: u32,
 }
 
 /// Reads a little-endian u16 from a byte slice.
@@ -103,6 +126,49 @@ pub fn parse_wav_header(data: &[u8]) -> Result<WavHeader, WavError> {
         num_channels,
         sample_rate,
         bits_per_sample,
+        loop_points: parse_smpl_loop(data),
+    })
+}
+
+/// Reads the first loop out of a WAV `smpl` chunk (pat-s3rrv.56).
+///
+/// The RIFF sampler chunk is 36 bytes of header (manufacturer, product, sample
+/// period, MIDI unity note, MIDI pitch fraction, SMPTE format, SMPTE offset,
+/// loop count, sampler-data size) followed by 24 bytes per loop. Godot reads
+/// only the FIRST loop (`resource_importer_wav.cpp`); a multi-loop sampler file
+/// is not an error, its extra loops simply have no representation.
+///
+/// ⚠️ THE WAV LOOP `type` FIELD AND GODOT'S `LoopMode` ARE DIFFERENT
+/// NUMBERINGS, and they overlap, so a raw copy compiles and is wrong: WAV uses
+/// 0 = forward, 1 = alternating, 2 = backward, while Godot uses 0 = disabled,
+/// 1 = forward, 2 = ping-pong, 3 = backward. Copying the value across turns
+/// every forward loop into a DISABLED one — indistinguishable from the old
+/// unlooped behaviour, so the bug would present as "looping was never
+/// implemented".
+fn parse_smpl_loop(data: &[u8]) -> Option<WavLoop> {
+    let (offset, size) = find_chunk(data, b"smpl")?;
+    let chunk = data.get(offset..)?;
+    // 36 bytes of chunk header, then the first 24-byte loop record.
+    if size < 60 || chunk.len() < 60 {
+        return None;
+    }
+    // A `smpl` chunk that declares no loops is well-formed — plenty of files
+    // carry one only for its MIDI unity-note data. It just has nothing to loop.
+    if read_u32_le(chunk, 28) == 0 {
+        return None;
+    }
+    let mode = match read_u32_le(chunk, 36 + 4) {
+        0 => LoopMode::Forward,
+        1 => LoopMode::PingPong,
+        2 => LoopMode::Backward,
+        // An unknown type still means "this file wants to loop"; forward is the
+        // safe reading and matches Godot's own fallback.
+        _ => LoopMode::Forward,
+    };
+    Some(WavLoop {
+        mode,
+        begin: read_u32_le(chunk, 36 + 8),
+        end: read_u32_le(chunk, 36 + 12),
     })
 }
 

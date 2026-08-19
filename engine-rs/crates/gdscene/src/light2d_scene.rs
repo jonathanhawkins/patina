@@ -196,6 +196,61 @@ pub fn collect_occluders_2d(tree: &SceneTree) -> Vec<LightOccluder2D> {
         };
         occluders.push(occ);
     }
+
+    // Tile occluders (pat-s3rrv.65).
+    //
+    // ⚠️ Until now `collect_occluders_2d` only ever looked at nodes whose class
+    // is literally `LightOccluder2D`, so a tile could not cast a shadow at all —
+    // which is why the occlusion half of the TileSet editor had to start here
+    // rather than with a route: authoring it first would have written data that
+    // round-trips through the file and lights nothing.
+    for id in tree.all_nodes_in_tree_order() {
+        let Some(node) = tree.get_node(id) else {
+            continue;
+        };
+        if !matches!(node.class_name(), "TileMapLayer" | "TileMap") {
+            continue;
+        }
+        let sources = match node.get_property(crate::tilemap::TILE_OCCLUDER_SOURCES) {
+            Variant::PackedInt32Array(v) => v,
+            _ => continue,
+        };
+        if sources.is_empty() {
+            continue;
+        }
+        let cells = match node.get_property("tile_map_data") {
+            Variant::PackedByteArray(bytes) => crate::tilemap::decode_tile_map_data(&bytes),
+            _ => continue,
+        };
+        let tile_size = match node.get_property(crate::tilemap::TILE_SET_TILE_SIZE) {
+            Variant::Vector2i(v) => v,
+            _ => gdcore::math::Vector2i::new(16, 16),
+        };
+        let local_polygon = match node.get_property(crate::tilemap::TILE_OCCLUDER_POLYGON) {
+            Variant::PackedVector2Array(v) => v,
+            _ => Vec::new(),
+        };
+        // Layer-local -> world, the same transform the LightOccluder2D branch
+        // applies. Using the node's position alone would drop rotation and
+        // scale, so a rotated tilemap would cast unrotated shadows.
+        let xform = crate::node2d::get_global_transform(tree, id);
+        let light_mask = match node.get_property("occluder_light_mask") {
+            Variant::Int(i) => i as u32,
+            _ => 1,
+        };
+        for poly in
+            crate::tilemap::tile_occluder_polygons(&cells, tile_size, &sources, &local_polygon)
+        {
+            let points: Vec<Vector2> = poly.into_iter().map(|p| xform.xform(p)).collect();
+            // Tiles are solid, so their occluders are closed: an open polyline
+            // would leave the far edge unlit-through, which reads as a shadow
+            // with a missing side.
+            let mut occ = LightOccluder2D::new(points, true);
+            occ.light_mask = light_mask;
+            occluders.push(occ);
+        }
+    }
+
     occluders
 }
 

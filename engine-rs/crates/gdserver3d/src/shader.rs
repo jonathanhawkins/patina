@@ -305,22 +305,14 @@ fn parse_uniform_type(s: &str) -> Option<UniformType> {
     }
 }
 
-/// Best-effort default value parse for simple literals.
+/// Best-effort default value parse for uniform literals (pat-s3rrv.36).
+///
+/// Delegates to the shared parser in `gdresource`, which both renderers now
+/// use. This copy understood only `true`/`false`/int/float, so every vector
+/// default became `Variant::Nil` and the uniform read as zero — and the 2D
+/// renderer carried a byte-identical copy with the same hole.
 fn parse_default_value(s: &str) -> Variant {
-    let s = s.trim();
-    if s == "true" {
-        return Variant::Bool(true);
-    }
-    if s == "false" {
-        return Variant::Bool(false);
-    }
-    if let Ok(i) = s.parse::<i64>() {
-        return Variant::Int(i);
-    }
-    if let Ok(f) = s.parse::<f64>() {
-        return Variant::Float(f);
-    }
-    Variant::Nil
+    gdresource::shader_tokenizer::parse_shader_default_value(s)
 }
 
 // ---------------------------------------------------------------------------

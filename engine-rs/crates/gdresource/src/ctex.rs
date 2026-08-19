@@ -40,17 +40,20 @@
 //! - `DATA_FORMAT_PNG` / `DATA_FORMAT_WEBP`: decoded by reusing the crate's
 //!   PNG/WebP importers.
 //! - `DATA_FORMAT_IMAGE`, uncompressed: `L8`/`LA8`/`RGB8`/`RGBA8`.
-//! - `DATA_FORMAT_IMAGE`, VRAM-compressed (pat-s3rrv.48): `DXT1` (BC1), `DXT5`
-//!   (BC3), `DXT3` (BC2), `DXT5_RA_AS_RG`, `RGTC_R` (BC4) and `RGTC_RG` (BC5),
-//!   decoded to
-//!   RGBA8 through
-//!   [`crate::block_compression`]. `compress/mode = VRAM Compressed` is the
-//!   default of Godot's "3D" texture preset, so this is how most 3D textures in
-//!   a real project are stored.
-//! - Every other `Image::Format` — BC7/BC6H, the ETC/ETC2 family, ASTC —
-//!   and `DATA_FORMAT_BASIS_UNIVERSAL` return an [`EngineError::Unsupported`]
-//!   that **names the format**, so a project that fails to load says which
-//!   encoder produced it.
+//! - `DATA_FORMAT_IMAGE`, VRAM-compressed (pat-s3rrv.48): the S3TC family —
+//!   `DXT1` (BC1), `DXT3` (BC2), `DXT5` (BC3), `DXT5_RA_AS_RG`, `RGTC_R` (BC4),
+//!   `RGTC_RG` (BC5) — and the ETC2/EAC family Godot's Web export uses: `ETC`
+//!   (ETC1), `ETC2_RGB8`, `ETC2_RGBA8`, `ETC2_RA_AS_RG`, `ETC2_R11` and
+//!   `ETC2_RG11`. All decode to RGBA8 through [`crate::block_compression`].
+//!   `compress/mode = VRAM Compressed` is the default of Godot's "3D" texture
+//!   preset, so this is how most 3D textures in a real project are stored.
+//! - Still unsupported: BC7/BC6H, ASTC, ETC2's punchthrough `RGB8A1`, the
+//!   signed `R11S`/`RG11S` variants, and `DATA_FORMAT_BASIS_UNIVERSAL`. Each
+//!   returns an [`EngineError::Unsupported`] that **names the format**, so a
+//!   project that fails to load says which encoder produced it.
+//! - Layered and volume artifacts (`.ctexarray`, `.ccube`, `.ccubearray`,
+//!   `.ctex3d`) share the `GSTL` container — see
+//!   [`load_ctex_layered_bytes`].
 //!
 //! # Mip chains
 //!
@@ -213,15 +216,52 @@ fn image_layout(img_format: u32) -> EngineResult<ImageLayout> {
         IMG_FORMAT_BPTC_RGBA => return Err(unsupported("BPTC_RGBA/BC7")),
         IMG_FORMAT_BPTC_RGBF => return Err(unsupported("BPTC_RGBF/BC6H signed")),
         IMG_FORMAT_BPTC_RGBFU => return Err(unsupported("BPTC_RGBFU/BC6H unsigned")),
-        IMG_FORMAT_ETC => return Err(unsupported("ETC1")),
-        IMG_FORMAT_ETC2_R11 => return Err(unsupported("ETC2_R11")),
-        IMG_FORMAT_ETC2_R11S => return Err(unsupported("ETC2_R11S")),
-        IMG_FORMAT_ETC2_RG11 => return Err(unsupported("ETC2_RG11")),
-        IMG_FORMAT_ETC2_RG11S => return Err(unsupported("ETC2_RG11S")),
-        IMG_FORMAT_ETC2_RGB8 => return Err(unsupported("ETC2_RGB8")),
-        IMG_FORMAT_ETC2_RGBA8 => return Err(unsupported("ETC2_RGBA8")),
-        IMG_FORMAT_ETC2_RGB8A1 => return Err(unsupported("ETC2_RGB8A1")),
-        IMG_FORMAT_ETC2_RA_AS_RG => return Err(unsupported("ETC2_RA_AS_RG")),
+        // ETC1 is the ETC2 individual/differential subset, so the same block
+        // decoder reads it (pat-s3rrv.48).
+        IMG_FORMAT_ETC => ImageLayout::Block {
+            block_bytes: 8,
+            decode: block_compression::decode_etc2_rgb8,
+            name: "ETC1",
+        },
+        // EAC single- and dual-channel, decompressed to R8/RG8 like Godot does,
+        // so the unused channels stay zero and alpha opaque.
+        IMG_FORMAT_ETC2_R11 => ImageLayout::Block {
+            block_bytes: 8,
+            decode: block_compression::decode_eac_r11,
+            name: "ETC2_R11",
+        },
+        IMG_FORMAT_ETC2_RG11 => ImageLayout::Block {
+            block_bytes: 16,
+            decode: block_compression::decode_eac_rg11,
+            name: "ETC2_RG11",
+        },
+        // ⚠️ The SIGNED EAC variants are a different value mapping (the base is
+        // a signed 8-bit value), and etcpak — the decoder this port follows —
+        // has no signed path. Left unsupported rather than decoded wrongly.
+        IMG_FORMAT_ETC2_R11S => return Err(unsupported("ETC2_R11S (signed)")),
+        IMG_FORMAT_ETC2_RG11S => return Err(unsupported("ETC2_RG11S (signed)")),
+        IMG_FORMAT_ETC2_RGB8 => ImageLayout::Block {
+            block_bytes: 8,
+            decode: block_compression::decode_etc2_rgb8,
+            name: "ETC2_RGB8",
+        },
+        IMG_FORMAT_ETC2_RGBA8 => ImageLayout::Block {
+            block_bytes: 16,
+            decode: block_compression::decode_etc2_rgba8,
+            name: "ETC2_RGBA8",
+        },
+        // ⚠️ Punchthrough alpha: the `diffbit` becomes an opacity flag and
+        // index 2 means fully transparent, a different colour path that etcpak
+        // does not implement. Decoding it as plain ETC2_RGB8 would silently
+        // drop the transparency, so it stays unsupported.
+        IMG_FORMAT_ETC2_RGB8A1 => return Err(unsupported("ETC2_RGB8A1 (punchthrough)")),
+        // Same block layout as ETC2_RGBA8 with the channels swizzled for normal
+        // maps; consumers that care read the `format` property.
+        IMG_FORMAT_ETC2_RA_AS_RG => ImageLayout::Block {
+            block_bytes: 16,
+            decode: block_compression::decode_etc2_rgba8,
+            name: "ETC2_RA_AS_RG",
+        },
         IMG_FORMAT_ASTC_4X4 => return Err(unsupported("ASTC_4x4")),
         IMG_FORMAT_ASTC_4X4_HDR => return Err(unsupported("ASTC_4x4_HDR")),
         IMG_FORMAT_ASTC_8X8 => return Err(unsupported("ASTC_8x8")),
@@ -325,15 +365,32 @@ pub fn load_ctex_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>> 
     }
     let _width = c.u32()?; // original texture width
     let _height = c.u32()?; // original texture height
-                            // pat-s3rrv.48: `df` carries FORMAT_BIT_HAS_MIPMAPS, which says whether a
-                            // mip chain follows level 0.
-    let df = c.u32()?;
+                            // `df` carries FORMAT_BIT_HAS_MIPMAPS. The blob below
+                            // states its own level count, which is what upstream
+                            // reads, so this is informational here.
+    let _df = c.u32()?;
     let _mipmap_limit = c.u32()?;
     c.u32()?; // reserved
     c.u32()?;
     c.u32()?;
 
-    // Inner image header.
+    let (tex, levels) = read_image_blob(&mut c, path)?;
+    Ok(with_mipmap_count(tex, levels))
+}
+
+/// Reads ONE self-delimiting image blob at the cursor and returns it plus the
+/// number of mip levels it carried (level 0 included).
+///
+/// This is Godot's `CompressedTexture2D::load_image_from_file`
+/// (`scene/resources/compressed_texture.cpp`), and it is a separate function for
+/// the same reason it is upstream: a `.ctexarray` / `.ccube` / `.ctex3d` is a
+/// short header followed by **several** of these blobs back to back, so reading
+/// one has to leave the cursor exactly at the start of the next (pat-s3rrv.48).
+///
+/// ⚠️ The outer file's `FORMAT_BIT_HAS_MIPMAPS` is deliberately not consulted:
+/// upstream never passes it here, and the blob's own `mipmaps` field is what
+/// says how many levels follow.
+fn read_image_blob(c: &mut CtexCursor<'_>, path: &Path) -> EngineResult<(Arc<Resource>, u32)> {
     let data_format = c.u32()?;
     let w = c.u16()? as u32;
     let h = c.u16()? as u32;
@@ -342,19 +399,24 @@ pub fn load_ctex_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>> 
 
     match data_format {
         CTEX_DATA_FORMAT_PNG => {
-            // Level 0: u32 size + an embedded PNG file. Reuse the crate's PNG
-            // importer so a `.ctex`-sourced texture matches a source-PNG one.
+            // Every level is length-framed here, and level 0 is the one that
+            // becomes pixels — but the rest still have to be stepped over so a
+            // following layer starts where it should.
             let size = c.u32()? as usize;
             let png = c.take(size)?;
-            import_image_bytes(png, path)
+            let tex = import_image_bytes(png, path)?;
+            skip_framed_levels(c, mipmaps)?;
+            Ok((tex, mipmaps.saturating_add(1)))
         }
         CTEX_DATA_FORMAT_WEBP => {
-            // Level 0: u32 size + an embedded WebP file (same layout as PNG).
-            // Godot's default 2D texture importer stores textures this way, so
-            // this is the common path for any real imported project. (pat-nzgdu.8)
+            // Same layout as PNG. Godot's default 2D texture importer stores
+            // textures this way, so this is the common path for a real project
+            // (pat-nzgdu.8).
             let size = c.u32()? as usize;
             let webp = c.take(size)?;
-            import_webp_bytes(webp, path)
+            let tex = import_webp_bytes(webp, path)?;
+            skip_framed_levels(c, mipmaps)?;
+            Ok((tex, mipmaps.saturating_add(1)))
         }
         CTEX_DATA_FORMAT_BASIS_UNIVERSAL => Err(EngineError::Unsupported(
             "Basis Universal .ctex is not supported".into(),
@@ -364,33 +426,24 @@ pub fn load_ctex_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>> 
 
             // Levels are stored back to back with NO per-level size prefix —
             // unlike the PNG/WebP arms above, where each level is length-framed.
-            // `load_image_from_file` (compressed_texture.cpp) reads the whole
-            // chain as one run, so the only way to find level 1 is to compute
-            // level 0's exact byte length.
+            // `load_image_from_file` reads the whole chain as one run, so the
+            // only way to find level 1 is to compute level 0's exact length.
             let level0_size = layout.level_size(w, h)?;
             let level0 = c.take(level0_size)?;
 
             // Walk the rest of the chain. Nothing here needs the bytes yet —
             // level 0 is what becomes pixels — but reading them proves the file
             // actually carries the levels its header advertises, so a truncated
-            // artifact is an error instead of a texture with a silent hole.
-            let extra_levels = if (df & CTEX_FORMAT_BIT_HAS_MIPMAPS) != 0 || mipmaps > 0 {
-                mipmaps
-            } else {
-                0
-            };
+            // artifact is an error instead of a texture with a silent hole, and
+            // leaves the cursor on the next layer.
             let (mut lw, mut lh) = layout.next_level(w, h);
-            for _ in 0..extra_levels {
+            for _ in 0..mipmaps {
                 let size = layout.level_size(lw, lh)?;
                 c.take(size)?;
                 let (nw, nh) = layout.next_level(lw, lh);
                 lw = nw;
                 lh = nh;
             }
-            // Godot counts `mipmaps` as levels BEYOND level 0, so a texture with
-            // one extra level has two levels in total. `mipmap_count` reports
-            // the total, which is what a renderer allocating storage needs.
-            let mipmap_count = extra_levels.saturating_add(1);
 
             let tex = match &layout {
                 ImageLayout::Raw { bpp, format_str } => {
@@ -407,12 +460,220 @@ pub fn load_ctex_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>> 
                     build_raw_texture(w, h, rgba.as_slice(), 4, "RGBA", path)
                 }
             };
-            Ok(with_mipmap_count(tex, mipmap_count))
+            // Godot counts `mipmaps` as levels BEYOND level 0, so a texture with
+            // one extra level has two in total. `mipmap_count` reports the
+            // total, which is what a renderer allocating storage needs.
+            Ok((tex, mipmaps.saturating_add(1)))
         }
         other => Err(EngineError::Parse(format!(
             "unknown .ctex data format {other}"
         ))),
     }
+}
+
+/// Steps over `count` length-framed sub-images (the PNG/WebP level chain).
+fn skip_framed_levels(c: &mut CtexCursor<'_>, count: u32) -> EngineResult<()> {
+    for _ in 0..count {
+        let size = c.u32()? as usize;
+        c.take(size)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Layered / volume artifacts — .ctexarray, .ccube, .ccubearray, .ctex3d
+// ---------------------------------------------------------------------------
+
+/// `GSTL` — the magic every layered and volume artifact starts with.
+///
+/// Both `CompressedTextureLayered::_load_data` and
+/// `CompressedTexture3D::_load_data` check for this same four-byte tag
+/// (`scene/resources/compressed_texture.cpp`), which is why the file extension —
+/// not the header — is what says which of the four resource types a file is.
+pub const CTEX_LAYERED_MAGIC: &[u8; 4] = b"GSTL";
+
+/// Which layered/volume resource an artifact holds.
+///
+/// The discriminants are Godot's `ResourceImporterLayeredTexture::Mode`
+/// (`editor/import/resource_importer_layered_texture.h:65`), which the importer
+/// writes into the header's third word and the loader checks against
+/// `TextureLayered::LayeredType` — the two enums share their first three values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayeredKind {
+    /// `.ctexarray` → `CompressedTexture2DArray`.
+    Texture2DArray,
+    /// `.ccube` → `CompressedCubemap` (six layers).
+    Cubemap,
+    /// `.ccubearray` → `CompressedCubemapArray`.
+    CubemapArray,
+    /// `.ctex3d` → `CompressedTexture3D`, where the layer count is the volume's
+    /// depth and extra volume mipmaps follow the slices.
+    Texture3D,
+}
+
+impl LayeredKind {
+    /// The `mode` value the importer stamps into the header.
+    fn mode(self) -> u32 {
+        match self {
+            Self::Texture2DArray => 0,
+            Self::Cubemap => 1,
+            Self::CubemapArray => 2,
+            Self::Texture3D => 3,
+        }
+    }
+
+    /// The Godot class the artifact loads as.
+    fn class_name(self) -> &'static str {
+        match self {
+            Self::Texture2DArray => "CompressedTexture2DArray",
+            Self::Cubemap => "CompressedCubemap",
+            Self::CubemapArray => "CompressedCubemapArray",
+            Self::Texture3D => "CompressedTexture3D",
+        }
+    }
+
+    /// `depth` for a volume, `layers` for everything else — the property name
+    /// Godot exposes for the count in the header's second word.
+    fn count_property(self) -> &'static str {
+        match self {
+            Self::Texture3D => "depth",
+            _ => "layers",
+        }
+    }
+}
+
+/// Loads a layered or volume `.ctex` artifact.
+///
+/// The header is 36 bytes, written by
+/// `ResourceImporterLayeredTexture::_save_tex`
+/// (`editor/import/resource_importer_layered_texture.cpp:170`):
+///
+/// ```text
+/// "GSTL"  version  count  mode  0  0  extra_mipmaps  0  0
+/// ```
+///
+/// then `count + extra_mipmaps` image blobs back to back, each in exactly the
+/// format a plain `.ctex` carries after its own header. `count` is the layer
+/// count for an array or cubemap and the depth for a volume; `extra_mipmaps` is
+/// non-zero only for volumes, whose mip chain is a set of whole smaller slices
+/// rather than a chain inside each blob.
+///
+/// Every layer is decoded — not just layer 0 — and stored as a subresource
+/// keyed `layer_<i>`, with layer 0's pixels also placed on the returned
+/// resource so a consumer that only knows how to read a `Texture2D` still sees
+/// an image rather than an empty one (pat-s3rrv.48).
+pub fn load_ctex_layered_bytes(
+    data: &[u8],
+    path: &Path,
+    kind: LayeredKind,
+) -> EngineResult<Arc<Resource>> {
+    let mut c = CtexCursor::new(data);
+
+    if c.take(4)? != CTEX_LAYERED_MAGIC {
+        return Err(EngineError::Parse(format!(
+            "not a layered .ctex file (expected GSTL magic) for {}",
+            path.display()
+        )));
+    }
+    let version = c.u32()?;
+    if version > CTEX_FORMAT_VERSION_MAX {
+        return Err(EngineError::Unsupported(format!(
+            "layered .ctex format version {version} is newer than supported \
+             ({CTEX_FORMAT_VERSION_MAX})"
+        )));
+    }
+
+    let count = c.u32()?;
+    let mode = c.u32()?;
+    c.u32()?; // reserved (0)
+    c.u32()?; // reserved (0)
+    let extra_mipmaps = c.u32()?;
+    c.u32()?; // reserved (0)
+    c.u32()?; // reserved (0)
+
+    // Upstream fails the load outright on a mismatch rather than guessing, and
+    // so does this: a `.ccube` whose header says "2D array" is a mislabelled
+    // file, and silently treating six layers as an array would put a broken
+    // cubemap on screen instead of an error in the log.
+    if mode != kind.mode() {
+        return Err(EngineError::Parse(format!(
+            "{} declares mode {mode}, expected {} for {}",
+            path.display(),
+            kind.mode(),
+            kind.class_name()
+        )));
+    }
+    if count == 0 {
+        return Err(EngineError::Parse(format!(
+            "{} declares zero layers",
+            path.display()
+        )));
+    }
+
+    let total = count.saturating_add(extra_mipmaps);
+    let mut layers: Vec<Arc<Resource>> = Vec::with_capacity(total as usize);
+    let mut levels_in_layer0 = 1;
+    for i in 0..total {
+        let (tex, levels) = read_image_blob(&mut c, path)?;
+        if i == 0 {
+            levels_in_layer0 = levels;
+        }
+        layers.push(tex);
+    }
+
+    let first = layers.first().expect("count > 0 was checked above").clone();
+    let mut res = Resource::new(kind.class_name());
+    res.path = format!(
+        "res://{}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
+    // Layer 0's own properties describe the whole set: every layer of a Godot
+    // layered texture shares one width, height and format.
+    for key in ["width", "height", "format", "bit_depth", "has_pixel_data"] {
+        if let Some(v) = first.get_property(key) {
+            res.set_property(key, v.clone());
+        }
+    }
+    if let Some(pixels) = first.get_property("pixels") {
+        res.set_property("pixels", pixels.clone());
+    }
+    res.set_property(kind.count_property(), Variant::Int(count as i64));
+    res.set_property("layer_count", Variant::Int(count as i64));
+    res.set_property("mipmap_count", Variant::Int(levels_in_layer0 as i64));
+    if kind == LayeredKind::Texture3D {
+        res.set_property("mipmap_slices", Variant::Int(extra_mipmaps as i64));
+    }
+    for (i, layer) in layers.into_iter().enumerate() {
+        res.subresources.insert(format!("layer_{i}"), layer);
+    }
+    Ok(Arc::new(res))
+}
+
+/// Reads a layered artifact off disk. One helper per extension so each can be
+/// registered as a plain [`LoaderFn`](crate::importers::LoaderFn).
+fn load_layered_file(path: &Path, kind: LayeredKind) -> EngineResult<Arc<Resource>> {
+    let data = std::fs::read(path).map_err(EngineError::Io)?;
+    load_ctex_layered_bytes(&data, path, kind)
+}
+
+/// Loads a `.ctexarray` (`CompressedTexture2DArray`).
+pub fn load_ctexarray_file(path: &Path) -> EngineResult<Arc<Resource>> {
+    load_layered_file(path, LayeredKind::Texture2DArray)
+}
+
+/// Loads a `.ccube` (`CompressedCubemap`).
+pub fn load_ccube_file(path: &Path) -> EngineResult<Arc<Resource>> {
+    load_layered_file(path, LayeredKind::Cubemap)
+}
+
+/// Loads a `.ccubearray` (`CompressedCubemapArray`).
+pub fn load_ccubearray_file(path: &Path) -> EngineResult<Arc<Resource>> {
+    load_layered_file(path, LayeredKind::CubemapArray)
+}
+
+/// Loads a `.ctex3d` (`CompressedTexture3D`).
+pub fn load_ctex3d_file(path: &Path) -> EngineResult<Arc<Resource>> {
+    load_layered_file(path, LayeredKind::Texture3D)
 }
 
 /// Records how many mip levels the artifact carries, including level 0

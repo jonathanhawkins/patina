@@ -92,7 +92,12 @@ fn input_singleton_polling_frames() {
     let mut interp = Interpreter::new();
     let class_def = interp.run_class(SCRIPT).unwrap();
     let mut inst = interp.instantiate_class(&class_def).unwrap();
-    interp.set_scene_access(Box::new(InputMock { state: state.clone() }), 1);
+    interp.set_scene_access(
+        Box::new(InputMock {
+            state: state.clone(),
+        }),
+        1,
+    );
 
     // Frame 1: ui_right held.
     state.borrow_mut().pressed = ["ui_right".to_string()].into_iter().collect();
@@ -122,10 +127,107 @@ fn input_singleton_polling_frames() {
         s.just_released = ["ui_accept".to_string()].into_iter().collect();
     }
     let (_, _, released) = poll(&mut interp, &mut inst);
-    assert!(released, "is_action_just_released true on the release frame");
+    assert!(
+        released,
+        "is_action_just_released true on the release frame"
+    );
 
     // Frame 5: released set cleared → false the next frame.
     state.borrow_mut().just_released.clear();
     let (_, _, released) = poll(&mut interp, &mut inst);
-    assert!(!released, "is_action_just_released false the frame after release");
+    assert!(
+        !released,
+        "is_action_just_released false the frame after release"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// pat-s3rrv.14 (e): `Input.get_action_raw_strength`
+// ---------------------------------------------------------------------------
+
+/// A mock whose two strength accessors return **different** values.
+///
+/// ⚠️ That difference is the whole point. `get_action_strength` and
+/// `get_action_raw_strength` diverge only for ANALOG bindings once a deadzone
+/// applies — `gdplatform::input` documents a stick at 0.6 under a 0.1 deadzone
+/// reading 0.56 from `strength` and 0.6 from raw. A digital binding reports
+/// 1.0 from both, so an implementation that simply aliased the two would pass
+/// every keyboard-shaped test and diverge only on a gamepad. These numbers are
+/// that exact documented pair.
+struct AnalogMock;
+
+const DEADZONED: f32 = 0.56;
+const RAW: f32 = 0.6;
+
+impl SceneAccess for AnalogMock {
+    fn get_node(&self, _from: u64, _path: &str) -> Option<u64> {
+        None
+    }
+    fn get_parent(&self, _node: u64) -> Option<u64> {
+        None
+    }
+    fn get_children(&self, _node: u64) -> Vec<u64> {
+        Vec::new()
+    }
+    fn get_node_property(&self, _node: u64, _prop: &str) -> Variant {
+        Variant::Nil
+    }
+    fn set_node_property(&mut self, _node: u64, _prop: &str, _value: Variant) {}
+    fn emit_signal(&mut self, _node: u64, _signal: &str, _args: &[Variant]) {}
+    fn connect_signal(&mut self, _source: u64, _signal: &str, _target: u64, _method: &str) {}
+    fn get_node_name(&self, _node: u64) -> Option<String> {
+        None
+    }
+    fn is_input_action_pressed(&self, _action: &str) -> bool {
+        true
+    }
+    fn get_action_strength(&self, _action: &str) -> f32 {
+        DEADZONED
+    }
+    fn get_action_raw_strength(&self, _action: &str) -> f32 {
+        RAW
+    }
+}
+
+const RAW_SCRIPT: &str = "\
+extends Node
+func poll() -> Array:
+    return [Input.get_action_strength(\"move\"), Input.get_action_raw_strength(\"move\")]
+";
+
+/// `Input.get_action_raw_strength` dispatches, and routes to its OWN accessor.
+///
+/// Before this it had no arm in the `Input` handler at all — the two hits for
+/// that name elsewhere in the interpreter are `InputEvent`'s method of the same
+/// name, which is a different call — so it fell through to `UndefinedFunction`
+/// and killed the calling script.
+#[test]
+fn input_get_action_raw_strength_dispatches_to_its_own_accessor() {
+    let mut interp = Interpreter::new();
+    let class_def = interp.run_class(RAW_SCRIPT).unwrap();
+    let mut inst = interp.instantiate_class(&class_def).unwrap();
+    interp.set_scene_access(Box::new(AnalogMock), 1);
+
+    let r = interp
+        .call_instance_method(&mut inst, "poll", &[])
+        .expect("`Input.get_action_raw_strength` must dispatch, not raise");
+    let a = match r {
+        Variant::Array(a) => a,
+        o => panic!("poll() must return an Array, got {o:?}"),
+    };
+
+    assert!(
+        (num(&a[0]) - DEADZONED as f64).abs() < 1e-6,
+        "get_action_strength must return the DEADZONED value, got {}",
+        num(&a[0])
+    );
+    // The load-bearing assertion: reading 0.56 here would mean raw is aliased
+    // to the deadzoned accessor.
+    assert!(
+        (num(&a[1]) - RAW as f64).abs() < 1e-6,
+        "get_action_raw_strength must return the RAW value {RAW}, got {} — the \
+         deadzoned value here means the two are aliased, which is invisible on \
+         a keyboard and wrong on every gamepad",
+        num(&a[1])
+    );
 }

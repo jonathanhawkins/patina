@@ -119,11 +119,16 @@ fn write_properties(out: &mut String, resource: &Resource) -> EngineResult<()> {
 
 /// Formats a Variant value in `.tres` syntax.
 fn format_variant(v: &Variant) -> String {
-    // A builtin `Variant` has no kind for (Vector4, Rect2i, Projection,
-    // PackedVector4Array) was preserved verbatim at load; re-emit that exact
-    // text (pat-0q2kx.136). Without this the round-trip would write the
-    // preservation dictionary into the file — which is a worse corruption than
-    // the drop it replaced, so it is checked before the normal match.
+    // A builtin `Variant` has no kind for was preserved verbatim at load;
+    // re-emit that exact text (pat-0q2kx.136). Without this the round-trip
+    // would write the preservation dictionary into the file — which is a worse
+    // corruption than the drop it replaced, so it is checked before the normal
+    // match.
+    //
+    // Since pat-s3rrv.59 the five literals that used to take this path
+    // (`Vector4`, `Vector4i`, `Rect2i`, `Projection`, `PackedVector4Array`)
+    // are real Variant kinds with arms below, so nothing currently reaches it.
+    // It stays for the next builtin Godot adds ahead of this port.
     if let Some((_ty, literal)) = crate::loader::unparsed_literal(v) {
         return literal.to_string();
     }
@@ -149,6 +154,41 @@ fn format_variant(v: &Variant) -> String {
             format_f32(v.z)
         ),
         Variant::Vector3i(v) => format!("Vector3i({}, {}, {})", v.x, v.y, v.z),
+        Variant::Vector4(v) => format!(
+            "Vector4({}, {}, {}, {})",
+            format_f32(v.x),
+            format_f32(v.y),
+            format_f32(v.z),
+            format_f32(v.w)
+        ),
+        Variant::Vector4i(v) => format!("Vector4i({}, {}, {}, {})", v.x, v.y, v.z, v.w),
+        Variant::Rect2i(r) => format!(
+            "Rect2i({}, {}, {}, {})",
+            r.position.x, r.position.y, r.size.x, r.size.y
+        ),
+        // Sixteen numbers in COLUMN-MAJOR order — the same walk the loader
+        // uses, so `parse(format(p)) == p`. Emitting rows would round-trip
+        // cleanly through this port while disagreeing with Godot.
+        Variant::Projection(p) => format!(
+            "Projection({})",
+            p.m.iter()
+                .flatten()
+                .map(|c| format_f32(*c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Variant::PackedVector4Array(v) => format!(
+            "PackedVector4Array({})",
+            v.iter()
+                .flat_map(|p| [
+                    format_f32(p.x),
+                    format_f32(p.y),
+                    format_f32(p.z),
+                    format_f32(p.w)
+                ])
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Variant::Color(c) => format!(
             "Color({}, {}, {}, {})",
             format_f32(c.r),

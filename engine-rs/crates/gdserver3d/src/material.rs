@@ -181,6 +181,42 @@ impl CullMode {
     }
 }
 
+/// Godot `BaseMaterial3D.BlendMode` (pat-s3rrv.30).
+///
+/// The blend equation each mode selects is transcribed from
+/// `upstream/godot/drivers/gles3/rasterizer_scene_gles3.cpp`, which is the only
+/// place the factors are actually written down — the enum name alone does not
+/// say, for instance, that `Sub` REVERSE-subtracts (dst − src) rather than
+/// subtracting the destination, or that `Mul` and `Mix` leave the destination
+/// alpha untouched against an opaque background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    /// Source-over (`BLEND_MODE_MIX` = 0, the default).
+    #[default]
+    Mix,
+    /// Additive (`BLEND_MODE_ADD` = 1).
+    Add,
+    /// Reverse subtract (`BLEND_MODE_SUB` = 2).
+    Sub,
+    /// Modulate (`BLEND_MODE_MUL` = 3).
+    Mul,
+    /// Source already carries premultiplied alpha (`BLEND_MODE_PREMULT_ALPHA` = 4).
+    PremultAlpha,
+}
+
+impl BlendMode {
+    /// Maps Godot's integer enum (material.h:228-232).
+    pub fn from_godot_int(value: i64) -> Self {
+        match value {
+            1 => Self::Add,
+            2 => Self::Sub,
+            3 => Self::Mul,
+            4 => Self::PremultAlpha,
+            _ => Self::Mix,
+        }
+    }
+}
+
 /// Godot `BaseMaterial3D.DepthDrawMode` (pat-s3rrv.30).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DepthDrawMode {
@@ -229,6 +265,8 @@ pub struct Material3D {
     pub cull_mode: CullMode,
     /// Godot `depth_draw_mode`.
     pub depth_draw_mode: DepthDrawMode,
+    /// Godot `blend_mode` (pat-s3rrv.30).
+    pub blend_mode: BlendMode,
     /// Optional albedo texture (sRGB); its decoded texel multiplies [`albedo`]
     /// per-fragment at the sampled UV. `None` = flat albedo color.
     ///
@@ -266,6 +304,7 @@ impl Default for Material3D {
             shading_mode: ShadingMode::Lambert,
             double_sided: false,
             transparency: Transparency::Disabled,
+            blend_mode: BlendMode::Mix,
             alpha_scissor_threshold: 0.5,
             cull_mode: CullMode::Back,
             depth_draw_mode: DepthDrawMode::OpaqueOnly,
@@ -343,6 +382,11 @@ pub struct StandardMaterial3D {
     pub cull_mode: CullMode,
     /// Godot `depth_draw_mode`.
     pub depth_draw_mode: DepthDrawMode,
+    /// Godot `blend_mode` (pat-s3rrv.30). Like `transparency` before it, this
+    /// key was never read from `.tscn`, so an additive or multiply material —
+    /// how essentially every glow, flame and shadow-decal effect is authored —
+    /// composited as a plain source-over blend.
+    pub blend_mode: BlendMode,
 }
 
 impl Default for StandardMaterial3D {
@@ -361,6 +405,7 @@ impl Default for StandardMaterial3D {
             shading_mode: ShadingMode::Lambert,
             double_sided: false,
             transparency: Transparency::Disabled,
+            blend_mode: BlendMode::Mix,
             // Godot's own default; a scene that enables AlphaScissor without
             // naming a threshold expects 0.5, not 0.0 (which would discard
             // nothing and look like the feature is inert).
@@ -391,6 +436,7 @@ impl StandardMaterial3D {
             alpha_scissor_threshold: self.alpha_scissor_threshold,
             cull_mode: self.cull_mode,
             depth_draw_mode: self.depth_draw_mode,
+            blend_mode: self.blend_mode,
             ..Material3D::default()
         }
     }

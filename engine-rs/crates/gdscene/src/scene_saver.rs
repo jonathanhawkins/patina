@@ -66,6 +66,31 @@ pub fn format_variant_value(v: &Variant) -> String {
             )
         }
         Variant::Vector3i(v) => format!("Vector3i({}, {}, {})", v.x, v.y, v.z),
+        Variant::Vector4(v) => {
+            format!(
+                "Vector4({}, {}, {}, {})",
+                format_f32(v.x),
+                format_f32(v.y),
+                format_f32(v.z),
+                format_f32(v.w)
+            )
+        }
+        Variant::Vector4i(v) => format!("Vector4i({}, {}, {}, {})", v.x, v.y, v.z, v.w),
+        // Integer components print bare, exactly as they were authored — going
+        // through `format_f32` would write `Rect2i(0, 0, 16, 16)` back as
+        // floats and stop the file round-tripping.
+        Variant::Rect2i(r) => format!(
+            "Rect2i({}, {}, {}, {})",
+            r.position.x, r.position.y, r.size.x, r.size.y
+        ),
+        // Sixteen cells in COLUMN-MAJOR order (`m[column][row]`), the order
+        // `gdresource::loader::parse_variant_value` reads back. A transposed
+        // projection still renders, just wrongly, so nothing downstream would
+        // catch the mistake.
+        Variant::Projection(p) => {
+            let cells: Vec<String> = p.m.iter().flatten().map(|c| format_f32(*c)).collect();
+            format!("Projection({})", cells.join(", "))
+        }
         Variant::Color(c) => {
             format!(
                 "Color({}, {}, {}, {})",
@@ -176,6 +201,20 @@ pub fn format_variant_value(v: &Variant) -> String {
                 })
                 .collect();
             format!("PackedColorArray({})", items.join(", "))
+        }
+        Variant::PackedVector4Array(v) => {
+            let items: Vec<String> = v
+                .iter()
+                .flat_map(|p| {
+                    [
+                        format_f32(p.x),
+                        format_f32(p.y),
+                        format_f32(p.z),
+                        format_f32(p.w),
+                    ]
+                })
+                .collect();
+            format!("PackedVector4Array({})", items.join(", "))
         }
         // 3D math types serialize with their Godot constructor syntax, matching
         // the field order `gdresource::loader::parse_variant_value` reads back.
@@ -586,6 +625,425 @@ fn collect_spriteframes_tables(tree: &SceneTree, node_ids: &[NodeId]) -> SpriteF
     }
 }
 
+/// The `TileSet` sub-resources rebuilt from a node's `__tile_set__*` /
+/// `__tile_physics_*` companions.
+struct TileSetTables {
+    /// Rendered `[sub_resource]` sections, ready to append.
+    text: String,
+    /// `node id -> TileSet sub-resource id`, for `tile_set = SubResource("…")`.
+    nodes: HashMap<NodeId, String>,
+    /// Atlas textures as `[ext_resource]` rows, merged into the header.
+    ext: Vec<(String, String, String, Option<String>)>,
+    /// How many `[sub_resource]` sections were emitted.
+    count: usize,
+}
+
+impl TileSetTables {
+    fn resource_count(&self) -> usize {
+        self.count
+    }
+}
+
+/// Serializes every TileMapLayer's authored TileSet in the saved subtree
+/// (pat-s3rrv.65).
+///
+/// # Why this has to exist
+///
+/// The `__tile_set__*` companions are a **cache** and [`is_internal_prop`]
+/// deliberately drops them: they are property names Godot has never heard of.
+/// That was fine while a TileSet could only arrive from a loaded `.tscn`, whose
+/// node kept the original `tile_set = SubResource("…")` reference. But a TileSet
+/// *authored in the editor* has no such reference, so nothing wrote it — the
+/// edit lived in memory, was dropped on save, and the file came back without it.
+///
+/// So this rebuilds Godot's real shape, which is exactly what
+/// `packed_scene`'s reader already consumes:
+///
+/// ```text
+/// [sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_Layer_0"]
+/// texture = ExtResource("Texture_res___atlas_png")
+/// texture_region_size = Vector2i(16, 16)
+/// 0:0/0 = 0
+/// 0:0/0/physics_layer_0/polygon_0/points = PackedVector2Array(-8, -8, 8, -8, 8, 8, -8, 8)
+///
+/// [sub_resource type="TileSet" id="TileSet_Layer"]
+/// tile_size = Vector2i(16, 16)
+/// physics_layer_0/collision_layer = 1
+/// sources/0 = SubResource("TileSetAtlasSource_Layer_0")
+/// ```
+fn collect_tileset_tables(tree: &SceneTree, node_ids: &[NodeId]) -> TileSetTables {
+    let mut text = String::new();
+    let mut nodes: HashMap<NodeId, String> = HashMap::new();
+    let mut ext: std::collections::BTreeMap<String, (String, String)> =
+        std::collections::BTreeMap::new();
+    let mut count = 0usize;
+
+    for &nid in node_ids {
+        let Some(node) = tree.get_node(nid) else {
+            continue;
+        };
+        if !matches!(node.class_name(), "TileMapLayer" | "TileMap") {
+            continue;
+        }
+        let source_ids = crate::tilemap::tile_set_source_ids(
+            &node.get_property(crate::tilemap::TILE_SET_SOURCE_IDS),
+        );
+        if source_ids.is_empty() {
+            continue;
+        }
+        let stem = sanitize_resource_id(node.name());
+        let tile_size = match node.get_property(crate::tilemap::TILE_SET_TILE_SIZE) {
+            Variant::Vector2i(v) => v,
+            _ => gdcore::math::Vector2i::new(16, 16),
+        };
+
+        let mut source_refs: Vec<(i32, String)> = Vec::new();
+        for source_id in &source_ids {
+            let source_id = *source_id;
+            let Variant::String(texture) =
+                node.get_property(&crate::tilemap::tile_set_source_key(source_id, "texture"))
+            else {
+                continue;
+            };
+            let sub_id = format!("TileSetAtlasSource_{stem}_{source_id}");
+            let tex_id = format!("Texture_{}", sanitize_resource_id(&texture));
+            ext.entry(tex_id.clone())
+                .or_insert_with(|| (ext_resource_type_for(&texture), texture.clone()));
+
+            let nav_sources = match node.get_property(crate::tilemap::TILE_NAV_SOURCES) {
+                Variant::PackedInt32Array(v) => v,
+                _ => Vec::new(),
+            };
+            // ⚠️ The two polygon families do NOT share an origin, so this is
+            // not the collision path with a different key name:
+            //
+            //   * `__tile_physics_*` points are TILE-CENTRE relative — the
+            //     static body is placed at the tile centre
+            //     (`gdphysics2d/tilemap_collision.rs:83`) and the points are
+            //     used as-is.
+            //   * `__tile_nav_polygon__` is TOP-LEFT relative — documented so
+            //     at `tilemap.rs:526`, and `tile_navigation_polygons` adds the
+            //     cell's top-left corner to every point.
+            //
+            // Godot stores both centred on the tile, so the navigation polygon
+            // has to have half a tile taken off on the way out. Skipping that
+            // conversion writes a polygon displaced by half a tile — which
+            // still loads, still looks like a navigation mesh, and puts the
+            // walkable area over the tile's bottom-right corner.
+            let half =
+                gdcore::math::Vector2::new(tile_size.x as f32 / 2.0, tile_size.y as f32 / 2.0);
+            let nav_local = match node.get_property(crate::tilemap::TILE_NAV_POLYGON) {
+                Variant::PackedVector2Array(p) => p,
+                _ => Vec::new(),
+            };
+            let nav_points: Vec<gdcore::math::Vector2> = if nav_local.len() >= 3 {
+                nav_local.iter().map(|v| *v - half).collect()
+            } else {
+                // Godot's default tile navigation polygon is the whole tile,
+                // which is also what an empty `__tile_nav_polygon__` means.
+                vec![
+                    gdcore::math::Vector2::new(-half.x, -half.y),
+                    gdcore::math::Vector2::new(half.x, -half.y),
+                    gdcore::math::Vector2::new(half.x, half.y),
+                    gdcore::math::Vector2::new(-half.x, half.y),
+                ]
+            };
+
+            // ⚠️ Godot's TileData holds a NavigationPolygon **resource**, not a
+            // point array: `TileData::_set` does
+            // `Ref<NavigationPolygon> polygon = p_value` (tile_set.cpp:6824), and
+            // a PackedVector2Array converts to a NULL Ref — the file loads, no
+            // error is raised, and every polygon is silently dropped. Patina's
+            // own round trip could not see this: our loader read back exactly
+            // what our saver wrote (pat-s3rrv.65).
+            //
+            // One sub-resource per SOURCE, not per tile, because Patina holds
+            // one polygon per layer — every tile of the source shares it. It is
+            // emitted BEFORE the atlas source that references it.
+            // Occlusion, the same shape as navigation and with the same
+            // top-left -> tile-centre rebasing: `__tile_occluder_polygon__` is
+            // top-left relative (tilemap.rs) and Godot's TileData polygons are
+            // centred (pat-s3rrv.65).
+            let occl_sources = match node.get_property(crate::tilemap::TILE_OCCLUDER_SOURCES) {
+                Variant::PackedInt32Array(v) => v,
+                _ => Vec::new(),
+            };
+            let occl_local = match node.get_property(crate::tilemap::TILE_OCCLUDER_POLYGON) {
+                Variant::PackedVector2Array(p) => p,
+                _ => Vec::new(),
+            };
+            let occl_points: Vec<gdcore::math::Vector2> = if occl_local.len() >= 3 {
+                occl_local.iter().map(|v| *v - half).collect()
+            } else {
+                vec![
+                    gdcore::math::Vector2::new(-half.x, -half.y),
+                    gdcore::math::Vector2::new(half.x, -half.y),
+                    gdcore::math::Vector2::new(half.x, half.y),
+                    gdcore::math::Vector2::new(-half.x, half.y),
+                ]
+            };
+            let occl_sub_id = format!("OccluderPolygon2D_{stem}_{source_id}");
+            if occl_sources.contains(&source_id) {
+                writeln!(
+                    text,
+                    "\n[sub_resource type=\"OccluderPolygon2D\" id=\"{occl_sub_id}\"]"
+                )
+                .unwrap();
+                writeln!(
+                    text,
+                    "polygon = {}",
+                    format_variant_value(&Variant::PackedVector2Array(occl_points.clone()))
+                )
+                .unwrap();
+                // A tile is solid, so its occluder is a closed polygon rather
+                // than a polyline; `closed` defaults true in Godot but is
+                // written explicitly because the runtime side asserts it.
+                writeln!(text, "closed = true").unwrap();
+            }
+
+            let nav_sub_id = format!("NavigationPolygon_{stem}_{source_id}");
+            if !nav_sources.is_empty() {
+                writeln!(
+                    text,
+                    "\n[sub_resource type=\"NavigationPolygon\" id=\"{nav_sub_id}\"]"
+                )
+                .unwrap();
+                writeln!(
+                    text,
+                    "vertices = {}",
+                    format_variant_value(&Variant::PackedVector2Array(nav_points.clone()))
+                )
+                .unwrap();
+                // `polygons` is an Array of PackedInt32Array indices into
+                // `vertices`: one convex polygon over every vertex in order.
+                let indices: Vec<String> = (0..nav_points.len()).map(|i| i.to_string()).collect();
+                writeln!(
+                    text,
+                    "polygons = [PackedInt32Array({})]",
+                    indices.join(", ")
+                )
+                .unwrap();
+            }
+
+            writeln!(
+                text,
+                "\n[sub_resource type=\"TileSetAtlasSource\" id=\"{sub_id}\"]"
+            )
+            .unwrap();
+            writeln!(text, "texture = ExtResource(\"{tex_id}\")").unwrap();
+            for key in ["texture_region_size", "margins", "separation"] {
+                let value = node.get_property(&crate::tilemap::tile_set_source_key(source_id, key));
+                if !value.is_nil() {
+                    writeln!(text, "{key} = {}", format_variant_value(&value)).unwrap();
+                }
+            }
+
+            // Per-tile data. The atlas coordinate lives only inside the
+            // companion key's own text, so the tiles are recovered by parsing
+            // the keys back — sorted, because a HashMap walk would reshuffle
+            // the file on every save.
+            let mut tiles: Vec<(gdcore::math::Vector2i, Vec<gdcore::math::Vector2>)> = Vec::new();
+            for (name, value) in node.properties() {
+                let Some(atlas) = crate::tilemap::tile_physics_points_atlas(name, source_id) else {
+                    continue;
+                };
+                let points = match value {
+                    Variant::PackedVector2Array(p) => p.clone(),
+                    _ => Vec::new(),
+                };
+                tiles.push((atlas, points));
+            }
+            tiles.sort_by_key(|(a, _)| (a.y, a.x));
+
+            // Navigation-enabled tiles for this source (pat-s3rrv.65). A tile
+            // may carry navigation WITHOUT collision, so the set is the union
+            // of the physics tiles above and the painted cells using this
+            // source — deriving it from the physics companions alone would drop
+            // every nav-only tile silently.
+            let mut nav_tiles: Vec<gdcore::math::Vector2i> = Vec::new();
+            if nav_sources.contains(&source_id) {
+                let cells = match node.get_property("tile_map_data") {
+                    Variant::PackedByteArray(bytes) => crate::tilemap::decode_tile_map_data(&bytes),
+                    _ => std::collections::HashMap::new(),
+                };
+                for data in cells.values() {
+                    if data.source_id == source_id && !nav_tiles.contains(&data.atlas_coords) {
+                        nav_tiles.push(data.atlas_coords);
+                    }
+                }
+                nav_tiles.sort_by_key(|a| (a.y, a.x));
+            }
+
+            let mut occl_tiles: Vec<gdcore::math::Vector2i> = Vec::new();
+            if occl_sources.contains(&source_id) {
+                let cells = match node.get_property("tile_map_data") {
+                    Variant::PackedByteArray(bytes) => crate::tilemap::decode_tile_map_data(&bytes),
+                    _ => std::collections::HashMap::new(),
+                };
+                for data in cells.values() {
+                    if data.source_id == source_id && !occl_tiles.contains(&data.atlas_coords) {
+                        occl_tiles.push(data.atlas_coords);
+                    }
+                }
+                occl_tiles.sort_by_key(|a| (a.y, a.x));
+            }
+
+            let physics_tiles: Vec<gdcore::math::Vector2i> =
+                tiles.iter().map(|(a, _)| *a).collect();
+
+            for (atlas, points) in tiles {
+                let (ax, ay) = (atlas.x, atlas.y);
+                // Godot declares the tile itself before any of its data; without
+                // this line the atlas source has no tile at those coordinates
+                // and every `<ax>:<ay>/0/...` key below is orphaned.
+                writeln!(text, "{ax}:{ay}/0 = 0").unwrap();
+                if points.len() >= 3 {
+                    writeln!(
+                        text,
+                        "{ax}:{ay}/0/physics_layer_0/polygon_0/points = {}",
+                        format_variant_value(&Variant::PackedVector2Array(points))
+                    )
+                    .unwrap();
+                }
+                let one_way =
+                    node.get_property(&crate::tilemap::tile_physics_one_way_key(source_id, atlas));
+                if let Variant::Bool(b) = one_way {
+                    writeln!(text, "{ax}:{ay}/0/physics_layer_0/polygon_0/one_way = {b}").unwrap();
+                }
+                if nav_tiles.contains(&atlas) {
+                    writeln!(
+                        text,
+                        "{ax}:{ay}/0/navigation_layer_0/polygon = SubResource(\"{nav_sub_id}\")"
+                    )
+                    .unwrap();
+                }
+                if occl_tiles.contains(&atlas) {
+                    // ⚠️ THREE components. `occlusion_layer_0/polygon` (two)
+                    // also parses, but Godot marks it "Kept for compatibility"
+                    // and writes the indexed form — a tile can carry several
+                    // occluder polygons per layer where it carries exactly one
+                    // navigation polygon.
+                    writeln!(
+                        text,
+                        "{ax}:{ay}/0/occlusion_layer_0/polygon_0/polygon = SubResource(\"{occl_sub_id}\")"
+                    )
+                    .unwrap();
+                }
+            }
+
+            // Tiles that carry navigation or occlusion but NOT collision: the
+            // loop above walks the physics tiles only, so a tile that is
+            // walkable or shadow-casting but not solid has not been declared
+            // yet — and an undeclared tile's `<ax>:<ay>/0/...` keys are orphaned
+            // on load.
+            //
+            // ⚠️ One pass over the UNION, not one pass per layer: a tile that is
+            // both walkable and occluding would otherwise have its
+            // `<ax>:<ay>/0 = 0` declaration written twice.
+            let mut layer_only: Vec<gdcore::math::Vector2i> = Vec::new();
+            for atlas in nav_tiles.iter().chain(occl_tiles.iter()) {
+                if !physics_tiles.contains(atlas) && !layer_only.contains(atlas) {
+                    layer_only.push(*atlas);
+                }
+            }
+            layer_only.sort_by_key(|a| (a.y, a.x));
+            for atlas in &layer_only {
+                let (ax, ay) = (atlas.x, atlas.y);
+                writeln!(text, "{ax}:{ay}/0 = 0").unwrap();
+                if nav_tiles.contains(atlas) {
+                    writeln!(
+                        text,
+                        "{ax}:{ay}/0/navigation_layer_0/polygon = SubResource(\"{nav_sub_id}\")"
+                    )
+                    .unwrap();
+                }
+                if occl_tiles.contains(atlas) {
+                    writeln!(
+                        text,
+                        "{ax}:{ay}/0/occlusion_layer_0/polygon_0/polygon = SubResource(\"{occl_sub_id}\")"
+                    )
+                    .unwrap();
+                }
+            }
+
+            count += 1;
+            source_refs.push((source_id, sub_id));
+        }
+
+        if source_refs.is_empty() {
+            continue;
+        }
+
+        let tileset_id = format!("TileSet_{stem}");
+        writeln!(
+            text,
+            "\n[sub_resource type=\"TileSet\" id=\"{tileset_id}\"]"
+        )
+        .unwrap();
+        writeln!(
+            text,
+            "tile_size = {}",
+            format_variant_value(&Variant::Vector2i(tile_size))
+        )
+        .unwrap();
+        // ⚠️ A tile's collision polygon is stored under `physics_layer_0`, and
+        // Godot only reads it when that layer EXISTS. Without this line the
+        // polygons are written and then ignored on load — the exact "wired but
+        // inert" failure, in the file format rather than in code.
+        let has_collision = match node.get_property(crate::tilemap::TILE_PHYSICS_SOURCES) {
+            Variant::PackedInt32Array(v) => !v.is_empty(),
+            _ => false,
+        };
+        if has_collision {
+            writeln!(text, "physics_layer_0/collision_layer = 1").unwrap();
+        }
+        // Same rule as the physics layer above: Godot reads a tile's
+        // `navigation_layer_0/polygon` only when the navigation layer EXISTS on
+        // the TileSet. Without this the polygons are written and then ignored
+        // on load (pat-s3rrv.65).
+        let has_navigation = match node.get_property(crate::tilemap::TILE_NAV_SOURCES) {
+            Variant::PackedInt32Array(v) => !v.is_empty(),
+            _ => false,
+        };
+        if has_navigation {
+            writeln!(text, "navigation_layer_0/layers = 1").unwrap();
+        }
+        // Same rule again: Godot reads a tile's occluder only when the
+        // occlusion layer exists on the TileSet. `light_mask` is the layer's
+        // own property (tile_set.cpp:4148), not the tile's.
+        let has_occlusion = match node.get_property(crate::tilemap::TILE_OCCLUDER_SOURCES) {
+            Variant::PackedInt32Array(v) => !v.is_empty(),
+            _ => false,
+        };
+        if has_occlusion {
+            writeln!(text, "occlusion_layer_0/light_mask = 1").unwrap();
+        }
+        for (source_id, sub_id) in &source_refs {
+            writeln!(text, "sources/{source_id} = SubResource(\"{sub_id}\")").unwrap();
+        }
+        count += 1;
+        nodes.insert(nid, tileset_id);
+    }
+
+    TileSetTables {
+        text,
+        nodes,
+        ext: ext
+            .into_iter()
+            .map(|(id, (res_type, path))| (id, res_type, path, None))
+            .collect(),
+        count,
+    }
+}
+
+/// Writes the `tile_set = SubResource("...")` reference for a node whose
+/// TileSet was regenerated above.
+fn write_tileset_props(out: &mut String, tables: &TileSetTables, nid: NodeId) {
+    if let Some(sub_id) = tables.nodes.get(&nid) {
+        writeln!(out, "tile_set = SubResource(\"{sub_id}\")").unwrap();
+    }
+}
+
 /// Properties regenerated from a node's attached player or frame library, which
 /// the node writer must therefore NOT also emit from its own parsed copies.
 ///
@@ -595,9 +1053,16 @@ fn collect_spriteframes_tables(tree: &SceneTree, node_ids: &[NodeId]) -> SpriteF
 fn skip_keys_for(
     anims: &AnimationTables,
     sframes: &SpriteFramesTables,
+    tilesets: &TileSetTables,
     nid: NodeId,
 ) -> Vec<&'static str> {
     let mut keys: Vec<&'static str> = anims.skip_keys(nid).to_vec();
+    // Same hazard as `sprite_frames`: a TileMapLayer loaded from a scene keeps
+    // the raw `SubResource("…")` string in its bag, so writing both that and
+    // the regenerated reference would emit `tile_set` twice.
+    if tilesets.nodes.contains_key(&nid) {
+        keys.push("tile_set");
+    }
     if sframes.nodes.contains_key(&nid) {
         keys.push("sprite_frames");
     }
@@ -723,6 +1188,12 @@ impl TscnSaver {
         // companion keys would be written verbatim as properties Godot has
         // never heard of.
         let sframes = collect_spriteframes_tables(tree, &node_ids);
+        // Every TileMapLayer's authored TileSet becomes a real `TileSet` +
+        // `TileSetAtlasSource` sub-resource pair (pat-s3rrv.65). Before this an
+        // editor-authored TileSet existed only in memory: the `__tile_set__*`
+        // companions are dropped as internal, and there was no `tile_set`
+        // reference to fall back on, so saving lost the whole thing.
+        let tilesets = collect_tileset_tables(tree, &node_ids);
 
         let mut out = String::new();
         // Header. Godot emits `load_steps` = (ext + sub resources) + 1 whenever
@@ -731,7 +1202,9 @@ impl TscnSaver {
             + tables.sub.len()
             + anims.resource_count()
             + sframes.resource_count()
-            + sframes.ext.len();
+            + sframes.ext.len()
+            + tilesets.resource_count()
+            + tilesets.ext.len();
         if resource_count > 0 {
             writeln!(out, "[gd_scene load_steps={} format=3]", resource_count + 1).unwrap();
         } else {
@@ -744,6 +1217,11 @@ impl TscnSaver {
         let mut ext_rows: Vec<&(String, String, String, Option<String>)> =
             tables.ext.iter().collect();
         for row in &sframes.ext {
+            if !ext_rows.iter().any(|(id, _, _, _)| id == &row.0) {
+                ext_rows.push(row);
+            }
+        }
+        for row in &tilesets.ext {
             if !ext_rows.iter().any(|(id, _, _, _)| id == &row.0) {
                 ext_rows.push(row);
             }
@@ -779,6 +1257,7 @@ impl TscnSaver {
         // sections so the players' `libraries` references resolve on re-load.
         out.push_str(&anims.text);
         out.push_str(&sframes.text);
+        out.push_str(&tilesets.text);
 
         // Build a map from NodeId -> relative path within the subtree.
         let mut id_to_path: HashMap<NodeId, String> = HashMap::new();
@@ -792,9 +1271,15 @@ impl TscnSaver {
 
             if nid == root_id {
                 // Root node — no parent attribute.
-                write_node_section(&mut out, node, None, &skip_keys_for(&anims, &sframes, nid));
+                write_node_section(
+                    &mut out,
+                    node,
+                    None,
+                    &skip_keys_for(&anims, &sframes, &tilesets, nid),
+                );
                 write_animation_player_props(&mut out, &anims, nid);
                 write_spriteframes_props(&mut out, &sframes, nid);
+                write_tileset_props(&mut out, &tilesets, nid);
             } else {
                 // Compute parent path.
                 let parent_id = match node.parent() {
@@ -815,10 +1300,11 @@ impl TscnSaver {
                     &mut out,
                     node,
                     Some(&parent_path),
-                    &skip_keys_for(&anims, &sframes, nid),
+                    &skip_keys_for(&anims, &sframes, &tilesets, nid),
                 );
                 write_animation_player_props(&mut out, &anims, nid);
                 write_spriteframes_props(&mut out, &sframes, nid);
+                write_tileset_props(&mut out, &tilesets, nid);
             }
         }
 
@@ -964,6 +1450,17 @@ fn is_internal_prop(key: &str) -> bool {
         // and is written back verbatim, which is what makes a painted layer
         // survive a save.
         || key.starts_with("__tile_set__")
+        // The per-tile companions are the same kind of cache and were NOT
+        // filtered (pat-s3rrv.65): any scene with tile collision re-saved with
+        // `__tile_physics_0_0_0_points = PackedVector2Array(…)` as a literal
+        // node property, which Godot cannot parse. They are regenerated above
+        // as real `TileSetAtlasSource` keys, so emitting the raw ones would
+        // both duplicate the data and corrupt the file.
+        || key.starts_with(crate::tilemap::TILE_PHYSICS_PREFIX)
+        || key == crate::tilemap::TILE_PHYSICS_SOURCES
+        || key.starts_with(crate::tilemap::TILE_CUSTOM_DATA_PREFIX)
+        || key == crate::tilemap::TILE_CUSTOM_DATA_LAYERS
+        || key.starts_with("__tile_nav_")
         || key == "_instance"
         || key == "_instance_path"
         || key == "_script_path"

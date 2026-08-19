@@ -69,6 +69,7 @@ pub mod physics_server;
 pub mod physics_server_3d;
 pub mod polygon_path_finder;
 pub mod popup;
+pub mod range_controls;
 pub mod raycast2d;
 pub mod raycast3d;
 pub mod render_server_3d;

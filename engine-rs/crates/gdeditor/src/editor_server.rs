@@ -22,6 +22,7 @@ use gdscene::main_loop::MainLoop;
 use gdscene::node::{Node, NodeId};
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::scene_saver::TscnSaver;
+use gdscene::tilemap;
 use gdscene::SceneTree;
 use gdvariant::serialize::{from_json, to_json};
 use gdvariant::Variant;
@@ -31,7 +32,7 @@ use crate::filesystem::{EditorFileSystem, FileSystemDock};
 use crate::texture_cache::TextureCache;
 use crate::EditorCommand;
 
-use gdcore::math::Vector2;
+use gdcore::math::{Rect2, Vector2, Vector2i};
 use gdscene::scripting::{GDScriptNodeInstance, InputSnapshot};
 // pat-0q2kx.76: `call_method` is a `ScriptInstance` trait method, so the trait
 // has to be in scope to invoke it on a concrete instance.
@@ -316,6 +317,12 @@ pub struct MovieFrame {
 
 /// Shared editor state protected by a mutex.
 pub struct EditorState {
+    /// The plugin whose main screen is currently shown, if any (pat-s3rrv.66).
+    ///
+    /// Godot's main-screen bar shows one editor at a time — selecting a
+    /// plugin's tab hides the one it replaced. Recording the choice is what
+    /// lets a later request know which plugin to hide.
+    pub main_screen_plugin: Option<String>,
     /// The scene tree being edited.
     pub scene_tree: SceneTree,
     /// The currently selected node, if any.
@@ -538,6 +545,15 @@ pub struct EditorState {
     pub plugins: Vec<PluginEntry>,
     /// Running EditorPlugin instances, keyed by addon folder (pat-0q2kx.76).
     pub active_plugins: HashMap<String, GDScriptNodeInstance>,
+    /// Per-scene plugin state from `_get_state`, keyed by scene path and then
+    /// by plugin NAME (pat-s3rrv.66).
+    ///
+    /// Godot stores this in an `editstate` file in the editor metadata folder,
+    /// keyed by the plugin's `_get_plugin_name()` — which is why its doc says
+    /// "You must implement `_get_plugin_name` for the state to be stored and
+    /// restored correctly". Keying by addon FOLDER instead would look identical
+    /// until a project renamed a folder, then silently drop the state.
+    pub plugin_scene_state: HashMap<String, HashMap<String, Variant>>,
     /// `@tool` scripts executing against the EDIT tree, keyed by their node.
     pub tool_scripts: HashMap<NodeId, GDScriptNodeInstance>,
     /// Editor keybindings for the settings dialog.
@@ -864,6 +880,8 @@ impl EditorState {
         // resolves against the running editor.
         gdobject::editor_plugin_classes::register_editor_plugin_classes();
         Self {
+            // No plugin owns the main screen until one is selected.
+            main_screen_plugin: None,
             scene_tree: tree,
             selected_node: None,
             undo_stack: Vec::new(),
@@ -954,6 +972,7 @@ impl EditorState {
             debug_globals: Vec::new(),
             plugins: Vec::new(),
             active_plugins: HashMap::new(),
+            plugin_scene_state: HashMap::new(),
             tool_scripts: HashMap::new(),
             keybindings: EditorKeyBinding::defaults(),
             viewport_mode: ViewportMode::Select,
@@ -2463,6 +2482,8 @@ fn handle_connection(
         ("GET", "/api/assetlib/list") => api_get_assetlib_list(&mut stream),
         // pat-yxe4s: SCRIPT main-screen view for the selected node.
         ("GET", "/api/script/main_view") => api_script_main_view(state, &req.query, &mut stream),
+        ("GET", "/api/script/templates") => api_script_templates(state, &req.query, &mut stream),
+        ("POST", "/api/script/create") => api_script_create(state, &req.body, &mut stream),
         ("POST", "/api/script/save") => api_save_script(&req.body, &mut stream),
         ("POST", "/api/node/signals/connect") => api_connect_signal(state, &req.body, &mut stream),
         ("POST", "/api/node/groups/add") => api_add_group(state, &req.body, &mut stream),
@@ -2476,6 +2497,9 @@ fn handle_connection(
         ("POST", "/api/settings") => api_set_settings(state, &req.body, &mut stream),
         ("GET", "/api/plugins") => api_get_plugins(state, &mut stream),
         ("POST", "/api/plugins/toggle") => api_toggle_plugin(state, &req.body, &mut stream),
+        ("POST", "/api/plugins/main_screen") => {
+            api_plugin_main_screen(state, &req.body, &mut stream)
+        }
         // pat-0q2kx.77: Path2D / Polygon2D / Line2D point editing. One route set
         // serves all three; `point_property_for` picks the backing property.
         ("POST", "/api/path2d/point/add") => api_point_add(state, &req.body, &mut stream),
@@ -2524,6 +2548,19 @@ fn handle_connection(
         }
         ("POST", "/api/animation/tree/state/move") => {
             api_anim_tree_move_state(state, &req.body, &mut stream)
+        }
+        // pat-s3rrv.1: a blend TREE is built from connections, not transitions.
+        // `connections` was already served by GET /api/animation/tree and could
+        // only ever be empty, because nothing could create one.
+        ("POST", "/api/animation/tree/connect") => {
+            api_anim_tree_connect(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/animation/tree/disconnect") => {
+            api_anim_tree_disconnect(state, &req.body, &mut stream)
+        }
+        // pat-s3rrv.1: a blend space's points live in the node's params.
+        ("POST", "/api/animation/tree/node/param") => {
+            api_anim_tree_set_node_param(state, &req.body, &mut stream)
         }
         ("POST", "/api/animation/seek") => api_seek_animation(state, &req.body, &mut stream),
         ("POST", "/api/animation/record") => api_toggle_recording(state, &req.body, &mut stream),
@@ -2603,6 +2640,15 @@ fn handle_connection(
         ("GET", "/api/tilemap/data") => api_tilemap_data(state, &req.query, &mut stream),
         ("POST", "/api/tilemap/resize") => api_tilemap_resize(state, &req.body, &mut stream),
         ("GET", "/api/tilemap/tileset") => api_tilemap_tileset(state, &mut stream),
+        // pat-s3rrv.65: TileSet atlas-source authoring. Unlike
+        // `/api/tilemap/tileset` above — which reports the editor's own flat
+        // colour palette — these read and write the TileSet companions on the
+        // selected TileMapLayer, so an edit reaches the saved scene and the
+        // runtime's tile collision.
+        ("GET", "/api/tileset/source") => api_tileset_source_get(state, &req.query, &mut stream),
+        ("POST", "/api/tileset/source") => api_tileset_source_set(state, &req.body, &mut stream),
+        ("GET", "/api/tileset/tile") => api_tileset_tile_get(state, &req.query, &mut stream),
+        ("POST", "/api/tileset/tile/data") => api_tileset_tile_data(state, &req.body, &mut stream),
         // pat-r5p: Transform gizmo
         ("POST", "/api/viewport/drag_axis") => {
             api_viewport_drag_axis(state, &req.body, &mut stream)
@@ -2742,6 +2788,10 @@ fn handle_connection(
             api_audio_toggle_effect(state, &req.body, &mut stream)
         }
         ("POST", "/api/audio/layout/load_default") => api_audio_load_default(state, &mut stream),
+        ("GET", "/api/audio/peaks") => api_audio_get_peaks(state, &mut stream),
+        ("POST", "/api/audio/layout/save") => api_audio_save_layout(state, &mut stream),
+        ("POST", "/api/audio/layout/load") => api_audio_load_layout(state, &mut stream),
+        ("POST", "/api/audio/effect/swap") => api_audio_swap_effects(state, &req.body, &mut stream),
         // pat-db37w: Project Settings > Input Map tab
         ("GET", "/api/input_map") => api_get_input_map(state, &mut stream),
         ("POST", "/api/input_map") => api_set_input_map(state, &req.body, &mut stream),
@@ -4853,6 +4903,9 @@ fn api_delete_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
     // The deleted nodes no longer exist; clear the selection.
     state.selected_node = None;
     state.selected_nodes.clear();
+    // pat-s3rrv.66: a plugin that showed its panel for the deleted node has no
+    // other signal to hide it, so the empty selection must reach it too.
+    notify_plugins_of_selection(&mut state, None);
 
     send_json(stream, &format!(r#"{{"ok":true,"deleted":{}}}"#, deleted));
 }
@@ -4887,7 +4940,411 @@ fn api_select_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
     state.selected_node = Some(node_id);
     state.selected_nodes = vec![node_id];
     push_inspector_history(&mut state, node_id);
+    // pat-s3rrv.66: Godot's plugin selection contract runs here.
+    notify_plugins_of_selection(&mut state, Some(node_id));
     send_json(stream, r#"{"ok":true}"#);
+}
+
+/// Godot's `EditorPlugin` selection handshake (`editor/plugins/editor_plugin.cpp`).
+///
+/// On every selection change the editor asks each enabled plugin
+/// `_handles(object)`. The plugin that claims the object gets `_edit(object)`
+/// and `_make_visible(true)`; every other plugin gets `_make_visible(false)` so
+/// its UI hides. Without this a plugin can be enabled and ticked but can never
+/// claim an object — which is what "an EditorPlugin cannot do anything" meant
+/// in practice (pat-s3rrv.66).
+///
+/// ⚠️ `_make_visible(false)` is sent to non-claiming plugins EVEN WHEN nothing
+/// is selected. A plugin that showed its panel for the previous selection has
+/// no other signal to hide it, and Godot does the same.
+pub fn notify_plugins_of_selection(state: &mut EditorState, node: Option<NodeId>) {
+    if state.active_plugins.is_empty() {
+        return;
+    }
+    let object = match node {
+        Some(id) => Variant::ObjectId(gdcore::id::ObjectId::from_raw(id.raw())),
+        None => Variant::Nil,
+    };
+
+    // The plugin map is moved out for the duration: `call_method` needs `&mut`
+    // on an instance while `add_log` needs `&mut` on the state that owns them.
+    let mut plugins = std::mem::take(&mut state.active_plugins);
+    let mut logs: Vec<(String, String)> = Vec::new();
+
+    for (folder, instance) in plugins.iter_mut() {
+        let claims = node.is_some()
+            && instance.has_method("_handles")
+            && match instance.call_method("_handles", std::slice::from_ref(&object)) {
+                Ok(v) => v.is_truthy(),
+                Err(e) => {
+                    logs.push((
+                        "error".into(),
+                        format!("Plugin '{folder}' _handles failed: {e:?}"),
+                    ));
+                    false
+                }
+            };
+
+        if claims && instance.has_method("_edit") {
+            if let Err(e) = instance.call_method("_edit", std::slice::from_ref(&object)) {
+                logs.push((
+                    "error".into(),
+                    format!("Plugin '{folder}' _edit failed: {e:?}"),
+                ));
+            }
+        }
+        if instance.has_method("_make_visible") {
+            let arg = [Variant::Bool(claims)];
+            if let Err(e) = instance.call_method("_make_visible", &arg) {
+                logs.push((
+                    "error".into(),
+                    format!("Plugin '{folder}' _make_visible failed: {e:?}"),
+                ));
+            }
+        }
+        for line in instance.take_output() {
+            logs.push(("info".into(), line));
+        }
+    }
+
+    state.active_plugins = plugins;
+    for (level, message) in logs {
+        state.add_log(&level, message);
+    }
+}
+
+/// Calls one `EditorPlugin` virtual on every enabled plugin (pat-s3rrv.66).
+///
+/// Returns the folder of the first plugin whose return value is truthy, or
+/// `None` when nobody claimed it.
+///
+/// ⚠️ `stop_at_first_claim` is not a convenience — the two callers need
+/// genuinely different semantics, and Godot treats them differently:
+///
+/// * **Input forwarding** (`_forward_canvas_gui_input`) stops at the first
+///   plugin returning `true`. That plugin has CONSUMED the event, so offering
+///   it to the plugins behind it would let two of them act on one click.
+/// * **Lifecycle broadcasts** (`_apply_changes`) must reach EVERY plugin. A
+///   truthy return there does not mean "handled", and stopping would silently
+///   skip the rest — the kind of half-dispatch that looks wired and loses work.
+///
+/// Mirrors `notify_plugins_of_selection`'s borrow dance: the plugin map is
+/// moved out for the duration because `call_method` needs `&mut` on an instance
+/// while `add_log` needs `&mut` on the state that owns them.
+pub fn dispatch_plugin_virtual(
+    state: &mut EditorState,
+    method: &str,
+    args: &[Variant],
+    stop_at_first_claim: bool,
+) -> Option<String> {
+    if state.active_plugins.is_empty() {
+        return None;
+    }
+    let mut plugins = std::mem::take(&mut state.active_plugins);
+    let mut logs: Vec<(String, String)> = Vec::new();
+    let mut claimed: Option<String> = None;
+
+    for (folder, instance) in plugins.iter_mut() {
+        if stop_at_first_claim && claimed.is_some() {
+            break;
+        }
+        if !instance.has_method(method) {
+            continue;
+        }
+        match instance.call_method(method, args) {
+            Ok(v) => {
+                if v.is_truthy() && claimed.is_none() {
+                    claimed = Some(folder.clone());
+                }
+            }
+            Err(e) => logs.push((
+                "error".into(),
+                format!("Plugin '{folder}' {method} failed: {e:?}"),
+            )),
+        }
+        for line in instance.take_output() {
+            logs.push(("info".into(), line));
+        }
+    }
+
+    state.active_plugins = plugins;
+    for (level, message) in logs {
+        state.add_log(&level, message);
+    }
+    claimed
+}
+
+/// Runs `_build()` on every enabled plugin, returning the name of the first
+/// that REFUSED — `None` means the run may proceed (pat-s3rrv.66).
+///
+/// ⚠️ This is the **inverse** of [`dispatch_plugin_virtual`]'s
+/// `stop_at_first_claim`. That helper stops at the first plugin returning
+/// something truthy; `_build` stops at the first returning **false**. Godot's
+/// doc is explicit that the significant value is the refusal:
+///
+/// > If this method returns `false`, the project will not run. The run is
+/// > aborted immediately, so this also prevents all other plugins' `_build`
+/// > methods from running.
+///
+/// So a plugin declared after the refuser must NOT be asked — a build step that
+/// runs after another has already vetoed the run is doing work for a run that
+/// will not happen, and may do it against a half-prepared project.
+///
+/// A plugin with no `_build` override is treated as approving, matching Godot,
+/// where the virtual defaults to returning true.
+fn plugin_build_refusal(state: &mut EditorState) -> Option<String> {
+    if state.active_plugins.is_empty() {
+        return None;
+    }
+    let mut plugins = std::mem::take(&mut state.active_plugins);
+    let mut logs: Vec<(String, String)> = Vec::new();
+    let mut refused: Option<String> = None;
+
+    // Deterministic order, so which plugin gets blamed for a refusal does not
+    // depend on a HashMap walk.
+    let mut folders: Vec<String> = plugins.keys().cloned().collect();
+    folders.sort();
+
+    for folder in folders {
+        let Some(instance) = plugins.get_mut(&folder) else {
+            continue;
+        };
+        if !instance.has_method("_build") {
+            continue;
+        }
+        match instance.call_method("_build", &[]) {
+            Ok(v) => {
+                if !v.is_truthy() {
+                    refused = Some(folder.clone());
+                }
+            }
+            // A plugin whose `_build` raised has not approved the run. Treating
+            // an error as approval would let a broken build step through
+            // silently, which is the failure `_build` exists to prevent.
+            Err(e) => {
+                logs.push((
+                    "error".into(),
+                    format!("Plugin '{folder}' _build failed: {e:?}"),
+                ));
+                refused = Some(folder.clone());
+            }
+        }
+        for line in instance.take_output() {
+            logs.push(("info".into(), line));
+        }
+        if refused.is_some() {
+            break;
+        }
+    }
+
+    state.active_plugins = plugins;
+    for (level, message) in logs {
+        state.add_log(&level, message);
+    }
+    refused
+}
+
+/// Collects each plugin's `_get_state()` Dictionary, keyed by plugin NAME.
+///
+/// Unlike [`dispatch_plugin_virtual`], which reports only *which* plugin
+/// claimed, this keeps the returned Variant — `_get_state` exists precisely for
+/// its return value, so discarding it would make the call pointless.
+fn collect_plugin_state(state: &mut EditorState) -> HashMap<String, Variant> {
+    let folders: Vec<String> = state.active_plugins.keys().cloned().collect();
+    let mut out = HashMap::new();
+    for folder in folders {
+        // Resolved BEFORE taking the map, because `plugin_display_name` takes
+        // the plugin map itself.
+        let name = plugin_display_name(state, &folder);
+        let mut plugins = std::mem::take(&mut state.active_plugins);
+        if let Some(instance) = plugins.get_mut(&folder) {
+            if instance.has_method("_get_state") {
+                if let Ok(v) = instance.call_method("_get_state", &[]) {
+                    if !v.is_nil() {
+                        out.insert(name, v);
+                    }
+                }
+            }
+        }
+        state.active_plugins = plugins;
+    }
+    out
+}
+
+/// Hands each plugin back its own `_set_state` entry, if one was saved.
+///
+/// A plugin with no stored entry is NOT called: Godot only restores state it
+/// saved, and calling `_set_state({})` would ask a plugin to adopt an empty
+/// state it never wrote.
+fn restore_plugin_state(state: &mut EditorState, saved: &HashMap<String, Variant>) {
+    if saved.is_empty() {
+        return;
+    }
+    let folders: Vec<String> = state.active_plugins.keys().cloned().collect();
+    for folder in folders {
+        let name = plugin_display_name(state, &folder);
+        let Some(entry) = saved.get(&name).cloned() else {
+            continue;
+        };
+        let mut plugins = std::mem::take(&mut state.active_plugins);
+        if let Some(instance) = plugins.get_mut(&folder) {
+            if instance.has_method("_set_state") {
+                let _ = instance.call_method("_set_state", &[entry]);
+            }
+        }
+        state.active_plugins = plugins;
+    }
+}
+
+/// The `{position, button_index, pressed}` an editor viewport click is offered
+/// to plugins as (pat-s3rrv.66).
+///
+/// Godot hands `_forward_canvas_gui_input` a real `InputEventMouseButton`.
+/// Patina has no InputEvent object to pass through the interpreter yet, so the
+/// event arrives as a Dictionary carrying the same field names a plugin would
+/// read off one — `event.position`, `event.button_index`, `event.pressed`.
+fn canvas_click_event(x: f32, y: f32) -> Variant {
+    canvas_button_event(x, y, true)
+}
+
+/// The same event with an explicit `pressed`, so a drag END can be forwarded as
+/// a RELEASE rather than another press (pat-s3rrv.66).
+///
+/// ⚠️ A plugin distinguishes press from release on exactly this field. Sending
+/// `pressed: true` for a release would make a click-to-place tool fire twice
+/// per gesture — once on the press and once on what it believes is a second
+/// press — which looks like a double-input bug far from its cause.
+fn canvas_button_event(x: f32, y: f32, pressed: bool) -> Variant {
+    let mut d = gdvariant::Dictionary::new();
+    d.insert(
+        Variant::String("position".to_string()),
+        Variant::Vector2(gdcore::math::Vector2::new(x, y)),
+    );
+    // MOUSE_BUTTON_LEFT.
+    d.insert(Variant::String("button_index".to_string()), Variant::Int(1));
+    d.insert(
+        Variant::String("pressed".to_string()),
+        Variant::Bool(pressed),
+    );
+    Variant::Dictionary(d)
+}
+
+/// The plugin's own name, from `_get_plugin_name()`, falling back to its folder
+/// (pat-s3rrv.66).
+///
+/// Godot shows this on the main-screen tab, so a plugin that implements the
+/// virtual should be listed under the name it chose rather than its directory.
+pub fn plugin_display_name(state: &mut EditorState, folder: &str) -> String {
+    let mut plugins = std::mem::take(&mut state.active_plugins);
+    let name = plugins
+        .get_mut(folder)
+        .filter(|i| i.has_method("_get_plugin_name"))
+        .and_then(|i| i.call_method("_get_plugin_name", &[]).ok())
+        .and_then(|v| match v {
+            Variant::String(s) if !s.is_empty() => Some(s),
+            _ => None,
+        })
+        .unwrap_or_else(|| folder.to_string());
+    state.active_plugins = plugins;
+    name
+}
+
+/// Whether the plugin owns a main-screen tab (`_has_main_screen`).
+pub fn plugin_has_main_screen(state: &mut EditorState, folder: &str) -> bool {
+    let mut plugins = std::mem::take(&mut state.active_plugins);
+    let has = plugins
+        .get_mut(folder)
+        .filter(|i| i.has_method("_has_main_screen"))
+        .and_then(|i| i.call_method("_has_main_screen", &[]).ok())
+        .map(|v| v.is_truthy())
+        .unwrap_or(false);
+    state.active_plugins = plugins;
+    has
+}
+
+/// `POST /api/plugins/main_screen` — activate a plugin's main screen
+/// (pat-s3rrv.66).
+///
+/// Godot's main-screen bar carries a tab per plugin whose `_has_main_screen()`
+/// answers true. Selecting one calls `_make_visible(true)` on it and
+/// `_make_visible(false)` on the main screen it replaced
+/// (`editor/plugins/editor_plugin.cpp`). Until now the server could ANSWER
+/// `_has_main_screen` but nothing could ever act on it, so the tab had nowhere
+/// to route and the virtual was decorative.
+///
+/// ⚠️ Only main-screen plugins are toggled here. A dock plugin's visibility is
+/// owned by the SELECTION handshake (`notify_plugins_of_selection`), so hiding
+/// every plugin on a main-screen switch would blank a dock that a selection had
+/// just shown — two features fighting over one virtual.
+fn api_plugin_main_screen(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let folder = match parsed.get("folder").and_then(|v| v.as_str()) {
+        Some(f) => f.to_string(),
+        None => {
+            send_error(stream, 400, "missing folder");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    if !state.active_plugins.contains_key(&folder) {
+        send_error(stream, 404, "no such enabled plugin");
+        return;
+    }
+
+    // Resolve which plugins own a main screen BEFORE taking the map:
+    // `plugin_has_main_screen` needs `&mut state` and does its own take/restore.
+    let folders: Vec<String> = state.active_plugins.keys().cloned().collect();
+    let mut screens: Vec<String> = Vec::new();
+    for f in folders {
+        if plugin_has_main_screen(&mut state, &f) {
+            screens.push(f);
+        }
+    }
+    if !screens.contains(&folder) {
+        send_error(stream, 400, "plugin has no main screen");
+        return;
+    }
+
+    let mut plugins = std::mem::take(&mut state.active_plugins);
+    let mut logs: Vec<(String, String)> = Vec::new();
+    for f in &screens {
+        let Some(instance) = plugins.get_mut(f) else {
+            continue;
+        };
+        if !instance.has_method("_make_visible") {
+            continue;
+        }
+        let arg = [Variant::Bool(*f == folder)];
+        if let Err(e) = instance.call_method("_make_visible", &arg) {
+            logs.push((
+                "error".into(),
+                format!("Plugin '{f}' _make_visible failed: {e:?}"),
+            ));
+        }
+        for line in instance.take_output() {
+            logs.push(("info".into(), line));
+        }
+    }
+    state.active_plugins = plugins;
+    for (level, message) in logs {
+        state.add_log(&level, message);
+    }
+    state.main_screen_plugin = Some(folder.clone());
+
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"main_screen":"{}"}}"#,
+            folder.replace('"', "")
+        ),
+    );
 }
 
 /// Records `node_id` as the newly inspected object in the inspector navigation
@@ -7153,6 +7610,9 @@ fn api_set_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     };
 
     let prop_name = property.clone();
+    // Cloned before the command takes ownership, so auto-key can record the
+    // same value the edit applied.
+    let keyed_value = new_value.clone();
     let mut cmd = EditorCommand::SetProperty {
         node_id,
         property,
@@ -7183,6 +7643,10 @@ fn api_set_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         );
         crate::control_binding::invalidate_layout(&mut state.scene_tree, node_id, parent_size);
     }
+
+    // Auto-key (pat-s3rrv.62): while armed, every property edit also records a
+    // keyframe at the playhead. No-op when disarmed.
+    auto_key_property(&mut state, node_id, &prop_name, &keyed_value);
 
     // pat-zzgh5: broadcast a mutation event to every `/api/events` subscriber.
     let event = format!(
@@ -7709,11 +8173,35 @@ fn api_save_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
             return;
         }
     };
+    // pat-s3rrv.66: Godot's `EditorNode::_save_scene` runs
+    // `apply_changes_in_editors()` BEFORE serialising, so a plugin holding
+    // unflushed edits can write them into the scene and have them land in the
+    // file. Calling it after the save would be useless — the .tscn is already
+    // written by then. Broadcast, not first-claim: every plugin must get it.
+    dispatch_plugin_virtual(&mut state, "_apply_changes", &[], false);
+
     let tscn = TscnSaver::save_tree(&state.scene_tree, save_root);
 
     if let Err(e) = atomic_write(std::path::Path::new(&path), tscn.as_bytes()) {
         send_error(stream, 500, &format!("failed to write: {e}"));
         return;
+    }
+
+    // pat-s3rrv.66: `_save_external_data` runs AFTER the scene is written, not
+    // before. The doc is explicit — "called after the editor saves the project
+    // or when it's closed. It asks the plugin to save edited external
+    // scenes/resources" — which is the opposite ordering from `_apply_changes`
+    // above ("about to save"). Pairing them in one call site would have looked
+    // tidy and put this one on the wrong side of the write.
+    dispatch_plugin_virtual(&mut state, "_save_external_data", &[], false);
+
+    // pat-s3rrv.66: `_get_state` is collected per scene on save, so reopening
+    // the scene can hand each plugin its own view position / grid / folding back
+    // through `_set_state`. Keyed by scene PATH here and by plugin NAME inside,
+    // mirroring Godot's per-scene `editstate` metadata file.
+    let plugin_state = collect_plugin_state(&mut state);
+    if !plugin_state.is_empty() {
+        state.plugin_scene_state.insert(path.clone(), plugin_state);
     }
 
     state.scene_file = Some(path.clone());
@@ -8004,6 +8492,13 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
                 tab.name = name;
                 tab.modified = false;
             }
+            // pat-s3rrv.66: hand each plugin back the state it saved for THIS
+            // scene. Cloned out first because `restore_plugin_state` needs
+            // `&mut state` to call into the plugin instances, and the map lives
+            // on the same struct.
+            if let Some(saved) = state.plugin_scene_state.get(&path).cloned() {
+                restore_plugin_state(&mut state, &saved);
+            }
             state.add_log("info", format!("Loaded scene from '{}'", path));
             send_json(stream, r#"{"ok":true}"#);
         }
@@ -8031,6 +8526,29 @@ fn api_viewport_click(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     let y = parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
 
     let mut state = state.lock().unwrap();
+
+    // pat-s3rrv.66: plugins get the click BEFORE the editor's own select tool.
+    // A plugin returning true has CONSUMED the event, so the selection must not
+    // change — that is the whole point of `_forward_canvas_gui_input`, and a
+    // plugin implementing its own click-to-place tool is unusable without it.
+    let event = canvas_click_event(x, y);
+    if let Some(folder) =
+        dispatch_plugin_virtual(&mut state, "_forward_canvas_gui_input", &[event], true)
+    {
+        let selected = match state.selected_node {
+            Some(id) => id.raw().to_string(),
+            None => "null".to_string(),
+        };
+        send_json(
+            stream,
+            &format!(
+                r#"{{"selected":{selected},"consumed_by":"{}"}}"#,
+                folder.replace('"', "")
+            ),
+        );
+        return;
+    }
+
     let vw = state.viewport_width;
     let vh = state.viewport_height;
     let zoom = state.viewport_zoom;
@@ -8074,6 +8592,26 @@ fn api_viewport_drag_start(state: &Arc<Mutex<EditorState>>, body: &str, stream: 
     let y = parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
 
     let mut state = state.lock().unwrap();
+
+    // pat-s3rrv.66: plugins get the press that BEGINS a drag, before the
+    // editor's own hit test. Only the click route forwarded before this, so a
+    // plugin could consume a click and then watch the editor drag the node out
+    // from under it on the very next gesture.
+    //
+    // Consuming here means `drag_state` is never set, so the editor's drag
+    // never starts and `drag_end` finds nothing to commit — the plugin owns the
+    // whole gesture rather than half of it.
+    let event = canvas_button_event(x, y, true);
+    if let Some(folder) =
+        dispatch_plugin_virtual(&mut state, "_forward_canvas_gui_input", &[event], true)
+    {
+        send_json(
+            stream,
+            &format!(r#"{{"ok":true,"consumed_by":"{}"}}"#, folder.replace('"', "")),
+        );
+        return;
+    }
+
     let vw = state.viewport_width;
     let vh = state.viewport_height;
     let zoom = state.viewport_zoom;
@@ -8183,6 +8721,26 @@ fn api_viewport_drag_end(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
     let y = parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
 
     let mut state = state.lock().unwrap();
+
+    // The RELEASE half of the same gesture, forwarded as `pressed: false`.
+    //
+    // ⚠️ Placed BEFORE `drag_state.take()`. A plugin that claimed the press
+    // left `drag_state` unset, so this only ever reaches a gesture the EDITOR
+    // owns; consuming it therefore means "do not commit the move", which is
+    // well-defined because nothing has been applied yet — the delta is computed
+    // and written below.
+    let release = canvas_button_event(x, y, false);
+    if let Some(folder) =
+        dispatch_plugin_virtual(&mut state, "_forward_canvas_gui_input", &[release], true)
+    {
+        state.drag_state = None;
+        send_json(
+            stream,
+            &format!(r#"{{"ok":true,"consumed_by":"{}"}}"#, folder.replace('"', "")),
+        );
+        return;
+    }
+
 
     let drag = match state.drag_state.take() {
         Some(d) => d,
@@ -10103,10 +10661,23 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("GET", "/api/commands", "[]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/animations", "[]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/animation", "[\"name\"]", "null", "{\"type\":\"object\"}"),
+    // pat-s3rrv.1: the AnimationTree graph routes were dispatched but absent
+    // from the schema, so a client had no way to discover them.
+    ("GET", "/api/animation/tree", "[]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/animation/tree/state/add", "[]", "{\"name\":\"string\",\"kind\":\"string?\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/animation/tree/state/remove", "[]", "{\"name\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/animation/tree/state/move", "[]", "{\"name\":\"string\",\"x\":\"number\",\"y\":\"number\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/animation/tree/transition/add", "[]", "{\"from\":\"string\",\"to\":\"string\",\"xfade\":\"number?\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/animation/tree/transition/remove", "[]", "{\"from\":\"string\",\"to\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/animation/tree/transition/set", "[]", "{\"from\":\"string\",\"to\":\"string\",\"xfade\":\"number\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/animation/tree/connect", "[]", "{\"from\":\"string\",\"to\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/animation/tree/disconnect", "[]", "{\"from\":\"string\",\"to\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/animation/tree/node/param", "[]", "{\"name\":\"string\",\"key\":\"string\",\"value\":\"string\"}", "{\"type\":\"object\"}"),
     ("GET", "/api/runtime/status", "[]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/runtime/input/state", "[]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/settings", "[]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/plugins", "[]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/plugins/main_screen", "[]", "{\"folder\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\",\"main_screen\":\"string\"}}"),
     ("GET", "/api/keybindings", "[]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/editor/mode", "[]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/editor/main_view", "[]", "null", "{\"type\":\"object\"}"),
@@ -10129,6 +10700,10 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/api/audio/bus/rename", "[]", "{\"index\":\"number\",\"name\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/audio/bus/volume", "[]", "{\"index\":\"number\",\"volume_db\":\"number\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/audio/bus/mute", "[]", "{\"index\":\"number\"}", "{\"type\":\"object\"}"),
+    ("GET", "/api/audio/peaks", "[]", "null", "{\"type\":\"object\",\"properties\":{\"playing\":\"boolean\",\"buses\":\"array\"}}"),
+    ("POST", "/api/audio/layout/save", "[]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/audio/layout/load", "[]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/audio/effect/swap", "[]", "{\"index\":\"number\",\"from\":\"number\",\"to\":\"number\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/audio/bus/solo", "[]", "{\"index\":\"number\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/audio/bus/bypass", "[]", "{\"index\":\"number\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/audio/bus/output", "[]", "{\"index\":\"number\",\"target\":\"string\"}", "{\"type\":\"object\"}"),
@@ -10148,6 +10723,10 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/api/node/change_type", "[]", "{\"node_id\":\"number\",\"class_name\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/node/duplicate", "[]", "{\"node_id\":\"number\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/property/set", "[]", "{\"node_id\":\"number\",\"property\":\"string\",\"value\":\"any\"}", "{\"type\":\"object\"}"),
+    ("GET", "/api/tileset/source", "[\"node_id\"]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/tileset/source", "[]", "{\"node_id\":\"number\",\"source_id\":\"number\",\"texture\":\"string\",\"region_size\":\"array\",\"margins\":\"array\",\"separation\":\"array\",\"tile_size\":\"array\"}", "{\"type\":\"object\"}"),
+    ("GET", "/api/tileset/tile", "[\"node_id\",\"source_id\"]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/tileset/tile/data", "[]", "{\"node_id\":\"number\",\"source_id\":\"number\",\"atlas\":\"array\",\"collision_rect\":\"array\",\"full_cell_collision\":\"boolean\",\"one_way\":\"boolean\",\"custom_data\":\"object\",\"navigation\":\"boolean\",\"navigation_polygon\":\"array\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/undo", "[]", "null", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\"}}"),
     ("POST", "/api/redo", "[]", "null", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\"}}"),
     ("GET", "/api/history", "[]", "null", "{\"type\":\"object\",\"properties\":{\"current\":\"number\",\"entries\":\"array\"}}"),
@@ -10160,6 +10739,8 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/api/filesystem/delete", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/filesystem/mkdir", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/script/save", "[]", "{\"path\":\"string\",\"source\":\"string\"}", "{\"type\":\"object\"}"),
+    ("GET", "/api/script/templates", "[\"base_class?\"]", "null", "{\"type\":\"object\",\"properties\":{\"templates\":\"array\",\"count\":\"number\"}}"),
+    ("POST", "/api/script/create", "[]", "{\"path\":\"string\",\"base_class\":\"string?\",\"class_name\":\"string?\",\"template\":\"string?\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\",\"content\":\"string\"}}"),
     // pat-0q2kx.14: script-editor completion + goto-definition.
     ("POST", "/api/script/complete", "[]", "{\"current_class\":\"string\",\"prefix\":\"string\",\"dot_class\":\"string?\",\"locals\":\"array\"}", "{\"type\":\"object\",\"properties\":{\"candidates\":\"array\",\"count\":\"number\"}}"),
     ("GET", "/api/script/goto", "[\"path\",\"symbol?\",\"line?\",\"col?\"]", "null", "{\"type\":\"object\",\"properties\":{\"found\":\"boolean\",\"file\":\"string\",\"line\":\"number\",\"symbol\":\"string\"}}"),
@@ -11251,6 +11832,156 @@ fn api_get_assetlib_list(stream: &mut TcpStream) {
     send_json(stream, &body.to_string());
 }
 
+/// The directory `res://` resolves against for template lookup.
+///
+/// Mirrors the sibling script routes, which resolve `res://` against the
+/// process CWD, and prefers an explicitly configured project root when the
+/// editor was pointed at one.
+fn script_project_root(state: &EditorState) -> std::path::PathBuf {
+    match &state.project_root {
+        Some(root) if !root.is_empty() => std::path::PathBuf::from(root),
+        _ => std::env::current_dir().unwrap_or_default(),
+    }
+}
+
+/// `GET /api/script/templates?base_class=Control`
+///
+/// Every template applicable to `base_class`, nearest ancestor first, so the
+/// Create-Script dialog can populate its Template dropdown. Godot searches the
+/// whole ancestor chain, which is why a `Sprite2D` still sees `Node`'s default.
+fn api_script_templates(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let base_class = query_param(query, "base_class")
+        .map(url_decode)
+        .unwrap_or_else(|| "Node".to_string());
+    let root = {
+        let s = state.lock().unwrap();
+        script_project_root(&s)
+    };
+    let templates = crate::script_templates::templates_for(&base_class, &root);
+    let items: Vec<serde_json::Value> = templates
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "id": t.id,
+                "name": t.name,
+                "inherit": t.inherit,
+                "description": t.description,
+                "origin": t.origin.as_str(),
+            })
+        })
+        .collect();
+    // Length BEFORE the macro: `items` is moved in at "templates", so reading
+    // it afterwards would not compile.
+    let count = items.len();
+    let json = serde_json::json!({
+        "base_class": base_class,
+        "templates": items,
+        "count": count,
+    });
+    send_json(stream, &json.to_string());
+}
+
+/// `POST /api/script/create`
+///
+/// Generates a new script body from the chosen template and base class and
+/// writes it. The body is produced HERE rather than in the browser: the client
+/// used to build it as a string literal, which is why every new script carried
+/// the same hardcoded `extends Node2D` whatever the node's real class was.
+///
+/// Attaching the result to a node stays a separate `/api/property/set`, so this
+/// route does not duplicate the undo bookkeeping that already lives there.
+fn api_script_create(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let json = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let path = match json.get("path").and_then(|p| p.as_str()) {
+        Some(p) => p.trim().to_string(),
+        None => {
+            send_error(stream, 400, "missing path field");
+            return;
+        }
+    };
+    // Validate BEFORE touching the disk, and report which rule broke — the old
+    // flow failed silently after the fact, leaving no clue what was wrong.
+    if let Some(problem) = crate::script_templates::script_path_problem(&path) {
+        send_error(stream, 400, &problem);
+        return;
+    }
+    let base_class = json
+        .get("base_class")
+        .and_then(|b| b.as_str())
+        .filter(|b| !b.is_empty())
+        .unwrap_or("Node")
+        .to_string();
+    let class_name = json
+        .get("class_name")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| {
+            // Godot defaults the class name to the file's base name.
+            path.rsplit('/')
+                .next()
+                .unwrap_or("NewScript")
+                .trim_end_matches(".gd")
+                .to_string()
+        });
+    let template_id = json
+        .get("template")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty());
+
+    let root = {
+        let s = state.lock().unwrap();
+        script_project_root(&s)
+    };
+    let content = crate::script_templates::generate_script(
+        &base_class,
+        &class_name,
+        template_id,
+        &root,
+        crate::script_templates::DEFAULT_INDENT,
+    );
+
+    let file_path = match path.strip_prefix("res://") {
+        Some(stripped) => root.join(stripped),
+        None => std::path::PathBuf::from(&path),
+    };
+    if file_path.exists() {
+        // Godot reuses an existing file rather than clobbering it, and says so.
+        let json = serde_json::json!({
+            "ok": true,
+            "path": path,
+            "created": false,
+            "content": std::fs::read_to_string(&file_path).unwrap_or_default(),
+        });
+        send_json(stream, &json.to_string());
+        return;
+    }
+    if let Some(parent) = file_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            send_error(stream, 500, &format!("could not create directory: {e}"));
+            return;
+        }
+    }
+    if let Err(e) = std::fs::write(&file_path, &content) {
+        send_error(stream, 500, &format!("could not write script: {e}"));
+        return;
+    }
+    let json = serde_json::json!({
+        "ok": true,
+        "path": path,
+        "created": true,
+        "base_class": base_class,
+        "content": content,
+    });
+    send_json(stream, &json.to_string());
+}
+
 fn api_get_script(query: &str, stream: &mut TcpStream) {
     let raw_path = match query_param(query, "path") {
         Some(p) => url_decode(p),
@@ -11810,6 +12541,11 @@ fn api_select_multi(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         }
         state.selected_nodes = nids.clone();
         state.selected_node = nids.first().copied();
+        // pat-s3rrv.66 (h): multi-select ran the plugin handshake nowhere, so a
+        // plugin's panel went stale the moment the user ctrl-clicked. Godot
+        // dispatches on the FIRST selected object; an empty selection passes
+        // None, which hides every plugin via `_make_visible(false)`.
+        notify_plugins_of_selection(&mut state, nids.first().copied());
         let j: Vec<String> = nids.iter().map(|i| i.raw().to_string()).collect();
         send_json(
             stream,
@@ -11869,6 +12605,10 @@ fn api_select_multi(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         }
     }
     state.selected_node = state.selected_nodes.first().copied();
+    // Same handshake for the add/remove/toggle/range modes — this is the path
+    // ctrl-click and shift-click actually take.
+    let first = state.selected_nodes.first().copied();
+    notify_plugins_of_selection(&mut state, first);
     let j: Vec<String> = state
         .selected_nodes
         .iter()
@@ -12346,6 +13086,68 @@ fn sync_animations_from_scene(s: &mut EditorState) {
 /// Writes an edited clip back onto the scene's AnimationPlayer so the change
 /// reaches the scene tree — and therefore the saved `.tscn` — rather than living
 /// only in editor state. Returns whether a player took it.
+/// Records a keyframe for a property edit while **auto-key** is armed
+/// (pat-s3rrv.62).
+///
+/// Godot's auto-key writes a key on every inspector edit while the toggle is
+/// on, which is what makes "move the node, get a keyframe" work. Patina already
+/// had the flag — `AnimationPlaybackState::recording`, settable by a route,
+/// reported in `/api/animation/status` and read by the panel — but **nothing
+/// consumed it**: `api_set_property` never looked at it, so arming auto-key
+/// flipped a boolean and recorded nothing.
+///
+/// A missing animation, or none selected, is a no-op rather than an error:
+/// editing a property with auto-key left on but no clip open is an ordinary
+/// thing to do, not a failure.
+///
+/// ⚠️ Deliberately does NOT push its own undo entry. The property edit that
+/// triggered it already pushed one, and a second would make a single user
+/// action take two undos to reverse.
+fn auto_key_property(state: &mut EditorState, node_id: NodeId, property: &str, value: &Variant) {
+    if !state.animation_playback.recording {
+        return;
+    }
+    let Some(anim_name) = state.animation_playback.animation_name.clone() else {
+        return;
+    };
+    let time = state.animation_playback.current_time;
+    // Tracks address nodes by PATH, not by id — and that path is RELATIVE to the
+    // player's `root_node`, which is what both playback and the preview resolve
+    // against. Writing the absolute path here stored a track that addressed
+    // nothing and did not match how Godot writes tracks to `.tscn`.
+    let base = animation_track_base(state);
+    let Some(node_path) = relative_node_path(&state.scene_tree, base, node_id) else {
+        state.add_log(
+            "warn",
+            "auto-key: the edited node is outside the AnimationPlayer's root, so no track path addresses it".to_string(),
+        );
+        return;
+    };
+    let Some(anim) = state.animations.get_mut(&anim_name) else {
+        return;
+    };
+    let existing = anim.tracks.iter().position(|t| {
+        t.node_path == node_path
+            && t.property_path == property
+            && t.track_type == TrackType::Property
+    });
+    let idx = match existing {
+        Some(i) => i,
+        None => {
+            anim.tracks.push(AnimationTrack::with_type(
+                &node_path,
+                property,
+                TrackType::Property,
+            ));
+            anim.tracks.len() - 1
+        }
+    };
+    anim.tracks[idx].add_keyframe(KeyFrame::linear(time, value.clone()));
+    // Push the edited clip onto the scene's AnimationPlayer so saving persists
+    // it, exactly as an explicit keyframe add does.
+    write_animation_through(state, &anim_name);
+}
+
 fn write_animation_through(s: &mut EditorState, name: &str) -> bool {
     let Some(anim) = s.animations.get(name).cloned() else {
         return false;
@@ -12372,21 +13174,17 @@ fn write_animation_through(s: &mut EditorState, name: &str) -> bool {
 ///
 /// Track paths resolve against the AnimationPlayer's owner the same way the
 /// runtime resolves them, so a track on `Sprite2D:position` moves that sprite.
-fn apply_animation_preview(s: &mut EditorState) {
-    let Some(name) = s.animation_playback.animation_name.clone() else {
-        return;
-    };
-    let Some(anim) = s.animations.get(&name).cloned() else {
-        return;
-    };
-    let time = s.animation_playback.current_time;
-    // Resolve track paths exactly as the runtime does
-    // (`SceneTree::process_animations`): against the player's `root_node`, which
-    // a `.tscn`-loaded player defaults to `".."` — Godot's AnimationMixer
-    // default, the player's PARENT. Hardcoding the parent here would disagree
-    // with playback for any scene that sets `root_node` explicitly, so the
-    // preview would pose different nodes than the game does (pat-0q2kx.54).
-    let base = match scene_animation_player(s) {
+/// The node that animation track paths are relative to: the AnimationPlayer's
+/// `root_node`, which a `.tscn`-loaded player defaults to `".."` — Godot's
+/// AnimationMixer default, the player's PARENT.
+///
+/// Both playback (`SceneTree::process_animations`) and the editor preview
+/// resolve tracks against this node, so anything that WRITES a track has to
+/// produce a path relative to the very same base or the track will not resolve.
+/// Hardcoding the parent instead would disagree with playback for any scene
+/// that sets `root_node` explicitly (pat-0q2kx.54).
+fn animation_track_base(s: &EditorState) -> NodeId {
+    match scene_animation_player(s) {
         Some(player_node) => {
             let root_node = s
                 .scene_tree
@@ -12402,7 +13200,41 @@ fn apply_animation_preview(s: &mut EditorState) {
             }
         }
         None => s.scene_tree.root_id(),
+    }
+}
+
+/// Path of `node_id` relative to `base`, in the form animation tracks store.
+///
+/// Returns `None` when `base` is not an ancestor of `node_id`. There is no
+/// valid relative form in that case, and inventing one would store a track that
+/// silently resolves to nothing at playback.
+fn relative_node_path(tree: &SceneTree, base: NodeId, node_id: NodeId) -> Option<String> {
+    if node_id == base {
+        return Some(String::new());
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut cursor = Some(node_id);
+    while let Some(id) = cursor {
+        if id == base {
+            parts.reverse();
+            return Some(parts.join("/"));
+        }
+        let node = tree.get_node(id)?;
+        parts.push(node.name().to_string());
+        cursor = node.parent();
+    }
+    None
+}
+
+fn apply_animation_preview(s: &mut EditorState) {
+    let Some(name) = s.animation_playback.animation_name.clone() else {
+        return;
     };
+    let Some(anim) = s.animations.get(&name).cloned() else {
+        return;
+    };
+    let time = s.animation_playback.current_time;
+    let base = animation_track_base(s);
 
     for (idx, track) in anim.tracks.iter().enumerate() {
         // `sample_track` addresses tracks by index, not by reference.
@@ -12918,7 +13750,8 @@ fn anim_tree_kind_str(kind: crate::anim_tree_graph::NodeKind) -> &'static str {
     use crate::anim_tree_graph::NodeKind;
     match kind {
         NodeKind::StateMachine => "state_machine",
-        NodeKind::BlendSpace => "blend_space",
+        NodeKind::BlendSpace1D => "blend_space_1d",
+        NodeKind::BlendSpace2D => "blend_space_2d",
         NodeKind::Blend2 => "blend2",
         NodeKind::Animation => "animation",
     }
@@ -12930,7 +13763,10 @@ fn anim_tree_kind_from_str(s: &str) -> crate::anim_tree_graph::NodeKind {
     use crate::anim_tree_graph::NodeKind;
     match s {
         "state_machine" => NodeKind::StateMachine,
-        "blend_space" => NodeKind::BlendSpace,
+        "blend_space_2d" => NodeKind::BlendSpace2D,
+        // `blend_space` is the pre-split spelling; it maps to 1D, the simpler
+        // of the two, so an older client keeps working.
+        "blend_space_1d" | "blend_space" => NodeKind::BlendSpace1D,
         "blend2" => NodeKind::Blend2,
         _ => NodeKind::Animation,
     }
@@ -12950,13 +13786,24 @@ fn api_get_anim_tree(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
                 // `x`/`y` are the graph-canvas position the client persists via
                 // `state/move` (pat-0q2kx.166); without them the canvas would
                 // re-lay-out from scratch on every poll.
+                // pat-s3rrv.1: `params` carries a blend space's points and
+                // ranges. `AnimTreeGraph` has stored them since pat-0q2kx.166
+                // and the graph endpoint never emitted them, so the client had
+                // no way to see — let alone edit — anything but a node's name
+                // and position. `BTreeMap` order makes this deterministic.
+                let params: Vec<String> = n
+                    .params
+                    .iter()
+                    .map(|(k, v)| format!(r#""{}":"{}""#, json_escape(k), json_escape(v)))
+                    .collect();
                 format!(
-                    r#"{{"id":{},"name":"{}","kind":"{}","x":{},"y":{}}}"#,
+                    r#"{{"id":{},"name":"{}","kind":"{}","x":{},"y":{},"params":{{{}}}}}"#,
                     n.id,
                     json_escape(&n.name),
                     anim_tree_kind_str(n.kind),
                     n.x,
-                    n.y
+                    n.y,
+                    params.join(",")
                 )
             })
             .collect();
@@ -13198,6 +14045,120 @@ fn api_anim_tree_remove_transition(
     };
     if !state.anim_tree.remove_transition(from, to) {
         send_error(stream, 404, "unknown transition");
+        return;
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/tree/connect` -- link two blend-tree nodes
+/// (pat-s3rrv.1). Body: `{"from":"Blend2","to":"Output"}`.
+///
+/// A connection is NOT a transition: a state machine's edges carry a crossfade
+/// and fire on a condition, while a blend-tree edge is a permanent wire feeding
+/// one node's output into another. `AnimTreeGraph` has always kept the two in
+/// separate lists and `GET /api/animation/tree` has always served both; only
+/// the transition list had endpoints, so a blend tree could not be drawn.
+fn api_anim_tree_connect(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let (from, to) = match anim_tree_endpoints(&parsed, &state, stream) {
+        Some(pair) => pair,
+        None => return,
+    };
+    // Rejects self-links and duplicates, the same way `add_transition` does.
+    if !state.anim_tree.connect(from, to) {
+        send_error(stream, 400, "invalid or duplicate connection");
+        return;
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/tree/disconnect` -- drop a blend-tree link
+/// (pat-s3rrv.1). Body: `{"from":"Blend2","to":"Output"}`.
+fn api_anim_tree_disconnect(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let (from, to) = match anim_tree_endpoints(&parsed, &state, stream) {
+        Some(pair) => pair,
+        None => return,
+    };
+    if !state.anim_tree.disconnect(from, to) {
+        send_error(stream, 404, "unknown connection");
+        return;
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/animation/tree/node/param` -- set one parameter on a graph node
+/// (pat-s3rrv.1). Body: `{"name":"Space","key":"blend_point_0/pos","value":"0.5"}`.
+///
+/// This is what makes a blend space editable. Godot's `AnimationNodeBlendSpace1D`
+/// / `BlendSpace2D` keep their points as indexed resource properties —
+/// `blend_point_N/node` and `blend_point_N/pos` — alongside `min_space`,
+/// `max_space`, `snap` and `blend_position`, and this endpoint uses those exact
+/// key names so the served graph and the Godot resource describe a blend space
+/// the same way.
+///
+/// Values are strings: `AnimTreeGraph::params` is a `BTreeMap<String, String>`
+/// and a blend space's `pos` is a scalar in 1D but a pair in 2D, so a typed
+/// numeric field here would have to be one or the other.
+fn api_anim_tree_set_node_param(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let name = match anim_tree_name_field(&parsed, "name") {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing name");
+            return;
+        }
+    };
+    let key = match anim_tree_name_field(&parsed, "key") {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing key");
+            return;
+        }
+    };
+    // An empty value is legitimate (clearing a point's animation), so this reads
+    // the raw field rather than the non-empty helper above.
+    let value = match parsed.get("value").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing value");
+            return;
+        }
+    };
+    let mut state = state.lock().unwrap();
+    let id = match state.anim_tree.node_id_by_name(&name) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "unknown node");
+            return;
+        }
+    };
+    if !state.anim_tree.set_param(id, key, value) {
+        send_error(stream, 404, "unknown node");
         return;
     }
     send_json(stream, r#"{"ok":true}"#);
@@ -13514,6 +14475,29 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         send_json(stream, r#"{"ok":true,"already_running":true}"#);
         return;
     }
+    // pat-s3rrv.66: every plugin's `_build()` runs before the project does, and
+    // a `false` return ABORTS the run. Placed before the debugger attach and the
+    // tree build so a veto costs nothing — Godot's doc calls the run "aborted
+    // immediately", and a plugin that refuses to build should not leave a
+    // half-attached debugger or a constructed play tree behind.
+    if let Some(refuser) = plugin_build_refusal(&mut state) {
+        let name = plugin_display_name(&mut state, &refuser);
+        state.add_log(
+            "error",
+            format!("Play aborted: plugin '{name}' _build() returned false"),
+        );
+        send_json(
+            stream,
+            &serde_json::json!({
+                "ok": false,
+                "build_failed": true,
+                "plugin": name,
+            })
+            .to_string(),
+        );
+        return;
+    }
+
     // pat-s3rrv.27: the debugger must be live BEFORE the tree is built, because
     // `build_play_tree` dispatches `_enter_tree`/`_ready` inline on this thread.
     // A script asking `EngineDebugger.is_active()` in `_ready` — the acceptance
@@ -15903,6 +16887,687 @@ fn api_tilemap_tileset(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
 }
 
 // ---------------------------------------------------------------------------
+// pat-s3rrv.65: TileSet atlas-source editor
+//
+// Godot's TileSet editor (editor/scene/2d/tiles/tile_set_atlas_source_editor.cpp)
+// assigns an atlas texture to a source, slices it into tiles, and paints
+// per-tile TileData. Patina had no TileSet AUTHORING at all: the one endpoint,
+// `GET /api/tilemap/tileset`, reports the editor's own flat colour palette from
+// `TileGridStore`, which has nothing to do with the TileSet resource on the
+// selected `TileMapLayer`. Painting worked; defining what you painted did not.
+//
+// These routes read and write the node's flattened `__tile_set__*` /
+// `__tile_physics_*` / `__tile_custom_data_*` companions — the same properties
+// `packed_scene` writes on load, `tile_set_from_properties` reads, and
+// `physics_server::register_tilemap_bodies` already consumes. So an edit here
+// lands in the saved `.tscn` and is honoured by the runtime without any new
+// runtime path.
+// ---------------------------------------------------------------------------
+
+/// Reads a `[x, y]` JSON pair as a [`Vector2i`].
+fn json_vec2i(v: Option<&serde_json::Value>) -> Option<Vector2i> {
+    let arr = v?.as_array()?;
+    if arr.len() != 2 {
+        return None;
+    }
+    Some(Vector2i::new(
+        arr[0].as_f64()? as i32,
+        arr[1].as_f64()? as i32,
+    ))
+}
+
+/// Applies one property write to `node_id` as an undoable editor command.
+///
+/// Every TileSet edit goes through `EditorCommand::SetProperty` rather than
+/// touching the node directly, so it joins the undo stack and marks the scene
+/// modified exactly like an inspector edit — a direct write would save fine and
+/// be silently un-undoable.
+fn tileset_set_property(
+    state: &mut EditorState,
+    node_id: NodeId,
+    property: String,
+    new_value: Variant,
+) -> Result<(), String> {
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property,
+        new_value,
+        old_value: Variant::Nil,
+    };
+    cmd.execute(&mut state.scene_tree)
+        .map_err(|e| e.to_string())?;
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    Ok(())
+}
+
+/// Adds `source_id` to a node's `PackedInt32Array` id list, preserving order.
+///
+/// ⚠️ Used for BOTH `__tile_set__source_ids` and `__tile_physics_sources__`,
+/// and forgetting the second is the subtle failure this feature invites:
+/// `tile_collision_infos` returns an empty vec the moment `physics_sources` is
+/// empty, so a perfectly authored collision polygon produces **no body at all**
+/// and the tile reads as "collision does not work" rather than "the source was
+/// never registered".
+/// Drops `source_id` from a `__tile_*_sources__` list (pat-s3rrv.65).
+///
+/// The mirror of [`tileset_push_source_id`]. Without it a navigation toggle is
+/// one-way: `tile_navigation_polygons` keys off the list, so a tile switched
+/// back off would keep contributing a walkable region for the rest of the
+/// session and after every save.
+fn tileset_remove_source_id(
+    state: &mut EditorState,
+    node_id: NodeId,
+    list_property: &str,
+    source_id: i32,
+) -> Result<(), String> {
+    let mut ids = match state
+        .scene_tree
+        .get_node(node_id)
+        .map(|n| n.get_property(list_property))
+    {
+        Some(Variant::PackedInt32Array(v)) => v,
+        _ => return Ok(()),
+    };
+    if !ids.contains(&source_id) {
+        return Ok(());
+    }
+    ids.retain(|id| *id != source_id);
+    tileset_set_property(
+        state,
+        node_id,
+        list_property.to_string(),
+        Variant::PackedInt32Array(ids),
+    )
+}
+
+fn tileset_push_source_id(
+    state: &mut EditorState,
+    node_id: NodeId,
+    list_property: &str,
+    source_id: i32,
+) -> Result<(), String> {
+    let mut ids = match state
+        .scene_tree
+        .get_node(node_id)
+        .map(|n| n.get_property(list_property))
+    {
+        Some(Variant::PackedInt32Array(v)) => v,
+        _ => Vec::new(),
+    };
+    if ids.contains(&source_id) {
+        return Ok(());
+    }
+    ids.push(source_id);
+    ids.sort_unstable();
+    tileset_set_property(
+        state,
+        node_id,
+        list_property.to_string(),
+        Variant::PackedInt32Array(ids),
+    )
+}
+
+/// Resolves the `node_id` query/body parameter to a `TileMapLayer` node.
+///
+/// Rejects a node of the wrong class rather than writing tile companions onto,
+/// say, a Sprite2D — those would save into the `.tscn` and be read by nothing.
+fn tileset_target_node(state: &EditorState, raw: u64) -> Result<NodeId, (u16, String)> {
+    let nid =
+        find_node_by_raw_id(&state.scene_tree, raw).ok_or((404, "node not found".to_string()))?;
+    let class = state
+        .scene_tree
+        .get_node(nid)
+        .map(|n| n.class_name().to_string())
+        .unwrap_or_default();
+    if !matches!(class.as_str(), "TileMapLayer" | "TileMap") {
+        return Err((
+            400,
+            format!("node {raw} is a {class}, not a TileMapLayer — tile set companions on it would be read by nothing"),
+        ));
+    }
+    Ok(nid)
+}
+
+/// `GET /api/tileset/source?node_id=N` — the atlas sources of a TileMapLayer.
+fn api_tileset_source_get(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let raw: u64 = match query_param(query, "node_id").and_then(|v| v.parse().ok()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let s = state.lock().unwrap();
+    let nid = match tileset_target_node(&s, raw) {
+        Ok(v) => v,
+        Err((code, msg)) => {
+            send_error(stream, code, &msg);
+            return;
+        }
+    };
+    let Some(node) = s.scene_tree.get_node(nid) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    let get = |k: &str| node.get_property(k);
+
+    let source_ids = tilemap::tile_set_source_ids(&get(tilemap::TILE_SET_SOURCE_IDS));
+    let physics_sources = match get(tilemap::TILE_PHYSICS_SOURCES) {
+        Variant::PackedInt32Array(v) => v,
+        _ => Vec::new(),
+    };
+    let tile_size = match get(tilemap::TILE_SET_TILE_SIZE) {
+        Variant::Vector2i(v) => v,
+        _ => Vector2i::new(16, 16),
+    };
+
+    let sources: Vec<serde_json::Value> = source_ids
+        .iter()
+        .filter_map(|&id| {
+            let Variant::String(texture) = get(&tilemap::tile_set_source_key(id, "texture")) else {
+                return None;
+            };
+            let v2 =
+                |suffix: &str, dflt: Vector2i| match get(&tilemap::tile_set_source_key(id, suffix))
+                {
+                    Variant::Vector2i(v) => v,
+                    _ => dflt,
+                };
+            // ⚠️ Computed BEFORE the `json!` call, not inline: a `{ … }` in a
+            // value position is parsed by `json!` as a nested JSON object, not
+            // as a Rust block.
+            let region = v2("texture_region_size", Vector2i::new(16, 16));
+            let margins = v2("margins", Vector2i::ZERO);
+            let separation = v2("separation", Vector2i::ZERO);
+            Some(serde_json::json!({
+                "id": id,
+                "texture": texture,
+                "region_size": [region.x, region.y],
+                "margins": [margins.x, margins.y],
+                "separation": [separation.x, separation.y],
+                "has_collision": physics_sources.contains(&id),
+            }))
+        })
+        .collect();
+
+    send_json(
+        stream,
+        &serde_json::json!({
+            "node_id": raw,
+            "tile_size": [tile_size.x, tile_size.y],
+            "custom_data_layers": tileset_custom_data_layers(node),
+            "sources": sources,
+        })
+        .to_string(),
+    );
+}
+
+/// The tile set's custom data layer names, in index order.
+fn tileset_custom_data_layers(node: &Node) -> Vec<String> {
+    match node.get_property(tilemap::TILE_CUSTOM_DATA_LAYERS) {
+        Variant::PackedStringArray(v) => v,
+        Variant::Array(items) => items
+            .iter()
+            .filter_map(|v| match v {
+                Variant::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `POST /api/tileset/source` — assign an atlas texture to a source id.
+///
+/// Body: `{"node_id":N,"source_id":S,"texture":"res://atlas.png",
+///         "region_size":[16,16],"margins":[0,0],"separation":[0,0],
+///         "tile_size":[16,16],"custom_data_layers":["damage"]}`
+fn api_tileset_source_set(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let raw = match p.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let source_id = match p.get("source_id").and_then(|v| v.as_i64()) {
+        Some(v) => v as i32,
+        None => {
+            send_error(stream, 400, "missing source_id");
+            return;
+        }
+    };
+    let texture = match p.get("texture").and_then(|v| v.as_str()) {
+        Some(v) => v.to_string(),
+        None => {
+            send_error(stream, 400, "missing texture");
+            return;
+        }
+    };
+
+    let mut s = state.lock().unwrap();
+    let nid = match tileset_target_node(&s, raw) {
+        Ok(v) => v,
+        Err((code, msg)) => {
+            send_error(stream, code, &msg);
+            return;
+        }
+    };
+
+    // Godot's TileSet defaults: 16x16 cells and 16x16 atlas regions.
+    let tile_size = json_vec2i(p.get("tile_size")).unwrap_or(Vector2i::new(16, 16));
+    let region = json_vec2i(p.get("region_size")).unwrap_or(Vector2i::new(16, 16));
+    let margins = json_vec2i(p.get("margins")).unwrap_or(Vector2i::ZERO);
+    let separation = json_vec2i(p.get("separation")).unwrap_or(Vector2i::ZERO);
+
+    let writes: Vec<(String, Variant)> = vec![
+        (
+            tilemap::TILE_SET_TILE_SIZE.to_string(),
+            Variant::Vector2i(tile_size),
+        ),
+        (
+            tilemap::tile_set_source_key(source_id, "texture"),
+            Variant::String(texture.clone()),
+        ),
+        (
+            tilemap::tile_set_source_key(source_id, "texture_region_size"),
+            Variant::Vector2i(region),
+        ),
+        (
+            tilemap::tile_set_source_key(source_id, "margins"),
+            Variant::Vector2i(margins),
+        ),
+        (
+            tilemap::tile_set_source_key(source_id, "separation"),
+            Variant::Vector2i(separation),
+        ),
+    ];
+    for (key, value) in writes {
+        if let Err(e) = tileset_set_property(&mut s, nid, key, value) {
+            send_error(stream, 500, &e);
+            return;
+        }
+    }
+    // Without this the source exists but `tile_set_from_properties` never walks
+    // it — `source_ids` is the list it iterates.
+    if let Err(e) = tileset_push_source_id(&mut s, nid, tilemap::TILE_SET_SOURCE_IDS, source_id) {
+        send_error(stream, 500, &e);
+        return;
+    }
+
+    if let Some(layers) = p.get("custom_data_layers").and_then(|v| v.as_array()) {
+        let names: Vec<String> = layers
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        if let Err(e) = tileset_set_property(
+            &mut s,
+            nid,
+            tilemap::TILE_CUSTOM_DATA_LAYERS.to_string(),
+            Variant::PackedStringArray(names),
+        ) {
+            send_error(stream, 500, &e);
+            return;
+        }
+    }
+
+    s.add_log(
+        "info",
+        format!("TileSet: atlas source {source_id} -> {texture}"),
+    );
+    let event =
+        format!(r#"{{"type":"tileset_source_changed","node_id":{raw},"source_id":{source_id}}}"#);
+    publish_event(&mut s, event);
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `GET /api/tileset/tile?node_id=N&source_id=S` — the atlas grid and the
+/// per-tile data authored on it.
+fn api_tileset_tile_get(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let raw: u64 = match query_param(query, "node_id").and_then(|v| v.parse().ok()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let source_id: i32 = match query_param(query, "source_id").and_then(|v| v.parse().ok()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing source_id");
+            return;
+        }
+    };
+    let s = state.lock().unwrap();
+    let nid = match tileset_target_node(&s, raw) {
+        Ok(v) => v,
+        Err((code, msg)) => {
+            send_error(stream, code, &msg);
+            return;
+        }
+    };
+    let Some(node) = s.scene_tree.get_node(nid) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+
+    let layers = tileset_custom_data_layers(node);
+    // Report every tile that carries authored data. Enumerating the whole atlas
+    // grid would need the texture's pixel size, which the editor does not have
+    // here; the client draws the grid from `region_size` and overlays these.
+    let mut tiles: Vec<serde_json::Value> = Vec::new();
+    for (name, value) in node.properties() {
+        let Some(atlas) = tilemap::tile_physics_points_atlas(name, source_id) else {
+            continue;
+        };
+        let polygon = match value {
+            Variant::PackedVector2Array(pts) => pts.clone(),
+            _ => Vec::new(),
+        };
+        let one_way = matches!(
+            node.get_property(&tilemap::tile_physics_one_way_key(source_id, atlas)),
+            Variant::Bool(true)
+        );
+        let custom: serde_json::Map<String, serde_json::Value> = layers
+            .iter()
+            .filter_map(|layer| {
+                let v = node.get_property(&tilemap::tile_custom_data_key(source_id, atlas, layer));
+                if v.is_nil() {
+                    return None;
+                }
+                Some((layer.clone(), serde_json::Value::String(v.to_string())))
+            })
+            .collect();
+        tiles.push(serde_json::json!({
+            "atlas": [atlas.x, atlas.y],
+            "collision": polygon.iter().map(|p| serde_json::json!([p.x, p.y])).collect::<Vec<_>>(),
+            "one_way": one_way,
+            "custom_data": custom,
+        }));
+    }
+    // Deterministic order so the client's grid does not reshuffle between polls
+    // — a HashMap walk over the node's properties is not stable.
+    tiles.sort_by_key(|t| {
+        let a = &t["atlas"];
+        (a[1].as_i64().unwrap_or(0), a[0].as_i64().unwrap_or(0))
+    });
+
+    send_json(
+        stream,
+        &serde_json::json!({
+            "node_id": raw,
+            "source_id": source_id,
+            "custom_data_layers": layers,
+            "tiles": tiles,
+        })
+        .to_string(),
+    );
+}
+
+/// `POST /api/tileset/tile/data` — set one tile's collision and custom data.
+///
+/// Body: `{"node_id":N,"source_id":S,"atlas":[0,0],
+///         "collision_rect":[x,y,w,h] | "collision_polygon":[[x,y],…] |
+///         "full_cell_collision":true | "clear_collision":true,
+///         "one_way":false, "custom_data":{"damage":"5"}}`
+fn api_tileset_tile_data(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let raw = match p.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let source_id = match p.get("source_id").and_then(|v| v.as_i64()) {
+        Some(v) => v as i32,
+        None => {
+            send_error(stream, 400, "missing source_id");
+            return;
+        }
+    };
+    let atlas = json_vec2i(p.get("atlas")).unwrap_or(Vector2i::ZERO);
+
+    let mut s = state.lock().unwrap();
+    let nid = match tileset_target_node(&s, raw) {
+        Ok(v) => v,
+        Err((code, msg)) => {
+            send_error(stream, code, &msg);
+            return;
+        }
+    };
+    let tile_size = match s
+        .scene_tree
+        .get_node(nid)
+        .map(|n| n.get_property(tilemap::TILE_SET_TILE_SIZE))
+    {
+        Some(Variant::Vector2i(v)) => v,
+        _ => Vector2i::new(16, 16),
+    };
+
+    // -- collision ----------------------------------------------------------
+    //
+    // ⚠️ Points are tile-local and CENTRED on the tile, Godot's convention and
+    // what `gdphysics2d::tilemap_collision` expects. `collision_rect_polygon`
+    // is the only place that shape is built, so the editor cannot drift from
+    // the runtime.
+    let mut touched_collision = false;
+    if p.get("clear_collision").and_then(|v| v.as_bool()) == Some(true) {
+        if let Err(e) = tileset_set_property(
+            &mut s,
+            nid,
+            tilemap::tile_physics_points_key(source_id, atlas),
+            Variant::PackedVector2Array(Vec::new()),
+        ) {
+            send_error(stream, 500, &e);
+            return;
+        }
+        touched_collision = true;
+    } else {
+        let polygon = if p.get("full_cell_collision").and_then(|v| v.as_bool()) == Some(true) {
+            Some(tilemap::full_cell_collision_polygon(tile_size))
+        } else if let Some(r) = p.get("collision_rect").and_then(|v| v.as_array()) {
+            if r.len() != 4 {
+                send_error(stream, 400, "collision_rect must be [x, y, w, h]");
+                return;
+            }
+            let f = |i: usize| r[i].as_f64().unwrap_or(0.0) as f32;
+            Some(tilemap::collision_rect_polygon(Rect2::new(
+                Vector2::new(f(0), f(1)),
+                Vector2::new(f(2), f(3)),
+            )))
+        } else {
+            p.get("collision_polygon")
+                .and_then(|v| v.as_array())
+                .map(|pts| {
+                    pts.iter()
+                        .filter_map(|pt| {
+                            let a = pt.as_array()?;
+                            Some(Vector2::new(
+                                a.first()?.as_f64()? as f32,
+                                a.get(1)?.as_f64()? as f32,
+                            ))
+                        })
+                        .collect::<Vec<Vector2>>()
+                })
+        };
+        if let Some(polygon) = polygon {
+            if let Err(e) = tileset_set_property(
+                &mut s,
+                nid,
+                tilemap::tile_physics_points_key(source_id, atlas),
+                Variant::PackedVector2Array(polygon),
+            ) {
+                send_error(stream, 500, &e);
+                return;
+            }
+            touched_collision = true;
+        }
+    }
+
+    if let Some(one_way) = p.get("one_way").and_then(|v| v.as_bool()) {
+        if let Err(e) = tileset_set_property(
+            &mut s,
+            nid,
+            tilemap::tile_physics_one_way_key(source_id, atlas),
+            Variant::Bool(one_way),
+        ) {
+            send_error(stream, 500, &e);
+            return;
+        }
+        touched_collision = true;
+    }
+
+    // ⚠️ THE STEP THAT MAKES IT REAL. `tile_collision_infos` bails out the
+    // moment `physics_sources` is empty, so without registering the source the
+    // polygon above is stored, saved, reloaded — and produces no body at all.
+    if touched_collision {
+        if let Err(e) =
+            tileset_push_source_id(&mut s, nid, tilemap::TILE_PHYSICS_SOURCES, source_id)
+        {
+            send_error(stream, 500, &e);
+            return;
+        }
+    }
+
+    // -- navigation ---------------------------------------------------------
+    //
+    // ⚠️ TWO ways this differs from the collision block above, both easy to get
+    // wrong by copying it:
+    //
+    //  1. Points are tile-local from the TOP-LEFT corner, NOT centred on the
+    //     tile. `tile_navigation_polygons` adds the cell's corner to every
+    //     point, and the saver rebases to Godot's centred form on the way out.
+    //     Sending centred points here puts the walkable area a half-tile off.
+    //  2. Patina holds ONE polygon per LAYER, where Godot holds one per
+    //     `TileData` — so `atlas` is deliberately not part of the key. Posting a
+    //     second tile's polygon REPLACES the first rather than adding to it.
+    let mut touched_navigation = false;
+    if let Some(points) = p.get("navigation_polygon").and_then(|v| v.as_array()) {
+        let polygon: Vec<Vector2> = points
+            .iter()
+            .filter_map(|pt| {
+                let a = pt.as_array()?;
+                Some(Vector2::new(
+                    a.first()?.as_f64()? as f32,
+                    a.get(1)?.as_f64()? as f32,
+                ))
+            })
+            .collect();
+        if !polygon.is_empty() && polygon.len() < 3 {
+            send_error(stream, 400, "navigation_polygon needs at least 3 points");
+            return;
+        }
+        if let Err(e) = tileset_set_property(
+            &mut s,
+            nid,
+            tilemap::TILE_NAV_POLYGON.to_string(),
+            Variant::PackedVector2Array(polygon),
+        ) {
+            send_error(stream, 500, &e);
+            return;
+        }
+        touched_navigation = true;
+    }
+    match p.get("navigation").and_then(|v| v.as_bool()) {
+        // ⚠️ THE STEP THAT MAKES IT REAL, the navigation twin of the physics
+        // source registration above: `tile_navigation_polygons` returns nothing
+        // at all while the source list is empty, so a polygon stored without
+        // this produces no walkable region — saved, reloaded, and inert.
+        Some(true) => touched_navigation = true,
+        Some(false) => {
+            if let Err(e) =
+                tileset_remove_source_id(&mut s, nid, tilemap::TILE_NAV_SOURCES, source_id)
+            {
+                send_error(stream, 500, &e);
+                return;
+            }
+            touched_navigation = false;
+        }
+        None => {}
+    }
+    if touched_navigation {
+        if let Err(e) = tileset_push_source_id(&mut s, nid, tilemap::TILE_NAV_SOURCES, source_id) {
+            send_error(stream, 500, &e);
+            return;
+        }
+    }
+
+    // -- custom data --------------------------------------------------------
+    if let Some(map) = p.get("custom_data").and_then(|v| v.as_object()) {
+        let mut layers = s
+            .scene_tree
+            .get_node(nid)
+            .map(tileset_custom_data_layers)
+            .unwrap_or_default();
+        for (layer, value) in map {
+            let variant = match value {
+                serde_json::Value::Bool(b) => Variant::Bool(*b),
+                serde_json::Value::Number(n) if n.is_i64() => Variant::Int(n.as_i64().unwrap_or(0)),
+                serde_json::Value::Number(n) => Variant::Float(n.as_f64().unwrap_or(0.0)),
+                other => Variant::String(match other.as_str() {
+                    Some(t) => t.to_string(),
+                    None => other.to_string(),
+                }),
+            };
+            if let Err(e) = tileset_set_property(
+                &mut s,
+                nid,
+                tilemap::tile_custom_data_key(source_id, atlas, layer),
+                variant,
+            ) {
+                send_error(stream, 500, &e);
+                return;
+            }
+            // A value on an undeclared layer is unreachable from script:
+            // `TileData.get_custom_data(name)` looks the name up in the layer
+            // list, so declare it on first use rather than storing an orphan.
+            if !layers.iter().any(|l| l == layer) {
+                layers.push(layer.clone());
+                if let Err(e) = tileset_set_property(
+                    &mut s,
+                    nid,
+                    tilemap::TILE_CUSTOM_DATA_LAYERS.to_string(),
+                    Variant::PackedStringArray(layers.clone()),
+                ) {
+                    send_error(stream, 500, &e);
+                    return;
+                }
+            }
+        }
+    }
+
+    s.add_log(
+        "info",
+        format!(
+            "TileSet: tile ({}, {}) of source {source_id}",
+            atlas.x, atlas.y
+        ),
+    );
+    let event = format!(
+        r#"{{"type":"tileset_tile_changed","node_id":{raw},"source_id":{source_id},"atlas":[{},{}]}}"#,
+        atlas.x, atlas.y
+    );
+    publish_event(&mut s, event);
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+// ---------------------------------------------------------------------------
 // pat-r5p: Transform gizmo - axis-constrained drag, rotate, scale
 // ---------------------------------------------------------------------------
 
@@ -16278,8 +17943,32 @@ pub fn process_tool_scripts(state: &mut EditorState, delta: f64) {
 
 /// `GET /api/plugins` — returns the list of registered editor plugins.
 fn api_get_plugins(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
-    let s = state.lock().unwrap();
-    let j = serde_json::to_string(&s.plugins).unwrap_or_else(|_| "[]".to_string());
+    let mut s = state.lock().unwrap();
+    // pat-s3rrv.66: `_get_plugin_name` and `_has_main_screen` are answered by
+    // the plugin SCRIPT, so they can only be read off the live instance —
+    // `plugin.cfg` carries neither. A plugin that is listed but not enabled has
+    // no instance, and keeps its cfg name.
+    let folders: Vec<String> = s.plugins.iter().map(|p| p.folder.clone()).collect();
+    let mut rows: Vec<serde_json::Value> = Vec::with_capacity(folders.len());
+    for (i, folder) in folders.iter().enumerate() {
+        let mut row = match serde_json::to_value(&s.plugins[i]) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if s.active_plugins.contains_key(folder) {
+            let name = plugin_display_name(&mut s, folder);
+            let main_screen = plugin_has_main_screen(&mut s, folder);
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert("name".to_string(), serde_json::Value::String(name));
+                obj.insert(
+                    "main_screen".to_string(),
+                    serde_json::Value::Bool(main_screen),
+                );
+            }
+        }
+        rows.push(row);
+    }
+    let j = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string());
     send_json(stream, &format!(r#"{{"plugins":{j}}}"#));
 }
 
@@ -18145,6 +19834,18 @@ fn api_new_scene(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
         tab.inspector_history = cur_history;
         tab.inspector_history_index = cur_index;
     }
+    // pat-s3rrv.66: `_clear` fires BEFORE the tree is swapped. Godot's doc —
+    // "Clear all the state and reset the object being edited to zero. This
+    // ensures your plugin does not keep editing a currently existing node, or a
+    // node from the wrong scene" — is about dropping a reference, so a plugin
+    // has to be told while the node it holds still exists. Calling it after the
+    // swap would notify plugins about a tree that is already gone, which is the
+    // very situation the hook exists to prevent.
+    //
+    // Broadcast, not first-claim: every plugin must drop its state, and a truthy
+    // return here does not mean "handled".
+    dispatch_plugin_virtual(&mut s, "_clear", &[], false);
+
     // Fresh empty scene: a bare root with no children. Drop any selection and
     // nav history that referenced the previous scene's now-gone nodes.
     s.scene_tree = SceneTree::new();
@@ -19386,6 +21087,131 @@ fn api_audio_toggle_effect(state: &Arc<Mutex<EditorState>>, body: &str, stream: 
 }
 
 /// `POST /api/audio/layout/load_default` — resets to a lone `Master` bus.
+/// The project's bus-layout file.
+///
+/// Godot stores the path in the `audio/buses/default_bus_layout` project
+/// setting; `res://default_bus_layout.tres` is its default and the path the
+/// runner's boot-time loader already reads
+/// (`patina-runner`'s bootstrap), so writing here is what makes an edit in the
+/// panel audible in Play (pat-s3rrv.52).
+fn audio_layout_path(state: &EditorState) -> Option<std::path::PathBuf> {
+    state
+        .project_root
+        .as_ref()
+        .map(|root| std::path::Path::new(root).join("default_bus_layout.tres"))
+}
+
+/// `POST /api/audio/layout/save` — writes the layout to the project's
+/// `default_bus_layout.tres`.
+///
+/// Until this existed the Save button called `logMessage(...)` and nothing
+/// else: the panel's whole model lived in `EditorState` and never reached
+/// disk, so nothing the user did in it could ever be heard in the game.
+fn api_audio_save_layout(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let (path, text, json) = {
+        let s = state.lock().unwrap();
+        let Some(path) = audio_layout_path(&s) else {
+            send_error(stream, 400, "no project open");
+            return;
+        };
+        (path, s.audio_bus_layout.to_tres(), audio_layout_json(&s))
+    };
+    if let Err(err) = std::fs::write(&path, text) {
+        send_error(
+            stream,
+            500,
+            &format!("could not write {}: {err}", path.display()),
+        );
+        return;
+    }
+    send_json(stream, &json);
+}
+
+/// `POST /api/audio/layout/load` — replaces the layout with the project's
+/// `default_bus_layout.tres`.
+///
+/// A missing file is NOT an error: a project that has never saved a layout is
+/// the common case, and Godot shows the default layout for it rather than
+/// refusing to open the panel.
+fn api_audio_load_layout(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let path = {
+        let s = state.lock().unwrap();
+        let Some(path) = audio_layout_path(&s) else {
+            send_error(stream, 400, "no project open");
+            return;
+        };
+        path
+    };
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let json = {
+        let mut s = state.lock().unwrap();
+        if !text.trim().is_empty() {
+            s.audio_bus_layout = crate::audio_bus_layout::AudioBusLayout::from_tres(&text);
+        }
+        audio_layout_json(&s)
+    };
+    send_json(stream, &json);
+}
+
+/// `POST /api/audio/effect/swap` — reorders two effects within one bus.
+///
+/// Effect order is audible (a filter before a reverb is not the same sound as
+/// one after it), so this is a real edit and it is what the panel's drag
+/// handles post. Mirrors Godot's `AudioServer.swap_bus_effects`.
+fn api_audio_swap_effects(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some((p, index)) = audio_body_index(body) else {
+        send_error(stream, 400, "missing index");
+        return;
+    };
+    let from = p.get("from").and_then(|v| v.as_u64());
+    let to = p.get("to").and_then(|v| v.as_u64());
+    let (Some(from), Some(to)) = (from, to) else {
+        send_error(stream, 400, "missing from/to");
+        return;
+    };
+    let json = {
+        let mut s = state.lock().unwrap();
+        if !s
+            .audio_bus_layout
+            .swap_effects(index, from as usize, to as usize)
+        {
+            send_error(stream, 400, "effect slot out of range");
+            return;
+        }
+        audio_layout_json(&s)
+    };
+    send_json(stream, &json);
+}
+
+/// `GET /api/audio/peaks` — live per-bus peak levels for the panel's VU meters.
+///
+/// Reads the RUNNING game's mixer (`EditorState::run_main_loop`), which is the
+/// only place real levels exist. The panel used to derive its meters from each
+/// bus's fader value, so a meter moved when you dragged the slider and stayed
+/// still when the game got loud — the opposite of what a meter reports.
+///
+/// With nothing playing there is no mixer to read, so the response is empty and
+/// the panel shows the floor. That is the honest reading: an idle editor is
+/// silent. It is NOT a stub — start a scene and these numbers move.
+fn api_audio_get_peaks(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let peaks = {
+        let s = state.lock().unwrap();
+        s.run_main_loop
+            .as_ref()
+            .map(|ml| ml.audio_bridge().bus_peaks_db())
+            .unwrap_or_default()
+    };
+    let buses: Vec<serde_json::Value> = peaks
+        .iter()
+        .map(|(l, r)| serde_json::json!({ "left_db": l, "right_db": r }))
+        .collect();
+    let playing = !buses.is_empty();
+    send_json(
+        stream,
+        &serde_json::json!({ "playing": playing, "buses": buses }).to_string(),
+    );
+}
+
 fn api_audio_load_default(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let json = {
         let mut s = state.lock().unwrap();

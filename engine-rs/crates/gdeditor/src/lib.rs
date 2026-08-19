@@ -127,6 +127,7 @@ pub mod script_find_replace;
 pub mod script_gutter;
 pub mod script_main_view;
 pub mod script_outline;
+pub mod script_templates;
 pub mod settings;
 pub mod shader_editor;
 pub mod signal_connect_advanced;

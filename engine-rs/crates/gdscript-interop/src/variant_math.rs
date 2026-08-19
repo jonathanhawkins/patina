@@ -20,7 +20,7 @@
 //! forms with `*_local` as the right-multiply counterparts, and `Rect2.has_point`
 //! is inclusive at `position` and exclusive at `end`.
 
-use gdcore::math::{Rect2, Transform2D, Vector2, Vector2i, Vector3, Vector3i};
+use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector2i, Vector3, Vector3i};
 use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
 use gdvariant::Variant;
 
@@ -443,6 +443,11 @@ pub(crate) fn static_member(type_name: &str, member: &str) -> Option<Variant> {
         ("Plane", "PLANE_YZ") => Some(Variant::Plane(Plane::new(Vector3::new(1.0, 0.0, 0.0), 0.0))),
         ("Plane", "PLANE_XZ") => Some(Variant::Plane(Plane::new(Vector3::new(0.0, 1.0, 0.0), 0.0))),
         ("Plane", "PLANE_XY") => Some(Variant::Plane(Plane::new(Vector3::new(0.0, 0.0, 1.0), 0.0))),
+        // All 146 Godot colour constants, from the table `gdcore` owns
+        // (pat-s3rrv.58). The interpreter used to hardcode SIX inline, so
+        // `Color.YELLOW`, `Color.CYAN`, `Color.ORANGE` and 140 others resolved
+        // to `None`.
+        ("Color", name) => Color::named(name).map(Variant::Color),
         _ => None,
     }
 }
@@ -461,6 +466,70 @@ pub(crate) fn member_get(value: &Variant, member: &str) -> Option<Variant> {
             "position" => Some(Variant::Vector2(r.position)),
             "size" => Some(Variant::Vector2(r.size)),
             "end" => Some(Variant::Vector2(r.end())),
+            _ => None,
+        },
+        // The pat-s3rrv.59 builtins. Components come back as `Int` for the
+        // integer types and `Float` for the float ones — handing back a Float
+        // for a `Vector4i.x` would make `v.x == 3` fail the way an int vector
+        // silently widened to a float used to (pat-nzgdu.78).
+        Variant::Rect2i(r) => match member {
+            "position" => Some(Variant::Vector2i(r.position)),
+            "size" => Some(Variant::Vector2i(r.size)),
+            "end" => Some(Variant::Vector2i(r.end())),
+            _ => None,
+        },
+        Variant::Vector4(v) => match member {
+            "x" => Some(Variant::Float(v.x as f64)),
+            "y" => Some(Variant::Float(v.y as f64)),
+            "z" => Some(Variant::Float(v.z as f64)),
+            "w" => Some(Variant::Float(v.w as f64)),
+            _ => None,
+        },
+        Variant::Vector4i(v) => match member {
+            "x" => Some(Variant::Int(v.x as i64)),
+            "y" => Some(Variant::Int(v.y as i64)),
+            "z" => Some(Variant::Int(v.z as i64)),
+            "w" => Some(Variant::Int(v.w as i64)),
+            _ => None,
+        },
+        // ⚠️ A Projection's `x`/`y`/`z`/`w` are its four COLUMNS, each a whole
+        // Vector4 (doc/classes/Projection.xml:268-277) — NOT scalar components
+        // the way `Vector4.x` is. Storage is column-major, so `m[0]` really is
+        // the `x` column; reading rows here would transpose every matrix a
+        // script inspects.
+        Variant::Projection(p) => {
+            let column = |i: usize| {
+                Some(Variant::Vector4(gdcore::math::Vector4::new(
+                    p.m[i][0], p.m[i][1], p.m[i][2], p.m[i][3],
+                )))
+            };
+            match member {
+                "x" => column(0),
+                "y" => column(1),
+                "z" => column(2),
+                "w" => column(3),
+                _ => None,
+            }
+        }
+        // Godot's Color members beyond the four channels (pat-s3rrv.58): the
+        // 8-bit views and the HSV decomposition. `r/g/b/a` are handled by the
+        // interpreter's own fast path, and are repeated here so a caller
+        // reaching `member_get` directly still gets them.
+        //
+        // ⚠️ `h`/`s`/`v` are 0..1, NOT degrees — a script treating `col.h` as a
+        // 0..360 hue gets a wildly wrong colour that still looks like a colour.
+        Variant::Color(c) => match member {
+            "r" => Some(Variant::Float(c.r as f64)),
+            "g" => Some(Variant::Float(c.g as f64)),
+            "b" => Some(Variant::Float(c.b as f64)),
+            "a" => Some(Variant::Float(c.a as f64)),
+            "r8" => Some(Variant::Int(c.r8())),
+            "g8" => Some(Variant::Int(c.g8())),
+            "b8" => Some(Variant::Int(c.b8())),
+            "a8" => Some(Variant::Int(c.a8())),
+            "h" => Some(Variant::Float(c.h() as f64)),
+            "s" => Some(Variant::Float(c.s() as f64)),
+            "v" => Some(Variant::Float(c.v() as f64)),
             _ => None,
         },
         Variant::Transform2D(t) => match member {
@@ -541,6 +610,37 @@ fn member_set_inner(
             other.variant_type()
         ))),
     };
+    let want_vec2i = |v: &Variant| match v {
+        Variant::Vector2i(v) => Ok(*v),
+        other => Err(type_error(format!(
+            "{ctx} expects a Vector2i, got {}",
+            other.variant_type()
+        ))),
+    };
+    let want_vec4 = |v: &Variant| match v {
+        Variant::Vector4(v) => Ok(*v),
+        other => Err(type_error(format!(
+            "{ctx} expects a Vector4, got {}",
+            other.variant_type()
+        ))),
+    };
+    // A component assignment accepts an Int where a float is wanted, because
+    // GDScript's `5` and `5.0` are both ordinary ways to write a coordinate.
+    let want_f32 = |v: &Variant| match v {
+        Variant::Float(f) => Ok(*f as f32),
+        Variant::Int(i) => Ok(*i as f32),
+        other => Err(type_error(format!(
+            "{ctx} expects a float, got {}",
+            other.variant_type()
+        ))),
+    };
+    let want_i32 = |v: &Variant| match v {
+        Variant::Int(i) => Ok(*i as i32),
+        other => Err(type_error(format!(
+            "{ctx} expects an int, got {}",
+            other.variant_type()
+        ))),
+    };
     match value {
         Variant::Rect2(r) => {
             let mut r = *r;
@@ -552,6 +652,56 @@ fn member_set_inner(
                 _ => unreachable!("member_get gated the member name"),
             }
             Ok(Variant::Rect2(r))
+        }
+        Variant::Rect2i(r) => {
+            let mut r = *r;
+            match member {
+                "position" => r.position = want_vec2i(new_value)?,
+                "size" => r.size = want_vec2i(new_value)?,
+                // Godot keeps `position` fixed and moves `end` by resizing.
+                "end" => r.size = want_vec2i(new_value)? - r.position,
+                _ => unreachable!("member_get gated the member name"),
+            }
+            Ok(Variant::Rect2i(r))
+        }
+        Variant::Vector4(v) => {
+            let mut v = *v;
+            let f = want_f32(new_value)?;
+            match member {
+                "x" => v.x = f,
+                "y" => v.y = f,
+                "z" => v.z = f,
+                "w" => v.w = f,
+                _ => unreachable!("member_get gated the member name"),
+            }
+            Ok(Variant::Vector4(v))
+        }
+        Variant::Vector4i(v) => {
+            let mut v = *v;
+            let i = want_i32(new_value)?;
+            match member {
+                "x" => v.x = i,
+                "y" => v.y = i,
+                "z" => v.z = i,
+                "w" => v.w = i,
+                _ => unreachable!("member_get gated the member name"),
+            }
+            Ok(Variant::Vector4i(v))
+        }
+        Variant::Projection(p) => {
+            let mut p = *p;
+            let col = want_vec4(new_value)?;
+            let index = match member {
+                "x" => 0,
+                "y" => 1,
+                "z" => 2,
+                "w" => 3,
+                _ => unreachable!("member_get gated the member name"),
+            };
+            // Column-major storage: writing `m[index]` replaces a whole column,
+            // which is exactly what assigning `proj.x` means.
+            p.m[index] = [col.x, col.y, col.z, col.w];
+            Ok(Variant::Projection(p))
         }
         Variant::Transform2D(t) => {
             let mut t = *t;
@@ -650,7 +800,87 @@ pub(crate) fn call_method(
         Variant::Quaternion(q) => Some(quaternion_method(*q, method, args)),
         Variant::Aabb(a) => Some(aabb_method(*a, method, args)),
         Variant::Plane(p) => Some(plane_method(*p, method, args)),
+        Variant::Color(c) => Some(color_method(*c, method, args)),
         _ => None,
+    }
+}
+
+/// `Color`'s builtin methods (pat-s3rrv.58).
+///
+/// Every one forwards to the already-tested `gdcore::math::Color`
+/// implementation rather than recomputing anything here, so the interpreter and
+/// the engine cannot drift apart on what `darkened` means.
+fn color_method(c: Color, method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    let ctx = format!("Color.{method}()");
+    match method {
+        // -- derived colours --
+        "inverted" => Ok(Variant::Color(c.inverted())),
+        "lightened" => Ok(Variant::Color(c.lightened(arg_num(args, 0, &ctx)?))),
+        "darkened" => Ok(Variant::Color(c.darkened(arg_num(args, 0, &ctx)?))),
+        "blend" => Ok(Variant::Color(c.blend(arg_color(args, 0, &ctx)?))),
+        "lerp" => Ok(Variant::Color(
+            c.lerp(arg_color(args, 0, &ctx)?, arg_num(args, 1, &ctx)?),
+        )),
+        "clamp" => {
+            // Godot's defaults are the 0..1 corners.
+            let lo = args
+                .first()
+                .map(|_| arg_color(args, 0, &ctx))
+                .transpose()?
+                .unwrap_or(Color::new(0.0, 0.0, 0.0, 0.0));
+            let hi = args
+                .get(1)
+                .map(|_| arg_color(args, 1, &ctx))
+                .transpose()?
+                .unwrap_or(Color::WHITE);
+            Ok(Variant::Color(c.clamp_to(lo, hi)))
+        }
+
+        // -- scalars --
+        "get_luminance" => Ok(Variant::Float(c.get_luminance() as f64)),
+        "is_equal_approx" => Ok(Variant::Bool(c.is_equal_approx(arg_color(args, 0, &ctx)?))),
+
+        // -- colour spaces --
+        "srgb_to_linear" => Ok(Variant::Color(c.srgb_to_linear())),
+        "linear_to_srgb" => Ok(Variant::Color(c.linear_to_srgb())),
+
+        // -- serialisation --
+        //
+        // ⚠️ `to_html` defaults to WITH alpha in Godot, so a bare `to_html()`
+        // yields 8 digits. Defaulting to false would quietly drop alpha from
+        // every colour a script serialises.
+        "to_html" => {
+            let with_alpha = match args.first() {
+                Some(Variant::Bool(b)) => *b,
+                None => true,
+                Some(other) => {
+                    return Err(type_error(format!("{ctx} expects a bool, got {other:?}")))
+                }
+            };
+            Ok(Variant::String(c.to_html(with_alpha)))
+        }
+        "to_argb32" => Ok(Variant::Int(c.to_argb32())),
+        "to_abgr32" => Ok(Variant::Int(c.to_abgr32())),
+        "to_rgba32" => Ok(Variant::Int(c.to_rgba32())),
+        "to_argb64" => Ok(Variant::Int(c.to_argb64())),
+        "to_abgr64" => Ok(Variant::Int(c.to_abgr64())),
+        "to_rgba64" => Ok(Variant::Int(c.to_rgba64())),
+
+        _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("Color.{method}"),
+        ))),
+    }
+}
+
+/// A `Color` argument, accepting only a real colour — a script passing a number
+/// where a colour belongs gets a named error rather than a silent black.
+fn arg_color(args: &[Variant], idx: usize, ctx: &str) -> Result<Color, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::Color(c)) => Ok(*c),
+        Some(other) => Err(type_error(format!(
+            "{ctx} expects a Color for argument {idx}, got {other:?}"
+        ))),
+        None => Err(type_error(format!("{ctx} is missing argument {idx}"))),
     }
 }
 
@@ -1691,6 +1921,227 @@ pub(crate) fn vector_static_call(
             let ctx = "Vector2.from_angle()";
             Some(arg_num(args, 0, ctx).map(|a| Variant::Vector2(Vector2::new(a.cos(), a.sin()))))
         }
+
+        // Color's static constructors (pat-s3rrv.58). These arrive here rather
+        // than at `call_method_on` because they are calls on a TYPE NAME, and
+        // this hook is consulted for any `Ident.method(...)` — not only the
+        // vector types its name suggests.
+        ("Color", "from_hsv") => {
+            let ctx = "Color.from_hsv()";
+            Some((|| {
+                let h = arg_num(args, 0, ctx)?;
+                let s = arg_num(args, 1, ctx)?;
+                let v = arg_num(args, 2, ctx)?;
+                // Godot's alpha argument is optional and defaults to opaque.
+                let a = match args.get(3) {
+                    Some(_) => arg_num(args, 3, ctx)?,
+                    None => 1.0,
+                };
+                Ok(Variant::Color(Color::from_hsv(h, s, v, a)))
+            })())
+        }
+        ("Color", "from_rgba8") => {
+            let ctx = "Color.from_rgba8()";
+            Some((|| {
+                let r = arg_int(args, 0, ctx)? as i64;
+                let g = arg_int(args, 1, ctx)? as i64;
+                let b = arg_int(args, 2, ctx)? as i64;
+                let a = match args.get(3) {
+                    Some(_) => arg_int(args, 3, ctx)? as i64,
+                    None => 255,
+                };
+                Ok(Variant::Color(Color::from_rgba8(r, g, b, a)))
+            })())
+        }
+        // `Color.html("#ff8800")`. An unparseable string is an ERROR rather
+        // than a silent black — Godot's own `html` reports the bad value, and a
+        // silent default is the kind of failure that surfaces as a wrong-looking
+        // scene hours later.
+        ("Color", "html") => {
+            let ctx = "Color.html()";
+            Some(match args.first() {
+                Some(Variant::String(text)) => Color::from_html(text)
+                    .map(Variant::Color)
+                    .ok_or_else(|| type_error(format!("{ctx}: invalid html colour {text:?}"))),
+                Some(other) => Err(type_error(format!("{ctx} expects a String, got {other:?}"))),
+                None => Err(type_error(format!("{ctx} is missing argument 0"))),
+            })
+        }
+        ("Color", "html_is_valid") => {
+            let ctx = "Color.html_is_valid()";
+            Some(match args.first() {
+                Some(Variant::String(text)) => Ok(Variant::Bool(Color::html_is_valid(text))),
+                Some(other) => Err(type_error(format!("{ctx} expects a String, got {other:?}"))),
+                None => Err(type_error(format!("{ctx} is missing argument 0"))),
+            })
+        }
+        ("Color", "hex") => {
+            let ctx = "Color.hex()";
+            Some(arg_int(args, 0, ctx).map(|h| Variant::Color(Color::from_hex32(h as u32))))
+        }
+        ("Color", "hex64") => {
+            let ctx = "Color.hex64()";
+            Some(match args.first() {
+                Some(Variant::Int(h)) => Ok(Variant::Color(Color::from_hex64(*h as u64))),
+                Some(other) => Err(type_error(format!("{ctx} expects an int, got {other:?}"))),
+                None => Err(type_error(format!("{ctx} is missing argument 0"))),
+            })
+        }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::*;
+
+    // pat-s3rrv.58 — the Color dispatch tables.
+    //
+    // These call `variant_math` directly rather than through the interpreter,
+    // so they verify the half of the wiring that lives here independently of
+    // the `call_method_on` delegation line in `interpreter.rs`.
+
+    fn col(r: f32, g: f32, b: f32, a: f32) -> Variant {
+        Variant::Color(Color::new(r, g, b, a))
+    }
+
+    fn unwrap_color(v: Variant) -> Color {
+        match v {
+            Variant::Color(c) => c,
+            other => panic!("expected a Color, got {other:?}"),
+        }
+    }
+
+    fn call(c: Variant, method: &str, args: &[Variant]) -> Variant {
+        call_method(&c, method, args)
+            .unwrap_or_else(|| panic!("Color.{method} is not dispatched at all"))
+            .unwrap_or_else(|e| panic!("Color.{method} errored: {e:?}"))
+    }
+
+    /// The acceptance's own case: `Color.YELLOW.darkened(0.2)`.
+    #[test]
+    fn color_instance_methods_dispatch() {
+        let yellow = Variant::Color(Color::named("YELLOW").expect("YELLOW"));
+        let dark = unwrap_color(call(yellow.clone(), "darkened", &[Variant::Float(0.2)]));
+        assert!(
+            dark.is_equal_approx(Color::new(0.8, 0.8, 0.0, 1.0)),
+            "{dark:?}"
+        );
+
+        let inv = unwrap_color(call(col(1.0, 1.0, 0.0, 1.0), "inverted", &[]));
+        assert!(
+            inv.is_equal_approx(Color::new(0.0, 0.0, 1.0, 1.0)),
+            "{inv:?}"
+        );
+
+        match call(col(1.0, 1.0, 0.0, 1.0), "get_luminance", &[]) {
+            Variant::Float(l) => assert!((l - 0.9278).abs() < 1e-3, "{l}"),
+            other => panic!("expected Float, got {other:?}"),
+        }
+
+        let blended = unwrap_color(call(
+            col(1.0, 0.0, 0.0, 1.0),
+            "blend",
+            &[col(0.0, 0.0, 1.0, 0.5)],
+        ));
+        assert!(
+            blended.is_equal_approx(Color::new(0.5, 0.0, 0.5, 1.0)),
+            "{blended:?}"
+        );
+    }
+
+    /// ⚠️ Godot's `to_html` defaults to WITH alpha. Defaulting to `false` would
+    /// silently drop alpha from every colour a script serialises.
+    #[test]
+    fn to_html_defaults_to_including_alpha() {
+        let c = Variant::Color(Color::from_html("#ff8800").unwrap());
+        assert_eq!(
+            call(c.clone(), "to_html", &[]),
+            Variant::String("ff8800ff".into()),
+            "a bare to_html() must include alpha"
+        );
+        // …and the acceptance's explicit `to_html(false)`.
+        assert_eq!(
+            call(c, "to_html", &[Variant::Bool(false)]),
+            Variant::String("ff8800".into())
+        );
+    }
+
+    #[test]
+    fn color_constants_resolve_through_static_member() {
+        let yellow = static_member("Color", "YELLOW").expect("YELLOW resolves");
+        assert!(unwrap_color(yellow).is_equal_approx(Color::new(1.0, 1.0, 0.0, 1.0)));
+        // One that the old six-arm table could not answer.
+        assert!(static_member("Color", "REBECCA_PURPLE").is_some());
+        assert!(static_member("Color", "NOT_A_COLOUR").is_none());
+    }
+
+    #[test]
+    fn color_members_read_through_member_get() {
+        let c = Color::new(0.5, 0.0, 1.0, 1.0);
+        let v = Variant::Color(c);
+        assert_eq!(member_get(&v, "r8"), Some(Variant::Int(128)));
+        assert_eq!(member_get(&v, "b8"), Some(Variant::Int(255)));
+        match member_get(&v, "h") {
+            // ⚠️ 0..1, not degrees.
+            Some(Variant::Float(h)) => assert!((0.0..=1.0).contains(&h), "hue {h} out of 0..1"),
+            other => panic!("expected Float hue, got {other:?}"),
+        }
+        assert_eq!(member_get(&v, "not_a_member"), None);
+    }
+
+    /// `Color.from_hsv(...)` and `Color.html(...)` are calls on a TYPE NAME, so
+    /// they route through `vector_static_call` — which, despite its name, is
+    /// consulted for any `Ident.method(...)`.
+    #[test]
+    fn color_static_constructors_dispatch() {
+        let cyan = vector_static_call(
+            "Color",
+            "from_hsv",
+            &[
+                Variant::Float(0.5),
+                Variant::Float(1.0),
+                Variant::Float(1.0),
+            ],
+        )
+        .expect("from_hsv is dispatched")
+        .expect("from_hsv succeeds");
+        assert!(unwrap_color(cyan).is_equal_approx(Color::new(0.0, 1.0, 1.0, 1.0)));
+
+        let parsed = vector_static_call("Color", "html", &[Variant::String("#ff8800".into())])
+            .expect("html is dispatched")
+            .expect("html succeeds");
+        assert!(unwrap_color(parsed).is_equal_approx(Color::from_html("ff8800").unwrap()));
+
+        assert_eq!(
+            vector_static_call("Color", "html_is_valid", &[Variant::String("#zzz".into())])
+                .expect("dispatched")
+                .expect("succeeds"),
+            Variant::Bool(false)
+        );
+    }
+
+    /// A bad argument is a NAMED error, not a silent default — a silent black
+    /// surfaces as a wrong-looking scene long after the mistake.
+    #[test]
+    fn bad_arguments_report_rather_than_defaulting() {
+        assert!(
+            call_method(&col(1.0, 0.0, 0.0, 1.0), "blend", &[Variant::Int(3)])
+                .expect("dispatched")
+                .is_err(),
+            "blend() with a non-Color must error"
+        );
+        assert!(
+            vector_static_call("Color", "html", &[Variant::String("nonsense".into())])
+                .expect("dispatched")
+                .is_err(),
+            "an unparseable html colour must error rather than yielding black"
+        );
+        assert!(
+            call_method(&col(1.0, 0.0, 0.0, 1.0), "no_such_method", &[])
+                .expect("Color is dispatched")
+                .is_err(),
+            "an unknown method must name itself"
+        );
     }
 }

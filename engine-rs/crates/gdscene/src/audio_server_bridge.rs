@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use gdaudio::import::AudioStreamLoader;
 use gdaudio::sample::AudioOutputStream;
 use gdaudio::spatial::{
-    AttenuationModel, AudioListener3D, AudioStreamPlayer2D as Spatial2D,
-    AudioStreamPlayer3D as Spatial3D,
+    doppler_pitch_scale, AttenuationModel, AudioListener3D, AudioStreamPlayer2D as Spatial2D,
+    AudioStreamPlayer3D as Spatial3D, DopplerTracking,
 };
 use gdaudio::{mix_and_write, AudioBuffer, AudioServer, AudioStreamPlayer};
 use gdcore::math::{Vector2, Vector3};
@@ -31,6 +31,11 @@ use crate::scene_tree::SceneTree;
 /// [`set_screen_half_width`](AudioServerBridge::set_screen_half_width). A 2D
 /// source this far to the right of the listener pans fully right.
 const DEFAULT_SCREEN_HALF_WIDTH: f32 = 576.0;
+
+/// Speed of sound in air, m/s — the constant Godot's Doppler uses
+/// (`AudioStreamPlayer3D`; the same 343.0 `gdaudio::spatial`'s own unit tests
+/// pass in). Not a project setting in Godot, so it is not one here.
+const SPEED_OF_SOUND_M_S: f32 = 343.0;
 
 /// Which flavor of audio player a node is — positional players get a per-frame
 /// pan/attenuation pass, plain ones do not (pat-0q2kx.57).
@@ -73,11 +78,30 @@ pub struct AudioServerBridge {
     last_mix: Vec<f32>,
     /// Half the viewport width in canvas units, for 2D panning.
     screen_half_width: f32,
+    /// pat-s3rrv.55: last frame's world position per 3D source, and the
+    /// listener's, so Doppler has a velocity to work from.
+    ///
+    /// Godot derives Doppler velocity from the change in global transform
+    /// between steps rather than from an authored velocity field
+    /// (`AudioStreamPlayer3D::_notification` / `NOTIFICATION_INTERNAL_PROCESS`),
+    /// so the bridge has to remember where everything was. A source seen for the
+    /// first time has no previous position and therefore no velocity — its first
+    /// frame is unshifted, which is correct rather than a special case.
+    prev_source_pos: HashMap<NodeId, Vector3>,
+    /// Last frame's listener position; `None` until the first frame.
+    prev_listener_pos: Option<Vector3>,
     /// Streams that named a file the bridge could not load, in the order they
     /// failed. A silent player is indistinguishable from a correct one, so the
     /// failure has to survive past the log line for the runner and tests to
     /// see it (pat-s3rrv.5).
     stream_errors: Vec<String>,
+    /// The loop each node's stream declares, resolved once at load and applied
+    /// to every voice the node starts (pat-s3rrv.56).
+    ///
+    /// Kept here rather than on the voice because a node can stop and restart:
+    /// the loop is a property of the STREAM, so a replayed clip must loop the
+    /// same way without re-reading the file.
+    stream_loops: HashMap<NodeId, gdaudio::import::StreamLoop>,
 }
 
 impl AudioServerBridge {
@@ -93,6 +117,9 @@ impl AudioServerBridge {
             frame_accumulator: 0.0,
             last_mix: Vec::new(),
             screen_half_width: DEFAULT_SCREEN_HALF_WIDTH,
+            prev_source_pos: HashMap::new(),
+            prev_listener_pos: None,
+            stream_loops: HashMap::new(),
             stream_errors: Vec::new(),
         }
     }
@@ -139,11 +166,48 @@ impl AudioServerBridge {
     /// Directly assigns a decoded stream buffer to the player for
     /// `node_id`, creating the player if needed. Used by tests and by
     /// callers that decode audio themselves.
+    /// The live playback rate for a node's voice (pat-s3rrv.55).
+    ///
+    /// Doppler multiplies this every frame, and a pitch shift is inaudible in a
+    /// peak/energy reading of the mix, so there is no way to observe the
+    /// feature from `last_mix` alone. Takes `&mut self` because the server only
+    /// hands out streams mutably.
+    pub fn playback_pitch_scale(&mut self, id: NodeId) -> Option<f32> {
+        let playback_id = self.players.get(&id).and_then(|p| p.playback_id())?;
+        self.server.stream_mut(playback_id).map(|s| s.pitch_scale())
+    }
+
     pub fn set_stream_buffer(&mut self, node_id: NodeId, buffer: AudioBuffer) {
         self.players
             .entry(node_id)
             .or_insert_with(AudioStreamPlayer::new)
             .set_stream(buffer);
+    }
+
+    /// Per-bus `(left, right)` peak levels in dB, mixer bus order.
+    ///
+    /// Godot's audio bus panel drives every VU meter from
+    /// `AudioServer.get_bus_peak_volume_left_db/right_db` on a timer. Patina
+    /// computed the same peaks and exposed them nowhere, so the editor's meters
+    /// were derived from the FADER position instead — they moved when you
+    /// dragged the slider and did not move when the game got loud, which is the
+    /// opposite of what a meter is for (pat-s3rrv.52).
+    ///
+    /// Returns plain `f32` pairs rather than any `gdaudio` type on purpose: the
+    /// editor reads this through `gdscene` and must not need a `gdaudio`
+    /// dependency of its own.
+    ///
+    /// Channel pair 0 (the stereo output) — silence and unknown buses report
+    /// the dB floor rather than failing, since meters poll every frame.
+    pub fn bus_peaks_db(&self) -> Vec<(f32, f32)> {
+        (0..self.server.mixer().bus_count())
+            .map(|i| {
+                (
+                    self.server.get_bus_peak_volume_left_db(i, 0),
+                    self.server.get_bus_peak_volume_right_db(i, 0),
+                )
+            })
+            .collect()
     }
 
     /// Number of currently audible streams.
@@ -223,7 +287,7 @@ impl AudioServerBridge {
         // Positional players re-derive pan/volume from the live transforms every
         // frame, exactly as Godot's `_update_panning` does, and must run before
         // the mix below so this frame's audio carries this frame's position.
-        self.apply_spatial(tree, &players);
+        self.apply_spatial(tree, &players, delta);
 
         // Drop players whose nodes left the tree.
         let live: HashSet<NodeId> = player_ids.iter().copied().collect();
@@ -270,7 +334,7 @@ impl AudioServerBridge {
     /// a moving source or a moving listener both take effect immediately. The
     /// math itself already lived in `gdaudio::spatial` and was tested there;
     /// what was missing was any call path from the scene tree to it.
-    fn apply_spatial(&mut self, tree: &SceneTree, players: &[(NodeId, PlayerKind)]) {
+    fn apply_spatial(&mut self, tree: &SceneTree, players: &[(NodeId, PlayerKind)], delta: f64) {
         if !players
             .iter()
             .any(|(_, kind)| *kind != PlayerKind::NonPositional)
@@ -285,10 +349,12 @@ impl AudioServerBridge {
             let Some(playback_id) = self.players.get(id).and_then(|p| p.playback_id()) else {
                 continue;
             };
+            let mut doppler: Option<f32> = None;
             let result = match kind {
                 PlayerKind::NonPositional => continue,
                 PlayerKind::Positional3D => {
                     let source = self.read_spatial_3d(tree, *id);
+                    doppler = self.doppler_for(tree, *id, &source, &listener_3d, delta);
                     source.compute_spatial(&listener_3d)
                 }
                 PlayerKind::Positional2D => {
@@ -299,8 +365,66 @@ impl AudioServerBridge {
             if let Some(playback) = self.server.stream_mut(playback_id) {
                 playback.set_linear_gain(result.volume_linear);
                 playback.set_pan(result.pan_left, result.pan_right);
+                if let Some(pitch) = doppler {
+                    playback.set_pitch_scale(pitch);
+                }
             }
         }
+        // Remember where everything was, for next frame's velocities. Done after
+        // the loop so every source in THIS frame compared against the same
+        // listener sample.
+        self.prev_listener_pos = Some(listener_3d.position);
+    }
+
+    /// The Doppler pitch multiplier for one source this frame, or `None` when
+    /// the node has `doppler_tracking` off (pat-s3rrv.55).
+    ///
+    /// `gdaudio::spatial::doppler_pitch_scale` existed and was unit-tested with
+    /// **no callers** — the maths was right and nothing in the scene path asked
+    /// for it, so `doppler_tracking` was an authored property that did nothing.
+    ///
+    /// ⚠️ This MULTIPLIES the node's own `pitch_scale` rather than replacing it.
+    /// `sync_player_node` has already pushed the authored pitch onto the voice
+    /// by the time `apply_spatial` runs, and `set_pitch_scale` overwrites, so
+    /// setting the bare Doppler factor here would silently discard whatever the
+    /// game author set.
+    fn doppler_for(
+        &mut self,
+        tree: &SceneTree,
+        id: NodeId,
+        source: &Spatial3D,
+        listener: &AudioListener3D,
+        delta: f64,
+    ) -> Option<f32> {
+        if source.doppler_tracking == DopplerTracking::Disabled {
+            // Still record the position: enabling tracking mid-run must not
+            // produce one bogus frame from a stale sample.
+            self.prev_source_pos.insert(id, source.position);
+            return None;
+        }
+        let prev_source = self.prev_source_pos.insert(id, source.position);
+        let dt = delta as f32;
+        if dt <= 1e-6 {
+            return None;
+        }
+        // First sight of this source (or of the listener) has no velocity.
+        let (Some(prev_source), Some(prev_listener)) = (prev_source, self.prev_listener_pos) else {
+            return None;
+        };
+        let source_velocity = (source.position - prev_source) * (1.0 / dt);
+        let listener_velocity = (listener.position - prev_listener) * (1.0 / dt);
+        let doppler = doppler_pitch_scale(
+            source.position,
+            source_velocity,
+            listener.position,
+            listener_velocity,
+            SPEED_OF_SOUND_M_S,
+        );
+        let authored = tree
+            .get_node(id)
+            .and_then(|n| number_property(n, "pitch_scale"))
+            .unwrap_or(1.0);
+        Some((authored * doppler).max(0.01))
     }
 
     /// The active 3D listener: an `AudioListener3D` with `current` set wins,
@@ -385,6 +509,36 @@ impl AudioServerBridge {
         }
         if let Variant::Int(model) = node.get_property("attenuation_model") {
             source.attenuation_model = AttenuationModel::from_godot_int(model);
+        }
+        // pat-s3rrv.55: the emission cone and attenuation filter. These were
+        // struct fields nothing ever wrote, so authoring them in a scene had no
+        // effect whatsoever — the classic registered-but-inert shape.
+        if let Variant::Bool(on) = node.get_property("emission_angle_enabled") {
+            source.emission_angle_enabled = on;
+        }
+        if let Some(v) = number_property(node, "emission_angle_degrees") {
+            source.emission_angle_degrees = v;
+        }
+        if let Some(v) = number_property(node, "emission_angle_filter_attenuation_db") {
+            source.emission_angle_filter_attenuation_db = v;
+        }
+        if let Some(v) = number_property(node, "attenuation_filter_cutoff_hz") {
+            source.attenuation_filter_cutoff_hz = v;
+        }
+        if let Some(v) = number_property(node, "attenuation_filter_db") {
+            source.attenuation_filter_db = v;
+        }
+        // The cone is measured against the node's FORWARD, which Godot takes as
+        // the -Z basis column of the global transform — so a rotated speaker
+        // points where the scene says it points rather than always down -Z.
+        // ⚠️ `Basis` stores COLUMNS as `x`/`y`/`z`, so the -Z column is
+        // `-basis.z` directly. Reading it index-wise as `(-x.z, -y.z, -z.z)`
+        // would transpose the matrix and point a rotated source the wrong way.
+        let basis = crate::node3d::get_global_transform(tree, id).basis;
+        let z = basis.z;
+        let forward = gdcore::math::Vector3::new(-z.x, -z.y, -z.z);
+        if forward.length() > 1e-6 {
+            source.forward = forward;
         }
         source
     }
@@ -514,7 +668,12 @@ impl AudioServerBridge {
                 // undecodable file was indistinguishable from success: the
                 // player just stayed silent. Report it (pat-0q2kx.6).
                 match load_stream_buffer(&mut self.importer, &path) {
-                    Ok(buffer) => player.set_stream(buffer),
+                    Ok((buffer, loop_points)) => {
+                        if let Some(points) = loop_points {
+                            self.stream_loops.insert(id, points);
+                        }
+                        player.set_stream(buffer);
+                    }
                     Err(err) => {
                         // `warn!` alone is invisible in a default runner log, so
                         // a missing asset presented as plain silence. Raise it
@@ -544,14 +703,22 @@ impl AudioServerBridge {
         let voice_alive = voice_state.is_some();
 
         if first_sight && (autoplay || playing_prop) {
-            if player.play(&mut self.server).is_some() {
+            if let Some(pid) = player.play(&mut self.server) {
+                if let Some(points) = self.stream_loops.get(&id) {
+                    apply_stream_loop(&mut self.server, pid, points);
+                }
                 if let Some(node) = tree.get_node_mut(id) {
                     node.set_property("playing", Variant::Bool(true));
                 }
             }
         } else if playing_prop && !voice_alive && !player.playing_flag() {
-            // Script flipped `playing` on: start the stream.
-            player.play(&mut self.server);
+            // Script flipped `playing` on: start the stream. The loop is a
+            // property of the STREAM, so a replay loops the same way.
+            if let Some(pid) = player.play(&mut self.server) {
+                if let Some(points) = self.stream_loops.get(&id) {
+                    apply_stream_loop(&mut self.server, pid, points);
+                }
+            }
         } else if !playing_prop && voice_alive {
             // Script flipped `playing` off: stop the stream, paused or not.
             player.stop(&mut self.server);
@@ -684,6 +851,9 @@ fn import_artifact_for(source: &Path) -> Option<PathBuf> {
     }
 }
 
+/// A decoded stream plus the loop it declares, if any (pat-s3rrv.56).
+type LoadedStream = (AudioBuffer, Option<gdaudio::import::StreamLoop>);
+
 /// Decodes the stream at `path`, unwrapping an editor import artifact when the
 /// remap resolved to one (pat-s3rrv.47).
 ///
@@ -693,18 +863,50 @@ fn import_artifact_for(source: &Path) -> Option<PathBuf> {
 fn load_stream_buffer(
     importer: &mut AudioStreamLoader,
     path: &Path,
-) -> Result<AudioBuffer, String> {
+) -> Result<LoadedStream, String> {
     let is_artifact = path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
         .is_some_and(|e| matches!(e.as_str(), "oggvorbisstr" | "mp3str" | "sample"));
     if !is_artifact {
-        return importer.load_buffer(path).map_err(|e| e.to_string());
+        // `load_file` rather than `load_buffer`: the loop the file declares
+        // lives on the info half, and discarding it here is exactly why every
+        // looping track played once and stopped (pat-s3rrv.56).
+        return importer
+            .load_file(path)
+            .map(|import| (import.buffer, import.info.loop_points))
+            .map_err(|e| e.to_string());
     }
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
     let payload = artifact_audio_payload(&data, &path.to_string_lossy())?;
-    gdaudio::decode::decode_auto(&payload).map_err(|e| e.to_string())
+    // An import artifact's container carries `loop`/`loop_offset` metadata that
+    // nothing parses yet, so an artifact stream reports no loop and plays once
+    // — the previous behaviour, rather than a guessed one.
+    gdaudio::decode::decode_auto(&payload)
+        .map(|buffer| (buffer, None))
+        .map_err(|e| e.to_string())
+}
+
+/// Applies a stream's declared loop to a freshly started voice.
+///
+/// A free function on purpose: the call sites already hold a `&mut` borrow of
+/// `self.players`, and a `&mut self` method would collide with it.
+///
+/// ⚠️ `begin_secs`/`end_secs` are SECONDS. The WAV `smpl` chunk and Godot's
+/// `AudioStreamWAV.loop_begin`/`loop_end` are FRAMES; the conversion happens in
+/// `gdaudio::import` where the sample rate is known, so anything reaching here
+/// is already in the playback API's units.
+fn apply_stream_loop(
+    server: &mut AudioServer,
+    pid: gdaudio::server::PlaybackId,
+    points: &gdaudio::import::StreamLoop,
+) {
+    if let Some(voice) = server.stream_mut(pid) {
+        voice.set_loop_mode(points.mode);
+        voice.set_loop_begin(points.begin_secs);
+        voice.set_loop_end(points.end_secs);
+    }
 }
 
 /// Extracts the codec payload (ogg / mp3 / wav bytes) from an audio import

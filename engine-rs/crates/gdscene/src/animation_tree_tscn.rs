@@ -37,6 +37,7 @@ use crate::animation::{Animation, LoopMode};
 use crate::animation_tree::{
     AnimationLeafOptions, AnimationNode, AnimationPlayMode, AnimationTree, BlendSpace1D,
     BlendSpace2D, BlendSpaceBlendMode, OneShot, OneShotMixMode, StateMachine, StateTransition,
+    SwitchMode, TransitionAdvanceMode,
 };
 use crate::node::NodeId;
 use crate::packed_scene::PackedScene;
@@ -294,19 +295,41 @@ fn build_state_machine(
             if to == END_STATE || from == END_STATE || to == START_STATE {
                 continue;
             }
-            let (mut crossfade, mut condition) = (0.0, String::new());
+            // Every field of `AnimationNodeStateMachineTransition`
+            // (pat-s3rrv.1). Only `xfade_time` and `advance_condition` used to
+            // be read, so a scene's switch mode, advance mode, priority and
+            // reset flag were all discarded — and `advance_mode` in particular
+            // decides whether an edge fires on its own at all.
+            let mut edge = StateTransition {
+                from,
+                to,
+                ..Default::default()
+            };
             if let Some(t_props) = sub_resource_id(Some(&triple[2]))
                 .and_then(|id| scene.sub_resource_props(&id).cloned())
             {
-                crossfade = float_of(t_props.get("xfade_time")).unwrap_or(0.0) as f64;
-                condition = string_of(t_props.get("advance_condition")).unwrap_or_default();
+                edge.crossfade = float_of(t_props.get("xfade_time")).unwrap_or(0.0) as f64;
+                edge.condition = string_of(t_props.get("advance_condition")).unwrap_or_default();
+                edge.advance_expression =
+                    string_of(t_props.get("advance_expression")).unwrap_or_default();
+                if let Some(v) = int_of(t_props.get("switch_mode")) {
+                    edge.switch_mode = SwitchMode::from_godot_int(v);
+                }
+                if let Some(v) = int_of(t_props.get("advance_mode")) {
+                    edge.advance_mode = TransitionAdvanceMode::from_godot_int(v);
+                }
+                if let Some(v) = int_of(t_props.get("priority")) {
+                    edge.priority = v as i32;
+                }
+                if let Some(Variant::Bool(b)) = t_props.get("reset") {
+                    edge.reset = *b;
+                }
+                if let Some(Variant::Bool(b)) = t_props.get("break_loop_at_end") {
+                    edge.break_loop_at_end = *b;
+                }
+                edge.xfade_curve = sub_resource_id(t_props.get("xfade_curve"));
             }
-            sm.transitions.push(StateTransition {
-                from,
-                to,
-                condition,
-                crossfade,
-            });
+            sm.transitions.push(edge);
         }
     }
 

@@ -59,6 +59,20 @@ fn prop(ml: &MainLoop, id: gdscene::node::NodeId, name: &str) -> Variant {
 }
 
 /// **The acceptance test.** A 1-second timer must resume near frame 60, not 30.
+///
+/// ⚠️ The firing frame is counted **in Rust**, by stepping one frame at a time
+/// and watching for the post-`await` flag to flip. An earlier version of this
+/// test had the script count its own frames in `_process` and stamped that
+/// counter after the await — and it read `0`, which looks exactly like "the
+/// timer fired immediately" but actually meant `_process` never ran, so the
+/// counter never left its initialiser. This fixture attaches the script and
+/// calls `process_script_ready` directly rather than running the full
+/// `enter_tree` lifecycle, so the node is never process-enabled and the
+/// in-script counter can only ever be 0.
+///
+/// Counting from the loop that does the stepping removes the dependency
+/// entirely: the frame index is the test's own, it cannot be zero by accident,
+/// and "never fired" becomes a distinct outcome from "fired on frame 0".
 #[test]
 fn scene_tree_timer_advances_once_per_frame_with_flags() {
     gdscript_interop::set_engine_time_scale(1.0);
@@ -66,40 +80,45 @@ fn scene_tree_timer_advances_once_per_frame_with_flags() {
     let (mut ml, main) = scene_with_script(
         "\
 extends Node2D
-var fired_at = -1
-var frames = 0
-func _process(_d):
-\tself.frames = self.frames + 1
+var fired = false
 func _ready():
 \tawait get_tree().create_timer(1.0).timeout
-\tself.fired_at = self.frames
+\tself.fired = true
 ",
     );
 
     assert_eq!(
-        prop(&ml, main, "fired_at"),
-        Variant::Int(-1),
+        prop(&ml, main, "fired"),
+        Variant::Bool(false),
         "await must suspend _ready before the timer fires"
     );
 
-    // Run 90 frames — well past both the correct answer (60) and the buggy one
-    // (30), so the test reads the frame it ACTUALLY fired on rather than merely
-    // confirming it fired within a generous budget. A budget-style assertion is
-    // what let the double-advance survive: firing at 30 also satisfies "fired
-    // within 90 frames".
-    for _ in 0..90 {
+    // Run up to 90 frames — well past both the correct answer (60) and the buggy
+    // one (30) — and record the frame the flag actually flips on. A budget-style
+    // "fired within 90 frames" assertion is what let the double-advance survive,
+    // since firing at 30 satisfies it just as well as firing at 60.
+    let mut fired_at: Option<usize> = None;
+    for frame in 1..=90 {
         ml.step(FRAME);
+        if prop(&ml, main, "fired") == Variant::Bool(true) {
+            fired_at = Some(frame);
+            break;
+        }
     }
 
-    let fired_at = match prop(&ml, main, "fired_at") {
-        Variant::Int(n) => n,
-        other => panic!("timer never fired; fired_at = {other:?}"),
-    };
+    let fired_at = fired_at.expect(
+        "the timer never fired within 90 frames (1.5 s of game time). The await \
+         is parked forever — either process_script_coroutines is not advancing \
+         timers at all, or it is not draining take_timeout_signals to wake the \
+         parked await.",
+    );
     assert!(
         (59..=61).contains(&fired_at),
         "a 1.0 s timer at 60 fps must resume on frame ~60 (±1), got {fired_at}. \
          ~30 means the timer is still being advanced twice per frame — once by \
-         process_frame_with_scripts and once by process_script_coroutines."
+         process_frame_with_scripts and once by process_script_coroutines. A \
+         very small number means it is being advanced by something far faster \
+         than the frame delta."
     );
 }
 

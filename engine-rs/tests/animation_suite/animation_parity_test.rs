@@ -605,7 +605,7 @@ fn tween_property_empty_tween_completes_immediately() {
 
 use gdscene::animation_tree::{
     AnimationNode, AnimationTree, BlendSpace1D, BlendSpace2D, OneShot, StateMachine,
-    StateTransition,
+    StateTransition, TransitionAdvanceMode,
 };
 
 fn const_anim(name: &str, value: f64) -> Animation {
@@ -804,7 +804,10 @@ fn animation_tree_blend_state_machine_transitions_on_condition() {
         from: "idle".into(),
         to: "walk".into(),
         condition: "moving".into(),
-        crossfade: 0.0,
+        // Godot fires a condition-driven edge only in ADVANCE_MODE_AUTO;
+        // ENABLED (the default) is `travel()`-only (pat-s3rrv.1).
+        advance_mode: TransitionAdvanceMode::Auto,
+        ..Default::default()
     });
     tree.set_root(AnimationNode::StateMachine(sm));
 
@@ -847,6 +850,8 @@ fn animation_tree_blend_state_machine_crossfade_blends_during_transition() {
         to: "walk".into(),
         condition: "moving".into(),
         crossfade: 1.0,
+        advance_mode: TransitionAdvanceMode::Auto,
+        ..Default::default()
     });
     tree.set_root(AnimationNode::StateMachine(sm));
 

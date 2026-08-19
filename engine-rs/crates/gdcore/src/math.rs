@@ -13,7 +13,10 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 /// A 2D vector with `i32` components, matching Godot's `Vector2i`.
 ///
 /// Used for tile coordinates, pixel-perfect positions, and grid-based math.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// `Default` is `(0, 0)`, which is what Godot's default-constructed `Vector2i`
+/// is — and what lets [`Rect2i`] derive its own `Default` (pat-s3rrv.59).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Vector2i {
     /// The X component.
     pub x: i32,
@@ -48,6 +51,16 @@ impl Vector2i {
     /// Creates a new integer vector.
     pub const fn new(x: i32, y: i32) -> Self {
         Self { x, y }
+    }
+
+    /// Component-wise minimum (Godot `Vector2i.min`).
+    pub fn min_components(self, other: Self) -> Self {
+        Self::new(self.x.min(other.x), self.y.min(other.y))
+    }
+
+    /// Component-wise maximum (Godot `Vector2i.max`).
+    pub fn max_components(self, other: Self) -> Self {
+        Self::new(self.x.max(other.x), self.y.max(other.y))
     }
 }
 
@@ -147,6 +160,497 @@ impl Neg for Vector3i {
     type Output = Self;
     fn neg(self) -> Self {
         Self::new(-self.x, -self.y, -self.z)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vector4i
+// ---------------------------------------------------------------------------
+
+/// A 4D vector with `i32` components, matching Godot's `Vector4i`
+/// (`core/math/vector4i.h`).
+///
+/// One of the six Variant builtins Patina had no Rust type for at all
+/// (pat-s3rrv.59). The integer counterpart of [`Vector4`], used wherever a
+/// four-component index or extent must stay exact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Vector4i {
+    /// The X component.
+    pub x: i32,
+    /// The Y component.
+    pub y: i32,
+    /// The Z component.
+    pub z: i32,
+    /// The W component.
+    pub w: i32,
+}
+
+impl Vector4i {
+    /// The zero vector `(0, 0, 0, 0)`.
+    pub const ZERO: Self = Self {
+        x: 0,
+        y: 0,
+        z: 0,
+        w: 0,
+    };
+    /// The one vector `(1, 1, 1, 1)`.
+    pub const ONE: Self = Self {
+        x: 1,
+        y: 1,
+        z: 1,
+        w: 1,
+    };
+    /// The component-wise minimum — Godot's `Vector4i.MIN`.
+    pub const MIN: Self = Self {
+        x: i32::MIN,
+        y: i32::MIN,
+        z: i32::MIN,
+        w: i32::MIN,
+    };
+    /// The component-wise maximum — Godot's `Vector4i.MAX`.
+    pub const MAX: Self = Self {
+        x: i32::MAX,
+        y: i32::MAX,
+        z: i32::MAX,
+        w: i32::MAX,
+    };
+
+    /// Creates a new integer 4D vector.
+    pub const fn new(x: i32, y: i32, z: i32, w: i32) -> Self {
+        Self { x, y, z, w }
+    }
+
+    /// Squared length. Godot has no `length_squared` overflow guard either, so
+    /// this is an `i64` to keep a large component from wrapping silently.
+    pub fn length_squared(self) -> i64 {
+        let (x, y, z, w) = (self.x as i64, self.y as i64, self.z as i64, self.w as i64);
+        x * x + y * y + z * z + w * w
+    }
+
+    /// Euclidean length (Godot `Vector4i.length`, which returns a float).
+    pub fn length(self) -> f32 {
+        (self.length_squared() as f64).sqrt() as f32
+    }
+
+    /// Component-wise absolute value (Godot `Vector4i.abs`).
+    pub fn abs(self) -> Self {
+        Self::new(
+            self.x.saturating_abs(),
+            self.y.saturating_abs(),
+            self.z.saturating_abs(),
+            self.w.saturating_abs(),
+        )
+    }
+
+    /// Component-wise sign (`-1`, `0` or `1`) — Godot `Vector4i.sign`.
+    pub fn sign(self) -> Self {
+        Self::new(
+            self.x.signum(),
+            self.y.signum(),
+            self.z.signum(),
+            self.w.signum(),
+        )
+    }
+
+    /// Component-wise minimum (Godot `Vector4i.min`).
+    pub fn min(self, other: Self) -> Self {
+        Self::new(
+            self.x.min(other.x),
+            self.y.min(other.y),
+            self.z.min(other.z),
+            self.w.min(other.w),
+        )
+    }
+
+    /// Component-wise maximum (Godot `Vector4i.max`).
+    pub fn max(self, other: Self) -> Self {
+        Self::new(
+            self.x.max(other.x),
+            self.y.max(other.y),
+            self.z.max(other.z),
+            self.w.max(other.w),
+        )
+    }
+
+    /// Component-wise clamp between `min` and `max` (Godot `Vector4i.clamp`).
+    pub fn clamp(self, min: Self, max: Self) -> Self {
+        self.max(min).min(max)
+    }
+}
+
+impl Add for Vector4i {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self::new(
+            self.x + rhs.x,
+            self.y + rhs.y,
+            self.z + rhs.z,
+            self.w + rhs.w,
+        )
+    }
+}
+
+impl Sub for Vector4i {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Self::new(
+            self.x - rhs.x,
+            self.y - rhs.y,
+            self.z - rhs.z,
+            self.w - rhs.w,
+        )
+    }
+}
+
+impl Neg for Vector4i {
+    type Output = Self;
+    fn neg(self) -> Self {
+        Self::new(-self.x, -self.y, -self.z, -self.w)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vector4
+// ---------------------------------------------------------------------------
+
+/// A 4D vector with `f32` components, matching Godot's `Vector4`
+/// (`core/math/vector4.h`).
+///
+/// Godot's homogeneous coordinate type: the row of a [`crate::math3d::Projection`],
+/// a shader `vec4`, and the element type of `PackedVector4Array`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Vector4 {
+    /// The X component.
+    pub x: f32,
+    /// The Y component.
+    pub y: f32,
+    /// The Z component.
+    pub z: f32,
+    /// The W component.
+    pub w: f32,
+}
+
+impl Vector4 {
+    /// The zero vector `(0, 0, 0, 0)`.
+    pub const ZERO: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        w: 0.0,
+    };
+    /// The one vector `(1, 1, 1, 1)`.
+    pub const ONE: Self = Self {
+        x: 1.0,
+        y: 1.0,
+        z: 1.0,
+        w: 1.0,
+    };
+    /// All components positive infinity — Godot's `Vector4.INF`.
+    pub const INF: Self = Self {
+        x: f32::INFINITY,
+        y: f32::INFINITY,
+        z: f32::INFINITY,
+        w: f32::INFINITY,
+    };
+
+    /// Creates a new 4D vector.
+    pub const fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
+        Self { x, y, z, w }
+    }
+
+    /// Squared length (Godot `Vector4.length_squared`).
+    pub fn length_squared(self) -> f32 {
+        self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w
+    }
+
+    /// Euclidean length (Godot `Vector4.length`).
+    pub fn length(self) -> f32 {
+        self.length_squared().sqrt()
+    }
+
+    /// Unit vector in the same direction, or [`ZERO`](Self::ZERO) for a
+    /// zero-length input — Godot returns a zero vector rather than NaN.
+    pub fn normalized(self) -> Self {
+        let len = self.length();
+        if len > 0.0 {
+            Self::new(self.x / len, self.y / len, self.z / len, self.w / len)
+        } else {
+            Self::ZERO
+        }
+    }
+
+    /// Whether the vector is (near enough) unit length — Godot
+    /// `Vector4.is_normalized`, which compares the SQUARED length so no square
+    /// root is taken.
+    pub fn is_normalized(self) -> bool {
+        (self.length_squared() - 1.0).abs() < 1e-5
+    }
+
+    /// Dot product (Godot `Vector4.dot`).
+    pub fn dot(self, other: Self) -> f32 {
+        self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w
+    }
+
+    /// Distance to `other` (Godot `Vector4.distance_to`).
+    pub fn distance_to(self, other: Self) -> f32 {
+        (other - self).length()
+    }
+
+    /// Squared distance to `other` (Godot `Vector4.distance_squared_to`).
+    pub fn distance_squared_to(self, other: Self) -> f32 {
+        (other - self).length_squared()
+    }
+
+    /// Linear interpolation toward `other` by `weight` (Godot `Vector4.lerp`).
+    pub fn lerp(self, other: Self, weight: f32) -> Self {
+        Self::new(
+            self.x + (other.x - self.x) * weight,
+            self.y + (other.y - self.y) * weight,
+            self.z + (other.z - self.z) * weight,
+            self.w + (other.w - self.w) * weight,
+        )
+    }
+
+    /// Component-wise absolute value (Godot `Vector4.abs`).
+    pub fn abs(self) -> Self {
+        Self::new(self.x.abs(), self.y.abs(), self.z.abs(), self.w.abs())
+    }
+
+    /// Component-wise floor (Godot `Vector4.floor`).
+    pub fn floor(self) -> Self {
+        Self::new(
+            self.x.floor(),
+            self.y.floor(),
+            self.z.floor(),
+            self.w.floor(),
+        )
+    }
+
+    /// Component-wise ceil (Godot `Vector4.ceil`).
+    pub fn ceil(self) -> Self {
+        Self::new(self.x.ceil(), self.y.ceil(), self.z.ceil(), self.w.ceil())
+    }
+
+    /// Component-wise round (Godot `Vector4.round`).
+    pub fn round(self) -> Self {
+        Self::new(
+            self.x.round(),
+            self.y.round(),
+            self.z.round(),
+            self.w.round(),
+        )
+    }
+
+    /// Component-wise minimum (Godot `Vector4.min`).
+    pub fn min(self, other: Self) -> Self {
+        Self::new(
+            self.x.min(other.x),
+            self.y.min(other.y),
+            self.z.min(other.z),
+            self.w.min(other.w),
+        )
+    }
+
+    /// Component-wise maximum (Godot `Vector4.max`).
+    pub fn max(self, other: Self) -> Self {
+        Self::new(
+            self.x.max(other.x),
+            self.y.max(other.y),
+            self.z.max(other.z),
+            self.w.max(other.w),
+        )
+    }
+
+    /// The integer vector with each component truncated toward zero, the
+    /// conversion Godot's `Vector4i(Vector4)` constructor performs.
+    pub fn to_vector4i(self) -> Vector4i {
+        Vector4i::new(self.x as i32, self.y as i32, self.z as i32, self.w as i32)
+    }
+}
+
+impl Add for Vector4 {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self::new(
+            self.x + rhs.x,
+            self.y + rhs.y,
+            self.z + rhs.z,
+            self.w + rhs.w,
+        )
+    }
+}
+
+impl Sub for Vector4 {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Self::new(
+            self.x - rhs.x,
+            self.y - rhs.y,
+            self.z - rhs.z,
+            self.w - rhs.w,
+        )
+    }
+}
+
+impl Mul<f32> for Vector4 {
+    type Output = Self;
+    fn mul(self, rhs: f32) -> Self {
+        Self::new(self.x * rhs, self.y * rhs, self.z * rhs, self.w * rhs)
+    }
+}
+
+impl Div<f32> for Vector4 {
+    type Output = Self;
+    fn div(self, rhs: f32) -> Self {
+        Self::new(self.x / rhs, self.y / rhs, self.z / rhs, self.w / rhs)
+    }
+}
+
+impl Neg for Vector4 {
+    type Output = Self;
+    fn neg(self) -> Self {
+        Self::new(-self.x, -self.y, -self.z, -self.w)
+    }
+}
+
+impl From<Vector4i> for Vector4 {
+    fn from(v: Vector4i) -> Self {
+        Self::new(v.x as f32, v.y as f32, v.z as f32, v.w as f32)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rect2i
+// ---------------------------------------------------------------------------
+
+/// An axis-aligned rectangle with integer bounds, matching Godot's `Rect2i`
+/// (`core/math/rect2i.h`).
+///
+/// The type a `TileSet` atlas region and every pixel-exact UI rect wants: going
+/// through [`Rect2`]'s floats would round a region boundary and sample the
+/// neighbouring tile (pat-s3rrv.59).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Rect2i {
+    /// The top-left corner position.
+    pub position: Vector2i,
+    /// The width and height of the rectangle.
+    pub size: Vector2i,
+}
+
+impl Rect2i {
+    /// Creates a new integer rectangle.
+    pub const fn new(position: Vector2i, size: Vector2i) -> Self {
+        Self { position, size }
+    }
+
+    /// Creates a rectangle from loose components, the order Godot's
+    /// `Rect2i(x, y, w, h)` constructor takes.
+    pub const fn from_components(x: i32, y: i32, width: i32, height: i32) -> Self {
+        Self {
+            position: Vector2i::new(x, y),
+            size: Vector2i::new(width, height),
+        }
+    }
+
+    /// The end point (`position + size`) — Godot's `Rect2i.end`.
+    pub fn end(self) -> Vector2i {
+        self.position + self.size
+    }
+
+    /// Whether `point` lies inside the rectangle.
+    ///
+    /// ⚠️ Godot's `has_point` is half-open — the low edge is inside and the
+    /// high edge is not — so tiling rectangles never both claim a pixel.
+    pub fn has_point(self, point: Vector2i) -> bool {
+        let end = self.end();
+        point.x >= self.position.x
+            && point.y >= self.position.y
+            && point.x < end.x
+            && point.y < end.y
+    }
+
+    /// The enclosed area (Godot `Rect2i.get_area`).
+    pub fn area(self) -> i64 {
+        self.size.x as i64 * self.size.y as i64
+    }
+
+    /// Whether the rect has a strictly positive area (Godot `Rect2i.has_area`).
+    pub fn has_area(self) -> bool {
+        self.size.x > 0 && self.size.y > 0
+    }
+
+    /// The centre point.
+    ///
+    /// ⚠️ Godot computes this with INTEGER division (`position + (size / 2)`),
+    /// so an odd extent biases toward the low corner — matching it matters for
+    /// anything that pairs a centre with `has_point`.
+    pub fn get_center(self) -> Vector2i {
+        Vector2i::new(
+            self.position.x + self.size.x / 2,
+            self.position.y + self.size.y / 2,
+        )
+    }
+
+    /// Whether this rect overlaps `other` (Godot `Rect2i.intersects`, which is
+    /// half-open on both axes like `has_point`).
+    pub fn intersects(self, other: Self) -> bool {
+        let a_end = self.end();
+        let b_end = other.end();
+        self.position.x < b_end.x
+            && a_end.x > other.position.x
+            && self.position.y < b_end.y
+            && a_end.y > other.position.y
+    }
+
+    /// Whether `other` lies entirely within this rect (Godot `Rect2i.encloses`).
+    pub fn encloses(self, other: Self) -> bool {
+        other.position.x >= self.position.x
+            && other.position.y >= self.position.y
+            && other.end().x <= self.end().x
+            && other.end().y <= self.end().y
+    }
+
+    /// The overlapping region, or a zero-size rect when they do not overlap
+    /// (Godot `Rect2i.intersection`).
+    pub fn intersection(self, other: Self) -> Self {
+        if !self.intersects(other) {
+            return Self::default();
+        }
+        let position = self.position.max_components(other.position);
+        let end = self.end().min_components(other.end());
+        Self::new(position, end - position)
+    }
+
+    /// The smallest rect containing both (Godot `Rect2i.merge`).
+    pub fn merge(self, other: Self) -> Self {
+        let position = self.position.min_components(other.position);
+        let end = self.end().max_components(other.end());
+        Self::new(position, end - position)
+    }
+
+    /// The same rect with a non-negative size, moving `position` to the true
+    /// top-left (Godot `Rect2i.abs`).
+    pub fn abs(self) -> Self {
+        Self::new(
+            Vector2i::new(
+                self.position.x + self.size.x.min(0),
+                self.position.y + self.size.y.min(0),
+            ),
+            Vector2i::new(self.size.x.abs(), self.size.y.abs()),
+        )
+    }
+
+    /// The rect grown by `amount` on every side (Godot `Rect2i.grow`).
+    pub fn grow(self, amount: i32) -> Self {
+        Self::new(
+            Vector2i::new(self.position.x - amount, self.position.y - amount),
+            Vector2i::new(self.size.x + amount * 2, self.size.y + amount * 2),
+        )
+    }
+
+    /// The smallest rect containing this one and `point` (Godot `Rect2i.expand`).
+    pub fn expand(self, point: Vector2i) -> Self {
+        self.merge(Self::new(point, Vector2i::ZERO))
     }
 }
 
@@ -968,6 +1472,656 @@ impl Color {
             self.a,
         )
     }
+
+    // -- 8-bit members (pat-s3rrv.58) ---------------------------------------
+    //
+    // Godot exposes `r8`/`g8`/`b8`/`a8` as read/write members in 0..255. They
+    // ROUND rather than truncate (`core/math/color.h`), so 0.5 is 128, not 127
+    // — truncating would drift every colour one step dark and only show up as a
+    // slightly-off screenshot diff.
+
+    /// Red in 0..255 (Godot `Color.r8`).
+    pub fn r8(self) -> i64 {
+        channel_to_8bit(self.r)
+    }
+
+    /// Green in 0..255 (Godot `Color.g8`).
+    pub fn g8(self) -> i64 {
+        channel_to_8bit(self.g)
+    }
+
+    /// Blue in 0..255 (Godot `Color.b8`).
+    pub fn b8(self) -> i64 {
+        channel_to_8bit(self.b)
+    }
+
+    /// Alpha in 0..255 (Godot `Color.a8`).
+    pub fn a8(self) -> i64 {
+        channel_to_8bit(self.a)
+    }
+
+    /// Builds a colour from 0..255 components (Godot `Color8`).
+    pub fn from_rgba8(r: i64, g: i64, b: i64, a: i64) -> Self {
+        Self::new(
+            r as f32 / 255.0,
+            g as f32 / 255.0,
+            b as f32 / 255.0,
+            a as f32 / 255.0,
+        )
+    }
+
+    // -- HSV members --------------------------------------------------------
+
+    /// Hue in 0..1 (Godot `Color.h`).
+    ///
+    /// ⚠️ 0..1, NOT 0..360. Godot normalises hue everywhere in the Color API,
+    /// so a caller passing degrees gets a wildly wrong colour that still looks
+    /// like a colour.
+    pub fn h(self) -> f32 {
+        let (h, _, _) = self.to_hsv();
+        h
+    }
+
+    /// Saturation in 0..1 (Godot `Color.s`).
+    pub fn s(self) -> f32 {
+        let (_, s, _) = self.to_hsv();
+        s
+    }
+
+    /// Value in 0..1 (Godot `Color.v`).
+    pub fn v(self) -> f32 {
+        let (_, _, v) = self.to_hsv();
+        v
+    }
+
+    /// This colour as `(hue, saturation, value)`, each in 0..1.
+    ///
+    /// Matches `Color::get_h/get_s/get_v` (`core/math/color.cpp`). A greyscale
+    /// colour has no meaningful hue; Godot reports 0 for it rather than NaN.
+    pub fn to_hsv(self) -> (f32, f32, f32) {
+        let max = self.r.max(self.g).max(self.b);
+        let min = self.r.min(self.g).min(self.b);
+        let delta = max - min;
+        let h = if delta == 0.0 {
+            0.0
+        } else if max == self.r {
+            ((self.g - self.b) / delta) % 6.0
+        } else if max == self.g {
+            (self.b - self.r) / delta + 2.0
+        } else {
+            (self.r - self.g) / delta + 4.0
+        };
+        // Godot's hue is 0..1, so the 0..6 sector value is scaled and wrapped.
+        let h = (h / 6.0).rem_euclid(1.0);
+        let s = if max == 0.0 { 0.0 } else { delta / max };
+        (h, s, max)
+    }
+
+    /// Builds a colour from hue/saturation/value, each in 0..1 (Godot
+    /// `Color.from_hsv`).
+    pub fn from_hsv(h: f32, s: f32, v: f32, a: f32) -> Self {
+        let h = h.rem_euclid(1.0) * 6.0;
+        let s = s.clamp(0.0, 1.0);
+        let v = v.clamp(0.0, 1.0);
+        let i = h.floor();
+        let f = h - i;
+        let p = v * (1.0 - s);
+        let q = v * (1.0 - s * f);
+        let t = v * (1.0 - s * (1.0 - f));
+        let (r, g, b) = match i as i32 % 6 {
+            0 => (v, t, p),
+            1 => (q, v, p),
+            2 => (p, v, t),
+            3 => (p, q, v),
+            4 => (t, p, v),
+            _ => (v, p, q),
+        };
+        Self::new(r, g, b, a)
+    }
+
+    // -- Derived colours ----------------------------------------------------
+
+    /// The colour with RGB inverted, alpha untouched (Godot `inverted`).
+    pub fn inverted(self) -> Self {
+        Self::new(1.0 - self.r, 1.0 - self.g, 1.0 - self.b, self.a)
+    }
+
+    /// Interpolated `amount` of the way towards white (Godot `lightened`).
+    ///
+    /// ⚠️ NOT symmetric with [`darkened`](Self::darkened): lightening moves
+    /// TOWARDS white (`c + (1 - c) * amount`) while darkening SCALES towards
+    /// black (`c * (1 - amount)`). Implementing either as the other's mirror
+    /// gives plausible-looking but wrong values.
+    pub fn lightened(self, amount: f32) -> Self {
+        Self::new(
+            self.r + (1.0 - self.r) * amount,
+            self.g + (1.0 - self.g) * amount,
+            self.b + (1.0 - self.b) * amount,
+            self.a,
+        )
+    }
+
+    /// The colour scaled `amount` of the way towards black (Godot `darkened`).
+    pub fn darkened(self, amount: f32) -> Self {
+        let k = 1.0 - amount;
+        Self::new(self.r * k, self.g * k, self.b * k, self.a)
+    }
+
+    /// Alpha-blends `over` on top of this colour (Godot `blend`).
+    ///
+    /// A fully transparent result is returned as transparent BLACK rather than
+    /// dividing by a zero alpha, which is what Godot does and what keeps the
+    /// channels finite.
+    pub fn blend(self, over: Self) -> Self {
+        let sa = 1.0 - over.a;
+        let a = self.a * sa + over.a;
+        if a <= 0.0 {
+            return Self::new(0.0, 0.0, 0.0, 0.0);
+        }
+        Self::new(
+            (self.r * self.a * sa + over.r * over.a) / a,
+            (self.g * self.a * sa + over.g * over.a) / a,
+            (self.b * self.a * sa + over.b * over.a) / a,
+            a,
+        )
+    }
+
+    /// Perceived brightness (Godot `get_luminance`), Rec. 709 weights.
+    pub fn get_luminance(self) -> f32 {
+        0.2126 * self.r + 0.7152 * self.g + 0.0722 * self.b
+    }
+
+    /// Every component clamped into `[min, max]` (Godot `clamp`).
+    pub fn clamp_to(self, min: Self, max: Self) -> Self {
+        Self::new(
+            self.r.clamp(min.r, max.r),
+            self.g.clamp(min.g, max.g),
+            self.b.clamp(min.b, max.b),
+            self.a.clamp(min.a, max.a),
+        )
+    }
+
+    /// Whether every component is approximately equal (Godot
+    /// `is_equal_approx`).
+    pub fn is_equal_approx(self, other: Self) -> bool {
+        (self.r - other.r).abs() < 1e-5
+            && (self.g - other.g).abs() < 1e-5
+            && (self.b - other.b).abs() < 1e-5
+            && (self.a - other.a).abs() < 1e-5
+    }
+
+    // -- HTML / integer forms ----------------------------------------------
+
+    /// The colour as a hex string, WITHOUT a leading `#` (Godot `to_html`).
+    ///
+    /// ⚠️ Godot orders the alpha LAST here (`rrggbbaa`), unlike the packed
+    /// integer forms below which are ARGB. The two conventions sit next to each
+    /// other in the same API and are easy to swap.
+    pub fn to_html(self, with_alpha: bool) -> String {
+        let mut out = format!("{:02x}{:02x}{:02x}", self.r8(), self.g8(), self.b8());
+        if with_alpha {
+            out.push_str(&format!("{:02x}", self.a8()));
+        }
+        out
+    }
+
+    /// Parses a Godot HTML colour: `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa`,
+    /// with or without the leading `#` (Godot `Color.html`).
+    ///
+    /// Returns `None` for anything else, which is what
+    /// [`html_is_valid`](Self::html_is_valid) reports.
+    pub fn from_html(text: &str) -> Option<Self> {
+        let hex = text.strip_prefix('#').unwrap_or(text);
+        if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        // The 3- and 4-digit forms repeat each digit: `#f80` is `#ff8800`.
+        let expand = |c: char| -> String { format!("{c}{c}") };
+        let full: String = match hex.len() {
+            3 | 4 => hex.chars().map(expand).collect(),
+            6 | 8 => hex.to_string(),
+            _ => return None,
+        };
+        let byte = |i: usize| -> f32 {
+            u8::from_str_radix(&full[i * 2..i * 2 + 2], 16).unwrap_or(0) as f32 / 255.0
+        };
+        let a = if full.len() == 8 { byte(3) } else { 1.0 };
+        Some(Self::new(byte(0), byte(1), byte(2), a))
+    }
+
+    /// Whether `text` parses as a Godot HTML colour (Godot `html_is_valid`).
+    pub fn html_is_valid(text: &str) -> bool {
+        Self::from_html(text).is_some()
+    }
+
+    /// Packed `0xAARRGGBB` (Godot `to_argb32`).
+    pub fn to_argb32(self) -> i64 {
+        (self.a8() << 24) | (self.r8() << 16) | (self.g8() << 8) | self.b8()
+    }
+
+    /// Packed `0xAABBGGRR` (Godot `to_abgr32`).
+    pub fn to_abgr32(self) -> i64 {
+        (self.a8() << 24) | (self.b8() << 16) | (self.g8() << 8) | self.r8()
+    }
+
+    /// Packed `0xRRGGBBAA` (Godot `to_rgba32`).
+    pub fn to_rgba32(self) -> i64 {
+        (self.r8() << 24) | (self.g8() << 16) | (self.b8() << 8) | self.a8()
+    }
+
+    // -- 64-bit and packed-integer constructors (pat-s3rrv.58) -------------
+
+    /// A 0..1 channel as a 0..65535 half-word.
+    ///
+    /// Rounds, for the same reason [`channel_to_8bit`] does.
+    #[inline]
+    fn channel_to_16bit(c: f32) -> i64 {
+        (c.clamp(0.0, 1.0) * 65535.0).round() as i64
+    }
+
+    /// Packs four 16-bit channels into the low-to-high slots of one word.
+    ///
+    /// ⚠️ Assembled in `u64` and cast at the end, NOT shifted in `i64`. A full
+    /// channel in the top slot is `65535 << 48`, which exceeds `i64::MAX` — in
+    /// `i64` that is an overflow panic in debug builds, and the panic would only
+    /// fire for colours with a high alpha, i.e. almost every opaque one. Godot
+    /// returns the same bit pattern from a signed `int64_t`, so the cast is the
+    /// faithful part, not a workaround.
+    #[inline]
+    fn pack64(hi: i64, a: i64, b: i64, lo: i64) -> i64 {
+        (((hi as u64) << 48) | ((a as u64) << 32) | ((b as u64) << 16) | (lo as u64)) as i64
+    }
+
+    /// Packed `0xAAAARRRRGGGGBBBB` (Godot `to_argb64`).
+    pub fn to_argb64(self) -> i64 {
+        Self::pack64(
+            Self::channel_to_16bit(self.a),
+            Self::channel_to_16bit(self.r),
+            Self::channel_to_16bit(self.g),
+            Self::channel_to_16bit(self.b),
+        )
+    }
+
+    /// Packed `0xAAAABBBBGGGGRRRR` (Godot `to_abgr64`).
+    pub fn to_abgr64(self) -> i64 {
+        Self::pack64(
+            Self::channel_to_16bit(self.a),
+            Self::channel_to_16bit(self.b),
+            Self::channel_to_16bit(self.g),
+            Self::channel_to_16bit(self.r),
+        )
+    }
+
+    /// Packed `0xRRRRGGGGBBBBAAAA` (Godot `to_rgba64`).
+    pub fn to_rgba64(self) -> i64 {
+        Self::pack64(
+            Self::channel_to_16bit(self.r),
+            Self::channel_to_16bit(self.g),
+            Self::channel_to_16bit(self.b),
+            Self::channel_to_16bit(self.a),
+        )
+    }
+
+    /// Builds a colour from a packed 32-bit `0xRRGGBBAA` (Godot `Color.hex`).
+    ///
+    /// ⚠️ RGBA order, matching `to_rgba32` — NOT the ARGB of `to_argb32`, which
+    /// sits two methods away in the same API.
+    pub fn from_hex32(hex: u32) -> Self {
+        Self::new(
+            ((hex >> 24) & 0xff) as f32 / 255.0,
+            ((hex >> 16) & 0xff) as f32 / 255.0,
+            ((hex >> 8) & 0xff) as f32 / 255.0,
+            (hex & 0xff) as f32 / 255.0,
+        )
+    }
+
+    /// Builds a colour from a packed 64-bit `0xRRRRGGGGBBBBAAAA` (Godot
+    /// `Color.hex64`).
+    pub fn from_hex64(hex: u64) -> Self {
+        Self::new(
+            ((hex >> 48) & 0xffff) as f32 / 65535.0,
+            ((hex >> 32) & 0xffff) as f32 / 65535.0,
+            ((hex >> 16) & 0xffff) as f32 / 65535.0,
+            (hex & 0xffff) as f32 / 65535.0,
+        )
+    }
+
+    /// A Godot named colour constant, or `None` if the name is not one.
+    ///
+    /// Godot exposes 146 of these on `Color` (`core/math/color_names.inc`) —
+    /// the X11/CSS palette plus `TRANSPARENT`. The GDScript interpreter used to
+    /// hardcode SIX of them inline, so `Color.YELLOW`, `Color.CYAN`,
+    /// `Color.ORANGE` and 140 others silently resolved to `None`
+    /// (pat-s3rrv.58).
+    ///
+    /// The table lives here rather than in the interpreter because `Color` owns
+    /// its own constants, and because it keeps the interpreter's lookup to one
+    /// line instead of 146 — a real consideration in a 28k-line file several
+    /// agents share.
+    ///
+    /// ⚠️ Values are Godot's, which are the X11 ones, and X11 disagrees with
+    /// CSS on several names: `GRAY` is `bebebe` (not CSS `808080` — that is
+    /// `WEB_GRAY`), `GREEN` is pure `00ff00` (not CSS `008000` — that is
+    /// `WEB_GREEN`), and `MAROON`/`PURPLE` likewise have `WEB_` variants.
+    /// Taking the CSS value for those four is the easy mistake and produces a
+    /// colour that looks reasonable and is wrong.
+    pub fn named(name: &str) -> Option<Self> {
+        let hex = match name {
+            "ALICE_BLUE" => "f0f8ff",
+            "ANTIQUE_WHITE" => "faebd7",
+            "AQUA" => "00ffff",
+            "AQUAMARINE" => "7fffd4",
+            "AZURE" => "f0ffff",
+            "BEIGE" => "f5f5dc",
+            "BISQUE" => "ffe4c4",
+            "BLACK" => "000000",
+            "BLANCHED_ALMOND" => "ffebcd",
+            "BLUE" => "0000ff",
+            "BLUE_VIOLET" => "8a2be2",
+            "BROWN" => "a52a2a",
+            "BURLYWOOD" => "deb887",
+            "CADET_BLUE" => "5f9ea0",
+            "CHARTREUSE" => "7fff00",
+            "CHOCOLATE" => "d2691e",
+            "CORAL" => "ff7f50",
+            "CORNFLOWER_BLUE" => "6495ed",
+            "CORNSILK" => "fff8dc",
+            "CRIMSON" => "dc143c",
+            "CYAN" => "00ffff",
+            "DARK_BLUE" => "00008b",
+            "DARK_CYAN" => "008b8b",
+            "DARK_GOLDENROD" => "b8860b",
+            "DARK_GRAY" => "a9a9a9",
+            "DARK_GREEN" => "006400",
+            "DARK_KHAKI" => "bdb76b",
+            "DARK_MAGENTA" => "8b008b",
+            "DARK_OLIVE_GREEN" => "556b2f",
+            "DARK_ORANGE" => "ff8c00",
+            "DARK_ORCHID" => "9932cc",
+            "DARK_RED" => "8b0000",
+            "DARK_SALMON" => "e9967a",
+            "DARK_SEA_GREEN" => "8fbc8f",
+            "DARK_SLATE_BLUE" => "483d8b",
+            "DARK_SLATE_GRAY" => "2f4f4f",
+            "DARK_TURQUOISE" => "00ced1",
+            "DARK_VIOLET" => "9400d3",
+            "DEEP_PINK" => "ff1493",
+            "DEEP_SKY_BLUE" => "00bfff",
+            "DIM_GRAY" => "696969",
+            "DODGER_BLUE" => "1e90ff",
+            "FIREBRICK" => "b22222",
+            "FLORAL_WHITE" => "fffaf0",
+            "FOREST_GREEN" => "228b22",
+            "FUCHSIA" => "ff00ff",
+            "GAINSBORO" => "dcdcdc",
+            "GHOST_WHITE" => "f8f8ff",
+            "GOLD" => "ffd700",
+            "GOLDENROD" => "daa520",
+            "GRAY" => "bebebe",
+            "GREEN" => "00ff00",
+            "GREEN_YELLOW" => "adff2f",
+            "HONEYDEW" => "f0fff0",
+            "HOT_PINK" => "ff69b4",
+            "INDIAN_RED" => "cd5c5c",
+            "INDIGO" => "4b0082",
+            "IVORY" => "fffff0",
+            "KHAKI" => "f0e68c",
+            "LAVENDER" => "e6e6fa",
+            "LAVENDER_BLUSH" => "fff0f5",
+            "LAWN_GREEN" => "7cfc00",
+            "LEMON_CHIFFON" => "fffacd",
+            "LIGHT_BLUE" => "add8e6",
+            "LIGHT_CORAL" => "f08080",
+            "LIGHT_CYAN" => "e0ffff",
+            "LIGHT_GOLDENROD" => "fafad2",
+            "LIGHT_GRAY" => "d3d3d3",
+            "LIGHT_GREEN" => "90ee90",
+            "LIGHT_PINK" => "ffb6c1",
+            "LIGHT_SALMON" => "ffa07a",
+            "LIGHT_SEA_GREEN" => "20b2aa",
+            "LIGHT_SKY_BLUE" => "87cefa",
+            "LIGHT_SLATE_GRAY" => "778899",
+            "LIGHT_STEEL_BLUE" => "b0c4de",
+            "LIGHT_YELLOW" => "ffffe0",
+            "LIME" => "00ff00",
+            "LIME_GREEN" => "32cd32",
+            "LINEN" => "faf0e6",
+            "MAGENTA" => "ff00ff",
+            "MAROON" => "b03060",
+            "MEDIUM_AQUAMARINE" => "66cdaa",
+            "MEDIUM_BLUE" => "0000cd",
+            "MEDIUM_ORCHID" => "ba55d3",
+            "MEDIUM_PURPLE" => "9370db",
+            "MEDIUM_SEA_GREEN" => "3cb371",
+            "MEDIUM_SLATE_BLUE" => "7b68ee",
+            "MEDIUM_SPRING_GREEN" => "00fa9a",
+            "MEDIUM_TURQUOISE" => "48d1cc",
+            "MEDIUM_VIOLET_RED" => "c71585",
+            "MIDNIGHT_BLUE" => "191970",
+            "MINT_CREAM" => "f5fffa",
+            "MISTY_ROSE" => "ffe4e1",
+            "MOCCASIN" => "ffe4b5",
+            "NAVAJO_WHITE" => "ffdead",
+            "NAVY_BLUE" => "000080",
+            "OLD_LACE" => "fdf5e6",
+            "OLIVE" => "808000",
+            "OLIVE_DRAB" => "6b8e23",
+            "ORANGE" => "ffa500",
+            "ORANGE_RED" => "ff4500",
+            "ORCHID" => "da70d6",
+            "PALE_GOLDENROD" => "eee8aa",
+            "PALE_GREEN" => "98fb98",
+            "PALE_TURQUOISE" => "afeeee",
+            "PALE_VIOLET_RED" => "db7093",
+            "PAPAYA_WHIP" => "ffefd5",
+            "PEACH_PUFF" => "ffdab9",
+            "PERU" => "cd853f",
+            "PINK" => "ffc0cb",
+            "PLUM" => "dda0dd",
+            "POWDER_BLUE" => "b0e0e6",
+            "PURPLE" => "a020f0",
+            "REBECCA_PURPLE" => "663399",
+            "RED" => "ff0000",
+            "ROSY_BROWN" => "bc8f8f",
+            "ROYAL_BLUE" => "4169e1",
+            "SADDLE_BROWN" => "8b4513",
+            "SALMON" => "fa8072",
+            "SANDY_BROWN" => "f4a460",
+            "SEA_GREEN" => "2e8b57",
+            "SEASHELL" => "fff5ee",
+            "SIENNA" => "a0522d",
+            "SILVER" => "c0c0c0",
+            "SKY_BLUE" => "87ceeb",
+            "SLATE_BLUE" => "6a5acd",
+            "SLATE_GRAY" => "708090",
+            "SNOW" => "fffafa",
+            "SPRING_GREEN" => "00ff7f",
+            "STEEL_BLUE" => "4682b4",
+            "TAN" => "d2b48c",
+            "TEAL" => "008080",
+            "THISTLE" => "d8bfd8",
+            "TOMATO" => "ff6347",
+            "TRANSPARENT" => "ffffff00",
+            "TURQUOISE" => "40e0d0",
+            "VIOLET" => "ee82ee",
+            "WEB_GRAY" => "808080",
+            "WEB_GREEN" => "008000",
+            "WEB_MAROON" => "800000",
+            "WEB_PURPLE" => "800080",
+            "WHEAT" => "f5deb3",
+            "WHITE" => "ffffff",
+            "WHITE_SMOKE" => "f5f5f5",
+            "YELLOW" => "ffff00",
+            "YELLOW_GREEN" => "9acd32",
+            _ => return None,
+        };
+        Self::from_html(hex)
+    }
+
+    /// Every Godot named colour, as `(name, colour)` pairs.
+    ///
+    /// Exposed so a consumer (the inspector's colour picker, a test sweeping
+    /// the table) can enumerate them without duplicating the list.
+    pub fn named_constants() -> &'static [&'static str] {
+        &[
+            "ALICE_BLUE",
+            "ANTIQUE_WHITE",
+            "AQUA",
+            "AQUAMARINE",
+            "AZURE",
+            "BEIGE",
+            "BISQUE",
+            "BLACK",
+            "BLANCHED_ALMOND",
+            "BLUE",
+            "BLUE_VIOLET",
+            "BROWN",
+            "BURLYWOOD",
+            "CADET_BLUE",
+            "CHARTREUSE",
+            "CHOCOLATE",
+            "CORAL",
+            "CORNFLOWER_BLUE",
+            "CORNSILK",
+            "CRIMSON",
+            "CYAN",
+            "DARK_BLUE",
+            "DARK_CYAN",
+            "DARK_GOLDENROD",
+            "DARK_GRAY",
+            "DARK_GREEN",
+            "DARK_KHAKI",
+            "DARK_MAGENTA",
+            "DARK_OLIVE_GREEN",
+            "DARK_ORANGE",
+            "DARK_ORCHID",
+            "DARK_RED",
+            "DARK_SALMON",
+            "DARK_SEA_GREEN",
+            "DARK_SLATE_BLUE",
+            "DARK_SLATE_GRAY",
+            "DARK_TURQUOISE",
+            "DARK_VIOLET",
+            "DEEP_PINK",
+            "DEEP_SKY_BLUE",
+            "DIM_GRAY",
+            "DODGER_BLUE",
+            "FIREBRICK",
+            "FLORAL_WHITE",
+            "FOREST_GREEN",
+            "FUCHSIA",
+            "GAINSBORO",
+            "GHOST_WHITE",
+            "GOLD",
+            "GOLDENROD",
+            "GRAY",
+            "GREEN",
+            "GREEN_YELLOW",
+            "HONEYDEW",
+            "HOT_PINK",
+            "INDIAN_RED",
+            "INDIGO",
+            "IVORY",
+            "KHAKI",
+            "LAVENDER",
+            "LAVENDER_BLUSH",
+            "LAWN_GREEN",
+            "LEMON_CHIFFON",
+            "LIGHT_BLUE",
+            "LIGHT_CORAL",
+            "LIGHT_CYAN",
+            "LIGHT_GOLDENROD",
+            "LIGHT_GRAY",
+            "LIGHT_GREEN",
+            "LIGHT_PINK",
+            "LIGHT_SALMON",
+            "LIGHT_SEA_GREEN",
+            "LIGHT_SKY_BLUE",
+            "LIGHT_SLATE_GRAY",
+            "LIGHT_STEEL_BLUE",
+            "LIGHT_YELLOW",
+            "LIME",
+            "LIME_GREEN",
+            "LINEN",
+            "MAGENTA",
+            "MAROON",
+            "MEDIUM_AQUAMARINE",
+            "MEDIUM_BLUE",
+            "MEDIUM_ORCHID",
+            "MEDIUM_PURPLE",
+            "MEDIUM_SEA_GREEN",
+            "MEDIUM_SLATE_BLUE",
+            "MEDIUM_SPRING_GREEN",
+            "MEDIUM_TURQUOISE",
+            "MEDIUM_VIOLET_RED",
+            "MIDNIGHT_BLUE",
+            "MINT_CREAM",
+            "MISTY_ROSE",
+            "MOCCASIN",
+            "NAVAJO_WHITE",
+            "NAVY_BLUE",
+            "OLD_LACE",
+            "OLIVE",
+            "OLIVE_DRAB",
+            "ORANGE",
+            "ORANGE_RED",
+            "ORCHID",
+            "PALE_GOLDENROD",
+            "PALE_GREEN",
+            "PALE_TURQUOISE",
+            "PALE_VIOLET_RED",
+            "PAPAYA_WHIP",
+            "PEACH_PUFF",
+            "PERU",
+            "PINK",
+            "PLUM",
+            "POWDER_BLUE",
+            "PURPLE",
+            "REBECCA_PURPLE",
+            "RED",
+            "ROSY_BROWN",
+            "ROYAL_BLUE",
+            "SADDLE_BROWN",
+            "SALMON",
+            "SANDY_BROWN",
+            "SEA_GREEN",
+            "SEASHELL",
+            "SIENNA",
+            "SILVER",
+            "SKY_BLUE",
+            "SLATE_BLUE",
+            "SLATE_GRAY",
+            "SNOW",
+            "SPRING_GREEN",
+            "STEEL_BLUE",
+            "TAN",
+            "TEAL",
+            "THISTLE",
+            "TOMATO",
+            "TRANSPARENT",
+            "TURQUOISE",
+            "VIOLET",
+            "WEB_GRAY",
+            "WEB_GREEN",
+            "WEB_MAROON",
+            "WEB_PURPLE",
+            "WHEAT",
+            "WHITE",
+            "WHITE_SMOKE",
+            "YELLOW",
+            "YELLOW_GREEN",
+        ]
+    }
+}
+
+/// A 0..1 channel as Godot's 0..255 byte.
+///
+/// ⚠️ Rounds rather than truncates, matching `core/math/color.h`. Truncation
+/// would map 0.5 to 127 instead of 128 and pull every converted colour one step
+/// dark.
+#[inline]
+fn channel_to_8bit(c: f32) -> i64 {
+    (c.clamp(0.0, 1.0) * 255.0).round() as i64
 }
 
 /// sRGB→linear transfer function for a single channel (Godot's exact curve).
@@ -1571,5 +2725,313 @@ mod tests {
             "expected a wrap-crossing lerp, got {mid}"
         );
         assert!(approx_eq(lerp_angle(0.2, 0.8, 0.5), 0.5));
+    }
+
+    // -- Color builtin surface (pat-s3rrv.58) -------------------------------
+
+    /// Godot's own value for every case here, so a plausible-but-wrong formula
+    /// fails rather than passing on self-consistency.
+    #[test]
+    fn color_8bit_members_round_rather_than_truncate() {
+        // ⚠️ 0.5 is 128, not 127. Truncating pulls every converted colour one
+        // step dark — invisible in isolation, visible as a screenshot diff.
+        assert_eq!(Color::new(0.5, 0.0, 1.0, 1.0).r8(), 128);
+        assert_eq!(Color::new(0.5, 0.0, 1.0, 1.0).g8(), 0);
+        assert_eq!(Color::new(0.5, 0.0, 1.0, 1.0).b8(), 255);
+        assert_eq!(Color::new(0.0, 0.0, 0.0, 0.5).a8(), 128);
+        // Out-of-range components clamp rather than wrapping.
+        assert_eq!(Color::new(2.0, -1.0, 0.0, 1.0).r8(), 255);
+        assert_eq!(Color::new(2.0, -1.0, 0.0, 1.0).g8(), 0);
+    }
+
+    #[test]
+    fn color_to_html_matches_godot() {
+        let c = Color::from_html("#ff8800").expect("valid html");
+        assert_eq!(c.to_html(false), "ff8800");
+        // ⚠️ Alpha goes LAST in to_html (rgba), unlike the packed ARGB ints.
+        assert_eq!(c.to_html(true), "ff8800ff");
+    }
+
+    #[test]
+    fn color_from_html_accepts_every_godot_form() {
+        // The 3- and 4-digit forms repeat each digit.
+        assert!(Color::from_html("#f80")
+            .unwrap()
+            .is_equal_approx(Color::from_html("#ff8800").unwrap()));
+        assert!(Color::from_html("f80f")
+            .unwrap()
+            .is_equal_approx(Color::from_html("#ff8800ff").unwrap()));
+        // …and the leading `#` is optional.
+        assert!(Color::from_html("ff8800").is_some());
+
+        assert!(!Color::html_is_valid("#12345"), "5 digits is not a form");
+        assert!(!Color::html_is_valid("#gggggg"), "non-hex digits");
+        assert!(!Color::html_is_valid(""), "empty");
+    }
+
+    #[test]
+    fn color_lightened_and_darkened_are_not_mirrors() {
+        let yellow = Color::new(1.0, 1.0, 0.0, 1.0);
+        // The acceptance's case: Color.YELLOW.darkened(0.2) -> (0.8, 0.8, 0).
+        let dark = yellow.darkened(0.2);
+        assert!(
+            dark.is_equal_approx(Color::new(0.8, 0.8, 0.0, 1.0)),
+            "{dark:?}"
+        );
+
+        // ⚠️ Lightening moves TOWARDS white, it does not scale: 0.5 lightened by
+        // 0.2 is 0.6, whereas the mirror of `darkened` would give 0.4.
+        let grey = Color::new(0.5, 0.5, 0.5, 1.0);
+        assert!(
+            grey.lightened(0.2)
+                .is_equal_approx(Color::new(0.6, 0.6, 0.6, 1.0)),
+            "{:?}",
+            grey.lightened(0.2)
+        );
+        assert!(grey
+            .darkened(0.2)
+            .is_equal_approx(Color::new(0.4, 0.4, 0.4, 1.0)));
+    }
+
+    #[test]
+    fn color_inverted_leaves_alpha_alone() {
+        let c = Color::new(1.0, 1.0, 0.0, 0.25).inverted();
+        assert!(c.is_equal_approx(Color::new(0.0, 0.0, 1.0, 0.25)), "{c:?}");
+    }
+
+    #[test]
+    fn color_luminance_uses_rec709_weights() {
+        assert!((Color::WHITE.get_luminance() - 1.0).abs() < 1e-5);
+        assert!((Color::BLACK.get_luminance()).abs() < 1e-5);
+        // Yellow: 0.2126 + 0.7152.
+        let y = Color::new(1.0, 1.0, 0.0, 1.0).get_luminance();
+        assert!((y - 0.9278).abs() < 1e-4, "{y}");
+        // Green alone must outweigh red alone — the ordering a flat 1/3 average
+        // would lose.
+        assert!(
+            Color::new(0.0, 1.0, 0.0, 1.0).get_luminance()
+                > Color::new(1.0, 0.0, 0.0, 1.0).get_luminance()
+        );
+    }
+
+    #[test]
+    fn color_hsv_round_trips() {
+        // from_hsv(0.5, 1, 1) is cyan.
+        let cyan = Color::from_hsv(0.5, 1.0, 1.0, 1.0);
+        assert!(
+            cyan.is_equal_approx(Color::new(0.0, 1.0, 1.0, 1.0)),
+            "{cyan:?}"
+        );
+
+        for c in [
+            Color::new(1.0, 0.0, 0.0, 1.0),
+            Color::new(0.0, 1.0, 0.0, 1.0),
+            Color::new(0.25, 0.5, 0.75, 1.0),
+        ] {
+            let (h, s, v) = c.to_hsv();
+            let back = Color::from_hsv(h, s, v, 1.0);
+            assert!(
+                back.is_equal_approx(c),
+                "{c:?} -> ({h},{s},{v}) -> {back:?}"
+            );
+        }
+
+        // ⚠️ Hue is 0..1, NOT degrees. A greyscale colour reports hue 0 rather
+        // than NaN.
+        assert!(Color::new(1.0, 0.0, 0.0, 1.0).h() < 1e-5);
+        assert!((Color::new(0.0, 1.0, 1.0, 1.0).h() - 0.5).abs() < 1e-5);
+        assert_eq!(Color::new(0.3, 0.3, 0.3, 1.0).h(), 0.0);
+        assert_eq!(Color::new(0.3, 0.3, 0.3, 1.0).s(), 0.0);
+        assert!((Color::new(0.3, 0.3, 0.3, 1.0).v() - 0.3).abs() < 1e-5);
+    }
+
+    #[test]
+    fn color_blend_composites_over() {
+        // Opaque over anything is that colour.
+        let base = Color::new(1.0, 0.0, 0.0, 1.0);
+        let over = Color::new(0.0, 0.0, 1.0, 1.0);
+        assert!(base.blend(over).is_equal_approx(over));
+
+        // Fully transparent over leaves the base untouched.
+        assert!(base
+            .blend(Color::new(0.0, 1.0, 0.0, 0.0))
+            .is_equal_approx(base));
+
+        // Half-alpha blue over opaque red meets in the middle.
+        let half = base.blend(Color::new(0.0, 0.0, 1.0, 0.5));
+        assert!(
+            half.is_equal_approx(Color::new(0.5, 0.0, 0.5, 1.0)),
+            "{half:?}"
+        );
+
+        // Transparent over transparent stays finite rather than dividing by 0.
+        let none = Color::new(1.0, 1.0, 1.0, 0.0).blend(Color::new(1.0, 1.0, 1.0, 0.0));
+        assert!(
+            none.is_equal_approx(Color::new(0.0, 0.0, 0.0, 0.0)),
+            "{none:?}"
+        );
+    }
+
+    #[test]
+    fn color_packed_integer_forms_use_their_own_orders() {
+        // ⚠️ to_html is RGBA but the packed ints are ARGB/ABGR/RGBA — three
+        // orders in one API, so each is pinned separately.
+        let c = Color::new(1.0, 0.5, 0.0, 1.0);
+        assert_eq!(c.to_argb32(), 0xff_ff_80_00);
+        assert_eq!(c.to_abgr32(), 0xff_00_80_ff);
+        assert_eq!(c.to_rgba32(), 0xff_80_00_ff);
+    }
+
+    #[test]
+    fn color_from_rgba8_and_clamp() {
+        let c = Color::from_rgba8(255, 128, 0, 255);
+        assert_eq!(c.r8(), 255);
+        assert_eq!(c.g8(), 128);
+        assert_eq!(c.b8(), 0);
+
+        let clamped =
+            Color::new(2.0, -1.0, 0.5, 1.0).clamp_to(Color::new(0.0, 0.0, 0.0, 0.0), Color::WHITE);
+        assert!(
+            clamped.is_equal_approx(Color::new(1.0, 0.0, 0.5, 1.0)),
+            "{clamped:?}"
+        );
+    }
+
+    #[test]
+    fn color_named_covers_godots_whole_table() {
+        assert_eq!(
+            Color::named_constants().len(),
+            146,
+            "Godot exposes 146 named colours (core/math/color_names.inc)"
+        );
+        // Every advertised name must actually resolve — a name in the list that
+        // `named()` does not know would be a silent hole.
+        for name in Color::named_constants() {
+            assert!(
+                Color::named(name).is_some(),
+                "{name} is advertised but does not resolve"
+            );
+        }
+        assert!(Color::named("NOT_A_COLOUR").is_none());
+        assert!(Color::named("yellow").is_none(), "names are SCREAMING_CASE");
+    }
+
+    /// ⚠️ Godot uses the X11 palette, which disagrees with CSS on four names.
+    /// Taking the CSS value gives a plausible colour that is wrong, and the
+    /// `WEB_` variants exist precisely to carry the CSS ones.
+    #[test]
+    fn color_named_uses_x11_values_not_css() {
+        assert!(Color::named("GRAY")
+            .unwrap()
+            .is_equal_approx(Color::from_html("bebebe").unwrap()));
+        assert!(Color::named("WEB_GRAY")
+            .unwrap()
+            .is_equal_approx(Color::from_html("808080").unwrap()));
+
+        // X11 GREEN is pure green; CSS `green` is the darker WEB_GREEN.
+        assert!(Color::named("GREEN")
+            .unwrap()
+            .is_equal_approx(Color::new(0.0, 1.0, 0.0, 1.0)));
+        assert!(Color::named("WEB_GREEN")
+            .unwrap()
+            .is_equal_approx(Color::from_html("008000").unwrap()));
+
+        assert!(Color::named("MAROON")
+            .unwrap()
+            .is_equal_approx(Color::from_html("b03060").unwrap()));
+        assert!(Color::named("PURPLE")
+            .unwrap()
+            .is_equal_approx(Color::from_html("a020f0").unwrap()));
+    }
+
+    #[test]
+    fn color_named_matches_the_existing_constants() {
+        // The six the interpreter already hardcoded must not change value.
+        assert!(Color::named("WHITE").unwrap().is_equal_approx(Color::WHITE));
+        assert!(Color::named("BLACK").unwrap().is_equal_approx(Color::BLACK));
+        assert!(Color::named("RED")
+            .unwrap()
+            .is_equal_approx(Color::new(1.0, 0.0, 0.0, 1.0)));
+        assert!(Color::named("BLUE")
+            .unwrap()
+            .is_equal_approx(Color::new(0.0, 0.0, 1.0, 1.0)));
+
+        // The acceptance's colour, and the aliases Godot keeps.
+        assert!(Color::named("YELLOW")
+            .unwrap()
+            .is_equal_approx(Color::new(1.0, 1.0, 0.0, 1.0)));
+        assert!(Color::named("AQUA")
+            .unwrap()
+            .is_equal_approx(Color::named("CYAN").unwrap()));
+        assert!(Color::named("FUCHSIA")
+            .unwrap()
+            .is_equal_approx(Color::named("MAGENTA").unwrap()));
+    }
+
+    /// 🔴 `Color.TRANSPARENT` IS TRANSPARENT WHITE, and it deliberately does
+    /// NOT equal this crate's `Color::TRANSPARENT`.
+    ///
+    /// Godot documents `Color.TRANSPARENT` as `Color(1, 1, 1, 0)`
+    /// (`color_names.inc`), so that is what the GDScript-facing table returns.
+    /// gdcore's own `Color::TRANSPARENT` const is `(0, 0, 0, 0)` and is used
+    /// across the engine as a ZERO SENTINEL — `MultiMesh::instance_custom_data`
+    /// defaults to it, and that data is fed to shaders where an alpha of 0 does
+    /// not hide the RGB channels. Changing the const to match Godot would
+    /// silently rewrite those defaults from zeros to ones.
+    ///
+    /// So the two intentionally differ. If a future change "fixes" the const to
+    /// match Godot, sweep the 19 `Color::TRANSPARENT` uses first — several want
+    /// the zero, not the colour.
+    #[test]
+    fn color_transparent_is_white_with_zero_alpha() {
+        let t = Color::named("TRANSPARENT").unwrap();
+        assert_eq!(t.a8(), 0);
+        assert_eq!(t.r8(), 255);
+        assert_eq!(t.g8(), 255);
+        assert_eq!(t.b8(), 255);
+
+        // The divergence, asserted rather than left to be discovered.
+        assert_ne!(
+            t.r8(),
+            Color::TRANSPARENT.r8(),
+            "gdcore's TRANSPARENT const is the zero sentinel, not Godot's colour"
+        );
+    }
+
+    #[test]
+    fn color_64bit_forms_and_hex_constructors() {
+        let c = Color::new(1.0, 0.5, 0.0, 1.0);
+        // 0.5 -> 32768 (rounded), 1.0 -> 65535, 0.0 -> 0.
+        assert_eq!(c.to_rgba64(), 0xffff_8000_0000_ffffu64 as i64);
+        assert_eq!(c.to_argb64(), 0xffff_ffff_8000_0000u64 as i64);
+        assert_eq!(c.to_abgr64(), 0xffff_0000_8000_ffffu64 as i64);
+
+        // ⚠️ `hex` is RGBA, matching to_rgba32 — not the ARGB of to_argb32.
+        let round = Color::from_hex32(0xff8000ff);
+        assert!(round.is_equal_approx(c), "{round:?}");
+        assert_eq!(
+            Color::from_hex32(c.to_rgba32() as u32).to_rgba32(),
+            c.to_rgba32()
+        );
+
+        let wide = Color::from_hex64(0xffff_8000_0000_ffff);
+        assert!(wide.is_equal_approx(c), "{wide:?}");
+    }
+
+    /// ⚠️ The 64-bit packers must not overflow on a full top channel.
+    ///
+    /// `65535 << 48` exceeds `i64::MAX`, so shifting in `i64` panics in debug
+    /// builds — and it would fire for almost every OPAQUE colour, since alpha
+    /// occupies the top slot in two of the three orders. Opaque white is the
+    /// case that catches it.
+    #[test]
+    fn color_64bit_packing_survives_a_full_top_channel() {
+        let w = Color::WHITE;
+        assert_eq!(w.to_argb64(), -1, "all-ones is -1 as a signed word");
+        assert_eq!(w.to_rgba64(), -1);
+        assert_eq!(w.to_abgr64(), -1);
+        // …and round-trips through the unsigned view.
+        assert_eq!(w.to_rgba64() as u64, u64::MAX);
+        assert!(Color::from_hex64(w.to_rgba64() as u64).is_equal_approx(w));
     }
 }

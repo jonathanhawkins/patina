@@ -341,6 +341,41 @@ fn probe_1_construct_astar2d() {
     assert!(ready_survives(&[MK2D]));
 }
 
+/// Splits the two remaining explanations for `probe_2` (pat-s3rrv.19).
+///
+/// `probe_1` proves `AStar2D.new()` does not raise — but NOT that it handed
+/// back an *AStar* handle. If the `.new()` chain fell through to some other
+/// RefCounted arm, `a` would hold a foreign handle that constructs fine and
+/// rejects every AStar method, which looks identical from outside.
+///
+/// `get_point_count` takes **no arguments** and lives in the shared dispatch,
+/// so it separates the two cleanly:
+///   * passes → the handle IS an AStar handle and dispatch works, so whatever
+///     `probe_2` hits is specific to `add_point` or to its arguments;
+///   * fails → `.new()` never produced an AStar handle, and the fault is in the
+///     constructor arm, not in any method.
+#[test]
+fn probe_1a_zero_arg_method_reaches_the_engine() {
+    assert!(
+        ready_survives(&[MK2D, "var c = a.get_point_count()"]),
+        "a no-argument AStar method raised: `AStar2D.new()` did not return an \
+         AStar handle at all"
+    );
+}
+
+/// Removes the local variable from `probe_2` (pat-s3rrv.19).
+///
+/// `probe_2` passes the position through a local (`var p = Vector2(0, 0)`), so
+/// a failure there could equally be the local's fault as `add_point`'s. Inlining
+/// the constructor at the call site takes that variable out of the picture.
+#[test]
+fn probe_1b_add_point_with_an_inline_vector() {
+    assert!(
+        ready_survives(&[MK2D, "a.add_point(1, Vector2(0, 0), 1.0)"]),
+        "add_point raised even with the vector built inline"
+    );
+}
+
 #[test]
 fn probe_2_add_point() {
     assert!(ready_survives(&[MK2D, P0, ADD1]));

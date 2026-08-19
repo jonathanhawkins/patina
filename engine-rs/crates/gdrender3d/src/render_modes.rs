@@ -5,7 +5,7 @@
 //! sorting for alpha blending, alpha-scissor discard, face culling
 //! (front/back/disabled) via screen-space winding, and depth-draw modes.
 
-use gdcore::math::Vector2;
+use gdcore::math::{Color, Vector2};
 
 /// The mode enums are defined beside `StandardMaterial3D` in `gdserver3d` and
 /// re-exported here (pat-s3rrv.30).
@@ -15,7 +15,65 @@ use gdcore::math::Vector2;
 /// not the reverse. Re-exporting keeps one definition, so a material's
 /// `cull_mode` and [`should_cull`]'s parameter are the same type by
 /// construction rather than by convention.
-pub use gdserver3d::material::{CullMode, DepthDrawMode, Transparency};
+pub use gdserver3d::material::{BlendMode, CullMode, DepthDrawMode, Transparency};
+
+/// Composites `src` over `dst` per Godot's `BaseMaterial3D.blend_mode`
+/// (pat-s3rrv.30).
+///
+/// ⚠️ Every equation here is transcribed from the GL blend state Godot sets in
+/// `drivers/gles3/rasterizer_scene_gles3.cpp:3255-3285`, because the mode names
+/// do not describe the maths:
+///
+/// * `Sub` uses `GL_FUNC_REVERSE_SUBTRACT` — it is `dst - src`, NOT `src - dst`.
+///   Reading it as "subtract the source" gets the sign backwards on every pixel.
+/// * `Mul` multiplies by the DESTINATION (`GL_DST_COLOR`, `GL_ZERO`) and leaves
+///   destination alpha alone; it is a modulate, not a 50/50 mix.
+/// * `Add` and `Sub` scale the source by its own alpha (`GL_SRC_ALPHA`) in the
+///   transparent pass, so a fully transparent additive fragment contributes
+///   nothing rather than its full colour.
+/// * `Mix` uses the transparent-background variant, whose alpha is
+///   `src.a + dst.a * (1 - src.a)`. Against an opaque target (`dst.a == 1`) that
+///   is identical to the opaque-background variant Godot otherwise selects, so
+///   the two agree wherever it matters here.
+pub fn blend_pixel(mode: BlendMode, src: Color, dst: Color) -> Color {
+    let a = src.a.clamp(0.0, 1.0);
+    let c = |v: f32| v.clamp(0.0, 1.0);
+    match mode {
+        BlendMode::Mix => Color::new(
+            c(src.r * a + dst.r * (1.0 - a)),
+            c(src.g * a + dst.g * (1.0 - a)),
+            c(src.b * a + dst.b * (1.0 - a)),
+            c(a + dst.a * (1.0 - a)),
+        ),
+        BlendMode::Add => Color::new(
+            c(src.r * a + dst.r),
+            c(src.g * a + dst.g),
+            c(src.b * a + dst.b),
+            c(src.a * a + dst.a),
+        ),
+        // Reverse subtract: the destination is what gets darkened.
+        BlendMode::Sub => Color::new(
+            c(dst.r - src.r * a),
+            c(dst.g - src.g * a),
+            c(dst.b - src.b * a),
+            c(dst.a - src.a * a),
+        ),
+        BlendMode::Mul => Color::new(
+            c(src.r * dst.r),
+            c(src.g * dst.g),
+            c(src.b * dst.b),
+            // `GL_ZERO, GL_ONE` on the alpha channel: the destination keeps its
+            // own alpha rather than being modulated.
+            c(dst.a),
+        ),
+        BlendMode::PremultAlpha => Color::new(
+            c(src.r + dst.r * (1.0 - a)),
+            c(src.g + dst.g * (1.0 - a)),
+            c(src.b + dst.b * (1.0 - a)),
+            c(src.a + dst.a * (1.0 - a)),
+        ),
+    }
+}
 
 /// Signed area of a screen-space triangle; positive = counter-clockwise (the
 /// front-facing winding), negative = clockwise (back-facing).

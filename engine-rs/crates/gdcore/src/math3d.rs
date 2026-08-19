@@ -3,7 +3,7 @@
 //! These mirror Godot's built-in 3D math types and follow the same
 //! conventions (Y-up, right-handed coordinate system).
 
-use crate::math::Vector3;
+use crate::math::{Vector2, Vector3, Vector4};
 use std::ops::Mul;
 
 // ---------------------------------------------------------------------------
@@ -839,6 +839,366 @@ impl Plane {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Projection
+// ---------------------------------------------------------------------------
+
+/// A 4×4 projection matrix, matching Godot's `Projection`
+/// (`core/math/projection.h`).
+///
+/// One of the Variant builtins Patina had no core type for (pat-s3rrv.59):
+/// `Camera3D.get_camera_projection()`, every XR view matrix and any `.tscn`
+/// property holding a `Projection(...)` literal are this type.
+///
+/// **Storage is column-major (`m[column][row]`)**, Godot's and OpenGL's
+/// convention, and deliberately identical to the ad-hoc `Projection` in
+/// `gdscene::camera3d` so consolidating the two is a move rather than a
+/// rewrite. Getting this backwards transposes every matrix silently, so the
+/// convention is stated at every constructor below.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Projection {
+    /// Column-major data: `m[column][row]`.
+    pub m: [[f32; 4]; 4],
+}
+
+impl Projection {
+    /// The identity projection.
+    pub const IDENTITY: Self = Self {
+        m: [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    };
+
+    /// The all-zero projection — Godot's `Projection.ZERO`.
+    pub const ZERO: Self = Self { m: [[0.0; 4]; 4] };
+
+    /// Builds a projection from its four columns, each a [`Vector4`].
+    ///
+    /// This is Godot's `Projection(Vector4, Vector4, Vector4, Vector4)`
+    /// constructor, and the order a `.tscn` literal writes.
+    pub const fn from_columns(x: Vector4, y: Vector4, z: Vector4, w: Vector4) -> Self {
+        Self {
+            m: [
+                [x.x, x.y, x.z, x.w],
+                [y.x, y.y, y.z, y.w],
+                [z.x, z.y, z.z, z.w],
+                [w.x, w.y, w.z, w.w],
+            ],
+        }
+    }
+
+    /// The `index`-th column as a [`Vector4`], the shape Godot's `[]` operator
+    /// yields. Panics outside `0..4`, like an out-of-range index anywhere else.
+    pub fn column(self, index: usize) -> Vector4 {
+        let c = self.m[index];
+        Vector4::new(c[0], c[1], c[2], c[3])
+    }
+
+    /// The 16 components in column-major order — the layout a GPU uniform
+    /// upload wants, and what `PackedFloat32Array` round-trips.
+    pub fn to_array(self) -> [f32; 16] {
+        let mut out = [0.0; 16];
+        for (col, chunk) in self.m.iter().enumerate() {
+            out[col * 4..col * 4 + 4].copy_from_slice(chunk);
+        }
+        out
+    }
+
+    /// Rebuilds a projection from 16 column-major components.
+    pub fn from_array(values: [f32; 16]) -> Self {
+        let mut m = [[0.0f32; 4]; 4];
+        for (col, chunk) in values.chunks_exact(4).enumerate() {
+            m[col].copy_from_slice(chunk);
+        }
+        Self { m }
+    }
+
+    /// A perspective projection (Godot `Projection.create_perspective`).
+    ///
+    /// `fov_y` is in **degrees**, matching Godot's argument and `Camera3D.fov`.
+    pub fn create_perspective(fov_y: f32, aspect: f32, z_near: f32, z_far: f32) -> Self {
+        let half_fov = (fov_y * 0.5).to_radians();
+        let top = z_near * half_fov.tan();
+        let right = top * aspect;
+        Self::create_frustum(-right, right, -top, top, z_near, z_far)
+    }
+
+    /// An off-centre perspective frustum (Godot `Projection.create_frustum`).
+    pub fn create_frustum(
+        left: f32,
+        right: f32,
+        bottom: f32,
+        top: f32,
+        z_near: f32,
+        z_far: f32,
+    ) -> Self {
+        let mut p = Self::ZERO;
+        p.m[0][0] = 2.0 * z_near / (right - left);
+        p.m[1][1] = 2.0 * z_near / (top - bottom);
+        p.m[2][0] = (right + left) / (right - left);
+        p.m[2][1] = (top + bottom) / (top - bottom);
+        p.m[2][2] = -(z_far + z_near) / (z_far - z_near);
+        p.m[2][3] = -1.0;
+        p.m[3][2] = -2.0 * z_far * z_near / (z_far - z_near);
+        p
+    }
+
+    /// An orthographic projection (Godot `Projection.create_orthogonal`).
+    pub fn create_orthogonal(
+        left: f32,
+        right: f32,
+        bottom: f32,
+        top: f32,
+        z_near: f32,
+        z_far: f32,
+    ) -> Self {
+        let mut p = Self::IDENTITY;
+        p.m[0][0] = 2.0 / (right - left);
+        p.m[1][1] = 2.0 / (top - bottom);
+        p.m[2][2] = -2.0 / (z_far - z_near);
+        p.m[3][0] = -(right + left) / (right - left);
+        p.m[3][1] = -(top + bottom) / (top - bottom);
+        p.m[3][2] = -(z_far + z_near) / (z_far - z_near);
+        p
+    }
+
+    /// Transforms a homogeneous point (Godot's `Projection * Vector4`).
+    pub fn xform(self, v: Vector4) -> Vector4 {
+        Vector4::new(
+            self.m[0][0] * v.x + self.m[1][0] * v.y + self.m[2][0] * v.z + self.m[3][0] * v.w,
+            self.m[0][1] * v.x + self.m[1][1] * v.y + self.m[2][1] * v.z + self.m[3][1] * v.w,
+            self.m[0][2] * v.x + self.m[1][2] * v.y + self.m[2][2] * v.z + self.m[3][2] * v.w,
+            self.m[0][3] * v.x + self.m[1][3] * v.y + self.m[2][3] * v.z + self.m[3][3] * v.w,
+        )
+    }
+
+    /// The transpose (Godot `Projection.transposed`).
+    pub fn transposed(self) -> Self {
+        let mut out = Self::ZERO;
+        for col in 0..4 {
+            for row in 0..4 {
+                out.m[col][row] = self.m[row][col];
+            }
+        }
+        out
+    }
+
+    /// A perspective frustum shifted off-axis by `offset`, in near-plane units.
+    ///
+    /// The form a stereo/HMD eye or a shifted-lens camera needs, and the one
+    /// `gdscene::camera3d` already carries under this name — kept identical so
+    /// consolidating the two `Projection` types is a move (pat-s3rrv.59).
+    pub fn create_perspective_with_offset(
+        fov_y: f32,
+        aspect: f32,
+        offset: Vector2,
+        z_near: f32,
+        z_far: f32,
+    ) -> Self {
+        let half_fov = (fov_y * 0.5).to_radians();
+        let top = z_near * half_fov.tan();
+        let right = top * aspect;
+        Self::create_frustum(
+            -right + offset.x,
+            right + offset.x,
+            -top + offset.y,
+            top + offset.y,
+            z_near,
+            z_far,
+        )
+    }
+
+    /// An orthographic projection sized by its vertical extent and aspect ratio
+    /// — Godot's `Projection.create_orthogonal_aspect`, and the shape
+    /// `Camera3D.size` describes.
+    ///
+    /// ⚠️ `gdscene::camera3d::Projection` spells this `create_orthogonal`, while
+    /// its off-centre form is `create_orthogonal_off_center`. Godot (and this
+    /// type) use `create_orthogonal` for the OFF-CENTRE form, so consolidating
+    /// the two is a rename at the call sites:
+    /// `create_orthogonal(size, aspect, …)` → `create_orthogonal_aspect(…)`,
+    /// `create_orthogonal_off_center(…)` → `create_orthogonal(…)`.
+    pub fn create_orthogonal_aspect(size: f32, aspect: f32, z_near: f32, z_far: f32) -> Self {
+        let half_h = size * 0.5;
+        let half_w = half_h * aspect;
+        Self::create_orthogonal(-half_w, half_w, -half_h, half_h, z_near, z_far)
+    }
+
+    /// The matrix determinant.
+    ///
+    /// Computed by the same Gauss elimination the inverse uses, so the two can
+    /// never disagree about whether a matrix is singular.
+    pub fn determinant(self) -> f32 {
+        let mut a = self.m;
+        let mut det = 1.0f32;
+        for col in 0..4 {
+            // Partial pivoting: swap in the row with the largest magnitude so a
+            // zero (or tiny) pivot does not blow the elimination up.
+            let mut pivot = col;
+            for row in col + 1..4 {
+                if a[row][col].abs() > a[pivot][col].abs() {
+                    pivot = row;
+                }
+            }
+            if a[pivot][col].abs() < 1e-12 {
+                return 0.0;
+            }
+            if pivot != col {
+                a.swap(pivot, col);
+                det = -det;
+            }
+            det *= a[col][col];
+            let inv_pivot = 1.0 / a[col][col];
+            for row in col + 1..4 {
+                let factor = a[row][col] * inv_pivot;
+                if factor != 0.0 {
+                    for k in col..4 {
+                        a[row][k] -= factor * a[col][k];
+                    }
+                }
+            }
+        }
+        det
+    }
+
+    /// The inverse projection — what unprojecting a screen point needs.
+    ///
+    /// Solved by Gauss-Jordan elimination with partial pivoting rather than a
+    /// transcribed cofactor expansion: the elimination is short enough to read,
+    /// and `p * p.inverse() == IDENTITY` is a property a test can check
+    /// directly, which a hand-written cofactor table is not.
+    ///
+    /// A singular matrix returns [`IDENTITY`](Self::IDENTITY) rather than a
+    /// matrix full of infinities, matching what `gdscene::camera3d` does — a
+    /// degenerate camera should render wrongly, not poison every later
+    /// computation with NaN.
+    pub fn inverse(self) -> Self {
+        // Row-major working copy: `a[row]` is a row of the matrix followed by a
+        // row of the identity. `self.m` is COLUMN-major, so this transposes on
+        // the way in and back on the way out.
+        let mut a = [[0.0f32; 8]; 4];
+        for row in 0..4 {
+            for col in 0..4 {
+                a[row][col] = self.m[col][row];
+            }
+            a[row][4 + row] = 1.0;
+        }
+
+        for col in 0..4 {
+            let mut pivot = col;
+            for row in col + 1..4 {
+                if a[row][col].abs() > a[pivot][col].abs() {
+                    pivot = row;
+                }
+            }
+            if a[pivot][col].abs() < 1e-10 {
+                return Self::IDENTITY;
+            }
+            a.swap(pivot, col);
+
+            let inv_pivot = 1.0 / a[col][col];
+            for k in 0..8 {
+                a[col][k] *= inv_pivot;
+            }
+            for row in 0..4 {
+                if row == col {
+                    continue;
+                }
+                let factor = a[row][col];
+                if factor != 0.0 {
+                    for k in 0..8 {
+                        a[row][k] -= factor * a[col][k];
+                    }
+                }
+            }
+        }
+
+        let mut out = Self::ZERO;
+        for row in 0..4 {
+            for col in 0..4 {
+                out.m[col][row] = a[row][4 + col];
+            }
+        }
+        out
+    }
+
+    /// The six clipping planes, in the order `[left, right, bottom, top, near,
+    /// far]`, with normals pointing INTO the frustum.
+    ///
+    /// Gribb–Hartmann extraction from the matrix rows. Gribb–Hartmann yields
+    /// planes where `ax + by + cz + d >= 0` means "inside", while [`Plane`]'s
+    /// `distance_to` computes `normal·p - d` — hence the negated `d`. Getting
+    /// that sign wrong inverts every culling test, so it is spelled out here
+    /// and asserted in the tests.
+    pub fn get_frustum_planes(self) -> [Plane; 6] {
+        let m = &self.m;
+        // `m` is column-major, so a matrix ROW gathers one component across all
+        // four columns.
+        let row = |r: usize| -> [f32; 4] { [m[0][r], m[1][r], m[2][r], m[3][r]] };
+        let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+
+        let make_plane = |a: f32, b: f32, c: f32, d: f32| -> Plane {
+            let len = (a * a + b * b + c * c).sqrt();
+            if len < 1e-10 {
+                return Plane::new(Vector3::new(0.0, 1.0, 0.0), 0.0);
+            }
+            let inv = 1.0 / len;
+            Plane::new(Vector3::new(a * inv, b * inv, c * inv), -d * inv)
+        };
+        let combine = |sign: f32, r: [f32; 4]| -> Plane {
+            make_plane(
+                r3[0] + sign * r[0],
+                r3[1] + sign * r[1],
+                r3[2] + sign * r[2],
+                r3[3] + sign * r[3],
+            )
+        };
+
+        [
+            combine(1.0, r0),  // left
+            combine(-1.0, r0), // right
+            combine(1.0, r1),  // bottom
+            combine(-1.0, r1), // top
+            combine(1.0, r2),  // near
+            combine(-1.0, r2), // far
+        ]
+    }
+
+    /// Whether the projection has no perspective divide — Godot
+    /// `Projection.is_orthogonal`, which tests the last row of the matrix.
+    pub fn is_orthogonal(self) -> bool {
+        self.m[0][3] == 0.0 && self.m[1][3] == 0.0 && self.m[2][3] == 0.0 && self.m[3][3] == 1.0
+    }
+}
+
+impl Default for Projection {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl Mul for Projection {
+    type Output = Self;
+
+    /// Matrix product, in Godot's order: `a * b` applies `b` first.
+    fn mul(self, rhs: Self) -> Self {
+        let mut out = Self::ZERO;
+        for col in 0..4 {
+            for row in 0..4 {
+                let mut sum = 0.0;
+                for k in 0..4 {
+                    sum += self.m[k][row] * rhs.m[col][k];
+                }
+                out.m[col][row] = sum;
+            }
+        }
+        out
+    }
+}
 
 #[cfg(test)]
 mod tests {

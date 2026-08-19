@@ -637,6 +637,15 @@ select.renderer-indicator option { color: var(--text); background: var(--panel);
 #anim-tree-body { padding: 6px 8px; }
 .anim-tree-node { padding: 3px 8px; border-radius: 3px; font-size: 12px; }
 .anim-tree-node.active { background: var(--accent); color: #000; }
+/* pat-s3rrv.1: state-machine edit affordances. A positioned state node needs a
+   background of its own — absolutely positioned nodes overlap the graph and an
+   unpainted one is unreadable where two cross. */
+.anim-tree-node[data-state] { background: var(--panel); border: 1px solid var(--border); white-space: nowrap; user-select: none; }
+.anim-tree-del { background: none; border: 0; color: var(--text-dim); cursor: pointer; font-size: 12px; padding: 0 2px; margin-left: 6px; }
+.anim-tree-del:hover { color: var(--text); }
+.anim-tree-transition, .anim-tree-connection, .anim-tree-blend-point { display: flex; align-items: center; gap: 6px; padding: 1px 0; }
+.anim-tree-bs-point-pos { width: 90px; }
+.anim-tree-xfade { width: 60px; }
 /* Output panel (Godot EditorLog parity): log + filter box, right-side toolbar */
 #output-panel-body { display: flex; height: 100%; gap: 4px; }
 #output-left { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -1344,6 +1353,10 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   width: 100%; margin-bottom: 10px; padding: 4px 8px;
 }
 .connect-dialog-buttons { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+/* Create Script dialog validation label (pat-s3rrv.63). Godot shows WHY a path
+   is rejected next to the field instead of failing after you commit. */
+.create-script-error { min-height: 14px; font-size: 11px; color: #e06c75; margin-bottom: 6px; }
+.create-script-error.ok { color: var(--text-dim); }
 
 /* Script panel */
 #script-panel { display: flex; flex-direction: column; height: 100%; }
@@ -2384,6 +2397,39 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
             <span id="tilemap-alt-label" style="opacity:0.7;">alt 0</span>
           </div>
           <div id="tilemap-palette-tiles" style="display:flex;flex-wrap:wrap;gap:3px;"></div>
+          <!-- pat-s3rrv.65: TileSet atlas-source editor. Godot's
+               tile_set_atlas_source_editor.cpp assigns a texture to a source,
+               slices it into tiles, and paints per-tile TileData. The palette
+               above only chooses WHICH tile to paint; this defines what a tile
+               IS, which had no editor at all. -->
+          <div id="tileset-editor" style="margin-top:6px;border-top:1px solid var(--border,#111);padding-top:6px;">
+            <div style="font-weight:bold;margin-bottom:4px;">Atlas Source</div>
+            <input id="tileset-atlas-texture" placeholder="res://atlas.png" style="width:100%;font-size:10px;margin-bottom:3px;">
+            <div style="display:flex;gap:3px;margin-bottom:3px;">
+              <input id="tileset-region-w" type="number" value="16" title="Atlas region width" style="width:48px;font-size:10px;">
+              <input id="tileset-region-h" type="number" value="16" title="Atlas region height" style="width:48px;font-size:10px;">
+              <button id="tileset-assign-atlas" title="Assign this texture as the atlas source for the selected TileMapLayer">Assign</button>
+            </div>
+            <div id="tileset-sources" style="opacity:0.75;margin-bottom:5px;"></div>
+            <div style="font-weight:bold;margin-bottom:4px;">Tile Data</div>
+            <div style="display:flex;gap:3px;align-items:center;margin-bottom:3px;">
+              <span style="opacity:0.7;">atlas</span>
+              <input id="tileset-tile-x" type="number" value="0" title="Atlas X of the tile being edited" style="width:40px;font-size:10px;">
+              <input id="tileset-tile-y" type="number" value="0" title="Atlas Y of the tile being edited" style="width:40px;font-size:10px;">
+            </div>
+            <div style="display:flex;gap:3px;margin-bottom:3px;">
+              <button id="tileset-full-collision" title="Give this tile a full-cell collision box (Godot's default tile shape)">Collision</button>
+              <button id="tileset-clear-collision" title="Remove this tile's collision polygon">Clear</button>
+              <label style="font-size:10px;"><input id="tileset-one-way" type="checkbox"> one-way</label>
+              <label style="font-size:10px;" title="Make this source's painted cells walkable (TileSet navigation layer 0)"><input id="tileset-navigation" type="checkbox"> nav</label>
+            </div>
+            <div style="display:flex;gap:3px;margin-bottom:3px;">
+              <input id="tileset-cd-key" placeholder="custom data layer" style="width:88px;font-size:10px;">
+              <input id="tileset-cd-value" placeholder="value" style="width:56px;font-size:10px;">
+              <button id="tileset-cd-set" title="Set this custom data layer's value on the tile">Set</button>
+            </div>
+            <div id="tileset-tiles" style="opacity:0.75;"></div>
+          </div>
         </div>
         <!-- pat-9yq5q: 2D viewport toolbar (Godot CanvasItemEditor main_menu_hbox,
              canvas_item_editor_plugin.cpp:5702-6040), in Godot order. Shown in 2D
@@ -2825,17 +2871,50 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
                    refreshAnimTree(), not hardcoded. -->
               <div id="anim-tree-toolbar" style="display:flex;gap:4px;padding:4px 0">
                 <input id="anim-tree-state-name" placeholder="State name" style="flex:1;min-width:0">
-                <button id="anim-tree-add-state" title="Add state">+</button>
+                <!-- pat-s3rrv.1: /state/add has always accepted a `kind`, and the
+                     client never sent one — so every node was an Animation leaf
+                     and a blend tree or blend space could not be built at all. -->
+                <select id="anim-tree-kind" title="Node type">
+                  <option value="animation">AnimationNodeAnimation</option>
+                  <option value="blend2">AnimationNodeBlend2</option>
+                  <option value="blend_space_1d">AnimationNodeBlendSpace1D</option>
+                  <option value="blend_space_2d">AnimationNodeBlendSpace2D</option>
+                  <option value="state_machine">AnimationNodeStateMachine</option>
+                </select>
+                <button id="anim-tree-add-state" title="Add node">+</button>
               </div>
               <div id="anim-tree-transition-toolbar" style="display:flex;gap:4px;padding:0 0 4px 0">
                 <input id="anim-tree-from" placeholder="From" style="flex:1;min-width:0">
                 <input id="anim-tree-to" placeholder="To" style="flex:1;min-width:0">
-                <button id="anim-tree-connect" title="Connect transition">&#8594;</button>
+                <button id="anim-tree-connect" title="Connect transition (state machine edge)">&#8594;</button>
+                <!-- A blend-tree WIRE, not a transition: it carries no crossfade
+                     and no condition. Both lists are served by /api/animation/tree. -->
+                <button id="anim-tree-wire" title="Wire blend-tree output (connection)">&#8674;</button>
               </div>
               <div id="anim-tree-body">
                 <div class="anim-tree-node active">AnimationNodeStateMachine (root)</div>
                 <div id="anim-tree-states"></div>
                 <div id="anim-tree-transitions" style="padding:4px 0;color:var(--text-dim);font-size:11px"></div>
+                <!-- pat-s3rrv.1: blend-tree connections, served by
+                     /api/animation/tree as `connections` and previously never
+                     rendered. -->
+                <div id="anim-tree-connections" style="padding:0 0 4px 0;color:var(--text-dim);font-size:11px"></div>
+                <!-- pat-s3rrv.1: blend-space point editor. Hidden until a blend
+                     space node is selected — the panel edits ONE node's points. -->
+                <div id="anim-tree-blendspace" style="display:none;border-top:1px solid var(--border);padding-top:4px">
+                  <div id="anim-tree-bs-title" style="font-size:11px;color:var(--text-dim)"></div>
+                  <div style="display:flex;gap:4px;padding:2px 0">
+                    <input id="anim-tree-bs-min" placeholder="min_space" style="flex:1;min-width:0">
+                    <input id="anim-tree-bs-max" placeholder="max_space" style="flex:1;min-width:0">
+                    <input id="anim-tree-bs-blend" placeholder="blend_position" style="flex:1;min-width:0">
+                  </div>
+                  <div id="anim-tree-bs-points"></div>
+                  <div style="display:flex;gap:4px;padding:2px 0">
+                    <input id="anim-tree-bs-anim" placeholder="Animation" style="flex:1;min-width:0">
+                    <input id="anim-tree-bs-pos" placeholder="pos (x or x,y)" style="flex:1;min-width:0">
+                    <button id="anim-tree-bs-add" title="Add blend point">+</button>
+                  </div>
+                </div>
                 <div style="padding:8px 0;color:var(--text-dim);font-size:11px">Connect nodes to create animation state transitions.</div>
               </div>
             </div>
@@ -3163,6 +3242,28 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   </div>
 </div>
 
+
+<!-- Create Script dialog (pat-s3rrv.63 — Godot's ScriptCreateDialog).
+     Reuses the .connect-dialog-* modal styling rather than duplicating it; the
+     classes are generic modal chrome despite the name. -->
+<div class="connect-dialog-overlay" id="create-script-overlay">
+  <div class="connect-dialog">
+    <h3>Attach Node Script</h3>
+    <label>Inherits</label>
+    <input type="text" id="create-script-inherits" placeholder="Node">
+    <label>Class Name</label>
+    <input type="text" id="create-script-class" placeholder="MyScript">
+    <label>Template</label>
+    <select id="create-script-template"></select>
+    <label>Path</label>
+    <input type="text" id="create-script-path" placeholder="res://scripts/new_script.gd">
+    <div id="create-script-error" class="create-script-error"></div>
+    <div class="connect-dialog-buttons">
+      <button id="create-script-cancel">Cancel</button>
+      <button id="create-script-confirm" style="border-color:var(--accent);color:var(--accent)">Create</button>
+    </div>
+  </div>
+</div>
 
 <!-- Command palette (pat-ugb0p) -->
 <div id="command-palette">
@@ -5411,6 +5512,44 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     return wrap;
   }
 
+  // pat-s3rrv.64: the Packed* family, as EditorPropertyArray does it
+  // (editor_properties_array_dict.cpp) — a resizable indexed list rather than a
+  // fixed component grid.
+  //
+  // ⚠️ THE WIRE SHAPE IS ONE FLAT ARRAY, never an array of elements.
+  // `serialize.rs` decodes PackedVector2Array by chunking a flat list in pairs
+  // and REJECTS an odd length outright; PackedVector3Array chunks in threes.
+  // Emitting [[x,y],[x,y]] would be refused by `from_json` and the edit would
+  // vanish at the server — the same silent discard this bead exists to fix.
+  // `stride` is how many flat slots make one element.
+  var PACKED_ARRAY_SPECS = {
+    // ⚠️ Byte is the one CLAMPED type: the decoder is `u8::try_from(as_u64())`,
+    // so a negative or >255 entry makes `as_u64()`/`try_from` fail and the
+    // WHOLE array is rejected, not just the bad element.
+    PackedByteArray: { stride: 1, kind: 'int', min: 0, max: 255, axes: [''] },
+    PackedInt32Array: { stride: 1, kind: 'int', axes: [''] },
+    PackedInt64Array: { stride: 1, kind: 'int', axes: [''] },
+    PackedFloat32Array: { stride: 1, kind: 'float', axes: [''] },
+    PackedFloat64Array: { stride: 1, kind: 'float', axes: [''] },
+    PackedStringArray: { stride: 1, kind: 'string', axes: [''] },
+    PackedVector2Array: { stride: 2, kind: 'float', axes: ['x', 'y'] },
+    PackedVector3Array: { stride: 3, kind: 'float', axes: ['x', 'y', 'z'] },
+    PackedVector4Array: { stride: 4, kind: 'float', axes: ['x', 'y', 'z', 'w'] },
+    PackedColorArray: { stride: 4, kind: 'float', axes: ['r', 'g', 'b', 'a'] }
+  };
+
+  // Coerces one input's text to the element type its decoder accepts.
+  function packedNumber(raw, spec) {
+    if (spec.kind === 'string') return String(raw);
+    if (spec.kind === 'int') {
+      var n = parseInt(raw, 10) || 0;
+      if (spec.min != null && n < spec.min) n = spec.min;
+      if (spec.max != null && n > spec.max) n = spec.max;
+      return n;
+    }
+    return parseFloat(raw) || 0;
+  }
+
   function createPropertyRow(nodeId, prop) {
     var row = document.createElement('div');
     row.className = 'insp-row';
@@ -5607,9 +5746,13 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         vec.appendChild(link);
       }
       val.appendChild(vec);
-    } else if (type === 'Vector3') {
-      var arr = Array.isArray(v) ? v : [0, 0, 0];
-      ['x','y','z'].forEach(function(axis, i) {
+    } else if (type === 'Vector3' || type === 'Vector4') {
+      // pat-s3rrv.64: Vector4 was previously excluded because `Variant` had no
+      // such kind. It does now, and `from_json` decodes it from a flat
+      // 4-element array — the same shape this branch already emits.
+      var vecAxes = (type === 'Vector4') ? ['x','y','z','w'] : ['x','y','z'];
+      var arr = Array.isArray(v) ? v : [0, 0, 0, 0];
+      vecAxes.forEach(function(axis, i) {
         var al = document.createElement('span');
         al.className = 'vec-label'; al.textContent = axis;
         var ai = document.createElement('input');
@@ -5618,7 +5761,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         ai.addEventListener('change', function() {
           var vals = [];
           val.querySelectorAll('.vec-input').forEach(function(inp) { vals.push(parseFloat(inp.value)||0); });
-          setProperty(nodeId, prop.name, { type: 'Vector3', value: vals });
+          setProperty(nodeId, prop.name, { type: type, value: vals });
         });
         val.appendChild(al); val.appendChild(ai);
       });
@@ -5822,6 +5965,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       });
       val.appendChild(snInput);
     } else if (type === 'Rect2') {
+      // pat-s3rrv.64: these four inputs had NO change listener, so every edit to
+      // a region_rect or a camera limit was silently discarded — the field took
+      // the keystroke, showed the new number, and threw it away. Mirrors the
+      // Vector3 editor above: re-read every sibling on change, because a Rect2
+      // is written as a whole value, not per component.
       var rect = Array.isArray(v) ? v : [0, 0, 0, 0];
       var rectLabels = ['X','Y','W','H'];
       var rectDiv = document.createElement('div');
@@ -5831,9 +5979,288 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         var rinp = document.createElement('input');
         rinp.type = 'number'; rinp.step = '0.1'; rinp.className = 'rect2-input';
         rinp.value = rect[ri] != null ? rect[ri] : 0;
+        rinp.addEventListener('change', function() {
+          var vals = [];
+          rectDiv.querySelectorAll('.rect2-input').forEach(function(inp) {
+            vals.push(parseFloat(inp.value) || 0);
+          });
+          setProperty(nodeId, prop.name, { type: 'Rect2', value: vals });
+        });
         rectDiv.appendChild(rl); rectDiv.appendChild(rinp);
       }
       val.appendChild(rectDiv);
+    } else if (type === 'Transform3D') {
+      // The only shape here that NESTS: from_json wants
+      // `{basis: {x:[3], y:[3], z:[3]}, origin:[3]}`. Flattening it — or
+      // emitting `basis` as an array — is rejected, and the edit would vanish
+      // at the server with nothing visible in the browser.
+      var t3Groups = [
+        { key: 'basis.x', n: 3 }, { key: 'basis.y', n: 3 },
+        { key: 'basis.z', n: 3 }, { key: 'origin', n: 3 }
+      ];
+      var tDiv = document.createElement('div');
+      tDiv.className = 'compound-editor';
+      function commitTransform3D() {
+        var basis = {};
+        var origin = [];
+        t3Groups.forEach(function(g) {
+          var nums = [];
+          tDiv.querySelectorAll('[data-group="' + g.key + '"]').forEach(function(inp) {
+            nums.push(parseFloat(inp.value) || 0);
+          });
+          if (g.key === 'origin') { origin = nums; }
+          else { basis[g.key.split('.')[1]] = nums; }
+        });
+        setProperty(nodeId, prop.name, {
+          type: 'Transform3D',
+          value: { basis: basis, origin: origin }
+        });
+      }
+      t3Groups.forEach(function(g) {
+        var tl = document.createElement('span');
+        tl.className = 'vec-label'; tl.textContent = g.key;
+        tDiv.appendChild(tl);
+        // Read back through the same nesting the encoder writes.
+        var src = [];
+        if (v && typeof v === 'object') {
+          if (g.key === 'origin') { src = v.origin || []; }
+          else if (v.basis) { src = v.basis[g.key.split('.')[1]] || []; }
+        }
+        for (var ti = 0; ti < g.n; ti++) {
+          var tin = document.createElement('input');
+          tin.type = 'number'; tin.step = '0.1'; tin.className = 'compound-input';
+          tin.setAttribute('data-group', g.key);
+          tin.value = src[ti] != null ? src[ti] : 0;
+          tin.addEventListener('change', commitTransform3D);
+          tDiv.appendChild(tin);
+        }
+      });
+      val.appendChild(tDiv);
+    } else if (type === 'Quaternion') {
+      // pat-s3rrv.64: flat [x, y, z, w], matching `serialize.rs`'s Quaternion
+      // decode, which REQUIRES exactly four elements and returns None
+      // otherwise — so the handler always sends all four.
+      var qArr = Array.isArray(v) ? v : [0, 0, 0, 1];
+      var qDiv = document.createElement('div');
+      qDiv.className = 'vecn-editor';
+      ['x','y','z','w'].forEach(function(axis, i) {
+        var ql = document.createElement('span');
+        ql.className = 'vec-label'; ql.textContent = axis;
+        var qi = document.createElement('input');
+        qi.type = 'number'; qi.step = '0.01'; qi.className = 'quat-input';
+        // w defaults to 1: a quaternion of all zeros is not a rotation at all.
+        qi.value = qArr[i] != null ? qArr[i] : (axis === 'w' ? 1 : 0);
+        qi.addEventListener('change', function() {
+          var vals = [];
+          qDiv.querySelectorAll('.quat-input').forEach(function(inp) {
+            vals.push(parseFloat(inp.value) || 0);
+          });
+          setProperty(nodeId, prop.name, { type: 'Quaternion', value: vals });
+        });
+        qDiv.appendChild(ql); qDiv.appendChild(qi);
+      });
+      val.appendChild(qDiv);
+    } else if (type === 'AABB' || type === 'Transform2D' || type === 'Basis' || type === 'Rect2i') {
+      // pat-s3rrv.64: both decode from an OBJECT of named arrays, not a flat
+      // list — `{position:[3], size:[3]}` for AABB and `{x:[2], y:[2],
+      // origin:[2]}` for Transform2D (serialize.rs). Sending a flat array here
+      // would be rejected by from_json and the edit would vanish, which is the
+      // same silent-discard this bead exists to fix.
+      // Each decoder names its own groups. Basis rides here rather than in a
+      // branch of its own because `parse_vec3` accepts EITHER {x,y,z} or a
+      // 3-element array — so its columns can be emitted as arrays like the
+      // others, and no third emitter is needed.
+      // Rect2i decodes from {position:[2], size:[2]} — the same object-of-arrays
+      // shape, but INTEGER components, so it rides here rather than with the
+      // flat integer vectors.
+      var groups = (type === 'AABB')
+        ? [{ key: 'position', n: 3 }, { key: 'size', n: 3 }]
+        : (type === 'Rect2i')
+          ? [{ key: 'position', n: 2 }, { key: 'size', n: 2 }]
+          : (type === 'Basis')
+            ? [{ key: 'x', n: 3 }, { key: 'y', n: 3 }, { key: 'z', n: 3 }]
+            : [{ key: 'x', n: 2 }, { key: 'y', n: 2 }, { key: 'origin', n: 2 }];
+      var groupsAreInt = (type === 'Rect2i');
+      var axisNames = ['x','y','z'];
+      var cDiv = document.createElement('div');
+      cDiv.className = 'compound-editor';
+      function commitCompound() {
+        var out = {};
+        groups.forEach(function(g) {
+          var nums = [];
+          cDiv.querySelectorAll('[data-group="' + g.key + '"]').forEach(function(inp) {
+            nums.push(groupsAreInt ? (parseInt(inp.value, 10) || 0) : (parseFloat(inp.value) || 0));
+          });
+          out[g.key] = nums;
+        });
+        setProperty(nodeId, prop.name, { type: type, value: out });
+      }
+      groups.forEach(function(g) {
+        var gl = document.createElement('span');
+        gl.className = 'vec-label'; gl.textContent = g.key;
+        cDiv.appendChild(gl);
+        var src = (v && typeof v === 'object' && Array.isArray(v[g.key])) ? v[g.key] : [];
+        for (var gi = 0; gi < g.n; gi++) {
+          var ci = document.createElement('input');
+          ci.type = 'number'; ci.className = 'compound-input';
+          ci.step = groupsAreInt ? '1' : '0.1';
+          ci.setAttribute('data-group', g.key);
+          ci.title = g.key + '.' + axisNames[gi];
+          ci.value = src[gi] != null ? src[gi] : 0;
+          ci.addEventListener('change', commitCompound);
+          cDiv.appendChild(ci);
+        }
+      });
+      val.appendChild(cDiv);
+    } else if (type === 'Vector2i' || type === 'Vector3i' || type === 'Vector4i') {
+      // pat-s3rrv.64: integer vectors had no editor at all and fell to the
+      // read-only span below, so a TileMap cell coord could be read but never
+      // changed.
+      //
+      // ⚠️ Vector4i is here now: `Variant::Vector4i` and its `from_json` arm
+      // both exist (serialize.rs), so the write round-trips. It was previously
+      // excluded because neither did — an editor for a type the server cannot
+      // decode looks like it works and silently 400s, the same class of bug as
+      // the Rect2 one above. Check the DECODER before adding any type here.
+      var icomps = (type === 'Vector2i') ? ['x','y']
+        : (type === 'Vector4i') ? ['x','y','z','w'] : ['x','y','z'];
+      var iArr = Array.isArray(v) ? v : [];
+      var iDiv = document.createElement('div');
+      iDiv.className = 'vecn-editor';
+      icomps.forEach(function(axis, i) {
+        var nl = document.createElement('span');
+        nl.className = 'vec-label'; nl.textContent = axis;
+        var ni = document.createElement('input');
+        // Whole-number step: a 0.1 spinner would offer values an integer vector
+        // cannot hold.
+        ni.type = 'number'; ni.step = '1'; ni.className = 'vecn-input';
+        ni.value = iArr[i] != null ? iArr[i] : 0;
+        ni.addEventListener('change', function() {
+          var vals = [];
+          iDiv.querySelectorAll('.vecn-input').forEach(function(inp) {
+            vals.push(parseInt(inp.value, 10) || 0);
+          });
+          setProperty(nodeId, prop.name, { type: type, value: vals });
+        });
+        iDiv.appendChild(nl); iDiv.appendChild(ni);
+      });
+      val.appendChild(iDiv);
+    } else if (type === 'Projection') {
+      // pat-s3rrv.64: Projection decodes from a FLAT 16-element array —
+      // `from_json` rejects any other length outright and fills m[i/4][i%4],
+      // i.e. ROW MAJOR, and `to_json` flattens the same way. That matches
+      // neither the object-of-arrays emitter (AABB/Transform2D/Basis/Rect2i)
+      // nor the strided Packed list, so it gets its own fixed 4x4 grid.
+      var projVals = (Array.isArray(v) && v.length === 16) ? v.slice() : new Array(16).fill(0);
+      var projDiv = document.createElement('div');
+      projDiv.className = 'compound-editor projection-editor';
+      function commitProjection() {
+        var nums = [];
+        projDiv.querySelectorAll('.projection-input').forEach(function(inp) {
+          nums.push(parseFloat(inp.value) || 0);
+        });
+        // The length is FIXED at 16 — this grid never adds or removes cells, so
+        // re-reading every input keeps it valid by construction.
+        setProperty(nodeId, prop.name, { type: 'Projection', value: nums });
+      }
+      var projAxes = ['x', 'y', 'z', 'w'];
+      for (var pr = 0; pr < 4; pr++) {
+        (function(row) {
+          var rl = document.createElement('span');
+          rl.className = 'vec-label'; rl.textContent = projAxes[row];
+          projDiv.appendChild(rl);
+          for (var pc = 0; pc < 4; pc++) {
+            var pinp = document.createElement('input');
+            pinp.type = 'number'; pinp.step = '0.1'; pinp.className = 'projection-input';
+            pinp.title = projAxes[row] + '.' + projAxes[pc];
+            pinp.value = projVals[row * 4 + pc];
+            pinp.addEventListener('change', commitProjection);
+            projDiv.appendChild(pinp);
+          }
+        })(pr);
+      }
+      val.appendChild(projDiv);
+    } else if (PACKED_ARRAY_SPECS[type]) {
+      var pspec = PACKED_ARRAY_SPECS[type];
+      var pFlat = Array.isArray(v) ? v.slice() : [];
+      var pCount = Math.floor(pFlat.length / pspec.stride);
+      var pDiv = document.createElement('div');
+      pDiv.className = 'array-editor packed-editor';
+
+      // Read the CURRENT inputs rather than the captured `pFlat`: add/remove
+      // must not discard edits typed since the row was rendered.
+      function packedValues() {
+        var out = [];
+        pDiv.querySelectorAll('.packed-input').forEach(function(inp) {
+          out.push(packedNumber(inp.value, pspec));
+        });
+        return out;
+      }
+      function commitPacked(next) {
+        setProperty(nodeId, prop.name, { type: type, value: next || packedValues() });
+      }
+
+      var pHeader = document.createElement('div');
+      pHeader.className = 'array-header';
+      pHeader.textContent = type + ' (' + pCount + ' elements)';
+      var pAdd = document.createElement('button');
+      pAdd.className = 'array-add'; pAdd.textContent = '+'; pAdd.title = 'Add element';
+      pAdd.addEventListener('click', function() {
+        var next = packedValues();
+        for (var k = 0; k < pspec.stride; k++) next.push(pspec.kind === 'string' ? '' : 0);
+        commitPacked(next);
+        setTimeout(fetchSelected, 100);
+      });
+      pHeader.appendChild(pAdd);
+      pDiv.appendChild(pHeader);
+
+      for (var pi = 0; pi < pCount; pi++) {
+        (function(idx) {
+          var itemRow = document.createElement('div');
+          itemRow.className = 'array-item';
+          var itemLabel = document.createElement('span');
+          itemLabel.textContent = '[' + idx + ']';
+          itemRow.appendChild(itemLabel);
+          for (var ci = 0; ci < pspec.stride; ci++) {
+            if (pspec.axes[ci]) {
+              var axl = document.createElement('span');
+              axl.className = 'vec-label'; axl.textContent = pspec.axes[ci];
+              itemRow.appendChild(axl);
+            }
+            var inp = document.createElement('input');
+            inp.className = 'packed-input';
+            // Flat, not an if/else pair, on purpose: the inspector tests slice
+            // a branch by scanning forward to the next else-clause, so a nested
+            // one would hide the remove/splice code below from every assertion.
+            inp.type = (pspec.kind === 'string') ? 'text' : 'number';
+            if (pspec.kind !== 'string') {
+              // Whole-number step for integer arrays: a 0.1 spinner would offer
+              // values the element type cannot hold.
+              inp.step = (pspec.kind === 'int') ? '1' : '0.1';
+              if (pspec.min != null) inp.min = pspec.min;
+              if (pspec.max != null) inp.max = pspec.max;
+            }
+            var slot = pFlat[idx * pspec.stride + ci];
+            inp.value = slot != null ? slot : (pspec.kind === 'string' ? '' : 0);
+            inp.addEventListener('change', function() { commitPacked(); });
+            itemRow.appendChild(inp);
+          }
+          var pRemove = document.createElement('button');
+          pRemove.className = 'array-remove'; pRemove.textContent = 'x'; pRemove.title = 'Remove';
+          pRemove.addEventListener('click', function() {
+            var next = packedValues();
+            // Splice a whole ELEMENT, not one slot — removing a single number
+            // from a Vector2 array would leave an odd length that the decoder
+            // rejects outright.
+            next.splice(idx * pspec.stride, pspec.stride);
+            commitPacked(next);
+            setTimeout(fetchSelected, 100);
+          });
+          itemRow.appendChild(pRemove);
+          pDiv.appendChild(itemRow);
+        })(pi);
+      }
+      val.appendChild(pDiv);
     } else {
       var span = document.createElement('span');
       span.className = 'insp-readonly';
@@ -6475,7 +6902,119 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         host.appendChild(sw);
       })(tiles[i]);
     }
+    buildTileSetEditor();
   }
+
+  // pat-s3rrv.65: the TileSet atlas-source editor.
+  //
+  // Everything here targets the SELECTED TileMapLayer's own TileSet, via
+  // /api/tileset/source and /api/tileset/tile — not the flat colour palette
+  // /api/tilemap/tileset reports. An edit lands in the saved .tscn and is
+  // honoured by the runtime's tile collision.
+  function tileSetNodeId() {
+    // Same gate the palette uses: writing tile companions onto a non-TileMap
+    // node would save into the .tscn and be read by nothing. The server
+    // rejects it too, but not asking is better than a 400 per click.
+    return isTileMapNodeSelected() ? selectedNodeId : null;
+  }
+  function tileSetAtlasCoords() {
+    var x = parseInt((document.getElementById('tileset-tile-x') || {}).value || '0', 10) || 0;
+    var y = parseInt((document.getElementById('tileset-tile-y') || {}).value || '0', 10) || 0;
+    return [x, y];
+  }
+  // The atlas source being edited. Godot's first atlas source id is 0.
+  var tileSetSourceId = 0;
+
+  async function buildTileSetEditor() {
+    var host = document.getElementById('tileset-sources');
+    if (!host) return;
+    var nid = tileSetNodeId();
+    if (!nid) { host.textContent = ''; return; }
+    var data = await api('GET', '/api/tileset/source?node_id=' + nid);
+    var sources = (data && data.sources) || [];
+    host.innerHTML = '';
+    if (!sources.length) { host.textContent = 'no atlas source'; }
+    for (var i = 0; i < sources.length; i++) {
+      (function(src) {
+        var row = document.createElement('div');
+        row.style.cssText = 'cursor:pointer;' + (src.id === tileSetSourceId ? 'color:var(--accent,#5c9ded);' : '');
+        row.textContent = '#' + src.id + ' ' + src.texture + ' ' + src.region_size[0] + 'x' + src.region_size[1] + (src.has_collision ? ' [collision]' : '');
+        row.addEventListener('click', function() { tileSetSourceId = src.id; buildTileSetEditor(); });
+        host.appendChild(row);
+      })(sources[i]);
+    }
+    await buildTileSetTiles();
+  }
+
+  async function buildTileSetTiles() {
+    var host = document.getElementById('tileset-tiles');
+    if (!host) return;
+    var nid = tileSetNodeId();
+    if (!nid) { host.textContent = ''; return; }
+    var data = await api('GET', '/api/tileset/tile?node_id=' + nid + '&source_id=' + tileSetSourceId);
+    var tiles = (data && data.tiles) || [];
+    host.innerHTML = '';
+    if (!tiles.length) { host.textContent = 'no tile data'; return; }
+    for (var i = 0; i < tiles.length; i++) {
+      var t = tiles[i];
+      var row = document.createElement('div');
+      row.textContent = '(' + t.atlas[0] + ',' + t.atlas[1] + ')' +
+        (t.collision && t.collision.length ? ' collision' : '') +
+        (t.one_way ? ' one-way' : '');
+      host.appendChild(row);
+    }
+  }
+
+  async function postTileData(extra) {
+    var nid = tileSetNodeId();
+    if (!nid) return;
+    var atlas = tileSetAtlasCoords();
+    var body = { node_id: nid, source_id: tileSetSourceId, atlas: atlas };
+    for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) body[k] = extra[k]; }
+    await api('POST', '/api/tileset/tile/data', body);
+    await buildTileSetTiles();
+  }
+
+  document.addEventListener('DOMContentLoaded', function() {
+    var assign = document.getElementById('tileset-assign-atlas');
+    if (assign) assign.addEventListener('click', async function() {
+      var nid = tileSetNodeId();
+      if (!nid) return;
+      var w = parseInt((document.getElementById('tileset-region-w') || {}).value || '16', 10) || 16;
+      var h = parseInt((document.getElementById('tileset-region-h') || {}).value || '16', 10) || 16;
+      await api('POST', '/api/tileset/source', {
+        node_id: nid,
+        source_id: tileSetSourceId,
+        texture: (document.getElementById('tileset-atlas-texture') || {}).value || '',
+        region_size: [w, h],
+        tile_size: [w, h]
+      });
+      await buildTileSetEditor();
+    });
+    var full = document.getElementById('tileset-full-collision');
+    if (full) full.addEventListener('click', function() {
+      var ow = document.getElementById('tileset-one-way');
+      postTileData({ full_cell_collision: true, one_way: !!(ow && ow.checked) });
+    });
+    var clear = document.getElementById('tileset-clear-collision');
+    if (clear) clear.addEventListener('click', function() { postTileData({ clear_collision: true }); });
+    // Navigation posts on CHANGE, both ways: unchecking removes the source
+    // from the navigation layer, which is what `tileset_remove_source_id`
+    // exists for. A one-way button would leave every tile ever marked walkable
+    // walkable forever.
+    var nav = document.getElementById('tileset-navigation');
+    if (nav) nav.addEventListener('change', function() {
+      postTileData({ navigation: !!nav.checked });
+    });
+    var cd = document.getElementById('tileset-cd-set');
+    if (cd) cd.addEventListener('click', function() {
+      var key = (document.getElementById('tileset-cd-key') || {}).value || '';
+      if (!key) return;
+      var custom = {};
+      custom[key] = (document.getElementById('tileset-cd-value') || {}).value || '';
+      postTileData({ custom_data: custom });
+    });
+  });
 
   // pat-0q2kx.75: the active tool decides what a pointer gesture posts. Godot's
   // tiles editor keeps paint/erase/bucket/rect/line/picker in one toolbar and
@@ -8071,15 +8610,51 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     if (addBus) addBus.addEventListener('click', function() { audioPost('/api/audio/bus/add', {}); });
     if (loadDefault) loadDefault.addEventListener('click', function() { audioPost('/api/audio/layout/load_default', {}); });
     if (createBtn) createBtn.addEventListener('click', function() { audioPost('/api/audio/layout/load_default', {}); });
-    if (loadBtn) loadBtn.addEventListener('click', function() { logMessage('editor', 'Audio: Load Bus Layout'); });
-    if (saveAs) saveAs.addEventListener('click', function() { logMessage('editor', 'Audio: Save Bus Layout As'); });
+    // These two used to call logMessage() and nothing else, so the panel's whole
+    // model lived in memory and never reached the project (pat-s3rrv.52). They
+    // now round-trip through default_bus_layout.tres, which is the same file the
+    // runner loads at boot.
+    if (loadBtn) loadBtn.addEventListener('click', function() { audioPost('/api/audio/layout/load', {}); });
+    if (saveAs) saveAs.addEventListener('click', function() { audioPost('/api/audio/layout/save', {}); });
 
     // Bus strips are rendered dynamically; use event delegation.
     busesEl.addEventListener('click', onAudioBusClick);
     busesEl.addEventListener('input', onAudioBusInput);
     busesEl.addEventListener('change', onAudioBusChange);
+    // Drag-reorder of the effect chain (Godot: swap_bus_effects). Order is
+    // audible, so this is a real edit rather than a list nicety.
+    busesEl.addEventListener('dragstart', onAudioEffectDragStart);
+    busesEl.addEventListener('dragover', onAudioEffectDragOver);
+    busesEl.addEventListener('drop', onAudioEffectDrop);
 
     refreshAudioBuses();
+    // Meters poll the RUNNING game's mixer. Godot drives them from a timer for
+    // the same reason: peaks are a property of the audio being played, not of
+    // anything the panel itself knows.
+    if (!window.__audioPeakTimer) window.__audioPeakTimer = setInterval(refreshAudioPeaks, 100);
+  }
+
+  // Live per-bus peaks from the running game, newest poll wins. Empty when
+  // nothing is playing, which is the honest reading for a silent editor.
+  var audioPeaks = [];
+
+  async function refreshAudioPeaks() {
+    var busesEl = document.getElementById('audio-buses');
+    if (!busesEl || !busesEl.offsetParent) return; // panel hidden: do not poll
+    var data = await api('GET', '/api/audio/peaks');
+    audioPeaks = (data && data.buses) || [];
+    // Update only the meter fills. Re-rendering the strips would fight a fader
+    // the user is dragging and reset an open dropdown.
+    var fills = busesEl.querySelectorAll('.abus-meter-fill');
+    for (var i = 0; i < fills.length; i++) {
+      fills[i].style.height = audioMeterPct(audioPeakDb(i), false) + '%';
+    }
+  }
+
+  // The left-channel peak for a bus, or the floor when nothing is playing.
+  function audioPeakDb(index) {
+    var p = audioPeaks[index];
+    return p ? p.left_db : -80;
   }
 
   async function refreshAudioBuses() {
@@ -8125,7 +8700,10 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       menuBtn +
       '</div>';
 
-    var fill = audioMeterPct(bus.volume_db, bus.muted);
+    // ⚠️ From the PEAK, not from `bus.volume_db`. Deriving the meter from the
+    // fader made it move when you dragged the slider and sit still when the
+    // game got loud — the opposite of what a VU meter reports (pat-s3rrv.52).
+    var fill = audioMeterPct(audioPeakDb(idx), bus.muted);
     // The fader sits beside a dB scale (like Godot) and a VU meter.
     var faderMeter =
       '<div class="audio-bus-meter-row">' +
@@ -8139,7 +8717,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var effects = '<div class="abus-effects">';
     (bus.effects || []).forEach(function(fx, fi) {
       effects +=
-        '<div class="abus-effect' + (fx.enabled ? '' : ' disabled') + '">' +
+        '<div class="abus-effect' + (fx.enabled ? '' : ' disabled') + '" draggable="true" data-fx-row="' + fi + '" title="Drag to reorder">' +
         '<input type="checkbox" data-act="effect-toggle" data-fx="' + fi + '"' + (fx.enabled ? ' checked' : '') + ' title="Enable/disable effect">' +
         '<span class="abus-effect-name">' + escapeHtml(fx.name) + '</span>' +
         '<button class="abus-effect-del" data-act="effect-del" data-fx="' + fi + '" title="Delete Effect">&times;</button>' +
@@ -8169,6 +8747,49 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 
     return '<div class="audio-bus' + (bus.is_master ? ' master' : '') + '" data-index="' + idx + '">' +
       nameField + toggles + faderMeter + dbReadout + effects + addEffect + output + '</div>';
+  }
+
+  // ---- Effect chain drag-reorder (pat-s3rrv.52) ----
+  //
+  // Godot's bus panel lets you drag an effect within its bus to reorder the
+  // chain (`AudioServer.swap_bus_effects`). Order is audible — a filter before
+  // a reverb is not the same sound as one after it — so the drop posts a real
+  // edit and the saved layout carries the new order.
+
+  // The row being dragged, as (bus index, slot). Null between drags.
+  var audioDragFx = null;
+
+  function onAudioEffectDragStart(e) {
+    var row = e.target && e.target.closest ? e.target.closest('.abus-effect') : null;
+    if (!row) return;
+    audioDragFx = {
+      bus: audioBusIndex(row),
+      slot: parseInt(row.getAttribute('data-fx-row'), 10)
+    };
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  }
+
+  // Without preventDefault the browser refuses the drop outright.
+  function onAudioEffectDragOver(e) {
+    if (!audioDragFx) return;
+    var row = e.target && e.target.closest ? e.target.closest('.abus-effect') : null;
+    if (row) e.preventDefault();
+  }
+
+  function onAudioEffectDrop(e) {
+    if (!audioDragFx) return;
+    var row = e.target && e.target.closest ? e.target.closest('.abus-effect') : null;
+    if (!row) { audioDragFx = null; return; }
+    e.preventDefault();
+    var bus = audioBusIndex(row);
+    var slot = parseInt(row.getAttribute('data-fx-row'), 10);
+    var from = audioDragFx.slot;
+    var sameBus = bus === audioDragFx.bus;
+    audioDragFx = null;
+    // Reordering ACROSS buses is a move, not a swap, and the server has no
+    // route for it — ignore rather than silently swapping the wrong pair.
+    if (!sameBus || slot === from || isNaN(slot) || isNaN(from)) return;
+    audioPost('/api/audio/effect/swap', { index: bus, from: from, to: slot });
   }
 
   function audioBusIndex(el) {
@@ -12390,28 +13011,159 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   }
 
   async function createNewScript() {
-    var path = prompt('Script file path (e.g. res://scripts/player.gd):');
-    if (!path) return; if (!path.endsWith('.gd')) path += '.gd';
-    var template = 'extends Node2D\n\nfunc _ready():\n    pass\n\nfunc _process(delta):\n    pass\n';
-    var result = await api('POST', '/api/script/save', { path: path, content: template });
-    if (result && result.ok) {
-      currentScriptPath = path; renderScript(template, path);
-      if (selectedNodeId !== null) {
-        await api('POST', '/api/property/set', { node_id: selectedNodeId, property: 'script', value: { type: 'String', value: path } });
-        await fetchSelected();
-      }
+    // Same dialog as Attach Script. This used to be a second bare text entry
+    // with its OWN hardcoded Node2D template literal, so creating a script here
+    // ignored the selected node's class even after the attach path was fixed.
+    await openCreateScriptDialog(selectedNodeId);
+  }
+  // The class a new script should extend (pat-s3rrv.63).
+  //
+  // The template used to be a hardcoded `extends Node2D` for EVERY node, so
+  // attaching a script to a Control or a Node3D produced a script whose base
+  // class did not match its node — which is not a cosmetic default, it is a
+  // runtime error the moment the script uses anything from its real base.
+  // Godot's Create Script dialog defaults the Inherits field to the selected
+  // node's class for exactly this reason.
+  function scriptBaseClassFor(nodeId) {
+    var cls = (selectedNodeData && (selectedNodeData.class || selectedNodeData.class_name)) || '';
+    // Fall back to `Node`, not `Node2D`: Node is the one base every node in the
+    // tree actually has, so a wrong guess degrades to "less specific" rather
+    // than "wrong branch of the hierarchy".
+    return cls || 'Node';
+  }
+
+  // Godot's script-path validation (script_create_dialog.cpp): a script lives
+  // under res:// and ends in a known extension. Returning the reason rather
+  // than a bool so the caller can say WHICH rule was broken.
+  function scriptPathProblem(path) {
+    if (!path) return 'a path is required';
+    if (path.indexOf('res://') !== 0) return 'path must start with res://';
+    if (path.length <= 'res://'.length) return 'path needs a file name';
+    if (!/\.gd$/.test(path)) return 'path must end in .gd';
+    return null;
+  }
+
+  // ---- Create Script dialog (pat-s3rrv.63) ----
+  //
+  // Godot opens ScriptCreateDialog here (editor/script/script_create_dialog.cpp):
+  // Inherits defaults to the selected node's class, the Template dropdown is
+  // populated across that class's ancestor chain, and the path is validated on
+  // every keystroke with the reason shown inline. A prompt() can do none of
+  // that — it cannot show the base class it is about to use, cannot offer a
+  // template, and cannot refuse a bad path before the file is written.
+  var pendingScriptNodeId = null;
+
+  // `res://scripts/my_thing.gd` -> `MyThing`, Godot's default class name.
+  function scriptClassNameFor(path) {
+    var file = String(path || '').split('/').pop().replace(/\.gd$/, '');
+    return file.replace(/(^|_)([a-z])/g, function(m, sep, c) { return c.toUpperCase(); });
+  }
+
+  async function loadScriptTemplates(baseClass) {
+    var sel = document.getElementById('create-script-template');
+    if (!sel) return;
+    sel.innerHTML = '';
+    var resp = await api('GET', '/api/script/templates?base_class=' + encodeURIComponent(baseClass));
+    var list = (resp && resp.templates) || [];
+    list.forEach(function(t) {
+      var opt = document.createElement('option');
+      opt.value = t.id;
+      opt.textContent = t.name + ' (' + String(t.origin).replace('_', ' ') + ')';
+      if (t.description) opt.title = t.description;
+      sel.appendChild(opt);
+    });
+  }
+
+  // Live validation: shows WHICH rule is broken and disables Create while it is.
+  function validateCreateScript() {
+    var pathEl = document.getElementById('create-script-path');
+    var err = document.getElementById('create-script-error');
+    var confirmBtn = document.getElementById('create-script-confirm');
+    var problem = scriptPathProblem(((pathEl || {}).value || '').trim());
+    if (err) {
+      err.textContent = problem || '';
+      err.classList.toggle('ok', !problem);
+    }
+    if (confirmBtn) confirmBtn.disabled = !!problem;
+    return !problem;
+  }
+
+  async function openCreateScriptDialog(nodeId) {
+    pendingScriptNodeId = nodeId;
+    var base = scriptBaseClassFor(nodeId);
+    var suggested = 'res://scripts/new_script.gd';
+    document.getElementById('create-script-inherits').value = base;
+    document.getElementById('create-script-path').value = suggested;
+    document.getElementById('create-script-class').value = scriptClassNameFor(suggested);
+    document.getElementById('create-script-error').textContent = '';
+    document.getElementById('create-script-overlay').classList.add('open');
+    validateCreateScript();
+    await loadScriptTemplates(base);
+    document.getElementById('create-script-path').focus();
+  }
+
+  function closeCreateScriptDialog() {
+    document.getElementById('create-script-overlay').classList.remove('open');
+    pendingScriptNodeId = null;
+  }
+
+  async function confirmCreateScript() {
+    // Re-check rather than trusting the disabled button: Enter can reach here.
+    if (!validateCreateScript()) return;
+    var path = document.getElementById('create-script-path').value.trim();
+    var base = document.getElementById('create-script-inherits').value.trim() || 'Node';
+    var className = document.getElementById('create-script-class').value.trim();
+    var template = (document.getElementById('create-script-template') || {}).value || '';
+    // The body is generated SERVER-side from the base class and template.
+    // Building it here as a string literal is what made every new script carry
+    // the same base class whatever its node actually was.
+    var created = await api('POST', '/api/script/create', {
+      path: path, base_class: base, class_name: className, template: template
+    });
+    if (!created || created.error) {
+      // The server's error is an envelope ({code, message}); show it in the
+      // dialog and keep the dialog OPEN so the path can be fixed in place.
+      var why = (created && created.error && created.error.message) || 'unknown error';
+      var err = document.getElementById('create-script-error');
+      if (err) { err.textContent = why; err.classList.remove('ok'); }
+      return;
+    }
+    var nodeId = pendingScriptNodeId;
+    closeCreateScriptDialog();
+    currentScriptPath = path;
+    renderScript(created.content, path);
+    if (nodeId !== null && nodeId !== undefined) {
+      await api('POST', '/api/property/set', { node_id: nodeId, property: 'script', value: { type: 'String', value: path } });
+      await fetchSelected();
     }
   }
+
+  function setupCreateScriptDialog() {
+    var pathEl = document.getElementById('create-script-path');
+    var inherits = document.getElementById('create-script-inherits');
+    if (!pathEl || !inherits) return;
+    // Godot re-validates on every keystroke rather than at commit time.
+    pathEl.addEventListener('input', function() {
+      validateCreateScript();
+      document.getElementById('create-script-class').value = scriptClassNameFor(pathEl.value);
+    });
+    // Changing the base class re-fetches the templates that apply to it.
+    inherits.addEventListener('change', function() {
+      loadScriptTemplates(inherits.value.trim() || 'Node');
+    });
+    document.getElementById('create-script-cancel').addEventListener('click', closeCreateScriptDialog);
+    document.getElementById('create-script-confirm').addEventListener('click', confirmCreateScript);
+    pathEl.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') document.getElementById('create-script-confirm').click();
+      if (e.key === 'Escape') closeCreateScriptDialog();
+    });
+    document.getElementById('create-script-overlay').addEventListener('click', function(e) {
+      if (e.target === this) closeCreateScriptDialog();
+    });
+  }
+
   async function doAttachScript(nodeId) {
-    var path = prompt('Script file path (e.g. res://scripts/player.gd):');
-    if (!path) return; if (!path.endsWith('.gd')) path += '.gd';
-    var existing = await api('GET', '/api/script?path=' + encodeURIComponent(path));
-    if (!existing || existing.error) {
-      var template = 'extends Node2D\n\nfunc _ready():\n    pass\n\nfunc _process(delta):\n    pass\n';
-      await api('POST', '/api/script/save', { path: path, content: template });
-    }
-    await api('POST', '/api/property/set', { node_id: nodeId, property: 'script', value: { type: 'String', value: path } });
-    await fetchSelected();
+    await openCreateScriptDialog(nodeId);
   }
   function clearScript() {
     currentScriptPath = null; scriptOriginalContent = ''; markScriptModified(false);
@@ -12449,31 +13201,400 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         var graph = await resp.json();
         var byId = {};
         (graph.states || []).forEach(function(s) { byId[s.id] = s.name; });
+        // pat-s3rrv.1: states are laid out at the x/y the server persists, and
+        // dragging one commits through /state/move. Rendering them as a plain
+        // stacked list threw those coordinates away, which is why the endpoint
+        // had no caller.
         statesEl.innerHTML = '';
+        statesEl.style.position = 'relative';
+        statesEl.style.height = '200px';
+        statesEl.style.overflow = 'auto';
+        // pat-s3rrv.1: edges are DRAWN on the canvas, not only listed below it.
+        // Appended before the nodes so it paints underneath them, and
+        // pointer-events:none so it never swallows a drag.
+        drawAnimTreeEdges(statesEl, graph);
         (graph.states || []).forEach(function(s) {
           var div = document.createElement('div');
           div.className = 'anim-tree-node' +
             (graph.current_state === s.name ? ' active' : '');
-          div.textContent = 'AnimationNodeAnimation: ' + s.name;
+          div.style.position = 'absolute';
+          div.style.left = (s.x || 0) + 'px';
+          div.style.top = (s.y || 0) + 'px';
+          div.style.cursor = 'move';
+          div.dataset.state = s.name;
+          var label = document.createElement('span');
+          // The label follows the node's real kind. It was hardcoded to
+          // AnimationNodeAnimation, so a blend2 or blend space node — which the
+          // add form can now create — would have described itself wrongly.
+          label.textContent = animTreeClassName(s.kind) + ': ' + s.name;
+          div.appendChild(label);
+          var del = document.createElement('button');
+          del.className = 'anim-tree-del';
+          del.title = 'Remove state';
+          del.textContent = '\u00d7';
+          del.addEventListener('click', function(ev) {
+            ev.stopPropagation();
+            removeAnimTreeState(s.name);
+          });
+          div.appendChild(del);
+          if (s.kind === 'blend_space_1d' || s.kind === 'blend_space_2d') {
+            div.title = 'Click to edit blend points';
+            div.addEventListener('click', function() { selectAnimTreeBlendSpace(s.name); });
+          }
+          makeAnimTreeStateDraggable(div, s.name);
           statesEl.appendChild(div);
         });
+        // Transitions are EDITABLE rows, not a joined string: the xfade commits
+        // through /transition/set and the button through /transition/remove.
         if (transEl) {
-          transEl.textContent = (graph.transitions || [])
-            .map(function(t) { return byId[t.from] + ' -> ' + byId[t.to]; })
-            .join(', ');
+          transEl.innerHTML = '';
+          (graph.transitions || []).forEach(function(t) {
+            var from = byId[t.from];
+            var to = byId[t.to];
+            if (from === undefined || to === undefined) return;
+            var row = document.createElement('div');
+            row.className = 'anim-tree-transition';
+            row.dataset.from = from;
+            row.dataset.to = to;
+            var name = document.createElement('span');
+            name.textContent = from + ' \u2192 ' + to;
+            row.appendChild(name);
+            var xf = document.createElement('input');
+            xf.type = 'number';
+            xf.className = 'anim-tree-xfade';
+            xf.min = '0';
+            xf.step = '0.05';
+            xf.title = 'Cross-fade time (xfade_time), seconds';
+            xf.value = (t.xfade === undefined ? 0 : t.xfade);
+            xf.addEventListener('change', function() {
+              setAnimTreeTransitionXfade(from, to, parseFloat(xf.value));
+            });
+            row.appendChild(xf);
+            var del = document.createElement('button');
+            del.className = 'anim-tree-del';
+            del.title = 'Remove transition';
+            del.textContent = '\u00d7';
+            del.addEventListener('click', function() {
+              removeAnimTreeTransition(from, to);
+            });
+            row.appendChild(del);
+            transEl.appendChild(row);
+          });
         }
+        renderAnimTreeConnections(graph, byId);
+        renderAnimTreeBlendSpace(graph);
       } catch (e) { /* editor stays usable if the tree endpoint is unavailable */ }
+    }
+
+    // A node's connection point on the canvas. The node box is laid out from
+    // its top-left, so an edge drawn to the raw x/y would touch the corner
+    // rather than the body.
+    function animTreeAnchor(st) {
+      return { x: (st.x || 0) + 60, y: (st.y || 0) + 10 };
+    }
+
+    function drawAnimTreeEdges(container, graph) {
+      var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('id', 'anim-tree-edges');
+      svg.style.position = 'absolute';
+      svg.style.left = '0';
+      svg.style.top = '0';
+      svg.style.width = '100%';
+      svg.style.height = '100%';
+      svg.style.pointerEvents = 'none';
+      var byName = {};
+      (graph.states || []).forEach(function(st) { byName[st.id] = st; });
+      function line(from, to, dashed) {
+        var a = byName[from], b = byName[to];
+        if (!a || !b) return;
+        var pa = animTreeAnchor(a), pb = animTreeAnchor(b);
+        var el = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        el.setAttribute('x1', pa.x);
+        el.setAttribute('y1', pa.y);
+        el.setAttribute('x2', pb.x);
+        el.setAttribute('y2', pb.y);
+        el.setAttribute('stroke', 'currentColor');
+        el.setAttribute('stroke-width', '1');
+        // A blend-tree wire is dashed and a state transition solid, so the two
+        // edge kinds stay distinguishable on a graph that carries both.
+        if (dashed) el.setAttribute('stroke-dasharray', '4 3');
+        el.setAttribute('class', dashed ? 'anim-tree-wire-line' : 'anim-tree-transition-line');
+        svg.appendChild(el);
+      }
+      (graph.transitions || []).forEach(function(t) { line(t.from, t.to, false); });
+      (graph.connections || []).forEach(function(c) { line(c.from, c.to, true); });
+      container.appendChild(svg);
+    }
+
+    function animTreeClassName(kind) {
+      if (kind === 'state_machine') return 'AnimationNodeStateMachine';
+      if (kind === 'blend_space_1d') return 'AnimationNodeBlendSpace1D';
+      if (kind === 'blend_space_2d') return 'AnimationNodeBlendSpace2D';
+      if (kind === 'blend2') return 'AnimationNodeBlend2';
+      return 'AnimationNodeAnimation';
+    }
+
+    // --- Blend space point editor (pat-s3rrv.1) ---------------------------
+    // Godot keeps a blend space's points as indexed resource properties:
+    // `blend_point_N/node` (the animation) and `blend_point_N/pos` (a scalar in
+    // 1D, an "x,y" pair in 2D), alongside min_space/max_space/blend_position.
+    // Those exact key names go through /api/animation/tree/node/param, so the
+    // served graph describes a blend space the way the resource does.
+    var animTreeBlendSpaceNode = null;
+
+    async function setAnimTreeNodeParam(name, key, value) {
+      await fetch('/api/animation/tree/node/param', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name, key: key, value: String(value) })
+      });
+    }
+
+    /// Reads the contiguous run of blend points out of a node's params.
+    function animTreeBlendPoints(params) {
+      var points = [];
+      for (var i = 0; ; i++) {
+        var node = params['blend_point_' + i + '/node'];
+        // An empty string ends the run too: removal clears the trailing slot in
+        // place (the param endpoint sets, it does not delete), so treating ''
+        // as a real point would show a phantom row after every delete.
+        if (node === undefined || node === '') break;
+        points.push({ node: node, pos: params['blend_point_' + i + '/pos'] || '0' });
+      }
+      return points;
+    }
+
+    function selectAnimTreeBlendSpace(state) {
+      animTreeBlendSpaceNode = state;
+      refreshAnimTree();
+    }
+
+    function renderAnimTreeBlendSpace(graph) {
+      var panel = document.getElementById('anim-tree-blendspace');
+      if (!panel) return;
+      var node = (graph.states || []).filter(function(s) {
+        return s.name === animTreeBlendSpaceNode &&
+          (s.kind === 'blend_space_1d' || s.kind === 'blend_space_2d');
+      })[0];
+      if (!node) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = '';
+      var params = node.params || {};
+      var twoD = node.kind === 'blend_space_2d';
+      var title = document.getElementById('anim-tree-bs-title');
+      if (title) title.textContent = animTreeClassName(node.kind) + ': ' + node.name;
+
+      [['anim-tree-bs-min', 'min_space'], ['anim-tree-bs-max', 'max_space'],
+       ['anim-tree-bs-blend', 'blend_position']].forEach(function(pair) {
+        var el = document.getElementById(pair[0]);
+        if (!el) return;
+        el.value = params[pair[1]] === undefined ? '' : params[pair[1]];
+        el.onchange = function() {
+          setAnimTreeNodeParam(node.name, pair[1], el.value).then(refreshAnimTree);
+        };
+      });
+
+      var list = document.getElementById('anim-tree-bs-points');
+      if (!list) return;
+      list.innerHTML = '';
+      var points = animTreeBlendPoints(params);
+      points.forEach(function(pt, i) {
+        var row = document.createElement('div');
+        row.className = 'anim-tree-blend-point';
+        row.dataset.index = i;
+        var label = document.createElement('span');
+        label.textContent = pt.node;
+        row.appendChild(label);
+        var pos = document.createElement('input');
+        pos.className = 'anim-tree-bs-point-pos';
+        // A 2D point needs BOTH components, so it stays a text field: a number
+        // input would silently reject "0.5,0.25".
+        pos.type = twoD ? 'text' : 'number';
+        if (!twoD) pos.step = '0.01';
+        pos.value = pt.pos;
+        pos.addEventListener('change', function() {
+          setAnimTreeNodeParam(node.name, 'blend_point_' + i + '/pos', pos.value)
+            .then(refreshAnimTree);
+        });
+        row.appendChild(pos);
+        var del = document.createElement('button');
+        del.className = 'anim-tree-del';
+        del.title = 'Remove blend point';
+        del.textContent = '\u00d7';
+        del.addEventListener('click', function() { removeAnimTreeBlendPoint(node.name, points, i); });
+        row.appendChild(del);
+        list.appendChild(row);
+      });
+    }
+
+    async function addAnimTreeBlendPoint() {
+      if (!animTreeBlendSpaceNode) return;
+      var anim = document.getElementById('anim-tree-bs-anim');
+      var pos = document.getElementById('anim-tree-bs-pos');
+      if (!anim || !anim.value) return;
+      var resp = await fetch('/api/animation/tree');
+      if (!resp.ok) return;
+      var graph = await resp.json();
+      var node = (graph.states || []).filter(function(s) {
+        return s.name === animTreeBlendSpaceNode;
+      })[0];
+      if (!node) return;
+      var index = animTreeBlendPoints(node.params || {}).length;
+      await setAnimTreeNodeParam(node.name, 'blend_point_' + index + '/node', anim.value);
+      await setAnimTreeNodeParam(node.name, 'blend_point_' + index + '/pos',
+        pos && pos.value ? pos.value : '0');
+      anim.value = '';
+      if (pos) pos.value = '';
+      await refreshAnimTree();
+    }
+
+    // Points are re-indexed by REWRITING the survivors, because the params are a
+    // contiguous `blend_point_N/...` run: blanking one in place would leave a
+    // hole, and the reader stops at the first missing index — every point after
+    // the deleted one would vanish from the editor while staying in the graph.
+    async function removeAnimTreeBlendPoint(name, points, index) {
+      var kept = points.filter(function(_, i) { return i !== index; });
+      for (var i = 0; i < kept.length; i++) {
+        await setAnimTreeNodeParam(name, 'blend_point_' + i + '/node', kept[i].node);
+        await setAnimTreeNodeParam(name, 'blend_point_' + i + '/pos', kept[i].pos);
+      }
+      // The now-unused trailing slot is cleared last, so a reader that runs
+      // concurrently never sees a run shorter than the real point count.
+      await setAnimTreeNodeParam(name, 'blend_point_' + kept.length + '/node', '');
+      await refreshAnimTree();
+    }
+
+    function renderAnimTreeConnections(graph, byId) {
+      var el = document.getElementById('anim-tree-connections');
+      if (!el) return;
+      el.innerHTML = '';
+      (graph.connections || []).forEach(function(c) {
+        var from = byId[c.from];
+        var to = byId[c.to];
+        if (from === undefined || to === undefined) return;
+        var row = document.createElement('div');
+        row.className = 'anim-tree-connection';
+        row.dataset.from = from;
+        row.dataset.to = to;
+        var name = document.createElement('span');
+        // A dashed arrow, to read differently from a transition's solid one.
+        name.textContent = from + ' \u21e2 ' + to;
+        row.appendChild(name);
+        var del = document.createElement('button');
+        del.className = 'anim-tree-del';
+        del.title = 'Remove connection';
+        del.textContent = '\u00d7';
+        del.addEventListener('click', function() { unwireAnimTreeNodes(from, to); });
+        row.appendChild(del);
+        el.appendChild(row);
+      });
+    }
+
+    // pat-s3rrv.1: the four state-machine edit endpoints below were served by
+    // editor_server.rs and called by nothing, so the graph was add-only —
+    // states could not be moved or deleted and transitions could not be edited
+    // or removed. Godot's state-machine editor does all four.
+    async function removeAnimTreeState(name) {
+      await fetch('/api/animation/tree/state/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name })
+      });
+      await refreshAnimTree();
+    }
+
+    async function moveAnimTreeState(name, x, y) {
+      await fetch('/api/animation/tree/state/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name, x: x, y: y })
+      });
+    }
+
+    async function removeAnimTreeTransition(from, to) {
+      await fetch('/api/animation/tree/transition/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: from, to: to })
+      });
+      await refreshAnimTree();
+    }
+
+    async function setAnimTreeTransitionXfade(from, to, xfade) {
+      // The server rejects a negative xfade with a 400; clamping here keeps the
+      // spinner from posting a value it knows will fail.
+      if (!(xfade >= 0)) xfade = 0;
+      await fetch('/api/animation/tree/transition/set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: from, to: to, xfade: xfade })
+      });
+      await refreshAnimTree();
+    }
+
+    // Dragging commits ONCE on mouseup rather than per mousemove: /state/move
+    // rewrites the graph, and posting every pixel would put a request per frame
+    // on the wire for a value only the final position matters for.
+    function makeAnimTreeStateDraggable(el, name) {
+      el.addEventListener('mousedown', function(down) {
+        if (down.target && down.target.classList.contains('anim-tree-del')) return;
+        down.preventDefault();
+        var startX = down.clientX, startY = down.clientY;
+        var originX = parseFloat(el.style.left) || 0;
+        var originY = parseFloat(el.style.top) || 0;
+        function onMove(move) {
+          el.style.left = Math.max(0, originX + (move.clientX - startX)) + 'px';
+          el.style.top = Math.max(0, originY + (move.clientY - startY)) + 'px';
+        }
+        function onUp() {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          moveAnimTreeState(name, parseFloat(el.style.left) || 0, parseFloat(el.style.top) || 0);
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
     }
 
     async function addAnimTreeState() {
       var input = document.getElementById('anim-tree-state-name');
       if (!input || !input.value) return;
+      var kindEl = document.getElementById('anim-tree-kind');
       await fetch('/api/animation/tree/state/add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: input.value })
+        body: JSON.stringify({
+          name: input.value,
+          kind: kindEl && kindEl.value ? kindEl.value : 'animation'
+        })
       });
       input.value = '';
+      await refreshAnimTree();
+    }
+
+    // pat-s3rrv.1: a blend-tree wire. Reuses the From/To fields the transition
+    // button reads, because in Godot's blend-tree editor you are connecting the
+    // same two nodes — only the edge type differs.
+    async function wireAnimTreeNodes() {
+      var from = document.getElementById('anim-tree-from');
+      var to = document.getElementById('anim-tree-to');
+      if (!from || !to || !from.value || !to.value) return;
+      await fetch('/api/animation/tree/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: from.value, to: to.value })
+      });
+      await refreshAnimTree();
+    }
+
+    async function unwireAnimTreeNodes(from, to) {
+      await fetch('/api/animation/tree/disconnect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: from, to: to })
+      });
       await refreshAnimTree();
     }
 
@@ -12493,6 +13614,10 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     if (treeAddBtn) treeAddBtn.addEventListener('click', addAnimTreeState);
     var treeConnectBtn = document.getElementById('anim-tree-connect');
     if (treeConnectBtn) treeConnectBtn.addEventListener('click', connectAnimTreeTransition);
+    var treeWireBtn = document.getElementById('anim-tree-wire');
+    if (treeWireBtn) treeWireBtn.addEventListener('click', wireAnimTreeNodes);
+    var bsAddBtn = document.getElementById('anim-tree-bs-add');
+    if (bsAddBtn) bsAddBtn.addEventListener('click', addAnimTreeBlendPoint);
 
     // --- Theme resource editor (pat-nzgdu.102) ------------------------------
     // Opens a .tres Theme, lists its item overrides, and edits an item's color
@@ -14796,6 +15921,56 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     for (var j = 0; j < btns.length; j++) btns[j].classList.toggle('active', btns[j].getAttribute('data-mode') === mode);
     setCentralView(mode);
   }
+  // ---- Plugin main screens (pat-s3rrv.66) ----
+  //
+  // Godot's main-screen bar carries a tab for every plugin whose
+  // `_has_main_screen()` answers true, and selecting one calls
+  // `_make_visible(true)` on it while hiding the editor it replaced
+  // (editor/plugins/editor_plugin.cpp). The server already ANSWERED
+  // `_has_main_screen` and `_get_plugin_name`; nothing rendered a tab, so the
+  // virtual was decorative — a plugin could declare a main screen and never be
+  // reachable.
+  //
+  // `/api/plugins` reports `name` and `main_screen` for each ENABLED plugin
+  // (both are answered by the live script, so a disabled plugin has neither).
+  async function refreshPluginMainScreens() {
+    var bar = document.querySelector('.mode-buttons');
+    if (!bar) return;
+    // Drop the previous set first: disabling a plugin must remove its tab, and
+    // re-rendering without clearing would accumulate duplicates on every call.
+    var stale = bar.querySelectorAll('.mode-btn.plugin-screen');
+    for (var i = 0; i < stale.length; i++) stale[i].remove();
+
+    var resp = await api('GET', '/api/plugins');
+    var list = (resp && resp.plugins) || [];
+    var focus = document.getElementById('distraction-free-toggle');
+    list.forEach(function(p) {
+      if (!p.main_screen) return;
+      var b = document.createElement('button');
+      b.className = 'mode-btn plugin-screen';
+      b.setAttribute('data-plugin', p.folder);
+      // `_get_plugin_name()` when the script overrides it, else the folder.
+      b.textContent = p.name || p.folder;
+      b.title = 'Main screen provided by the ' + p.folder + ' plugin';
+      b.addEventListener('click', function() { selectPluginMainScreen(p.folder); });
+      bar.insertBefore(b, focus);
+    });
+  }
+
+  async function selectPluginMainScreen(folder) {
+    // One main screen at a time: clear the built-in modes' highlight too, or the
+    // bar would show 2D and the plugin as active together.
+    var btns = document.querySelectorAll('.mode-btn');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle('active', btns[i].getAttribute('data-plugin') === folder);
+    }
+    var resp = await api('POST', '/api/plugins/main_screen', { folder: folder });
+    if (!resp || resp.error) {
+      var why = (resp && resp.error && resp.error.message) || 'unknown error';
+      showFsToast('Could not open plugin main screen: ' + why);
+    }
+  }
+
   function selectMode(mode) {
     api('POST', '/api/editor/mode', { mode: mode });
     applyMode(mode);
@@ -15276,6 +16451,8 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   setupVp2dToolbar();
   setupRightPanelTabs();
   setupConnectDialog();
+  setupCreateScriptDialog();
+  refreshPluginMainScreens();
   setupAddNodeDialog();
   setupPlayButtons();
   setupAnimationPanel();

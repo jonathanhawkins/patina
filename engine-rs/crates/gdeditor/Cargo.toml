@@ -39,3 +39,8 @@ tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+# pat-s3rrv.52: the audio-bus acceptance test proves the layout the editor
+# SAVES is the one the runtime LOADS, which means re-reading it through the
+# real `AudioMixer::load_bus_layout_tres`. DEV-only and acyclic: gdaudio
+# depends on gdcore alone and never on gdeditor.
+gdaudio = { path = "../gdaudio" }

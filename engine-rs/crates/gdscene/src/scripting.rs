@@ -1616,6 +1616,18 @@ impl SceneAccess for SceneTreeAccessor {
         {
             return Some(value);
         }
+        // Skeleton3D's bone API (pat-s3rrv.23). Same shape and same reason as
+        // the agent arm above: it answers `None` for every non-skeleton node,
+        // so the generic table below is reached unchanged.
+        //
+        // ClassDB had already been taught these method names, which opened the
+        // `class_has_method` dispatch gate onto nothing — the 38 working
+        // functions in `skeleton3d` still had no script-facing binding.
+        if let Some(value) =
+            crate::skeleton3d::call_skeleton_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
         // String-ish first argument, shared by the group/child/signal calls.
         let arg_str = |i: usize| -> Option<String> {
             match args.get(i) {
@@ -3518,6 +3530,73 @@ impl SceneAccess for SceneTreeAccessor {
         self.tree().input_map_action_event_count(action)
     }
 
+    /// pat-s3rrv.14: the engine's real bindings, translated into the spec shape
+    /// the interpreter matches events against.
+    ///
+    /// A `GamepadButton` with no Godot `JoyButton` (the analog triggers, which
+    /// are axes there) is DROPPED rather than reported under a wrong index — a
+    /// binding that cannot be named in Godot's terms must not masquerade as one
+    /// that can.
+    fn input_map_action_events(
+        &self,
+        action: &str,
+    ) -> Vec<gdscript_interop::bindings::InputEventSpec> {
+        use gdplatform::input::ActionBinding as B;
+        use gdscript_interop::bindings::InputEventSpec;
+        self.tree()
+            .input_map_action_bindings(action)
+            .iter()
+            .filter_map(|binding| match binding {
+                B::KeyBinding(key) => Some(InputEventSpec::key(key.to_godot_keycode())),
+                B::KeyWithModifiers(combo) => Some(InputEventSpec {
+                    class: "InputEventKey".to_string(),
+                    code: combo.key.to_godot_keycode(),
+                    axis_value: 0.0,
+                    shift: combo.shift,
+                    ctrl: combo.ctrl,
+                    alt: combo.alt,
+                }),
+                B::MouseBinding(button) => Some(InputEventSpec {
+                    class: "InputEventMouseButton".to_string(),
+                    code: button.to_godot_index(),
+                    axis_value: 0.0,
+                    shift: false,
+                    ctrl: false,
+                    alt: false,
+                }),
+                B::GamepadButtonBinding(button) => {
+                    button.to_godot_index().map(|code| InputEventSpec {
+                        class: "InputEventJoypadButton".to_string(),
+                        code,
+                        axis_value: 0.0,
+                        shift: false,
+                        ctrl: false,
+                        alt: false,
+                    })
+                }
+                // A bare axis binding presses on POSITIVE deflection, which is
+                // what `ActionBinding::axis_positive` means; the directional
+                // form below carries its own sign.
+                B::GamepadAxisBinding(axis) => Some(InputEventSpec {
+                    class: "InputEventJoypadMotion".to_string(),
+                    code: axis.to_godot_index(),
+                    axis_value: 1.0,
+                    shift: false,
+                    ctrl: false,
+                    alt: false,
+                }),
+                B::GamepadAxisDirection { axis, positive } => Some(InputEventSpec {
+                    class: "InputEventJoypadMotion".to_string(),
+                    code: axis.to_godot_index(),
+                    axis_value: if *positive { 1.0 } else { -1.0 },
+                    shift: false,
+                    ctrl: false,
+                    alt: false,
+                }),
+            })
+            .collect()
+    }
+
     fn get_connected_joypads(&self) -> Vec<i64> {
         self.tree().input_connected_joypads().to_vec()
     }
@@ -4646,6 +4725,15 @@ fn astar_call_shared<V: crate::astar::AStarVector>(
             Some(Variant::Nil)
         }
         "get_point_count" => Some(Variant::Int(a.get_point_count() as i64)),
+        // pat-s3rrv.19: the id/capacity surface. `get_available_point_id` is
+        // the one scripts reach for constantly — `a.add_point(a.get_available_point_id(), pos)`.
+        "get_available_point_id" => Some(Variant::Int(a.get_available_point_id())),
+        "get_point_capacity" => Some(Variant::Int(a.get_point_capacity() as i64)),
+        "reserve_space" => {
+            let n = astar_int(args, 0).max(0) as usize;
+            a.reserve_space(n);
+            Some(Variant::Nil)
+        }
         "get_point_ids" => Some(Variant::PackedInt64Array(a.get_point_ids())),
         "get_point_weight_scale" => Some(Variant::Float(
             a.get_point_weight_scale(astar_int(args, 0)).unwrap_or(0.0) as f64,
@@ -4719,6 +4807,12 @@ fn astar_call_2d(a: &mut crate::astar::AStar2D, method: &str, args: &[Variant]) 
         "get_closest_point" => Some(Variant::Int(
             a.get_closest_point(astar_v2(args, 0), astar_bool(args, 1, false)),
         )),
+        // pat-s3rrv.19: the fallback is the dimension's zero — `AStarVector`
+        // cannot name one generically, and Godot returns a default-constructed
+        // vector when no segment qualifies.
+        "get_closest_position_in_segment" => Some(Variant::Vector2(
+            a.get_closest_position_in_segment(astar_v2(args, 0), gdcore::math::Vector2::ZERO),
+        )),
         _ => astar_call_shared(a, method, args),
     }
 }
@@ -4747,6 +4841,9 @@ fn astar_call_3d(a: &mut crate::astar::AStar3D, method: &str, args: &[Variant]) 
         )),
         "get_closest_point" => Some(Variant::Int(
             a.get_closest_point(astar_v3(args, 0), astar_bool(args, 1, false)),
+        )),
+        "get_closest_position_in_segment" => Some(Variant::Vector3(
+            a.get_closest_position_in_segment(astar_v3(args, 0), gdcore::math::Vector3::ZERO),
         )),
         _ => astar_call_shared(a, method, args),
     }
@@ -4815,6 +4912,9 @@ fn astar_call_grid(
             g.set_jumping_enabled(astar_bool(args, 0, true));
             Some(Variant::Nil)
         }
+        // pat-s3rrv.19: `update()` used to be a no-op, so this had nothing to
+        // report; the flag it clears is what a script branches on.
+        "is_dirty" => Some(Variant::Bool(g.is_dirty())),
         "update" => {
             g.update();
             Some(Variant::Nil)
@@ -4893,6 +4993,164 @@ mod tests {
     use crate::main_loop::MainLoop;
     use crate::node::Node;
     use crate::scene_tree::SceneTree;
+
+    /// pat-s3rrv.19: does the AStar registry round-trip AT ALL?
+    ///
+    /// The script-level diagnostic proved `AStar2D.new()` hands back a
+    /// correctly tagged handle (`0xa100000000000001`) and that *every* method on
+    /// it then fails — including `get_point_count()`, which takes no arguments.
+    /// So `astar_call` returns `None` for an entry `astar_new` has just
+    /// inserted, which should be impossible: both use the same file-level
+    /// `thread_local!` and the same key.
+    ///
+    /// This calls the two trait methods back to back with NOTHING in between —
+    /// no interpreter, no script, no `stacker::maybe_grow` stack switch. It
+    /// splits the last fork in that bead:
+    ///
+    /// * FAILS → the registry itself is broken, and the fault is in these ~30
+    ///   lines.
+    /// * PASSES → the registry is fine and something on the interpreter path
+    ///   between `.new()` and the method call is losing it.
+    #[test]
+    fn astar_registry_round_trips_a_handle() {
+        use gdscript_interop::bindings::SceneAccess;
+
+        let mut tree = SceneTree::new();
+        // SAFETY: `tree` outlives the accessor, which never escapes this test.
+        let mut access = unsafe { SceneTreeAccessor::new(&mut tree as *mut SceneTree) };
+
+        let raw = access
+            .astar_new("AStar2D")
+            .expect("AStar2D.new() must mint a handle");
+        assert_eq!(
+            raw & 0xFF00_0000_0000_0000,
+            gdscript_interop::bindings::ASTAR_HANDLE_TAG,
+            "the minted handle must carry the AStar tag",
+        );
+
+        let answer = access.astar_call(raw, "get_point_count", &[]);
+        assert_eq!(
+            answer,
+            Some(Variant::Int(0)),
+            "`astar_call` must find the entry `astar_new` just inserted. `None` \
+             here means the registry lookup is the bug — the handle is right \
+             (verified above) and no interpreter was involved at all",
+        );
+
+        // …and it must still be there on a second call, i.e. the lookup is not
+        // consuming the entry.
+        assert_eq!(
+            access.astar_call(raw, "get_point_count", &[]),
+            Some(Variant::Int(0)),
+            "the entry must survive being looked up",
+        );
+    }
+
+    /// pat-s3rrv.19: an AStar handle must be claimed by NO other handle family.
+    ///
+    /// This is the bug the whole bead turned on. `ASTAR_HANDLE_TAG` was `0xA1`,
+    /// which is byte-for-byte `gdcore::xml_parser`'s `XML_HANDLE_TAG` — the same
+    /// tag in a different crate. `call_method_on` checks `is_xml_parser_handle`
+    /// **before** the AStar branch, so every AStar handle was claimed by
+    /// XMLParser and every method on it died as
+    /// `MethodNotFound("XMLParser.<method>")`.
+    ///
+    /// It hid for eight passes because the symptom points at the wrong layer:
+    /// `AStar2D.new()` works (the constructor never consults the predicates),
+    /// the registry round-trips in isolation, and the failure is identical for
+    /// zero-argument methods — so the constructor, the registry and the argument
+    /// conversion all look guilty in turn and all check out clean.
+    ///
+    /// ⚠️ A tag byte is a WORKSPACE-wide namespace that nothing enforces. A
+    /// sweep of `gdscript-interop` alone — which is where `ASTAR_HANDLE_TAG`
+    /// lives — misses `gdcore`, `gdresource` and `gdobject` entirely. That is
+    /// precisely the sweep I ran, twice, and it came back clean both times.
+    #[test]
+    fn an_astar_handle_is_not_claimed_by_another_handle_family() {
+        use gdscript_interop::bindings::SceneAccess;
+
+        let mut tree = SceneTree::new();
+        // SAFETY: `tree` outlives the accessor, which never escapes this test.
+        let mut access = unsafe { SceneTreeAccessor::new(&mut tree as *mut SceneTree) };
+
+        for class in ["AStar2D", "AStar3D", "AStarGrid2D"] {
+            let raw = access.astar_new(class).expect("handle minted");
+            let id = gdcore::id::ObjectId::from_raw(raw);
+
+            assert!(
+                gdscript_interop::bindings::is_astar_handle(raw),
+                "{class} must mint an AStar-tagged handle",
+            );
+            // The collision that caused this bead. `is_xml_parser_handle` is
+            // checked earlier in `call_method_on`, so a shared tag silently
+            // steals every AStar method call.
+            assert!(
+                !gdcore::xml_parser::is_xml_parser_handle(id),
+                "{class}'s handle {raw:#018x} is being claimed by XMLParser — \
+                 the two tags have collided again. `call_method_on` checks \
+                 XMLParser first, so every AStar method will die as \
+                 MethodNotFound(\"XMLParser.<method>\")",
+            );
+            assert!(
+                !gdcore::is_file_access_handle(id) && !gdcore::is_dir_access_handle(id),
+                "{class}'s handle collides with a gdcore file handle",
+            );
+            assert!(
+                !gdresource::is_config_file_handle(id)
+                    && !gdresource::is_zip_reader_handle(id)
+                    && !gdresource::is_zip_packer_handle(id)
+                    && !gdresource::pck::is_pck_packer_handle(id),
+                "{class}'s handle collides with a gdresource handle",
+            );
+            assert!(
+                !gdobject::refcounted_handle::is_refcounted_handle(id),
+                "{class}'s handle collides with the RefCounted family",
+            );
+        }
+    }
+
+    /// pat-s3rrv.19: the next layer down — a script WITH access installed.
+    ///
+    /// `astar_registry_round_trips_a_handle` proved the registry is sound:
+    /// `astar_new` inserts and `astar_call` finds it again. So the handle is
+    /// lost somewhere on the interpreter path instead.
+    ///
+    /// This runs the real thing one step below `SceneTree::call_script_method`:
+    /// a `GDScriptNodeInstance` with a genuine `SceneTreeAccessor` installed,
+    /// invoked directly so the `Result` — and with it the **error text** — comes
+    /// back instead of being swallowed. `call_script_method` discards the error
+    /// (it returns `Option`), which is why every previous run could only say
+    /// *that* it failed and never *why*.
+    #[test]
+    fn astar_reaches_a_script_with_access_installed() {
+        use gdscript_interop::bindings::ScriptInstance;
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let node = tree
+            .add_child(root, Node::new("Pathfinder", "Node"))
+            .expect("child adds");
+        let src = "extends Node\n\
+                   func run():\n\
+                   \x20   var a = AStar2D.new()\n\
+                   \x20   return a.get_point_count()\n";
+        let mut script =
+            crate::GDScriptNodeInstance::from_source(src, node).expect("script parses");
+
+        // SAFETY: `tree` outlives `script` in this test and is never moved
+        // afterwards; the accessor does not escape.
+        let accessor = unsafe { SceneTreeAccessor::new(&mut tree as *mut SceneTree) };
+        script.set_scene_access(Box::new(accessor), node.raw());
+
+        let out = script.call_method("run", &[]);
+        assert_eq!(
+            out.as_ref().ok(),
+            Some(&Variant::Int(0)),
+            "an empty AStar2D has 0 points. The error text is the deliverable \
+             here — it names the layer that loses a handle the registry \
+             demonstrably round-trips: {out:?}",
+        );
+    }
 
     // pat-u3l8c.12: `load("x.gd").new()` — the accessor loads the script, makes
     // a node of its base class with the script attached, and returns its id.
