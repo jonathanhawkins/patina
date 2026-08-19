@@ -1277,6 +1277,37 @@ fn playback_param_name(path: &str) -> Option<&str> {
     }
 }
 
+/// Whether `node_id` is an `HTTPRequest` (pat-s3rrv.78).
+/// The HTTPRequest settings as authored on the NODE (pat-s3rrv.78).
+///
+/// ⚠️ Read from the node properties, not from a copy on `HttpRequestNode`.
+/// ClassDB registers `timeout` and `max_redirects` on HTTPRequest with Godot's
+/// defaults, so a `.tscn` writing `timeout = 5.0` and a script writing
+/// `r.timeout = 5.0` both land here — and Godot treats `r.timeout = 5.0` and
+/// `r.set_timeout(5.0)` as the same operation. A second copy on the node struct
+/// would make those two disagree, with whichever one the transport happened to
+/// read winning silently.
+fn http_settings(tree: &SceneTree, node_id: NodeId) -> crate::http_request_node::RequestSettings {
+    let node = tree.get_node(node_id);
+    crate::http_request_node::RequestSettings {
+        timeout: match node.map(|n| n.get_property("timeout")) {
+            Some(Variant::Float(f)) => f,
+            Some(Variant::Int(i)) => i as f64,
+            _ => crate::http_request_node::DEFAULT_TIMEOUT,
+        },
+        max_redirects: match node.map(|n| n.get_property("max_redirects")) {
+            Some(Variant::Int(i)) => i,
+            _ => crate::http_request_node::DEFAULT_MAX_REDIRECTS,
+        },
+    }
+}
+
+fn is_http_request(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .map(|n| n.class_name() == "HTTPRequest")
+        .unwrap_or(false)
+}
+
 /// Whether `node_id` is a `RichTextLabel` (pat-s3rrv.74).
 fn is_rich_text_label(tree: &SceneTree, node_id: NodeId) -> bool {
     tree.get_node(node_id)
@@ -1668,6 +1699,48 @@ impl SceneAccess for SceneTreeAccessor {
         {
             return Some(value);
         }
+        // ShapeCast2D answers its own surface (pat-s3rrv.87), and must do so
+        // BEFORE the generic table below: that table's `is_colliding` /
+        // `get_collider` / `get_collision_point` arms read RayCast2D's SINGULAR
+        // `_hit_point` / `_hit_collider` keys, which a shape cast never writes —
+        // it publishes indexed arrays. Left to the table, a ShapeCast2D would
+        // read a raycast's empty results and report `false` forever. The handler
+        // declines every non-ShapeCast2D node, so the table stays reachable.
+        if method == "force_shapecast_update" {
+            // Inlined rather than factored into a helper method: this block is
+            // inside `impl SceneAccess`, which may only contain that trait's own
+            // members, so a helper here would mean widening the trait in
+            // gdscript-interop for one caller.
+            //
+            // Godot re-runs the sweep immediately so the SAME frame observes the
+            // result; the per-tick pass runs before the script phase, so this is
+            // what lets a script re-query after moving the cast mid-frame.
+            let addr = self.tree().script_physics_addr();
+            if addr != 0 {
+                // SAFETY: identical contract to `force_raycast_update_2d` —
+                // `set_script_physics_server` stored the address of a live
+                // `PhysicsServer` that `MainLoop` clears before the server can
+                // move or drop, and the server is a sibling of the tree, never
+                // stored inside it, so this shared borrow cannot alias the
+                // `&mut SceneTree` taken on the next line.
+                let physics = unsafe { &*(addr as *const crate::physics_server::PhysicsServer) };
+                crate::shapecast2d::force_shapecast_update(self.tree_mut(), physics, nid);
+            }
+            return Some(Variant::Nil);
+        }
+        if let Some(value) =
+            crate::shapecast2d::call_shapecast_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+        // TileMapLayer's cell/coordinate API (pat-s3rrv.88). Every operation had
+        // a Rust implementation and no binding at all, so a running game could
+        // not touch its tilemap — procedural generation, the node's dominant
+        // use, was impossible. Declines every non-tilemap node.
+        if let Some(value) = crate::tilemap::call_tilemap_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
         // Skeleton3D's bone API (pat-s3rrv.23). Same shape and same reason as
         // the agent arm above: it answers `None` for every non-skeleton node,
         // so the generic table below is reached unchanged.
@@ -1751,6 +1824,64 @@ impl SceneAccess for SceneTreeAccessor {
                 let recursive = !matches!(args.get(1), Some(Variant::Bool(false)));
                 self.tree_mut()
                     .set_multiplayer_authority(nid, authority, recursive);
+                Some(Variant::Nil)
+            }
+            // -- MultiplayerSynchronizer visibility (pat-s3rrv.17) -----------
+            //
+            // Both halves of this feature already existed and could not meet:
+            // the per-peer state lives on the synchronizer and `poll_outbound`
+            // already refuses to send to a peer it is hidden from, but no script
+            // could reach either one.
+            "set_visibility_for" => {
+                let peer = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => return Some(Variant::Nil),
+                };
+                // ⚠️ `visible` is required. Reading a missing or non-bool second
+                // argument as `false` would HIDE the node — the opposite of the
+                // no-op a malformed call should be.
+                let Some(Variant::Bool(visible)) = args.get(1) else {
+                    return Some(Variant::Nil);
+                };
+                self.tree_mut()
+                    .synchronizer_set_visibility_for(nid, peer, *visible);
+                Some(Variant::Nil)
+            }
+            "is_visible_to" => {
+                let peer = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => return Some(Variant::Nil),
+                };
+                // Reads the cached filter verdict plus the stored per-peer
+                // state; it never runs a filter, so `tree()` suffices.
+                Some(Variant::Bool(
+                    self.tree().synchronizer_is_visible_to(nid, peer),
+                ))
+            }
+            "add_visibility_filter" => {
+                // The Callable is stored, not called here: it is evaluated once
+                // per peer during the outbound replication pass, which is the
+                // only place the peer list exists.
+                let Some(filter) = args.first().cloned() else {
+                    return Some(Variant::Nil);
+                };
+                self.tree_mut()
+                    .synchronizer_add_visibility_filter(nid, filter);
+                Some(Variant::Nil)
+            }
+            // Godot `remove_visibility_filter(callable)` — void, and silent
+            // about a filter that was never added (`HashSet::erase`,
+            // `multiplayer_synchronizer.cpp:216`). Without this arm a script
+            // could install a filter and never take it back: the only way to
+            // stop filtering was to free the synchronizer.
+            "remove_visibility_filter" => {
+                let Some(filter) = args.first().cloned() else {
+                    return Some(Variant::Nil);
+                };
+                self.tree_mut()
+                    .synchronizer_remove_visibility_filter(nid, filter);
                 Some(Variant::Nil)
             }
             // -- Physics 2D space queries (pat-s3rrv.26) ---------------------
@@ -2758,6 +2889,112 @@ impl SceneAccess for SceneTreeAccessor {
                 Some(Variant::Nil)
             }
 
+            // -- HTTPRequest (pat-s3rrv.78) ----------------------------------
+            //
+            // ⚠️ `HTTPRequest` was registered in ClassDB with a 602-line
+            // transport behind it and NO route from a script to either. A
+            // `.tscn` node of that type loaded, answered `get_class()`
+            // correctly, and did nothing — which is worse than being absent,
+            // because everything except the behaviour says it works.
+            "request" if is_http_request(self.tree(), nid) => {
+                let url = arg_str(0)?;
+                // Godot: request(url, custom_headers, method, request_data).
+                // The method ordinal is argument 2 (`http_client.h:118-126`).
+                let method_ord = match args.get(2) {
+                    Some(Variant::Int(m)) => *m,
+                    _ => 0,
+                };
+                let Some(method) = crate::http_request_node::method_from_int(method_ord) else {
+                    // ERR_UNAVAILABLE. OPTIONS/TRACE/CONNECT have no transport
+                    // variant, and silently substituting GET would look like a
+                    // successful request while doing something else entirely.
+                    return Some(Variant::Int(2));
+                };
+                let body = match args.get(3) {
+                    Some(Variant::String(s)) => s.clone().into_bytes(),
+                    Some(Variant::PackedByteArray(b)) => b.clone(),
+                    _ => Vec::new(),
+                };
+                // ⚠️ Resolved BEFORE the mutable borrow below; reading the
+                // tree inside the `http_request_for` call is E0502.
+                let settings = http_settings(self.tree(), nid);
+                let code = self
+                    .tree_mut()
+                    .http_request_for(nid)
+                    .request(&url, method, body, settings);
+                Some(Variant::Int(code as i64))
+            }
+            // `request_raw` differs only in taking the body as bytes, which the
+            // arm above already accepts.
+            "request_raw" if is_http_request(self.tree(), nid) => {
+                let url = arg_str(0)?;
+                let method_ord = match args.get(2) {
+                    Some(Variant::Int(m)) => *m,
+                    _ => 0,
+                };
+                let Some(method) = crate::http_request_node::method_from_int(method_ord) else {
+                    return Some(Variant::Int(2));
+                };
+                let body = match args.get(3) {
+                    Some(Variant::PackedByteArray(b)) => b.clone(),
+                    Some(Variant::String(s)) => s.clone().into_bytes(),
+                    _ => Vec::new(),
+                };
+                // ⚠️ Resolved BEFORE the mutable borrow below; reading the
+                // tree inside the `http_request_for` call is E0502.
+                let settings = http_settings(self.tree(), nid);
+                let code = self
+                    .tree_mut()
+                    .http_request_for(nid)
+                    .request(&url, method, body, settings);
+                Some(Variant::Int(code as i64))
+            }
+            // ⚠️ `cancel_request` returns VOID and emits nothing. The
+            // capability has existed on the node the whole time
+            // (`HttpRequestNode::cancel`, which consumes the transport's
+            // recorded failure so no late `request_completed` fires, matching
+            // `http_request.cpp:186-210`) with no route from a script to reach
+            // it — a cancel button in a game could not cancel anything.
+            "cancel_request" if is_http_request(self.tree(), nid) => {
+                self.tree_mut().http_request_for(nid).cancel();
+                Some(Variant::Nil)
+            }
+            // Godot exposes `timeout` and `max_redirects` as properties; these
+            // are the bound setter/getter names, and they read and write the
+            // same node properties the `.tscn` does, so `r.timeout = 5.0` and
+            // `r.set_timeout(5.0)` cannot disagree.
+            "set_timeout" if is_http_request(self.tree(), nid) => {
+                let requested = match args.first() {
+                    Some(Variant::Float(f)) => *f,
+                    Some(Variant::Int(i)) => *i as f64,
+                    _ => return Some(Variant::Nil),
+                };
+                let current = http_settings(self.tree(), nid).timeout;
+                // Negative is rejected, not clamped — see `accepted_timeout`.
+                let value = crate::http_request_node::accepted_timeout(current, requested);
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("timeout", Variant::Float(value));
+                }
+                Some(Variant::Nil)
+            }
+            "get_timeout" if is_http_request(self.tree(), nid) => {
+                Some(Variant::Float(http_settings(self.tree(), nid).timeout))
+            }
+            "set_max_redirects" if is_http_request(self.tree(), nid) => {
+                let Some(Variant::Int(amount)) = args.first() else {
+                    return Some(Variant::Nil);
+                };
+                // ⚠️ Stored verbatim, negatives included: a negative means
+                // UNLIMITED (`http_request.cpp:255`), not "none".
+                let amount = *amount;
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("max_redirects", Variant::Int(amount));
+                }
+                Some(Variant::Nil)
+            }
+            "get_max_redirects" if is_http_request(self.tree(), nid) => {
+                Some(Variant::Int(http_settings(self.tree(), nid).max_redirects))
+            }
             // -- RichTextLabel text API (pat-s3rrv.74) -----------------------
             //
             // Godot builds rich text imperatively as well as declaratively;

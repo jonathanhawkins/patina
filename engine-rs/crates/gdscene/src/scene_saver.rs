@@ -888,6 +888,38 @@ fn collect_tileset_tables(tree: &SceneTree, node_ids: &[NodeId]) -> TileSetTable
                 occl_tiles.sort_by_key(|a| (a.y, a.x));
             }
 
+            // Tiles carrying custom data (pat-s3rrv.65). Built from the
+            // PAINTED CELLS like `occl_tiles`, not from the physics companions:
+            // custom data is authored per tile and a tile may carry it while
+            // being neither solid, walkable nor shadow-casting. Deriving it from
+            // `tiles` instead would silently drop exactly those tiles.
+            let custom_layer_names = tileset_custom_data_layer_names(node);
+            let mut custom_tiles: Vec<gdcore::math::Vector2i> = Vec::new();
+            if !custom_layer_names.is_empty() {
+                let cells = match node.get_property("tile_map_data") {
+                    Variant::PackedByteArray(bytes) => crate::tilemap::decode_tile_map_data(&bytes),
+                    _ => std::collections::HashMap::new(),
+                };
+                for data in cells.values() {
+                    if data.source_id != source_id || custom_tiles.contains(&data.atlas_coords) {
+                        continue;
+                    }
+                    let has_any = custom_layer_names.iter().any(|name| {
+                        !node
+                            .get_property(&crate::tilemap::tile_custom_data_key(
+                                source_id,
+                                data.atlas_coords,
+                                name,
+                            ))
+                            .is_nil()
+                    });
+                    if has_any {
+                        custom_tiles.push(data.atlas_coords);
+                    }
+                }
+                custom_tiles.sort_by_key(|a| (a.y, a.x));
+            }
+
             let physics_tiles: Vec<gdcore::math::Vector2i> =
                 tiles.iter().map(|(a, _)| *a).collect();
 
@@ -909,6 +941,29 @@ fn collect_tileset_tables(tree: &SceneTree, node_ids: &[NodeId]) -> TileSetTable
                     node.get_property(&crate::tilemap::tile_physics_one_way_key(source_id, atlas));
                 if let Variant::Bool(b) = one_way {
                     writeln!(text, "{ax}:{ay}/0/physics_layer_0/polygon_0/one_way = {b}").unwrap();
+                }
+
+                // ⚠️ Godot keys a tile's custom data by layer INDEX
+                // (`custom_data_<i>`, tile_set.cpp:6848) while Patina's
+                // companion is keyed by layer NAME, so the enumeration order
+                // here IS the mapping — it must match the
+                // `custom_data_layer_<i>/name` declarations written above.
+                //
+                // The value is emitted verbatim; see the loader for why the
+                // layer's declared type is deliberately not applied.
+                for (index, name) in custom_layer_names.iter().enumerate() {
+                    let value = node.get_property(&crate::tilemap::tile_custom_data_key(
+                        source_id, atlas, name,
+                    ));
+                    if value.is_nil() {
+                        continue;
+                    }
+                    writeln!(
+                        text,
+                        "{ax}:{ay}/0/custom_data_{index} = {}",
+                        format_variant_value(&value)
+                    )
+                    .unwrap();
                 }
                 if nav_tiles.contains(&atlas) {
                     writeln!(
@@ -941,7 +996,11 @@ fn collect_tileset_tables(tree: &SceneTree, node_ids: &[NodeId]) -> TileSetTable
             // both walkable and occluding would otherwise have its
             // `<ax>:<ay>/0 = 0` declaration written twice.
             let mut layer_only: Vec<gdcore::math::Vector2i> = Vec::new();
-            for atlas in nav_tiles.iter().chain(occl_tiles.iter()) {
+            for atlas in nav_tiles
+                .iter()
+                .chain(occl_tiles.iter())
+                .chain(custom_tiles.iter())
+            {
                 if !physics_tiles.contains(atlas) && !layer_only.contains(atlas) {
                     layer_only.push(*atlas);
                 }
@@ -950,6 +1009,23 @@ fn collect_tileset_tables(tree: &SceneTree, node_ids: &[NodeId]) -> TileSetTable
             for atlas in &layer_only {
                 let (ax, ay) = (atlas.x, atlas.y);
                 writeln!(text, "{ax}:{ay}/0 = 0").unwrap();
+                // Same emission as the physics loop above — a tile reaches this
+                // branch precisely because it has no collision, which says
+                // nothing about whether it carries custom data.
+                for (index, name) in custom_layer_names.iter().enumerate() {
+                    let value = node.get_property(&crate::tilemap::tile_custom_data_key(
+                        source_id, *atlas, name,
+                    ));
+                    if value.is_nil() {
+                        continue;
+                    }
+                    writeln!(
+                        text,
+                        "{ax}:{ay}/0/custom_data_{index} = {}",
+                        format_variant_value(&value)
+                    )
+                    .unwrap();
+                }
                 if nav_tiles.contains(atlas) {
                     writeln!(
                         text,
@@ -1017,6 +1093,25 @@ fn collect_tileset_tables(tree: &SceneTree, node_ids: &[NodeId]) -> TileSetTable
         };
         if has_occlusion {
             writeln!(text, "occlusion_layer_0/light_mask = 1").unwrap();
+        }
+
+        // Custom data layers are declared on the TILESET and referenced per
+        // tile by index (pat-s3rrv.65). Without these declarations Godot has no
+        // layer for a `custom_data_<i>` key to belong to, so the per-tile values
+        // written below would be dropped on load — the same rule that makes
+        // `physics_layer_0/collision_layer` and `occlusion_layer_0/light_mask`
+        // mandatory above.
+        //
+        // ⚠️ `name` only. Godot also stores `custom_data_layer_<i>/type`, but a
+        // guessed type is worse than an absent one: it would silently coerce the
+        // value on load, whereas an absent type leaves the Variant as authored.
+        for (index, name) in tileset_custom_data_layer_names(node).iter().enumerate() {
+            writeln!(
+                text,
+                "custom_data_layer_{index}/name = {}",
+                format_variant_value(&Variant::String(name.clone()))
+            )
+            .unwrap();
         }
         for (source_id, sub_id) in &source_refs {
             writeln!(text, "sources/{source_id} = SubResource(\"{sub_id}\")").unwrap();
@@ -1417,6 +1512,25 @@ fn parse_ext_resource_id(s: &str) -> Option<String> {
     Some(inner.to_string())
 }
 
+/// The custom data layer NAMES declared on a TileMapLayer's flattened TileSet.
+///
+/// Accepts both spellings for the same reason the editor's reader does: the
+/// route writes a `PackedStringArray`, but a `.tscn` round trip can land the
+/// same list as a generic `Array` of strings.
+fn tileset_custom_data_layer_names(node: &crate::node::Node) -> Vec<String> {
+    match node.get_property(crate::tilemap::TILE_CUSTOM_DATA_LAYERS) {
+        Variant::PackedStringArray(v) => v,
+        Variant::Array(items) => items
+            .iter()
+            .filter_map(|v| match v {
+                Variant::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Property keys that are internal companions, never emitted as scene
 /// properties (they are re-encoded as resource references / header attributes).
 fn is_internal_prop(key: &str) -> bool {
@@ -1461,9 +1575,38 @@ fn is_internal_prop(key: &str) -> bool {
         || key.starts_with(crate::tilemap::TILE_CUSTOM_DATA_PREFIX)
         || key == crate::tilemap::TILE_CUSTOM_DATA_LAYERS
         || key.starts_with("__tile_nav_")
+        // ⚠️ The occlusion companions were missed when the others were filtered
+        // (pat-s3rrv.65). `__tile_occluder_sources__` and
+        // `__tile_occluder_polygon__` are the same kind of cache and are
+        // regenerated above as a real `OccluderPolygon2D` sub-resource plus
+        // `occlusion_layer_0/polygon_0/polygon`, so writing the raw keys too
+        // both duplicates the data and emits properties Godot cannot parse —
+        // exactly the corruption described for `__tile_physics_*`.
+        //
+        // It also made the whole-tile default explicit: the raw key round-tripped
+        // an empty `PackedVector2Array` back onto the node, so an untouched tile
+        // came back looking edited instead of absent.
+        || key.starts_with("__tile_occluder_")
         || key == "_instance"
         || key == "_instance_path"
         || key == "_script_path"
+        // `_camera2d_scroll_center` / `_camera2d_scroll_rotation` are the
+        // Camera2D's running scroll state, republished every frame by
+        // `behavioral_2d::process_camera2d_scroll` (pat-s3rrv.84). They are
+        // frame state, not authored data — writing them would invent properties
+        // Godot has never heard of, and would pin a saved scene to whatever
+        // centre the camera happened to be easing through when it was saved.
+        || key.starts_with("_camera2d_scroll_")
+        // `__gradient_offsets` / `__gradient_colors` / `__width_curve_samples`
+        // cache a Line2D's `gradient` and `width_curve` sub-resources, flattened
+        // onto the node so the rasterizer can reach them (pat-s3rrv.85). The
+        // node's own `gradient` / `width_curve` properties still carry the
+        // `SubResource` references that round-trip; emitting the caches too
+        // would invent properties Godot has never heard of, exactly as for
+        // `__shape__*` above — and `__width_curve_samples` would additionally
+        // write a 101-entry baked table in place of the four authored points.
+        || key.starts_with("__gradient_")
+        || key.starts_with("__width_curve_")
 }
 
 /// The `type=` an external resource is declared as in a `[ext_resource]` header,

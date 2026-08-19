@@ -16403,6 +16403,33 @@ fn api_input_mouse_move(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
     };
 
     state.mouse_position = (x, y);
+    // pat-s3rrv.76: a PointerEvent carries stylus data that a MouseEvent does
+    // not. Recorded on the tree just before the motion event is pushed, so
+    // `_input` sees Godot's pressure/tilt/pen_inverted instead of the zeros
+    // `input_event_to_variant` used to hardcode.
+    //
+    // ⚠️ Only written when the payload ACTUALLY carries pen data. Writing
+    // unconditionally would reset pressure to 0.0 on every ordinary mouse move,
+    // which a script reads as "the pen was lifted" rather than "no new data" —
+    // and the values are sticky precisely so they survive events that omit them.
+    let has_pen = v["pressure"].is_number()
+        || v["tilt_x"].is_number()
+        || v["tilt_y"].is_number()
+        || v["pen_inverted"].is_boolean();
+    if has_pen {
+        if let Some(ref mut main_loop) = state.run_main_loop {
+            main_loop
+                .tree_mut()
+                .set_pen_state(gdscene::scene_tree::PenState {
+                    pressure: v["pressure"].as_f64().unwrap_or(0.0) as f32,
+                    tilt: gdcore::math::Vector2::new(
+                        v["tilt_x"].as_f64().unwrap_or(0.0) as f32,
+                        v["tilt_y"].as_f64().unwrap_or(0.0) as f32,
+                    ),
+                    inverted: v["pen_inverted"].as_bool().unwrap_or(false),
+                });
+        }
+    }
     // Motion carries the frame-to-frame delta, as Godot's
     // InputEventMouseMotion.relative does (pat-0q2kx.23).
     if let Some(ref mut main_loop) = state.run_main_loop {

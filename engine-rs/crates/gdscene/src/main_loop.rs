@@ -1989,6 +1989,29 @@ impl MainLoop {
         }
     }
 
+    /// Sweeps every `ShapeCast2D` (pat-s3rrv.87).
+    ///
+    /// Godot updates a ShapeCast2D under
+    /// `NOTIFICATION_INTERNAL_PHYSICS_PROCESS`, so this sits beside
+    /// [`Self::process_raycasts`] and shares its shape: collect ids from an
+    /// immutable read, then drive each one through the same entry point the
+    /// scripted `force_shapecast_update()` calls, so a per-frame sweep and an
+    /// on-demand one can never disagree.
+    pub fn process_shapecasts(&mut self) {
+        let mut casts: Vec<NodeId> = Vec::new();
+        for id in self.tree.all_nodes_in_tree_order() {
+            let Some(node) = self.tree.get_node(id) else {
+                continue;
+            };
+            if node.class_name() == "ShapeCast2D" {
+                casts.push(id);
+            }
+        }
+        for id in casts {
+            crate::shapecast2d::force_shapecast_update(&mut self.tree, &self.physics_server, id);
+        }
+    }
+
     /// Sets the number of physics ticks per second (default 60).
     pub fn set_physics_ticks_per_second(&mut self, tps: u32) {
         assert!(tps > 0, "physics_ticks_per_second must be > 0");
@@ -2503,12 +2526,24 @@ impl MainLoop {
             );
         }
 
-        // `false`: physics picking passes the event on to a collider's
-        // `_input_event`, and it does not own the click-window bookkeeping that
-        // `SceneTree::push_input` does. Passing `false` preserves exactly the
-        // behaviour this call site had before `double_click` was computed at all
-        // (pat-s3rrv.76) rather than guessing a value here.
-        let payload = crate::scene_tree::input_event_to_variant(event, false);
+        // The REAL flag, not `false` (pat-s3rrv.76). Godot delivers a double
+        // click to a collider's `_input_event` exactly as it does to `_input`;
+        // hardcoding `false` meant a collider could never see one.
+        //
+        // Safe to read here, and the ordering is the whole argument: `step`
+        // dispatches `push_input(event)` and then `physics_pick_input(event)`
+        // for the SAME event inside one loop iteration, so the flag was computed
+        // from this event microseconds earlier and cannot be a stale read from
+        // the previous press. Picking running last is Godot's order too
+        // (`viewport.cpp:3464-3580`). If picking is ever hoisted above
+        // `push_input`, this silently reports the PREVIOUS event's flag — move
+        // the mirror, do not reorder the calls.
+        let payload = crate::scene_tree::input_event_to_variant(
+            event,
+            self.tree.last_double_click(),
+            self.tree.pen_state(),
+            self.tree.last_modifiers(),
+        );
         for nid in hits {
             if self.tree.is_input_handled() {
                 return;
@@ -2694,8 +2729,14 @@ impl MainLoop {
         // arguments to a five-parameter handler is not a partial delivery: the
         // interpreter rejects the arity outright and the raise is swallowed, so
         // a handler with Godot's documented signature never ran.
-        // See the 2D picking site above: `false` preserves the prior behaviour.
-        let payload = crate::scene_tree::input_event_to_variant(event, false);
+        // See the 2D picking site above for why reading the mirrored flag here
+        // is ordering-safe; the 3D pass runs later still in the same iteration.
+        let payload = crate::scene_tree::input_event_to_variant(
+            event,
+            self.tree.last_double_click(),
+            self.tree.pen_state(),
+            self.tree.last_modifiers(),
+        );
         let args = [
             Variant::ObjectId(camera.object_id()),
             payload.clone(),
@@ -2945,13 +2986,31 @@ impl MainLoop {
         if !self.tree.has_input_snapshot() {
             let platform_snap = self.input_state.snapshot();
             // Convert gdplatform::InputSnapshot → gdscene::scripting::InputSnapshot.
-            // Convert mouse buttons to Godot button index strings (1=Left, 2=Right, 3=Middle).
+            // Convert mouse buttons to Godot button index strings
+            // (1=Left, 2=Right, 3=Middle, 8=XBUTTON1, 9=XBUTTON2).
+            //
+            // ⚠️ The thumb buttons were MISSING here (pat-s3rrv.76), and that
+            // made two script-facing APIs silently wrong rather than absent:
+            // `Input.is_mouse_button_pressed(MOUSE_BUTTON_XBUTTON1)` answered
+            // false while the button was held, and `Input.get_mouse_button_mask`
+            // — which derives from that same query — could never set
+            // MOUSE_BUTTON_MASK_MB_XBUTTON1/2 (128/256). Widening the mask loop
+            // WITHOUT this would have changed nothing: the bits it ORs in are
+            // read from this set.
+            //
+            // Wheel buttons (4..=7) are deliberately absent. Godot's
+            // `MouseButtonMask` (core/input/input_enums.h:142-149) names only
+            // LEFT/RIGHT/MIDDLE/MB_XBUTTON1/MB_XBUTTON2, and a wheel notch is
+            // pressed and released within one batch, so it is never held at the
+            // moment this per-frame snapshot is taken.
             let mut mouse_buttons_pressed = std::collections::HashSet::new();
             use gdplatform::input::MouseButton;
             for (btn, idx) in [
                 (MouseButton::Left, "1"),
                 (MouseButton::Right, "2"),
                 (MouseButton::Middle, "3"),
+                (MouseButton::XButton1, "8"),
+                (MouseButton::XButton2, "9"),
             ] {
                 if platform_snap.is_mouse_button_pressed(btn) {
                     mouse_buttons_pressed.insert(idx.to_string());
@@ -3114,6 +3173,12 @@ impl MainLoop {
             && physics_steps < self.max_physics_steps_per_frame
         {
             // Sync scene node positions to physics world before stepping.
+            // A script may have painted or erased cells since the last tick
+            // (pat-s3rrv.88). Tile collision is keyed off `tile_map_data`, which
+            // only `register_bodies` used to re-read — so a scripted `set_cell`
+            // showed up in pixels but never in physics. Fingerprinted per layer,
+            // so an unchanged map costs one comparison.
+            self.physics_server.refresh_tilemap_bodies(&self.tree);
             self.physics_server.sync_to_physics(&mut self.tree);
             self.physics_server.step_physics(physics_dt as f32);
             self.physics_server.sync_from_physics(&mut self.tree);
@@ -3224,6 +3289,7 @@ impl MainLoop {
             // thing this bead is about — and ran it once per frame rather than
             // once per physics tick.
             self.process_raycasts();
+            self.process_shapecasts();
             // Bind the physics server for the script phase so a
             // `_physics_process` handler can drive `PhysicsServer2D` directly
             // (pat-0q2kx.200). Bracketed tightly around the phase: the tree
@@ -3353,6 +3419,22 @@ impl MainLoop {
             // remote push runs first so a notifier moved by one this frame is
             // tested at the position it actually ended up in.
             crate::behavioral_2d::process_remote_transforms(&mut self.tree);
+            // -- Camera2D scroll integration (pat-s3rrv.84) --
+            // Godot's `Camera2D::_update_scroll` runs on the process
+            // notification, not in the renderer, and keeps the resolved centre
+            // on the node between frames. Drag margins measure their dead zone
+            // from that centre and position smoothing eases from it, so both
+            // are identities without it. Runs after the remote push (a
+            // RemoteTransform2D may drive the camera) and before the notifiers,
+            // so they test against the centre this frame actually renders.
+            crate::behavioral_2d::process_camera2d_scroll(&mut self.tree, delta_secs as f32);
+            // -- Parallax phase (pat-s3rrv.86) --
+            // Immediately after the camera scroll, because it reads the centre
+            // that pass just resolved: a smoothed or drag-held camera must
+            // parallax against the view it actually renders, not the target it
+            // is still easing toward. Before the notifiers for the same reason
+            // the camera pass is — a layer moved here is tested where it ends up.
+            crate::parallax_runtime::process_parallax(&mut self.tree);
             crate::behavioral_2d::process_visibility_notifiers(&mut self.tree);
             // Materializes is_pressed on buttons no input event has reached, so
             // an untouched button reads false rather than Nil. Idempotent, so it
@@ -3386,6 +3468,10 @@ impl MainLoop {
             // A default-process_mode Timer stops while paused, which is why Godot's
             // pause menus use `Always` timers (pat-0q2kx.140).
             self.tree.process_timer_nodes(delta_secs);
+            // pat-s3rrv.78: HTTPRequest nodes poll their transport on the same
+            // per-frame pass as timers, so `request_completed` reaches a script
+            // with no Rust-side driving — which is the whole wiring requirement.
+            self.tree.process_http_requests();
         } else {
             // The one phase that does NOT stop dead at pause (pat-s3rrv.46).
             // Godot decides per tween: `TWEEN_PAUSE_PROCESS` keeps a pause-menu

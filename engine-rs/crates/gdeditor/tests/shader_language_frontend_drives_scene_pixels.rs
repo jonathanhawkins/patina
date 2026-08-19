@@ -95,39 +95,84 @@ fn close(a: Color, b: Color) -> bool {
 /// black clear proves the shader ran and produced its own value.
 #[test]
 fn shader_language_frontend_drives_scene_pixels() {
-    // A local, a branch on UV, and a swizzle assignment. The old matcher
-    // recognised none of these and would have produced zero instructions.
-    // ⚠️ The threshold is 0.75, not 0.5, and both samples sit in the upper-left
-    // quadrant. See `render`: the covered region is the sprite's own extent, and
-    // UV across it runs roughly 0.56..0.94 — a 0.5 threshold puts EVERY covered
-    // texel on the same side of the branch, so the two samples come back equal
-    // and the test fails without the `if` being at fault.
-    let code = "shader_type canvas_item; void fragment() { vec3 tint = vec3(0.0, 0.0, 1.0); \
-                if (UV.x > 0.75) { tint = vec3(1.0, 0.0, 0.0); } COLOR.rgb = tint; }";
-    let shaded = render(&sprite_scene_tscn(code));
+    // ⚠️ The threshold is MEASURED, not assumed.
+    //
+    // This previously hardcoded 0.75 and sampled columns 0 and 3, on the stated
+    // assumption that UV.x runs ~0.56..0.94 across the covered region. Where the
+    // sprite lands is exactly the half of the pipeline this bead is NOT about —
+    // the sibling gradient test in `canvas_item_shader_scene_pixels.rs` avoids
+    // depending on it for the same reason — and any change to the transform
+    // silently turns the branch assertion into "both samples fell on the same
+    // side of the threshold": a shader failure that is really a fixture failure.
+    //
+    // So render a UV ramp first, learn the real span, and put the threshold in
+    // the middle of it. GREEN marks coverage, because an uncovered texel and a
+    // covered texel at UV.x ≈ 0 are indistinguishable in the red channel alone.
+    let probe = render(&sprite_scene_tscn(
+        "shader_type canvas_item; void fragment() { COLOR.rgb = vec3(UV.x, 1.0, 0.0); }",
+    ));
+    let row = 2;
+    let covered: Vec<(u32, f32)> = (0..SIZE)
+        .map(|x| (x, pixel(&probe, x, row)))
+        .filter(|(_, c)| c.g > 0.5)
+        .map(|(x, c)| (x, c.r))
+        .collect();
+    assert!(
+        covered.len() >= 2,
+        "the UV probe must cover at least two texels in row {row} for there to be \
+         a span to split; got {covered:?}. That is a coverage/fixture failure, \
+         not a shader one"
+    );
 
-    // The widest span the sprite is known to cover — the same two columns the
-    // sibling gradient test samples.
-    let left = pixel(&shaded, 0, 2);
-    let right = pixel(&shaded, 3, 2);
+    let lo = covered
+        .iter()
+        .map(|(_, u)| *u)
+        .fold(f32::INFINITY, f32::min);
+    let hi = covered
+        .iter()
+        .map(|(_, u)| *u)
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!(
+        hi - lo > 0.05,
+        "UV.x must vary across the covered row (got {lo}..{hi}); a flat ramp means \
+         UV never reached the shader at all"
+    );
+    let threshold = (lo + hi) * 0.5;
+    let (left_x, _) = *covered
+        .iter()
+        .find(|(_, u)| *u < threshold)
+        .expect("a covered texel below the midpoint");
+    let (right_x, _) = *covered
+        .iter()
+        .find(|(_, u)| *u > threshold)
+        .expect("a covered texel above the midpoint");
+
+    // A local, a branch on UV, and a swizzle assignment. The old line matcher
+    // recognised none of these and would have produced zero instructions.
+    let code = format!(
+        "shader_type canvas_item; void fragment() {{ vec3 tint = vec3(0.0, 0.0, 1.0); \
+         if (UV.x > {threshold:.4}) {{ tint = vec3(1.0, 0.0, 0.0); }} COLOR.rgb = tint; }}"
+    );
+    let shaded = render(&sprite_scene_tscn(&code));
+    let left = pixel(&shaded, left_x, row);
+    let right = pixel(&shaded, right_x, row);
 
     let blue = Color::rgb(0.0, 0.0, 1.0);
     let red = Color::rgb(1.0, 0.0, 0.0);
-    // Asserted as a SET rather than per-position: the claim under test is that
-    // both arms of the `if` execute and reach pixels, which does not depend on
-    // which column lands on which side of the threshold.
     assert!(
-        close(left, blue) && close(right, red),
-        "the branch must produce blue below the threshold and red above it; \
-         got left {left:?}, right {right:?}. White means the shader body was \
-         skipped entirely — the line-matcher behaviour this bead replaces. \
-         Black means the texel is not covered, which is a fixture problem, not \
-         a shader one. Equal-but-coloured means both samples fell on the same \
-         side of the threshold."
+        close(left, blue),
+        "column {left_x} measured UV.x below {threshold:.4}, so the else-arm's blue \
+         must reach it; got {left:?}. White means the shader body was skipped \
+         entirely — the line-matcher behaviour this bead replaces"
+    );
+    assert!(
+        close(right, red),
+        "column {right_x} measured UV.x above {threshold:.4}, so the if-arm's red \
+         must reach it; got {right:?}"
     );
     assert!(
         !close(left, right),
-        "the two halves must differ — identical halves mean the `if` never ran"
+        "the two arms must differ — identical halves mean the `if` never ran"
     );
 }
 

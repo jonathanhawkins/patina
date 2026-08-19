@@ -32,7 +32,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use gdcore::id::ObjectId;
 
-use crate::network::{ConnectionStatus, NetworkPeer, OfflineMultiplayerPeer};
+use crate::network::{ConnectionStatus, NetworkPeer, OfflineMultiplayerPeer, PeerId};
 use crate::websocket_multiplayer::WebSocketMultiplayerPeer;
 
 /// Tags an `ObjectId` issued by [`new_multiplayer_peer_handle`]. `0x4D` is
@@ -82,6 +82,38 @@ impl MultiplayerPeerHandle {
     /// `MultiplayerPeer.get_unique_id()`.
     pub fn get_unique_id(&self) -> i64 {
         i64::from(self.as_network_peer().get_unique_id().0)
+    }
+
+    /// `WebSocketMultiplayerPeer.get_peer_address(id)` (pat-s3rrv.81).
+    ///
+    /// ⚠️ NOT on the `NetworkPeer` trait, deliberately. Godot declares these two
+    /// on `WebSocketMultiplayerPeer`, not on `MultiplayerPeer` — ENet exposes
+    /// the same information through `ENetPacketPeer` instead — so putting them
+    /// on the shared trait would advertise them for every transport and force
+    /// four implementors to answer a question their protocol does not ask.
+    /// Matching on the handle keeps the surface exactly where Godot puts it.
+    ///
+    /// `Offline` answers with Godot's not-found values (`""` / `0`): it has no
+    /// remote peers at all, so every id is unknown to it.
+    pub fn get_peer_address(&self, peer: i64) -> String {
+        match self {
+            MultiplayerPeerHandle::Offline(_) => String::new(),
+            MultiplayerPeerHandle::WebSocket(p) => match u32::try_from(peer) {
+                Ok(id) => p.get_peer_address(PeerId(id)),
+                Err(_) => String::new(),
+            },
+        }
+    }
+
+    /// `WebSocketMultiplayerPeer.get_peer_port(id)` (pat-s3rrv.81).
+    pub fn get_peer_port(&self, peer: i64) -> i64 {
+        match self {
+            MultiplayerPeerHandle::Offline(_) => 0,
+            MultiplayerPeerHandle::WebSocket(p) => match u32::try_from(peer) {
+                Ok(id) => p.get_peer_port(PeerId(id)),
+                Err(_) => 0,
+            },
+        }
     }
 
     /// `MultiplayerPeer.get_connection_status()` as Godot's

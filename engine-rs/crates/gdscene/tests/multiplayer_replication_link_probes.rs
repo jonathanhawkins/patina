@@ -200,6 +200,7 @@ fn a_spawn_packet_round_trips_and_is_not_claimed_by_another_decoder() {
         scene_path: "/tmp/player.tscn".into(),
         data: String::new(),
         net_id: 7,
+        properties: Vec::new(),
     };
     let encoded = encode_spawn_packet(&req);
 
@@ -288,6 +289,7 @@ fn a_spawn_packet_instantiates_the_scene_from_an_absolute_path() {
         data: String::new(),
         net_id: 1,
         scene_index: 0,
+        properties: Vec::new(),
     };
     let spawned = replicator.apply_spawn(&mut tree, root, &packet, |p| {
         gdcore::file_access::FileAccess::read_file_string(p).ok()

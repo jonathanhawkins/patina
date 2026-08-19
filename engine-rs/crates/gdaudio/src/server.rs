@@ -465,16 +465,43 @@ impl AudioServer {
             if filtering {
                 let key = (hs_db, hs_cutoff, rate, out_ch);
                 if stream.highshelf_key != key || stream.highshelf.len() != out_ch {
-                    // ⚠️ `q` is `sqrt(0.5)`, DERIVED rather than picked: Godot's
-                    // high-shelf uses `beta = sqrt(gain) / sqrt(Q)` with a
-                    // default resonance of 0.5 (`audio_filter_sw.cpp:163-176`,
-                    // `audio_filter_sw.h:78`), while this biquad's shelf term is
-                    // `2*sqrt(a)*alpha` with `alpha = sin(w)/(2q)`. The two
-                    // agree exactly when `q == sqrt(Q_godot)`.
-                    let q = 0.5f32.sqrt();
+                    // ⚠️ `q` is 1, DERIVED rather than picked, and it is NOT the
+                    // `AudioFilterSW` class default. This call path sets the
+                    // resonance explicitly — `filter.set_resonance(1)` at
+                    // `audio_server.cpp:674`, inside `_mix_step_for_channel`,
+                    // the only place the 3D attenuation filter is built. Godot's
+                    // shelf term is `sqrt(gain)/sqrt(Q) * sin(w)` and this
+                    // biquad's is `2*sqrt(a)*alpha` with `alpha = sin(w)/(2q)`,
+                    // so the two agree exactly when `q == sqrt(Q_godot)`, and
+                    // `sqrt(1) == 1`. Reading the class default (0.5, at
+                    // `audio_filter_sw.h:78`) instead of the call site gave
+                    // `sqrt(0.5)` here and a measurably different curve.
+                    let q = 1.0f32;
+                    // ⚠️ The shelf AMPLITUDE is `10^(dB/20)`, not the RBJ
+                    // `10^(dB/40)` that `Biquad::new` computes. Godot builds
+                    // `linear_attenuation = db_to_linear(db_att)`
+                    // (`audio_stream_player_3d.cpp:460`) and passes it as the
+                    // filter's *gain*, which `AudioFilterSW` drops straight into
+                    // the `A` slot with `set_stages(1)` and therefore no
+                    // `pow(gain, 1/(stages+1))` root. A shelf's asymptotic gain
+                    // is `A²`, so Godot's filter is twice as deep in dB as the
+                    // authored `attenuation_filter_db` — and the dB spelling
+                    // used here before produced exactly half that depth.
+                    //
+                    // The bead recorded this as needing "an A/B against a real
+                    // Godot build". It does not: the two call sites above pin
+                    // every free parameter, and with them the coefficients are
+                    // identical to Godot's.
+                    let shelf_amplitude = 10.0f32.powf(hs_db / 20.0);
                     stream.highshelf = (0..out_ch)
                         .map(|_| {
-                            Biquad::new(FilterMode::HighShelf, hs_cutoff, rate as f32, q, hs_db)
+                            Biquad::with_shelf_amplitude(
+                                FilterMode::HighShelf,
+                                hs_cutoff,
+                                rate as f32,
+                                q,
+                                shelf_amplitude,
+                            )
                         })
                         .collect();
                     stream.highshelf_key = key;

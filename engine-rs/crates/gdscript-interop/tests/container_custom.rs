@@ -24,9 +24,17 @@
 //! **Scope note:** this covers the subset of pat-s3rrv.8's method-table gap that
 //! does not depend on reshaping `Variant::Array`/`Variant::Dictionary`. The
 //! typed-container queries (`is_typed`, `get_typed_builtin`, …), the read-only
-//! flags (`make_read_only`, `is_read_only`), `assign`, and `duplicate_deep` all
-//! need per-value state or `Resource.DeepDuplicateMode`, which arrive with the
+//! flags (`make_read_only`, `is_read_only`) and `duplicate_deep` all need
+//! per-value state or `Resource.DeepDuplicateMode`, which arrive with the
 //! shared-storage refactor — see the bead's `remaining_scope`.
+//!
+//! ⚠️ **Correction.** An earlier revision of this note listed `assign` in that
+//! blocked set. That was wrong, and wrong in the direction that costs coverage:
+//! `assign` needs no per-value state at all. For an untyped container it is a
+//! plain contents copy, expressible through the same `array_mutate` /
+//! `write_place` path `push_back` and `erase` already use — the type-conversion
+//! clause in `Array.xml` only bites once containers can be *typed*, which they
+//! cannot be here. It is implemented and pinned below.
 
 use gdscript_interop::interpreter::Interpreter;
 use gdvariant::Variant;
@@ -231,5 +239,100 @@ fn recursive_equal_gives_up_true_past_the_recursion_budget() {
     assert_eq!(
         run("var a = {\"x\": 1}\nvar b = {\"y\": 2}\nreturn a.recursive_equal(b, 2000)"),
         Ok(Variant::Bool(true))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Array.assign / Dictionary.assign
+// ---------------------------------------------------------------------------
+//
+// `assign(other)` copies another container's CONTENTS into this one, resizing
+// to match (`Array.xml`, `Dictionary.xml`). Before this change both raised
+// `UndefinedFunction`, so every assertion here fails against the old tree
+// rather than passing vacuously.
+
+#[test]
+fn assign_resizes_the_receiver_to_match_the_source() {
+    // 3 elements in, 2 out. This is the assertion that separates `assign` from
+    // an element-wise overwrite, which would leave the stale third element and
+    // report a size of 3.
+    assert_eq!(
+        run("var a = [1, 2, 3]\nvar b = [9, 9]\na.assign(b)\nreturn a.size()"),
+        Ok(Variant::Int(2))
+    );
+}
+
+#[test]
+fn assign_replaces_every_element() {
+    assert_eq!(
+        run("var a = [1, 2, 3]\nvar b = [9, 8]\na.assign(b)\nreturn a"),
+        Ok(Variant::Array(vec![Variant::Int(9), Variant::Int(8)]))
+    );
+}
+
+#[test]
+fn assign_grows_a_shorter_receiver() {
+    // The opposite direction from the shrink above: a receiver *smaller* than
+    // the source must take all of it, not just as many as it had room for.
+    assert_eq!(
+        run("var a = [1]\nvar b = [7, 8, 9]\na.assign(b)\nreturn a"),
+        Ok(Variant::Array(vec![
+            Variant::Int(7),
+            Variant::Int(8),
+            Variant::Int(9)
+        ]))
+    );
+}
+
+#[test]
+fn assign_leaves_the_source_alone() {
+    // ⚠️ Honest label: this CANNOT fail while Array is a value type — nothing
+    // can alias anything. It is here as the pin for pat-s3rrv.8's shared-storage
+    // flip, after which `a.assign(b)` must still copy rather than make the two
+    // share storage. That difference is the entire reason Godot has the method,
+    // so the flip must not be allowed to land without this staying green.
+    assert_eq!(
+        run("var a = [1]\nvar b = [2, 3]\na.assign(b)\na.push_back(4)\nreturn b"),
+        Ok(Variant::Array(vec![Variant::Int(2), Variant::Int(3)]))
+    );
+}
+
+#[test]
+fn assign_rejects_a_non_array() {
+    let err = run("var a = [1]\na.assign(5)\nreturn a").unwrap_err();
+    assert!(
+        err.contains("takes an Array"),
+        "a non-Array argument must be refused by type, got {err}"
+    );
+}
+
+#[test]
+fn dictionary_assign_drops_keys_the_source_does_not_have() {
+    // 🔑 The discriminating case. A `merge`-shaped implementation keeps "x" and
+    // passes every other assertion in this block; only this one catches it.
+    assert_eq!(
+        run("var a = {\"x\": 1, \"y\": 2}\nvar b = {\"z\": 3}\na.assign(b)\nreturn a.has(\"x\")"),
+        Ok(Variant::Bool(false))
+    );
+    assert_eq!(
+        run("var a = {\"x\": 1, \"y\": 2}\nvar b = {\"z\": 3}\na.assign(b)\nreturn a.size()"),
+        Ok(Variant::Int(1))
+    );
+}
+
+#[test]
+fn dictionary_assign_brings_the_source_entries_across() {
+    assert_eq!(
+        run("var a = {\"x\": 1}\nvar b = {\"z\": 3}\na.assign(b)\nreturn a[\"z\"]"),
+        Ok(Variant::Int(3))
+    );
+}
+
+#[test]
+fn dictionary_assign_rejects_a_non_dictionary() {
+    let err = run("var a = {\"x\": 1}\na.assign([1])\nreturn a").unwrap_err();
+    assert!(
+        err.contains("takes a Dictionary"),
+        "a non-Dictionary argument must be refused by type, got {err}"
     );
 }

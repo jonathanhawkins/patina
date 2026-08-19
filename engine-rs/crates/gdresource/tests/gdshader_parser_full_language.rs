@@ -213,3 +213,70 @@ void fragment() {
         albedo(&c),
     );
 }
+
+// ---------------------------------------------------------------------------
+// pat-s3rrv.36 — a LEXICAL failure must name its line, like a parse failure does
+// ---------------------------------------------------------------------------
+
+/// 🔑 `parse_shader` reported every lexical error as **line 0**.
+///
+/// The tests above already pin that a *parse* error names its line (5 and 4).
+/// A *lex* error did not: `parse_shader` mapped the lexer's failure into
+/// `ShaderError { line: 0, col: 0 }` and discarded the position the lexer had
+/// already computed — even though every `ShaderLexError` variant carries
+/// `line`/`col` and its own `Display` prints them.
+///
+/// ⚠️ Line 0 is not merely imprecise, it is OUT OF RANGE: `ShaderError.line` is
+/// 1-based (the tokenizer's counter starts at 1), so 0 is a line no editor can
+/// highlight and no author can find. This bead's acceptance asks for a
+/// diagnostic "naming the offending line", and a lexical typo is the most common
+/// way to earn one.
+#[test]
+fn a_lexical_error_names_its_line_and_column() {
+    // `#` is not a GDShader character — the tokenizer's own test pins it as
+    // `ShaderLexError::UnexpectedChar { ch: '#', .. }`. Here it sits on line 3.
+    let src = "shader_type canvas_item;\nvoid fragment() {\n    COLOR = #invalid;\n}\n";
+
+    let err = parse_shader(src).expect_err("an unexpected character must fail to parse");
+
+    assert_ne!(
+        err.line, 0,
+        "line 0 is out of range for a 1-based line number — this is the old \
+         behaviour, where the lexer's position was thrown away"
+    );
+    assert_eq!(
+        err.line, 3,
+        "the error must name the line the bad character is on; got line {} ({})",
+        err.line, err.message
+    );
+    assert!(
+        err.col > 0,
+        "the column is 1-based too and must survive the same trip; got {}",
+        err.col
+    );
+    assert!(
+        err.message.contains('#'),
+        "the message must name the offending character, got {:?}",
+        err.message
+    );
+}
+
+/// The position must survive for EVERY lexical variant, not just the one above.
+///
+/// An unterminated block comment reports where the comment STARTED, which is the
+/// line an author needs — the failure is only detected at end-of-input.
+#[test]
+fn an_unterminated_block_comment_names_the_line_it_opened_on() {
+    let src = "shader_type canvas_item;\nvoid fragment() {\n    /* never closed\n}\n";
+
+    let err = parse_shader(src).expect_err("an unterminated block comment must fail to parse");
+
+    assert_ne!(err.line, 0, "the lexer's position must not be discarded");
+    assert_eq!(
+        err.line, 3,
+        "the comment opens on line 3, which is where the author must look — \
+         reporting the end-of-input line would point at the wrong place; got \
+         line {} ({})",
+        err.line, err.message
+    );
+}

@@ -492,16 +492,77 @@ impl PackedScene {
                 _ => None,
             }
         };
+        // Flatten a Line2D's `gradient` and `width_curve` sub-resources onto the
+        // node (pat-s3rrv.85). By render time the `PackedScene` — and with it
+        // `sub_resource_props` — is gone; only the `SceneTree` remains, so the
+        // per-vertex colour and width the rasterizer needs have to travel on the
+        // node, exactly as `__material__*` and `curve_points` do.
         for tmpl in &mut templates {
-            // Godot's resolve order: a node-level override wins over the mesh's
-            // own material (`material_override` is handled by the ShaderMaterial
-            // pass below).
-            let mat_id =
+            if let Some(grad_id) = sub_ref_id(tmpl.properties.get("gradient")) {
+                if let Some(props) = sub_resource_props.get(&grad_id) {
+                    // Godot's Gradient stores parallel stop arrays; both are
+                    // required to sample, so a bag missing either is left alone
+                    // rather than half-copied.
+                    if let (Some(offsets), Some(colors)) =
+                        (props.get("offsets"), props.get("colors"))
+                    {
+                        tmpl.properties
+                            .insert("__gradient_offsets".into(), offsets.clone());
+                        tmpl.properties
+                            .insert("__gradient_colors".into(), colors.clone());
+                    }
+                }
+            }
+            if let Some(curve_id) = sub_ref_id(tmpl.properties.get("width_curve")) {
+                if let Some(Variant::Array(data)) = sub_resource_props
+                    .get(&curve_id)
+                    .and_then(|p| p.get("_data"))
+                {
+                    if let Some(samples) = bake_curve_samples(data) {
+                        tmpl.properties.insert(
+                            "__width_curve_samples".into(),
+                            Variant::PackedFloat32Array(samples),
+                        );
+                    }
+                }
+            }
+        }
+
+        for tmpl in &mut templates {
+            // Godot's resolve order, from the renderer itself:
+            // `render_forward_clustered.cpp:4206` picks
+            // `material_override.is_valid() ? material_override : p_material`,
+            // and doc/classes/GeometryInstance3D.xml:67 says the override "will
+            // be used instead of any material set in any material slot of the
+            // mesh". So `material_override` wins outright, the per-surface slot
+            // is next, and the mesh's own material is the fallback.
+            //
+            // `material_override` used to be missing from this chain entirely —
+            // the comment here claimed the ShaderMaterial pass below handled it,
+            // but that pass only accepts sub-resources whose class is literally
+            // `ShaderMaterial`. A node overriding with a plain
+            // StandardMaterial3D therefore matched NEITHER pass and rendered
+            // unmaterialed: no `__material__*` companions, so
+            // `material3d_for_node` answered `None` and the mesh fell back to
+            // flat shading with the authored colour, metallic, roughness and
+            // render modes all silently dropped (pat-s3rrv.30).
+            //
+            // ⚠️ ShaderMaterial is excluded here deliberately. The pass below
+            // owns that case and flattens it to `shader_code` /
+            // `shader_parameter/*`; letting it through would additionally give
+            // the node a `__material__*` bag holding none of the
+            // StandardMaterial3D keys, so `material3d_for_node` would hand the
+            // renderer a DEFAULT material where it correctly returns `None`
+            // today — turning every shader-material mesh flat.
+            let override_id = sub_ref_id(tmpl.properties.get("material_override"))
+                .filter(|id| sub_resources.get(id).map(String::as_str) != Some("ShaderMaterial"));
+            let mat_id = override_id.or_else(|| {
                 sub_ref_id(tmpl.properties.get("surface_material_override/0")).or_else(|| {
                     sub_ref_id(tmpl.properties.get("mesh"))
                         .and_then(|mesh_id| sub_resource_props.get(&mesh_id))
                         .and_then(|p| sub_ref_id(p.get("material")))
-                });
+                })
+            });
             if let Some(mat_id) = mat_id {
                 if let Some(Variant::Color(c)) = sub_resource_props
                     .get(&mat_id)
@@ -667,11 +728,67 @@ impl PackedScene {
             let Some(curve_id) = sub_ref_id(tmpl.properties.get("curve")) else {
                 continue;
             };
-            let is_2d = sub_resources.get(&curve_id).map(String::as_str) == Some("Curve2D");
-            if !is_2d {
-                // Curve3D bakes through the 3D path driver; only the 2D half is
-                // in scope here, and guessing at the other would be worse than
-                // leaving it untouched.
+            let class = sub_resources.get(&curve_id).map(String::as_str);
+            if class == Some("Curve3D") {
+                // The 3D half (pat-s3rrv.83). `Curve3D::_set_data` takes the
+                // SAME in/out/position triple as the 2D form, but over a
+                // `PackedVector3Array` (`curve.cpp:2278-2299`), so only the
+                // element type differs — the ordering does not.
+                //
+                // ⚠️ Godot's `_set_data` also requires a `tilts` array and
+                // ERR_FAILs without it. Tilt rotates PathFollow3D about the
+                // curve; it does not move the polyline, so it is deliberately
+                // not read here — baking the path and rotating along it are
+                // separate concerns, and inventing a tilt would be worse than
+                // leaving rotation at its default.
+                let Some(Variant::Dictionary(data)) = sub_resource_props
+                    .get(&curve_id)
+                    .and_then(|p| p.get("_data"))
+                else {
+                    continue;
+                };
+                let Some(Variant::PackedVector3Array(raw)) = data.get("points") else {
+                    continue;
+                };
+                if raw.is_empty() || raw.len() % 3 != 0 {
+                    continue;
+                }
+                let mut control: Vec<crate::bezier_bake::CurvePoint3> = raw
+                    .chunks_exact(3)
+                    .map(|t| crate::bezier_bake::CurvePoint3 {
+                        in_handle: t[0],
+                        out_handle: t[1],
+                        position: t[2],
+                    })
+                    .collect();
+                // `closed` loops the last point back to the first — but ONLY
+                // "if the curve has more than 2 control points"
+                // (doc/classes/Curve3D.xml:207). A 2-point curve marked closed
+                // stays open in Godot, so the count guard is part of the rule
+                // rather than a defensive extra.
+                //
+                // Appending a copy of the first point is the whole
+                // implementation: `bake_curve_3d` walks `windows(2)`, so the new
+                // final pair is (last, first) and picks up `last.out_handle`
+                // with `first.in_handle` exactly as any other segment would.
+                let closed = matches!(
+                    sub_resource_props
+                        .get(&curve_id)
+                        .and_then(|p| p.get("closed")),
+                    Some(Variant::Bool(true))
+                );
+                if closed && control.len() > 2 {
+                    control.push(control[0]);
+                }
+                let baked = crate::bezier_bake::bake_curve_3d(&control, 16);
+                if baked.is_empty() {
+                    continue;
+                }
+                tmpl.properties
+                    .insert("curve_points".into(), Variant::PackedVector3Array(baked));
+                continue;
+            }
+            if class != Some("Curve2D") {
                 continue;
             }
             let Some(Variant::Dictionary(data)) = sub_resource_props
@@ -1091,6 +1208,30 @@ impl PackedScene {
                 Variant::Vector2i(tile_size),
             );
 
+            // Godot names custom data layers on the TILESET
+            // (`custom_data_layer_<i>/name`, tile_set.cpp:4211) and refers to
+            // them per tile by INDEX (`custom_data_<i>`, :6848). Patina's
+            // companions are keyed by NAME, so the index -> name map has to be
+            // built here, before any source is walked.
+            //
+            // ⚠️ Densely numbered from 0 like every Godot array property, so
+            // stop at the first gap rather than scanning an arbitrary range.
+            let mut custom_data_layers: Vec<String> = Vec::new();
+            for index in 0.. {
+                match set_props.get(&format!("custom_data_layer_{index}/name")) {
+                    Some(Variant::String(name)) if !name.is_empty() => {
+                        custom_data_layers.push(name.clone());
+                    }
+                    _ => break,
+                }
+            }
+            if !custom_data_layers.is_empty() {
+                tmpl.properties.insert(
+                    crate::tilemap::TILE_CUSTOM_DATA_LAYERS.to_string(),
+                    Variant::PackedStringArray(custom_data_layers.clone()),
+                );
+            }
+
             let mut source_ids: Vec<i32> = Vec::new();
             let mut physics_source_ids: Vec<i32> = Vec::new();
             let mut nav_source_ids: Vec<i32> = Vec::new();
@@ -1139,6 +1280,12 @@ impl PackedScene {
                 // Flattened onto the node the physics server can build the
                 // tile's static bodies from the tree alone, exactly as
                 // `__shape__*` lets it build a CollisionShape2D's body.
+                collect_tile_custom_data(
+                    source_id,
+                    source_props,
+                    &custom_data_layers,
+                    &mut tmpl.properties,
+                );
                 if collect_tile_physics(source_id, source_props, &mut tmpl.properties) {
                     physics_source_ids.push(source_id);
                 }
@@ -1816,6 +1963,68 @@ fn extract_header_attrs(header: &str) -> HashMap<String, String> {
 /// The value is a `Ref<OccluderPolygon2D>` either way, so the geometry lives in
 /// a sub-resource under `polygon` and half a tile goes back on, exactly as for
 /// navigation.
+/// Flattens one atlas source's per-tile custom data onto the node
+/// (pat-s3rrv.65).
+///
+/// ⚠️ This whole path was MISSING, and silently: the editor authors
+/// `__tile_custom_data_*` companions, `is_internal_prop` correctly keeps those
+/// caches out of the saved file, and — unlike the physics, navigation and
+/// occlusion families — nothing regenerated them as real Godot keys. A user set
+/// per-tile custom data, saved, reloaded, and it was gone; a `.tscn` authored in
+/// real Godot lost it on load.
+///
+/// ⚠️ The two key shapes are NOT the same prefix, which is the easy mistake:
+/// the TileSet declares `custom_data_layer_<i>/name` (with a `/` component)
+/// while a tile stores `<x>:<y>/<alt>/custom_data_<i>` (no `layer` word, no
+/// sub-component). See `tile_set.cpp:4211` and `:6848`.
+///
+/// Values are copied VERBATIM. Godot types the layer separately
+/// (`custom_data_layer_<i>/type`), so re-encoding here would be a second, worse
+/// source of truth than the value's own Variant.
+fn collect_tile_custom_data(
+    source_id: i32,
+    source_props: &HashMap<String, Variant>,
+    layer_names: &[String],
+    out: &mut HashMap<String, Variant>,
+) {
+    if layer_names.is_empty() {
+        return;
+    }
+    for (key, value) in source_props {
+        let Some((coords, rest)) = key.split_once('/') else {
+            continue;
+        };
+        let Some((ax, ay)) = coords.split_once(':') else {
+            continue;
+        };
+        let (Ok(ax), Ok(ay)) = (ax.trim().parse::<i32>(), ay.trim().parse::<i32>()) else {
+            continue;
+        };
+        let Some((_alt, layer_rest)) = rest.split_once('/') else {
+            continue;
+        };
+        // Exactly one component: `custom_data_<i>`. A key with a further `/`
+        // belongs to another family and is not ours to read.
+        let Some(index) = layer_rest.strip_prefix("custom_data_") else {
+            continue;
+        };
+        let Ok(index) = index.parse::<usize>() else {
+            continue;
+        };
+        let Some(name) = layer_names.get(index) else {
+            continue;
+        };
+        out.insert(
+            crate::tilemap::tile_custom_data_key(
+                source_id,
+                gdcore::math::Vector2i::new(ax, ay),
+                name,
+            ),
+            value.clone(),
+        );
+    }
+}
+
 fn collect_tile_occlusion(
     source_id: i32,
     source_props: &HashMap<String, Variant>,
@@ -2681,6 +2890,149 @@ shape = SubResource("Sph_1")
             vp("SphCol"),
             Variant::String("shape:SphereShape3D|0.75".into())
         );
+    }
+
+    /// pat-s3rrv.30 — a plain `StandardMaterial3D` reached through
+    /// `GeometryInstance3D.material_override` must flatten onto the node.
+    ///
+    /// This slot matched NEITHER flattening pass: the `__material__*` pass read
+    /// only `surface_material_override/0` and the mesh's own material, while the
+    /// ShaderMaterial pass accepts only sub-resources whose class is literally
+    /// `ShaderMaterial`. So the most obvious way to give a mesh a material in
+    /// the Godot editor produced a node with no material companions at all, and
+    /// the mesh rendered unmaterialed.
+    ///
+    /// ⚠️ The assertion deliberately checks a `__material__*` companion and not
+    /// just `albedo_color`. `albedo_color` is special-cased and surfaced on its
+    /// own, so a fix that resolved the id far enough to copy the colour but not
+    /// the property bag would pass a colour-only assertion while every render
+    /// mode, metallic and roughness value stayed dropped — which is the actual
+    /// symptom this bead is about.
+    #[test]
+    fn material_override_flattens_a_plain_standard_material() {
+        let tscn = r#"[gd_scene format=3]
+
+[sub_resource type="BoxMesh" id="Box_1"]
+
+[sub_resource type="StandardMaterial3D" id="Mat_1"]
+albedo_color = Color(0, 0, 1, 1)
+transparency = 1
+cull_mode = 1
+
+[node name="World" type="Node3D"]
+
+[node name="BlueBox" type="MeshInstance3D" parent="."]
+mesh = SubResource("Box_1")
+material_override = SubResource("Mat_1")
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        let node = nodes.iter().find(|n| n.name() == "BlueBox").unwrap();
+
+        assert_eq!(
+            node.get_property("__material__class"),
+            Variant::String("StandardMaterial3D".into()),
+            "material_override must be resolved by the __material__ pass; the \
+             ShaderMaterial pass only accepts class == ShaderMaterial, so a \
+             plain material here matches neither and the mesh renders unmaterialed",
+        );
+        // The full bag, not just the colour — see the doc comment.
+        assert_eq!(
+            node.get_property("__material__transparency"),
+            Variant::Int(1),
+            "the material's render modes must travel on the node, not only its albedo",
+        );
+        assert_eq!(node.get_property("__material__cull_mode"), Variant::Int(1));
+        match node.get_property("albedo_color") {
+            Variant::Color(c) => assert!(
+                c.r.abs() < 1e-4 && c.g.abs() < 1e-4 && (c.b - 1.0).abs() < 1e-4,
+                "blue albedo: {c:?}"
+            ),
+            other => panic!("expected albedo_color Color, got {other:?}"),
+        }
+    }
+
+    /// `material_override` outranks the per-surface slot.
+    ///
+    /// Godot's renderer picks
+    /// `material_override.is_valid() ? material_override : p_material`
+    /// (`render_forward_clustered.cpp:4206`), and the docs say the override is
+    /// used "instead of any material set in any material slot of the mesh"
+    /// (doc/classes/GeometryInstance3D.xml:67).
+    ///
+    /// ⚠️ Both materials are present on purpose. Appending `material_override`
+    /// to the END of the resolve chain would satisfy the test above — the node
+    /// gets a bag either way — and still pick the wrong material whenever a mesh
+    /// carries both, which is exactly when the override exists to matter.
+    #[test]
+    fn material_override_wins_over_the_per_surface_slot() {
+        let tscn = r#"[gd_scene format=3]
+
+[sub_resource type="BoxMesh" id="Box_1"]
+
+[sub_resource type="StandardMaterial3D" id="Slot_1"]
+albedo_color = Color(1, 0, 0, 1)
+
+[sub_resource type="StandardMaterial3D" id="Over_1"]
+albedo_color = Color(0, 1, 0, 1)
+
+[node name="World" type="Node3D"]
+
+[node name="Box" type="MeshInstance3D" parent="."]
+mesh = SubResource("Box_1")
+surface_material_override/0 = SubResource("Slot_1")
+material_override = SubResource("Over_1")
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        let node = nodes.iter().find(|n| n.name() == "Box").unwrap();
+
+        match node.get_property("albedo_color") {
+            Variant::Color(c) => assert!(
+                c.r.abs() < 1e-4 && (c.g - 1.0).abs() < 1e-4 && c.b.abs() < 1e-4,
+                "the override (green) must win over the per-surface slot (red), got {c:?}",
+            ),
+            other => panic!("expected albedo_color Color, got {other:?}"),
+        }
+    }
+
+    /// A ShaderMaterial override must stay out of the `__material__*` channel.
+    ///
+    /// ⚠️ A GUARD, not a discriminator — it held before `material_override`
+    /// joined the resolve chain too. It is here because the obvious way to add
+    /// that slot is without a class filter, and then a shader mesh would gain a
+    /// `__material__*` bag containing none of the StandardMaterial3D keys:
+    /// `material3d_for_node` would answer `Some(default)` instead of `None` and
+    /// hand the renderer a flat default material for every shader-material mesh
+    /// in the project.
+    #[test]
+    fn a_shader_material_override_does_not_gain_a_standard_material_bag() {
+        let tscn = r#"[gd_scene format=3]
+
+[sub_resource type="Shader" id="Shader_1"]
+code = "shader_type spatial; void fragment() { ALBEDO = vec3(1.0); }"
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]
+shader = SubResource("Shader_1")
+
+[node name="Water" type="MeshInstance3D"]
+material_override = SubResource("ShaderMaterial_1")
+"#;
+        let scene = PackedScene::from_tscn(tscn).unwrap();
+        let nodes = scene.instance().unwrap();
+        let water = &nodes[0];
+
+        assert!(
+            !water.has_property("__material__class"),
+            "a ShaderMaterial override belongs to the shader pass only; giving it \
+             a __material__ bag makes material3d_for_node return a DEFAULT \
+             material instead of None",
+        );
+        // …and the shader pass still owns it.
+        match water.get_property("shader_code") {
+            Variant::String(s) => assert!(s.contains("shader_type spatial"), "code: {s}"),
+            other => panic!("expected shader_code string, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4523,4 +4875,108 @@ stream = ExtResource("1_beep")
         assert_eq!(parse_ext_resource_ref("SubResource(\"1\")"), None);
         assert_eq!(parse_ext_resource_ref("ExtResource()"), None);
     }
+}
+
+/// Number of baked samples for a `width_curve`, matching Godot's default
+/// `Curve.bake_resolution` of 100 plus the closing sample.
+const WIDTH_CURVE_BAKE: usize = 101;
+
+/// Reads a `Variant` that Godot may have written as either a float or an int.
+fn curve_scalar(v: &Variant) -> f32 {
+    match v {
+        Variant::Float(f) => *f as f32,
+        Variant::Int(i) => *i as f32,
+        _ => 0.0,
+    }
+}
+
+/// Scalar cubic Bézier, mirroring `Math::bezier_interpolate`
+/// (upstream/godot/core/math/math_funcs.h).
+fn bezier_scalar(start: f32, c1: f32, c2: f32, end: f32, t: f32) -> f32 {
+    let omt = 1.0 - t;
+    let omt2 = omt * omt;
+    let omt3 = omt2 * omt;
+    let t2 = t * t;
+    let t3 = t2 * t;
+    start * omt3 + c1 * omt2 * t * 3.0 + c2 * omt * t2 * 3.0 + end * t3
+}
+
+/// Bakes a Godot `Curve` sub-resource's `_data` into a dense sample table over
+/// the curve's `[0, 1]` domain.
+///
+/// `_data` is a flat array carrying FIVE elements per point — position, left
+/// tangent, right tangent, left mode, right mode (`Curve::get_data`,
+/// upstream/godot/scene/resources/curve.cpp:440). Only the position and the two
+/// tangents affect the sampled value; the modes are editor state.
+///
+/// ⚠️ Godot samples BETWEEN two points as a cubic Bézier whose inner control
+/// points sit a third of the span apart, offset by the tangents
+/// (`Curve::sample_local_nocheck`, curve.cpp:475). That is **not** a straight
+/// line: with the tangents left at zero — the common authored case — the ramp
+/// is smoothstep-shaped, so interpolating linearly would visibly disagree with
+/// Godot at every interior sample while still passing a monotone "thicker at one
+/// end" check.
+///
+/// Line2D reads its curve through `sample_baked`, so baking here is what Godot
+/// itself does rather than an approximation of it. Returns `None` for a bag
+/// whose `_data` is absent, empty, or not a whole number of points.
+fn bake_curve_samples(data: &[Variant]) -> Option<Vec<f32>> {
+    const ELEMS: usize = 5;
+    if data.is_empty() || data.len() % ELEMS != 0 {
+        return None;
+    }
+    struct CurvePt {
+        pos: gdcore::math::Vector2,
+        left_tangent: f32,
+        right_tangent: f32,
+    }
+    let mut points = Vec::with_capacity(data.len() / ELEMS);
+    for chunk in data.chunks_exact(ELEMS) {
+        let Variant::Vector2(pos) = &chunk[0] else {
+            // A malformed point makes every later index wrong, so bail rather
+            // than bake a table that is silently misaligned.
+            return None;
+        };
+        points.push(CurvePt {
+            pos: *pos,
+            left_tangent: curve_scalar(&chunk[1]),
+            right_tangent: curve_scalar(&chunk[2]),
+        });
+    }
+
+    let sample = |offset: f32| -> f32 {
+        if points.len() == 1 {
+            return points[0].pos.y;
+        }
+        // Godot's `get_index`: the last point at or before `offset`.
+        let mut i = 0;
+        while i + 1 < points.len() && points[i + 1].pos.x <= offset {
+            i += 1;
+        }
+        if i == points.len() - 1 {
+            return points[i].pos.y;
+        }
+        let local = offset - points[i].pos.x;
+        if i == 0 && local <= 0.0 {
+            return points[0].pos.y;
+        }
+        let a = &points[i];
+        let b = &points[i + 1];
+        let mut d = b.pos.x - a.pos.x;
+        if d.abs() < 1e-6 {
+            return b.pos.y;
+        }
+        let t = local / d;
+        d /= 3.0;
+        let yac = a.pos.y + d * a.right_tangent;
+        let ybc = b.pos.y - d * b.left_tangent;
+        bezier_scalar(a.pos.y, yac, ybc, b.pos.y, t)
+    };
+
+    let last = (WIDTH_CURVE_BAKE - 1) as f32;
+    Some(
+        (0..WIDTH_CURVE_BAKE)
+            .map(|i| sample(i as f32 / last))
+            .collect(),
+    )
 }

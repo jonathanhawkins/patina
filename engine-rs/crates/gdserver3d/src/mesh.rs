@@ -167,6 +167,36 @@ pub struct Mesh3D {
     /// `Skin` indirection — not raw skeleton bone indices). Empty when the
     /// mesh is not rigged.
     pub bone_indices: Vec<[u32; 4]>,
+    /// Named blend shapes (Godot's morph targets), empty for a mesh without
+    /// any.
+    ///
+    /// Populated by the glTF importer from `primitives[].targets`
+    /// (pat-s3rrv.23). `gdrender3d::morph` has carried the blending maths and
+    /// its unit tests all along with nothing able to supply it data; this is
+    /// where the data now lives.
+    pub blend_shapes: Vec<BlendShape3D>,
+}
+
+/// A named blend shape: per-vertex position deltas from the base mesh.
+///
+/// ⚠️ **Deltas, not absolute positions.** glTF morph-target accessors hold
+/// displacements, and `gdrender3d::morph::apply_morph` adds them to the base.
+/// Godot converts them to absolutes on import (`gltf_document.cpp:1817`,
+/// `w_varr[l] = r_varr[l] + r_src_varr[l]`) because its ArrayMesh blend-shape
+/// format stores absolutes — storing absolutes here instead would add the base
+/// twice and read as a scale bug rather than a bad import.
+///
+/// A `vertex_deltas` shorter than the mesh's vertex array is legal and affects
+/// only the vertices it covers, which is what Godot's pad-with-base amounts to:
+/// a base position is a zero delta.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BlendShape3D {
+    /// Blend-shape name. Godot addresses shapes by name, and glTF supplies it
+    /// through `mesh.extras.targetNames`; `morph_<k>` is the fallback Godot
+    /// uses when the file names none.
+    pub name: String,
+    /// Per-vertex position deltas, parallel to [`Mesh3D::vertices`].
+    pub vertex_deltas: Vec<Vector3>,
 }
 
 impl Mesh3D {
@@ -181,6 +211,7 @@ impl Mesh3D {
             surfaces: Vec::new(),
             bone_weights: Vec::new(),
             bone_indices: Vec::new(),
+            blend_shapes: Vec::new(),
         }
     }
 
@@ -305,6 +336,7 @@ impl Mesh3D {
             surfaces: Vec::new(),
             bone_weights: Vec::new(),
             bone_indices: Vec::new(),
+            blend_shapes: Vec::new(),
         }
     }
 
@@ -360,6 +392,7 @@ impl Mesh3D {
             surfaces: Vec::new(),
             bone_weights: Vec::new(),
             bone_indices: Vec::new(),
+            blend_shapes: Vec::new(),
         }
     }
 
@@ -424,6 +457,7 @@ impl Mesh3D {
             surfaces: Vec::new(),
             bone_weights: Vec::new(),
             bone_indices: Vec::new(),
+            blend_shapes: Vec::new(),
         }
     }
 
@@ -446,6 +480,7 @@ impl Mesh3D {
             surfaces: Vec::new(),
             bone_weights: Vec::new(),
             bone_indices: Vec::new(),
+            blend_shapes: Vec::new(),
         }
     }
 
@@ -557,6 +592,7 @@ impl Mesh3D {
             surfaces: Vec::new(),
             bone_weights: Vec::new(),
             bone_indices: Vec::new(),
+            blend_shapes: Vec::new(),
         }
     }
 
@@ -695,6 +731,7 @@ impl Mesh3D {
             surfaces: Vec::new(),
             bone_weights: Vec::new(),
             bone_indices: Vec::new(),
+            blend_shapes: Vec::new(),
         }
     }
 
@@ -848,6 +885,7 @@ impl Mesh3D {
             surfaces: Vec::new(),
             bone_weights: Vec::new(),
             bone_indices: Vec::new(),
+            blend_shapes: Vec::new(),
         })
     }
 

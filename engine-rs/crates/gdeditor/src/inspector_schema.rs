@@ -398,9 +398,41 @@ mod tests {
 
     #[test]
     fn uncaptured_class_resolves_to_nearest_seeded_ancestor() {
-        // Path2D is not captured; it should resolve up to Node2D (27 props).
-        assert!(parent_of("Path2D").is_none()); // not in the parent table either
-                                                // but a known intermediate resolves:
+        // ⚠️ Path2D IS resolvable, and the assertion here used to claim the
+        // opposite while the comment beside it said the right thing. The
+        // curated PARENTS table does not list Path2D, but `parent_of` falls
+        // back to `generated_parent_of`, which carries every `inherits` edge
+        // Godot declares — including `("Path2D", "Node2D")` (pat-0q2kx.128).
+        //
+        // It had been false ever since that fallback landed and stayed
+        // invisible because nothing ran this module's lib tests; pat-s3rrv.57
+        // listed `--lib inspector_schema` as a verify command and turned a
+        // dormant red into a live gate.
+        assert_eq!(
+            parent_of("Path2D"),
+            Some("Node2D"),
+            "the generated fallback resolves an uncaptured class's parent"
+        );
+        // …which is what lets an uncaptured class reach a seeded ancestor's
+        // schema — the behaviour this test is named for.
+        let node2d: std::collections::HashSet<String> = editor_schema("Node2D")
+            .unwrap()
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect();
+        let path2d: std::collections::HashSet<String> = editor_schema("Path2D")
+            .expect("an uncaptured class still resolves through its ancestor")
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect();
+        // ⚠️ Subset, not equality: `editor_schema` also merges in whatever
+        // ClassDB knows about Path2D itself, and ClassDB is a global registry
+        // another test in this binary may have populated first.
+        assert!(
+            node2d.is_subset(&path2d),
+            "Path2D must carry Node2D's schema"
+        );
+
         let control: std::collections::HashSet<String> = editor_schema("Control")
             .unwrap()
             .iter()

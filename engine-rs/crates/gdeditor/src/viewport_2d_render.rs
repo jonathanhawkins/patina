@@ -175,6 +175,38 @@ pub enum Render2DKind {
         /// The stroke color.
         color: Color,
     },
+    /// A `Line2D` whose stroke varies along its length — a `gradient`, a
+    /// `width_curve`, or a non-default cap/joint mode.
+    ///
+    /// Kept separate from [`Render2DKind::Line`] so the plain uniform stroke
+    /// (and every `_draw`-command line, which can never carry these) keeps its
+    /// existing shape and rasterizer path untouched.
+    LineShaded {
+        /// The polyline points, in node-local space.
+        points: Vec<Vector2>,
+        /// Per-vertex width: `width` scaled by the baked `width_curve`.
+        widths: Vec<f32>,
+        /// Per-vertex color: `default_color` modulated by the `gradient`.
+        colors: Vec<Color>,
+        /// Whether the stroke loops back to its first point.
+        closed: bool,
+        /// `begin_cap_mode`/`end_cap_mode` resolved to a round cap.
+        round_cap: bool,
+        /// `joint_mode` resolved to a round joint.
+        round_joint: bool,
+    },
+    /// A `Polygon2D` filled through a texture sampled by per-vertex UVs.
+    PolygonTextured {
+        /// The polygon vertices, in node-local space.
+        points: Vec<Vector2>,
+        /// One UV per vertex.
+        uvs: Vec<Vector2>,
+        /// Resource path of the fill texture.
+        texture: String,
+        /// The node's `color`, drawn when the texture cannot be loaded so a
+        /// textured polygon never renders as nothing.
+        color: Color,
+    },
     /// A `ColorRect`'s solid rectangle: its size and fill color.
     ColorRect {
         /// The rectangle size (Control's `size`).
@@ -900,16 +932,67 @@ fn draw_command_render(
 /// with `show_behind_parent` is emitted *before* its parent, which is exactly what
 /// that flag means (`canvas_item.cpp`).
 fn push_draw_order(tree: &SceneTree, id: NodeId, out: &mut Vec<NodeId>) {
-    let children = canvas_order::draw_ordered_children(tree, id);
+    // ⚠️ A `y_sort_enabled` node draws its whole reachable subtree as ONE sorted
+    // group (pat-s3rrv.22): Godot flattens every descendant reached through
+    // non-y-sorted children and sorts them together, so a grandchild can
+    // interleave between its own parent and that parent's siblings. Sorting only
+    // direct children moves each child's subtree as an indivisible block.
+    //
+    // The members of a flattened group are emitted here and MUST NOT be recursed
+    // into again — doing both is the double-listing trap, and a node drawn twice
+    // at the same transform is pixel-identical, which is why
+    // `draw_list_has_no_duplicates_or_drops` asserts the multiset rather than
+    // the image.
+    let flattened = canvas_order::y_sort_enabled(tree, id);
+    let children = if flattened {
+        canvas_order::y_sort_group(tree, id)
+    } else {
+        canvas_order::draw_ordered_children(tree, id)
+    };
+    // ⚠️ Simplification worth knowing: `show_behind_parent` is partitioned over
+    // the whole group, so a flattened GRANDCHILD carrying the flag lands before
+    // this node rather than before its own parent. For the overwhelmingly common
+    // case (no `show_behind_parent` inside a y-sorted subtree) the result is
+    // identical, and it keeps the flag's existing meaning for direct children.
     let (behind, front): (Vec<NodeId>, Vec<NodeId>) = children
         .into_iter()
         .partition(|&child| read_bool(tree, child, "show_behind_parent"));
     for child in behind {
-        push_draw_order(tree, child, out);
+        push_group_member(tree, child, flattened, out);
     }
-    out.push(id);
+    // ⚠️ Godot's `CLIP_CHILDREN_ONLY` (1) means "this node is used as a mask and
+    // is **not** drawn" (doc/classes/CanvasItem.xml:809-811);
+    // `CLIP_CHILDREN_AND_DRAW` (2) is a mask that IS drawn. Both still clip, and
+    // `clip_rect_for` already covers that half with its `!= 0` test — so the
+    // self-draw is the only thing the two modes disagree about, and it was the
+    // half nothing implemented: `clip_children_mode` had exactly one production
+    // consumer and it could not tell 1 from 2.
+    //
+    // Only this node's own emission is skipped. Its children are still walked
+    // below, because a mask that swallowed its subtree would clip everything to
+    // nothing rather than mask it.
+    if canvas_order::clip_children_mode(tree, id) != 1 {
+        out.push(id);
+    }
     for child in front {
-        push_draw_order(tree, child, out);
+        push_group_member(tree, child, flattened, out);
+    }
+}
+
+/// Emits one member of a parent's draw list.
+///
+/// When the parent was NOT y-sorted the member is an ordinary child and owns its
+/// own subtree walk. When it WAS, the member's descendants are already present in
+/// the flattened group — except for a member that is itself `y_sort_enabled`,
+/// which the group walk deliberately did not descend into because it owns a
+/// nested sort of its own.
+fn push_group_member(tree: &SceneTree, id: NodeId, flattened: bool, out: &mut Vec<NodeId>) {
+    if !flattened || canvas_order::y_sort_enabled(tree, id) {
+        push_draw_order(tree, id, out);
+        return;
+    }
+    if canvas_order::clip_children_mode(tree, id) != 1 {
+        out.push(id);
     }
 }
 
@@ -1260,16 +1343,79 @@ fn render_kind_for(tree: &SceneTree, id: gdscene::NodeId, class: &str) -> Render
             }
         }
         "Polygon2D" => {
+            let points = read_points(tree, id, "polygon");
+            // Godot leaves `uv` empty until the polygon is unwrapped and then
+            // textures it by its own VERTEX POSITIONS — `polygon_2d.cpp:237`
+            // uses `points[i]` when the uv array is the wrong length, so an
+            // un-unwrapped textured polygon is still textured, not flat
+            // (pat-s3rrv.85).
+            let authored_uv = read_points(tree, id, "uv");
+            let uvs = if authored_uv.len() == points.len() {
+                authored_uv
+            } else {
+                points.clone()
+            };
+            if points.len() >= 3 {
+                if let Some(texture) = node2d::get_texture_path(tree, id) {
+                    return Render2DKind::PolygonTextured {
+                        points,
+                        uvs,
+                        texture,
+                        color: read_color(tree, id, "color"),
+                    };
+                }
+            }
             return Render2DKind::Polygon {
-                points: read_points(tree, id, "polygon"),
+                points,
                 color: read_color(tree, id, "color"),
             };
         }
         "Line2D" => {
+            let points = read_points(tree, id, "points");
+            let width = read_f32(tree, id, "width", 0.0);
+            let color = read_color(tree, id, "default_color");
+            // `gradient` and `width_curve` are sub-resources that `packed_scene`
+            // flattened onto the node; caps and joints are plain enums. Any one
+            // of them makes the stroke non-uniform, which the shaded path exists
+            // to draw (pat-s3rrv.85).
+            let offsets = read_f32_array(tree, id, "__gradient_offsets");
+            let grad_colors = read_colors(tree, id, "__gradient_colors");
+            let curve = read_f32_array(tree, id, "__width_curve_samples");
+            // Godot: 0 = NONE, 1 = BOX, 2 = ROUND for both caps and joints.
+            let round_cap = read_f32(tree, id, "begin_cap_mode", 0.0) as i32 == 2
+                || read_f32(tree, id, "end_cap_mode", 0.0) as i32 == 2;
+            let round_joint = read_f32(tree, id, "joint_mode", 0.0) as i32 == 2;
+            let shaded = !curve.is_empty()
+                || (!grad_colors.is_empty() && grad_colors.len() == offsets.len())
+                || round_cap
+                || round_joint;
+            if shaded && points.len() >= 2 {
+                let last = (points.len() - 1) as f32;
+                let (widths, colors): (Vec<f32>, Vec<Color>) = (0..points.len())
+                    .map(|i| {
+                        // Godot samples both along the stroke's normalized
+                        // length (`line_builder.cpp`), so a two-point line reads
+                        // the curve/gradient at exactly 0.0 and 1.0.
+                        let t = if last > 0.0 { i as f32 / last } else { 0.0 };
+                        (
+                            width * sample_baked(&curve, t),
+                            sample_gradient(&offsets, &grad_colors, t).unwrap_or(color),
+                        )
+                    })
+                    .unzip();
+                return Render2DKind::LineShaded {
+                    points,
+                    widths,
+                    colors,
+                    closed: read_bool(tree, id, "closed"),
+                    round_cap,
+                    round_joint,
+                };
+            }
             return Render2DKind::Line {
-                points: read_points(tree, id, "points"),
-                width: read_f32(tree, id, "width", 0.0),
-                color: read_color(tree, id, "default_color"),
+                points,
+                width,
+                color,
             };
         }
         // pat-0q2kx.77: a Path2D's curve is a Curve2D sub-resource, flattened
@@ -1421,6 +1567,98 @@ fn read_f32(tree: &SceneTree, id: gdscene::NodeId, key: &str, default: f32) -> f
         Some(Variant::Int(i)) => i as f32,
         _ => default,
     }
+}
+
+/// Reads a `PackedFloat32Array` property, tolerating the generic `Array` form a
+/// hand-built node may carry (same split `read_points` documents).
+fn read_f32_array(tree: &SceneTree, id: gdscene::NodeId, key: &str) -> Vec<f32> {
+    match tree.get_node(id).map(|n| n.get_property(key)) {
+        Some(Variant::PackedFloat32Array(v)) => v,
+        Some(Variant::PackedFloat64Array(v)) => v.into_iter().map(|f| f as f32).collect(),
+        Some(Variant::Array(items)) => items
+            .into_iter()
+            .filter_map(|v| match v {
+                Variant::Float(f) => Some(f as f32),
+                Variant::Int(i) => Some(i as f32),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Reads a `PackedColorArray` property, tolerating the generic `Array` form.
+fn read_colors(tree: &SceneTree, id: gdscene::NodeId, key: &str) -> Vec<Color> {
+    match tree.get_node(id).map(|n| n.get_property(key)) {
+        Some(Variant::PackedColorArray(v)) => v,
+        Some(Variant::Array(items)) => items
+            .into_iter()
+            .filter_map(|v| match v {
+                Variant::Color(c) => Some(c),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Samples a flattened `Gradient` at `t`.
+///
+/// Godot's default `GRADIENT_INTERPOLATE_LINEAR` lerps between the two stops
+/// bracketing the offset and clamps outside the first and last
+/// (`Gradient::get_color_at_offset`, upstream/godot/scene/resources/gradient.h).
+/// Returns `None` when the node carries no usable gradient, so the caller falls
+/// back to `default_color` rather than to black.
+fn sample_gradient(offsets: &[f32], colors: &[Color], t: f32) -> Option<Color> {
+    if colors.is_empty() || offsets.len() != colors.len() {
+        return None;
+    }
+    if colors.len() == 1 || t <= offsets[0] {
+        return Some(colors[0]);
+    }
+    let last = offsets.len() - 1;
+    if t >= offsets[last] {
+        return Some(colors[last]);
+    }
+    let mut i = 0;
+    while i + 1 < last && offsets[i + 1] <= t {
+        i += 1;
+    }
+    let span = offsets[i + 1] - offsets[i];
+    let k = if span.abs() < 1e-6 {
+        0.0
+    } else {
+        (t - offsets[i]) / span
+    };
+    let (a, b) = (colors[i], colors[i + 1]);
+    Some(Color::new(
+        a.r + (b.r - a.r) * k,
+        a.g + (b.g - a.g) * k,
+        a.b + (b.b - a.b) * k,
+        a.a + (b.a - a.a) * k,
+    ))
+}
+
+/// Samples a baked curve table at `t`, interpolating between the two nearest
+/// samples the way Godot's `Curve::sample_baked` does.
+///
+/// An empty table means the node has no `width_curve`, which scales the stroke
+/// by 1.0 — never by 0.0, which would erase it.
+fn sample_baked(samples: &[f32], t: f32) -> f32 {
+    if samples.is_empty() {
+        return 1.0;
+    }
+    if samples.len() == 1 {
+        return samples[0];
+    }
+    let last = samples.len() - 1;
+    let pos = t.clamp(0.0, 1.0) * last as f32;
+    let i = (pos.floor() as usize).min(last);
+    if i == last {
+        return samples[last];
+    }
+    let k = pos - i as f32;
+    samples[i] + (samples[i + 1] - samples[i]) * k
 }
 
 // ===========================================================================
@@ -1684,26 +1922,9 @@ pub const CONTROL_Z_BASE: i64 = 1 << 20;
 /// (Godot 4) or the legacy `current` property, and when several claim it the last
 /// one in tree order wins (upstream/godot/scene/2d/camera_2d.cpp).
 pub fn current_camera2d(tree: &SceneTree) -> Option<gdscene::NodeId> {
-    let mut subtree = Vec::new();
-    tree.collect_subtree_top_down(tree.root_id(), &mut subtree);
-    let mut found = None;
-    for id in subtree {
-        let Some(node) = tree.get_node(id) else {
-            continue;
-        };
-        if node.class_name() != "Camera2D" {
-            continue;
-        }
-        let claims = match node.get_property("enabled") {
-            Variant::Bool(b) => b,
-            // Godot 3 named it `current`; scenes in the wild still carry it.
-            _ => matches!(node.get_property("current"), Variant::Bool(true)),
-        };
-        if claims {
-            found = Some(id);
-        }
-    }
-    found
+    // One definition, shared with the per-frame scroll pass so the camera that
+    // integrates is the camera that renders (pat-s3rrv.84).
+    gdscene::behavioral_2d::current_camera2d(tree)
 }
 
 /// The canvas transform an enabled `Camera2D` imposes on the runtime frame —
@@ -1730,17 +1951,88 @@ pub fn camera2d_view_transform(
     // The camera's own global position plus its `offset`, as Godot's target.
     let target =
         node2d::get_global_transform(tree, camera).origin + node2d::get_camera_offset(tree, camera);
-    let current = previous_center.unwrap_or(target);
-    let center = node2d::compute_camera2d_position(&config, current, target, viewport_size, dt);
+    let center = resolve_camera2d_center(
+        tree,
+        camera,
+        &config,
+        target,
+        viewport_size,
+        previous_center,
+        dt,
+    );
+    // Godot folds the camera's rotation into the canvas transform only when
+    // `ignore_rotation` is false, which is NOT the default: an upright view
+    // under a rotated camera is the normal case (camera_2d.cpp:259).
+    let rotation = if config.ignore_rotation {
+        0.0
+    } else {
+        published_camera2d_rotation(tree, camera)
+            .unwrap_or_else(|| node2d::get_global_rotation(tree, camera))
+    };
 
     let half = Vector2::new(viewport_size.x * 0.5, viewport_size.y * 0.5);
     // Applied right-to-left: recentre on the camera, scale by zoom, then move to
     // the middle of the viewport (`A * B` applies B first).
-    Some(
-        Transform2D::translated(half)
-            * Transform2D::scaled(config.zoom)
-            * Transform2D::translated(-center),
-    )
+    // The world counter-rotates by the camera's angle, so the canvas transform
+    // carries its negation.
+    let view = Transform2D::translated(half) * Transform2D::scaled(config.zoom);
+    let view = if rotation == 0.0 {
+        view
+    } else {
+        view * Transform2D::rotated(-rotation)
+    };
+    Some(view * Transform2D::translated(-center))
+}
+
+/// The Camera2D scroll centre `behavioral_2d::process_camera2d_scroll` published
+/// for this frame, if any.
+fn published_camera2d_center(tree: &SceneTree, camera: gdscene::NodeId) -> Option<Vector2> {
+    match tree
+        .get_node(camera)
+        .map(|n| n.get_property(gdscene::behavioral_2d::CAMERA2D_SCROLL_CENTER))
+    {
+        Some(gdvariant::Variant::Vector2(v)) => Some(v),
+        _ => None,
+    }
+}
+
+/// The published view rotation, companion to [`published_camera2d_center`].
+fn published_camera2d_rotation(tree: &SceneTree, camera: gdscene::NodeId) -> Option<f32> {
+    match tree
+        .get_node(camera)
+        .map(|n| n.get_property(gdscene::behavioral_2d::CAMERA2D_SCROLL_ROTATION))
+    {
+        Some(gdvariant::Variant::Float(f)) => Some(f as f32),
+        _ => None,
+    }
+}
+
+/// Decides which centre a frame renders at.
+///
+/// The three cases are distinct on purpose. An explicit `previous_center` means
+/// the CALLER keeps the scroll state and wants this call to advance it. A
+/// published centre means the frame step already advanced it, so integrating
+/// again here would ease twice per frame and converge at double speed. With
+/// neither, there is no state to ease from and the camera snaps — which is also
+/// the correct answer whenever smoothing is off (pat-s3rrv.84).
+fn resolve_camera2d_center(
+    tree: &SceneTree,
+    camera: gdscene::NodeId,
+    config: &node2d::Camera2DConfig,
+    target: Vector2,
+    viewport_size: Vector2,
+    previous_center: Option<Vector2>,
+    dt: f32,
+) -> Vector2 {
+    match (previous_center, published_camera2d_center(tree, camera)) {
+        (Some(prev), _) => {
+            node2d::compute_camera2d_position(config, prev, target, viewport_size, dt)
+        }
+        (None, Some(published)) => published,
+        (None, None) => {
+            node2d::compute_camera2d_position(config, target, target, viewport_size, dt)
+        }
+    }
 }
 
 /// Pre-multiplies a camera view transform onto every **world-canvas** render item.
@@ -1841,12 +2133,13 @@ pub fn camera2d_center(
     let config = node2d::camera2d_config_from_node(tree, camera);
     let target =
         node2d::get_global_transform(tree, camera).origin + node2d::get_camera_offset(tree, camera);
-    let current = previous_center.unwrap_or(target);
-    Some(node2d::compute_camera2d_position(
+    Some(resolve_camera2d_center(
+        tree,
+        camera,
         &config,
-        current,
         target,
         viewport_size,
+        previous_center,
         dt,
     ))
 }
@@ -2416,6 +2709,79 @@ pub fn rasterize_render_list_with_quality(
                     );
                 }
             }
+            // pat-s3rrv.85. `draw_polyline_shaded` has taken per-vertex widths
+            // and colours since pat-0q2kx.191 with ZERO non-test callers: the
+            // rasterizer did not need writing, only wiring. Points are
+            // transformed here because the gdrender2d entry point takes
+            // screen-space vertices, the same as the `Mesh` arm below.
+            Render2DKind::LineShaded {
+                points,
+                widths,
+                colors,
+                closed,
+                round_cap,
+                round_joint,
+            } => {
+                if points.len() >= 2 && widths.len() == points.len() && colors.len() == points.len()
+                {
+                    let pts: Vec<Vector2> = points.iter().map(|p| xform.xform(*p)).collect();
+                    let cols: Vec<Color> =
+                        colors.iter().map(|c| modulate(*c, item.modulate)).collect();
+                    gdrender2d::polygon_raster::draw_polyline_shaded(
+                        &mut fb,
+                        &pts,
+                        widths,
+                        &cols,
+                        *closed,
+                        if *round_cap {
+                            gdrender2d::polygon_raster::LineCap::Round
+                        } else {
+                            gdrender2d::polygon_raster::LineCap::None
+                        },
+                        if *round_joint {
+                            gdrender2d::polygon_raster::LineJoint::Round
+                        } else {
+                            gdrender2d::polygon_raster::LineJoint::Sharp
+                        },
+                    );
+                }
+            }
+            Render2DKind::PolygonTextured {
+                points,
+                uvs,
+                texture,
+                color,
+            } => {
+                let pts: Vec<Vector2> = points.iter().map(|p| xform.xform(*p)).collect();
+                let mut drawn = false;
+                if let Some(cache) = texture_cache.as_deref_mut() {
+                    if let Some(tex) = cache.get(texture) {
+                        if tex.width > 0 && tex.height > 0 {
+                            // Godot authors Polygon2D UVs in TEXTURE PIXELS and
+                            // divides by the texture size before handing them to
+                            // the renderer (`polygon_2d.cpp:232`). The rasterizer
+                            // clamps to 0..1, so skipping this would collapse
+                            // every texel coordinate onto one edge of the image.
+                            let (tw, th) = (tex.width as f32, tex.height as f32);
+                            let norm: Vec<Vector2> = uvs
+                                .iter()
+                                .map(|uv| Vector2::new(uv.x / tw, uv.y / th))
+                                .collect();
+                            gdrender2d::polygon_raster::fill_polygon_textured(
+                                &mut fb, &pts, &norm, tex,
+                            );
+                            drawn = true;
+                        }
+                    }
+                }
+                if !drawn {
+                    // No cache, or the texture failed to load. Godot still shows
+                    // the polygon tinted by `color`, and falling through to
+                    // nothing would make a textured Polygon2D VANISH where the
+                    // untextured one drew fine.
+                    fill_polygon(&mut fb, xform, points, modulate(*color, item.modulate));
+                }
+            }
             Render2DKind::Particles { texture, particles } => {
                 // Godot draws one billboard per live particle each frame,
                 // textured by the emitter's `texture`
@@ -2625,7 +2991,10 @@ fn item_screen_bounds(item: &Render2DItem) -> Option<Rect2> {
             }
             r
         }
-        Render2DKind::Polygon { points, .. } | Render2DKind::Line { points, .. } => {
+        Render2DKind::Polygon { points, .. }
+        | Render2DKind::Line { points, .. }
+        | Render2DKind::LineShaded { points, .. }
+        | Render2DKind::PolygonTextured { points, .. } => {
             let first = points.first()?;
             let (mut min, mut max) = (*first, *first);
             for p in &points[1..] {

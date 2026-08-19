@@ -271,6 +271,70 @@ fn mouse_button_mask_is_a_bitfield() {
     );
 }
 
+/// pat-s3rrv.76 — the thumb buttons must reach the mask.
+///
+/// ⚠️ TWO independent gaps had to close for this to read anything, which is why
+/// the assertion is on the exact VALUE rather than merely "nonzero": the mask
+/// loop in `interpreter.rs` stopped at button 3, AND the per-frame snapshot in
+/// `main_loop.rs` that feeds `is_mouse_button_pressed` recorded only
+/// Left/Right/Middle. Fixing either one alone still reads 0 here — widening the
+/// loop while the snapshot stays narrow ORs in bits that are never set.
+#[test]
+fn the_thumb_buttons_reach_the_mouse_button_mask() {
+    let (mut ml, observer) = observer_scene();
+
+    ml.push_event(InputEvent::MouseButton {
+        button: MouseButton::XButton1,
+        pressed: true,
+        position: Vector2::ZERO,
+    });
+    ml.step(1.0 / 60.0);
+    assert_eq!(
+        script_prop(ml.tree(), observer, "button_mask"),
+        Variant::Int(128),
+        "MOUSE_BUTTON_MASK_MB_XBUTTON1 is 1 << (8 - 1) = 128 \
+         (core/input/input_enums.h:147)"
+    );
+
+    // 🔑 A THIRD API was wrong for the same reason, and it is not a mask
+    // question: Godot's `is_anything_pressed` returns true whenever the button
+    // mask is non-empty (core/input/input.cpp:286), and the mask includes the
+    // thumb buttons. With them missing from the snapshot, holding one made
+    // `Input.is_anything_pressed()` answer FALSE — a game pausing on "no input"
+    // would have paused with a button held down.
+    assert_eq!(
+        script_prop(ml.tree(), observer, "anything"),
+        Variant::Bool(true),
+        "a held thumb button must count as input; Godot's is_anything_pressed \
+         tests the mask, which carries MB_XBUTTON1"
+    );
+
+    ml.push_event(InputEvent::MouseButton {
+        button: MouseButton::XButton2,
+        pressed: true,
+        position: Vector2::ZERO,
+    });
+    ml.step(1.0 / 60.0);
+    assert_eq!(
+        script_prop(ml.tree(), observer, "button_mask"),
+        Variant::Int(128 | 256),
+        "both thumb buttons held ORs to 384 — a mask that REPLACED rather than \
+         accumulated would read 256 here and still look plausible"
+    );
+
+    ml.push_event(InputEvent::MouseButton {
+        button: MouseButton::XButton1,
+        pressed: false,
+        position: Vector2::ZERO,
+    });
+    ml.step(1.0 / 60.0);
+    assert_eq!(
+        script_prop(ml.tree(), observer, "button_mask"),
+        Variant::Int(256),
+        "releasing XBUTTON1 clears its bit and leaves XBUTTON2's standing"
+    );
+}
+
 /// `get_last_mouse_velocity` reports pixels **per second**, so it depends on the
 /// frame delta rather than being the raw displacement.
 #[test]

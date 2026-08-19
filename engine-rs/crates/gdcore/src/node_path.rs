@@ -128,6 +128,36 @@ impl NodePath {
         self.names.join("/")
     }
 
+    /// Godot `NodePath.hash()` — the value Godot's own hash maps key on
+    /// (pat-s3rrv.60).
+    ///
+    /// Transcribed from `core/string/node_path.cpp:35-41`:
+    /// ```text
+    /// StringName path    = get_concatenated_names();
+    /// StringName subpath = get_concatenated_subnames();
+    /// uint32_t hash = HashMapHasherDefault::hash(Pair<...>(path, subpath));
+    /// hash_cache = is_absolute() ? hash : ~hash;
+    /// ```
+    ///
+    /// ⚠️ NOTE THE BITWISE NOT for a RELATIVE path. It is one character in the
+    /// C++ and invisible to any test that only uses absolute paths, so both
+    /// cases are pinned below.
+    ///
+    /// ⚠️ Named `godot_hash`, not `hash`: this type derives [`Hash`], and an
+    /// inherent `hash` sitting beside `Hash::hash` is an ambiguity trap for
+    /// every later caller. The script-facing name is still `"hash"` — that is a
+    /// dispatch string, not this identifier.
+    pub fn godot_hash(&self) -> u32 {
+        let h1 = u64::from(godot_string_hash(&self.get_concatenated_names()));
+        let h2 = u64::from(godot_string_hash(&self.get_concatenated_subnames()));
+        let hash = hash_one_uint64((h1 << 32) | h2);
+        if self.absolute {
+            hash
+        } else {
+            !hash
+        }
+    }
+
     /// Godot's `NodePath.slice(begin, end)` — a sub-path over the NAMES
     /// (pat-s3rrv.60).
     ///
@@ -201,9 +231,112 @@ impl From<String> for NodePath {
     }
 }
 
+/// Godot's `String::hash` — djb2 (`core/string/ustring.cpp:2734`).
+///
+/// ⚠️ It walks **code points** (`char32_t`), not UTF-8 bytes. Hashing
+/// `s.bytes()` agrees with Godot for ASCII and silently diverges the moment a
+/// path contains a non-ASCII character, which is exactly the kind of bug that
+/// only shows up when a value crosses an engine boundary.
+fn godot_string_hash(s: &str) -> u32 {
+    let mut h: u32 = 5381;
+    for ch in s.chars() {
+        // `hashv = ((hashv << 5) + hashv) + c` — all uint32, wrapping.
+        h = h.wrapping_shl(5).wrapping_add(h).wrapping_add(ch as u32);
+    }
+    h
+}
+
+/// Godot's `hash_one_uint64` (`core/templates/hashfuncs.h:87-96`), the 64→32
+/// finaliser the Pair hasher ends with.
+fn hash_one_uint64(p_int: u64) -> u32 {
+    let mut v = p_int;
+    v = (!v).wrapping_add(v << 18);
+    v ^= v >> 31;
+    v = v.wrapping_mul(21);
+    v ^= v >> 11;
+    v = v.wrapping_add(v << 6);
+    v ^= v >> 22;
+    v as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔑 `NodePath.hash()` against values from an INDEPENDENT transcription.
+    ///
+    /// ⚠️ These constants were produced by re-transcribing Godot's chain
+    /// (`String::hash` djb2 → the `Pair` hasher → `hash_one_uint64`) into Python
+    /// and RUNNING it — not by printing what this implementation returns. A
+    /// wrong-but-stable hash satisfies every round-trip and self-consistency
+    /// test and only breaks when a value crosses an engine boundary, so
+    /// self-comparison would proves nothing here.
+    #[test]
+    fn godot_hash_matches_the_upstream_chain() {
+        assert_eq!(
+            NodePath::new("/root/Main").godot_hash(),
+            1_105_670_561,
+            "absolute path"
+        );
+        assert_eq!(
+            NodePath::new("Node:position:x").godot_hash(),
+            1_901_452_884,
+            "subnames participate as a separate StringName joined by ':'"
+        );
+    }
+
+    /// ⚠️ THE BITWISE NOT IS THE WHOLE TEST.
+    ///
+    /// Godot returns `hash` for an absolute path and `~hash` for a relative one
+    /// (`node_path.cpp:40`). It is one character upstream, and a port that drops
+    /// it passes every absolute-path assertion. Pinning both directions with the
+    /// SAME name content is what catches it.
+    #[test]
+    fn a_relative_path_hashes_to_the_complement_of_the_absolute_one() {
+        let rel = NodePath::new("Main/Sprite");
+        assert_eq!(rel.godot_hash(), 3_441_622_773, "relative path");
+
+        let abs = NodePath::new("/Main/Sprite");
+        assert_eq!(
+            rel.godot_hash(),
+            !abs.godot_hash(),
+            "the only difference between the two is the leading slash, so their \
+             hashes must be exact bitwise complements"
+        );
+        assert_ne!(
+            rel.godot_hash(),
+            abs.godot_hash(),
+            "a port that ignored is_absolute would make these equal"
+        );
+    }
+
+    /// The primitives, pinned separately so a failure says WHICH stage drifted.
+    #[test]
+    fn the_hash_primitives_match_godot() {
+        // `String::hash("")` is what Godot's `StringName::get_empty_hash`
+        // returns, so an empty path is not a special case.
+        assert_eq!(godot_string_hash(""), 5381, "djb2 seed");
+        assert_eq!(
+            godot_string_hash("a"),
+            5381 * 33 + 97,
+            "djb2 step is *33 + c"
+        );
+
+        // ⚠️ Code points, not bytes. 'Ü' is two UTF-8 bytes but ONE char32_t.
+        assert_eq!(
+            godot_string_hash("Ü"),
+            5381u32.wrapping_mul(33).wrapping_add(0xDC),
+            "the hash must consume the code point U+00DC, not its two UTF-8 bytes"
+        );
+
+        assert_eq!(NodePath::new("Ünï").godot_hash(), 1_261_690_316);
+    }
+
+    /// An empty path still hashes, and to the documented value.
+    #[test]
+    fn an_empty_path_hashes_without_special_casing() {
+        assert_eq!(NodePath::empty().godot_hash(), 2_757_153_842);
+    }
 
     #[test]
     fn parse_absolute_path() {

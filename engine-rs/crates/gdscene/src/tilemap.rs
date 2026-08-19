@@ -2645,3 +2645,237 @@ mod tests {
         assert_eq!(region.size, Vector2::new(32.0, 32.0));
     }
 }
+
+// ---------------------------------------------------------------------------
+// GDScript node method surface (pat-s3rrv.88)
+// ---------------------------------------------------------------------------
+//
+// Every cell operation above takes a [`TileMapStore`], which is an EDITOR-side
+// structure: nothing in the running engine ever builds one (`rg TileMapStore`
+// finds no constructor outside this module). At runtime the source of truth is
+// the node's own `tile_map_data` property — both the render path
+// (`viewport_2d_render::tilemap_quads`) and the tile-physics pass
+// (`physics_server`) decode it directly. So the script bridge below works on
+// that property: decode, mutate, re-encode. That is also exactly what makes a
+// scripted edit show up in pixels and in collision on the next frame, with no
+// invalidation step of its own.
+//
+// Godot ground truth: `upstream/godot/scene/2d/tile_map_layer.cpp`.
+
+/// Godot's `TileSet::INVALID_SOURCE` — the "no tile here" source id.
+pub const INVALID_SOURCE: i32 = -1;
+/// Godot's `TileSetSource::INVALID_ATLAS_COORDS`.
+pub const INVALID_ATLAS_COORDS: Vector2i = Vector2i::new(-1, -1);
+/// Godot's `TileSetSource::INVALID_TILE_ALTERNATIVE`.
+pub const INVALID_TILE_ALTERNATIVE: i32 = -1;
+/// Godot's `TileSet.tile_size` default, used when a layer has no TileSet yet.
+const DEFAULT_TILE_SIZE: Vector2i = Vector2i::new(16, 16);
+
+/// Decodes the cells a TileMapLayer node currently holds.
+fn node_cells(tree: &crate::scene_tree::SceneTree, node_id: NodeId) -> HashMap<Vector2i, TileData> {
+    match tree
+        .get_node(node_id)
+        .map(|n| n.get_property("tile_map_data"))
+    {
+        Some(Variant::PackedByteArray(bytes)) => decode_tile_map_data(&bytes),
+        _ => HashMap::new(),
+    }
+}
+
+/// Re-encodes cells onto the node, which is what the render and physics passes
+/// read on the next frame.
+fn write_node_cells(
+    tree: &mut crate::scene_tree::SceneTree,
+    node_id: NodeId,
+    cells: &HashMap<Vector2i, TileData>,
+) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(
+            "tile_map_data",
+            Variant::PackedByteArray(encode_tile_map_data(cells)),
+        );
+    }
+}
+
+/// The layer's cell size in pixels, from the flattened TileSet companion.
+fn node_tile_size(tree: &crate::scene_tree::SceneTree, node_id: NodeId) -> Vector2i {
+    match tree
+        .get_node(node_id)
+        .map(|n| n.get_property(TILE_SET_TILE_SIZE))
+    {
+        Some(Variant::Vector2i(v)) if v.x != 0 && v.y != 0 => v,
+        _ => DEFAULT_TILE_SIZE,
+    }
+}
+
+/// Applies Godot's `set_cell` to a decoded cell map.
+///
+/// Godot normalises a PARTIALLY invalid triple to fully invalid — passing an
+/// invalid source id, atlas coord OR alternative while the others are valid
+/// clears all three (`tile_map_layer.cpp`), so the cell is erased rather than
+/// stored half-specified.
+fn apply_set_cell(
+    cells: &mut HashMap<Vector2i, TileData>,
+    coords: Vector2i,
+    source_id: i32,
+    atlas_coords: Vector2i,
+    alternative: i32,
+) {
+    let any_invalid = source_id == INVALID_SOURCE
+        || atlas_coords == INVALID_ATLAS_COORDS
+        || alternative == INVALID_TILE_ALTERNATIVE;
+    if any_invalid {
+        cells.remove(&coords);
+        return;
+    }
+    let entry = cells.entry(coords).or_insert_with(|| TileData {
+        source_id,
+        atlas_coords,
+        alternative_id: alternative,
+        custom_data: HashMap::new(),
+    });
+    entry.source_id = source_id;
+    entry.atlas_coords = atlas_coords;
+    entry.alternative_id = alternative;
+}
+
+/// Answers `TileMapLayer`'s script method surface, or `None` for any other node.
+///
+/// Runs ahead of the generic node-method table in `scripting::call_node_method`
+/// and declines every non-TileMapLayer node, the contract
+/// `navigation_agents::call_agent_method` follows. `TileMap` (the deprecated
+/// multi-layer node) is accepted too so a `.tscn` authored against either class
+/// reaches the same implementation.
+pub fn call_tilemap_method(
+    tree: &mut crate::scene_tree::SceneTree,
+    node_id: NodeId,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    let class = tree.get_node(node_id)?.class_name().to_string();
+    if class != "TileMapLayer" && class != "TileMap" {
+        return None;
+    }
+
+    let cell_arg = |i: usize| -> Vector2i {
+        match args.get(i) {
+            Some(Variant::Vector2i(v)) => *v,
+            // A script may hand a float Vector2 to a coordinate parameter;
+            // Godot coerces rather than failing.
+            Some(Variant::Vector2(v)) => Vector2i::new(v.x as i32, v.y as i32),
+            _ => Vector2i::ZERO,
+        }
+    };
+    let int_arg = |i: usize, default: i32| -> i32 {
+        match args.get(i) {
+            Some(Variant::Int(v)) => *v as i32,
+            Some(Variant::Float(f)) => *f as i32,
+            _ => default,
+        }
+    };
+
+    Some(match method {
+        "set_cell" => {
+            let coords = cell_arg(0);
+            // Godot's defaults: an omitted source id means "erase".
+            let source_id = int_arg(1, INVALID_SOURCE);
+            let atlas = match args.get(2) {
+                Some(Variant::Vector2i(v)) => *v,
+                Some(Variant::Vector2(v)) => Vector2i::new(v.x as i32, v.y as i32),
+                _ => Vector2i::ZERO,
+            };
+            let alternative = int_arg(3, 0);
+            let mut cells = node_cells(tree, node_id);
+            apply_set_cell(&mut cells, coords, source_id, atlas, alternative);
+            write_node_cells(tree, node_id, &cells);
+            Variant::Nil
+        }
+        "erase_cell" => {
+            let coords = cell_arg(0);
+            let mut cells = node_cells(tree, node_id);
+            cells.remove(&coords);
+            write_node_cells(tree, node_id, &cells);
+            Variant::Nil
+        }
+        "clear" => {
+            write_node_cells(tree, node_id, &HashMap::new());
+            Variant::Nil
+        }
+        "get_cell_source_id" => {
+            let coords = cell_arg(0);
+            Variant::Int(
+                node_cells(tree, node_id)
+                    .get(&coords)
+                    .map(|t| t.source_id)
+                    .unwrap_or(INVALID_SOURCE) as i64,
+            )
+        }
+        "get_cell_atlas_coords" => {
+            let coords = cell_arg(0);
+            Variant::Vector2i(
+                node_cells(tree, node_id)
+                    .get(&coords)
+                    .map(|t| t.atlas_coords)
+                    .unwrap_or(INVALID_ATLAS_COORDS),
+            )
+        }
+        "get_cell_alternative_tile" => {
+            let coords = cell_arg(0);
+            Variant::Int(
+                node_cells(tree, node_id)
+                    .get(&coords)
+                    .map(|t| t.alternative_id)
+                    .unwrap_or(INVALID_TILE_ALTERNATIVE) as i64,
+            )
+        }
+        "get_used_cells" => {
+            // Sorted so a script iterating the result gets a stable order rather
+            // than `HashMap` iteration order, which would differ run to run.
+            let mut coords: Vec<Vector2i> = node_cells(tree, node_id).into_keys().collect();
+            coords.sort_by_key(|c| (c.y, c.x));
+            Variant::Array(coords.into_iter().map(Variant::Vector2i).collect())
+        }
+        "get_used_rect" => {
+            let cells = node_cells(tree, node_id);
+            if cells.is_empty() {
+                // Godot returns an empty rect for an empty layer.
+                Variant::Rect2i(gdcore::math::Rect2i::new(Vector2i::ZERO, Vector2i::ZERO))
+            } else {
+                let (mut min, mut max) = (
+                    Vector2i::new(i32::MAX, i32::MAX),
+                    Vector2i::new(i32::MIN, i32::MIN),
+                );
+                for c in cells.keys() {
+                    min = Vector2i::new(min.x.min(c.x), min.y.min(c.y));
+                    max = Vector2i::new(max.x.max(c.x), max.y.max(c.y));
+                }
+                // The rect spans through the last cell, hence the +1.
+                Variant::Rect2i(gdcore::math::Rect2i::new(
+                    min,
+                    Vector2i::new(max.x - min.x + 1, max.y - min.y + 1),
+                ))
+            }
+        }
+        "map_to_local" => {
+            let tile_size = node_tile_size(tree, node_id);
+            Variant::Vector2(map_to_local(tile_size, cell_arg(0)))
+        }
+        "local_to_map" => {
+            let tile_size = node_tile_size(tree, node_id);
+            let local = match args.first() {
+                Some(Variant::Vector2(v)) => *v,
+                Some(Variant::Vector2i(v)) => Vector2::new(v.x as f32, v.y as f32),
+                _ => Vector2::ZERO,
+            };
+            Variant::Vector2i(local_to_map(tile_size, local))
+        }
+        "get_surrounding_cells" => Variant::Array(
+            get_surrounding_cells(cell_arg(0))
+                .into_iter()
+                .map(Variant::Vector2i)
+                .collect(),
+        ),
+        // Not a tilemap method: let the generic table answer it.
+        _ => return None,
+    })
+}

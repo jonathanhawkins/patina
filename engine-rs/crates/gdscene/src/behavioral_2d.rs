@@ -235,11 +235,10 @@ fn is_notifier(class_name: &str) -> bool {
 pub fn visible_world_rect(tree: &SceneTree) -> Rect2 {
     let viewport = tree.root_window().visible_size();
 
-    let camera = tree.all_nodes_in_tree_order().into_iter().find(|id| {
-        tree.get_node(*id).is_some_and(|n| {
-            n.class_name() == "Camera2D" && matches!(n.get_property("current"), Variant::Bool(true))
-        })
-    });
+    // Same lookup the renderer uses, so the rect culled against is the rect
+    // drawn — a Godot 4 scene spells the claim `enabled`, which the old
+    // `current`-only test here never matched (pat-s3rrv.84).
+    let camera = current_camera2d(tree);
 
     match camera {
         Some(cam) => {
@@ -257,7 +256,18 @@ pub fn visible_world_rect(tree: &SceneTree) -> Rect2 {
                     viewport.y
                 },
             );
-            let center = node2d::get_screen_center_position(tree, cam, viewport);
+            // Prefer the centre `process_camera2d_scroll` resolved this frame,
+            // so a smoothed or drag-held camera culls against the view it
+            // actually renders rather than the target it is still easing toward
+            // (pat-s3rrv.84). Falls back to the snapped target when no frame has
+            // been stepped yet, which is what an un-run tree reports.
+            let center = match tree
+                .get_node(cam)
+                .map(|n| n.get_property(CAMERA2D_SCROLL_CENTER))
+            {
+                Some(Variant::Vector2(v)) => v,
+                _ => node2d::get_screen_center_position(tree, cam, viewport),
+            };
             Rect2::new(center - size * 0.5, size)
         }
         None => Rect2::new(Vector2::ZERO, viewport),
@@ -563,4 +573,97 @@ pub fn route_touch_screen_buttons(tree: &mut SceneTree, event: &InputEvent) -> V
         }
     }
     edits
+}
+
+/// Shadow property holding the Camera2D's resolved view centre, republished
+/// every frame by [`process_camera2d_scroll`].
+///
+/// Godot keeps `camera_pos`/`smoothed_camera_pos` as members on the Camera2D
+/// and integrates them in `_update_scroll`; Patina has no per-node runtime
+/// struct, so the running state lives on the node as an internal property —
+/// the same idiom `main_loop` uses for `_pathfollow_published_progress`.
+pub const CAMERA2D_SCROLL_CENTER: &str = "_camera2d_scroll_center";
+
+/// Shadow property holding the Camera2D's resolved view rotation. Stays at
+/// `0.0` while `ignore_rotation` is set, which is Godot's default.
+pub const CAMERA2D_SCROLL_ROTATION: &str = "_camera2d_scroll_rotation";
+
+/// The Camera2D driving the view, or `None` when no camera claims it.
+///
+/// Godot 4 spells the claim `enabled`; Godot 3 spelled it `current` and scenes
+/// in the wild still carry it, so a missing `enabled` falls back to it. When
+/// several cameras claim at once the LAST in top-down order wins, which is the
+/// tie-break the renderer has always used — this is the one definition both it
+/// and the scroll pass resolve through, so they cannot disagree about which
+/// camera is current (pat-s3rrv.84).
+pub fn current_camera2d(tree: &SceneTree) -> Option<NodeId> {
+    let mut subtree = Vec::new();
+    tree.collect_subtree_top_down(tree.root_id(), &mut subtree);
+    let mut found = None;
+    for id in subtree {
+        let Some(node) = tree.get_node(id) else {
+            continue;
+        };
+        if node.class_name() != "Camera2D" {
+            continue;
+        }
+        let claims = match node.get_property("enabled") {
+            Variant::Bool(b) => b,
+            _ => matches!(node.get_property("current"), Variant::Bool(true)),
+        };
+        if claims {
+            found = Some(id);
+        }
+    }
+    found
+}
+
+/// Advances the current Camera2D's scroll state by one frame — Patina's
+/// `Camera2D::_update_scroll`.
+///
+/// Drag margins are a dead zone measured from **last** frame's centre and
+/// position smoothing eases from it, so both are identities unless the centre
+/// survives between frames. Publishing it back onto the node is what makes
+/// `position_smoothing_enabled`, `position_smoothing_speed` and the four
+/// `drag_*_margin`s do anything at runtime: until now every caller passed
+/// `previous_center = None`, which fed `current == target` into both and
+/// collapsed them to a hard snap (pat-s3rrv.84).
+///
+/// The first frame seeds from the target rather than easing toward it, matching
+/// Godot's `first` branch (camera_2d.cpp:208) — a camera that is `current` from
+/// the start opens on its subject instead of sliding in from the origin.
+pub fn process_camera2d_scroll(tree: &mut SceneTree, dt: f32) {
+    let Some(cam) = current_camera2d(tree) else {
+        return;
+    };
+    let viewport = tree.root_window().visible_size();
+    let config = node2d::camera2d_config_from_node(tree, cam);
+
+    let target =
+        node2d::get_global_transform(tree, cam).origin + node2d::get_camera_offset(tree, cam);
+    let previous = match tree
+        .get_node(cam)
+        .map(|n| n.get_property(CAMERA2D_SCROLL_CENTER))
+    {
+        Some(Variant::Vector2(v)) => Some(v),
+        _ => None,
+    };
+    // No published centre yet => this camera's first frame: snap.
+    let current = previous.unwrap_or(target);
+    let center = node2d::compute_camera2d_position(&config, current, target, viewport, dt);
+
+    let target_rotation = node2d::get_global_rotation(tree, cam);
+    let previous_rotation = match tree
+        .get_node(cam)
+        .map(|n| n.get_property(CAMERA2D_SCROLL_ROTATION))
+    {
+        Some(Variant::Float(f)) => f as f32,
+        _ => target_rotation,
+    };
+    let rotation = node2d::smooth_camera_rotation(&config, previous_rotation, target_rotation, dt);
+
+    if let Some(node) = tree.get_node_mut(cam) {
+        node.set_property(CAMERA2D_SCROLL_CENTER, Variant::Vector2(center));
+        node.set_property(CAMERA2D_SCROLL_ROTATION, Variant::Float(rotation as f64));
+    }
 }

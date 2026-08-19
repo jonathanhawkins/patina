@@ -12,11 +12,11 @@
 //! vertex += blend_vertex;
 //! ```
 //!
-//! * [`BlendShapeMode::Normalized`] (`BLEND_SHAPE_MODE_NORMALIZED` = 0, and
-//!   **Godot's default**) — `(1 - Σw) * base + Σ w * shape`. The base is scaled
-//!   DOWN as weights rise, so a single shape at weight 1.0 replaces the base
-//!   entirely.
-//! * [`BlendShapeMode::Relative`] (`BLEND_SHAPE_MODE_RELATIVE` = 1) —
+//! * [`BlendShapeMode::Normalized`] (`BLEND_SHAPE_MODE_NORMALIZED` = 0) —
+//!   `(1 - Σw) * base + Σ w * shape`. The base is scaled DOWN as weights rise,
+//!   so a single shape at weight 1.0 replaces the base entirely.
+//! * [`BlendShapeMode::Relative`] (`BLEND_SHAPE_MODE_RELATIVE` = 1, and
+//!   **Godot's default** — `ArrayMesh.blend_shape_mode` is `default="1"`) —
 //!   `base + Σ w * shape`. The base is untouched and shapes are pure offsets.
 //!
 //! This module originally documented itself as matching `NORMALIZED` while
@@ -35,12 +35,25 @@ use gdcore::math::Vector3;
 /// `Mesh.BlendShapeMode` (`doc/classes/Mesh.xml:373-378`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BlendShapeMode {
-    /// `BLEND_SHAPE_MODE_NORMALIZED` (0) — Godot's default.
+    /// `BLEND_SHAPE_MODE_NORMALIZED` (0).
     ///
     /// `(1 - Σw) * base + Σ w * shape`: the base fades out as weights rise.
-    #[default]
     Normalized,
-    /// `BLEND_SHAPE_MODE_RELATIVE` (1) — `base + Σ w * shape`.
+    /// `BLEND_SHAPE_MODE_RELATIVE` (1) — `base + Σ w * shape`. **Godot's
+    /// default.**
+    ///
+    /// ⚠️ This used to be `Normalized`, documented as "Godot's default". It is
+    /// not: `ArrayMesh.blend_shape_mode` is `default="1"` in
+    /// `doc/classes/ArrayMesh.xml:209`, and `BLEND_SHAPE_MODE_RELATIVE` is 1
+    /// (`doc/classes/Mesh.xml:376`). Our own ClassDB already had it right —
+    /// `class_db.rs:7584` registers `Int(1)` — so the codebase contradicted
+    /// itself, with this side wrong.
+    ///
+    /// The two modes differ only by the `(1 - Σw)` scaling of the BASE, so a
+    /// fixture whose vertices sit at the origin gives identical results either
+    /// way (`0 * scale == 0`). That is why the mistake survived: it is invisible
+    /// to any test that morphs a vertex at the origin.
+    #[default]
     Relative,
 }
 
@@ -85,7 +98,7 @@ pub struct BlendShapes {
     /// Current weight per target (parallel to `targets`; 0 = inactive).
     pub weights: Vec<f32>,
     /// How the weights combine with [`base`](Self::base). Defaults to
-    /// [`BlendShapeMode::Normalized`], matching Godot.
+    /// [`BlendShapeMode::Relative`], matching Godot's `ArrayMesh` default.
     pub mode: BlendShapeMode,
 }
 
@@ -96,7 +109,7 @@ impl BlendShapes {
             base,
             targets: Vec::new(),
             weights: Vec::new(),
-            mode: BlendShapeMode::Normalized,
+            mode: BlendShapeMode::Relative,
         }
     }
 
@@ -318,15 +331,20 @@ mod tests {
         );
     }
 
-    /// `BlendShapes` defaults to Godot's default mode, not the one the module
-    /// used to implement under that name.
+    /// `BlendShapes` defaults to Godot's default mode.
+    ///
+    /// ⚠️ Renamed: this test was called `blendshapes_defaults_to_normalized`
+    /// and asserted exactly that. A test whose NAME states the wrong contract is
+    /// worse than no test — it reads as proof on every later review.
     #[test]
-    fn blendshapes_defaults_to_normalized() {
-        assert_eq!(BlendShapeMode::default(), BlendShapeMode::Normalized);
-        assert_eq!(
-            BlendShapes::new(base_tri()).mode,
-            BlendShapeMode::Normalized
-        );
+    fn blendshapes_default_to_relative_like_godot() {
+        // ⚠️ RELATIVE, not Normalized. `ArrayMesh.blend_shape_mode` is
+        // `default="1"` (doc/classes/ArrayMesh.xml:209) and
+        // BLEND_SHAPE_MODE_RELATIVE is 1 (doc/classes/Mesh.xml:376). This
+        // assertion previously pinned `Normalized` and was the reason the wrong
+        // default survived.
+        assert_eq!(BlendShapeMode::default(), BlendShapeMode::Relative);
+        assert_eq!(BlendShapes::new(base_tri()).mode, BlendShapeMode::Relative);
         // Godot's ordinals, and an unknown value falls back to the default
         // rather than silently selecting the other mode.
         assert_eq!(

@@ -250,3 +250,71 @@ fn a_lexable_but_misplaced_top_level_token_is_still_an_error() {
         "a stray `]` at top level must still be rejected, not skipped"
     );
 }
+
+/// `faceforward(N, I, Nref)` returns `N` when `dot(Nref, I) < 0`, else `-N`.
+///
+/// ⚠️ Both directions are asserted because either one alone is satisfied by a
+/// wrong implementation: a version that always returns `N` passes the first
+/// case, and one that always negates passes the second. Only the pair pins the
+/// conditional.
+#[test]
+fn faceforward_flips_only_when_the_reference_disagrees() {
+    match eval(
+        "\tOUT = faceforward(vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, -1.0), vec3(0.0, 0.0, 1.0));",
+    ) {
+        ShaderValue::Vec3(v) => assert!(
+            (v[2] - 1.0).abs() < 1e-6,
+            "dot(Nref, I) is negative, so N is returned unchanged, got {v:?}"
+        ),
+        other => panic!("faceforward must return a vec3, got {other:?}"),
+    }
+    match eval(
+        "\tOUT = faceforward(vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, 1.0));",
+    ) {
+        ShaderValue::Vec3(v) => assert!(
+            (v[2] + 1.0).abs() < 1e-6,
+            "dot(Nref, I) is positive, so N is negated, got {v:?}"
+        ),
+        other => panic!("faceforward must return a vec3, got {other:?}"),
+    }
+}
+
+/// The inclusive comparisons, pinned **at the equality boundary**.
+///
+/// ⚠️ That boundary is the only place they differ from their strict twins:
+/// `greaterThan(2, 1)` and `greaterThanEqual(2, 1)` agree, so a fixture using
+/// unequal operands is green whether or not the `=` half was implemented. These
+/// six were added with no coverage at all.
+#[test]
+fn the_inclusive_comparisons_differ_at_the_equality_boundary() {
+    assert_eq!(
+        eval("\tOUT = all(greaterThan(vec2(1.0, 1.0), vec2(1.0, 1.0)));"),
+        ShaderValue::Bool(false),
+        "strict greaterThan is false for equal operands"
+    );
+    assert_eq!(
+        eval("\tOUT = all(greaterThanEqual(vec2(1.0, 1.0), vec2(1.0, 1.0)));"),
+        ShaderValue::Bool(true),
+        "greaterThanEqual is true for equal operands — the whole difference"
+    );
+    assert_eq!(
+        eval("\tOUT = all(lessThanEqual(vec2(1.0, 1.0), vec2(1.0, 1.0)));"),
+        ShaderValue::Bool(true),
+        "lessThanEqual is likewise inclusive"
+    );
+    assert_eq!(
+        eval("\tOUT = all(equal(vec2(1.0, 1.0), vec2(1.0, 1.0)));"),
+        ShaderValue::Bool(true)
+    );
+    assert_eq!(
+        eval("\tOUT = any(notEqual(vec2(1.0, 1.0), vec2(1.0, 1.0)));"),
+        ShaderValue::Bool(false),
+        "nothing differs, so notEqual is false in every component"
+    );
+    // ...and notEqual really does fire when a component differs, so the `false`
+    // above is a decision rather than a constant.
+    assert_eq!(
+        eval("\tOUT = any(notEqual(vec2(1.0, 2.0), vec2(1.0, 1.0)));"),
+        ShaderValue::Bool(true)
+    );
+}

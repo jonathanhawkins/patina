@@ -46,6 +46,33 @@ impl MultiplayerReplicator {
         let source = resolve(&packet.scene_path)?;
         let scene = PackedScene::from_tscn(&source).ok()?;
         let node_id = add_packed_scene_to_tree(tree, parent, &scene).ok()?;
+        // The spawn state, applied BEFORE the caller can observe the node
+        // (pat-s3rrv.17). Godot applies it in `_spawn_node` as the instance is
+        // created, so a spawned node is never briefly visible with its scene
+        // defaults; without it the node showed authored defaults until the first
+        // periodic SYNC frame landed, which for a `replication_interval` of a
+        // second is a second of a visibly wrong position or skin.
+        //
+        // ⚠️ Key resolution is the same as `apply_sync`'s: a colon targets a
+        // CHILD of the spawned root, resolved relative to it, and an
+        // unresolvable subpath is skipped rather than fudged onto the root —
+        // writing a child's property onto its parent is a silent corruption.
+        let mut writes: Vec<(NodeId, String, Variant)> = Vec::new();
+        for (name, value) in &packet.properties {
+            match name.rsplit_once(':') {
+                Some((subpath, prop)) => {
+                    if let Some(child) = tree.get_node_or_null(node_id, subpath) {
+                        writes.push((child, prop.to_string(), value.clone()));
+                    }
+                }
+                None => writes.push((node_id, name.clone(), value.clone())),
+            }
+        }
+        for (target, prop, value) in writes {
+            if let Some(node) = tree.get_node_mut(target) {
+                node.set_property(&prop, value);
+            }
+        }
         self.spawned.insert(packet.net_id, node_id);
         Some(node_id)
     }
@@ -73,22 +100,52 @@ impl MultiplayerReplicator {
     /// Applies a decoded [`SyncPacket`] by writing each replicated property onto
     /// the node mapped to the packet's `net_id`. Returns `true` if that node was
     /// found and updated, `false` if the `net_id` is unknown or the node is gone.
+    ///
+    /// A property key may carry a subpath (`Sprite2D:modulate`), which the
+    /// Godot editor emits whenever a `SceneReplicationConfig` entry targets a
+    /// CHILD of the synchronizer's root. Those are resolved relative to the
+    /// mapped node and written on the child. The sending side keys them the
+    /// same way, so no wire-format change is involved — the packet has always
+    /// carried arbitrary `(String, Variant)` pairs (pat-s3rrv.17).
     pub fn apply_sync(&mut self, tree: &mut SceneTree, packet: &SyncPacket) -> bool {
         let Some(&node_id) = self.spawned.get(&packet.net_id) else {
             return false;
         };
-        let Some(node) = tree.get_node_mut(node_id) else {
+        if tree.get_node(node_id).is_none() {
             return false;
-        };
+        }
+        // Resolve every target BEFORE writing any of them. A config path may
+        // name a CHILD of the replicated node (`Sprite2D:modulate`), and
+        // resolving that subpath needs a shared borrow of the tree which cannot
+        // overlap the mutable borrow the write itself takes.
+        let mut writes: Vec<(NodeId, String, Variant)> = Vec::new();
         for (name, value) in &packet.properties {
-            // The packet already carries real Variants (pat-s3rrv.17), so the
-            // value is written through untouched. This used to run a
-            // `decode_property_value` guess over a stringified payload, which
-            // could only recover `Vector2` from an `"x,y"` spelling and handed
-            // back `Variant::String` for everything else — so a replicated
-            // `Vector3`, `Color` or `bool` landed on the node as a string and
-            // silently mismatched the property it was written to.
-            node.set_property(name, value.clone());
+            match name.rsplit_once(':') {
+                // Split from the RIGHT: only the last colon separates the
+                // property, and the node part may itself contain them.
+                Some((subpath, prop)) => {
+                    // An unresolvable subpath is skipped rather than fudged onto
+                    // the root — writing a child's `modulate` onto its parent
+                    // would be a silent corruption, and the receiving scene may
+                    // simply not have that child yet.
+                    if let Some(child) = tree.get_node_or_null(node_id, subpath) {
+                        writes.push((child, prop.to_string(), value.clone()));
+                    }
+                }
+                None => writes.push((node_id, name.clone(), value.clone())),
+            }
+        }
+        for (target, prop, value) in writes {
+            if let Some(node) = tree.get_node_mut(target) {
+                // The packet already carries real Variants (pat-s3rrv.17), so the
+                // value is written through untouched. This used to run a
+                // `decode_property_value` guess over a stringified payload, which
+                // could only recover `Vector2` from an `"x,y"` spelling and handed
+                // back `Variant::String` for everything else — so a replicated
+                // `Vector3`, `Color` or `bool` landed on the node as a string and
+                // silently mismatched the property it was written to.
+                node.set_property(&prop, value);
+            }
         }
         true
     }
@@ -112,6 +169,7 @@ mod tests {
             data: String::new(),
             net_id,
             scene_index: 0,
+            properties: Vec::new(),
         }
     }
 

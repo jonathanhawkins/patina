@@ -17,6 +17,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
+use crate::multiplayer_peer_state::MultiplayerPeerState;
 use crate::network::{
     ConnectionStatus, NetworkError, NetworkPeer, Packet, PeerId, Result, TransferMode,
 };
@@ -49,6 +50,16 @@ pub struct ENetMultiplayerPeer {
     /// address → peer_id (server accept path)
     addr_to_id: HashMap<SocketAddr, PeerId>,
     next_peer_id: u32,
+    /// Connect/disconnect SIGNALS, separate from the `peers` roster above
+    /// (pat-s3rrv.81).
+    ///
+    /// ⚠️ `MultiplayerAPI::poll` drains signals through
+    /// `NetworkPeer::drain_signals`, which defaults to EMPTY. This transport
+    /// tracked peers but never recorded the EVENT, so a script connected to
+    /// `multiplayer.peer_connected` heard nothing over ENet no matter how many
+    /// clients joined — the same defect that was fixed for WebSocket, which is
+    /// why the two now record at the same points.
+    peer_state: MultiplayerPeerState,
     inbox: VecDeque<Packet>,
     /// Outbound reliable frames waiting for ACK: (to, frame_bytes, last_sent, seq, channel)
     pending_reliable: Vec<PendingReliable>,
@@ -84,6 +95,7 @@ impl ENetMultiplayerPeer {
             peers: HashMap::new(),
             addr_to_id: HashMap::new(),
             next_peer_id: 2,
+            peer_state: MultiplayerPeerState::new(),
             inbox: VecDeque::new(),
             pending_reliable: Vec::new(),
             next_seq: HashMap::new(),
@@ -195,6 +207,10 @@ impl ENetMultiplayerPeer {
             self.next_peer_id = self.next_peer_id.saturating_add(1);
             self.peers.insert(id, src);
             self.addr_to_id.insert(src, id);
+            // Recorded HERE, beside the roster insert, so the two halves cannot
+            // drift: `peers` answers "who is connected", `peer_state` carries
+            // the peer_connected event a script is waiting on.
+            self.peer_state.add_peer(id.0 as i32);
             let welcome = encode_control(FLAG_WELCOME, 0, id, 0, &id.0.to_be_bytes());
             let _ = self.send_raw(src, &welcome);
             return;
@@ -206,6 +222,9 @@ impl ENetMultiplayerPeer {
                 self.id = PeerId(assigned);
                 if let Some(server) = self.server_addr {
                     self.peers.insert(PeerId::SERVER, server);
+                    // The client's own peer_connected is for the SERVER (id 1);
+                    // Godot fires it on both sides, with each seeing the other.
+                    self.peer_state.add_peer(PeerId::SERVER.0 as i32);
                 }
                 self.status = ConnectionStatus::Connected;
             }
@@ -325,6 +344,17 @@ impl Default for ENetMultiplayerPeer {
 }
 
 impl NetworkPeer for ENetMultiplayerPeer {
+    /// Hands the recorded connect/disconnect events to `MultiplayerAPI::poll`
+    /// (pat-s3rrv.81).
+    ///
+    /// ⚠️ Without this override the trait's DEFAULT (empty) applies and every
+    /// event is silently dropped — the transport works, peers appear in
+    /// `get_peers()`, and scripts still never hear `peer_connected`. Overriding
+    /// it is the whole delivery path.
+    fn drain_signals(&mut self) -> Vec<crate::multiplayer_peer_state::MultiplayerPeerSignal> {
+        self.peer_state.drain_signals()
+    }
+
     fn send_packet(&mut self, to: PeerId, packet: Packet) -> Result<()> {
         if self.status != ConnectionStatus::Connected {
             return Err(NetworkError::Transport("not connected".into()));
@@ -472,6 +502,10 @@ fn decode_frame(buf: &[u8]) -> Option<Frame> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // ⚠️ Imported HERE rather than at the top of the file: the only non-test
+    // use (`drain_signals`, :354) spells the type out in full, so a top-level
+    // import would be unused in a non-test build and warn.
+    use crate::multiplayer_peer_state::MultiplayerPeerSignal;
     use crate::network::TransferMode;
 
     fn pump_until_connected(server: &mut ENetMultiplayerPeer, client: &mut ENetMultiplayerPeer) {
@@ -503,6 +537,60 @@ mod tests {
         assert_eq!(client.get_connection_status(), ConnectionStatus::Connected);
         assert_ne!(client.get_unique_id(), PeerId(0));
         assert_ne!(client.get_unique_id(), PeerId::SERVER);
+    }
+
+    /// 🔑 `peer_connected` must actually reach `MultiplayerAPI::poll`
+    /// (pat-s3rrv.81).
+    ///
+    /// ⚠️ This transport recorded peers in its roster but never recorded the
+    /// EVENT, and `NetworkPeer::drain_signals` defaults to EMPTY — so a script
+    /// connected to `multiplayer.peer_connected` heard nothing over ENet no
+    /// matter how many clients joined. The transport looked entirely healthy:
+    /// the handshake completed, `get_peers()` listed the peer, packets flowed.
+    /// Only the signal was missing, which is why a large green suite missed it.
+    ///
+    /// Both sides are asserted because they carry DIFFERENT ids — the server
+    /// sees the client's assigned id (> 1) and the client sees the server (1).
+    /// Asserting only one would pass against a stub that emitted a constant.
+    #[test]
+    fn both_sides_record_peer_connected_for_the_other() {
+        let mut server = ENetMultiplayerPeer::new();
+        let addr = server.create_server("127.0.0.1:0").unwrap();
+        let mut client = ENetMultiplayerPeer::new();
+        client.create_client(addr).unwrap();
+        pump_until_connected(&mut server, &mut client);
+
+        let client_id = client.get_unique_id();
+        assert!(
+            client_id.0 > 1,
+            "the client must have been assigned a real id, got {client_id:?}"
+        );
+
+        let server_signals = server.drain_signals();
+        assert!(
+            server_signals.contains(&MultiplayerPeerSignal::PeerConnected(client_id.0 as i32)),
+            "the server must record peer_connected({}) — an empty list is the old \
+             behaviour, where drain_signals took the trait's empty default; got {:?}",
+            client_id.0,
+            server_signals
+        );
+
+        let client_signals = client.drain_signals();
+        assert!(
+            client_signals.contains(&MultiplayerPeerSignal::PeerConnected(
+                PeerId::SERVER.0 as i32
+            )),
+            "the client must record peer_connected(1) for the SERVER; got {client_signals:?}"
+        );
+
+        // ⚠️ Drained, not re-emitted. A signal list rebuilt from the roster on
+        // every poll would re-fire peer_connected every frame, which a script
+        // counting joins would see as an endless stream of new peers.
+        assert!(
+            server.drain_signals().is_empty(),
+            "signals must be consumed by the drain, not regenerated from the roster"
+        );
+        assert!(client.drain_signals().is_empty());
     }
 
     #[test]

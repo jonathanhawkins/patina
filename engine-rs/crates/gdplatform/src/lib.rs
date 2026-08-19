@@ -95,7 +95,10 @@ pub use multiplayer_peer_handles::{
 pub use websocket_peer::{Frame, Opcode, WebSocketError, WebSocketPeer, WebSocketState, WriteMode};
 pub use window::{HeadlessWindow, WindowConfig, WindowEvent, WindowId, WindowManager};
 
-pub use webrtc_peer::{WebRTCMultiplayerPeer, WebRtcState};
+pub use webrtc_peer::{
+    ConnectionState, DataChannelConfig, WebRTCDataChannel, WebRTCMultiplayerPeer,
+    WebRTCPeerConnection,
+};
 // pat-0q2kx.236: the WebXR state machine has been complete and natively tested
 // since pat-nzgdu.150, but only `XrPose`/`XrServer` were re-exported — so
 // `WebXrInterface` was unreachable from any other crate and had zero consumers

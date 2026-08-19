@@ -110,6 +110,59 @@ pub fn draw_ordered_children(tree: &SceneTree, parent_id: NodeId) -> Vec<NodeId>
     children
 }
 
+/// Whether `node_id` has `y_sort_enabled` set.
+pub fn y_sort_enabled(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .map(|n| prop_bool(n, "y_sort_enabled", false))
+        .unwrap_or(false)
+}
+
+/// The Y-sort GROUP of a `y_sort_enabled` parent: every descendant reachable
+/// through non-y-sorted children, flattened into one list and sorted by global Y
+/// (pat-s3rrv.22).
+///
+/// Godot does not sort a y-sorted node's direct children in isolation — it
+/// collects the whole reachable subtree into a single list and sorts that
+/// (`renderer_canvas_cull.cpp:110-181`), so a grandchild can interleave between
+/// its own parent and that parent's siblings. Sorting only direct children makes
+/// a child's entire subtree move as one block, which is visibly wrong the moment
+/// a character's sprite should pass in front of a prop nested under something
+/// else.
+///
+/// ⚠️ The walk STOPS at a child that is itself `y_sort_enabled`: that node is a
+/// member of this group (it is drawn, and sorts by its own Y), but its subtree
+/// belongs to *its* group, not this one. Descending into it would merge two
+/// independent sorts into one and destroy the nesting Godot preserves.
+pub fn y_sort_group(tree: &SceneTree, parent_id: NodeId) -> Vec<NodeId> {
+    let mut group: Vec<NodeId> = Vec::new();
+    collect_y_sort_group(tree, parent_id, &mut group);
+    // Stable, so members sharing a Y keep scene-tree order — the same tiebreak
+    // `draw_ordered_children` relies on.
+    group.sort_by(|&a, &b| {
+        global_y(tree, a)
+            .partial_cmp(&global_y(tree, b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    group
+}
+
+fn collect_y_sort_group(tree: &SceneTree, parent_id: NodeId, out: &mut Vec<NodeId>) {
+    for child in direct_children(tree, parent_id) {
+        out.push(child);
+        if !y_sort_enabled(tree, child) {
+            collect_y_sort_group(tree, child, out);
+        }
+    }
+}
+
+/// Scene-tree-order children of `parent_id`.
+fn direct_children(tree: &SceneTree, parent_id: NodeId) -> Vec<NodeId> {
+    tree.all_nodes_in_tree_order()
+        .into_iter()
+        .filter(|&id| tree.get_node(id).and_then(|n| n.parent()) == Some(parent_id))
+        .collect()
+}
+
 /// Godot `clip_children` mode for a node (0 = disabled, 1 = clip only,
 /// 2 = clip and draw). Consumers mask child draws to the parent when != 0.
 pub fn clip_children_mode(tree: &SceneTree, node_id: NodeId) -> i32 {

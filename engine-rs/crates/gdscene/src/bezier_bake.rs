@@ -8,7 +8,7 @@
 //! tangent by distance. The Curve2D upgrade + the per-frame PathFollow2D step
 //! consume these.
 
-use gdcore::math::Vector2;
+use gdcore::math::{Vector2, Vector3};
 
 /// A Curve2D control point: a `position` with `in`/`out` bezier handles stored
 /// relative to the position (Godot convention).
@@ -189,4 +189,58 @@ mod tests {
         let p = sample_baked(&one, 5.0);
         assert!(approx(p.x, 3.0) && approx(p.y, 4.0));
     }
+}
+
+// ---------------------------------------------------------------------------
+// 3D (pat-s3rrv.83)
+// ---------------------------------------------------------------------------
+
+/// One control point of a 3D Bezier path.
+///
+/// Handles are RELATIVE to the position, the same convention Godot serialises
+/// (`curve.cpp` `Curve3D::_set_data`: `in`, `out`, `position` per triple).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurvePoint3 {
+    /// The control point itself.
+    pub position: Vector3,
+    /// Incoming handle, relative to [`position`](Self::position).
+    pub in_handle: Vector3,
+    /// Outgoing handle, relative to [`position`](Self::position).
+    pub out_handle: Vector3,
+}
+
+fn cubic_bezier_3d(p0: Vector3, c1: Vector3, c2: Vector3, p3: Vector3, t: f32) -> Vector3 {
+    let u = 1.0 - t;
+    p0 * (u * u * u) + c1 * (3.0 * u * u * t) + c2 * (3.0 * u * t * t) + p3 * (t * t * t)
+}
+
+/// Samples `points` into a polyline by evaluating each Bezier segment `steps`
+/// times — the 3D twin of [`bake_curve`] (pat-s3rrv.83).
+///
+/// Returns positions only. The 2D baker also carries an arc-length table
+/// because its consumer needs distances; the 3D path driver samples the
+/// `curve_points` polyline directly, so a distance column here would be an
+/// unused second source of truth.
+///
+/// An empty curve yields an empty polyline; a single point yields that point,
+/// which is what makes a one-point Path3D render as a dot rather than nothing.
+pub fn bake_curve_3d(points: &[CurvePoint3], steps: usize) -> Vec<Vector3> {
+    let mut baked: Vec<Vector3> = Vec::new();
+    if points.is_empty() {
+        return baked;
+    }
+    let steps = steps.max(1);
+    baked.push(points[0].position);
+    for seg in points.windows(2) {
+        let (a, b) = (seg[0], seg[1]);
+        let p0 = a.position;
+        let c1 = a.position + a.out_handle;
+        let c2 = b.position + b.in_handle;
+        let p3 = b.position;
+        for s in 1..=steps {
+            let t = s as f32 / steps as f32;
+            baked.push(cubic_bezier_3d(p0, c1, c2, p3, t));
+        }
+    }
+    baked
 }

@@ -300,6 +300,7 @@ pub fn extrude_contour(contour: &[Vector2], depth: f32, pixel_size: f32) -> Mesh
         surfaces: Vec::new(),
         bone_weights: Vec::new(),
         bone_indices: Vec::new(),
+        blend_shapes: Vec::new(),
     }
 }
 
@@ -357,6 +358,7 @@ impl TextMesh {
             surfaces: Vec::new(),
             bone_weights: Vec::new(),
             bone_indices: Vec::new(),
+            blend_shapes: Vec::new(),
         };
         for contour in contours {
             let part = extrude_contour(contour, self.depth, self.pixel_size);

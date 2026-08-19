@@ -117,6 +117,23 @@ pub trait NetworkPeer: Send {
     fn get_connection_status(&self) -> ConnectionStatus;
     /// Shut down the transport.
     fn close(&mut self);
+
+    /// Roster changes this transport observed since the last call
+    /// (pat-s3rrv.81).
+    ///
+    /// ⚠️ This was MISSING from the trait, and the consequence was total: a
+    /// real handshake never produced `peer_connected` for a script. The
+    /// transports record connections into their own `MultiplayerPeerState`,
+    /// while `MultiplayerAPI::poll` drained only its OWN `peers` — two states
+    /// that never met. Every green multiplayer test announced its peer with a
+    /// Rust-side `add_peer`, which writes to the half that IS drained, so the
+    /// gap survived a large test suite untouched.
+    ///
+    /// Defaulted to empty so a transport with no roster of its own (offline,
+    /// mocks) is unaffected and no existing implementor has to change.
+    fn drain_signals(&mut self) -> Vec<crate::multiplayer_peer_state::MultiplayerPeerSignal> {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +444,9 @@ impl MultiplayerAPI {
         let Some(peer) = self.peer.as_mut() else {
             return Vec::new();
         };
+        // Taken while `peer` is in scope; applied to `self.peers` below, which
+        // is a disjoint field so the two borrows do not overlap.
+        let transport_signals = peer.drain_signals();
         let mut other = Vec::new();
         let mut raw = Vec::new();
         for packet in peer.poll() {
@@ -447,6 +467,21 @@ impl MultiplayerAPI {
             self.remote_sender_id = PeerId(id.unsigned_abs());
             self.events
                 .push(MultiplayerEvent::PeerPacket { id, packet });
+        }
+
+        // Pull the TRANSPORT's roster changes into the API's own peer state
+        // first, so a real handshake reaches the same event path a Rust-side
+        // `add_peer` does (pat-s3rrv.81). Without this the loop below drains a
+        // state nothing outside the API ever writes to.
+        for signal in transport_signals {
+            match signal {
+                MultiplayerPeerSignal::PeerConnected(id) => {
+                    self.peers.add_peer(id);
+                }
+                MultiplayerPeerSignal::PeerDisconnected(id) => {
+                    self.peers.disconnect_peer(id);
+                }
+            }
         }
 
         // Peer roster changes the transport recorded, promoted to API events.
@@ -1295,7 +1330,10 @@ pub const REPLICATION_KIND_SPAWN: u8 = NetworkCommand::Spawn.to_byte();
 pub const REPLICATION_KIND_SYNC: u8 = NetworkCommand::Sync.to_byte();
 
 /// A recorded spawn request that was (or will be) advertised to peers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// ⚠️ No longer `Eq`: `properties` carries `Variant`s, which are only
+/// `PartialEq` (floats). Nothing keyed a map or set on this type.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpawnRequest {
     /// Index into the spawner's spawnable-scene list.
     pub scene_index: u32,
@@ -1305,10 +1343,20 @@ pub struct SpawnRequest {
     pub data: String,
     /// Local net id assigned to this spawn (monotonic counter).
     pub net_id: u32,
+    /// The spawn-flagged property values captured at send time (pat-s3rrv.17).
+    ///
+    /// ⚠️ Gathered by the SCENE layer, not here: this struct has no access to
+    /// property values, which live on the nodes. Godot does the same, building
+    /// the spawn state in `SceneReplicationInterface::_make_spawn_packet`
+    /// rather than in the spawner. Empty is the correct value for a spawner
+    /// whose config flags nothing for spawn.
+    pub properties: Vec<(String, Variant)>,
 }
 
 /// Decoded spawn packet payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// ⚠️ Not `Eq` — see [`SpawnRequest`].
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpawnPacket {
     /// Scene path to instantiate.
     pub scene_path: String,
@@ -1318,6 +1366,9 @@ pub struct SpawnPacket {
     pub net_id: u32,
     /// Scene index in the remote spawner's list.
     pub scene_index: u32,
+    /// Spawn-state property values to apply to the new instance before it is
+    /// first seen (pat-s3rrv.17).
+    pub properties: Vec<(String, Variant)>,
 }
 
 /// Decoded property-sync packet payload.
@@ -1345,6 +1396,29 @@ pub fn encode_spawn_packet(req: &SpawnRequest) -> Vec<u8> {
     out.extend_from_slice(path_bytes);
     out.extend_from_slice(&(data_bytes.len() as u16).to_be_bytes());
     out.extend_from_slice(data_bytes);
+    // The spawn state, in exactly the framing `encode_sync_packet` uses
+    // (pat-s3rrv.17): `u16 count`, then `u16 name_len | name | u16 value_len |
+    // binary Variant` per entry.
+    //
+    // ⚠️ Entries are built first and counted after, for the same reason as the
+    // sync packet: a value that fails to encode is skipped, so writing
+    // `properties.len()` up front would claim more entries than the body
+    // carries and desync the reader for the rest of the packet.
+    let mut body = Vec::new();
+    let mut written: u16 = 0;
+    for (name, value) in &req.properties {
+        let Ok(vb) = gdvariant::binary::encode_variant(value) else {
+            continue;
+        };
+        let nb = name.as_bytes();
+        body.extend_from_slice(&(nb.len() as u16).to_be_bytes());
+        body.extend_from_slice(nb);
+        body.extend_from_slice(&(vb.len() as u16).to_be_bytes());
+        body.extend_from_slice(&vb);
+        written = written.saturating_add(1);
+    }
+    out.extend_from_slice(&written.to_be_bytes());
+    out.extend_from_slice(&body);
     out
 }
 
@@ -1371,11 +1445,49 @@ pub fn decode_spawn_packet(data: &[u8]) -> Option<SpawnPacket> {
         return None;
     }
     let spawn_data = String::from_utf8(data[i..i + data_len].to_vec()).ok()?;
+    i += data_len;
+
+    // The spawn state. ⚠️ OPTIONAL on read: a packet that ends here is a spawn
+    // with no spawn-flagged properties, which is both the pre-pat-s3rrv.17 wire
+    // shape and the ordinary case for a spawner that flags none. Treating a
+    // missing section as a decode FAILURE would drop those spawns entirely.
+    let mut properties = Vec::new();
+    if data.len() >= i + 2 {
+        let count = u16::from_be_bytes(data[i..i + 2].try_into().ok()?) as usize;
+        i += 2;
+        for _ in 0..count {
+            if data.len() < i + 2 {
+                return None;
+            }
+            let name_len = u16::from_be_bytes(data[i..i + 2].try_into().ok()?) as usize;
+            i += 2;
+            if data.len() < i + name_len + 2 {
+                return None;
+            }
+            let name = String::from_utf8(data[i..i + name_len].to_vec()).ok()?;
+            i += name_len;
+            let value_len = u16::from_be_bytes(data[i..i + 2].try_into().ok()?) as usize;
+            i += 2;
+            if data.len() < i + value_len {
+                return None;
+            }
+            // Same shape as `decode_sync_packet`: the length prefix is
+            // authoritative for framing, so `i` advances by it regardless of
+            // what `decode_variant` reports consuming, and one malformed value
+            // cannot desync the entries after it.
+            let (value, _consumed) =
+                gdvariant::binary::decode_variant(&data[i..i + value_len]).ok()?;
+            i += value_len;
+            properties.push((name, value));
+        }
+    }
+
     Some(SpawnPacket {
         scene_path,
         data: spawn_data,
         net_id,
         scene_index,
+        properties,
     })
 }
 
@@ -1579,6 +1691,20 @@ impl MultiplayerSpawner {
     /// Uses the first spawnable scene when any are registered; otherwise fails
     /// with [`NetworkError::Transport`]. Honors `spawn_limit` when non-zero.
     pub fn spawn(&mut self, data: impl Into<String>) -> Result<SpawnRequest> {
+        self.spawn_with_properties(data, Vec::new())
+    }
+
+    /// [`spawn`](Self::spawn) carrying the spawn-state property values.
+    ///
+    /// ⚠️ The values arrive from the caller because this struct cannot reach
+    /// them: property values live on scene nodes, and this crate has no scene.
+    /// Godot splits it the same way — `MultiplayerSpawner` allocates the id and
+    /// `SceneReplicationInterface::_make_spawn_packet` gathers the state.
+    pub fn spawn_with_properties(
+        &mut self,
+        data: impl Into<String>,
+        properties: Vec<(String, Variant)>,
+    ) -> Result<SpawnRequest> {
         if self.spawn_limit > 0 && self.spawn_requests.len() as u32 >= self.spawn_limit {
             return Err(NetworkError::Transport("spawn limit reached".into()));
         }
@@ -1596,6 +1722,7 @@ impl MultiplayerSpawner {
             scene_path,
             data: data.into(),
             net_id,
+            properties,
         };
         self.spawn_requests.push(req.clone());
         Ok(req)
@@ -1631,6 +1758,7 @@ impl MultiplayerSpawner {
             scene_path: decoded.scene_path.clone(),
             data: decoded.data.clone(),
             net_id: decoded.net_id,
+            properties: decoded.properties.clone(),
         });
         Some(decoded)
     }
@@ -2391,6 +2519,7 @@ mod tests {
             scene_index: 0,
             scene_path: "res://a.tscn".into(),
             data: String::new(),
+            properties: Vec::new(),
         });
         assert!(decode_rpc_packet(&spawn).is_none(), "spawn is not an RPC");
         assert!(decode_raw_packet(&spawn).is_none(), "spawn is not raw");
@@ -2581,9 +2710,38 @@ mod tests {
             scene_path: "res://a.tscn".into(),
             data: "x".into(),
             net_id: 7,
+            // ⚠️ Typed values, not strings: the whole point of carrying binary
+            // Variants is that a Vector2 arrives as a Vector2. A String-only
+            // fixture would pass against a stringifying encoder.
+            properties: vec![
+                ("hp".to_string(), Variant::Int(42)),
+                (
+                    "pos".to_string(),
+                    Variant::Vector2(gdcore::math::Vector2::new(1.5, -2.5)),
+                ),
+            ],
         };
         let bytes = encode_spawn_packet(&req);
         let back = decode_spawn_packet(&bytes).unwrap();
+        assert_eq!(
+            back.properties, req.properties,
+            "spawn-state values must round-trip with their types intact",
+        );
+        // A spawn with no spawn-flagged properties still decodes — and so does a
+        // packet truncated before the section, which is the pre-pat-s3rrv.17
+        // wire shape.
+        let bare = SpawnRequest {
+            properties: Vec::new(),
+            ..req.clone()
+        };
+        let bare_bytes = encode_spawn_packet(&bare);
+        assert!(decode_spawn_packet(&bare_bytes).is_some());
+        assert!(
+            decode_spawn_packet(&bare_bytes[..bare_bytes.len() - 2])
+                .is_some_and(|p| p.properties.is_empty()),
+            "a packet ending before the property section is a spawn with none, \
+             not a decode failure",
+        );
         assert_eq!(back.scene_path, req.scene_path);
         assert_eq!(back.data, req.data);
         assert_eq!(back.net_id, 7);

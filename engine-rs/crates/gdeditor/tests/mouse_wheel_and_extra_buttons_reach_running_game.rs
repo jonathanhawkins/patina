@@ -146,6 +146,13 @@ fn script_int(port: u16, name: &str) -> i64 {
         .unwrap_or_else(|| panic!("script var `{name}` missing from /api/runtime/node: {node}"))
 }
 
+fn script_float(port: u16, name: &str) -> f64 {
+    let node = runtime_node(port);
+    property_value(&node, name)
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| panic!("script var `{name}` missing from /api/runtime/node: {node}"))
+}
+
 /// Counts `ui_copy` presses. `ui_copy` is a **builtin** action (Ctrl+C) — the
 /// scene declares no input map of its own, which is the point: Godot seeds the
 /// builtins before any project action is read.
@@ -408,5 +415,217 @@ fn the_served_page_forwards_the_wheel_to_the_running_game() {
         EDITOR_HTML.contains("/api/runtime/input/mouse_wheel"),
         "the wheel listener must forward the notch to the running game; without \
          it the page only zooms the editor viewport"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance clause 2 — double_click on the second press inside the window
+// ---------------------------------------------------------------------------
+
+/// Records every mouse PRESS and which of them reported `double_click`.
+///
+/// ⚠️ Guarded on `button_index == 1` (Godot's `MOUSE_BUTTON_LEFT`) rather than
+/// on `pressed`: `_input` receives every event, and a field a non-mouse event
+/// does not carry reads back as `Nil`. Counting presses and recording WHICH one
+/// was the double is what makes the assertion meaningful — a bare
+/// `self.saw_double = event.double_click` would be overwritten by the next
+/// event and could pass while reporting the wrong press.
+const DOUBLE_CLICK_GD: &str = "\
+extends Node2D
+var presses = 0
+var double_on_press = -1
+func _input(event):
+    if event.button_index == 1:
+        if event.pressed:
+            self.presses = self.presses + 1
+            if event.double_click:
+                self.double_on_press = self.presses
+";
+
+/// **Acceptance clause 2.** Two left-button presses inside the double-click
+/// window: the FIRST must not be a double, the SECOND must be.
+///
+/// The window is `DOUBLE_TAP_FRAMES` (15) of `trace_frame`, and `push_input`
+/// computes the flag from `last_mouse_press_frame` — the same mechanism the
+/// touch path uses for `double_tap`, which is why the two agree. Stepping once
+/// between the presses puts them one frame apart, well inside it.
+#[test]
+fn a_second_press_inside_the_window_reports_double_click() {
+    let (handle, port, _dir) = boot_with_script(DOUBLE_CLICK_GD);
+    play_paused(port);
+
+    assert!(http_post(port, "/api/runtime/input/mouse_down", r#"{"button":0}"#).contains("200 OK"));
+    step(port);
+    assert_eq!(script_int(port, "presses"), 1, "the first press arrived");
+    assert_eq!(
+        script_int(port, "double_on_press"),
+        -1,
+        "⚠️ the FIRST press must never be a double — with no prior press there \
+         is nothing to be a double OF, and a mechanism that reported true here \
+         would make the second assertion pass for the wrong reason"
+    );
+
+    assert!(http_post(port, "/api/runtime/input/mouse_down", r#"{"button":0}"#).contains("200 OK"));
+    step(port);
+
+    assert_eq!(
+        script_int(port, "presses"),
+        2,
+        "both presses reached _input"
+    );
+    assert_eq!(
+        script_int(port, "double_on_press"),
+        2,
+        "the SECOND press must carry double_click == true"
+    );
+
+    drop(handle);
+}
+
+/// ⚠️ The window is per-BUTTON. A left press followed by a right press is two
+/// different buttons and must not report a double — `last_mouse_press_frame` is
+/// keyed by the Godot button index precisely so a fast alternation between
+/// buttons cannot masquerade as a double-click.
+#[test]
+fn a_press_of_a_different_button_is_not_a_double_click() {
+    let (handle, port, _dir) = boot_with_script(DOUBLE_CLICK_GD);
+    play_paused(port);
+
+    // Right button first (index 2), then left (index 1) — the script only
+    // records the left one, which must be its FIRST press and not a double.
+    assert!(http_post(port, "/api/runtime/input/mouse_down", r#"{"button":2}"#).contains("200 OK"));
+    step(port);
+    assert!(http_post(port, "/api/runtime/input/mouse_down", r#"{"button":0}"#).contains("200 OK"));
+    step(port);
+
+    assert_eq!(
+        script_int(port, "presses"),
+        1,
+        "only the left press is counted"
+    );
+    assert_eq!(
+        script_int(port, "double_on_press"),
+        -1,
+        "a different button in between must not make this a double-click"
+    );
+
+    drop(handle);
+}
+
+// ---------------------------------------------------------------------------
+// Pen fields — pressure / tilt / pen_inverted
+// ---------------------------------------------------------------------------
+
+/// `if event is InputEventMouseMotion:` is the guard the existing motion tests
+/// use; a bare field read would fire on every event and see `Nil`.
+const PEN_GD: &str = "\
+extends Node2D
+var pressure = 0.0
+var tilt_x = 0.0
+var tilt_y = 0.0
+var inverted = 0
+func _input(event):
+    if event is InputEventMouseMotion:
+        self.pressure = event.pressure
+        self.tilt_x = event.tilt.x
+        self.tilt_y = event.tilt.y
+        if event.pen_inverted:
+            self.inverted = 1
+";
+
+/// A stylus sample reaches `_input` as Godot-shaped pressure/tilt/pen_inverted.
+///
+/// ⚠️ These are CARRIED data, not derived — `input_event_to_variant` hardcoded
+/// `pressure: 0.0`, `tilt: ZERO`, `pen_inverted: false` for every motion event,
+/// so a stylus was indistinguishable from a mouse no matter what the browser
+/// reported. The values now ride a `PenState` side channel on `SceneTree`,
+/// mirroring how `double_click` avoided adding a field to an enum variant with
+/// dozens of construction sites.
+#[test]
+fn a_stylus_pointer_delivers_pressure_and_tilt_to_input() {
+    let (handle, port, _dir) = boot_with_script(PEN_GD);
+    play_paused(port);
+
+    // Baseline: the script is running and nothing has reported pressure yet.
+    assert!(http_post(
+        port,
+        "/api/runtime/input/mouse_move",
+        r#"{"x":10.0,"y":10.0}"#
+    )
+    .contains("200 OK"));
+    step(port);
+    assert_eq!(
+        script_float(port, "pressure"),
+        0.0,
+        "no stylus data has been sent yet"
+    );
+
+    // A pen sample. Godot's ranges: pressure 0..1, tilt -1..1 on both axes
+    // (doc/classes/InputEventMouseMotion.xml).
+    assert!(http_post(
+        port,
+        "/api/runtime/input/mouse_move",
+        r#"{"x":20.0,"y":20.0,"pressure":0.75,"tilt_x":0.5,"tilt_y":-0.25,"pen_inverted":true}"#,
+    )
+    .contains("200 OK"));
+    step(port);
+    assert!(
+        (script_float(port, "pressure") - 0.75).abs() < 1e-6,
+        "`_input` must see the reported pressure, got {}",
+        script_float(port, "pressure")
+    );
+    assert!(
+        (script_float(port, "tilt_x") - 0.5).abs() < 1e-6,
+        "tilt.x must survive the trip, got {}",
+        script_float(port, "tilt_x")
+    );
+    assert!(
+        (script_float(port, "tilt_y") + 0.25).abs() < 1e-6,
+        "⚠️ tilt.y must keep its SIGN — negative is tilt away from the user, \
+         and an abs() or a swapped axis reads plausible but wrong; got {}",
+        script_float(port, "tilt_y")
+    );
+    assert_eq!(
+        script_int(port, "inverted"),
+        1,
+        "the eraser end must report pen_inverted"
+    );
+
+    // 🔑 STICKY. A browser sends pen data on pointer events only, so an ordinary
+    // move that omits it must NOT reset pressure to 0 — a script would read that
+    // as the pen being lifted.
+    assert!(http_post(
+        port,
+        "/api/runtime/input/mouse_move",
+        r#"{"x":30.0,"y":30.0}"#
+    )
+    .contains("200 OK"));
+    step(port);
+    assert!(
+        (script_float(port, "pressure") - 0.75).abs() < 1e-6,
+        "a move carrying no pen data must leave the last sample standing, got {}",
+        script_float(port, "pressure")
+    );
+
+    drop(handle);
+}
+
+/// The served page must actually collect the stylus data.
+///
+/// ⚠️ A `mousemove` listener cannot: `MouseEvent` has no `pressure`. The page
+/// caches the sample from a `pointermove` listener and merges it into the
+/// existing POST, rather than posting from both — two listeners would send two
+/// mouse_move events for one motion.
+#[test]
+fn the_served_page_collects_stylus_data_from_pointer_events() {
+    let html = gdeditor::editor_ui::EDITOR_HTML;
+    assert!(
+        html.contains("addEventListener('pointermove'"),
+        "the page must listen for pointermove; mousemove carries no pressure"
+    );
+    assert!(
+        html.contains("gameInputWithPen"),
+        "the cached stylus sample must be merged into the mouse_move payload, \
+         or the listener collects data that never leaves the browser"
     );
 }

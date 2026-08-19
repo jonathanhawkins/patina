@@ -706,6 +706,26 @@ pub enum InputEvent {
         pressed: bool,
         strength: f32,
     },
+    /// A pinch-zoom gesture (Godot `InputEventMagnifyGesture`).
+    ///
+    /// Godot's hierarchy is `InputEventGesture(position)` <
+    /// `InputEventMagnifyGesture(factor)`, and `InputEventGesture` itself
+    /// derives from `InputEventWithModifiers`. No modifier fields are carried
+    /// here because no source populates them yet; the builder reports them as
+    /// `false` rather than leaving a script's `event.shift_pressed` as Nil.
+    MagnifyGesture {
+        /// Where the gesture is centred (`InputEventGesture.position`).
+        position: Vector2,
+        /// Scale delta for this frame (`InputEventMagnifyGesture.factor`).
+        factor: f32,
+    },
+    /// A two-finger pan gesture (Godot `InputEventPanGesture`).
+    PanGesture {
+        /// Where the gesture is centred (`InputEventGesture.position`).
+        position: Vector2,
+        /// Pan delta for this frame (`InputEventPanGesture.delta`).
+        delta: Vector2,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1723,6 +1743,13 @@ impl InputState {
                         // stated purpose, so that adding a MIDI binding kind
                         // later is a deliberate act rather than an accident.
                         | InputEvent::Midi { .. }
+                        // Gestures have no press semantics and no
+                        // `ActionBinding` pairs with one, so `action_match`
+                        // already answers `None`. Listed for the same reason
+                        // MIDI is: binding a gesture later should be a
+                        // deliberate act, not an accident.
+                        | InputEvent::MagnifyGesture { .. }
+                        | InputEvent::PanGesture { .. }
                 ) {
                     continue;
                 }
@@ -1845,6 +1872,13 @@ impl InputState {
             // tracking it would invent a "held note" API Godot does not have,
             // and one that no NOTE_OFF path would reliably clear.
             InputEvent::Midi { .. } => {}
+            // Gestures accumulate no state either. Godot's `Input` singleton
+            // exposes no gesture query — a magnify/pan goes straight through to
+            // `_input` and nothing is held. In particular this does NOT move
+            // `mouse_position`: a trackpad gesture carries a position but does
+            // not move the cursor, and writing it here would drag the pointer
+            // to the gesture centre on every pinch.
+            InputEvent::MagnifyGesture { .. } | InputEvent::PanGesture { .. } => {}
         }
     }
 

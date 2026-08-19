@@ -1588,6 +1588,36 @@ pub fn mesh3d_from_gltf_resource(resource: &gdresource::Resource) -> Option<Mesh
         .unwrap_or_default();
     let rigged = bone_indices.len() == vertices.len() && bone_weights.len() == vertices.len();
 
+    // Blend shapes (glTF morph targets), stored by the importer as parallel
+    // name and delta arrays (pat-s3rrv.23).
+    //
+    // ⚠️ A target whose deltas are absent or unparseable is KEPT with an empty
+    // delta list, not dropped. Godot addresses shapes by index as well as by
+    // name (`blend_shapes/morph_N`), so dropping one renumbers every shape
+    // after it; and `morph::apply_morph_with_mode` deliberately counts an empty
+    // shape's weight toward `Σw` in normalized mode, mirroring Godot's
+    // `blend_total`. Dropping it would leave the base over-weighted.
+    let blend_shapes = match (
+        first_sub.get_property("blend_shape_names"),
+        first_sub.get_property("blend_shape_deltas"),
+    ) {
+        (Some(gdvariant::Variant::Array(names)), Some(gdvariant::Variant::Array(deltas))) => names
+            .iter()
+            .enumerate()
+            .map(|(k, n)| gdserver3d::mesh::BlendShape3D {
+                name: match n {
+                    gdvariant::Variant::String(s) => s.clone(),
+                    _ => format!("morph_{k}"),
+                },
+                vertex_deltas: deltas
+                    .get(k)
+                    .and_then(extract_vector3_array)
+                    .unwrap_or_default(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+
     let mut mesh = Mesh3D {
         vertices,
         normals,
@@ -1597,6 +1627,7 @@ pub fn mesh3d_from_gltf_resource(resource: &gdresource::Resource) -> Option<Mesh
         surfaces: Vec::new(),
         bone_indices: if rigged { bone_indices } else { Vec::new() },
         bone_weights: if rigged { bone_weights } else { Vec::new() },
+        blend_shapes,
         ..Default::default()
     };
 
@@ -2163,6 +2194,9 @@ pub fn standard_material_from_props(props: &HashMap<String, Variant>) -> Standar
             Some(Variant::Int(v)) => BlendMode::from_godot_int(*v),
             _ => BlendMode::Mix,
         },
+        // Godot's `no_depth_test` is a FLAG, so it arrives as a plain bool
+        // rather than an enum ordinal (pat-s3rrv.30).
+        no_depth_test: flag("no_depth_test"),
     }
 }
 

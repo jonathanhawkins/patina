@@ -44,7 +44,47 @@ impl Biquad {
     /// Builds a biquad for `mode` at `cutoff_hz` given the `sample_rate`, a
     /// resonance/quality factor `q` (Butterworth ≈ 0.707), and `gain_db` (only
     /// used by the shelf modes). Degenerate parameters yield a pass-through.
+    ///
+    /// ⚠️ `gain_db` is the RBJ-cookbook convention: the shelf amplitude is
+    /// `A = 10^(dB/40)` and a shelf's asymptotic gain is `A²`, so a `gain_db` of
+    /// −24 moves the shelf by −24 dB. Godot's own filters do **not** all use
+    /// this spelling — `AudioServer::_mix_step_for_channel` hands the 3D
+    /// attenuation filter a *linear* gain that lands in the `A` slot directly.
+    /// Callers matching that path want [`Biquad::with_shelf_amplitude`].
     pub fn new(mode: FilterMode, cutoff_hz: f32, sample_rate: f32, q: f32, gain_db: f32) -> Self {
+        // The RBJ shelf amplitude; `with_shelf_amplitude` is the same filter
+        // parameterised by `A` instead of by dB.
+        Self::with_shelf_amplitude(
+            mode,
+            cutoff_hz,
+            sample_rate,
+            q,
+            10.0f32.powf(gain_db / 40.0),
+        )
+    }
+
+    /// Builds a biquad from the shelf **amplitude** `a` rather than a dB gain.
+    ///
+    /// `a` is RBJ's `A`: the shelf's asymptotic gain is `a²`, and the
+    /// non-shelf modes ignore it entirely.
+    ///
+    /// This exists because Godot's 3D attenuation filter is parameterised that
+    /// way. `AudioStreamPlayer3D::_notification` computes
+    /// `linear_attenuation = db_to_linear(db_att)` and passes it as the filter's
+    /// *gain* (`audio_stream_player_3d.cpp:460-462`), and
+    /// `AudioFilterSW::prepare_coefficients` puts that value straight into the
+    /// `A` slot (`audio_filter_sw.cpp:79`, `:163-176`) — with `set_stages(1)`
+    /// there is no `pow(gain, 1/(stages+1))` root to undo it. So Godot's
+    /// effective shelf depth is `linear_attenuation²`, i.e. **twice the
+    /// authored `attenuation_filter_db` in dB**, and calling
+    /// [`Biquad::new`] with that dB value produces a shelf half as deep.
+    pub fn with_shelf_amplitude(
+        mode: FilterMode,
+        cutoff_hz: f32,
+        sample_rate: f32,
+        q: f32,
+        a: f32,
+    ) -> Self {
         if sample_rate <= 0.0 || cutoff_hz <= 0.0 || q <= 0.0 {
             return Self::passthrough();
         }
@@ -52,7 +92,6 @@ impl Biquad {
         let cw = w0.cos();
         let sw = w0.sin();
         let alpha = sw / (2.0 * q);
-        let a = 10.0f32.powf(gain_db / 40.0); // shelf gain amplitude
 
         let (b0, b1, b2, a0, a1, a2) = match mode {
             FilterMode::LowPass => {
@@ -163,6 +202,123 @@ mod tests {
             e += x * x;
         }
         e
+    }
+
+    /// Response magnitude at DC (`z = 1`) and Nyquist (`z = -1`) — the two
+    /// points where a shelf's asymptotes live, and where its depth is readable
+    /// without running a sweep.
+    fn gain_at_dc(f: &Biquad) -> f32 {
+        (f.b0 + f.b1 + f.b2) / (1.0 + f.a1 + f.a2)
+    }
+
+    fn gain_at_nyquist(f: &Biquad) -> f32 {
+        (f.b0 - f.b1 + f.b2) / (1.0 - f.a1 + f.a2)
+    }
+
+    /// pat-s3rrv.55 — the 3D attenuation filter's coefficients, against Godot.
+    ///
+    /// The bead recorded this as unresolvable without "an A/B against a real
+    /// Godot build". It is resolvable from the source: `set_resonance(1)` and
+    /// `set_stages(1)` at `audio_server.cpp:674-675` fix both free parameters,
+    /// and `linear_attenuation` goes into the `A` slot at
+    /// `audio_filter_sw.cpp:79`.
+    ///
+    /// ⚠️ The expected values are NOT read off this implementation. They come
+    /// from a separate transcription of `audio_filter_sw.cpp`'s HIGHSHELF branch
+    /// into Python that was executed, so a shared mistake in the Rust cannot
+    /// make this pass — the technique exists because a filter that is
+    /// self-consistently wrong looks exactly like one that is right.
+    #[test]
+    fn the_spatial_high_shelf_matches_godots_coefficients() {
+        // db_att = -24 dB → linear_attenuation = 10^(-24/20).
+        let linear_attenuation = 10.0f32.powf(-24.0 / 20.0);
+        // ⚠️ q = 1, not the `AudioFilterSW` class default of 0.5: this call path
+        // sets it explicitly (`audio_server.cpp:674`). Godot's shelf term is
+        // `sqrt(gain)/sqrt(Q) * sin`, this one's is `2*sqrt(a)*alpha` with
+        // `alpha = sin/(2q)`, so the two agree when `q == sqrt(Q)` — and
+        // `sqrt(1) == 1`.
+        let f = Biquad::with_shelf_amplitude(
+            FilterMode::HighShelf,
+            5_000.0,
+            SR,
+            1.0,
+            linear_attenuation,
+        );
+
+        for (got, want, name) in [
+            (f.b0, 0.016_886_37, "b0"),
+            (f.b1, 0.008_624_88, "b1"),
+            (f.b2, 0.006_186_35, "b2"),
+            (f.a1, -1.798_718_46, "a1"),
+            (f.a2, 0.830_416_06, "a2"),
+        ] {
+            assert!(
+                (got - want).abs() < 1e-5,
+                "{name}: got {got}, Godot gives {want}",
+            );
+        }
+    }
+
+    /// The depth question the bead left open, stated as behaviour.
+    ///
+    /// ⚠️ Godot's shelf is **twice as deep in dB** as the authored
+    /// `attenuation_filter_db`, because `linear_attenuation = 10^(dB/20)` lands
+    /// in the `A` slot whose asymptotic gain is `A²`. Feeding the same dB
+    /// through the RBJ spelling (`Biquad::new`, `A = 10^(dB/40)`) yields a shelf
+    /// at exactly half the depth — which is what this engine did, and which
+    /// sounds plausible in isolation. Only the comparison names it.
+    #[test]
+    fn the_spatial_shelf_depth_is_the_square_of_the_linear_attenuation() {
+        let db = -24.0f32;
+        let linear_attenuation = 10.0f32.powf(db / 20.0);
+        let f = Biquad::with_shelf_amplitude(
+            FilterMode::HighShelf,
+            5_000.0,
+            SR,
+            1.0,
+            linear_attenuation,
+        );
+
+        // Lows pass untouched — a high shelf that also moved DC would be a
+        // gain stage, not a shelf.
+        assert!(
+            (gain_at_dc(&f) - 1.0).abs() < 1e-4,
+            "DC gain must be unity, got {}",
+            gain_at_dc(&f),
+        );
+        let want = linear_attenuation * linear_attenuation;
+        assert!(
+            (gain_at_nyquist(&f) - want).abs() < 1e-6,
+            "high-frequency gain must be linear_attenuation² = {want} (that is \
+             {db} dB doubled to {} dB), got {}",
+            db * 2.0,
+            gain_at_nyquist(&f),
+        );
+
+        // The half-depth spelling, kept as the contrast: this is what the same
+        // dB produces through the RBJ parameterisation.
+        let rbj = Biquad::new(FilterMode::HighShelf, 5_000.0, SR, 1.0, db);
+        assert!(
+            (gain_at_nyquist(&rbj) - linear_attenuation).abs() < 1e-6,
+            "the RBJ dB spelling gives 10^(dB/20), half the depth",
+        );
+    }
+
+    /// The refactor must not have moved `Biquad::new`, which the bus-effect
+    /// filters use. `new(…, db)` is exactly `with_shelf_amplitude(…, 10^(db/40))`.
+    #[test]
+    fn the_db_constructor_still_means_the_rbj_amplitude() {
+        for db in [-24.0f32, -6.0, 0.0, 6.0] {
+            for mode in [FilterMode::HighShelf, FilterMode::LowShelf] {
+                let by_db = Biquad::new(mode, 5_000.0, SR, 0.707, db);
+                let by_a =
+                    Biquad::with_shelf_amplitude(mode, 5_000.0, SR, 0.707, 10.0f32.powf(db / 40.0));
+                assert!(
+                    (by_db.b0 - by_a.b0).abs() < 1e-9 && (by_db.a2 - by_a.a2).abs() < 1e-9,
+                    "{mode:?} at {db} dB changed under the refactor",
+                );
+            }
+        }
     }
 
     #[test]

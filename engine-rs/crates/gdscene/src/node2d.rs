@@ -474,6 +474,11 @@ pub fn set_camera_current(tree: &mut SceneTree, node_id: NodeId, current: bool) 
 /// Godot Camera2D limit sentinel (`±10_000_000`) meaning "no limit".
 pub const CAMERA2D_LIMIT_DEFAULT: f32 = 10_000_000.0;
 
+/// `Camera2D.AnchorMode`: the camera's position is the view's top-left corner.
+pub const ANCHOR_MODE_FIXED_TOP_LEFT: i64 = 0;
+/// `Camera2D.AnchorMode`: the camera's position is the view's centre (default).
+pub const ANCHOR_MODE_DRAG_CENTER: i64 = 1;
+
 /// Runtime configuration for a Camera2D: view limits, position smoothing, and
 /// drag margins. Mirrors Godot's `Camera2D` properties that shape the canvas
 /// transform. Values are the resolved runtime form (limits as `f32`, drag
@@ -499,6 +504,23 @@ pub struct Camera2DConfig {
     pub drag_bottom_margin: f32,
     /// Camera zoom (Godot 4: larger zoom = magnified = smaller visible area).
     pub zoom: Vector2,
+    /// `ANCHOR_MODE_FIXED_TOP_LEFT` (0) or `ANCHOR_MODE_DRAG_CENTER` (1).
+    /// Decides whether the camera's position is the view's top-left or its
+    /// centre; Godot's default is DRAG_CENTER.
+    pub anchor_mode: i64,
+    /// Gates the limit clamp entirely. With this false a camera is free to
+    /// leave its configured limits (Godot `Camera2D.limit_enabled`).
+    pub limit_enabled: bool,
+    /// Eases into the limits instead of clamping hard. Godot applies the clamp
+    /// BEFORE smoothing when this is set, and after it when it is not.
+    pub limit_smoothed: bool,
+    /// When false the camera's global rotation is folded into the view, so the
+    /// whole world counter-rotates. Godot's default is `true` (upright view).
+    pub ignore_rotation: bool,
+    /// Eases the view's rotation toward the camera's, mirroring position
+    /// smoothing. Only consulted when `ignore_rotation` is false.
+    pub rotation_smoothing_enabled: bool,
+    pub rotation_smoothing_speed: f32,
 }
 
 impl Default for Camera2DConfig {
@@ -517,6 +539,12 @@ impl Default for Camera2DConfig {
             drag_top_margin: 0.2,
             drag_bottom_margin: 0.2,
             zoom: Vector2::ONE,
+            anchor_mode: ANCHOR_MODE_DRAG_CENTER,
+            limit_enabled: true,
+            limit_smoothed: false,
+            ignore_rotation: true,
+            rotation_smoothing_enabled: false,
+            rotation_smoothing_speed: 5.0,
         }
     }
 }
@@ -591,6 +619,9 @@ pub fn clamp_camera_to_limits(
     center: Vector2,
     half_view: Vector2,
 ) -> Vector2 {
+    if !config.limit_enabled {
+        return center;
+    }
     let clamp_axis = |v: f32, lo: f32, hi: f32, hv: f32| {
         let min = lo + hv;
         let max = hi - hv;
@@ -617,9 +648,59 @@ pub fn compute_camera2d_position(
     dt: f32,
 ) -> Vector2 {
     let half_view = camera2d_half_view(viewport_size, config.zoom);
-    let dragged = apply_drag_margins(config, current, target, half_view);
-    let smoothed = smooth_camera_position(config, current, dragged, dt);
-    clamp_camera_to_limits(config, smoothed, half_view)
+    // Godot resolves the scroll against the view's CENTRE. Under
+    // `ANCHOR_MODE_FIXED_TOP_LEFT` the camera's position is the view's top-left
+    // corner instead (`screen_offset` is zero in that branch,
+    // camera_2d.cpp:162), so the centre sits half a view further along each
+    // axis. Converting up front lets the rest of the pipeline stay in one space.
+    let fixed_top_left = config.anchor_mode == ANCHOR_MODE_FIXED_TOP_LEFT;
+    let target = if fixed_top_left {
+        target + half_view
+    } else {
+        target
+    };
+    // The drag dead-zone is DRAG_CENTER-only: the FIXED_TOP_LEFT branch takes
+    // the target verbatim (camera_2d.cpp:158-160).
+    let dragged = if fixed_top_left {
+        target
+    } else {
+        apply_drag_margins(config, current, target, half_view)
+    };
+    // `limit_smoothed` moves the clamp to BEFORE the ease, which is what lets a
+    // smoothed camera glide into its limit instead of stopping dead on it.
+    // Godot clamps twice under exactly these two conditions (camera_2d.cpp:165
+    // and :226); `clamp_camera_to_limits` is itself a no-op when the limits are
+    // disabled, so `limit_enabled` need not be repeated here.
+    let limited = if config.limit_smoothed {
+        clamp_camera_to_limits(config, dragged, half_view)
+    } else {
+        dragged
+    };
+    let smoothed = smooth_camera_position(config, current, limited, dt);
+    if config.position_smoothing_enabled && config.limit_smoothed {
+        smoothed
+    } else {
+        clamp_camera_to_limits(config, smoothed, half_view)
+    }
+}
+
+/// The rotation Godot folds into the canvas transform (`Camera2D::get_screen_rotation`).
+///
+/// Zero while `ignore_rotation` is set — the default, which keeps the view
+/// upright however the camera node is rotated. Otherwise the camera's global
+/// rotation, eased from `current` by `rotation_smoothing_speed * dt` when
+/// rotation smoothing is on (camera_2d.cpp:214-221). The ease takes the short
+/// way round, so crossing +/-PI does not spin the world the long way.
+pub fn smooth_camera_rotation(config: &Camera2DConfig, current: f32, target: f32, dt: f32) -> f32 {
+    if config.ignore_rotation {
+        return 0.0;
+    }
+    if config.rotation_smoothing_enabled && dt > 0.0 {
+        let step = (config.rotation_smoothing_speed * dt).clamp(0.0, 1.0);
+        gdcore::math::lerp_angle(current, target, step)
+    } else {
+        target
+    }
 }
 
 // -- Camera2D limit / smoothing / drag property accessors -------------------
@@ -629,6 +710,16 @@ fn get_f32_prop(tree: &SceneTree, node_id: NodeId, key: &str, default: f32) -> f
         .map(|n| match n.get_property(key) {
             Variant::Float(f) => f as f32,
             Variant::Int(i) => i as f32,
+            _ => default,
+        })
+        .unwrap_or(default)
+}
+
+fn get_i64_prop(tree: &SceneTree, node_id: NodeId, key: &str, default: i64) -> i64 {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property(key) {
+            Variant::Int(i) => i,
+            Variant::Float(f) => f as i64,
             _ => default,
         })
         .unwrap_or(default)
@@ -715,6 +806,22 @@ pub fn camera2d_config_from_node(tree: &SceneTree, node_id: NodeId) -> Camera2DC
         drag_top_margin: get_f32_prop(tree, node_id, "drag_top_margin", d.drag_top_margin),
         drag_bottom_margin: get_f32_prop(tree, node_id, "drag_bottom_margin", d.drag_bottom_margin),
         zoom: get_zoom(tree, node_id),
+        anchor_mode: get_i64_prop(tree, node_id, "anchor_mode", d.anchor_mode),
+        limit_enabled: get_bool_prop(tree, node_id, "limit_enabled", d.limit_enabled),
+        limit_smoothed: get_bool_prop(tree, node_id, "limit_smoothed", d.limit_smoothed),
+        ignore_rotation: get_bool_prop(tree, node_id, "ignore_rotation", d.ignore_rotation),
+        rotation_smoothing_enabled: get_bool_prop(
+            tree,
+            node_id,
+            "rotation_smoothing_enabled",
+            d.rotation_smoothing_enabled,
+        ),
+        rotation_smoothing_speed: get_f32_prop(
+            tree,
+            node_id,
+            "rotation_smoothing_speed",
+            d.rotation_smoothing_speed,
+        ),
     }
 }
 

@@ -381,6 +381,20 @@ pub struct WebSocketPeer {
     /// Extra `Key: Value` lines added to the opening handshake (Godot
     /// `WebSocketPeer.handshake_headers`).
     handshake_headers: Vec<String>,
+    /// How often to send an unsolicited Ping; `ZERO` disables it (Godot
+    /// `WebSocketPeer.heartbeat_interval`, default `0.0`).
+    heartbeat_interval: Duration,
+    /// When the outstanding Ping went out.
+    last_heartbeat: Instant,
+    /// A Ping is outstanding and no Pong has answered it.
+    ///
+    /// ⚠️ This flag is what makes the heartbeat a **liveness timeout** rather
+    /// than a keepalive: if the next interval elapses while it is still set,
+    /// the connection is dropped. See [`poll`](Self::poll).
+    heartbeat_waiting: bool,
+    /// Cap on queued inbound packets (Godot
+    /// `WebSocketPeer.max_queued_packets`, default `4096`).
+    max_queued_packets: usize,
 }
 
 impl Default for WebSocketPeer {
@@ -409,6 +423,11 @@ impl WebSocketPeer {
             supported_protocols: Vec::new(),
             selected_protocol: String::new(),
             handshake_headers: Vec::new(),
+            // Godot's documented defaults: no heartbeat, 4096 queued packets.
+            heartbeat_interval: Duration::ZERO,
+            last_heartbeat: Instant::now(),
+            heartbeat_waiting: false,
+            max_queued_packets: 4096,
         }
     }
 
@@ -448,6 +467,38 @@ impl WebSocketPeer {
     }
 
     /// The extra handshake headers configured on this peer.
+    /// Godot `WebSocketPeer.heartbeat_interval`, in seconds; `0` disables.
+    ///
+    /// ⚠️ Documented as having **no effect in Web exports** — a browser
+    /// `WebSocket` sends its own pings and gives the page no control. A wasm
+    /// backend must accept this setting and ignore it, not emulate it.
+    pub fn set_heartbeat_interval(&mut self, seconds: f64) {
+        self.heartbeat_interval = if seconds > 0.0 {
+            Duration::from_secs_f64(seconds)
+        } else {
+            Duration::ZERO
+        };
+    }
+
+    /// The configured ping interval in seconds; `0.0` when disabled.
+    pub fn get_heartbeat_interval(&self) -> f64 {
+        self.heartbeat_interval.as_secs_f64()
+    }
+
+    /// Godot `WebSocketPeer.max_queued_packets` (default 4096).
+    ///
+    /// ⚠️ A value below 1 is clamped to 1: a cap of zero would discard every
+    /// packet the moment it arrived, which is indistinguishable from a dead
+    /// connection.
+    pub fn set_max_queued_packets(&mut self, max: i64) {
+        self.max_queued_packets = max.max(1) as usize;
+    }
+
+    /// The configured queue cap.
+    pub fn get_max_queued_packets(&self) -> i64 {
+        self.max_queued_packets as i64
+    }
+
     pub fn get_handshake_headers(&self) -> &[String] {
         &self.handshake_headers
     }
@@ -477,6 +528,18 @@ impl WebSocketPeer {
             .ok_or_else(|| WebSocketError::Connect("no address resolved".into()))?;
         let mut stream = TcpStream::connect_timeout(addr, self.connect_timeout)
             .map_err(|e| WebSocketError::Connect(e.to_string()))?;
+        // ⚠️ Nagle OFF by default, matching Godot: `wsl_peer.cpp:146` calls
+        // `tcp->set_no_delay(true)` on every connection, and the docs for
+        // `set_no_delay` say so in passing — "(default)". Leaving Nagle on would
+        // coalesce small frames and add up to 40 ms of latency to exactly the
+        // chatty small-message traffic a game uses a WebSocket for, which reads
+        // as server lag rather than as a socket option.
+        let _ = stream.set_nodelay(true);
+        // The heartbeat clock starts at the connection, not at construction: a
+        // peer built long before it connects would otherwise be "overdue" on its
+        // very first poll and fire a Ping immediately.
+        self.last_heartbeat = Instant::now();
+        self.heartbeat_waiting = false;
 
         let key = generate_key();
         let host_header = if parsed.port == 80 {
@@ -596,6 +659,36 @@ impl WebSocketPeer {
             // Peer dropped the TCP connection without a close frame.
             self.transition_closed(1006, "");
         }
+
+        // The heartbeat (Godot `heartbeat_interval`, `wsl_peer.cpp:715-731`).
+        //
+        // ⚠️ It is a LIVENESS TIMEOUT, not a keepalive. Sending a Ping every
+        // interval is only half of it: if the interval elapses again while the
+        // previous Ping is still unanswered, Godot tears the connection down
+        // (`close(-1)` — abrupt, no close frame). An implementation that only
+        // sends Pings keeps a dead connection open forever and looks correct
+        // against every test that has a live server on the other end.
+        //
+        // Placed at the END of `poll` on purpose: a Pong that arrived in this
+        // same tick has already cleared `heartbeat_waiting` in `handle_frame`,
+        // so a peer that answered promptly is never mistaken for a dead one.
+        if self.state == WebSocketState::Open
+            && !self.heartbeat_interval.is_zero()
+            && self.last_heartbeat.elapsed() > self.heartbeat_interval
+        {
+            if self.heartbeat_waiting {
+                self.transition_closed(1006, "heartbeat timeout");
+                return;
+            }
+            self.heartbeat_waiting = true;
+            // `last_heartbeat` advances only on a successful write, matching
+            // Godot, which sets it inside the `err == 0` branch — otherwise a
+            // failing socket would silently reset the timeout every tick and
+            // the timeout would never fire.
+            if self.send_frame(Opcode::Ping, &[]).is_ok() {
+                self.last_heartbeat = Instant::now();
+            }
+        }
     }
 
     /// Sends a payload as a text or binary message. Errors unless OPEN.
@@ -681,6 +774,64 @@ impl WebSocketPeer {
         &self.requested_url
     }
 
+    /// The connected peer's IP address (Godot `WebSocketPeer.get_connected_host`).
+    ///
+    /// Empty when there is no connection — Godot's `StreamPeerTCP` answers the
+    /// same way rather than erroring, so a script polling before the handshake
+    /// completes reads `""` rather than raising.
+    ///
+    /// ⚠️ Godot documents this as **unavailable in the Web export**: a browser
+    /// `WebSocket` never exposes the remote address. A wasm backend must report
+    /// empty here rather than inventing a value.
+    pub fn get_connected_host(&self) -> String {
+        self.stream
+            .as_ref()
+            .and_then(|s| s.peer_addr().ok())
+            .map(|a| a.ip().to_string())
+            .unwrap_or_default()
+    }
+
+    /// The connected peer's remote port (Godot `WebSocketPeer.get_connected_port`).
+    ///
+    /// `0` when there is no connection. ⚠️ Also unavailable in Godot's Web
+    /// export, for the same reason as [`get_connected_host`](Self::get_connected_host).
+    pub fn get_connected_port(&self) -> u16 {
+        self.stream
+            .as_ref()
+            .and_then(|s| s.peer_addr().ok())
+            .map(|a| a.port())
+            .unwrap_or(0)
+    }
+
+    /// Enables or disables Nagle's algorithm (Godot `WebSocketPeer.set_no_delay`).
+    ///
+    /// ⚠️ The argument's sense is inverted relative to the option it sets:
+    /// `set_no_delay(true)` means *disable* Nagle, i.e. `TCP_NODELAY = true`.
+    /// Connections start with it enabled, matching `wsl_peer.cpp:146`.
+    ///
+    /// A peer with no socket silently does nothing, and the setting does not
+    /// persist across a later `connect_to_url` — Godot has the same shape,
+    /// because the option lives on the socket rather than on the peer.
+    pub fn set_no_delay(&mut self, enabled: bool) {
+        if let Some(stream) = self.stream.as_ref() {
+            let _ = stream.set_nodelay(enabled);
+        }
+    }
+
+    /// Bytes still queued for sending (Godot
+    /// `WebSocketPeer.get_current_outbound_buffered_amount`).
+    ///
+    /// ⚠️ Always `0` here, and that is an accurate answer rather than a stub:
+    /// [`send`](Self::send) writes each frame straight to the socket and keeps
+    /// no outbound queue, so there is never anything buffered to report. Godot's
+    /// note — "Web exports use `WebSocket.bufferedAmount`, while other platforms
+    /// use an internal buffer" — describes implementations that DO queue.
+    /// **Anything that adds an outbound queue here must update this**, or a
+    /// script throttling on back-pressure will read zero and never throttle.
+    pub fn get_current_outbound_buffered_amount(&self) -> i64 {
+        0
+    }
+
     // -- internals ----------------------------------------------------------
 
     /// Drains all currently-available bytes into `in_buf`. Returns `true` on EOF.
@@ -741,12 +892,26 @@ impl WebSocketPeer {
         key_ok
     }
 
+    /// Queues an inbound packet, honouring `max_queued_packets`.
+    ///
+    /// ⚠️ A full queue REFUSES the newest packet; it does not evict the oldest.
+    /// Godot's send-side cap is `ERR_FAIL_COND_V(queued >= max, ERR_OUT_OF_MEMORY)`
+    /// (`wsl_peer.cpp:783`) — it rejects rather than making room. Evicting the
+    /// oldest is the intuitive choice for a bounded queue and silently discards
+    /// data the application had already been told it would receive.
+    fn queue_packet(&mut self, payload: Vec<u8>, is_text: bool) {
+        if self.packets.len() >= self.max_queued_packets {
+            return;
+        }
+        self.packets.push_back((payload, is_text));
+    }
+
     fn handle_frame(&mut self, frame: Frame) {
         match frame.opcode {
             Opcode::Text | Opcode::Binary => {
                 if frame.fin {
-                    self.packets
-                        .push_back((frame.payload, frame.opcode == Opcode::Text));
+                    let is_text = frame.opcode == Opcode::Text;
+                    self.queue_packet(frame.payload, is_text);
                 } else {
                     self.frag_opcode = Some(frame.opcode);
                     self.frag_payload = frame.payload;
@@ -757,14 +922,18 @@ impl WebSocketPeer {
                 if frame.fin {
                     let is_text = self.frag_opcode == Some(Opcode::Text);
                     let payload = std::mem::take(&mut self.frag_payload);
-                    self.packets.push_back((payload, is_text));
+                    self.queue_packet(payload, is_text);
                     self.frag_opcode = None;
                 }
             }
             Opcode::Ping => {
                 let _ = self.send_frame(Opcode::Pong, &frame.payload);
             }
-            Opcode::Pong => {}
+            // ⚠️ The answer to our own heartbeat Ping. Clearing this is what
+            // stops the NEXT interval from reading the connection as dead.
+            Opcode::Pong => {
+                self.heartbeat_waiting = false;
+            }
             Opcode::Close => {
                 let (code, reason) = parse_close_payload(&frame.payload);
                 if !self.close_frame_sent {
@@ -1033,6 +1202,215 @@ pub fn release_websocket_peer_handle(id: gdcore::id::ObjectId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// pat-s3rrv.79 — the four connection accessors answer on an UNCONNECTED
+    /// peer without panicking.
+    ///
+    /// ⚠️ This is the state a script sees most often: `WebSocketPeer.new()` then
+    /// a poll loop before the handshake completes. Godot's `StreamPeerTCP`
+    /// answers `""`/`0` there rather than erroring, so a script reading them
+    /// early gets a value, not a raise.
+    /// pat-s3rrv.79 — the heartbeat is a LIVENESS TIMEOUT, not a keepalive.
+    ///
+    /// ⚠️ This is the assertion that separates the two. A peer that sends a Ping
+    /// every interval and never checks for the Pong passes any test that only
+    /// counts pings; it keeps a dead connection open forever. Godot drops the
+    /// connection at the SECOND elapsed interval when the first Ping went
+    /// unanswered (`wsl_peer.cpp:716-721`), and this drives exactly that.
+    #[test]
+    fn an_unanswered_heartbeat_drops_the_connection_on_the_next_interval() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        // A server that completes the handshake and then goes silent — never
+        // answering a Ping. That is the case the timeout exists for; a server
+        // that answers is indistinguishable from a working one.
+        let server = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let n = std::io::Read::read(&mut sock, &mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                if let Some(key) = parse_handshake_key(&req) {
+                    let _ = std::io::Write::write_all(
+                        &mut sock,
+                        websocket_handshake_response(&key).as_bytes(),
+                    );
+                }
+                // Hold the socket open, deliberately answering nothing.
+                std::thread::sleep(Duration::from_millis(600));
+            }
+        });
+
+        let mut peer = WebSocketPeer::new();
+        peer.set_heartbeat_interval(0.05);
+        peer.connect_to_url(&format!("ws://127.0.0.1:{port}/"))
+            .expect("connect");
+
+        // Drive until the handshake completes.
+        for _ in 0..100 {
+            peer.poll();
+            if peer.get_ready_state() == WebSocketState::Open {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            peer.get_ready_state(),
+            WebSocketState::Open,
+            "the fixture must reach OPEN before the heartbeat can be tested",
+        );
+
+        // First interval: a Ping goes out and the peer stays open.
+        std::thread::sleep(Duration::from_millis(70));
+        peer.poll();
+        assert_eq!(
+            peer.get_ready_state(),
+            WebSocketState::Open,
+            "one unanswered Ping is not yet a timeout — Godot drops on the SECOND",
+        );
+
+        // Second interval with no Pong: the connection is torn down.
+        std::thread::sleep(Duration::from_millis(70));
+        peer.poll();
+        assert_eq!(
+            peer.get_ready_state(),
+            WebSocketState::Closed,
+            "an unanswered heartbeat must drop the connection; staying open is \
+             the keepalive-only bug this test exists for",
+        );
+
+        let _ = server.join();
+    }
+
+    /// A zero interval — Godot's default — never pings and never times out.
+    #[test]
+    fn a_zero_heartbeat_interval_is_disabled() {
+        let mut peer = WebSocketPeer::new();
+        assert_eq!(
+            peer.get_heartbeat_interval(),
+            0.0,
+            "Godot's default is 0.0 = disabled",
+        );
+        // Negative values disable too rather than producing a nonsense Duration.
+        peer.set_heartbeat_interval(-5.0);
+        assert_eq!(peer.get_heartbeat_interval(), 0.0);
+        peer.set_heartbeat_interval(2.5);
+        assert_eq!(peer.get_heartbeat_interval(), 2.5);
+    }
+
+    /// ⚠️ A full inbound queue REFUSES the newest packet rather than evicting
+    /// the oldest.
+    ///
+    /// Evicting is the intuitive choice for a bounded queue and is wrong: it
+    /// discards data the application was already told it would receive. Godot's
+    /// cap rejects instead (`wsl_peer.cpp:783`, `ERR_OUT_OF_MEMORY`). The
+    /// assertion checks WHICH packets survived, not just how many — a count
+    /// alone cannot tell the two policies apart.
+    #[test]
+    fn a_full_packet_queue_refuses_the_newest_not_the_oldest() {
+        let mut peer = WebSocketPeer::new();
+        assert_eq!(
+            peer.get_max_queued_packets(),
+            4096,
+            "Godot's documented default",
+        );
+        peer.set_max_queued_packets(2);
+
+        peer.queue_packet(b"first".to_vec(), true);
+        peer.queue_packet(b"second".to_vec(), true);
+        peer.queue_packet(b"third".to_vec(), true);
+
+        assert_eq!(peer.get_available_packet_count(), 2, "the cap holds");
+        assert_eq!(
+            peer.get_packet(),
+            b"first".to_vec(),
+            "the OLDEST packet must survive — evicting it to make room for \
+             `third` loses data the application was promised",
+        );
+        assert_eq!(peer.get_packet(), b"second".to_vec());
+    }
+
+    /// A cap below 1 is clamped, not honoured.
+    #[test]
+    fn a_zero_packet_cap_is_clamped_to_one() {
+        let mut peer = WebSocketPeer::new();
+        peer.set_max_queued_packets(0);
+        assert_eq!(
+            peer.get_max_queued_packets(),
+            1,
+            "a cap of zero would discard every packet on arrival, which is \
+             indistinguishable from a dead connection",
+        );
+    }
+
+    #[test]
+    fn the_connection_accessors_answer_on_an_unconnected_peer() {
+        let mut peer = WebSocketPeer::new();
+        assert_eq!(peer.get_connected_host(), "", "no socket, no host");
+        assert_eq!(peer.get_connected_port(), 0, "no socket, no port");
+        assert_eq!(
+            peer.get_current_outbound_buffered_amount(),
+            0,
+            "nothing sent, nothing queued",
+        );
+        // A no-op rather than a panic or an error — the option lives on the
+        // socket, and there is no socket yet.
+        peer.set_no_delay(true);
+        peer.set_no_delay(false);
+    }
+
+    /// A connected peer reports the address it is actually connected to, and
+    /// starts with Nagle disabled.
+    ///
+    /// ⚠️ The port assertion compares against the listener's OWN port rather
+    /// than a literal: an ephemeral port is the only way to keep this test from
+    /// colliding with a parallel one, so a hardcoded number would be both flaky
+    /// and untrue.
+    #[test]
+    fn a_connected_peer_reports_its_remote_address_and_starts_nodelay() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        // Accept and hold, so the connection stays up for the assertions. The
+        // handshake never completes, which is fine — these four accessors are
+        // socket-level and answer before the WebSocket upgrade does.
+        let server = std::thread::spawn(move || {
+            let held = listener.accept();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(held);
+        });
+
+        let mut peer = WebSocketPeer::new();
+        // The handshake will not finish against this bare listener; the socket
+        // is connected either way, which is what is under test.
+        let _ = peer.connect_to_url(&format!("ws://127.0.0.1:{port}/"));
+
+        assert_eq!(
+            peer.get_connected_host(),
+            "127.0.0.1",
+            "a connected peer must report the remote IP",
+        );
+        assert_eq!(
+            peer.get_connected_port(),
+            port,
+            "…and the remote port, which is the listener's ephemeral one",
+        );
+        // ⚠️ Godot sets TCP_NODELAY on every connection (`wsl_peer.cpp:146`), so
+        // this is the DEFAULT rather than something a script must ask for.
+        // Leaving Nagle on adds up to 40 ms to small frames and reads as server
+        // lag.
+        assert!(
+            peer.stream.as_ref().unwrap().nodelay().unwrap_or(false),
+            "connect_to_url must disable Nagle, matching Godot's default",
+        );
+        // And it can be turned back on.
+        peer.set_no_delay(false);
+        assert!(!peer.stream.as_ref().unwrap().nodelay().unwrap_or(true));
+
+        let _ = server.join();
+    }
 
     #[test]
     fn base64_known_vectors() {

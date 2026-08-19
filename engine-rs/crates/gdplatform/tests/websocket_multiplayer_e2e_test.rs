@@ -234,3 +234,65 @@ fn two_clients_get_distinct_peer_ids() {
     assert_ne!(first.get_unique_id(), second.get_unique_id());
     assert_eq!(server.get_peer_count(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// pat-s3rrv.81 — get_peer_address / get_peer_port
+// ---------------------------------------------------------------------------
+
+/// 🔑 Both methods were REGISTERED IN CLASSDB with no dispatch behind them, so
+/// `ClassDB.class_has_method` said yes and the call raised `UndefinedFunction`.
+/// This pins the transport half against a real handshake rather than a fixture.
+#[test]
+fn the_server_reports_a_connected_peers_address_and_port() {
+    let (server, client) = connected_pair();
+    let id = client.get_unique_id();
+
+    // The client dialled 127.0.0.1, so that is the address the server must see
+    // for it. Asserting the VALUE rather than "non-empty" — a stub returning a
+    // placeholder string would satisfy a non-empty check.
+    assert_eq!(
+        server.get_peer_address(id),
+        "127.0.0.1",
+        "the server must report the loopback address the client dialled from"
+    );
+
+    // ⚠️ The port is the client's EPHEMERAL source port, not the server's
+    // listening port, so it cannot be asserted as a constant — but it must be a
+    // real assigned port, never 0 (which is this API's not-found answer).
+    assert_ne!(
+        server.get_peer_port(id),
+        0,
+        "0 is the not-found value; a connected peer must have a real source port"
+    );
+}
+
+/// ⚠️ An UNKNOWN id answers with the not-found values, it does not raise.
+///
+/// Godot's `ERR_FAIL_COND_V(!peers_map.has(id), IPAddress())` / `..., 0)`
+/// (websocket_multiplayer_peer.cpp:472-480) means a script polling an id that
+/// has just disconnected reads `""` / `0` rather than erroring mid-frame. An
+/// implementation indexing the map directly would panic here instead.
+#[test]
+fn an_unknown_peer_id_answers_empty_and_zero() {
+    let (server, _client) = connected_pair();
+
+    assert_eq!(server.get_peer_address(PeerId(9999)), "");
+    assert_eq!(server.get_peer_port(PeerId(9999)), 0);
+
+    // The server itself is not in its own connection roster.
+    assert_eq!(server.get_peer_address(PeerId::SERVER), "");
+}
+
+/// A CLIENT holds one socket to the server, not a roster — so it answers with
+/// the not-found values for every id, including the server's.
+///
+/// Pinned because the obvious "just look it up" implementation would answer
+/// from whatever map happened to be non-empty, and a client that reported an
+/// address for peer 1 would look plausible while meaning nothing.
+#[test]
+fn a_client_has_no_peer_roster_to_report_from() {
+    let (_server, client) = connected_pair();
+
+    assert_eq!(client.get_peer_address(PeerId::SERVER), "");
+    assert_eq!(client.get_peer_port(PeerId::SERVER), 0);
+}

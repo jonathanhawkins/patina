@@ -107,6 +107,69 @@ impl PacketPeerStream {
     }
 }
 
+/// Script-visible handle table for `PacketPeerStream` (pat-s3rrv.80).
+///
+/// This module implemented the full framing but nothing could reach it: there
+/// was no ClassDB registration and no interpreter dispatch, so a 162-line
+/// working class was unreachable from GDScript. The handle pattern mirrors
+/// `websocket_peer.rs` exactly — same poison-tolerant table, same tag mask.
+///
+/// ⚠️ THE TAG BYTE IS A WORKSPACE-WIDE NAMESPACE. Two modules issuing the same
+/// top byte makes `is_*_handle` answer true for the other module's ids, and the
+/// symptom is a `MethodNotFound` naming the WRONG class. `0x5C` was chosen after
+/// sweeping all 36 `*_HANDLE_TAG` constants in the workspace; it is unused, and
+/// sits beside `StreamPeer` (`0x5B`) and `WebSocket` (`0x57`).
+const PACKET_PEER_STREAM_HANDLE_TAG: u64 = 0x5C00_0000_0000_0000;
+static NEXT_PACKET_PEER_STREAM_HANDLE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+static PACKET_PEER_STREAM_HANDLES: std::sync::Mutex<
+    Option<std::collections::HashMap<u64, PacketPeerStream>>,
+> = std::sync::Mutex::new(None);
+
+fn packet_peer_stream_handles(
+) -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<u64, PacketPeerStream>>> {
+    // A poisoned lock still holds a usable table: a panic in one script's
+    // handler must not make every later call fail.
+    PACKET_PEER_STREAM_HANDLES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Returns `true` when `id` was issued by [`new_packet_peer_stream_handle`].
+pub fn is_packet_peer_stream_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == PACKET_PEER_STREAM_HANDLE_TAG
+}
+
+/// Allocates a fresh [`PacketPeerStream`] and returns its script-visible id
+/// (Godot `PacketPeerStream.new()`).
+pub fn new_packet_peer_stream_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_PACKET_PEER_STREAM_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let raw = PACKET_PEER_STREAM_HANDLE_TAG | seq;
+    packet_peer_stream_handles()
+        .get_or_insert_with(std::collections::HashMap::new)
+        .insert(raw, PacketPeerStream::new());
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Runs `f` against the live peer behind `id`, or returns `None` when the
+/// handle was never issued or has already been released.
+pub fn with_packet_peer_stream<R>(
+    id: gdcore::id::ObjectId,
+    f: impl FnOnce(&mut PacketPeerStream) -> R,
+) -> Option<R> {
+    let mut guard = packet_peer_stream_handles();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    map.get_mut(&id.raw()).map(f)
+}
+
+/// Drops a handle. Idempotent.
+pub fn release_packet_peer_stream_handle(id: gdcore::id::ObjectId) {
+    let mut guard = packet_peer_stream_handles();
+    if let Some(map) = guard.as_mut() {
+        map.remove(&id.raw());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

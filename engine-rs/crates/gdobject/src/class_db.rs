@@ -1100,6 +1100,8 @@ fn node_class() -> ClassRegistration {
 
     ClassRegistration::new("Node")
         .parent("Object")
+        .signal(SignalInfo::new("editor_description_changed").arg("node"))
+        .signal(SignalInfo::new("editor_state_changed"))
         // Multiplayer authority (pat-s3rrv.17). Declared HERE, on Node, because
         // Godot puts it on Node — and because `class_has_method` consults
         // declared `MethodInfo` only: without these three the accessor arms
@@ -2913,7 +2915,23 @@ pub fn register_3d_classes() {
             ))
             .property(PropertyInfo::new("show_when_tracked", Variant::Bool(false))),
     );
-    register_class(ClassRegistration::new("XRController3D").parent("XRNode3D"));
+    register_class(
+        ClassRegistration::new("XRController3D")
+            .parent("XRNode3D")
+            .signal(SignalInfo::new("button_pressed").arg("name"))
+            .signal(SignalInfo::new("button_released").arg("name"))
+            .signal(
+                SignalInfo::new("input_float_changed")
+                    .arg("name")
+                    .arg("value"),
+            )
+            .signal(
+                SignalInfo::new("input_vector2_changed")
+                    .arg("name")
+                    .arg("value"),
+            )
+            .signal(SignalInfo::new("profile_changed").arg("role")),
+    );
     register_class(ClassRegistration::new("XRAnchor3D").parent("XRNode3D"));
     register_class(
         ClassRegistration::new("XRCamera3D")
@@ -4273,7 +4291,18 @@ pub fn register_3d_classes() {
                     .with_accessors("is_capture_included", ""),
             ),
     );
-    register_class(ClassRegistration::new("AnimationLibrary").parent("Resource"));
+    register_class(
+        ClassRegistration::new("AnimationLibrary")
+            .parent("Resource")
+            .signal(SignalInfo::new("animation_added").arg("name"))
+            .signal(SignalInfo::new("animation_changed").arg("name"))
+            .signal(SignalInfo::new("animation_removed").arg("name"))
+            .signal(
+                SignalInfo::new("animation_renamed")
+                    .arg("name")
+                    .arg("to_name"),
+            ),
+    );
     register_class(
         ClassRegistration::new("AnimationMixer")
             .parent("Node")
@@ -9822,6 +9851,8 @@ pub fn register_2d_classes() {
     register_class(
         ClassRegistration::new("Resource")
             .parent("RefCounted")
+            .signal(SignalInfo::new("setup_local_to_scene_requested"))
+            .signal(SignalInfo::new("changed"))
             .property(
                 PropertyInfo::new("resource_local_to_scene", Variant::Bool(false))
                     .with_accessors("is_local_to_scene", "set_local_to_scene"),
@@ -10429,6 +10460,10 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("CanvasItem")
                 .parent("Node")
+                .signal(SignalInfo::new("draw"))
+                .signal(SignalInfo::new("hidden"))
+                .signal(SignalInfo::new("item_rect_changed"))
+                .signal(SignalInfo::new("visibility_changed"))
                 .abstract_class()
                 .property(
                     PropertyInfo::new("visible", Variant::Bool(true))
@@ -10548,6 +10583,8 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("Sprite2D")
                 .parent("Node2D")
+                .signal(SignalInfo::new("frame_changed"))
+                .signal(SignalInfo::new("texture_changed"))
                 .property(
                     PropertyInfo::new("centered", Variant::Bool(true))
                         .with_accessors("is_centered", "set_centered"),
@@ -11662,7 +11699,11 @@ pub fn register_2d_classes() {
     if !class_exists("Skeleton2D") {
         // Godot documents no own properties for Skeleton2D; its surface is
         // entirely inherited (pat-0q2kx.127).
-        register_class(ClassRegistration::new("Skeleton2D").parent("Node2D"));
+        register_class(
+            ClassRegistration::new("Skeleton2D")
+                .parent("Node2D")
+                .signal(SignalInfo::new("bone_setup_changed")),
+        );
     }
     if !class_exists("Bone2D") {
         // Bone2D: 1 own properties from doc/classes/Bone2D.xml.
@@ -11719,12 +11760,16 @@ pub fn register_2d_classes() {
     }
     // 2D lights + occluder (pat-p0s82.6)
     if !class_exists("Path3D") {
-        register_class(ClassRegistration::new("Path3D").parent("Node3D").property(
-            PropertyInfo::new(
-                "debug_custom_color",
-                Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
-            ),
-        ));
+        register_class(
+            ClassRegistration::new("Path3D")
+                .parent("Node3D")
+                .signal(SignalInfo::new("curve_changed"))
+                .signal(SignalInfo::new("debug_color_changed"))
+                .property(PropertyInfo::new(
+                    "debug_custom_color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                )),
+        );
     }
     if !class_exists("PathFollow3D") {
         register_class(
@@ -12176,6 +12221,32 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("RichTextLabel")
                 .parent("Control")
+                // pat-s3rrv.74: RichTextLabel had 32/32 documented properties
+                // and 4/4 signals but **0 of 78 methods**, so
+                // `ClassDB.class_get_method_list("RichTextLabel")` was empty for
+                // a class whose whole point is its method API, and
+                // `class_has_method(.., "append_text")` answered false for a
+                // call the engine services today.
+                //
+                // These five are the ones actually IMPLEMENTED and dispatched —
+                // all behind the `is_rich_text_label` guard in
+                // gdscene/src/scripting.rs:2943+. Arities and the `const`
+                // qualifiers come from doc_classes/RichTextLabel.xml.
+                //
+                // ⚠️ The other 73 are deliberately NOT registered: nothing
+                // implements them, and `class_has_method` answering true for a
+                // method that raises on call is the same lie inverted.
+                //
+                // ⚠️ A bare name grep over the scene/script layers matches EIGHT
+                // of the 78, but `select_all`, `deselect` and `get_selected_text`
+                // are guarded by `is_text_input` (LineEdit/TextEdit), not by
+                // `is_rich_text_label`. Registering those would advertise
+                // another class's methods on this one.
+                .method(MethodInfo::new("append_text", 1))
+                .method(MethodInfo::new("add_text", 1))
+                .method(MethodInfo::new("clear", 0))
+                .method(MethodInfo::new("get_parsed_text", 0).const_method())
+                .method(MethodInfo::new("get_total_character_count", 0).const_method())
                 .property(
                     PropertyInfo::new("text", Variant::String(String::new()))
                         .with_accessors("get_text", "set_text"),
@@ -12756,6 +12827,8 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("Slider")
                 .parent("Range")
+                .signal(SignalInfo::new("drag_started"))
+                .signal(SignalInfo::new("drag_ended").arg("value_changed"))
                 // Godot's Slider is abstract: only H/VSlider are instantiable.
                 .abstract_class()
                 .property(
@@ -16303,6 +16376,37 @@ pub fn register_2d_classes() {
                 ),
         );
     }
+    // pat-s3rrv.83: Curve3D was absent while Curve2D and PathFollow3D were both
+    // registered, so `ClassDB.class_exists("Curve3D")` answered false for a
+    // resource a .tscn can legitimately carry.
+    //
+    // ⚠️ `bake_interval` is 0.2 here, NOT the 5.0 its Curve2D neighbour uses
+    // (doc/classes/Curve3D.xml:204 vs Curve2D). The two registrations look
+    // interchangeable and are not — 3D units are metres where 2D units are
+    // pixels, so copying the sibling would have declared a default 25x too
+    // coarse.
+    if !class_exists("Curve3D") {
+        register_class(
+            ClassRegistration::new("Curve3D")
+                .parent("Resource")
+                .property(
+                    PropertyInfo::new("bake_interval", Variant::Float(0.2))
+                        .with_accessors("get_bake_interval", "set_bake_interval"),
+                )
+                .property(
+                    PropertyInfo::new("closed", Variant::Bool(false))
+                        .with_accessors("is_closed", "set_closed"),
+                )
+                .property(
+                    PropertyInfo::new("point_count", Variant::Int(0))
+                        .with_accessors("get_point_count", "set_point_count"),
+                )
+                .property(
+                    PropertyInfo::new("up_vector_enabled", Variant::Bool(true))
+                        .with_accessors("is_up_vector_enabled", "set_up_vector_enabled"),
+                ),
+        );
+    }
     if !class_exists("SpriteFrames") {
         register_class(ClassRegistration::new("SpriteFrames").parent("Resource"));
     }
@@ -16455,29 +16559,11 @@ pub fn register_2d_classes() {
     // a script must not be able to `.new()` one.
     // `Range` is already registered above with these exact defaults, so the
     // Range family below simply parents to it (pat-s3rrv.71).
-    if !class_exists("Slider") {
-        register_class(
-            ClassRegistration::new("Slider")
-                .parent("Range")
-                .abstract_class()
-                .property(
-                    PropertyInfo::new("editable", Variant::Bool(true))
-                        .with_accessors("is_editable", "set_editable"),
-                )
-                .property(
-                    PropertyInfo::new("scrollable", Variant::Bool(true))
-                        .with_accessors("is_scrollable", "set_scrollable"),
-                )
-                .property(
-                    PropertyInfo::new("tick_count", Variant::Int(0))
-                        .with_accessors("get_ticks", "set_ticks"),
-                )
-                .property(
-                    PropertyInfo::new("ticks_on_borders", Variant::Bool(false))
-                        .with_accessors("get_ticks_on_borders", "set_ticks_on_borders"),
-                ),
-        );
-    }
+    // pat-s3rrv.71: `Slider`, `SpinBox` and `TextureProgressBar` used to be
+    // registered a SECOND time here. Both copies sat behind
+    // `if !class_exists(..)` in this same function, so the earlier, richer
+    // registration always won and these never executed — an edit landing in one
+    // of them would have compiled, read correctly and done nothing.
     for slider in ["HSlider", "VSlider"] {
         if !class_exists(slider) {
             register_class(ClassRegistration::new(slider).parent("Slider"));
@@ -16501,62 +16587,6 @@ pub fn register_2d_classes() {
         if !class_exists(bar) {
             register_class(ClassRegistration::new(bar).parent("ScrollBar"));
         }
-    }
-    if !class_exists("SpinBox") {
-        register_class(
-            ClassRegistration::new("SpinBox")
-                .parent("Range")
-                .property(
-                    PropertyInfo::new("editable", Variant::Bool(true))
-                        .with_accessors("is_editable", "set_editable"),
-                )
-                .property(
-                    PropertyInfo::new("prefix", Variant::String(String::new()))
-                        .with_accessors("get_prefix", "set_prefix"),
-                )
-                .property(
-                    PropertyInfo::new("suffix", Variant::String(String::new()))
-                        .with_accessors("get_suffix", "set_suffix"),
-                )
-                .property(
-                    PropertyInfo::new("step", Variant::Float(1.0))
-                        .with_accessors("get_step", "set_step"),
-                )
-                .property(
-                    PropertyInfo::new("update_on_text_changed", Variant::Bool(false))
-                        .with_accessors("get_update_on_text_changed", "set_update_on_text_changed"),
-                )
-                .property(
-                    PropertyInfo::new("select_all_on_focus", Variant::Bool(false))
-                        .with_accessors("is_select_all_on_focus", "set_select_all_on_focus"),
-                ),
-        );
-    }
-    if !class_exists("TextureProgressBar") {
-        register_class(
-            ClassRegistration::new("TextureProgressBar")
-                .parent("Range")
-                .property(
-                    PropertyInfo::new("fill_mode", Variant::Int(0))
-                        .with_accessors("get_fill_mode", "set_fill_mode"),
-                )
-                .property(
-                    PropertyInfo::new("nine_patch_stretch", Variant::Bool(false))
-                        .with_accessors("get_nine_patch_stretch", "set_nine_patch_stretch"),
-                )
-                .property(
-                    PropertyInfo::new("tint_under", Variant::Color(gdcore::math::Color::WHITE))
-                        .with_accessors("get_tint_under", "set_tint_under"),
-                )
-                .property(
-                    PropertyInfo::new("tint_over", Variant::Color(gdcore::math::Color::WHITE))
-                        .with_accessors("get_tint_over", "set_tint_over"),
-                )
-                .property(
-                    PropertyInfo::new("tint_progress", Variant::Color(gdcore::math::Color::WHITE))
-                        .with_accessors("get_tint_progress", "set_tint_progress"),
-                ),
-        );
     }
 
     // Containers.
@@ -17241,7 +17271,9 @@ pub fn register_root_window_chain() {
         register_class(
             ClassRegistration::new("Viewport")
                 .parent("Node")
+                .signal(SignalInfo::new("gui_focus_changed").arg("node"))
                 .abstract_class()
+                .signal(SignalInfo::new("size_changed"))
                 .property(
                     PropertyInfo::new("transparent_bg", Variant::Bool(false))
                         .with_accessors("has_transparent_background", "set_transparent_background"),
@@ -17253,6 +17285,21 @@ pub fn register_root_window_chain() {
         register_class(
             ClassRegistration::new("Window")
                 .parent("Viewport")
+                .signal(SignalInfo::new("about_to_popup"))
+                .signal(SignalInfo::new("close_requested"))
+                .signal(SignalInfo::new("dpi_changed"))
+                .signal(SignalInfo::new("files_dropped").arg("files"))
+                .signal(SignalInfo::new("focus_entered"))
+                .signal(SignalInfo::new("focus_exited"))
+                .signal(SignalInfo::new("go_back_requested"))
+                .signal(SignalInfo::new("mouse_entered"))
+                .signal(SignalInfo::new("mouse_exited"))
+                .signal(SignalInfo::new("nonclient_window_input").arg("event"))
+                .signal(SignalInfo::new("theme_changed"))
+                .signal(SignalInfo::new("title_changed"))
+                .signal(SignalInfo::new("titlebar_changed"))
+                .signal(SignalInfo::new("visibility_changed"))
+                .signal(SignalInfo::new("window_input").arg("event"))
                 .property(
                     PropertyInfo::new("title", Variant::String(String::new()))
                         .with_accessors("get_title", "set_title"),
@@ -17439,7 +17486,9 @@ pub fn register_viewport_classes() {
         register_class(
             ClassRegistration::new("Viewport")
                 .parent("Node")
+                .signal(SignalInfo::new("gui_focus_changed").arg("node"))
                 .abstract_class()
+                .signal(SignalInfo::new("size_changed"))
                 .property(
                     PropertyInfo::new("transparent_bg", Variant::Bool(false))
                         .with_accessors("has_transparent_background", "set_transparent_background"),
@@ -17458,6 +17507,21 @@ pub fn register_viewport_classes() {
         register_class(
             ClassRegistration::new("Window")
                 .parent("Viewport")
+                .signal(SignalInfo::new("about_to_popup"))
+                .signal(SignalInfo::new("close_requested"))
+                .signal(SignalInfo::new("dpi_changed"))
+                .signal(SignalInfo::new("files_dropped").arg("files"))
+                .signal(SignalInfo::new("focus_entered"))
+                .signal(SignalInfo::new("focus_exited"))
+                .signal(SignalInfo::new("go_back_requested"))
+                .signal(SignalInfo::new("mouse_entered"))
+                .signal(SignalInfo::new("mouse_exited"))
+                .signal(SignalInfo::new("nonclient_window_input").arg("event"))
+                .signal(SignalInfo::new("theme_changed"))
+                .signal(SignalInfo::new("title_changed"))
+                .signal(SignalInfo::new("titlebar_changed"))
+                .signal(SignalInfo::new("visibility_changed"))
+                .signal(SignalInfo::new("window_input").arg("event"))
                 .property(
                     PropertyInfo::new("title", Variant::String(String::new()))
                         .with_accessors("get_title", "set_title"),
@@ -21311,6 +21375,82 @@ pub fn register_networking_classes() {
         );
     }
 
+    // PacketPeerStream (pat-s3rrv.80). Godot: `inherits="PacketPeer"`, and it
+    // declares NO methods of its own — `put_packet` / `get_packet` /
+    // `get_available_packet_count` are all inherited from PacketPeer.
+    //
+    // ⚠️ They are registered HERE rather than on `PacketPeer` deliberately.
+    // Godot's placement is the base class, but `PacketPeer` is abstract and has
+    // several registered subclasses in this file that do NOT implement these —
+    // putting them on the base would make `class_has_method` answer true for
+    // every one of them. Registering them where they demonstrably work
+    // (gdplatform/src/packet_peer_stream.rs backs all three) advertises exactly
+    // the surface that functions.
+    //
+    // ⚠️ The three documented MEMBERS (`input_buffer_max_size`,
+    // `output_buffer_max_size`, `stream_peer`) are NOT registered: nothing backs
+    // them, and a property ClassDB reports but no accessor serves is the
+    // carried-but-inert shape this audit keeps finding.
+    // The GDExtension abstract bases (pat-s3rrv.80). Godot declares these with
+    // NOTHING but virtual methods — 5 and 4 respectively, zero members — because
+    // they exist purely so a GDExtension can implement a StreamPeer/PacketPeer.
+    //
+    // 🔑 That makes registering them the WHOLE feature, unlike the other
+    // unregistered networking classes on this bead: there is no behaviour to be
+    // missing, since Godot has none either. Registering a class whose engine
+    // support is absent would be a lie; registering one that is abstract BY
+    // DESIGN is simply the port.
+    //
+    // ⚠️ `WebRTCPeerConnectionExtension` and `WebRTCDataChannelExtension` are
+    // deliberately NOT here. They inherit from `WebRTCPeerConnection` /
+    // `WebRTCDataChannel`, which are unregistered — and an unregistered base
+    // silently severs the chain, so they would answer `class_exists` while
+    // `inheritance_chain` stopped short of Object. They belong in the same
+    // change that lands their parents.
+    if !class_exists("StreamPeerExtension") {
+        register_class(
+            ClassRegistration::new("StreamPeerExtension")
+                .parent("StreamPeer")
+                .method(
+                    MethodInfo::new("_get_available_bytes", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_get_data", 3).virtual_method())
+                .method(MethodInfo::new("_get_partial_data", 3).virtual_method())
+                .method(MethodInfo::new("_put_data", 3).virtual_method())
+                .method(MethodInfo::new("_put_partial_data", 3).virtual_method()),
+        );
+    }
+    if !class_exists("PacketPeerExtension") {
+        register_class(
+            ClassRegistration::new("PacketPeerExtension")
+                .parent("PacketPeer")
+                .method(
+                    MethodInfo::new("_get_available_packet_count", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_max_packet_size", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_get_packet", 2).virtual_method())
+                .method(MethodInfo::new("_put_packet", 2).virtual_method()),
+        );
+    }
+
+    if !class_exists("PacketPeerStream") {
+        register_class(
+            ClassRegistration::new("PacketPeerStream")
+                .parent("PacketPeer")
+                .method(MethodInfo::new("put_packet", 1))
+                .method(MethodInfo::new("get_packet", 0))
+                .method(MethodInfo::new("get_available_packet_count", 0).const_method()),
+        );
+    }
+
     // -- HTTPClient : RefCounted --
     if !class_exists("HTTPClient") {
         register_class(
@@ -21401,7 +21541,62 @@ pub fn register_networking_classes() {
                 .method(MethodInfo::new("close", 2))
                 .method(MethodInfo::new("get_ready_state", 0))
                 .method(MethodInfo::new("get_close_code", 0))
-                .method(MethodInfo::new("get_close_reason", 0)),
+                .method(MethodInfo::new("get_close_reason", 0))
+                // pat-s3rrv.79: both of these are IMPLEMENTED
+                // (gdplatform/src/websocket_peer.rs:680 and :440) and already
+                // dispatched to scripts (interpreter.rs:21373 and :21381) —
+                // they were simply absent from ClassDB, so
+                // `ClassDB.class_has_method("WebSocketPeer", "get_requested_url")`
+                // answered false for a method a script can call right now. Same
+                // shape as the emitted-but-undeclared signals in pat-s3rrv.57:
+                // reflection denying something the engine does.
+                //
+                // ⚠️ The rule this block follows: register what the engine can
+                // actually do, in the change that makes it able. Claiming a
+                // capability that fails on call is the same lie as denying one
+                // that works — just in the opposite direction.
+                //
+                // The four connection accessors below moved from the second
+                // category to the first in pat-s3rrv.79; they are implemented in
+                // `gdplatform/src/websocket_peer.rs`.
+                .method(MethodInfo::new("get_requested_url", 0).const_method())
+                .method(MethodInfo::new("get_selected_protocol", 0).const_method())
+                .method(MethodInfo::new("get_connected_host", 0).const_method())
+                .method(MethodInfo::new("get_connected_port", 0).const_method())
+                .method(MethodInfo::new("get_current_outbound_buffered_amount", 0).const_method())
+                .method(MethodInfo::new("set_no_delay", 1))
+                // Both properties are implemented in gdplatform AND already
+                // dispatched to scripts; only the declaration was missing, so
+                // `class_get_property_list` omitted two settings a script can
+                // set right now.
+                //
+                // ⚠️ `inbound_buffer_size` and `outbound_buffer_size` stay
+                // UNREGISTERED on purpose. Nothing implements them, and they
+                // cannot be implemented meaningfully yet: `send` writes straight
+                // to the socket and keeps no outbound queue, so there is no
+                // buffer for a size to bound. A declared-but-unbacked property
+                // is exactly the inert state this codebase keeps producing.
+                .property(
+                    PropertyInfo::new("handshake_headers", Variant::PackedStringArray(Vec::new()))
+                        .with_accessors("get_handshake_headers", "set_handshake_headers"),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "supported_protocols",
+                        Variant::PackedStringArray(Vec::new()),
+                    )
+                    .with_accessors("get_supported_protocols", "set_supported_protocols"),
+                )
+                // Both implemented in pat-s3rrv.79. Godot's defaults: no
+                // heartbeat, 4096 queued packets.
+                .property(
+                    PropertyInfo::new("heartbeat_interval", Variant::Float(0.0))
+                        .with_accessors("get_heartbeat_interval", "set_heartbeat_interval"),
+                )
+                .property(
+                    PropertyInfo::new("max_queued_packets", Variant::Int(4096))
+                        .with_accessors("get_max_queued_packets", "set_max_queued_packets"),
+                ),
         );
     }
 
@@ -21438,12 +21633,64 @@ pub fn register_networking_classes() {
     // pat-p0s82.29: WebRTCMultiplayerPeer is a high-use MultiplayerPeer;
     // register the class + core methods for ClassDB parity (native WebRTC
     // transport is a separate bead, pat-p0s82.22).
+    // WebRTCPeerConnection / WebRTCDataChannel (pat-s3rrv.80).
+    //
+    // ⚠️ Registered in the SAME change that made them constructible. Registering
+    // a class whose `new()` raises is the exact defect this bead documents on
+    // WebRTCMultiplayerPeer below — whose create_server/create_client/add_peer
+    // were advertised here long before they existed on the struct — so doing it
+    // ahead of the implementation would have added a second instance of the bug
+    // rather than a step toward fixing it.
+    //
+    // Parents are the `inherits` attribute from modules/webrtc/doc_classes/
+    // (module classes keep their docs there, not in doc/classes/): RefCounted
+    // for the connection, PacketPeer for the channel. Both are registered.
+    if !class_exists("WebRTCPeerConnection") {
+        register_class(
+            ClassRegistration::new("WebRTCPeerConnection")
+                .parent("RefCounted")
+                .signal(SignalInfo::new("session_description_created"))
+                .signal(SignalInfo::new("ice_candidate_created"))
+                .signal(SignalInfo::new("data_channel_received"))
+                .method(MethodInfo::new("create_offer", 0))
+                .method(MethodInfo::new("set_local_description", 2))
+                .method(MethodInfo::new("set_remote_description", 2))
+                .method(MethodInfo::new("add_ice_candidate", 3))
+                .method(MethodInfo::new("create_data_channel", 2))
+                .method(MethodInfo::new("poll", 0))
+                .method(MethodInfo::new("close", 0))
+                .method(MethodInfo::new("get_connection_state", 0))
+                .method(MethodInfo::new("get_gathering_state", 0))
+                .method(MethodInfo::new("get_signaling_state", 0)),
+        );
+    }
+    if !class_exists("WebRTCDataChannel") {
+        register_class(
+            ClassRegistration::new("WebRTCDataChannel")
+                .parent("PacketPeer")
+                .property(
+                    PropertyInfo::new("write_mode", Variant::Int(1))
+                        .with_accessors("get_write_mode", "set_write_mode"),
+                )
+                .method(MethodInfo::new("poll", 0))
+                .method(MethodInfo::new("get_ready_state", 0))
+                .method(MethodInfo::new("get_label", 0))
+                .method(MethodInfo::new("is_ordered", 0))
+                .method(MethodInfo::new("is_negotiated", 0))
+                .method(MethodInfo::new("get_id", 0))
+                .method(MethodInfo::new("get_max_packet_life_time", 0))
+                .method(MethodInfo::new("get_max_retransmits", 0))
+                .method(MethodInfo::new("get_protocol", 0))
+                .method(MethodInfo::new("was_string_packet", 0)),
+        );
+    }
     if !class_exists("WebRTCMultiplayerPeer") {
         register_class(
             ClassRegistration::new("WebRTCMultiplayerPeer")
                 .parent("MultiplayerPeer")
                 .method(MethodInfo::new("create_server", 0))
                 .method(MethodInfo::new("create_client", 1))
+                .method(MethodInfo::new("create_mesh", 1))
                 .method(MethodInfo::new("add_peer", 3))
                 .method(MethodInfo::new("poll", 0))
                 .method(MethodInfo::new("close", 0)),
@@ -21460,6 +21707,60 @@ pub fn register_networking_classes() {
                 .method(MethodInfo::new("create_client", 1))
                 .method(MethodInfo::new("poll", 0))
                 .method(MethodInfo::new("close", 0)),
+        );
+    }
+    // pat-s3rrv.81: the transport existed and was unreachable. `gdplatform`'s
+    // `websocket_multiplayer` and its handle plumbing were complete, and the
+    // interpreter already answered `WebSocketMultiplayerPeer.new()` and
+    // dispatched create_server/create_client/poll/close — but ClassDB had never
+    // heard of the class, so `ClassDB.class_exists("WebSocketMultiplayerPeer")`
+    // was false and anything consulting the registry (the inspector, a
+    // `class_get_method_list`, an editor node list) could not see it.
+    //
+    // Surface transcribed from `modules/websocket/doc_classes/`, NOT from
+    // `doc/classes/` — module classes keep their docs beside the module, and
+    // looking only in the usual place suggests there is no oracle at all.
+    //
+    // ⚠️ Only the five methods the class declares ITSELF are listed. `poll`,
+    // `close`, `get_unique_id` and `get_connection_status` are inherited from
+    // MultiplayerPeer, which already declares them along with the
+    // peer_connected/peer_disconnected signals — redeclaring them here would
+    // duplicate the entries a `class_get_method_list` walk returns.
+    //
+    // ⚠️ ClassDB is a REFLECTION database, not a dispatch table, and the two do
+    // not fully agree here. `create_client` and `create_server` are dispatched
+    // by `Interpreter::call_multiplayer_peer_instance`; `get_peer`,
+    // `get_peer_address` and `get_peer_port` are NOT — they are declared
+    // because Godot declares them, so `class_get_method_list` matches, but
+    // calling one from a script still fails. Do not read this block as proof
+    // the whole surface is live.
+    if !class_exists("WebSocketMultiplayerPeer") {
+        register_class(
+            ClassRegistration::new("WebSocketMultiplayerPeer")
+                .parent("MultiplayerPeer")
+                .method(MethodInfo::new("create_client", 1))
+                .method(MethodInfo::new("create_server", 1))
+                .method(MethodInfo::new("get_peer", 1).const_method())
+                .method(MethodInfo::new("get_peer_address", 1).const_method())
+                .method(MethodInfo::new("get_peer_port", 1).const_method())
+                .property(PropertyInfo::new(
+                    "handshake_headers",
+                    Variant::PackedStringArray(Vec::new()),
+                ))
+                .property(PropertyInfo::new("handshake_timeout", Variant::Float(3.0)))
+                .property(PropertyInfo::new(
+                    "inbound_buffer_size",
+                    Variant::Int(65535),
+                ))
+                .property(PropertyInfo::new("max_queued_packets", Variant::Int(4096)))
+                .property(PropertyInfo::new(
+                    "outbound_buffer_size",
+                    Variant::Int(65535),
+                ))
+                .property(PropertyInfo::new(
+                    "supported_protocols",
+                    Variant::PackedStringArray(Vec::new()),
+                )),
         );
     }
     // pat-0q2kx.94: `MultiplayerAPI` had exactly two methods and no signals, so
@@ -23544,6 +23845,7 @@ pub fn register_editor_classes() {
     if !class_exists("EditorPlugin") {
         register_class(
             ClassRegistration::new("EditorPlugin")
+                .signal(SignalInfo::new("project_settings_changed"))
                 .signal(SignalInfo::new("main_screen_changed").arg("screen_name"))
                 .signal(SignalInfo::new("resource_saved").arg("resource"))
                 .signal(SignalInfo::new("scene_changed").arg("scene_root"))

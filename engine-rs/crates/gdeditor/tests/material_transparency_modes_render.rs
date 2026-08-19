@@ -264,6 +264,27 @@ fn material_transparency_modes_render() {
         } else {
             gpu_rgb(&two_quads(0, 1.0))
         };
+        // ⚠️ `changed == 0` has TWO readings, and the message below only names
+        // one of them: the backend rendered both scenes and ignored
+        // `transparency`, OR it drew nothing at all and both frames are a flat
+        // clear colour. A uniform frame means the latter, and blaming the mode
+        // for it sends the next reader to entirely the wrong layer.
+        //
+        // Cheap to separate, so separate it here rather than by hand from a
+        // FAIL tail. Epsilon matches `differing`, so "uniform" means the same
+        // thing here as "identical" does there.
+        assert!(
+            !blended.is_empty()
+                && blended.iter().any(|p| {
+                    (p.r - blended[0].r).abs() > 1e-3
+                        || (p.g - blended[0].g).abs() > 1e-3
+                        || (p.b - blended[0].b).abs() > 1e-3
+                }),
+            "[{backend}] produced a uniform frame — nothing was drawn at all, so \
+             the transparency comparison below would be meaningless. Look at \
+             scene loading, the camera, or this backend's entry point, NOT at \
+             the blend mode."
+        );
         let changed = differing(&blended, &opaque);
         assert!(
             changed > 0,

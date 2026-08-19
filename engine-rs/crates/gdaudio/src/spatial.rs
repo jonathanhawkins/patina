@@ -324,10 +324,23 @@ impl AudioStreamPlayer3D {
         };
 
         // Godot muffles as well as quietens: the high-shelf cut grows as the
-        // source approaches `max_distance`, and the emission cone adds its own.
+        // source gets quieter, and the emission cone adds its own.
         // `db_att = (1 - min(1, multiplier)) * attenuation_filter_db`
         // (`audio_stream_player_3d.cpp:449-465`).
-        let multiplier = self.max_distance_multiplier(distance);
+        //
+        // ⚠️ `multiplier` is the FULL attenuation — the model's gain times the
+        // `max_distance` fade — not the fade alone:
+        //
+        //     multiplier = db_to_linear(_get_attenuation_db(dist));
+        //     if (max_distance > 0) multiplier *= MAX(0, 1.0 - dist/max_distance);
+        //
+        // (`audio_stream_player_3d.cpp:445-448`). Using only the fade made the
+        // distance filter **completely inert in the default configuration**,
+        // because `max_distance` defaults to 0 (unlimited) and the fade is then
+        // a constant 1.0, so `1 - min(1, 1)` is zero at every distance. With a
+        // `max_distance` set it was merely too shallow: at 50 units of a
+        // 100-unit range the fade alone gives -12 dB where Godot gives -23.8.
+        let multiplier = self.compute_attenuation(distance);
         let distance_filter_db = (1.0 - multiplier.min(1.0)) * self.attenuation_filter_db;
         // ⚠️ The cone is measured SOURCE → LISTENER, and `to_source` points the
         // other way. Passing it directly reads an on-axis listener as 180°
@@ -742,6 +755,41 @@ mod tests {
         assert_eq!(l.position, Vector3::ZERO);
         assert!((l.forward.z - (-1.0)).abs() < 1e-5);
         assert!((l.right.x - 1.0).abs() < 1e-5);
+    }
+
+    /// pat-s3rrv.55 — the distance filter's depth tracks the FULL attenuation.
+    ///
+    /// Godot's `multiplier` is the model's linear gain times the `max_distance`
+    /// fade (`audio_stream_player_3d.cpp:445-448`), and the shelf depth is
+    /// `(1 - min(1, multiplier)) * attenuation_filter_db`.
+    ///
+    /// ⚠️ Reading only the fade made this **inert by default**: `max_distance`
+    /// defaults to 0 (unlimited), the fade is then a constant 1.0, and
+    /// `1 - min(1, 1)` is zero at every distance — so a source could recede
+    /// forever without ever being muffled, while still getting quieter. That is
+    /// the failure this pins, and it is invisible to any test that sets
+    /// `max_distance`.
+    ///
+    /// The expected numbers are derived from the C++ chain, not from this
+    /// implementation: at 50 units with `unit_size` 10 the inverse-distance
+    /// model gives -13.979 dB, a linear multiplier of 0.2, and therefore
+    /// `(1 - 0.2) * -24 = -19.2` dB of shelf.
+    #[test]
+    fn the_distance_filter_depth_uses_the_full_attenuation_multiplier() {
+        for (distance, want) in [(50.0f32, -19.2f32), (20.0, -12.0)] {
+            let player = AudioStreamPlayer3D::new(Vector3::new(0.0, 0.0, -distance));
+            // Defaults: unit_size 10, max_distance 0 (unlimited),
+            // InverseDistance, attenuation_filter_db -24.
+            assert_eq!(player.max_distance, 0.0, "fixture relies on the default");
+            let result = player.compute_spatial(&default_listener());
+            assert!(
+                (result.highshelf_db - want).abs() < 1e-3,
+                "at {distance} units the shelf must be {want} dB, got {} — 0.0 \
+                 means the ramp read the max_distance fade, which is a constant \
+                 1.0 when max_distance is unlimited",
+                result.highshelf_db,
+            );
+        }
     }
 
     // -- db_to_linear --

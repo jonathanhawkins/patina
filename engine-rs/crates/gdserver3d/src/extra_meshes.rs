@@ -127,6 +127,7 @@ impl PrismMesh {
             surfaces: Vec::new(),
             bone_weights: Vec::new(),
             bone_indices: Vec::new(),
+            blend_shapes: Vec::new(),
         }
     }
 }
@@ -147,6 +148,7 @@ impl PointMesh {
             surfaces: Vec::new(),
             bone_weights: Vec::new(),
             bone_indices: Vec::new(),
+            blend_shapes: Vec::new(),
         }
     }
 }

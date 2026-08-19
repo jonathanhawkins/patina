@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
+use crate::multiplayer_peer_state::{MultiplayerPeerSignal, MultiplayerPeerState};
 use crate::network::{
     ConnectionStatus, NetworkError, NetworkPeer, Packet, PeerId, Result, TransferMode,
 };
@@ -28,6 +29,14 @@ pub struct TcpMultiplayerPeer {
     pending_server: Option<TcpStream>,
     pending_server_buf: Vec<u8>,
     is_server_role: bool,
+    /// Connect/disconnect SIGNALS, separate from the `peers` roster
+    /// (pat-s3rrv.81).
+    ///
+    /// ⚠️ `MultiplayerAPI::poll` drains through `NetworkPeer::drain_signals`,
+    /// which DEFAULTS TO EMPTY. This transport tracked peers but never recorded
+    /// the event, so `multiplayer.peer_connected` never fired over TCP — the
+    /// same defect ENet had, fixed the same way.
+    peer_state: MultiplayerPeerState,
 }
 
 impl TcpMultiplayerPeer {
@@ -44,6 +53,7 @@ impl TcpMultiplayerPeer {
             pending_server: None,
             pending_server_buf: Vec::new(),
             is_server_role: false,
+            peer_state: MultiplayerPeerState::new(),
         }
     }
 
@@ -110,6 +120,8 @@ impl TcpMultiplayerPeer {
                             }
                             self.peers.insert(id, stream);
                             self.read_bufs.insert(id, Vec::new());
+                            // Beside the roster insert, so the two cannot drift.
+                            self.peer_state.add_peer(id.0 as i32);
                         }
                         Ok(None) | Ok(Some(_)) => {
                             // Incomplete or wrong magic — keep stream with temp key using next id
@@ -134,6 +146,7 @@ impl TcpMultiplayerPeer {
                                 if write_frame(&stream, &payload).is_ok() {
                                     self.peers.insert(id, stream);
                                     self.read_bufs.insert(id, Vec::new());
+                                    self.peer_state.add_peer(id.0 as i32);
                                 }
                             }
                         }
@@ -159,6 +172,8 @@ impl TcpMultiplayerPeer {
                     self.peers.insert(PeerId::SERVER, stream);
                     self.read_bufs
                         .insert(PeerId::SERVER, std::mem::take(&mut self.pending_server_buf));
+                    // The client's peer_connected names the SERVER (id 1).
+                    self.peer_state.add_peer(PeerId::SERVER.0 as i32);
                 }
             }
             Ok(None) | Ok(Some(_)) => {}
@@ -208,6 +223,14 @@ impl Default for TcpMultiplayerPeer {
 }
 
 impl NetworkPeer for TcpMultiplayerPeer {
+    /// Hands recorded connect events to `MultiplayerAPI::poll` (pat-s3rrv.81).
+    ///
+    /// ⚠️ Without this the trait's empty default applies and every event is
+    /// dropped, however healthy the transport looks.
+    fn drain_signals(&mut self) -> Vec<MultiplayerPeerSignal> {
+        self.peer_state.drain_signals()
+    }
+
     fn send_packet(&mut self, to: PeerId, packet: Packet) -> Result<()> {
         if self.status != ConnectionStatus::Connected {
             return Err(NetworkError::Transport("not connected".into()));
@@ -328,6 +351,53 @@ mod tests {
             client.get_connection_status(),
             server.peers.len()
         );
+    }
+
+    /// 🔑 `peer_connected` must reach `MultiplayerAPI::poll` over TCP too
+    /// (pat-s3rrv.81).
+    ///
+    /// ⚠️ Same defect ENet had: the roster was maintained, the handshake
+    /// completed, packets flowed — and the EVENT was never recorded, so
+    /// `drain_signals` took the trait's empty default and a script listening on
+    /// `multiplayer.peer_connected` heard nothing. Nothing about the transport
+    /// looked broken, which is why a green suite missed it.
+    #[test]
+    fn both_sides_record_peer_connected_for_the_other() {
+        let mut server = TcpMultiplayerPeer::new();
+        let addr = server.create_server("127.0.0.1:0").unwrap();
+        let mut client = TcpMultiplayerPeer::new();
+        client.create_client(addr).unwrap();
+        pump_until_connected(&mut server, &mut client);
+
+        let client_id = client.get_unique_id();
+        assert!(
+            client_id.0 > 1,
+            "the client must hold a real assigned id, got {client_id:?}"
+        );
+
+        // Both sides, because they carry DIFFERENT ids — asserting one only
+        // would pass against a stub emitting a constant.
+        let server_signals = server.drain_signals();
+        assert!(
+            server_signals.contains(&MultiplayerPeerSignal::PeerConnected(client_id.0 as i32)),
+            "the server must record peer_connected({}); an empty list is the old \
+             behaviour, where drain_signals took the empty default. Got {:?}",
+            client_id.0,
+            server_signals
+        );
+        let client_signals = client.drain_signals();
+        assert!(
+            client_signals.contains(&MultiplayerPeerSignal::PeerConnected(
+                PeerId::SERVER.0 as i32
+            )),
+            "the client must record peer_connected(1) for the SERVER; got {client_signals:?}"
+        );
+
+        // ⚠️ Consumed by the drain, not regenerated from the roster — otherwise
+        // every poll would re-fire peer_connected and a script counting joins
+        // would see an endless stream of new peers.
+        assert!(server.drain_signals().is_empty());
+        assert!(client.drain_signals().is_empty());
     }
 
     #[test]

@@ -267,6 +267,15 @@ pub struct Material3D {
     pub depth_draw_mode: DepthDrawMode,
     /// Godot `blend_mode` (pat-s3rrv.30).
     pub blend_mode: BlendMode,
+    /// Godot `no_depth_test` (pat-s3rrv.30).
+    ///
+    /// When set, the fragment's depth is never COMPARED — the surface draws
+    /// over whatever is already there regardless of distance. Depth WRITING is
+    /// a separate control (`depth_draw_mode`), which is why this is its own
+    /// flag rather than a fifth draw mode.
+    ///
+    /// This is how HUD-ish 3D elements and x-ray highlights are authored.
+    pub no_depth_test: bool,
     /// Optional albedo texture (sRGB); its decoded texel multiplies [`albedo`]
     /// per-fragment at the sampled UV. `None` = flat albedo color.
     ///
@@ -305,6 +314,7 @@ impl Default for Material3D {
             double_sided: false,
             transparency: Transparency::Disabled,
             blend_mode: BlendMode::Mix,
+            no_depth_test: false,
             alpha_scissor_threshold: 0.5,
             cull_mode: CullMode::Back,
             depth_draw_mode: DepthDrawMode::OpaqueOnly,
@@ -387,6 +397,9 @@ pub struct StandardMaterial3D {
     /// how essentially every glow, flame and shadow-decal effect is authored —
     /// composited as a plain source-over blend.
     pub blend_mode: BlendMode,
+    /// Godot `no_depth_test` — a FLAG in Godot (`set_flag`/`get_flag`), not a
+    /// mode, so its `.tscn` key is a plain bool (pat-s3rrv.30).
+    pub no_depth_test: bool,
 }
 
 impl Default for StandardMaterial3D {
@@ -406,6 +419,7 @@ impl Default for StandardMaterial3D {
             double_sided: false,
             transparency: Transparency::Disabled,
             blend_mode: BlendMode::Mix,
+            no_depth_test: false,
             // Godot's own default; a scene that enables AlphaScissor without
             // naming a threshold expects 0.5, not 0.0 (which would discard
             // nothing and look like the feature is inert).
@@ -437,6 +451,7 @@ impl StandardMaterial3D {
             cull_mode: self.cull_mode,
             depth_draw_mode: self.depth_draw_mode,
             blend_mode: self.blend_mode,
+            no_depth_test: self.no_depth_test,
             ..Material3D::default()
         }
     }
@@ -526,6 +541,23 @@ impl StandardMaterial3D {
                 "depth_draw_mode" => {
                     if let Variant::Int(v) = value {
                         mat.depth_draw_mode = DepthDrawMode::from_godot_int(*v);
+                    }
+                }
+                // 🔑 `blend_mode` was wired into `standard_material_from_props`
+                // (the `.tscn` path) but NOT here — which is exactly the split
+                // the comment above warns about. A `.tres` material authored
+                // additive composited as plain source-over, while the same
+                // material inline in a scene blended correctly.
+                "blend_mode" => {
+                    if let Variant::Int(v) = value {
+                        mat.blend_mode = BlendMode::from_godot_int(*v);
+                    }
+                }
+                // A FLAG in Godot (`set_flag`/`get_flag`), so the value is a
+                // plain bool rather than an enum ordinal.
+                "no_depth_test" => {
+                    if let Variant::Bool(b) = value {
+                        mat.no_depth_test = *b;
                     }
                 }
                 _ => {} // Ignore unknown properties.
@@ -677,6 +709,57 @@ mod tests {
     }
 
     // ── StandardMaterial3D ──
+
+    /// pat-s3rrv.30: the `.tres` / resource path parses the render modes too.
+    ///
+    /// 🔑 `blend_mode` was wired into `standard_material_from_props` (the
+    /// `.tscn` path) and NOT into `from_properties`, so a material authored as
+    /// a standalone `.tres` composited as plain source-over while the identical
+    /// material inline in a scene blended correctly. The comment in
+    /// `from_properties` warns about exactly this split; the warning was there
+    /// and the arm was not.
+    #[test]
+    fn the_resource_path_parses_blend_mode_and_no_depth_test() {
+        use std::collections::HashMap;
+
+        let props: HashMap<String, Variant> = [
+            ("blend_mode".to_string(), Variant::Int(1)),
+            ("no_depth_test".to_string(), Variant::Bool(true)),
+        ]
+        .into_iter()
+        .collect();
+        let mat = StandardMaterial3D::from_properties(props.iter());
+
+        assert_eq!(
+            mat.blend_mode,
+            BlendMode::Add,
+            "`blend_mode = 1` in a .tres must parse to Add, as it already did \
+             for a .tscn",
+        );
+        assert!(mat.no_depth_test, "`no_depth_test = true` must parse");
+
+        // ⚠️ The conversion is where both would silently die: `to_material3d`
+        // ends in `..Material3D::default()`, so anything not mapped explicitly
+        // resets — and the parser and the renderer both still look correct.
+        let render = mat.to_material3d();
+        assert_eq!(render.blend_mode, BlendMode::Add);
+        assert!(
+            render.no_depth_test,
+            "no_depth_test must survive to_material3d's ..default() tail",
+        );
+    }
+
+    /// An unspecified material keeps Godot's defaults for both.
+    #[test]
+    fn the_render_modes_default_to_godots_values() {
+        let mat = StandardMaterial3D::default();
+        assert_eq!(mat.blend_mode, BlendMode::Mix);
+        assert!(
+            !mat.no_depth_test,
+            "depth testing is ON by default; `no_depth_test` is opt-in",
+        );
+        assert!(!mat.to_material3d().no_depth_test);
+    }
 
     #[test]
     fn standard_material_defaults() {

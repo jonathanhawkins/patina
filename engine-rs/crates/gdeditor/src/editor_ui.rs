@@ -11218,6 +11218,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   var gameInputKeydownHandler = null;
   var gameInputKeyupHandler = null;
   var gameInputMousemoveHandler = null;
+  var gameInputPointermoveHandler = null;
+  // pat-s3rrv.76: the latest stylus sample, or null for a plain mouse.
+  var gameInputLastPen = null;
   var gameInputMousedownHandler = null;
   var gameInputMouseupHandler = null;
   // pat-s3rrv.77 — one per DOM phase, kept individually so the teardown below
@@ -11285,6 +11288,39 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     document.addEventListener('keyup', gameInputKeyupHandler, true);
     var vp = document.getElementById('viewport-container');
     if (vp) {
+      // pat-s3rrv.76: a MouseEvent carries NO stylus data, so pressure/tilt come
+      // from the PointerEvent that fires for the same physical motion (it fires
+      // BEFORE the compatibility mousemove, so this cache is always fresh).
+      //
+      // Deliberately a CACHE rather than a second POST: posting from both
+      // listeners would send two mouse_move events per motion. And the mousemove
+      // registration is left alone rather than switched to pointermove, because
+      // touch also raises pointermove and already has its own
+      // /api/runtime/input/touch route — switching would make every touch emit
+      // mouse motion as well.
+      gameInputPointermoveHandler = function(e) {
+        if (!runtimeRunning) return;
+        if (e.pointerType !== 'pen') { gameInputLastPen = null; return; }
+        gameInputLastPen = {
+          // PointerEvent.pressure is already 0..1, as Godot's is.
+          pressure: e.pressure,
+          // tiltX/tiltY are DEGREES (-90..90); Godot's tilt is -1..1 on both
+          // axes (doc/classes/InputEventMouseMotion.xml).
+          tilt_x: (e.tiltX || 0) / 90,
+          tilt_y: (e.tiltY || 0) / 90,
+          // Bit 5 of `buttons` is the eraser end.
+          pen_inverted: (e.buttons & 32) !== 0
+        };
+      };
+      function gameInputWithPen(p) {
+        if (gameInputLastPen) {
+          p.pressure = gameInputLastPen.pressure;
+          p.tilt_x = gameInputLastPen.tilt_x;
+          p.tilt_y = gameInputLastPen.tilt_y;
+          p.pen_inverted = gameInputLastPen.pen_inverted;
+        }
+        return p;
+      }
       gameInputMousemoveHandler = function(e) {
         if (!runtimeRunning) return;
         // pat-0q2kx.90: while the pointer is locked the browser freezes
@@ -11292,11 +11328,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         // absolute coords would send the same frozen point forever. Godot's web
         // build reads the same fields for MOUSE_MODE_CAPTURED.
         if (document.pointerLockElement === vp) {
-          api('POST', '/api/runtime/input/mouse_move', { dx: e.movementX || 0, dy: e.movementY || 0 });
+          api('POST', '/api/runtime/input/mouse_move', gameInputWithPen({ dx: e.movementX || 0, dy: e.movementY || 0 }));
           return;
         }
         var rect = vp.getBoundingClientRect();
-        api('POST', '/api/runtime/input/mouse_move', { x: e.clientX - rect.left, y: e.clientY - rect.top });
+        api('POST', '/api/runtime/input/mouse_move', gameInputWithPen({ x: e.clientX - rect.left, y: e.clientY - rect.top }));
       };
       gameInputMousedownHandler = function(e) {
         if (!runtimeRunning) return;
@@ -11307,6 +11343,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         api('POST', '/api/runtime/input/mouse_up', { button: e.button });
       };
       vp.addEventListener('mousemove', gameInputMousemoveHandler);
+      vp.addEventListener('pointermove', gameInputPointermoveHandler);
       vp.addEventListener('mousedown', gameInputMousedownHandler);
       vp.addEventListener('mouseup', gameInputMouseupHandler);
       // pat-s3rrv.77: the touch pipeline. Without these a phone or tablet
@@ -11512,6 +11549,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var vp = document.getElementById('viewport-container');
     if (vp) {
       if (gameInputMousemoveHandler) { vp.removeEventListener('mousemove', gameInputMousemoveHandler); gameInputMousemoveHandler = null; }
+      if (gameInputPointermoveHandler) { vp.removeEventListener('pointermove', gameInputPointermoveHandler); gameInputPointermoveHandler = null; gameInputLastPen = null; }
       if (gameInputMousedownHandler) { vp.removeEventListener('mousedown', gameInputMousedownHandler); gameInputMousedownHandler = null; }
       if (gameInputMouseupHandler) { vp.removeEventListener('mouseup', gameInputMouseupHandler); gameInputMouseupHandler = null; }
       if (gameInputTouchStartHandler) { vp.removeEventListener('touchstart', gameInputTouchStartHandler); gameInputTouchStartHandler = null; }

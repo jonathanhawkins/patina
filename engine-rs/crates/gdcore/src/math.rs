@@ -276,6 +276,87 @@ impl Vector4i {
     pub fn clamp(self, min: Self, max: Self) -> Self {
         self.max(min).min(max)
     }
+
+    /// Euclidean distance to `to` (Godot `Vector4i.distance_to`).
+    pub fn distance_to(self, to: Self) -> f32 {
+        Self::new(to.x - self.x, to.y - self.y, to.z - self.z, to.w - self.w).length()
+    }
+
+    /// Squared distance to `to` (Godot `Vector4i.distance_squared_to`).
+    ///
+    /// ⚠️ Returns an integer, not a float — the squared length of an integer
+    /// vector is exact, and Godot's own signature is `int64_t`
+    /// (`core/math/vector4i.h:98`). Returning a float here would quietly lose
+    /// exactness for the comparison this method exists to make cheap.
+    pub fn distance_squared_to(self, to: Self) -> i64 {
+        Self::new(to.x - self.x, to.y - self.y, to.z - self.z, to.w - self.w).length_squared()
+    }
+
+    /// Clamps every component between the same two scalars (Godot
+    /// `Vector4i.clampi`).
+    pub fn clampi(self, min: i32, max: i32) -> Self {
+        Self::new(
+            self.x.clamp(min, max),
+            self.y.clamp(min, max),
+            self.z.clamp(min, max),
+            self.w.clamp(min, max),
+        )
+    }
+
+    /// Component-wise minimum against a scalar (Godot `Vector4i.mini`).
+    pub fn mini(self, scalar: i32) -> Self {
+        Self::new(
+            self.x.min(scalar),
+            self.y.min(scalar),
+            self.z.min(scalar),
+            self.w.min(scalar),
+        )
+    }
+
+    /// Component-wise maximum against a scalar (Godot `Vector4i.maxi`).
+    pub fn maxi(self, scalar: i32) -> Self {
+        Self::new(
+            self.x.max(scalar),
+            self.y.max(scalar),
+            self.z.max(scalar),
+            self.w.max(scalar),
+        )
+    }
+
+    /// Snaps each component to the nearest multiple of the matching step
+    /// (Godot `Vector4i.snapped`).
+    pub fn snapped(self, step: Self) -> Self {
+        Self::new(
+            snapped_int(self.x, step.x),
+            snapped_int(self.y, step.y),
+            snapped_int(self.z, step.z),
+            snapped_int(self.w, step.w),
+        )
+    }
+
+    /// Snaps every component to the same step (Godot `Vector4i.snappedi`).
+    pub fn snappedi(self, step: i32) -> Self {
+        self.snapped(Self::new(step, step, step, step))
+    }
+}
+
+/// `Math::snapped` for integer components (Godot `Vector4i.snappedi`).
+///
+/// ⚠️ Godot has only ONE `Math::snapped`, taking doubles
+/// (`core/math/math_funcs.h:678`), so the integer path promotes, rounds and
+/// truncates back. That is not the same as integer arithmetic would give:
+/// `snapped(-5, 10)` is `floor(-0.5 + 0.5) * 10 = 0`, where a symmetric
+/// round-half-away would say `-10`.
+///
+/// ⚠️ Promoted through `f64`, not `f32`: an `i32` past 2^24 is not exactly
+/// representable in `f32`, so snapping a large coordinate would drift by more
+/// than the step it was asked to snap to.
+pub fn snapped_int(value: i32, step: i32) -> i32 {
+    if step == 0 {
+        return value;
+    }
+    let snapped = (f64::from(value) / f64::from(step) + 0.5).floor() * f64::from(step);
+    snapped as i32
 }
 
 impl Add for Vector4i {
@@ -328,6 +409,69 @@ pub struct Vector4 {
     pub z: f32,
     /// The W component.
     pub w: f32,
+}
+
+/// Godot `Math::cubic_interpolate` — the Catmull-Rom basis
+/// (`core/math/math_funcs.h:343-349`).
+fn cubic_interpolate_f(from: f32, to: f32, pre: f32, post: f32, w: f32) -> f32 {
+    0.5 * ((from * 2.0)
+        + (-pre + to) * w
+        + (2.0 * pre - 5.0 * from + 4.0 * to - post) * (w * w)
+        + (-pre + 3.0 * from - 3.0 * to + post) * (w * w * w))
+}
+
+/// Godot `Math::cubic_interpolate_in_time` — the Barry-Goldman method
+/// (`core/math/math_funcs.h`).
+///
+/// ⚠️ THE FIVE ZERO-GUARDS ARE NOT INTERCHANGEABLE. Each degenerate time span
+/// falls back to a DIFFERENT constant — `0.0`, `0.5`, `1.0`, `0.0`, `1.0` and
+/// `0.5` in order — and a port that used one value for all of them, or that let
+/// the division happen and produced NaN, would still look right for evenly
+/// spaced keyframes and only misbehave on the degenerate ones animation
+/// actually produces.
+#[allow(clippy::too_many_arguments)]
+fn cubic_interpolate_in_time_f(
+    from: f32,
+    to: f32,
+    pre: f32,
+    post: f32,
+    w: f32,
+    to_t: f32,
+    pre_t: f32,
+    post_t: f32,
+) -> f32 {
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let t = lerp(0.0, to_t, w);
+    let a1 = lerp(
+        pre,
+        from,
+        if pre_t == 0.0 {
+            0.0
+        } else {
+            (t - pre_t) / -pre_t
+        },
+    );
+    let a2 = lerp(from, to, if to_t == 0.0 { 0.5 } else { t / to_t });
+    let a3 = lerp(
+        to,
+        post,
+        if post_t - to_t == 0.0 {
+            1.0
+        } else {
+            (t - to_t) / (post_t - to_t)
+        },
+    );
+    let b1 = lerp(
+        a1,
+        a2,
+        if to_t - pre_t == 0.0 {
+            0.0
+        } else {
+            (t - pre_t) / (to_t - pre_t)
+        },
+    );
+    let b2 = lerp(a2, a3, if post_t == 0.0 { 1.0 } else { t / post_t });
+    lerp(b1, b2, if to_t == 0.0 { 0.5 } else { t / to_t })
 }
 
 impl Vector4 {
@@ -401,6 +545,55 @@ impl Vector4 {
         (other - self).length_squared()
     }
 
+    /// Catmull-Rom interpolation between `self` and `b`, with `pre_a` and
+    /// `post_b` as the surrounding control points (Godot
+    /// `Vector4.cubic_interpolate`), applied per component
+    /// (`core/math/vector4.cpp:147-154`).
+    ///
+    /// ⚠️ ARGUMENT ORDER IS A TRAP. The method takes `(b, pre_a, post_b, w)`
+    /// while the scalar it delegates to takes `(from, to, pre, post, w)` — so
+    /// `b` is the SECOND scalar argument and `pre_a` the third. Transposing
+    /// them still produces a smooth-looking curve through plausible values,
+    /// which is why the tests pin the endpoints: at `w == 0` the result must be
+    /// exactly `self` and at `w == 1` exactly `b`, and a swapped pair breaks
+    /// both.
+    pub fn cubic_interpolate(self, b: Self, pre_a: Self, post_b: Self, weight: f32) -> Self {
+        Self::new(
+            cubic_interpolate_f(self.x, b.x, pre_a.x, post_b.x, weight),
+            cubic_interpolate_f(self.y, b.y, pre_a.y, post_b.y, weight),
+            cubic_interpolate_f(self.z, b.z, pre_a.z, post_b.z, weight),
+            cubic_interpolate_f(self.w, b.w, pre_a.w, post_b.w, weight),
+        )
+    }
+
+    /// [`cubic_interpolate`](Self::cubic_interpolate) with explicit time values
+    /// for each control point — Godot's Barry-Goldman variant
+    /// (`Vector4.cubic_interpolate_in_time`, `core/math/vector4.cpp:156-163`).
+    ///
+    /// Used by animation when keyframes are not evenly spaced: with uniform
+    /// times it agrees with the plain cubic, which the tests cross-check.
+    #[allow(clippy::too_many_arguments)]
+    pub fn cubic_interpolate_in_time(
+        self,
+        b: Self,
+        pre_a: Self,
+        post_b: Self,
+        weight: f32,
+        b_t: f32,
+        pre_a_t: f32,
+        post_b_t: f32,
+    ) -> Self {
+        let f = |from: f32, to: f32, pre: f32, post: f32| {
+            cubic_interpolate_in_time_f(from, to, pre, post, weight, b_t, pre_a_t, post_b_t)
+        };
+        Self::new(
+            f(self.x, b.x, pre_a.x, post_b.x),
+            f(self.y, b.y, pre_a.y, post_b.y),
+            f(self.z, b.z, pre_a.z, post_b.z),
+            f(self.w, b.w, pre_a.w, post_b.w),
+        )
+    }
+
     /// Linear interpolation toward `other` by `weight` (Godot `Vector4.lerp`).
     pub fn lerp(self, other: Self, weight: f32) -> Self {
         Self::new(
@@ -465,6 +658,122 @@ impl Vector4 {
     /// conversion Godot's `Vector4i(Vector4)` constructor performs.
     pub fn to_vector4i(self) -> Vector4i {
         Vector4i::new(self.x as i32, self.y as i32, self.z as i32, self.w as i32)
+    }
+
+    /// Per-component `Math::fposmod` against a scalar (Godot `Vector4.posmod`).
+    pub fn posmod(self, m: f32) -> Self {
+        Self::new(
+            fposmod(self.x, m),
+            fposmod(self.y, m),
+            fposmod(self.z, m),
+            fposmod(self.w, m),
+        )
+    }
+
+    /// Per-component `Math::fposmod` against a vector (Godot `Vector4.posmodv`).
+    pub fn posmodv(self, m: Self) -> Self {
+        Self::new(
+            fposmod(self.x, m.x),
+            fposmod(self.y, m.y),
+            fposmod(self.z, m.z),
+            fposmod(self.w, m.w),
+        )
+    }
+
+    /// Snaps each component to the nearest multiple of the matching step
+    /// (Godot `Vector4.snapped`).
+    pub fn snapped(self, step: Self) -> Self {
+        Self::new(
+            snapped_scalar(self.x, step.x),
+            snapped_scalar(self.y, step.y),
+            snapped_scalar(self.z, step.z),
+            snapped_scalar(self.w, step.w),
+        )
+    }
+
+    /// Snaps every component to the same step (Godot `Vector4.snappedf`).
+    pub fn snappedf(self, step: f32) -> Self {
+        self.snapped(Self::new(step, step, step, step))
+    }
+
+    /// The component-wise reciprocal (Godot `Vector4.inverse`).
+    ///
+    /// ⚠️ Not the normalised or negated vector, despite the name — Godot's
+    /// `Vector4::inverse` is literally `1/x` per component
+    /// (`core/math/vector4.cpp:199`), so a zero component yields an infinity
+    /// rather than an error.
+    pub fn inverse(self) -> Self {
+        Self::new(1.0 / self.x, 1.0 / self.y, 1.0 / self.z, 1.0 / self.w)
+    }
+
+    /// Component-wise clamp between two vectors (Godot `Vector4.clamp`).
+    pub fn clamp(self, min: Self, max: Self) -> Self {
+        Self::new(
+            self.x.clamp(min.x, max.x),
+            self.y.clamp(min.y, max.y),
+            self.z.clamp(min.z, max.z),
+            self.w.clamp(min.w, max.w),
+        )
+    }
+
+    /// Clamps every component between the same two scalars (Godot
+    /// `Vector4.clampf`).
+    pub fn clampf(self, min: f32, max: f32) -> Self {
+        Self::new(
+            self.x.clamp(min, max),
+            self.y.clamp(min, max),
+            self.z.clamp(min, max),
+            self.w.clamp(min, max),
+        )
+    }
+
+    /// Component-wise minimum against a scalar (Godot `Vector4.minf`).
+    pub fn minf(self, scalar: f32) -> Self {
+        Self::new(
+            self.x.min(scalar),
+            self.y.min(scalar),
+            self.z.min(scalar),
+            self.w.min(scalar),
+        )
+    }
+
+    /// Component-wise maximum against a scalar (Godot `Vector4.maxf`).
+    pub fn maxf(self, scalar: f32) -> Self {
+        Self::new(
+            self.x.max(scalar),
+            self.y.max(scalar),
+            self.z.max(scalar),
+            self.w.max(scalar),
+        )
+    }
+}
+
+/// Godot's `Math::fposmod` (`core/math/math_funcs.h:279-286`).
+///
+/// ⚠️ **Not `rem_euclid`.** The result takes the sign of the DIVISOR, not an
+/// unconditionally positive value: `fposmod(5, -3)` is `-1` in Godot, while
+/// `5f32.rem_euclid(-3.0)` is `2`. Both are "a positive-ish modulo" by name and
+/// they disagree on exactly the inputs a wrapping calculation cares about.
+pub fn fposmod(x: f32, y: f32) -> f32 {
+    let value = x % y;
+    if (value < 0.0 && y > 0.0) || (value > 0.0 && y < 0.0) {
+        value + y
+    } else {
+        value
+    }
+}
+
+/// Godot's `Math::snapped` (`core/math/math_funcs.cpp:121-126`).
+///
+/// ⚠️ `floor(value / step + 0.5)`, which is round-half-**UP**, not Rust's
+/// `round()` (round-half-away-from-zero). They differ on every negative
+/// half-step: snapping `-2.5` to a step of `1` gives `-2` here and `-3` through
+/// `round()`. A step of `0` returns the value unchanged rather than dividing.
+pub fn snapped_scalar(value: f32, step: f32) -> f32 {
+    if step != 0.0 {
+        (value / step + 0.5).floor() * step
+    } else {
+        value
     }
 }
 
@@ -645,6 +954,38 @@ impl Rect2i {
         Self::new(
             Vector2i::new(self.position.x - amount, self.position.y - amount),
             Vector2i::new(self.size.x + amount * 2, self.size.y + amount * 2),
+        )
+    }
+
+    /// The rect grown by a separate amount on each side (Godot
+    /// `Rect2i.grow_individual`), transcribed from `core/math/rect2i.h:172-180`.
+    ///
+    /// ⚠️ The position moves by LEFT/TOP only, while the size grows by
+    /// `left + right` and `top + bottom` — growing the right side must not move
+    /// the origin. A negative amount shrinks, and Godot does not clamp, so a
+    /// rect can be shrunk to a negative size exactly as upstream allows.
+    pub fn grow_individual(self, left: i32, top: i32, right: i32, bottom: i32) -> Self {
+        Self::new(
+            Vector2i::new(self.position.x - left, self.position.y - top),
+            Vector2i::new(self.size.x + left + right, self.size.y + top + bottom),
+        )
+    }
+
+    /// The rect grown on a single side, identified by the `@GlobalScope` `Side`
+    /// enum — `SIDE_LEFT` 0, `SIDE_TOP` 1, `SIDE_RIGHT` 2, `SIDE_BOTTOM` 3
+    /// (`core/math/math_defs.h:116-119`).
+    ///
+    /// An out-of-range side leaves the rect unchanged: Godot's `grow_side`
+    /// passes `0` for every side that does not match, so an unmatched value
+    /// grows nothing. Mirrors [`Rect2::grow_side`].
+    ///
+    /// Godot: `Rect2i.grow_side` (`core/math/rect2i.h:159-166`).
+    pub fn grow_side(self, side: i64, amount: i32) -> Self {
+        self.grow_individual(
+            if side == 0 { amount } else { 0 },
+            if side == 1 { amount } else { 0 },
+            if side == 2 { amount } else { 0 },
+            if side == 3 { amount } else { 0 },
         )
     }
 

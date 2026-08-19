@@ -247,6 +247,39 @@ impl WebSocketMultiplayerPeer {
     }
 
     /// Number of connected peers.
+    /// Godot `WebSocketMultiplayerPeer.get_peer_address(id)`
+    /// (websocket_multiplayer_peer.cpp:472-475), as a string.
+    ///
+    /// ⚠️ An unknown peer id answers with the EMPTY string, not an error.
+    /// Godot's `ERR_FAIL_COND_V(!peers_map.has(id), IPAddress())` returns a
+    /// default-constructed `IPAddress`, which is the invalid/empty one — so a
+    /// script polling an id that has just disconnected gets "" rather than a
+    /// raise. Godot's return type is `IPAddress`; Patina has no such Variant, and
+    /// GDScript marshals it as a String either way.
+    ///
+    /// Only the SERVER role can answer: a client holds one socket to the server,
+    /// not a roster, which is why `conns` is the only source consulted.
+    pub fn get_peer_address(&self, peer: PeerId) -> String {
+        self.conns
+            .get(&peer)
+            .and_then(|c| c.stream.peer_addr().ok())
+            .map(|a| a.ip().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Godot `WebSocketMultiplayerPeer.get_peer_port(id)`
+    /// (websocket_multiplayer_peer.cpp:477-480).
+    ///
+    /// ⚠️ An unknown peer id answers `0`, matching Godot's
+    /// `ERR_FAIL_COND_V(!peers_map.has(id), 0)`.
+    pub fn get_peer_port(&self, peer: PeerId) -> i64 {
+        self.conns
+            .get(&peer)
+            .and_then(|c| c.stream.peer_addr().ok())
+            .map(|a| i64::from(a.port()))
+            .unwrap_or(0)
+    }
+
     pub fn get_peer_count(&self) -> usize {
         self.peer_state.get_peer_count()
     }
@@ -430,6 +463,18 @@ impl Default for WebSocketMultiplayerPeer {
 }
 
 impl NetworkPeer for WebSocketMultiplayerPeer {
+    /// The trait half of [`WebSocketMultiplayerPeer::drain_signals`]
+    /// (pat-s3rrv.81).
+    ///
+    /// ⚠️ Both spellings are needed. The inherent method is what
+    /// `gdplatform`'s own tests call on a concrete peer; this one is what
+    /// `MultiplayerAPI::poll` can reach through `Box<dyn NetworkPeer>`, and
+    /// without it the API silently used the trait's empty default — the
+    /// handshake completed and no script ever heard `peer_connected`.
+    fn drain_signals(&mut self) -> Vec<crate::multiplayer_peer_state::MultiplayerPeerSignal> {
+        self.peer_state.drain_signals()
+    }
+
     fn send_packet(&mut self, to: PeerId, packet: Packet) -> Result<()> {
         if self.status != ConnectionStatus::Connected {
             return Err(NetworkError::Transport("not connected".into()));

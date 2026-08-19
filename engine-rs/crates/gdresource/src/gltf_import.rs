@@ -8,11 +8,14 @@
 //! - ASCII `.gltf` (embedded `buffers[].uri` as `data:` base64 or external relative file)
 //! - Binary `.glb` (JSON + BIN chunks)
 //! - Mesh primitives: `POSITION`, optional `NORMAL`, `TEXCOORD_0`, `indices`
+//! - Morph targets: `primitives[].targets` `POSITION` deltas, named from
+//!   `mesh.extras.targetNames`
 //! - Materials: `pbrMetallicRoughness` baseColor / metallic / roughness + emissive + doubleSided
 //! - Nodes: name, children, mesh index, TRS or 4×4 matrix
 //!
 //! # Unsupported (documented)
-//! - Morph targets, sparse accessors, Draco/meshopt compression
+//! - Morph-target `NORMAL` / `TANGENT` deltas (only `POSITION` is imported)
+//! - Sparse accessors, Draco/meshopt compression
 //! - Skinned mesh skinning matrices / animation playback
 //! - Image / texture sampling (albedo texture URI is recorded but not decoded)
 //! - Cameras, lights, extensions beyond core 2.0
@@ -256,6 +259,58 @@ fn build_document(
                             .collect(),
                     ),
                 );
+            }
+
+            // Morph targets (glTF `primitives[].targets`) — the per-vertex
+            // POSITION deltas Godot imports as blend shapes
+            // (`modules/gltf/gltf_document.cpp:1784-1833`). Names come from
+            // `mesh.extras.targetNames`, falling back to Godot's `morph_<k>`
+            // for an unnamed or empty entry. Without this the importer dropped
+            // them silently, so `gdrender3d::morph` — which has carried the
+            // blending maths and its unit tests all along — had no path by
+            // which any file could reach it (pat-s3rrv.23).
+            //
+            // ⚠️ Stored as DELTAS, which is what the accessor holds. Godot
+            // converts to absolute positions here
+            // (`w_varr[l] = r_varr[l] + r_src_varr[l]`) because its ArrayMesh
+            // blend-shape format wants absolutes; `apply_morph` wants deltas
+            // and adds them to the base itself. Converting would add the base
+            // twice and move every morphed vertex to roughly double its
+            // position — which reads as a scale bug, not as a bad import.
+            //
+            // ⚠️ A target accessor shorter than POSITION is left short rather
+            // than padded. `apply_morph` only touches the vertices a delta
+            // array covers, which is the same result as Godot padding with the
+            // base position: a base position IS a zero delta.
+            if let Some(targets) = prim.get("targets").and_then(|v| v.as_array()) {
+                if !targets.is_empty() {
+                    let target_names = mesh
+                        .get("extras")
+                        .and_then(|e| e.get("targetNames"))
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut names: Vec<Variant> = Vec::with_capacity(targets.len());
+                    let mut deltas: Vec<Variant> = Vec::with_capacity(targets.len());
+                    for (k, target) in targets.iter().enumerate() {
+                        let name = target_names
+                            .get(k)
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(String::from)
+                            .unwrap_or_else(|| format!("morph_{k}"));
+                        let d = match target.get("POSITION").and_then(|v| v.as_u64()) {
+                            Some(acc) => read_vec3_accessor(json, &buffers, acc as usize)?,
+                            None => Vec::new(),
+                        };
+                        names.push(Variant::String(name));
+                        deltas.push(Variant::Array(
+                            d.iter().map(|p| Variant::Vector3(*p)).collect(),
+                        ));
+                    }
+                    sub.set_property("blend_shape_names", Variant::Array(names));
+                    sub.set_property("blend_shape_deltas", Variant::Array(deltas));
+                }
             }
 
             // indices (optional — if missing, sequential triangle list)

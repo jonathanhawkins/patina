@@ -238,3 +238,80 @@ fn unknown_methods_are_errors() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// pat-s3rrv.59 — Rect2i.grow_individual / grow_side
+// ---------------------------------------------------------------------------
+
+/// 🔑 The float `Rect2` has had both of these all along; `Rect2i` had only
+/// `grow`, so a script porting integer rect maths hit `UndefinedFunction`.
+///
+/// ⚠️ The asymmetry is the whole contract: the POSITION moves by left/top only,
+/// while the SIZE grows by `left + right` and `top + bottom`
+/// (`core/math/rect2i.h:172-180`). Growing the RIGHT side must not move the
+/// origin — an implementation that subtracted every amount from the position
+/// would still pass a symmetric fixture, so each side is exercised on its own.
+#[test]
+fn rect2i_grow_individual_moves_only_the_left_and_top() {
+    // Left only: origin moves left, width grows, TOP/height untouched.
+    assert_eq!(
+        eval("Rect2i(10, 10, 4, 4).grow_individual(2, 0, 0, 0)"),
+        eval("Rect2i(8, 10, 6, 4)"),
+        "growing LEFT moves x by -2 and widens by 2"
+    );
+    // Right only: origin unchanged, width grows.
+    assert_eq!(
+        eval("Rect2i(10, 10, 4, 4).grow_individual(0, 0, 3, 0)"),
+        eval("Rect2i(10, 10, 7, 4)"),
+        "growing RIGHT must NOT move the origin"
+    );
+    // Top only, then bottom only — same asymmetry on the y axis.
+    assert_eq!(
+        eval("Rect2i(10, 10, 4, 4).grow_individual(0, 5, 0, 0)"),
+        eval("Rect2i(10, 5, 4, 9)")
+    );
+    assert_eq!(
+        eval("Rect2i(10, 10, 4, 4).grow_individual(0, 0, 0, 5)"),
+        eval("Rect2i(10, 10, 4, 9)")
+    );
+
+    // ⚠️ Negative amounts SHRINK and Godot does not clamp — a rect may end up
+    // with a negative size rather than being silently corrected.
+    assert_eq!(
+        eval("Rect2i(0, 0, 4, 4).grow_individual(-1, -1, -1, -1)"),
+        eval("Rect2i(1, 1, 2, 2)"),
+        "a negative grow shrinks symmetrically"
+    );
+}
+
+/// `grow_side` takes a `@GlobalScope` **Side** ordinal — LEFT 0, TOP 1,
+/// RIGHT 2, BOTTOM 3 (`core/math/math_defs.h:116-119`).
+///
+/// ⚠️ All four are checked because the ordinals are positional: a transposed
+/// pair (TOP/RIGHT, say) is invisible on a square rect grown by the same amount
+/// on both, so each side is grown alone and compared against the
+/// `grow_individual` result it must equal.
+#[test]
+fn rect2i_grow_side_maps_the_godot_side_ordinals() {
+    for (side, individual) in [
+        (0, "grow_individual(3, 0, 0, 0)"),
+        (1, "grow_individual(0, 3, 0, 0)"),
+        (2, "grow_individual(0, 0, 3, 0)"),
+        (3, "grow_individual(0, 0, 0, 3)"),
+    ] {
+        assert_eq!(
+            eval(&format!("Rect2i(10, 20, 4, 6).grow_side({side}, 3)")),
+            eval(&format!("Rect2i(10, 20, 4, 6).{individual}")),
+            "side {side} must grow the same edge grow_individual does"
+        );
+    }
+
+    // ⚠️ An out-of-range side changes nothing: Godot passes 0 for every side
+    // that does not match, so an unmatched ordinal grows no edge rather than
+    // erroring or defaulting to LEFT.
+    assert_eq!(
+        eval("Rect2i(10, 20, 4, 6).grow_side(9, 3)"),
+        eval("Rect2i(10, 20, 4, 6)"),
+        "an unknown side must leave the rect untouched"
+    );
+}

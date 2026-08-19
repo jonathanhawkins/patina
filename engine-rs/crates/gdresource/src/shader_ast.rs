@@ -23,7 +23,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::shader_tokenizer::{tokenize_shader_no_comments, ShaderToken, ShaderTokenSpan};
+use crate::shader_tokenizer::{
+    tokenize_shader_no_comments, ShaderLexError, ShaderToken, ShaderTokenSpan,
+};
 
 // ---------------------------------------------------------------------------
 // Values
@@ -281,10 +283,31 @@ struct Parser {
 /// `/api/shader_validate` needs to point an editor at the mistake — the old
 /// line matcher simply dropped anything it did not recognise.
 pub fn parse_shader(source: &str) -> Result<ShaderProgram, ShaderError> {
-    let tokens = tokenize_shader_no_comments(source).map_err(|e| ShaderError {
-        message: e.to_string(),
-        line: 0,
-        col: 0,
+    let tokens = tokenize_shader_no_comments(source).map_err(|e| {
+        // ⚠️ The lexer ALREADY knows where the problem is — every
+        // `ShaderLexError` variant carries `line`/`col`, and its `Display` even
+        // prints them. This used to build `ShaderError { line: 0, col: 0 }`,
+        // throwing that away and reporting every lexical failure as "line 0"
+        // (pat-s3rrv.36).
+        //
+        // Line 0 is not merely imprecise, it is out of range: `ShaderError.line`
+        // is documented 1-based, so 0 is a line no editor can highlight. Godot
+        // names the offending line for a shader compile error, and this bead's
+        // acceptance asks for exactly that.
+        //
+        // The or-pattern is wildcard-free on purpose, mirroring
+        // `shader_lex_error_pos` in gdeditor's shader editor: a new lex variant
+        // must fail to compile HERE rather than silently fall back to 0 again.
+        let (line, col) = match &e {
+            ShaderLexError::UnterminatedBlockComment { line, col }
+            | ShaderLexError::UnexpectedChar { line, col, .. }
+            | ShaderLexError::InvalidNumber { line, col, .. } => (*line, *col),
+        };
+        ShaderError {
+            message: e.to_string(),
+            line,
+            col,
+        }
     })?;
     Parser { tokens, pos: 0 }.parse_program()
 }

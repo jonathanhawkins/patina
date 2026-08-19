@@ -69,6 +69,25 @@ pub struct DeferredCall {
 /// an empty snapshot, so an unconfigured synchronizer stays inert rather than
 /// guessing at `position`.
 fn replication_properties_from_node(node: &crate::node::Node) -> Vec<String> {
+    replication_paths_from_node(node, "sync")
+}
+
+/// The properties a `MultiplayerSynchronizer` sends as SPAWN state
+/// (pat-s3rrv.17).
+///
+/// ⚠️ Godot's `SceneReplicationConfig` defaults BOTH flags to true
+/// (`scene_replication_config.h:51`), so an entry that does not spell `spawn`
+/// out is spawn state — the same default the sync reader uses. Defaulting to
+/// false here would make every editor-authored config send nothing at spawn
+/// while looking correctly configured.
+///
+/// No `_sync_properties` fallback: that array is the hand-authored SYNC list,
+/// and treating it as spawn state too would send a snapshot no config asked for.
+fn spawn_properties_from_node(node: &crate::node::Node) -> Vec<String> {
+    replication_paths_from_node(node, "spawn")
+}
+
+fn replication_paths_from_node(node: &crate::node::Node, flag_name: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     // Godot numbers the entries densely from 0, so stop at the first gap rather
     // than scanning an arbitrary range.
@@ -93,7 +112,7 @@ fn replication_properties_from_node(node: &crate::node::Node) -> Vec<String> {
             )),
             Variant::Int(0)
         );
-        if mode_never || !flag("sync", true) {
+        if mode_never || !flag(flag_name, true) {
             continue;
         }
         // ⚠️ A config path is `<node>:<property>`, e.g. `.:position`. Split from
@@ -102,18 +121,31 @@ fn replication_properties_from_node(node: &crate::node::Node) -> Vec<String> {
         let Some((node_part, prop)) = path.rsplit_once(':') else {
             continue;
         };
-        // Only properties on the synchronizer's own root are supported. A path
-        // targeting a CHILD (`Sprite:modulate`) is skipped rather than applied
-        // to the root — writing `modulate` on the wrong node would be a silent
-        // corruption, which is worse than not replicating it.
-        if !node_part.is_empty() && node_part != "." {
+        if prop.is_empty() {
             continue;
         }
-        if !prop.is_empty() {
+        // `.` and the empty node part both mean the synchronizer's own root, and
+        // those are stored as a BARE property name — that keeps the common case
+        // a plain `get_property` and keeps the same shape as the
+        // `_sync_properties` fallback below.
+        //
+        // A path targeting a CHILD (`Sprite2D:modulate`) is kept VERBATIM,
+        // colon and all. Both the outbound snapshot and the inbound apply split
+        // it again and resolve the subpath relative to the synchronizer's root,
+        // so the key means the same thing on either peer and no wire-format
+        // change is needed — the packet already carries arbitrary
+        // `(String, Variant)` pairs.
+        //
+        // ⚠️ This used to `continue` here, silently dropping every child path.
+        // Godot's editor authors configs with them constantly, so a real
+        // exported .tscn replicated nothing while looking correctly configured.
+        if node_part.is_empty() || node_part == "." {
             out.push(prop.to_string());
+        } else {
+            out.push(format!("{node_part}:{prop}"));
         }
     }
-    if !out.is_empty() {
+    if !out.is_empty() || flag_name != "sync" {
         return out;
     }
     match node.get_property("_sync_properties") {
@@ -170,6 +202,33 @@ struct ReplicationState {
     /// so "this child is gone" cannot be expressed without the id it arrived
     /// under.
     spawn_net_ids: HashMap<NodeId, u32>,
+    /// `MultiplayerSynchronizer` node -> its `add_visibility_filter` callables
+    /// (pat-s3rrv.17).
+    ///
+    /// ⚠️ These live HERE rather than beside the rest of the visibility state on
+    /// gdplatform's synchronizer, and not by preference. A filter is a
+    /// `Callable` that must be INVOKED, and gdplatform depends only on gdcore +
+    /// gdvariant — it has no route to a script interpreter, so it physically
+    /// cannot run one. Only gdscene can.
+    ///
+    /// The evaluated verdict is written back into the synchronizer's per-peer
+    /// visibility map, so `poll_outbound`'s existing `is_visible_to` check stays
+    /// the single place visibility is actually enforced.
+    visibility_filters: HashMap<NodeId, Vec<Variant>>,
+    /// Last computed filter verdict per `(synchronizer, peer)` (pat-s3rrv.17).
+    ///
+    /// ⚠️ Filters are evaluated ONLY in the outbound pass, never on demand from
+    /// `is_visible_to`. `call_script_method` takes the script OUT of the arena
+    /// for the duration of a call, so a script asking `is_visible_to()` from
+    /// `_process` is already checked out — a re-entrant call to a filter on that
+    /// same node finds no script and returns `None`. Treating that as a filter
+    /// failure would hide every peer whenever a script asked the question.
+    ///
+    /// So the outbound pass (which runs outside any script call, where the
+    /// filter genuinely can run) records its verdict here, and queries read the
+    /// cache. A query therefore reflects the previous frame's evaluation, which
+    /// is the honest answer: it is the verdict the send path is acting on.
+    filter_verdicts: HashMap<(NodeId, u32), bool>,
     /// Monotonic milliseconds accumulated from the frame delta.
     ///
     /// `MultiplayerSynchronizer::poll_outbound` compares this against its
@@ -343,6 +402,9 @@ pub struct SceneTree {
     /// which is what makes button drag-off/drag-back, and every draggable
     /// Control, work at all (pat-s3rrv.12).
     gui_mouse_focus: Option<NodeId>,
+    /// Per-node `HTTPRequest` state (pat-s3rrv.78), created lazily the first
+    /// time a script calls `request()` on an HTTPRequest node.
+    http_requests: HashMap<NodeId, crate::http_request_node::HttpRequestNode>,
     /// An in-flight scrollbar grabber drag (Godot's `ScrollBar::drag`), holding
     /// where the grab started so the handle stays under the pointer.
     gui_scrollbar_drag: Option<(NodeId, crate::range_controls::ScrollBarDrag)>,
@@ -440,6 +502,32 @@ pub struct SceneTree {
     /// against the previous press of the SAME button: chording left then right
     /// is not a double click.
     last_mouse_press_frame: std::collections::HashMap<i64, u64>,
+    /// Stylus data from the most recent pointer event, applied to the next
+    /// `InputEventMouseMotion` (pat-s3rrv.76). See [`PenState`].
+    pen: PenState,
+    /// The `double_click` flag [`push_input`](Self::push_input) computed for the
+    /// event it is dispatching right now (pat-s3rrv.76).
+    ///
+    /// Physics picking needs this value but runs outside `push_input` — it needs
+    /// the physics world, which the tree does not own — so the flag is mirrored
+    /// here rather than recomputed. Recomputing would be wrong, not merely
+    /// duplicated: the window bookkeeping is stateful (`last_mouse_press_frame`
+    /// is written as it is read), so a second pass over the same event would see
+    /// the press it just recorded and report every click as a double.
+    last_double_click: bool,
+    /// The modifier keys held as of the most recent key event (pat-s3rrv.14).
+    ///
+    /// ⚠️ Mouse and gesture events are `InputEventWithModifiers` in Godot
+    /// (`doc/classes/InputEventMouse.xml:2`), so `event.shift_pressed` on a
+    /// click is real state there. Patina's `InputEvent::MouseButton` carries no
+    /// modifier fields, and adding them is the same 71-construction-site change
+    /// `double_click` above declined — so the state is mirrored here instead,
+    /// from the flags every key event already carries.
+    ///
+    /// Without this every mouse and gesture event reported all four modifiers as
+    /// `false`, so **no script could implement shift-click or ctrl-click** —
+    /// multi-select, add-to-selection, and every other modifier-qualified click.
+    last_modifiers: (bool, bool, bool),
     /// Whether the scene tree is currently paused.
     paused: bool,
     /// Multiplayer coordinator wired into the tree (pat-u3l8c.75). Polled once
@@ -532,6 +620,7 @@ impl SceneTree {
             hovered_control: None,
             gui_press_target: None,
             gui_mouse_focus: None,
+            http_requests: HashMap::new(),
             gui_scrollbar_drag: None,
             hovered_meta: None,
             focus_owner: None,
@@ -556,6 +645,9 @@ impl SceneTree {
             event_trace: EventTrace::new(),
             trace_frame: 0,
             last_mouse_press_frame: std::collections::HashMap::new(),
+            pen: PenState::default(),
+            last_double_click: false,
+            last_modifiers: (false, false, false),
             paused: false,
             multiplayer: MultiplayerAPI::new(),
             replication: ReplicationState::default(),
@@ -589,6 +681,48 @@ impl SceneTree {
     /// change — this accessor writes the Rust struct only.
     pub fn root_window_mut(&mut self) -> &mut crate::viewport::RootWindow {
         &mut self.root_window
+    }
+
+    /// Records the stylus data the next `InputEventMouseMotion` should carry
+    /// (pat-s3rrv.76).
+    ///
+    /// The host calls this from its pointer-event route immediately before
+    /// pushing the motion event, so `_input` sees a Godot-shaped
+    /// `pressure`/`tilt`/`pen_inverted` instead of the hardcoded zeros that
+    /// made every stylus look like a mouse.
+    ///
+    /// ⚠️ STICKY, by design. A browser sends `pressure` on every pointer event,
+    /// so the value persists until the next one replaces it — clearing it per
+    /// event would report 0 for any motion that arrived without fresh data,
+    /// which reads as "pen lifted" rather than "unchanged".
+    pub fn set_pen_state(&mut self, pen: PenState) {
+        self.pen = pen;
+    }
+
+    /// The stylus data currently applied to motion events.
+    pub fn pen_state(&self) -> PenState {
+        self.pen
+    }
+
+    /// The `double_click` flag computed for the event most recently passed to
+    /// [`push_input`](Self::push_input).
+    ///
+    /// ⚠️ Only meaningful while that event is still being dispatched. It is read
+    /// by the physics-picking stage, which `MainLoop::step` runs immediately
+    /// after `push_input` within the same loop iteration, so the value belongs
+    /// to the event picking is handling. Reading it anywhere else reports the
+    /// previous event's flag.
+    pub fn last_double_click(&self) -> bool {
+        self.last_double_click
+    }
+
+    /// The `(shift, ctrl, alt)` state carried by the most recent key event.
+    ///
+    /// Read by the picking stages, which build their own payload for the same
+    /// event `push_input` is dispatching — the same mirroring reason as
+    /// [`last_double_click`](Self::last_double_click).
+    pub fn last_modifiers(&self) -> (bool, bool, bool) {
+        self.last_modifiers
     }
 
     /// Mirrors the root window's content-scale state onto the root NODE's
@@ -697,6 +831,7 @@ impl SceneTree {
                 root_path: String,
                 interval_ms: u32,
                 properties: Vec<String>,
+                public_visibility: bool,
             },
         }
 
@@ -756,6 +891,22 @@ impl SceneTree {
                                 .unwrap_or_default(),
                             interval_ms,
                             properties,
+                            // Godot's `public_visibility` defaults to TRUE
+                            // (doc_classes/MultiplayerSynchronizer.xml), which
+                            // is also what `MultiplayerSynchronizer::new` and
+                            // the ClassDB registration use — so an absent or
+                            // non-bool value means "visible to everyone".
+                            //
+                            // ⚠️ Until this was read, the visibility system was
+                            // enforced but unreachable: `poll_outbound` already
+                            // gates every send on `is_visible_to`, yet nothing
+                            // in the scene layer ever set it, so a `.tscn`
+                            // carrying `public_visibility = false` replicated to
+                            // every peer regardless.
+                            public_visibility: match node.get_property("public_visibility") {
+                                Variant::Bool(b) => b,
+                                _ => true,
+                            },
                         },
                     ));
                 }
@@ -781,12 +932,14 @@ impl SceneTree {
                     root_path,
                     interval_ms,
                     properties,
+                    public_visibility,
                 } => {
                     let mut sync = MultiplayerSynchronizer::new(interval_ms);
                     sync.set_root_path(root_path);
                     for name in properties {
                         sync.add_property(name);
                     }
+                    sync.set_visibility_public(public_visibility);
                     self.replication.synchronizers.insert(id, sync);
                 }
             }
@@ -818,7 +971,10 @@ impl SceneTree {
 
     fn apply_replication_packets(
         &mut self,
-        spawns: Vec<gdplatform::network::SpawnPacket>,
+        spawns: Vec<(
+            gdplatform::network::PeerId,
+            gdplatform::network::SpawnPacket,
+        )>,
         syncs: Vec<gdplatform::network::SyncPacket>,
     ) {
         // The replicator lives inside `self`, and its methods take `&mut SceneTree`
@@ -834,13 +990,31 @@ impl SceneTree {
         // whose scene puts the spawner elsewhere still parents correctly.
         let owner = self.replication_spawn_owner();
         let spawn_parent = owner.map(|(_, parent)| parent).unwrap_or(self.root_id);
-        let mut applied: Vec<NodeId> = Vec::new();
-        for spawn in spawns {
-            if let Some(id) = replicator.apply_spawn(self, spawn_parent, &spawn, |path| {
-                gdcore::file_access::FileAccess::read_file_string(path).ok()
-            }) {
-                applied.push(id);
+        for (from, spawn) in spawns {
+            // 🔑 Only the spawner's authority may spawn on this peer. Godot:
+            // `ERR_FAIL_COND_V(p_from != spawner->get_multiplayer_authority(),
+            // ERR_UNAUTHORIZED)` (scene_replication_interface.cpp:577).
+            //
+            // ⚠️ Godot does NOT replicate authority — I assumed it did when I
+            // recorded this item, and the C++ says otherwise. Both peers already
+            // agree on the spawner's authority because the spawner is part of
+            // the shared scene; what was missing is the receiver ENFORCING it.
+            //
+            // ⚠️ Only enforced when the receiver actually resolved a spawner.
+            // With none, the node lands at the scene root through the
+            // `spawn_parent` fallback above — already degenerate, and rejecting
+            // there would change the
+            // behaviour of trees that have no spawner at all.
+            if let Some((spawner_id, _)) = owner {
+                if i64::from(from.0) != self.get_multiplayer_authority(spawner_id) {
+                    continue;
+                }
             }
+            // `Option` is `#[must_use]`; nothing needs the new id any more now
+            // that the announced-at-birth bookkeeping is gone.
+            let _ = replicator.apply_spawn(self, spawn_parent, &spawn, |path| {
+                gdcore::file_access::FileAccess::read_file_string(path).ok()
+            });
         }
         for sync in syncs {
             replicator.apply_sync(self, &sync);
@@ -848,22 +1022,20 @@ impl SceneTree {
 
         self.replication.replicator = replicator;
 
-        // A node this peer received is NOT this peer's to announce. Godot gets
-        // that from authority: only the spawn's authority replicates it. Here
-        // the outbound diff would otherwise see the freshly applied child as
-        // "new" and announce it straight back to the sender, which would apply
-        // it, whose own diff would announce it again — an echo that adds one
-        // node per frame on BOTH trees for as long as the peers are connected.
-        // Marking it announced at birth is what makes replication
-        // one-directional.
-        if let Some((spawner_id, _)) = owner {
-            if !applied.is_empty() {
-                let seen = self.replication.announced.entry(spawner_id).or_default();
-                for id in applied {
-                    seen.insert(id);
-                }
-            }
-        }
+        // ⚠️ The "mark inbound spawns announced-at-birth" workaround that used
+        // to live here is GONE (pat-s3rrv.17 item 4), and the gate above is what
+        // replaced it. It stopped an echo cascade by suppressing the symptom: a
+        // received child looked "new" to the outbound diff, which announced it
+        // back to the sender, which applied and re-announced it — one node per
+        // frame on both trees, forever.
+        //
+        // The rule now expresses itself. An accepted spawn came from the
+        // spawner's authority, and a peer never receives its own packets, so the
+        // receiver is by construction NOT that authority — which means
+        // `poll_replication_spawns` skips the spawner entirely and there is
+        // nothing to echo. Removing the workaround BEFORE the gate existed would
+        // have traded a suppressed symptom for a live echo, which is why the
+        // ordering mattered.
     }
 
     /// Peers a replication frame should be addressed to (pat-s3rrv.17).
@@ -918,6 +1090,9 @@ impl SceneTree {
         // Phase 1 — collect (spawner, gone child) pairs without holding a borrow
         // into `self.replication` across the sends below.
         let mut gone: Vec<(NodeId, NodeId)> = Vec::new();
+        // Spawners whose own node has left the tree, kept so their registry
+        // entries can be pruned once the sends below are done.
+        let mut freed_spawners: Vec<NodeId> = Vec::new();
         for (spawner_id, announced) in &self.replication.announced {
             let Some(spawner) = self.replication.spawners.get(spawner_id) else {
                 continue;
@@ -925,6 +1100,27 @@ impl SceneTree {
             // Same rule as the spawn diff: a non-authority peer must not retract
             // a node it never announced.
             if !self.is_multiplayer_authority(*spawner_id) {
+                continue;
+            }
+            // ⚠️ Godot despawns a spawner's replicated nodes when the SPAWNER
+            // leaves the tree, not only when a child leaves `spawn_path`.
+            // Without this branch the `spawn_path` lookup below cannot resolve
+            // and simply `continue`s, so everything the spawner had announced
+            // lives forever on the client.
+            //
+            // The distinction from that skip is the whole point: a freed
+            // SPAWNER means "retract everything it announced", whereas a
+            // spawn_path that will not resolve means "I cannot tell" — and
+            // conflating the two would despawn the world on a client whose
+            // scene merely resolves the path differently.
+            //
+            // Authority is deliberately still read FIRST, and it answers
+            // correctly for a node that is already gone: `get_multiplayer_authority`
+            // walks to the missing node, breaks, and falls back to SERVER — so
+            // the host retracts and a client does not.
+            if self.get_node(*spawner_id).is_none() {
+                gone.extend(announced.iter().map(|child| (*spawner_id, *child)));
+                freed_spawners.push(*spawner_id);
                 continue;
             }
             let path = spawner.get_spawn_path();
@@ -950,7 +1146,10 @@ impl SceneTree {
                 }
             }
         }
-        if gone.is_empty() {
+        // ⚠️ `freed_spawners` is checked too: a spawner can leave the tree
+        // having announced nothing, and returning early there would leak its
+        // registry entry forever.
+        if gone.is_empty() && freed_spawners.is_empty() {
             return;
         }
 
@@ -981,6 +1180,17 @@ impl SceneTree {
                     );
                 }
             }
+        }
+
+        // Prune the freed spawners themselves. Registration only ever INSERTS
+        // (it is guarded by `registered.contains`), so without this a freed
+        // spawner is rescanned every frame forever — and because `NodeId`s can
+        // be reused, a stale entry could later attach to an unrelated node that
+        // happens to land on the same id.
+        for spawner_id in freed_spawners {
+            self.replication.spawners.remove(&spawner_id);
+            self.replication.announced.remove(&spawner_id);
+            self.replication.registered.remove(&spawner_id);
         }
     }
 
@@ -1051,11 +1261,18 @@ impl SceneTree {
                 // before `announced` is touched below — nesting that mutation
                 // inside a `match` on `spawners.get_mut(..)` would hold two
                 // borrows into `self.replication` at once.
+                // ⚠️ Gathered BEFORE the `spawners` borrow below, and from the
+                // scene rather than the spawner: property values live on nodes,
+                // which gdplatform cannot reach. Godot splits it the same way —
+                // the spawner allocates the id, and
+                // `SceneReplicationInterface::_make_spawn_packet` collects the
+                // state.
+                let spawn_state = self.spawn_state_for_subtree(child);
                 let request = self
                     .replication
                     .spawners
                     .get_mut(&spawner_id)
-                    .and_then(|spawner| spawner.spawn("").ok());
+                    .and_then(|spawner| spawner.spawn_with_properties("", spawn_state).ok());
                 let Some(request) = request else {
                     // Spawn limit reached, or no spawnable scene registered:
                     // still mark the child announced so a failing spawner does
@@ -1113,6 +1330,74 @@ impl SceneTree {
     /// Emits SYNC frames for every registered `MultiplayerSynchronizer` whose
     /// `replication_interval` has elapsed (pat-s3rrv.17).
     ///
+    /// The spawn-state values for every synchronizer inside a freshly spawned
+    /// subtree (pat-s3rrv.17).
+    ///
+    /// `SceneReplicationConfig::spawn_properties()` recorded which properties
+    /// are spawn-flagged and **nothing ever sent them** — the config had exactly
+    /// one caller repo-wide and it was a test assertion. So a spawned node
+    /// arrived on remote peers with its scene defaults, and only started
+    /// matching once the first periodic SYNC frame landed.
+    ///
+    /// ⚠️ Key resolution is deliberately identical to the sync snapshot: a key
+    /// carrying a colon targets a CHILD of the synchronizer's root
+    /// (`Sprite2D:modulate`), a bare key is the root's own. Resolving them
+    /// differently here would make the same config line mean two things
+    /// depending on which packet carried it.
+    fn spawn_state_for_subtree(&self, root_of_spawn: NodeId) -> Vec<(String, Variant)> {
+        let mut subtree = Vec::new();
+        self.collect_subtree_top_down(root_of_spawn, &mut subtree);
+        let mut out: Vec<(String, Variant)> = Vec::new();
+        for sync_id in subtree {
+            let Some(sync_node) = self.get_node(sync_id) else {
+                continue;
+            };
+            if sync_node.class_name() != "MultiplayerSynchronizer" {
+                continue;
+            }
+            let keys = spawn_properties_from_node(sync_node);
+            if keys.is_empty() {
+                continue;
+            }
+            // Godot's `root_path` defaults to ".." — the synchronizer replicates
+            // its parent, not itself.
+            let root_path =
+                variant_as_path_string(&sync_node.get_property("root_path")).unwrap_or_default();
+            let root = if root_path.is_empty() {
+                Some(sync_id)
+            } else {
+                self.get_node_or_null(sync_id, &root_path)
+            };
+            let Some(root) = root else {
+                continue;
+            };
+            let Some(root_node) = self.get_node(root) else {
+                continue;
+            };
+            for key in keys {
+                let value = match key.rsplit_once(':') {
+                    Some((subpath, prop)) => {
+                        let Some(child) = self.get_node_or_null(root, subpath) else {
+                            continue;
+                        };
+                        let Some(child_node) = self.get_node(child) else {
+                            continue;
+                        };
+                        child_node.get_property(prop)
+                    }
+                    None => root_node.get_property(&key),
+                };
+                // An unset property reads back `Nil`; sending it would clobber a
+                // real value on the receiving peer — the same rule the sync
+                // snapshot applies.
+                if !value.is_nil() {
+                    out.push((key, value));
+                }
+            }
+        }
+        out
+    }
+
     /// Mirrors Godot's `SceneReplicationInterface::_send_sync`: snapshot the
     /// configured properties off the live node, hand them to the synchronizer,
     /// and let it decide (on `replication_interval`) whether this tick actually
@@ -1145,14 +1430,34 @@ impl SceneTree {
             let Some(node) = self.get_node(root) else {
                 continue;
             };
-            let values: Vec<(String, Variant)> = sync
-                .properties_to_sync
-                .iter()
-                .map(|name| (name.clone(), node.get_property(name)))
+            // A key carrying a colon targets a CHILD of the root
+            // (`Sprite2D:modulate`); resolve it relative to the root and read
+            // the property off that node. A bare key is the root's own.
+            //
+            // Written as a plain loop rather than a `filter_map` closure: the
+            // child lookup needs `&self` while `node` is already borrowed from
+            // it, and keeping both as ordinary shared borrows in a loop body is
+            // the shape the surrounding code already proves compiles.
+            let mut values: Vec<(String, Variant)> = Vec::new();
+            for key in &sync.properties_to_sync {
+                let value = match key.rsplit_once(':') {
+                    Some((subpath, prop)) => {
+                        let Some(child) = self.get_node_or_null(root, subpath) else {
+                            continue;
+                        };
+                        let Some(child_node) = self.get_node(child) else {
+                            continue;
+                        };
+                        child_node.get_property(prop)
+                    }
+                    None => node.get_property(key),
+                };
                 // An unset property reads back `Nil`; replicating that would
                 // clobber a real value on the receiving peer.
-                .filter(|(_, value)| !value.is_nil())
-                .collect();
+                if !value.is_nil() {
+                    values.push((key.clone(), value));
+                }
+            }
             if !values.is_empty() {
                 snapshots.push((*id, values));
             }
@@ -1167,14 +1472,57 @@ impl SceneTree {
             }
         }
 
+        // Phase 2b — decide which (synchronizer, peer) pairs the visibility
+        // filters veto this frame (pat-s3rrv.17).
+        //
+        // ⚠️ The verdict is NOT written into the synchronizer's per-peer
+        // visibility map. Godot evaluates filters inside `is_visible_to` at
+        // QUERY time (multiplayer_synchronizer.cpp:193-207) and leaves
+        // `peer_visibility` alone, so an explicit `set_visibility_for` survives
+        // a filter pass. Storing the verdict would silently overwrite it.
+        //
+        // Effective visibility is therefore `filters AND stored`, which is
+        // exactly Godot's formula: the veto set below suppresses the send, and
+        // `poll_outbound`'s existing `is_visible_to` still applies the stored
+        // public/explicit state.
+        let mut vetoed: HashSet<(NodeId, u32)> = HashSet::new();
+        if !self.replication.visibility_filters.is_empty() {
+            self.replication.filter_verdicts.clear();
+            let sync_ids: Vec<NodeId> = self
+                .replication
+                .visibility_filters
+                .keys()
+                .copied()
+                .filter(|id| self.replication.synchronizers.contains_key(id))
+                .collect();
+            let peer_ids: Vec<u32> = peers.iter().map(|p| p.0).collect();
+            for sync_id in sync_ids {
+                for &peer_id in &peer_ids {
+                    let allowed = self.visibility_filters_allow(sync_id, peer_id);
+                    self.replication
+                        .filter_verdicts
+                        .insert((sync_id, peer_id), allowed);
+                    if !allowed {
+                        vetoed.insert((sync_id, peer_id));
+                    }
+                }
+            }
+        }
+
         // Phase 3 — send. `multiplayer` and `replication` are disjoint fields,
         // so both can be borrowed mutably here.
         let now_ms = self.replication.clock_ms;
         let Some(peer) = self.multiplayer.peer_mut() else {
             return;
         };
-        for sync in self.replication.synchronizers.values_mut() {
+        for (sync_id, sync) in self.replication.synchronizers.iter_mut() {
             for to in &peers {
+                // A filter veto suppresses the send without touching the stored
+                // visibility, so the two conditions AND rather than one
+                // overwriting the other.
+                if vetoed.contains(&(*sync_id, to.0)) {
+                    continue;
+                }
                 // `force = false`: the synchronizer applies its own interval.
                 let _ = sync.poll_outbound(peer, *to, now_ms, false);
             }
@@ -1282,7 +1630,9 @@ impl SceneTree {
             // a frame can only match one, and trying spawn first mirrors the
             // order the two arrive in for a newly replicated node.
             if let Some(spawn) = gdplatform::network::decode_spawn_packet(&packet.data) {
-                spawns.push(spawn);
+                // The SENDER travels with the packet: authorizing a spawn needs
+                // to know who sent it (pat-s3rrv.17 item 5).
+                spawns.push((packet.sender, spawn));
             } else if let Some(sync) = gdplatform::network::decode_sync_packet(&packet.data) {
                 syncs.push(sync);
             } else if let Some(net_id) = gdplatform::network::decode_despawn_packet(&packet.data) {
@@ -2099,9 +2449,40 @@ impl SceneTree {
                     }
                 }
             }
+            self.forget_replication_entries(nid);
         }
 
         Ok(removed)
+    }
+
+    /// Drops every replication registry entry belonging to a removed node
+    /// (pat-s3rrv.17 item 6).
+    ///
+    /// `remove_node` cleaned the arena, the weak-ref table and the group index
+    /// and left the replication maps alone, so a freed `MultiplayerSynchronizer`
+    /// or `MultiplayerSpawner` kept its entry forever. A game that spawns and
+    /// frees units continuously grew `synchronizers` without bound and walked
+    /// the dead entries on every outbound pass.
+    ///
+    /// ⚠️ Not a correctness bug today, and it is worth being precise about why:
+    /// `NodeId` wraps a monotonic `AtomicU64` (`gdcore/src/id.rs:19`), so ids are
+    /// never recycled and a later node cannot inherit a dead synchronizer's
+    /// config. Were ids pooled, this leak would be a silent misconfiguration
+    /// rather than only a leak.
+    ///
+    /// `announced` is cleaned from BOTH sides: a removed spawner drops its whole
+    /// set, and a removed child is dropped from whichever spawner announced it —
+    /// otherwise the child ids accumulate in a live spawner's set forever.
+    fn forget_replication_entries(&mut self, nid: NodeId) {
+        self.replication.spawners.remove(&nid);
+        self.replication.synchronizers.remove(&nid);
+        self.replication.registered.remove(&nid);
+        self.replication.visibility_filters.remove(&nid);
+        self.replication.announced.remove(&nid);
+        self.replication.spawn_net_ids.remove(&nid);
+        for announced in self.replication.announced.values_mut() {
+            announced.remove(&nid);
+        }
     }
 
     /// Reparents a node to a new parent.
@@ -2638,6 +3019,213 @@ impl SceneTree {
             return true;
         };
         i64::from(peer.get_unique_id().0) == self.get_multiplayer_authority(node_id)
+    }
+
+    /// Godot `MultiplayerSynchronizer.set_visibility_for(peer, visible)`
+    /// (pat-s3rrv.17).
+    ///
+    /// ⚠️ Peer `0` is NOT a peer id. Godot documents it as meaning "update
+    /// `public_visibility` instead" (doc_classes/MultiplayerSynchronizer.xml).
+    /// Treating it as an ordinary id would store an override for a peer that can
+    /// never connect, leaving the real default untouched — the call would look
+    /// like it worked and change nothing.
+    ///
+    /// Returns `false` when `node_id` is not a registered synchronizer, so
+    /// calling it on the wrong node is a visible no-op rather than a silent one.
+    pub fn synchronizer_set_visibility_for(
+        &mut self,
+        node_id: NodeId,
+        peer: i64,
+        visible: bool,
+    ) -> bool {
+        let Some(sync) = self.replication.synchronizers.get_mut(&node_id) else {
+            return false;
+        };
+        if peer == 0 {
+            sync.set_visibility_public(visible);
+            return true;
+        }
+        // ⚠️ `PeerId` wraps a **u32**. `peer as u32` on a negative id would wrap
+        // it to a huge number and store an override that no real peer can ever
+        // match — a silent no-op that looks like a successful call. Reject it.
+        let Ok(peer_id) = u32::try_from(peer) else {
+            return false;
+        };
+        sync.set_visibility_for(gdplatform::network::PeerId(peer_id), visible);
+        true
+    }
+
+    /// Godot `MultiplayerSynchronizer.add_visibility_filter(callable)`
+    /// (pat-s3rrv.17).
+    ///
+    /// Returns `false` for a node that is not a registered synchronizer, or for
+    /// a non-`Callable` argument — storing a non-callable would defer the
+    /// failure to the outbound pass, where it would look like a filter that
+    /// simply never fires.
+    pub fn synchronizer_add_visibility_filter(&mut self, node_id: NodeId, filter: Variant) -> bool {
+        if !self.replication.synchronizers.contains_key(&node_id) {
+            return false;
+        }
+        if !matches!(filter, Variant::Callable(_)) {
+            return false;
+        }
+        let filters = self
+            .replication
+            .visibility_filters
+            .entry(node_id)
+            .or_default();
+        // ⚠️ Deduped, because Godot stores these in a `HashSet<Callable>`
+        // (`multiplayer_synchronizer.h:59`) and `add_visibility_filter` is an
+        // `insert` (`:211`). Pushing unconditionally into a `Vec` makes a filter
+        // added twice RUN twice on every outbound pass — which is invisible for
+        // a pure predicate and wrong the moment one has a side effect or is
+        // expensive, and it also makes a single `remove` leave a copy behind.
+        if !filters.contains(&filter) {
+            filters.push(filter);
+        }
+        true
+    }
+
+    /// Godot `MultiplayerSynchronizer.remove_visibility_filter(callable)`
+    /// (pat-s3rrv.17).
+    ///
+    /// Returns `true` when a filter was removed. Godot's `erase` on a
+    /// `HashSet` is silent about a filter that was never added, so a `false`
+    /// here means "nothing matched", not "the call was rejected" — the two
+    /// rejection cases (unknown node, non-Callable) also return `false`, which
+    /// mirrors `synchronizer_add_visibility_filter`.
+    ///
+    /// ⚠️ Equality is `CallableRef`'s own impl (`gdvariant/src/variant.rs:127`),
+    /// which compares a `Method` by `target_id` + `method` name — so the
+    /// `Callable(self, "_deny")` a script writes here matches the one it passed
+    /// to `add_visibility_filter`, even though the two are separate values.
+    ///
+    /// ⚠️ **A LAMBDA filter can never be removed.** That same impl ends
+    /// `_ => false` with the note "lambdas are never equal", so a script that
+    /// does `var f = func(peer): return false` / `add_visibility_filter(f)` /
+    /// `remove_visibility_filter(f)` silently keeps filtering. Godot compares
+    /// lambda Callables by instance and would remove it. Fixing that means
+    /// giving `CallableRef::Lambda` an identity, which is a gdvariant change and
+    /// not this one — recorded here so the gap is visible at the call site
+    /// rather than discovered in a game.
+    pub fn synchronizer_remove_visibility_filter(
+        &mut self,
+        node_id: NodeId,
+        filter: Variant,
+    ) -> bool {
+        if !self.replication.synchronizers.contains_key(&node_id) {
+            return false;
+        }
+        if !matches!(filter, Variant::Callable(_)) {
+            return false;
+        }
+        let Some(filters) = self.replication.visibility_filters.get_mut(&node_id) else {
+            return false;
+        };
+        let before = filters.len();
+        filters.retain(|f| f != &filter);
+        let removed = filters.len() != before;
+        // Drop the entry entirely once empty: `process_replication` gates the
+        // whole visibility pass on `visibility_filters.is_empty()` (:1376), so
+        // an empty-but-present Vec would keep a per-tick walk alive for a
+        // synchronizer that no longer filters anything.
+        if filters.is_empty() {
+            self.replication.visibility_filters.remove(&node_id);
+        }
+        removed
+    }
+
+    /// Godot `MultiplayerSynchronizer.is_visible_to(peer)` (pat-s3rrv.17).
+    ///
+    /// A node that is not a registered synchronizer answers `true`: Godot's
+    /// default is public visibility, and `false` would read as "deliberately
+    /// hidden" for a node that simply is not a synchronizer at all.
+    pub fn synchronizer_is_visible_to(&self, node_id: NodeId, peer: i64) -> bool {
+        if !self.replication.synchronizers.contains_key(&node_id) {
+            return true;
+        }
+        let Ok(peer_id) = u32::try_from(peer) else {
+            // A malformed id can be neither filtered nor overridden; answer with
+            // whatever the public default currently is.
+            return self
+                .replication
+                .synchronizers
+                .get(&node_id)
+                .map(|s| s.is_visibility_public())
+                .unwrap_or(true);
+        };
+        // ⚠️ Godot checks the FILTERS first and returns on the first veto,
+        // before consulting `peer_visibility` at all
+        // (multiplayer_synchronizer.cpp:193-207). Reading only the stored state
+        // here would report a peer as visible that the outbound pass then
+        // refuses to send to — two answers to the same question.
+        //
+        // The verdict is READ FROM CACHE rather than recomputed: see
+        // `filter_verdicts`. Evaluating here would re-enter a script that is
+        // already checked out of the arena and answer `None` for every filter.
+        // An absent entry means "not evaluated yet", which is not a veto.
+        if !self
+            .replication
+            .filter_verdicts
+            .get(&(node_id, peer_id))
+            .copied()
+            .unwrap_or(true)
+        {
+            return false;
+        }
+        self.replication
+            .synchronizers
+            .get(&node_id)
+            .map(|s| s.is_visible_to(gdplatform::network::PeerId(peer_id)))
+            .unwrap_or(true)
+    }
+
+    /// Runs every `add_visibility_filter` Callable on `sync_id`, returning
+    /// whether they all permit `peer_id` (pat-s3rrv.17).
+    ///
+    /// Mirrors `MultiplayerSynchronizer::is_visible_to`: the filters are ANDed
+    /// and the first `false` wins.
+    ///
+    /// ⚠️ Anything that is not a genuine `true` HIDES the peer. Godot's
+    /// `ERR_FAIL_COND_V(err != CALL_OK || ret.get_type() != BOOL, false)` fails
+    /// CLOSED, so a filter that errors, names a missing method, or returns a
+    /// non-bool must not be read as permission.
+    fn visibility_filters_allow(&mut self, sync_id: NodeId, peer_id: u32) -> bool {
+        let Some(filters) = self.replication.visibility_filters.get(&sync_id) else {
+            return true;
+        };
+        if filters.is_empty() {
+            return true;
+        }
+        // Resolve the targets first: invoking a script needs `&mut self`, which
+        // the borrow on `visibility_filters` above rules out.
+        let mut calls: Vec<(NodeId, String)> = Vec::new();
+        for filter in filters {
+            let Variant::Callable(callable) = filter else {
+                continue;
+            };
+            let gdvariant::CallableRef::Method { target_id, method } = callable.inner_callable()
+            else {
+                continue;
+            };
+            // `target_id` is documented "0 for self", and self is the
+            // synchronizer the filter was registered on. Converting 0 straight
+            // to a NodeId yields a node that does not exist, so the filter would
+            // be stored, evaluated and silently never run.
+            let target = if *target_id == 0 {
+                sync_id
+            } else {
+                NodeId::from_object_id(gdcore::id::ObjectId::from_raw(*target_id))
+            };
+            calls.push((target, method.clone()));
+        }
+        for (target, method) in calls {
+            let ret = self.call_script_method(target, &method, &[Variant::Int(i64::from(peer_id))]);
+            if !matches!(ret, Some(Variant::Bool(true))) {
+                return false;
+            }
+        }
+        true
     }
 
     pub fn collect_subtree_top_down(&self, id: NodeId, out: &mut Vec<NodeId>) {
@@ -4358,7 +4946,22 @@ impl SceneTree {
             }
             _ => false,
         };
-        let payload = input_event_to_variant(event, double_click);
+        // Mirror it for the picking stage, which runs after this call for the
+        // SAME event (`MainLoop::step`) and cannot recompute it safely.
+        self.last_double_click = double_click;
+        // ⚠️ Updated from KEY events, and read by the mouse and gesture arms.
+        // Every key event carries the modifier state the platform saw — the web
+        // bridge reads `shiftKey`/`ctrlKey`/`altKey` off the browser event
+        // (`gdplatform/src/input.rs:2634`) — and a modifier key press is itself a
+        // key event carrying its own flag, so holding Shift and clicking with no
+        // other key in between still updates this.
+        if let Ev::Key {
+            shift, ctrl, alt, ..
+        } = event
+        {
+            self.last_modifiers = (*shift, *ctrl, *alt);
+        }
+        let payload = input_event_to_variant(event, double_click, self.pen, self.last_modifiers);
         // Each event starts unhandled; `set_input_as_handled()` sets the flag.
         self.input_handled = false;
 
@@ -4554,6 +5157,63 @@ impl SceneTree {
         if let Some((node, idx, meta)) = now {
             self.emit_signal(node, "meta_hover_started", &[Variant::String(meta.clone())]);
             self.hovered_meta = Some((node, idx, meta));
+        }
+    }
+
+    /// The `HTTPRequest` state for `node_id`, created on first use.
+    ///
+    /// Lazy because a `.tscn` can carry any number of HTTPRequest nodes that a
+    /// scene never actually uses; spinning up transport state for each at load
+    /// time would allocate threads for requests nobody makes.
+    pub fn http_request_for(
+        &mut self,
+        node_id: NodeId,
+    ) -> &mut crate::http_request_node::HttpRequestNode {
+        self.http_requests.entry(node_id).or_default()
+    }
+
+    /// Whether `node_id` already has HTTP state (without creating any).
+    pub fn has_http_request(&self, node_id: NodeId) -> bool {
+        self.http_requests.contains_key(&node_id)
+    }
+
+    /// Polls every in-flight `HTTPRequest` and emits `request_completed` for the
+    /// ones that finished (pat-s3rrv.78).
+    ///
+    /// Godot: `request_completed(result, response_code, headers, body)` — the
+    /// headers are a `PackedStringArray` of `"Name: Value"` lines and the body a
+    /// `PackedByteArray`, which is what a script's handler destructures.
+    ///
+    /// ⚠️ The payloads are drained BEFORE any signal is emitted. A handler is
+    /// script code that can add or free nodes — including another HTTPRequest —
+    /// and mutating `http_requests` while iterating it would be the classic
+    /// "emit inside the loop over the collection you are about to change".
+    pub fn process_http_requests(&mut self) {
+        let ready: Vec<(NodeId, Vec<gdplatform::http_request::RequestCompleted>)> = self
+            .http_requests
+            .iter()
+            .map(|(id, req)| (*id, req.drain_completed()))
+            .filter(|(_, done)| !done.is_empty())
+            .collect();
+
+        for (node_id, done) in ready {
+            if !self.nodes.contains_key(&node_id) {
+                // The node was freed while the request was in flight; Godot
+                // drops the callback rather than emitting into a dead object.
+                continue;
+            }
+            for payload in done {
+                self.emit_signal(
+                    node_id,
+                    "request_completed",
+                    &[
+                        Variant::Int(payload.result as i64),
+                        Variant::Int(payload.response_code as i64),
+                        Variant::PackedStringArray(payload.headers),
+                        Variant::PackedByteArray(payload.body),
+                    ],
+                );
+            }
         }
     }
 
@@ -6333,9 +6993,42 @@ fn modifier_props(shift: bool, ctrl: bool, alt: bool) -> Vec<(&'static str, Vari
     ]
 }
 
+/// The stylus data the last pointer event carried (pat-s3rrv.76).
+///
+/// ⚠️ CARRIED, NOT DERIVED — which is why this is a side channel and not a
+/// computation like `double_click`. Pressure and tilt only exist if the browser
+/// reports them, so they have to travel from the pointer event to the script.
+///
+/// They ride HERE rather than on `InputEvent::MouseMotion` because that variant
+/// has 33 construction sites across six crates; the same objection kept
+/// `double_click` off `InputEvent::MouseButton` (74 sites), so this follows the
+/// precedent already set in `push_input` rather than inventing a second shape.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PenState {
+    /// `0.0`..=`1.0`; Godot reports `1.0` for a plain mouse press and `0.0`
+    /// otherwise (`InputEventMouseMotion.pressure`).
+    pub pressure: f32,
+    /// X/Y tilt in `-1.0`..=`1.0` (`InputEventMouseMotion.tilt`).
+    pub tilt: gdcore::math::Vector2,
+    /// Whether the eraser end of the stylus is in use.
+    pub inverted: bool,
+}
+
+impl Default for PenState {
+    fn default() -> Self {
+        Self {
+            pressure: 0.0,
+            tilt: gdcore::math::Vector2::ZERO,
+            inverted: false,
+        }
+    }
+}
+
 pub(crate) fn input_event_to_variant(
     event: &gdplatform::input::InputEvent,
     double_click: bool,
+    pen: PenState,
+    modifiers: (bool, bool, bool),
 ) -> Variant {
     use gdplatform::input::InputEvent as Ev;
 
@@ -6384,7 +7077,7 @@ pub(crate) fn input_event_to_variant(
                 ),
                 ("device", Variant::Int(0)),
             ];
-            props.extend(modifier_props(false, false, false));
+            props.extend(modifier_props(modifiers.0, modifiers.1, modifiers.2));
             input_event_object("InputEventMouseButton", props)
         }
         Ev::MouseMotion { position, relative } => {
@@ -6398,13 +7091,13 @@ pub(crate) fn input_event_to_variant(
                     "screen_velocity",
                     Variant::Vector2(gdcore::math::Vector2::ZERO),
                 ),
-                ("pressure", Variant::Float(0.0)),
-                ("tilt", Variant::Vector2(gdcore::math::Vector2::ZERO)),
-                ("pen_inverted", Variant::Bool(false)),
+                ("pressure", Variant::Float(f64::from(pen.pressure))),
+                ("tilt", Variant::Vector2(pen.tilt)),
+                ("pen_inverted", Variant::Bool(pen.inverted)),
                 ("button_mask", Variant::Int(0)),
                 ("device", Variant::Int(0)),
             ];
-            props.extend(modifier_props(false, false, false));
+            props.extend(modifier_props(modifiers.0, modifiers.1, modifiers.2));
             input_event_object("InputEventMouseMotion", props)
         }
         Ev::GamepadButton {
@@ -6480,6 +7173,32 @@ pub(crate) fn input_event_to_variant(
                 ("device", Variant::Int(0)),
             ],
         ),
+        // Gestures (pat-s3rrv.14). These three classes were registered in
+        // ClassDB (`class_db.rs:22707-22736`) with nothing able to produce one,
+        // so `event is InputEventPanGesture` type-checked and could never be
+        // true — a dead script branch rather than an error.
+        //
+        // `InputEventGesture` derives from `InputEventWithModifiers`, so the
+        // modifier props are emitted (as `false`) rather than omitted: leaving
+        // them out makes `event.shift_pressed` read Nil where Godot gives a bool.
+        Ev::MagnifyGesture { position, factor } => {
+            let mut props = vec![
+                ("position", Variant::Vector2(*position)),
+                ("factor", Variant::Float(f64::from(*factor))),
+                ("device", Variant::Int(0)),
+            ];
+            props.extend(modifier_props(modifiers.0, modifiers.1, modifiers.2));
+            input_event_object("InputEventMagnifyGesture", props)
+        }
+        Ev::PanGesture { position, delta } => {
+            let mut props = vec![
+                ("position", Variant::Vector2(*position)),
+                ("delta", Variant::Vector2(*delta)),
+                ("device", Variant::Int(0)),
+            ];
+            props.extend(modifier_props(modifiers.0, modifiers.1, modifiers.2));
+            input_event_object("InputEventPanGesture", props)
+        }
         Ev::Action {
             action,
             pressed,

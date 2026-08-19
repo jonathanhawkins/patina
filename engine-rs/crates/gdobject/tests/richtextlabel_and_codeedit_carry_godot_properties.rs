@@ -84,9 +84,18 @@ fn the_true_defaulting_bools_are_true() {
     }
 }
 
+/// ⚠️ TWENTY-FOUR, not twenty-two. This assertion was stale and RED AT HEAD:
+/// `CodeEdit`'s registration carries 24 own members and the test still demanded
+/// 22, so the whole binary failed on it (nextest cancels the remaining tests) —
+/// it sank an unrelated completion that merely listed this file's test command.
+///
+/// 24 is the CORRECT number, checked against the oracle rather than simply
+/// matching the code to itself: `doc/classes/CodeEdit.xml` documents exactly 24
+/// `<member>` entries, so the registration is complete and the count was the
+/// thing left behind when someone finished the surface.
 #[test]
-fn codeedit_carries_its_twenty_two_members() {
-    assert_eq!(own_count("CodeEdit"), 22);
+fn codeedit_carries_its_twenty_four_members() {
+    assert_eq!(own_count("CodeEdit"), 24);
 
     assert_eq!(own("CodeEdit", "indent_size"), Variant::Int(4));
     assert_eq!(
@@ -159,4 +168,85 @@ fn no_member_is_declared_twice_along_the_chain() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// pat-s3rrv.74 — the METHOD half of the same class
+// ---------------------------------------------------------------------------
+
+/// Own (non-inherited) methods of `class`, as `(name, argument_count)`.
+fn own_methods(class: &str) -> Vec<(String, usize)> {
+    register_all_classes();
+    get_class_info(class)
+        .unwrap_or_else(|| panic!("{class} is registered"))
+        .methods
+        .into_iter()
+        .map(|m| (m.name, m.argument_count))
+        .collect()
+}
+
+/// 🔑 RichTextLabel had 32/32 properties and 4/4 signals but **0 of 78 methods**.
+///
+/// So `ClassDB.class_get_method_list("RichTextLabel")` came back empty for a
+/// class whose entire purpose is its method API, and
+/// `class_has_method("RichTextLabel", "append_text")` answered false for a call
+/// the engine services today — the same reflection-denies-the-engine shape as
+/// the emitted-but-undeclared signals in pat-s3rrv.57.
+///
+/// These five are exactly the ones implemented and dispatched, all behind the
+/// `is_rich_text_label` guard in `gdscene/src/scripting.rs`. Arities and the
+/// `const` qualifiers come from `doc_classes/RichTextLabel.xml`.
+#[test]
+fn richtextlabel_declares_the_methods_it_actually_dispatches() {
+    let methods = own_methods("RichTextLabel");
+
+    for (name, arity) in [
+        ("append_text", 1),
+        ("add_text", 1),
+        ("clear", 0),
+        ("get_parsed_text", 0),
+        ("get_total_character_count", 0),
+    ] {
+        let found = methods
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("RichTextLabel must declare `{name}`; got {methods:?}"));
+        assert_eq!(
+            found.1, arity,
+            "`{name}` takes {arity} argument(s) per doc_classes/RichTextLabel.xml"
+        );
+    }
+}
+
+/// ⚠️ Methods belonging to OTHER classes must not appear here.
+///
+/// A bare name grep over the scene/script layers matches eight of Godot's 78
+/// RichTextLabel methods, but `select_all`, `deselect` and `get_selected_text`
+/// are guarded by `is_text_input` — they are LineEdit/TextEdit methods that
+/// merely share a name. Registering them would advertise another widget's API on
+/// this class, and a name-collision over-report is exactly how that happens.
+///
+/// This also pins the deliberate restraint: the other 73 documented methods are
+/// unimplemented, and `class_has_method` answering true for a call that raises
+/// is the same lie inverted.
+#[test]
+fn richtextlabel_does_not_borrow_the_text_input_methods() {
+    let names: Vec<String> = own_methods("RichTextLabel")
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+
+    for foreign in ["select_all", "deselect", "get_selected_text"] {
+        assert!(
+            !names.contains(&foreign.to_string()),
+            "`{foreign}` is dispatched for LineEdit/TextEdit, not RichTextLabel — \
+             registering it here would advertise another class's method"
+        );
+    }
+
+    assert_eq!(
+        names.len(),
+        5,
+        "only the five dispatched methods belong here today; got {names:?}"
+    );
 }

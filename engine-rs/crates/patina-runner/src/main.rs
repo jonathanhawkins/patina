@@ -46,6 +46,8 @@ struct Args {
     trace_frames: bool,
     /// Whether to emit the lifecycle event trace (notifications, script calls, signals).
     event_trace: bool,
+    /// The `--debug-*` overlays the editor's Debug menu launched us with.
+    debug: patina_runner::debug_flags::DebugFlags,
 }
 
 /// Parses command-line arguments manually (no extra dependency).
@@ -74,6 +76,7 @@ fn parse_args() -> Result<Args, String> {
     let mut delta: f64 = 1.0 / 60.0;
     let mut trace_frames = false;
     let mut event_trace = false;
+    let mut debug = patina_runner::debug_flags::DebugFlags::default();
 
     let mut i = if starts_with_flag { 1 } else { 2 };
     while i < args.len() {
@@ -105,7 +108,18 @@ fn parse_args() -> Result<Args, String> {
                 scene_path = args.get(i).ok_or("--main-pack requires a path")?.clone();
             }
             other => {
-                return Err(format!("unknown argument: {other}"));
+                // ⚠️ The editor's Debug menu launches Play with these
+                // (`DebugToggles::play_session_flags`), and this arm used to
+                // reject them — so checking ANY item in that menu made Play
+                // fail with `unknown argument: --debug-navigation` instead of
+                // starting with the overlay on (pat-s3rrv.82).
+                //
+                // Still an error for anything genuinely unknown: `apply`
+                // reports whether it recognised the flag rather than swallowing
+                // it, so a typo is not silently ignored.
+                if !debug.apply(other) {
+                    return Err(format!("unknown argument: {other}"));
+                }
             }
         }
         i += 1;
@@ -121,6 +135,7 @@ fn parse_args() -> Result<Args, String> {
         delta,
         trace_frames,
         event_trace,
+        debug,
     })
 }
 
@@ -434,6 +449,18 @@ fn run_booted_project(booted: project_boot::BootedProject, project_dir: &Path, a
         "process_time": main_loop.process_time(),
         "tree": dump_tree_json(main_loop.tree()),
     });
+    // Report the debug overlays this session was launched with (pat-s3rrv.82),
+    // so a harness can confirm the editor's Debug menu reached the runner
+    // rather than being dropped on the way.
+    //
+    // ⚠️ Only the ENABLED ones are emitted. An always-present block of five
+    // `false`s would change the output of every existing run and could break a
+    // consumer asserting on the exact report.
+    for (name, enabled) in args.debug.as_pairs() {
+        if enabled {
+            output[name] = Value::Bool(true);
+        }
+    }
     if args.trace_frames {
         output["frame_trace"] = Value::Array(frame_trace);
     }
@@ -578,6 +605,18 @@ fn main() {
         "tree": dump_tree_json(main_loop.tree()),
     });
     let mut output = output;
+    // Report the debug overlays this session was launched with (pat-s3rrv.82),
+    // so a harness can confirm the editor's Debug menu reached the runner
+    // rather than being dropped on the way.
+    //
+    // ⚠️ Only the ENABLED ones are emitted. An always-present block of five
+    // `false`s would change the output of every existing run and could break a
+    // consumer asserting on the exact report.
+    for (name, enabled) in args.debug.as_pairs() {
+        if enabled {
+            output[name] = Value::Bool(true);
+        }
+    }
     if args.trace_frames {
         output["frame_trace"] = Value::Array(frame_trace);
     }

@@ -207,7 +207,7 @@ fn polygon_shape_from_node(tree: &SceneTree, node_id: NodeId) -> Option<Shape2D>
 
 /// Extracts a collision shape from a `CollisionShape2D` or `CollisionPolygon2D`
 /// node's properties.
-fn shape_from_node(tree: &SceneTree, node_id: NodeId) -> Option<Shape2D> {
+pub(crate) fn shape_from_node(tree: &SceneTree, node_id: NodeId) -> Option<Shape2D> {
     let node = tree.get_node(node_id)?;
     // A CollisionPolygon2D carries its geometry inline as a `polygon`
     // PackedVector2Array rather than referencing a Shape2D sub-resource, so it
@@ -221,6 +221,20 @@ fn shape_from_node(tree: &SceneTree, node_id: NodeId) -> Option<Shape2D> {
     if node.class_name() != "CollisionShape2D" {
         return None;
     }
+    shape_from_shape_props(tree, node_id)
+}
+
+/// Builds a shape from a node's own `shape` property and its `__shape__*`
+/// companions, WITHOUT the collider-class guard above.
+///
+/// Split out for `ShapeCast2D` (pat-s3rrv.87), which carries a `shape`
+/// sub-resource of its own and is flattened identically — but which must NOT be
+/// accepted by [`shape_from_node`]. That function is called on **every child**
+/// when registering a body's colliders, and a shape cast is routinely a child of
+/// the body it casts from, so widening the class guard there would silently give
+/// that body an extra collision shape.
+pub(crate) fn shape_from_shape_props(tree: &SceneTree, node_id: NodeId) -> Option<Shape2D> {
+    let node = tree.get_node(node_id)?;
 
     // A real `.tscn` writes `shape = SubResource("id")`, which the parser leaves as
     // `"SubResource:<id>"`; the geometry lives on the sub-resource and is copied
@@ -1458,6 +1472,20 @@ impl PhysicsServer {
     /// and the tile bodies are rebuilt only when that fingerprint changes — so
     /// `set_cell`/`erase_cell` add and remove collision, while an untouched map
     /// keeps its bodies (and their ids) across frames.
+    /// Re-registers tilemap collision from the CURRENT `tile_map_data`
+    /// (pat-s3rrv.88).
+    ///
+    /// [`Self::register_tilemap_bodies`] only ever ran from
+    /// [`Self::register_bodies`], an explicit start-up call, so a cell painted
+    /// from a **script** reached pixels — the render path decodes
+    /// `tile_map_data` afresh every frame — but never reached collision. The
+    /// per-node fingerprint check inside makes this a no-op on frames where no
+    /// layer changed, so it is cheap enough to run every tick.
+    pub fn refresh_tilemap_bodies(&mut self, tree: &SceneTree) {
+        let all_ids = tree.all_nodes_in_tree_order();
+        self.register_tilemap_bodies(tree, &all_ids);
+    }
+
     fn register_tilemap_bodies(&mut self, tree: &SceneTree, all_ids: &[NodeId]) {
         for &node_id in all_ids {
             let Some(node) = tree.get_node(node_id) else {

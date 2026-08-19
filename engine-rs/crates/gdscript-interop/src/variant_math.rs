@@ -1684,6 +1684,21 @@ fn rect2i_method(r: Rect2i, method: &str, args: &[Variant]) -> Result<Variant, R
         "expand" => Ok(Variant::Rect2i(r.expand(arg_vec2i(args, 0, &ctx)?))),
         "abs" => Ok(Variant::Rect2i(r.abs())),
         "grow" => Ok(Variant::Rect2i(r.grow(arg_int(args, 0, &ctx)?))),
+        // pat-s3rrv.59: the float `Rect2` has had both of these since it was
+        // written; `Rect2i` had only `grow`, so a script porting integer rect
+        // maths hit UndefinedFunction on the two that take per-side amounts.
+        "grow_individual" => Ok(Variant::Rect2i(r.grow_individual(
+            arg_int(args, 0, &ctx)?,
+            arg_int(args, 1, &ctx)?,
+            arg_int(args, 2, &ctx)?,
+            arg_int(args, 3, &ctx)?,
+        ))),
+        // ⚠️ The side is a `@GlobalScope` Side ordinal (LEFT 0, TOP 1, RIGHT 2,
+        // BOTTOM 3), not a rect coordinate — read as an int and widened, the
+        // same shape `Rect2.grow_side` takes.
+        "grow_side" => Ok(Variant::Rect2i(
+            r.grow_side(i64::from(arg_int(args, 0, &ctx)?), arg_int(args, 1, &ctx)?),
+        )),
         _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("Rect2i.{method}"),
         ))),
@@ -1754,8 +1769,58 @@ fn vector4_method(v: Vector4, method: &str, args: &[Variant]) -> Result<Variant,
             let weight = arg_num(args, 1, &ctx)?;
             Ok(Variant::Vector4(v.lerp(to, weight)))
         }
+        // pat-s3rrv.59. ⚠️ Godot's order is (b, pre_a, post_b, weight) — `b` is
+        // the DESTINATION and `pre_a`/`post_b` the surrounding control points.
+        // Reading them in the scalar's (from, to, pre, post) order instead would
+        // still yield a smooth curve through plausible values.
+        "cubic_interpolate" => {
+            let b = arg_vec4(args, 0, &ctx)?;
+            let pre_a = arg_vec4(args, 1, &ctx)?;
+            let post_b = arg_vec4(args, 2, &ctx)?;
+            let weight = arg_num(args, 3, &ctx)?;
+            Ok(Variant::Vector4(
+                v.cubic_interpolate(b, pre_a, post_b, weight),
+            ))
+        }
+        "cubic_interpolate_in_time" => {
+            let b = arg_vec4(args, 0, &ctx)?;
+            let pre_a = arg_vec4(args, 1, &ctx)?;
+            let post_b = arg_vec4(args, 2, &ctx)?;
+            let weight = arg_num(args, 3, &ctx)?;
+            let b_t = arg_num(args, 4, &ctx)?;
+            let pre_a_t = arg_num(args, 5, &ctx)?;
+            let post_b_t = arg_num(args, 6, &ctx)?;
+            Ok(Variant::Vector4(v.cubic_interpolate_in_time(
+                b, pre_a, post_b, weight, b_t, pre_a_t, post_b_t,
+            )))
+        }
         "min" => Ok(Variant::Vector4(v.min(arg_vec4(args, 0, &ctx)?))),
         "max" => Ok(Variant::Vector4(v.max(arg_vec4(args, 0, &ctx)?))),
+        "minf" => Ok(Variant::Vector4(v.minf(arg_num(args, 0, &ctx)?))),
+        "maxf" => Ok(Variant::Vector4(v.maxf(arg_num(args, 0, &ctx)?))),
+        // ⚠️ `posmod` is Godot's `Math::fposmod`, whose result takes the sign of
+        // the DIVISOR — `Vector4(5,5,5,5).posmod(-3)` is `-1` per component, not
+        // `2`. Rust's `rem_euclid` is the always-positive spelling and disagrees
+        // on exactly the negative-divisor case a wrapping calculation uses.
+        "posmod" => Ok(Variant::Vector4(v.posmod(arg_num(args, 0, &ctx)?))),
+        "posmodv" => Ok(Variant::Vector4(v.posmodv(arg_vec4(args, 0, &ctx)?))),
+        // ⚠️ `snapped` rounds half UP (`floor(v/step + 0.5)`), not half away
+        // from zero: snapping `-2.5` to a step of 1 gives `-2`, where `round()`
+        // gives `-3`.
+        "snapped" => Ok(Variant::Vector4(v.snapped(arg_vec4(args, 0, &ctx)?))),
+        "snappedf" => Ok(Variant::Vector4(v.snappedf(arg_num(args, 0, &ctx)?))),
+        // ⚠️ The component-wise RECIPROCAL, not a negation or a normalise.
+        "inverse" => Ok(Variant::Vector4(v.inverse())),
+        "clamp" => {
+            let lo = arg_vec4(args, 0, &ctx)?;
+            let hi = arg_vec4(args, 1, &ctx)?;
+            Ok(Variant::Vector4(v.clamp(lo, hi)))
+        }
+        "clampf" => {
+            let lo = arg_num(args, 0, &ctx)?;
+            let hi = arg_num(args, 1, &ctx)?;
+            Ok(Variant::Vector4(v.clampf(lo, hi)))
+        }
         "is_finite" => Ok(Variant::Bool(
             v.x.is_finite() && v.y.is_finite() && v.z.is_finite() && v.w.is_finite(),
         )),
@@ -1826,6 +1891,24 @@ fn vector4i_method(v: Vector4i, method: &str, args: &[Variant]) -> Result<Varian
             let hi = arg_vec4i(args, 1, &ctx)?;
             Ok(Variant::Vector4i(v.clamp(lo, hi)))
         }
+        "clampi" => {
+            let lo = arg_int(args, 0, &ctx)?;
+            let hi = arg_int(args, 1, &ctx)?;
+            Ok(Variant::Vector4i(v.clampi(lo, hi)))
+        }
+        "mini" => Ok(Variant::Vector4i(v.mini(arg_int(args, 0, &ctx)?))),
+        "maxi" => Ok(Variant::Vector4i(v.maxi(arg_int(args, 0, &ctx)?))),
+        "snapped" => Ok(Variant::Vector4i(v.snapped(arg_vec4i(args, 0, &ctx)?))),
+        "snappedi" => Ok(Variant::Vector4i(v.snappedi(arg_int(args, 0, &ctx)?))),
+        "distance_to" => Ok(Variant::Float(
+            v.distance_to(arg_vec4i(args, 0, &ctx)?) as f64
+        )),
+        // ⚠️ An INT, matching Godot's `int64_t` signature: the squared length of
+        // an integer vector is exact, and a float would lose that for the
+        // comparison this method exists to make cheap.
+        "distance_squared_to" => Ok(Variant::Int(
+            v.distance_squared_to(arg_vec4i(args, 0, &ctx)?),
+        )),
         // Same asymmetry as Vector4's; see the note there.
         "max_axis_index" => {
             let mut idx = 0;

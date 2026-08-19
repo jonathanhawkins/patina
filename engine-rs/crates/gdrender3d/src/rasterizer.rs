@@ -172,6 +172,17 @@ pub fn rasterize_triangle_with_modes(
     alpha_scissor_threshold: f32,
     depth_draw_mode: crate::render_modes::DepthDrawMode,
     blend_mode: crate::render_modes::BlendMode,
+    // Godot `no_depth_test`: skip the depth COMPARISON entirely, so the
+    // surface draws over whatever is already there regardless of distance
+    // (pat-s3rrv.30).
+    //
+    // ⚠️ Orthogonal to `depth_draw_mode`, which controls the WRITE. A material
+    // can test without writing, write without testing, both, or neither, and
+    // Godot exposes them as two separate controls for exactly that reason.
+    //
+    // ⚠️ Plain `//`, NOT `///` — a doc comment on a function PARAMETER is a
+    // hard compile error, and the formatter accepts it because it only parses.
+    no_depth_test: bool,
 ) {
     use crate::render_modes::{
         alpha_scissor_discard, blend_pixel, is_transparent, writes_depth, Transparency,
@@ -179,7 +190,16 @@ pub fn rasterize_triangle_with_modes(
 
     // Opaque materials keep the original path exactly — same ordering, same
     // early depth rejection, so nothing about existing rendering changes.
-    if transparency == Transparency::Disabled {
+    //
+    // ⚠️ …UNLESS `no_depth_test` is set. `rasterize_triangle` owns its own
+    // depth rejection and knows nothing about the flag, so taking this
+    // shortcut would silently ignore `no_depth_test` for every OPAQUE
+    // material — which is the common case, and exactly the surface the flag
+    // exists for (pat-s3rrv.30). Falling through costs the general path only
+    // when the flag is actually set; the general path writes
+    // `pixels[idx] = color` directly for a non-blended fragment, which is what
+    // the fast path does, so the output is unchanged.
+    if transparency == Transparency::Disabled && !no_depth_test {
         rasterize_triangle(
             v0,
             v1,
@@ -235,7 +255,11 @@ pub fn rasterize_triangle_with_modes(
 
             // Test only — the write is deferred until the fragment is known to
             // survive, and skipped entirely when the mode says so.
-            if depth >= depth_buf.get(ux, uy) {
+            //
+            // `no_depth_test` skips the COMPARISON but not the write: a
+            // material that disables the test can still occlude what comes
+            // after it, which is what Godot does.
+            if !no_depth_test && depth >= depth_buf.get(ux, uy) {
                 continue;
             }
 
@@ -399,6 +423,76 @@ mod tests {
         assert!(
             filled > 10,
             "triangle should fill many pixels, got {filled}"
+        );
+    }
+
+    /// pat-s3rrv.30: `no_depth_test` skips the depth COMPARISON.
+    ///
+    /// Both halves matter. With the flag off a farther surface must still be
+    /// occluded — otherwise the "on" case proves nothing, because a rasterizer
+    /// that never tested depth at all would pass it.
+    #[test]
+    fn no_depth_test_lets_a_farther_surface_draw_over_a_nearer_one() {
+        let (width, height) = (8u32, 8u32);
+        let count = (width * height) as usize;
+        let fs = UnlitFragmentShader;
+
+        let near = [
+            make_screen_vertex(0.0, 0.0, 0.3),
+            make_screen_vertex(7.0, 0.0, 0.3),
+            make_screen_vertex(3.5, 7.0, 0.3),
+        ];
+        let far = [
+            make_screen_vertex(0.0, 0.0, 0.8),
+            make_screen_vertex(7.0, 0.0, 0.8),
+            make_screen_vertex(3.5, 7.0, 0.8),
+        ];
+
+        let mut red = default_uniforms();
+        red.albedo = Color::new(1.0, 0.0, 0.0, 1.0);
+        let mut blue = default_uniforms();
+        blue.albedo = Color::new(0.0, 0.0, 1.0, 1.0);
+
+        // Draws `near` red, then `far` blue with the given flag, and reports
+        // how many pixels ended up blue.
+        let run = |no_depth_test: bool| -> usize {
+            let mut pixels = vec![Color::BLACK; count];
+            let mut depth = DepthBuffer::new(width, height);
+            for (tri, uniforms) in [(&near, &red), (&far, &blue)] {
+                rasterize_triangle_with_modes(
+                    &tri[0],
+                    &tri[1],
+                    &tri[2],
+                    &mut pixels,
+                    &mut depth,
+                    width,
+                    height,
+                    &fs,
+                    uniforms,
+                    // ⚠️ Fully qualified: the test module's `use super::*`
+                    // pulls in this file's items, and the mode enums live in
+                    // `crate::render_modes` — the function SIGNATURE qualifies
+                    // them for the same reason.
+                    crate::render_modes::Transparency::Disabled,
+                    0.5,
+                    crate::render_modes::DepthDrawMode::OpaqueOnly,
+                    crate::render_modes::BlendMode::Mix,
+                    no_depth_test,
+                );
+            }
+            pixels.iter().filter(|c| c.b > 0.9 && c.r < 0.1).count()
+        };
+
+        assert_eq!(
+            run(false),
+            0,
+            "with the depth test ON the farther blue triangle must be fully \
+             occluded by the nearer red one",
+        );
+        assert!(
+            run(true) > 0,
+            "with `no_depth_test` the farther blue triangle must draw over the \
+             nearer red one regardless of distance",
         );
     }
 
