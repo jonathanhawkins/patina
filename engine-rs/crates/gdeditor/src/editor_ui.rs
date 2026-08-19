@@ -2411,6 +2411,12 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
               <button id="tileset-assign-atlas" title="Assign this texture as the atlas source for the selected TileMapLayer">Assign</button>
             </div>
             <div id="tileset-sources" style="opacity:0.75;margin-bottom:5px;"></div>
+            <!-- pat-s3rrv.65: the atlas rendered as a clickable tile grid.
+                 Selecting a cell writes the atlas coords into the number inputs
+                 below, so every existing per-tile action (collision, nav,
+                 occlusion, custom data) drives off the same value it always
+                 did — the grid replaces the TYPING, not the wiring. -->
+            <div id="tileset-atlas-grid" style="display:flex;flex-wrap:wrap;gap:1px;margin-bottom:5px;max-height:180px;overflow:auto;"></div>
             <div style="font-weight:bold;margin-bottom:4px;">Tile Data</div>
             <div style="display:flex;gap:3px;align-items:center;margin-bottom:3px;">
               <span style="opacity:0.7;">atlas</span>
@@ -6954,6 +6960,81 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       })(sources[i]);
     }
     await buildTileSetTiles();
+    buildTileSetAtlasGrid(sources);
+  }
+
+  // Godot's atlas view: the source texture sliced into its tile grid, one cell
+  // per addressable tile, click to choose which tile the Tile Data controls
+  // edit (pat-s3rrv.65).
+  //
+  // The grid EXTENT comes from the image itself — cols = naturalWidth /
+  // region_w — so no server round-trip is needed to learn the atlas size, and a
+  // texture that fails to load degrades to a message rather than an empty box.
+  function buildTileSetAtlasGrid(sources) {
+    var host = document.getElementById('tileset-atlas-grid');
+    if (!host) return;
+    host.innerHTML = '';
+    var src = null;
+    for (var i = 0; i < sources.length; i++) {
+      if (sources[i].id === tileSetSourceId) { src = sources[i]; }
+    }
+    if (!src || !src.texture) { return; }
+    var rw = (src.region_size && src.region_size[0]) || 16;
+    var rh = (src.region_size && src.region_size[1]) || 16;
+    var url = '/api/preview/file?path=' + encodeURIComponent(src.texture);
+    var img = new Image();
+    img.onerror = function() { host.textContent = 'atlas preview unavailable'; };
+    img.onload = function() {
+      var cols = Math.max(1, Math.floor(img.naturalWidth / rw));
+      var rows = Math.max(1, Math.floor(img.naturalHeight / rh));
+      // A 1024px atlas of 16px tiles is 64x64 = 4096 cells; building that many
+      // DOM nodes locks the panel. Cap the rendered window and say so rather
+      // than silently drawing part of the atlas as if it were all of it.
+      var maxCells = 1024;
+      var truncated = cols * rows > maxCells;
+      if (truncated) { rows = Math.max(1, Math.floor(maxCells / cols)); }
+      host.style.width = (cols * (rw + 1)) + 'px';
+      for (var y = 0; y < rows; y++) {
+        for (var x = 0; x < cols; x++) {
+          host.appendChild(tileSetAtlasCell(x, y, rw, rh, url));
+        }
+      }
+      if (truncated) {
+        var note = document.createElement('div');
+        note.style.cssText = 'flex-basis:100%;opacity:0.7;font-size:10px;';
+        note.textContent = 'showing first ' + (cols * rows) + ' tiles';
+        host.appendChild(note);
+      }
+    };
+    img.src = url;
+  }
+
+  // One atlas cell. The texture is positioned so the cell shows exactly its own
+  // tile, which is why the whole grid can share a single decoded image.
+  function tileSetAtlasCell(x, y, rw, rh, url) {
+    var cur = tileSetAtlasCoords();
+    var selected = cur[0] === x && cur[1] === y;
+    var cell = document.createElement('div');
+    cell.className = 'tileset-atlas-cell';
+    cell.setAttribute('data-atlas-x', String(x));
+    cell.setAttribute('data-atlas-y', String(y));
+    cell.title = '(' + x + ', ' + y + ')';
+    cell.style.cssText =
+      'width:' + rw + 'px;height:' + rh + 'px;cursor:pointer;' +
+      'background-image:url("' + url + '");' +
+      'background-position:' + (-x * rw) + 'px ' + (-y * rh) + 'px;' +
+      'outline:1px solid ' + (selected ? 'var(--accent,#5c9ded)' : 'rgba(255,255,255,0.15)') + ';' +
+      'outline-offset:-1px;';
+    cell.addEventListener('click', function() {
+      // Writes the SAME inputs a user could type into, so selection and manual
+      // entry stay interchangeable and no handler needs to know about the grid.
+      var xi = document.getElementById('tileset-tile-x');
+      var yi = document.getElementById('tileset-tile-y');
+      if (xi) { xi.value = String(x); }
+      if (yi) { yi.value = String(y); }
+      buildTileSetEditor();
+    });
+    return cell;
   }
 
   async function buildTileSetTiles() {

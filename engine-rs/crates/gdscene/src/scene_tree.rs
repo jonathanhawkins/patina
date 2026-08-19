@@ -436,6 +436,11 @@ pub struct SceneTree {
     /// pointer is only ever installed for the duration of a script phase by
     /// [`SceneTree::set_script_physics_server`].
     script_physics: usize,
+    /// The 3D twin of [`script_physics`](Self::script_physics) (pat-s3rrv.107).
+    ///
+    /// Separate address rather than an enum: the two servers are different
+    /// types and a script can legitimately query both in one frame.
+    script_physics_3d: usize,
     /// Address of the `AudioServer` scripts reach through the `AudioServer`
     /// singleton, installed for the duration of a script phase
     /// (pat-s3rrv.6). A `usize` for the same `Send` reason as
@@ -628,6 +633,7 @@ impl SceneTree {
             scripts: HashMap::new(),
             input_snapshot: None,
             script_physics: 0,
+            script_physics_3d: 0,
             script_audio: 0,
             multiplayer_auth_callback: Variant::Nil,
             pending_input_commands: Vec::new(),
@@ -2062,6 +2068,31 @@ impl SceneTree {
         self.script_physics
     }
 
+    /// Binds the 3D physics server scripts reach through
+    /// `get_world_3d().direct_space_state` for the duration of a script phase
+    /// (pat-s3rrv.107). The 3D twin of `set_script_physics_server`.
+    pub fn set_script_physics_server_3d(
+        &mut self,
+        server: &mut crate::physics_server_3d::PhysicsServer3D,
+    ) {
+        self.script_physics_3d = server as *mut crate::physics_server_3d::PhysicsServer3D as usize;
+    }
+
+    /// Unbinds the script-facing 3D physics server.
+    ///
+    /// ⚠️ ALWAYS call this before the bound server can move or drop — it is the
+    /// half of the pair that matters. A missed BIND merely leaves the address at
+    /// 0, which reads as "no server" and answers queries emptily; a missed
+    /// CLEAR leaves a dangling address.
+    pub fn clear_script_physics_server_3d(&mut self) {
+        self.script_physics_3d = 0;
+    }
+
+    /// The bound script-facing 3D physics server address, or 0 when none.
+    pub(crate) fn script_physics_3d_addr(&self) -> usize {
+        self.script_physics_3d
+    }
+
     /// Binds `server` as the audio server that scripts reach through the
     /// `AudioServer` singleton for the duration of a script phase
     /// (pat-s3rrv.6).
@@ -3100,14 +3131,17 @@ impl SceneTree {
     /// `Callable(self, "_deny")` a script writes here matches the one it passed
     /// to `add_visibility_filter`, even though the two are separate values.
     ///
-    /// ⚠️ **A LAMBDA filter can never be removed.** That same impl ends
-    /// `_ => false` with the note "lambdas are never equal", so a script that
-    /// does `var f = func(peer): return false` / `add_visibility_filter(f)` /
-    /// `remove_visibility_filter(f)` silently keeps filtering. Godot compares
-    /// lambda Callables by instance and would remove it. Fixing that means
-    /// giving `CallableRef::Lambda` an identity, which is a gdvariant change and
-    /// not this one — recorded here so the gap is visible at the call site
-    /// rather than discovered in a game.
+    /// ⚠️ **A lambda filter used to be unremovable, and now is not**
+    /// (pat-s3rrv.67). `CallableRef`'s `PartialEq` ended `_ => false` with the
+    /// note "lambdas are never equal", so a script doing
+    /// `var f = func(peer): return false` / `add_visibility_filter(f)` /
+    /// `remove_visibility_filter(f)` silently kept filtering forever, because
+    /// `retain` compares by equality and nothing ever matched. Lambdas now
+    /// compare by the identity of their body `Arc`, which is exactly Godot's
+    /// rule — *"Lambda callables are only compared by reference"*
+    /// (`gdscript_lambda_callable.cpp:37-40`). The script must hand back the
+    /// SAME Callable it added, as it must in Godot; a freshly written
+    /// `func(peer): return false` is a different lambda and removes nothing.
     pub fn synchronizer_remove_visibility_filter(
         &mut self,
         node_id: NodeId,

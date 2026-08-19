@@ -144,6 +144,14 @@ pub fn process_character_movement(tree: &mut SceneTree, physics: &PhysicsServer3
         character.floor_stop_on_slope = bool_prop(tree, node_id, "floor_stop_on_slope", true);
         character.floor_constant_speed = bool_prop(tree, node_id, "floor_constant_speed", false);
         character.floor_block_on_wall = bool_prop(tree, node_id, "floor_block_on_wall", true);
+        // Godot's default is TRUE — a body slides along a ceiling unless the
+        // scene explicitly turns it off (`CharacterBody3D.xml:183`).
+        character.slide_on_ceiling = bool_prop(tree, node_id, "slide_on_ceiling", true);
+        // Godot's default is EVERY layer (4294967295), so an unauthored scene
+        // keeps the carry-everything behaviour it had before this existed
+        // (`CharacterBody3D.xml:168`).
+        character.platform_floor_layers =
+            u32_prop(tree, node_id, "platform_floor_layers", u32::MAX);
         character.wall_min_slide_angle = f32_prop(
             tree,
             node_id,
@@ -198,6 +206,48 @@ pub fn process_character_movement(tree: &mut SceneTree, physics: &PhysicsServer3
             Vector3::ZERO
         };
 
+        // Godot's `get_position_delta` — the travel over the last
+        // `move_and_slide` (pat-s3rrv.103). Same numerator as `_real_velocity`
+        // above WITHOUT the division, so the two cannot disagree about how far
+        // the body went.
+        let position_delta = end - start;
+        // ⚠️ `get_last_motion` is NOT this. Godot splits the movement into
+        // several motions when sliding occurs and reports the LAST one, so it
+        // equals the delta only when nothing was hit. The solver records it per
+        // sub-step; reusing `position_delta` here would look right in every
+        // fixture that never collides.
+        let last_motion = character.get_last_motion();
+        let platform_angular_velocity = character.get_platform_angular_velocity();
+
+        // Godot's `get_slide_collision(i)` / `KinematicCollision3D`
+        // (pat-s3rrv.103). Published as the SAME `_slide_collisions` array the
+        // 2D bridge writes, with the same keys, because the script surface that
+        // reads it is dimension-agnostic: `kinematic_collision_call` hands each
+        // field straight back with `rec.get(k).cloned()`, so a Vector3 stored
+        // here is what `get_normal()` returns — no 3D-specific arm needed.
+        //
+        // ⚠️ The collider is resolved from `BodyId3D` to a NODE here. The solver
+        // deliberately records only the id (it knows nothing about the tree),
+        // and this is the only place holding both halves of that map.
+        let slide_records: Vec<Variant> = (0..character.get_slide_collision_count())
+            .filter_map(|i| character.get_slide_collision(i).copied())
+            .map(|c| {
+                let mut rec = gdvariant::Dictionary::new();
+                rec.insert("normal", Variant::Vector3(c.normal));
+                rec.insert("depth", Variant::Float(c.depth as f64));
+                rec.insert("position", Variant::Vector3(c.position));
+                rec.insert("remainder", Variant::Vector3(c.remainder));
+                rec.insert(
+                    "collider",
+                    c.collider
+                        .and_then(|bid| physics.node_for_body(bid))
+                        .map(|nid| Variant::ObjectId(nid.object_id()))
+                        .unwrap_or(Variant::Nil),
+                );
+                Variant::Dictionary(rec)
+            })
+            .collect();
+
         // De-parent through the parent chain before storing — `position` is a
         // LOCAL property, and writing a world coordinate into it re-applies the
         // parent offset every tick (pat-0q2kx.31).
@@ -210,6 +260,13 @@ pub fn process_character_movement(tree: &mut SceneTree, physics: &PhysicsServer3
             node.set_property("floor_normal", Variant::Vector3(floor_normal));
             node.set_property("platform_velocity", Variant::Vector3(platform_velocity));
             node.set_property("_real_velocity", Variant::Vector3(real_velocity));
+            node.set_property("_position_delta", Variant::Vector3(position_delta));
+            node.set_property("_last_motion", Variant::Vector3(last_motion));
+            node.set_property(
+                "_platform_angular_velocity",
+                Variant::Vector3(platform_angular_velocity),
+            );
+            node.set_property("_slide_collisions", Variant::Array(slide_records));
         }
     }
 }

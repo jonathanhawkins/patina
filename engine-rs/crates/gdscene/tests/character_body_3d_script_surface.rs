@@ -259,3 +259,136 @@ func _physics_process(delta):
          guarantees"
     );
 }
+
+/// `get_position_delta()`, `get_last_motion()` and `get_platform_angular_velocity()`
+/// (pat-s3rrv.103).
+///
+/// ⚠️ `position_delta` and `last_motion` are DIFFERENT quantities that happen to
+/// coincide here: Godot splits a movement into several motions when sliding
+/// occurs and `get_last_motion` reports the final segment, so the two agree
+/// exactly when nothing was hit. This walker is unobstructed, which is why the
+/// equality below is the correct assertion — and why it is deliberately paired
+/// with the wall test underneath, which is the case that can tell them apart.
+#[test]
+fn position_delta_and_last_motion_are_reported_in_3d() {
+    let script = "\
+extends CharacterBody3D
+var ticks = 0
+var delta_v = Vector3(-1, -1, -1)
+var last_v = Vector3(-1, -1, -1)
+var ang_type = -1
+func _physics_process(delta):
+    velocity = Vector3(4, 0, 0)
+    move_and_slide()
+    self.ticks = self.ticks + 1
+    self.delta_v = get_position_delta()
+    self.last_v = get_last_motion()
+    self.ang_type = typeof(get_platform_angular_velocity())
+";
+    let (mut ml, player) = walker_scene(script);
+    for _ in 0..30 {
+        ml.step(1.0 / 60.0);
+    }
+
+    assert!(
+        int_prop(&ml, player, "ticks") > 0,
+        "`_physics_process` never ran"
+    );
+
+    // 4 units/s over a 1/60 tick ≈ 0.0667 of travel along +x.
+    let expected = 4.0 / 60.0;
+    match prop(&ml, player, "delta_v") {
+        Variant::Vector3(v) => assert!(
+            (v.x - expected).abs() < 0.02 && v.y.abs() < 0.02,
+            "get_position_delta() must be the travel over ONE move_and_slide \
+             (~{expected} along +x), got {v:?} — a value ~60x larger means it \
+             is reporting a per-second velocity instead of a delta"
+        ),
+        other => panic!("`delta_v` must be a Vector3, got {other:?}"),
+    }
+    match prop(&ml, player, "last_v") {
+        Variant::Vector3(v) => assert!(
+            (v.x - expected).abs() < 0.02,
+            "with nothing obstructing the walker the slide is a single segment, \
+             so get_last_motion() must equal the travel; got {v:?}"
+        ),
+        other => panic!("`last_v` must be a Vector3, got {other:?}"),
+    }
+    // 3D-only in Godot — CharacterBody2D has no such method — so it must answer
+    // a Vector3 rather than going through the 2D/3D dimension fallback.
+    assert_eq!(
+        int_prop(&ml, player, "ang_type"),
+        TYPE_VECTOR3,
+        "get_platform_angular_velocity() must be a Vector3"
+    );
+}
+
+/// 🔑 The case that separates the two: a body sliding along a wall.
+///
+/// ⚠️ Godot documents `get_last_motion` as *"useful to retrieve the current
+/// direction of the movement"* — the final segment, after the slide has removed
+/// the component pointing into the surface. So a character shoved hard into a
+/// wall must NOT report a last motion that still points into it, however large
+/// the commanded velocity along that axis was. An implementation that reported
+/// the raw requested motion, or that measured the outer anti-tunnelling
+/// sub-step rather than the slide iteration, fails exactly here.
+#[test]
+fn last_motion_follows_the_wall_not_the_input() {
+    let script = "\
+extends CharacterBody3D
+var ticks = 0
+var last_v = Vector3(-1, -1, -1)
+func _physics_process(delta):
+    velocity = Vector3(20, 0, 4)
+    move_and_slide()
+    self.ticks = self.ticks + 1
+    self.last_v = get_last_motion()
+";
+    // A wall standing at x = +2, thin in x and tall/wide in y/z.
+    let (mut ml, player) = walker_scene(script);
+    {
+        let tree = ml.tree_mut();
+        let root = tree
+            .get_node(player)
+            .and_then(|n| n.parent())
+            .expect("player has a parent");
+        let mut wall = Node::new("Wall", "StaticBody3D");
+        wall.set_property("position", Variant::Vector3(Vector3::new(2.0, 0.0, 0.0)));
+        let wall_id = tree.add_child(root, wall).unwrap();
+        let mut ws = Node::new("WallShape", "CollisionShape3D");
+        ws.set_property("shape", Variant::String("BoxShape3D".to_string()));
+        ws.set_property("size", Variant::Vector3(Vector3::new(1.0, 40.0, 40.0)));
+        tree.add_child(wall_id, ws).unwrap();
+    }
+    for _ in 0..90 {
+        ml.step(1.0 / 60.0);
+    }
+
+    assert!(
+        int_prop(&ml, player, "ticks") > 0,
+        "`_physics_process` never ran"
+    );
+    let end = node3d::get_position(ml.tree(), player);
+    assert!(
+        end.x < 2.0,
+        "the walker must be stopped by the wall at x = 2 rather than passing \
+         through it, ended at {end:?} — without contact this test proves nothing"
+    );
+    match prop(&ml, player, "last_v") {
+        Variant::Vector3(v) => {
+            // The commanded x velocity is 5x the z one, so a last motion that
+            // still leads with x would mean the slide projection never applied.
+            assert!(
+                v.x.abs() <= v.z.abs() + 0.01,
+                "pressed against a wall on +x, get_last_motion() must follow the \
+                 wall (mostly +z), not the input that points into it; got {v:?}"
+            );
+            assert!(
+                v.z > 0.0,
+                "and it must still carry the along-wall component the body is \
+                 actually travelling, got {v:?}"
+            );
+        }
+        other => panic!("`last_v` must be a Vector3, got {other:?}"),
+    }
+}

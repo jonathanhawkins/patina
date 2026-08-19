@@ -466,6 +466,9 @@ pub struct MainLoop {
     process_time: f64,
     /// Total accumulated physics (fixed-timestep) time in seconds.
     physics_time: f64,
+    /// Feeds `time/fps` and the process/physics timings into the process-wide
+    /// [`gdcore::performance`] registry each frame (pat-s3rrv.109).
+    performance_feed: gdcore::performance::FrameMonitorFeed,
     /// Time left over from physics stepping, carried into the next frame.
     physics_accumulator: f64,
     /// Double-buffered physics transforms for render-tick interpolation
@@ -622,6 +625,7 @@ impl MainLoop {
             engine_physics_tps_gen: gdscript_interop::engine_physics_ticks_per_second_generation(),
             process_time: 0.0,
             physics_time: 0.0,
+            performance_feed: gdcore::performance::FrameMonitorFeed::new(),
             physics_accumulator: 0.0,
             physics_interpolation: crate::physics_interpolation::PhysicsInterpolationState::new(),
             physics_interpolation_3d:
@@ -920,6 +924,10 @@ impl MainLoop {
             .collect();
         // --- 3D simulators (pat-0q2kx.154) ---
         self.particles_3d.retain(|id, _| present_3d.contains(id));
+        // Collected rather than emitted inside the loop: the loop holds a
+        // mutable borrow of `self.particles_3d`, and `emit_signal` needs
+        // `self.tree`. The 2D pass above is split for the same reason.
+        let mut finished_emitters_3d: Vec<NodeId> = Vec::new();
         for (id, is_emitting, emitter) in configs_3d {
             let sim = self
                 .particles_3d
@@ -927,9 +935,31 @@ impl MainLoop {
                 .or_insert_with(|| crate::particle3d::ParticleSimulator3D::new(emitter.clone()));
             // Re-read the authored config each frame so a property edited at
             // runtime takes effect, matching how the 2D path behaves.
+            //
+            // ⚠️ A drained one-shot must NOT be re-armed from the node. The
+            // node's `emitting` property stays `true` for the whole scene —
+            // nothing writes it back — so assigning it straight through resets
+            // `emitting` every frame, and `is_complete()` (which requires
+            // `!emitting`) can never become true. The simulator's own step sets
+            // the flag false when the burst drains; this preserves that
+            // decision. The 2D pass has computed the same suppression since
+            // pat-nzgdu.145 (pat-s3rrv.111).
+            let one_shot_finished = emitter.one_shot && sim.total_emitted >= emitter.amount as u64;
+            let emitting = is_emitting && !one_shot_finished;
             sim.emitter = emitter;
-            sim.emitter.emitting = is_emitting;
+            sim.emitter.emitting = emitting;
             sim.step(dt);
+            // Drain the one-shot completion edge (fires exactly once per drain).
+            if sim.take_finished() {
+                finished_emitters_3d.push(id);
+            }
+        }
+        // Godot fires `finished` when a one_shot emitter completes. The 3D
+        // simulator has carried `is_complete()` since pat-0q2kx.154 and nothing
+        // ever read it, so a CPUParticles3D never emitted the signal its class
+        // has always declared (pat-s3rrv.111).
+        for id in finished_emitters_3d {
+            self.tree.emit_signal(id, "finished", &[]);
         }
         let positions_3d: Vec<(NodeId, Vec<gdcore::math::Vector3>, Vec<Color>)> = self
             .particles_3d
@@ -2501,6 +2531,34 @@ impl MainLoop {
     }
 
     /// Returns a reference to the audio bridge.
+    /// Reroutes every live positional voice standing inside an `Area3D` whose
+    /// `audio_bus_override` is on to that area's `audio_bus_name`
+    /// (pat-s3rrv.102).
+    ///
+    /// ⚠️ `AudioServer::redirect_stream_bus` shipped with the audio server,
+    /// documented as being "for Godot's Area3D/Area2D audio-bus override", and
+    /// had no caller in the entire workspace — the effect existed and was
+    /// unreachable from a scene. This sweep is what connects the two.
+    ///
+    /// A player NOT inside an overriding area is left alone rather than being
+    /// forced back to Master: its bus is whatever the node itself asked for,
+    /// and stamping Master over that would break a player that legitimately
+    /// selected its own bus.
+    fn apply_area3d_audio_bus_overrides(&mut self) {
+        // Nothing to do before any area is registered — the common case for a
+        // scene with no Area3D at all, and it keeps the per-frame cost at one
+        // emptiness check rather than a tree walk.
+        if self.physics_server_3d.area_count() == 0 {
+            return;
+        }
+        for node_id in self.audio_bridge.player_nodes() {
+            let point = crate::node3d::get_global_transform(&self.tree, node_id).origin;
+            if let Some(bus) = self.physics_server_3d.audio_bus_at(&self.tree, point) {
+                self.audio_bridge.redirect_node_bus(node_id, &bus);
+            }
+        }
+    }
+
     pub fn audio_bridge(&self) -> &AudioServerBridge {
         &self.audio_bridge
     }
@@ -2528,10 +2586,13 @@ impl MainLoop {
         self.tree
             .set_script_physics_server(&mut self.physics_server);
         self.tree
+            .set_script_physics_server_3d(&mut self.physics_server_3d);
+        self.tree
             .set_script_audio_server(self.audio_bridge.server_mut());
         crate::lifecycle::LifecycleManager::enter_tree(&mut self.tree, node);
         self.tree.clear_script_audio_server();
         self.tree.clear_script_physics_server();
+        self.tree.clear_script_physics_server_3d();
     }
 
     /// Registers physics bodies from the scene tree.
@@ -3548,6 +3609,19 @@ impl MainLoop {
             // once per physics tick.
             self.process_raycasts();
             self.process_shapecasts();
+            // The 3D twin, moved into the tick for the same reason
+            // (pat-s3rrv.106). `process_queries_3d` drives RayCast3D,
+            // ShapeCast3D and SpringArm3D, and its only caller was the per-FRAME
+            // idle block AFTER this script phase — so a `_physics_process`
+            // handler read `is_colliding()` from the PREVIOUS frame, and false
+            // for the whole first one. Godot updates these under
+            // `NOTIFICATION_INTERNAL_PHYSICS_PROCESS`, i.e. before any script
+            // runs, exactly as the 2D pair above now do.
+            //
+            // ⚠️ It also ran once per FRAME rather than once per physics TICK.
+            // With several fixed steps in one frame, every tick after the first
+            // saw a stale cast.
+            self.process_queries_3d();
             // Bind the physics server for the script phase so a
             // `_physics_process` handler can drive `PhysicsServer2D` directly
             // (pat-0q2kx.200). Bracketed tightly around the phase: the tree
@@ -3555,6 +3629,8 @@ impl MainLoop {
             // the next thing to touch the server is the following tick's step.
             self.tree
                 .set_script_physics_server(&mut self.physics_server);
+            self.tree
+                .set_script_physics_server_3d(&mut self.physics_server_3d);
             // Same bracket for the audio server: `AudioServer.set_bus_volume_db`
             // from a `_physics_process` handler is ordinary Godot (pat-s3rrv.6).
             self.tree
@@ -3562,6 +3638,7 @@ impl MainLoop {
             self.tree.process_physics_frame_with_scripts(physics_dt);
             self.tree.clear_script_audio_server();
             self.tree.clear_script_physics_server();
+            self.tree.clear_script_physics_server_3d();
             // -- interpolation capture (pat-0q2kx.219) --
             // End of the tick: record the transforms this tick settled on,
             // rolling the previous ones back a slot. Runs after the script
@@ -3717,10 +3794,14 @@ impl MainLoop {
             // with a target_position advance across frames at runtime.
             self.process_navigation(delta_secs as f32);
 
-            // -- 3D query-node phase (pat-nzgdu.12) --
-            // Drive RayCast3D/ShapeCast3D/SpringArm3D against the synced 3D physics
-            // world so is_colliding()/get_collider()/hit_length update at runtime.
-            self.process_queries_3d();
+            // -- 3D query-node phase --
+            // MOVED into the physics tick by pat-s3rrv.106, exactly as the 2D
+            // pair was by pat-0q2kx.32. Running it here, after the script phase,
+            // meant `_physics_process` always read the PREVIOUS frame's cast.
+            // Godot updates these under `NOTIFICATION_INTERNAL_PHYSICS_PROCESS`,
+            // so there is no idle-phase update to keep: the 2D twins have none
+            // either, and leaving one here would recompute every cast a second
+            // time per frame for no observable gain.
 
             // -- Timer nodes (Godot Timer, idle process mode) (pat-u3l8c.3) --
             // A default-process_mode Timer stops while paused, which is why Godot's
@@ -3783,6 +3864,8 @@ impl MainLoop {
         // (pat-0q2kx.200).
         self.tree
             .set_script_physics_server(&mut self.physics_server);
+        self.tree
+            .set_script_physics_server_3d(&mut self.physics_server_3d);
         // Likewise for `AudioServer`: a `_process` handler ducking a bus or
         // polling a peak meter is the common case, and the mix that reads the
         // result happens later in this same frame (pat-s3rrv.6).
@@ -3791,6 +3874,7 @@ impl MainLoop {
         self.tree.process_frame_with_scripts(delta_secs);
         self.tree.clear_script_audio_server();
         self.tree.clear_script_physics_server();
+        self.tree.clear_script_physics_server_3d();
 
         // -- coroutine resume phase (pat-nzgdu.6) --
         // Drive GDScript `await` coroutines: advance SceneTreeTimers once,
@@ -3813,6 +3897,12 @@ impl MainLoop {
         // -- collision detection phase --
         // Run after scripts so collision properties are set before next frame's _process.
         self.tree.process_collisions();
+
+        // -- Area3D audio bus override (pat-s3rrv.102) --
+        // BEFORE the audio phase mixes: a voice rerouted after the mix would be
+        // heard on the old bus for one frame, which is exactly the kind of
+        // one-frame lag that makes a reverb zone feel wrong on entry.
+        self.apply_area3d_audio_bus_overrides();
 
         // -- audio phase (pat-u3l8c.2) --
         // After scripts so same-frame `playing` changes are heard immediately.
@@ -3850,6 +3940,27 @@ impl MainLoop {
 
         // -- bookkeeping --
         self.process_time += delta_secs;
+
+        // -- performance monitors (pat-s3rrv.109) --
+        // Fed at the END of the frame, after the deferred and free queues have
+        // drained, so `object/node_count` reports the tree a script would see
+        // on its next frame rather than a count that includes nodes this frame
+        // already freed.
+        //
+        // `record_frame` takes CUMULATIVE totals and windows `time/fps` over
+        // the trailing 1.0 of the first one, so it must be handed elapsed
+        // seconds — passing a per-frame delta would make every frame land in
+        // the same window and report the whole run as one second.
+        {
+            let mut registry = gdcore::performance::global().lock().unwrap();
+            self.performance_feed
+                .record_frame(&mut registry, self.process_time, self.physics_time);
+            registry.set(
+                gdcore::performance::Monitor::ObjectNodeCount,
+                self.tree.node_count() as f64,
+            );
+        }
+
         self.frame_counter += 1;
         gdscript_interop::set_engine_frame_counters(
             self.frame_counter,

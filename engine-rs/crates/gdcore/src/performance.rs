@@ -430,3 +430,98 @@ pub fn global() -> &'static Mutex<PerformanceRegistry> {
     static GLOBAL: OnceLock<Mutex<PerformanceRegistry>> = OnceLock::new();
     GLOBAL.get_or_init(|| Mutex::new(PerformanceRegistry::new()))
 }
+
+/// The `Performance.MONITOR_*` constant names a script writes, in Godot's
+/// declaration order, so index equals the discriminant of [`ALL_MONITORS`].
+///
+/// ⚠️ Transcribed from `upstream/godot/doc/classes/Performance.xml`, **not**
+/// derived from the Rust variant names or from [`MONITOR_NAMES`]. Both
+/// mechanical derivations are wrong, in different places:
+///
+/// - a CamelCase split of `Physics2dActiveObjects` gives
+///   `PHYSICS2D_ACTIVE_OBJECTS`, but Godot spells it
+///   `PHYSICS_2D_ACTIVE_OBJECTS` (likewise every `NAVIGATION_2D_*` /
+///   `NAVIGATION_3D_*` member);
+/// - upper-casing the monitor string `memory/msg_buf_max` gives
+///   `MEMORY_MSG_BUF_MAX`, but the constant is `MEMORY_MESSAGE_BUFFER_MAX`.
+///
+/// A script using the documented Godot spelling would miss under either.
+pub const MONITOR_CONST_NAMES: [&str; MONITOR_MAX] = [
+    "TIME_FPS",
+    "TIME_PROCESS",
+    "TIME_PHYSICS_PROCESS",
+    "TIME_NAVIGATION_PROCESS",
+    "MEMORY_STATIC",
+    "MEMORY_STATIC_MAX",
+    "MEMORY_MESSAGE_BUFFER_MAX",
+    "OBJECT_COUNT",
+    "OBJECT_RESOURCE_COUNT",
+    "OBJECT_NODE_COUNT",
+    "OBJECT_ORPHAN_NODE_COUNT",
+    "RENDER_TOTAL_OBJECTS_IN_FRAME",
+    "RENDER_TOTAL_PRIMITIVES_IN_FRAME",
+    "RENDER_TOTAL_DRAW_CALLS_IN_FRAME",
+    "RENDER_VIDEO_MEM_USED",
+    "RENDER_TEXTURE_MEM_USED",
+    "RENDER_BUFFER_MEM_USED",
+    "PHYSICS_2D_ACTIVE_OBJECTS",
+    "PHYSICS_2D_COLLISION_PAIRS",
+    "PHYSICS_2D_ISLAND_COUNT",
+    "PHYSICS_3D_ACTIVE_OBJECTS",
+    "PHYSICS_3D_COLLISION_PAIRS",
+    "PHYSICS_3D_ISLAND_COUNT",
+    "AUDIO_OUTPUT_LATENCY",
+    "NAVIGATION_ACTIVE_MAPS",
+    "NAVIGATION_REGION_COUNT",
+    "NAVIGATION_AGENT_COUNT",
+    "NAVIGATION_LINK_COUNT",
+    "NAVIGATION_POLYGON_COUNT",
+    "NAVIGATION_EDGE_COUNT",
+    "NAVIGATION_EDGE_MERGE_COUNT",
+    "NAVIGATION_EDGE_CONNECTION_COUNT",
+    "NAVIGATION_EDGE_FREE_COUNT",
+    "NAVIGATION_OBSTACLE_COUNT",
+    "PIPELINE_COMPILATIONS_CANVAS",
+    "PIPELINE_COMPILATIONS_MESH",
+    "PIPELINE_COMPILATIONS_SURFACE",
+    "PIPELINE_COMPILATIONS_DRAW",
+    "PIPELINE_COMPILATIONS_SPECIALIZATION",
+    "NAVIGATION_2D_ACTIVE_MAPS",
+    "NAVIGATION_2D_REGION_COUNT",
+    "NAVIGATION_2D_AGENT_COUNT",
+    "NAVIGATION_2D_LINK_COUNT",
+    "NAVIGATION_2D_POLYGON_COUNT",
+    "NAVIGATION_2D_EDGE_COUNT",
+    "NAVIGATION_2D_EDGE_MERGE_COUNT",
+    "NAVIGATION_2D_EDGE_CONNECTION_COUNT",
+    "NAVIGATION_2D_EDGE_FREE_COUNT",
+    "NAVIGATION_2D_OBSTACLE_COUNT",
+    "NAVIGATION_3D_ACTIVE_MAPS",
+    "NAVIGATION_3D_REGION_COUNT",
+    "NAVIGATION_3D_AGENT_COUNT",
+    "NAVIGATION_3D_LINK_COUNT",
+    "NAVIGATION_3D_POLYGON_COUNT",
+    "NAVIGATION_3D_EDGE_COUNT",
+    "NAVIGATION_3D_EDGE_MERGE_COUNT",
+    "NAVIGATION_3D_EDGE_CONNECTION_COUNT",
+    "NAVIGATION_3D_EDGE_FREE_COUNT",
+    "NAVIGATION_3D_OBSTACLE_COUNT",
+];
+
+/// Resolves a `Performance.TIME_FPS`-style constant name to its monitor.
+pub fn monitor_from_const_name(name: &str) -> Option<Monitor> {
+    MONITOR_CONST_NAMES
+        .iter()
+        .position(|n| *n == name)
+        .map(|i| ALL_MONITORS[i])
+}
+
+/// Resolves the integer a script passes to `get_monitor` back to a monitor.
+///
+/// Returns `None` for an out-of-range id rather than clamping, so a typo'd
+/// monitor reads as "no such monitor" instead of silently reporting `TIME_FPS`.
+pub fn monitor_from_index(index: i64) -> Option<Monitor> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| ALL_MONITORS.get(i).copied())
+}

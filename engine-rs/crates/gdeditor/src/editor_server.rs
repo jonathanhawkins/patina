@@ -19958,7 +19958,26 @@ fn api_get_monitors(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     } else {
         s.frame_times.iter().sum::<f64>() / s.frame_times.len() as f64
     };
-    let fps = if s.delta_time > 0.0 {
+    // pat-s3rrv.109: while the runtime MainLoop is live it owns the frame
+    // cadence and feeds `time/fps` into the process-wide performance registry —
+    // the very value a script reads back through
+    // `Performance.get_monitor(Performance.TIME_FPS)`, so the panel and the
+    // script cannot disagree within one run.
+    //
+    // The editor's own `delta_time` still answers when nothing is playing: the
+    // registry is not fed then, and reading it would report a flat 0 fps where
+    // the panel currently shows the editor's own repaint cadence.
+    let runtime_fps = if s.run_main_loop.is_some() {
+        gdcore::performance::global()
+            .lock()
+            .unwrap()
+            .get(gdcore::performance::Monitor::TimeFps)
+    } else {
+        0.0
+    };
+    let fps = if runtime_fps > 0.0 {
+        runtime_fps
+    } else if s.delta_time > 0.0 {
         1.0 / s.delta_time
     } else {
         0.0

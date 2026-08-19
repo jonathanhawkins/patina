@@ -266,3 +266,96 @@ func _physics_process(delta):
         "the listed entry must be the Lower node itself"
     );
 }
+
+// -- CharacterBody2D --------------------------------------------------------
+//
+// ⚠️ A kinematic body does NOT go through the solver's pair loop: it is swept
+// against an obstacle list built by `PhysicsServer::obstacle_bodies`, so the
+// exception has to be honoured there as well. Gating only the rigid-body pair
+// filter leaves a character walking straight into a wall it was excepted from —
+// which is the half of this feature games actually use for one-way doors and
+// pass-through platforms.
+
+const WALL_X: f32 = 100.0;
+
+/// `Root -> {Wall, Walker}`, the walker driven at the wall every tick.
+fn walker_scene(except_the_wall: bool) -> (MainLoop, NodeId) {
+    let mut tree = SceneTree::new();
+    let root_id = tree.root_id();
+    let root = tree
+        .add_child(root_id, Node::new("Root", "Node2D"))
+        .unwrap();
+
+    let mut wall = Node::new("Wall", "StaticBody2D");
+    wall.set_property("position", Variant::Vector2(Vector2::new(WALL_X, 0.0)));
+    let wall_id = tree.add_child(root, wall).unwrap();
+    let mut ws = Node::new("WallShape", "CollisionShape2D");
+    ws.set_property("size", Variant::Vector2(Vector2::new(20.0, 400.0)));
+    tree.add_child(wall_id, ws).unwrap();
+
+    let walker = tree
+        .add_child(root, Node::new("Walker", "CharacterBody2D"))
+        .unwrap();
+    let mut cs = Node::new("Shape", "CollisionShape2D");
+    cs.set_property("size", Variant::Vector2(Vector2::new(20.0, 20.0)));
+    tree.add_child(walker, cs).unwrap();
+
+    // The exception is re-asserted every tick: `add_collision_exception` is
+    // idempotent, and a script cannot tell when the body became registered.
+    let except_line = if except_the_wall {
+        "    add_collision_exception_with(get_node(\"../Wall\"))\n"
+    } else {
+        ""
+    };
+    let script = format!(
+        "\
+extends CharacterBody2D
+var ticks = 0
+func _physics_process(delta):
+    self.ticks = self.ticks + 1
+{except_line}    velocity = Vector2(200, 0)
+    move_and_slide()
+"
+    );
+    tree.attach_script(
+        walker,
+        Box::new(GDScriptNodeInstance::from_source(&script, walker).unwrap()),
+    );
+    (MainLoop::new(tree), walker)
+}
+
+fn x_of(ml: &MainLoop, id: NodeId) -> f32 {
+    match ml.tree().get_node(id).map(|n| n.get_property("position")) {
+        Some(Variant::Vector2(v)) => v.x,
+        other => panic!("walker must carry a Vector2 position, got {other:?}"),
+    }
+}
+
+/// ⚠️ The control: without an exception the wall stops the walker.
+#[test]
+fn without_an_exception_a_character_is_stopped_by_the_wall() {
+    let (mut ml, walker) = walker_scene(false);
+    settle(&mut ml);
+    let x = x_of(&ml, walker);
+    assert!(
+        x < WALL_X,
+        "the walker must be blocked by the wall at x = {WALL_X}, but reached \
+         {x} — if it passes through unconditionally, the exception test below \
+         proves nothing"
+    );
+}
+
+/// **The last acceptance clause.** A CharacterBody2D excepted from the wall
+/// walks through it.
+#[test]
+fn a_character_with_an_exception_walks_through_the_wall() {
+    let (mut ml, walker) = walker_scene(true);
+    settle(&mut ml);
+    let x = x_of(&ml, walker);
+    assert!(
+        x > WALL_X + 20.0,
+        "with the wall excepted the walker must pass clean through it, but \
+         stopped at {x} (wall at {WALL_X}) — the kinematic sweep builds its own \
+         obstacle list, so the solver's pair filter alone does not cover it"
+    );
+}

@@ -474,6 +474,13 @@ pub struct ParticleSimulator3D {
     pub time_accumulator: f32,
     /// Total number of particles emitted (used for seeding).
     pub total_emitted: u64,
+    /// A completed one-shot cycle waiting to be drained as Godot's `finished`
+    /// signal (pat-s3rrv.111). The 3D twin of `ParticleSimulator::finished_pending`.
+    finished_pending: bool,
+    /// Whether the current completion has already produced an edge, so a
+    /// one-shot that stays complete emits `finished` ONCE rather than on every
+    /// frame for the rest of the scene's life.
+    finished_emitted: bool,
 }
 
 impl ParticleSimulator3D {
@@ -484,6 +491,8 @@ impl ParticleSimulator3D {
             active_particles: Vec::new(),
             time_accumulator: 0.0,
             total_emitted: 0,
+            finished_pending: false,
+            finished_emitted: false,
         }
     }
 
@@ -574,6 +583,40 @@ impl ParticleSimulator3D {
                 }
             }
         }
+        self.update_finished_edge();
+    }
+
+    /// Records a `finished` edge when a one-shot emitter drains (pat-s3rrv.111).
+    ///
+    /// ⚠️ EDGE, not level. [`is_complete`](Self::is_complete) stays true for
+    /// every frame after the last particle dies, so emitting straight off it
+    /// would fire `finished` on every frame forever. This latches once and
+    /// re-arms only when the emitter leaves the complete state, which is what
+    /// makes `restart()` able to finish again.
+    ///
+    /// The `total_emitted > 0` guard matters as much as the latch: a freshly
+    /// built one-shot that has not emitted anything yet is *also* "one_shot,
+    /// not emitting, no live particles", so without it every idle emitter
+    /// would announce `finished` on its very first step.
+    fn update_finished_edge(&mut self) {
+        let complete = self.is_complete() && self.total_emitted > 0;
+        if complete {
+            if !self.finished_emitted {
+                self.finished_pending = true;
+                self.finished_emitted = true;
+            }
+        } else {
+            // Re-arm, so a restart()ed emitter can finish again.
+            self.finished_emitted = false;
+        }
+    }
+
+    /// Takes the pending `finished` edge, if any (pat-s3rrv.111).
+    ///
+    /// Returns `true` exactly once per completion — the seam `MainLoop` drains
+    /// each frame to emit Godot's `finished` signal. Draining is idempotent.
+    pub fn take_finished(&mut self) -> bool {
+        std::mem::take(&mut self.finished_pending)
     }
 
     /// Returns draw data for each live particle: (position, color, scale).

@@ -277,8 +277,59 @@ fn build_state_3d(
         angular_velocity: vec3_of(&node.get_property("angular_velocity")),
         transform,
         sleeping: matches!(node.get_property("sleeping"), Variant::Bool(true)),
+        // ⚠️ Was falling through to `..Default::default()` — an EMPTY contact
+        // list — so `state.get_contact_count()` answered 0 inside every 3D
+        // `_integrate_forces`, and the whole per-contact surface
+        // (`get_contact_local_normal` and friends, already implemented in the
+        // interpreter's 3D state table) had nothing to read. The struct field
+        // existed; nothing filled it.
+        contacts: contacts_of_3d(node),
         ..Default::default()
     })
+}
+
+/// The 3D twin of [`contacts_of`], reading the `_body_contacts` array
+/// `PhysicsServer3D::publish_body_contacts` leaves on a monitoring body
+/// (pat-s3rrv.105).
+///
+/// ⚠️ EMPTY unless the body opted in with `contact_monitor = true` AND
+/// `max_contacts_reported > 0` — the solver applies Godot's gate before the
+/// publisher ever sees a contact, so a body visibly resting on the floor still
+/// reports nothing until it asks to monitor. That is parity, not a missing read.
+fn contacts_of_3d(
+    node: &crate::node::Node,
+) -> Vec<gdobject::physics_direct_body_state::BodyContact3D> {
+    let Variant::Array(items) = node.get_property("_body_contacts") else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let Variant::Dictionary(rec) = item else {
+                return None;
+            };
+            let vec3 = |k: &str| match rec.get(k) {
+                Some(Variant::Vector3(v)) => *v,
+                _ => Vector3::ZERO,
+            };
+            Some(gdobject::physics_direct_body_state::BodyContact3D {
+                local_position: vec3("position"),
+                // The publisher already flipped this to point AWAY from the
+                // surface, matching Godot's `get_contact_local_normal`; taking
+                // it as published keeps the two ends from disagreeing about the
+                // sign.
+                local_normal: vec3("normal"),
+                collider_id: match rec.get("collider") {
+                    Some(Variant::ObjectId(id)) => id.raw() as i64,
+                    _ => 0,
+                },
+                // The 3D solver does not surface per-contact impulses or shape
+                // indices yet; left at their defaults rather than invented, so a
+                // reader sees zero instead of a plausible wrong number.
+                ..Default::default()
+            })
+        })
+        .collect()
 }
 
 /// The node's local transform, preferring an explicit `transform` property.

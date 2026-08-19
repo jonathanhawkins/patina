@@ -173,7 +173,26 @@ struct RequestState {
     /// Whether the `request_completed` signal has already been emitted for the
     /// current response (so [`poll`](HTTPRequest::poll) emits exactly once).
     emitted: bool,
+    /// wasm32 only: the in-flight browser fetch, driven from `poll`.
+    #[cfg(target_arch = "wasm32")]
+    web: Option<WebRequest>,
 }
+
+/// wasm32 only: the browser-side counterpart to the native worker thread.
+///
+/// ⚠️ The web has no thread to hand the request to. `std::thread::spawn`
+/// *compiles* on `wasm32-unknown-unknown` and then fails at runtime, which is
+/// why the native path is not merely slow here but silently broken — so the
+/// request is advanced from [`poll`](HTTPRequest::poll), one step per frame,
+/// the way `HTTPClientWeb` does it.
+///
+/// 🔑 All the per-frame decisions live in
+/// [`WebTransfer`](crate::web_request_driver::WebTransfer), which is compiled
+/// and tested on every target. What remains here is plumbing, deliberately:
+/// this module is `#[cfg]`-gated and so is never type-checked by a native build
+/// nor run by any build in this repo.
+#[cfg(target_arch = "wasm32")]
+type WebRequest = crate::web_request_driver::WebTransfer<crate::fetch_web::WebFetchBackend>;
 
 /// Payload delivered by the `request_completed` signal.
 ///
@@ -203,8 +222,8 @@ type CompletedCallback = Box<dyn Fn(&RequestCompleted) + Send + 'static>;
 ///    background thread over the [`HttpClient`](crate::http_client::HttpClient)
 ///    transport.
 /// 3. [`poll`](Self::poll) each frame; it emits `request_completed` once the
-///    response is ready. [`wait_for_completion`](Self::wait_for_completion) is a
-///    blocking convenience for tests/headless callers.
+///    response is ready. `wait_for_completion` is a blocking convenience for
+///    tests/headless callers, and exists on native targets only — see its note.
 ///
 /// Responses can also be supplied directly via
 /// [`inject_response`](Self::inject_response) for mock backends.
@@ -241,6 +260,8 @@ impl HTTPRequest {
                 response: None,
                 in_progress: false,
                 emitted: true,
+                #[cfg(target_arch = "wasm32")]
+                web: None,
             })),
             callbacks: Arc::new(Mutex::new(Vec::new())),
             max_redirects: 8,
@@ -302,12 +323,36 @@ impl HTTPRequest {
         }
 
         let state = Arc::clone(&self.state);
+
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
             let response = crate::http_client::HttpClient::perform(&config);
             let mut state = state.lock().unwrap();
             state.response = Some(response);
             state.in_progress = false;
         });
+
+        // The browser has no socket and no thread: issue a `fetch()` now and
+        // let `poll` walk it. See [`WebRequest`].
+        #[cfg(target_arch = "wasm32")]
+        {
+            let headers: Vec<(String, String)> = config
+                .headers
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
+            let id = crate::fetch_web::create(
+                config.method.as_str(),
+                &config.url,
+                &headers,
+                &config.body,
+            );
+
+            // `WebTransfer::new` enters the faked handshake; it deliberately
+            // does not go straight to the request. See its docs.
+            state.lock().unwrap().web =
+                Some(WebRequest::new(crate::fetch_web::WebFetchBackend::new(id)));
+        }
 
         OK
     }
@@ -317,6 +362,9 @@ impl HTTPRequest {
     ///
     /// Returns `true` if a signal was emitted on this call.
     pub fn poll(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        self.drive_web();
+
         let payload = {
             let mut state = self.state.lock().unwrap();
             if state.in_progress || state.emitted {
@@ -343,12 +391,77 @@ impl HTTPRequest {
         true
     }
 
+    /// wasm32 only: advances the in-flight browser fetch by one frame.
+    ///
+    /// Mirrors what Godot's `HTTPRequest` does to an `HTTPClientWeb` each
+    /// frame: poll the client, drain whatever the body stream has ready, and
+    /// build the response once the stream closes.
+    ///
+    /// 🔑 The `WebRequest` is **taken** out of the state and put back, rather
+    /// than borrowed in place. Holding `state.web.as_mut()` across the
+    /// completion path would borrow `state` for as long as the request is
+    /// alive, and every line that finishes the request has to write
+    /// `state.response` and `state.in_progress` — so the borrow-in-place shape
+    /// cannot be made to compile without splitting the function in two.
+    #[cfg(target_arch = "wasm32")]
+    fn drive_web(&self) {
+        use crate::web_request_driver::TransferOutcome;
+
+        let mut state = self.state.lock().unwrap();
+        let Some(mut transfer) = state.web.take() else {
+            return;
+        };
+
+        let Some(outcome) = transfer.step() else {
+            // Still in flight — hand it back for the next frame.
+            state.web = Some(transfer);
+            return;
+        };
+
+        // ⚠️ Free the browser handle on BOTH terminal paths, or the fetch keeps
+        // streaming into a registry entry nobody will read and its closures stay
+        // parked for the life of the page.
+        crate::fetch_web::free(transfer.backend().id());
+
+        state.response = Some(match outcome {
+            TransferOutcome::Completed {
+                status,
+                headers,
+                body,
+            } => HttpResponse {
+                status_code: status,
+                headers: headers.into_iter().collect(),
+                body,
+                result: HttpResultCode::Success,
+            },
+            // ⚠️ The code the server actually sent, not 0: the driver samples it
+            // before the state check precisely so a failed request keeps it.
+            TransferOutcome::Failed { status } => HttpResponse {
+                status_code: status,
+                headers: HashMap::new(),
+                body: Vec::new(),
+                result: HttpResultCode::ConnectionError,
+            },
+        });
+        state.in_progress = false;
+    }
+
     /// Blocks until the in-flight request finishes (driving [`poll`](Self::poll)
     /// so `request_completed` fires), or until `timeout` elapses.
     ///
     /// Returns `true` if the request completed within the deadline. Intended
     /// for tests and headless callers; the engine loop should call
     /// [`poll`](Self::poll) once per frame instead.
+    ///
+    /// ⚠️ **Native only.** In a browser this cannot be made to work: `fetch`
+    /// resolves on the event loop, so blocking the caller until the response
+    /// arrives blocks the very loop that would deliver it. That is a deadlock,
+    /// not a slow path, and `std::thread::sleep` on `wasm32-unknown-unknown`
+    /// does not rescue it. Web callers drive [`poll`](Self::poll) from the frame
+    /// loop, which is what the browser flow requires anyway — so this is gated
+    /// off rather than left to hang, and a wasm caller gets a compile error
+    /// instead of a locked-up tab.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn wait_for_completion(&self, timeout: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         loop {
@@ -369,6 +482,11 @@ impl HTTPRequest {
     /// Performs a blocking request and returns the response directly.
     ///
     /// Convenience for headless callers that don't need the signal/poll flow.
+    ///
+    /// ⚠️ **Native only**, for the same reason plus a harder one: this goes
+    /// straight to [`HttpClient::perform`](crate::http_client::HttpClient),
+    /// which opens a `std::net::TcpStream`. A browser has no socket to give it.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn request_sync(&self, config: &HttpRequestConfig) -> HttpResponse {
         crate::http_client::HttpClient::perform(config)
     }
@@ -386,6 +504,14 @@ impl HTTPRequest {
     /// Cancels any in-progress request, recording a failed result.
     pub fn cancel(&self) {
         let mut state = self.state.lock().unwrap();
+
+        // ⚠️ Drop the browser handle too, or the fetch keeps streaming into a
+        // registry entry nobody will ever read and its closures stay parked.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(web) = state.web.take() {
+            crate::fetch_web::free(web.backend().id());
+        }
+
         state.in_progress = false;
         state.emitted = false;
         state.response = Some(HttpResponse {

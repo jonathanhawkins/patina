@@ -659,32 +659,136 @@ pub fn set_attenuation(tree: &mut SceneTree, node_id: NodeId, attenuation: f64) 
 // MultiMeshInstance3D helpers
 // ---------------------------------------------------------------------------
 
+/// Floats per instance in a `MULTIMESH_TRANSFORM_3D` buffer: a row-major 3x4
+/// matrix, each basis row followed by one origin component
+/// (`servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp:1896-1907`).
+const MULTIMESH_XFORM_3D_FLOATS: usize = 12;
+/// Floats per instance in a `MULTIMESH_TRANSFORM_2D` buffer (a 2x4 matrix).
+const MULTIMESH_XFORM_2D_FLOATS: usize = 8;
+/// The per-instance color block that follows the transform when `use_colors`.
+const MULTIMESH_COLOR_FLOATS: usize = 4;
+
+/// The authored MultiMesh buffer copied onto the node by
+/// `PackedScene`'s `__multimesh__*` flattening, if the node has one.
+fn multimesh_buffer(tree: &SceneTree, node_id: NodeId) -> Option<Vec<f32>> {
+    match tree.get_node(node_id)?.get_property("__multimesh__buffer") {
+        Variant::PackedFloat32Array(v) if !v.is_empty() => Some(v),
+        _ => None,
+    }
+}
+
+/// `(per-instance stride, transform floats)` for the node's MultiMesh buffer.
+///
+/// ⚠️ Godot's `transform_format` defaults to `TRANSFORM_2D` (`MultiMesh.xml`
+/// gives `default="0"`), so a 3D scene has to say `transform_format = 1`.
+/// Assuming 3D because the node is a MultiMeshInstance3D would mis-stride an
+/// authored 2D buffer and read each instance from the wrong offset.
+fn multimesh_stride(tree: &SceneTree, node_id: NodeId) -> Option<(usize, usize)> {
+    let node = tree.get_node(node_id)?;
+    let xform = match node.get_property("__multimesh__transform_format") {
+        Variant::Int(1) => MULTIMESH_XFORM_3D_FLOATS,
+        _ => MULTIMESH_XFORM_2D_FLOATS,
+    };
+    let mut stride = xform;
+    if matches!(
+        node.get_property("__multimesh__use_colors"),
+        Variant::Bool(true)
+    ) {
+        stride += MULTIMESH_COLOR_FLOATS;
+    }
+    Some((stride, xform))
+}
+
+/// Decodes instance `index`'s transform out of the authored buffer.
+fn multimesh_buffer_transform(
+    tree: &SceneTree,
+    node_id: NodeId,
+    index: usize,
+) -> Option<Transform3D> {
+    let (stride, xform) = multimesh_stride(tree, node_id)?;
+    // A 2D buffer carries no 3D basis; fall back rather than invent one.
+    if xform != MULTIMESH_XFORM_3D_FLOATS {
+        return None;
+    }
+    let buffer = multimesh_buffer(tree, node_id)?;
+    let base = index.checked_mul(stride)?;
+    let f = buffer.get(base..base.checked_add(MULTIMESH_XFORM_3D_FLOATS)?)?;
+
+    // 🔑 Godot writes the basis ROWS (`basis.rows[0][0..2]`, then `origin.x`,
+    // and so on); our `Basis` stores COLUMNS in `x`/`y`/`z`. So each of our
+    // columns is strided out of the buffer, not read contiguously. Reading
+    // `f[0..3]` into `basis.x` is the natural-looking version and it is the
+    // transpose — invisible for a pure translation, wrong for any rotation.
+    Some(Transform3D {
+        basis: Basis {
+            x: Vector3::new(f[0], f[4], f[8]),
+            y: Vector3::new(f[1], f[5], f[9]),
+            z: Vector3::new(f[2], f[6], f[10]),
+        },
+        origin: Vector3::new(f[3], f[7], f[11]),
+    })
+}
+
+/// Decodes instance `index`'s color, which sits directly after its transform.
+fn multimesh_buffer_color(tree: &SceneTree, node_id: NodeId, index: usize) -> Option<Color> {
+    if !matches!(
+        tree.get_node(node_id)?
+            .get_property("__multimesh__use_colors"),
+        Variant::Bool(true)
+    ) {
+        return None;
+    }
+    let (stride, xform) = multimesh_stride(tree, node_id)?;
+    let buffer = multimesh_buffer(tree, node_id)?;
+    let base = index.checked_mul(stride)?.checked_add(xform)?;
+    let f = buffer.get(base..base.checked_add(MULTIMESH_COLOR_FLOATS)?)?;
+    Some(Color::new(f[0], f[1], f[2], f[3]))
+}
+
 /// Returns the number of instances in a MultiMeshInstance3D.
 pub fn get_multimesh_instance_count(tree: &SceneTree, node_id: NodeId) -> u32 {
     tree.get_node(node_id)
-        .and_then(|n| match n.get_property("instance_count") {
-            Variant::Int(v) => Some(v as u32),
-            _ => None,
+        .and_then(|n| {
+            // The authored sub-resource wins over the node-level property.
+            match n.get_property("__multimesh__instance_count") {
+                Variant::Int(v) => Some(v as u32),
+                _ => match n.get_property("instance_count") {
+                    Variant::Int(v) => Some(v as u32),
+                    _ => None,
+                },
+            }
         })
         .unwrap_or(0)
 }
 
 /// Returns the per-instance transform for the given instance index.
+///
+/// Prefers the authored MultiMesh buffer, so the N expanded instances of a
+/// MultiMeshInstance3D land where the scene placed them. Falls back to the
+/// node's single `instance_transform` property when no buffer was authored —
+/// which is all this used to do, stacking every instance at one position
+/// (pat-s3rrv.112).
 pub fn get_multimesh_instance_transform(
     tree: &SceneTree,
     node_id: NodeId,
-    _index: usize,
-) -> gdcore::math3d::Transform3D {
+    index: usize,
+) -> Transform3D {
+    if let Some(t) = multimesh_buffer_transform(tree, node_id, index) {
+        return t;
+    }
     tree.get_node(node_id)
         .and_then(|n| match n.get_property("instance_transform") {
             Variant::Transform3D(t) => Some(t),
             _ => None,
         })
-        .unwrap_or(gdcore::math3d::Transform3D::IDENTITY)
+        .unwrap_or(Transform3D::IDENTITY)
 }
 
 /// Returns the per-instance color for the given instance index.
-pub fn get_multimesh_instance_color(tree: &SceneTree, node_id: NodeId, _index: usize) -> Color {
+pub fn get_multimesh_instance_color(tree: &SceneTree, node_id: NodeId, index: usize) -> Color {
+    if let Some(c) = multimesh_buffer_color(tree, node_id, index) {
+        return c;
+    }
     tree.get_node(node_id)
         .and_then(|n| match n.get_property("instance_color") {
             Variant::Color(c) => Some(c),

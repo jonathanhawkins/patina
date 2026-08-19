@@ -96,7 +96,7 @@ pub fn render_scene_with_zoom_pan(
     zoom: f64,
     pan: (f64, f64),
 ) -> FrameBuffer {
-    render_scene_inner(tree, selected, width, height, zoom, pan, None)
+    render_scene_inner(tree, selected, width, height, zoom, pan, None, None)
 }
 
 /// Whether `tree` should be drawn through the 3D renderer (rather than the 2D
@@ -223,6 +223,39 @@ pub fn render_scene_with_textures(
         zoom,
         pan,
         Some(texture_cache),
+        None,
+    )
+}
+
+/// Renders the scene honouring an [`OverlaySettings`] set — Godot's View-menu
+/// overlay toggles (pat-s3rrv.82).
+///
+/// ⚠️ Deliberately a SEPARATE entry point rather than a parameter on the
+/// existing ones. `OverlaySettings::default()` enables only the origin cross and
+/// the lock/group icons, so routing the current callers through it would turn
+/// collision shapes and navmesh regions OFF for every existing caller and test —
+/// a silent change to what the editor draws, made while adding a toggle nobody
+/// had asked to flip yet. `render_scene`/`render_scene_with_zoom_pan`/
+/// `render_scene_with_textures` therefore keep drawing everything, and only a
+/// caller that actually has an overlay set gets the gating.
+pub fn render_scene_with_overlays(
+    tree: &SceneTree,
+    selected: Option<NodeId>,
+    width: u32,
+    height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+    overlays: &crate::viewport_2d::OverlaySettings,
+) -> FrameBuffer {
+    render_scene_inner(
+        tree,
+        selected,
+        width,
+        height,
+        zoom,
+        pan,
+        None,
+        Some(overlays),
     )
 }
 
@@ -234,7 +267,13 @@ fn render_scene_inner(
     zoom: f64,
     pan: (f64, f64),
     mut texture_cache: Option<&mut TextureCache>,
+    overlays: Option<&crate::viewport_2d::OverlaySettings>,
 ) -> FrameBuffer {
+    // `None` means "no overlay set supplied" — draw every gizmo, which is what
+    // every pre-existing caller expects. It is NOT the same as an empty set.
+    let shows = |o: crate::viewport_2d::CanvasOverlay| -> bool {
+        overlays.map_or(true, |set| set.is_enabled(o))
+    };
     let mut fb = FrameBuffer::new(width, height, BG_COLOR);
     let z = zoom as f32;
 
@@ -297,13 +336,23 @@ fn render_scene_inner(
                 }
             }
             "CollisionShape2D" => {
-                draw_collision_shape_from_node(&mut fb, node, pos, z, is_selected)
+                // ⚠️ Gated INSIDE the arm, not with a match guard: a failing
+                // guard falls through to the `_` catch-all below, which draws a
+                // default dot — so an overlay switched off would swap the gizmo
+                // for a different mark rather than hiding it.
+                if shows(crate::viewport_2d::CanvasOverlay::CollisionShapes) {
+                    draw_collision_shape_from_node(&mut fb, node, pos, z, is_selected);
+                }
             }
             // A baked NavigationRegion2D shows its navmesh, the same way a
             // CollisionShape2D shows its shape (pat-s3rrv.82). Unbaked regions
             // fall through to nothing drawn, which is what "not baked yet"
             // should look like.
-            "NavigationRegion2D" => draw_navigation_region(&mut fb, node, pos, z),
+            "NavigationRegion2D" => {
+                if shows(crate::viewport_2d::CanvasOverlay::NavigationRegions) {
+                    draw_navigation_region(&mut fb, node, pos, z);
+                }
+            }
             "CharacterBody2D" => draw_physics_body(&mut fb, pos, z, COLOR_CHARBODY, node),
             "RigidBody2D" => draw_physics_body(&mut fb, pos, z, COLOR_RIGIDBODY, node),
             "StaticBody2D" => draw_static_body(&mut fb, pos, z),

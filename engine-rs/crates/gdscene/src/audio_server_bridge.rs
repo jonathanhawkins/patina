@@ -177,6 +177,43 @@ impl AudioServerBridge {
         self.server.stream_mut(playback_id).map(|s| s.pitch_scale())
     }
 
+    /// Reroutes a live voice to `bus` — Godot's `Area3D.audio_bus_override`
+    /// (pat-s3rrv.102).
+    ///
+    /// `AudioServer::redirect_stream_bus` has existed and been tested since the
+    /// audio server landed, documented as being "for Godot's Area3D/Area2D
+    /// audio-bus override", and had NO CALLER: the effect was implemented and
+    /// unreachable. This is the caller.
+    ///
+    /// Returns `false` when the node has no live voice, which is the ordinary
+    /// case for a player that is not currently playing — the per-frame sweep
+    /// calls this for every positional player and simply skips the silent ones.
+    pub fn redirect_node_bus(&mut self, node_id: NodeId, bus: &str) -> bool {
+        let Some(playback_id) = self.players.get(&node_id).and_then(|p| p.playback_id()) else {
+            return false;
+        };
+        self.server.redirect_stream_bus(playback_id, bus)
+    }
+
+    /// The bus a node's live voice is routed to, for tests and tooling.
+    ///
+    /// Takes `&mut self` because the server only hands out streams mutably;
+    /// nothing is mutated.
+    pub fn node_bus(&mut self, node_id: NodeId) -> Option<String> {
+        let playback_id = self.players.get(&node_id).and_then(|p| p.playback_id())?;
+        self.server
+            .stream_mut(playback_id)
+            .map(|s| s.get_bus().to_string())
+    }
+
+    /// The nodes this bridge currently holds a player for, positional or not.
+    ///
+    /// The audio-bus sweep needs the list without borrowing the map, since it
+    /// then calls back into `&mut self` to redirect.
+    pub fn player_nodes(&self) -> Vec<NodeId> {
+        self.players.keys().copied().collect()
+    }
+
     pub fn set_stream_buffer(&mut self, node_id: NodeId, buffer: AudioBuffer) {
         self.players
             .entry(node_id)

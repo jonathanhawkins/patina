@@ -273,6 +273,23 @@ pub struct Environment3D {
     pub fog_depth_begin: f32,
     /// Distance where depth fog reaches full density (`fog_depth_end`).
     pub fog_depth_end: f32,
+    /// Gates the brightness/contrast/saturation adjustment stage
+    /// (`adjustment_enabled`, default **false**). With it off the three knobs
+    /// below are ignored, exactly as Godot's `FLAG_USE_BCS` gate works.
+    pub adjustment_enabled: bool,
+    /// Linear multiplier applied before the display encode
+    /// (`adjustment_brightness`, default **1.0**).
+    pub adjustment_brightness: f32,
+    /// Contrast around a 0.5 pivot (`adjustment_contrast`, default **1.0**).
+    ///
+    /// ⚠️ Applied to the **sRGB-encoded** value, not the linear one — see
+    /// [`crate::environment::Environment3D`] users in `postprocess`.
+    pub adjustment_contrast: f32,
+    /// Saturation (`adjustment_saturation`, default **1.0**). `0.0` is grey.
+    ///
+    /// ⚠️ Godot greys with an **even** 1/3 weight per channel, not a luminance
+    /// weighting.
+    pub adjustment_saturation: f32,
     /// Screen-space debanding dither after the sRGB encode. Patina extension:
     /// in Godot this is the `rendering/anti_aliasing/quality/use_debanding`
     /// viewport/project setting (default **false**), not an Environment
@@ -361,6 +378,10 @@ impl Default for Environment3D {
             fog_depth_end: 100.0,
             // Off by default so deterministic framebuffer goldens stay stable;
             // enable for editor/sky paths that want Godot-like gradient dither.
+            adjustment_enabled: false,
+            adjustment_brightness: 1.0,
+            adjustment_contrast: 1.0,
+            adjustment_saturation: 1.0,
             use_debanding: false,
             // Godot 4.6 SSAO defaults (Environment).
             ssao_enabled: false,
@@ -393,6 +414,29 @@ impl Environment3D {
                 "background_energy_multiplier" => {
                     if let Variant::Float(f) = value {
                         env.background_energy_multiplier = *f as f32;
+                    }
+                }
+                // The BCS adjustment stage (pat-s3rrv.113). These were
+                // registered in ClassDB, so the inspector round-tripped them
+                // into the .tscn, and nothing here read them back.
+                "adjustment_enabled" => {
+                    if let Variant::Bool(b) = value {
+                        env.adjustment_enabled = *b;
+                    }
+                }
+                "adjustment_brightness" => {
+                    if let Variant::Float(f) = value {
+                        env.adjustment_brightness = *f as f32;
+                    }
+                }
+                "adjustment_contrast" => {
+                    if let Variant::Float(f) = value {
+                        env.adjustment_contrast = *f as f32;
+                    }
+                }
+                "adjustment_saturation" => {
+                    if let Variant::Float(f) = value {
+                        env.adjustment_saturation = *f as f32;
                     }
                 }
                 "sky_custom_fov" => {

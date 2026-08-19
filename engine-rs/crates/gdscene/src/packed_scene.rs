@@ -1230,6 +1230,38 @@ impl PackedScene {
             }
         }
 
+        // Resolve `multimesh = SubResource("id")` on MultiMeshInstance3D by
+        // copying the MultiMesh body onto the node under `__multimesh__*`, the
+        // same way `__shape__*` above carries a CollisionShape's real geometry
+        // (pat-s3rrv.112). Before this, every expanded instance read the node's
+        // single `instance_transform` property, so a MultiMeshInstance3D drew N
+        // copies stacked at one position.
+        //
+        // Copying every property verbatim keeps this free of per-field
+        // knowledge: `buffer`, `instance_count`, `transform_format`,
+        // `use_colors` and `use_custom_data` all come along, and the real
+        // `multimesh` property keeps its `SubResource:<id>` value so the scene
+        // still round-trips.
+        for tmpl in &mut templates {
+            let resolved = match tmpl.properties.get("multimesh") {
+                Some(Variant::String(s)) => s.strip_prefix("SubResource:").and_then(|id| {
+                    let ty = sub_resources.get(id)?;
+                    Some((id.to_string(), ty.clone()))
+                }),
+                _ => None,
+            };
+            if let Some((mm_id, mm_class)) = resolved {
+                tmpl.properties
+                    .insert("__multimesh__class".into(), Variant::String(mm_class));
+                if let Some(mm_props) = sub_resource_props.get(&mm_id) {
+                    for (key, value) in mm_props {
+                        tmpl.properties
+                            .insert(format!("__multimesh__{key}"), value.clone());
+                    }
+                }
+            }
+        }
+
         // Resolve `texture_click_mask = SubResource("id")` on TextureButton to the
         // BitMap's `data` payload, copied onto the node as `__click_mask__data`
         // (pat-0q2kx.257).

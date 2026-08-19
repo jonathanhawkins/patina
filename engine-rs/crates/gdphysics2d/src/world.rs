@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use gdcore::math::{Transform2D, Vector2};
 
-use crate::body::{BodyId, PhysicsBody2D};
+use crate::body::{BodyId, BodyType, PhysicsBody2D};
 use crate::collision;
 use crate::joint::{self, Joint2D, JointId};
 use crate::shape::Shape2D;
@@ -217,6 +217,24 @@ impl Default for SpaceParams2D {
 /// multiplied by `physics/2d/default_gravity_vector` ((0, 1), i.e. down).
 pub const DEFAULT_GRAVITY_2D: Vector2 = Vector2::new(0.0, 980.0);
 
+/// Radius of a circle centred on the shape's local origin that contains the
+/// whole shape — the conservative bound a swept test needs.
+///
+/// ⚠️ Measured from the ORIGIN, not from the bounding rect's centre. A
+/// `Segment` or `SeparationRay` sits entirely off to one side of its origin, so
+/// halving the rect's diagonal would under-cover it and let a sweep pass
+/// through the far end.
+fn bounding_radius(shape: &crate::shape::Shape2D) -> f32 {
+    let r = shape.bounding_rect();
+    let (x0, y0) = (r.position.x, r.position.y);
+    let (x1, y1) = (x0 + r.size.x, y0 + r.size.y);
+    let corner = |x: f32, y: f32| (x * x + y * y).sqrt();
+    corner(x0, y0)
+        .max(corner(x1, y0))
+        .max(corner(x0, y1))
+        .max(corner(x1, y1))
+}
+
 impl PhysicsWorld2D {
     /// Creates an empty physics world.
     pub fn new() -> Self {
@@ -368,6 +386,67 @@ impl PhysicsWorld2D {
     /// Returns collision events for this frame (entered, persisting, exited).
     pub fn step(&mut self, dt: f32) -> Vec<CollisionEvent> {
         self.step_inner(dt, None, None, None)
+    }
+
+    /// Pulls `id` back to its first time of impact when the step it just took
+    /// jumped clean past a static obstacle (`RigidBody2D.continuous_cd`).
+    ///
+    /// 🔑 This is what makes `gdphysics2d::ccd` reachable at all: the module was
+    /// a complete, unit-tested swept-TOI implementation with **zero callers**,
+    /// and `continuous_cd` was a registered property nothing read — a fast
+    /// bullet passed straight through a wall while the inspector showed the
+    /// setting enabled.
+    fn ccd_clamp(&mut self, id: BodyId, prev: Vector2) {
+        let (new_pos, r_self, self_layer, self_mask) = match self.bodies.get(&id) {
+            Some(b) => (
+                b.position,
+                bounding_radius(&b.shape),
+                b.collision_layer,
+                b.collision_mask,
+            ),
+            None => return,
+        };
+        let motion = new_pos - prev;
+        if motion.length() < 1e-5 {
+            return;
+        }
+
+        let mut earliest: Option<f32> = None;
+        for other in self.bodies.values() {
+            // Only against things that do not move under the solver: two rigid
+            // bodies converging are the contact solver's job, and sweeping both
+            // would double-resolve the pair.
+            if other.id == id || other.body_type == BodyType::Rigid {
+                continue;
+            }
+            // Godot's layer/mask test is symmetric.
+            if (self_mask & other.collision_layer) == 0 && (other.collision_mask & self_layer) == 0
+            {
+                continue;
+            }
+            let r = r_self + bounding_radius(&other.shape);
+            let Some(t) = crate::ccd::ray_circle_toi(prev, motion, other.position, r) else {
+                continue;
+            };
+            // ⚠️ `ray_circle_toi` answers `Some(0.0)` when the sweep STARTS
+            // inside the radius. Clamping on that would pin a body already
+            // resting against something to its previous position forever — the
+            // regular narrow-phase owns overlaps, CCD only owns the gap that was
+            // skipped. It also silently drops `WorldBoundary`, whose bounding
+            // rect is ±1e9 so every sweep begins "inside" it.
+            if t <= 1e-4 {
+                continue;
+            }
+            if earliest.map_or(true, |e| t < e) {
+                earliest = Some(t);
+            }
+        }
+
+        if let Some(t) = earliest {
+            if let Some(body) = self.bodies.get_mut(&id) {
+                body.position = prev + motion * t;
+            }
+        }
     }
 
     /// Steps the simulation applying per-body area gravity/damp overrides.
@@ -667,6 +746,20 @@ impl PhysicsWorld2D {
             }
         }
 
+        // Continuous collision detection (`RigidBody2D.continuous_cd`) needs the
+        // position from BEFORE the transforms advance, so the sweep has a start
+        // point (pat-s3rrv.100). Mirrors `gdphysics3d::world`'s `ccd_prev`.
+        //
+        // Only moving RIGID bodies are swept: a static or kinematic body is
+        // placed by the scene rather than integrated, and a sleeping one is not
+        // moving at all.
+        let ccd_prev: Vec<(BodyId, Vector2)> = self
+            .bodies
+            .values()
+            .filter(|b| b.continuous_cd && b.body_type == BodyType::Rigid && !b.sleeping)
+            .map(|b| (b.id, b.position))
+            .collect();
+
         // Phase 4: `integrate_velocities` — now that the solver has produced the
         // final velocities, advance the transforms. The depenetration
         // pseudo-velocity moves the transform here and is then dropped, so
@@ -677,6 +770,12 @@ impl PhysicsWorld2D {
                 .copied()
                 .unwrap_or((Vector2::ZERO, 0.0));
             body.integrate_velocities_biased(dt, bias_linear, bias_angular);
+        }
+
+        // Phase 4b: pull back any swept body that tunnelled through a static
+        // obstacle during the step just integrated.
+        for (id, prev) in ccd_prev {
+            self.ccd_clamp(id, prev);
         }
 
         // Phase 5: joint constraints (iterated for convergence), on the

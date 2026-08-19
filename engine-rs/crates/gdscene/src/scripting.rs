@@ -772,6 +772,22 @@ impl SceneTreeAccessor {
         Some(unsafe { &*(addr as *const crate::physics_server::PhysicsServer) })
     }
 
+    /// The 3D twin of [`physics`](Self::physics) (pat-s3rrv.107).
+    fn physics_3d(&self) -> Option<&crate::physics_server_3d::PhysicsServer3D> {
+        let addr = self.tree().script_physics_3d_addr();
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: identical contract to `physics()`. `set_script_physics_server_3d`
+        // stored the address of a live `PhysicsServer3D` and `MainLoop` clears it
+        // before that server can move or drop, at every one of the paired
+        // set/clear brackets. A zero address means "not bound" and is handled
+        // above, so a non-zero one points at a live server. The server is a
+        // sibling of the tree, never inside it, so this borrow cannot alias the
+        // tree pointer.
+        Some(unsafe { &*(addr as *const crate::physics_server_3d::PhysicsServer3D) })
+    }
+
     /// Maps a shape query's `exclude` list from NODE ids to `BodyId`s
     /// (pat-s3rrv.26).
     ///
@@ -1214,6 +1230,76 @@ const PHYS_QUERY_TAG: u64 = 0xA6_00_0000_0000_0000;
 const WORLD_2D_HANDLE: u64 = PHYS_QUERY_TAG | 0x01;
 /// `World2D.direct_space_state`'s value.
 const SPACE_STATE_2D_HANDLE: u64 = PHYS_QUERY_TAG | 0x02;
+/// Builds a `PhysicsShapeQuery3D` from a script's
+/// `PhysicsShapeQueryParameters3D` resource (pat-s3rrv.107).
+///
+/// Shared by every shape-based 3D query — `intersect_shape`, `cast_motion`,
+/// `collide_shape`, `get_rest_info` — so the shape decoding, the extent
+/// conversion and the mask handling cannot drift apart between them.
+///
+/// ⚠️ Godot's `BoxShape3D.size` and the capsule/cylinder `height` are FULL
+/// extents; `Shape3D` stores HALF-extents and a total height. Passing `size`
+/// straight through yields a box twice the authored size, which silently
+/// over-reports overlaps.
+///
+/// Returns `None` when the params carry no usable shape — the callers turn that
+/// into Godot's empty answer rather than guessing geometry, because a
+/// substituted shape reports contacts that do not exist.
+fn shape_query_3d_from_params(
+    params: &gdvariant::ResourceRef,
+) -> Option<gdphysics3d::query::PhysicsShapeQuery3D> {
+    let Some(Variant::Resource(shape_res)) = params.properties.get("shape") else {
+        return None;
+    };
+    let num = |k: &str, d: f32| match shape_res.properties.get(k) {
+        Some(Variant::Float(f)) => *f as f32,
+        Some(Variant::Int(i)) => *i as f32,
+        _ => d,
+    };
+    let shape = match shape_res.class_name.as_str() {
+        "SphereShape3D" => gdphysics3d::shape::Shape3D::Sphere {
+            radius: num("radius", 0.5),
+        },
+        "BoxShape3D" => {
+            let size = match shape_res.properties.get("size") {
+                Some(Variant::Vector3(v)) => *v,
+                _ => gdcore::math::Vector3::new(1.0, 1.0, 1.0),
+            };
+            gdphysics3d::shape::Shape3D::BoxShape {
+                half_extents: gdcore::math::Vector3::new(size.x / 2.0, size.y / 2.0, size.z / 2.0),
+            }
+        }
+        "CapsuleShape3D" => gdphysics3d::shape::Shape3D::CapsuleShape {
+            radius: num("radius", 0.5),
+            height: num("height", 2.0),
+        },
+        "CylinderShape3D" => gdphysics3d::shape::Shape3D::CylinderShape {
+            radius: num("radius", 0.5),
+            height: num("height", 2.0),
+        },
+        _ => return None,
+    };
+    // Godot types `transform` as a Transform3D and uses its ORIGIN; a bare
+    // Vector3 is accepted too, since the query consumes only a position.
+    let position = match params.properties.get("transform") {
+        Some(Variant::Transform3D(t)) => t.origin,
+        Some(Variant::Vector3(v)) => *v,
+        _ => gdcore::math::Vector3::ZERO,
+    };
+    let mut query = gdphysics3d::query::PhysicsShapeQuery3D::new(shape, position);
+    if let Some(Variant::Int(m)) = params.properties.get("collision_mask") {
+        query.collision_mask = *m as u32;
+    }
+    if let Some(Variant::Vector3(v)) = params.properties.get("motion") {
+        query.motion = *v;
+    }
+    Some(query)
+}
+
+/// `get_world_3d()`'s return value (pat-s3rrv.107).
+const WORLD_3D_HANDLE: u64 = PHYS_QUERY_TAG | 0x11;
+/// `World3D.direct_space_state`'s value.
+const SPACE_STATE_3D_HANDLE: u64 = PHYS_QUERY_TAG | 0x12;
 /// Marks a ray-parameters handle; the low bits are its registry key.
 const RAY_PARAMS_BASE: u64 = PHYS_QUERY_TAG | 0x1000;
 
@@ -1561,6 +1647,74 @@ fn richtext_src(tree: &SceneTree, node_id: NodeId) -> String {
 /// Both properties are set: `bbcode_text` is what the draw arm prefers, and
 /// leaving a stale `text` behind would resurrect the old string the moment
 /// something cleared the bbcode one.
+/// The node property holding a `RichTextLabel`'s open tag stack.
+///
+/// Godot's push/pop API is a STACK of open tags — `push_color(); push_bold();
+/// pop()` closes the bold, not the colour — so `pop` has to know what the last
+/// `push` opened. The label itself carries that state, which keeps it alive
+/// across frames and dies with the node.
+const RICHTEXT_TAG_STACK: &str = "__richtext_tag_stack__";
+
+/// Reads the open-tag stack (outermost first).
+///
+/// Stored newline-joined because a BBCode close tag never contains a newline,
+/// so the round trip is lossless without a second escaping scheme.
+fn richtext_tag_stack(tree: &SceneTree, node_id: NodeId) -> Vec<String> {
+    match tree
+        .get_node(node_id)
+        .map(|n| n.get_property(RICHTEXT_TAG_STACK))
+    {
+        Some(Variant::String(s)) if !s.is_empty() => s.split('\n').map(str::to_string).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn set_richtext_tag_stack(tree: &mut SceneTree, node_id: NodeId, stack: &[String]) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(RICHTEXT_TAG_STACK, Variant::String(stack.join("\n")));
+    }
+}
+
+/// Godot's `push_*`: append `open` to the BBCode source and remember `close`.
+///
+/// ⚠️ ONLY emit tags `parse_bbcode` actually understands. A tag it does not
+/// recognise is stripped, so an unsupported push would appear to work — the
+/// call succeeds, the text still renders — while silently doing nothing. That
+/// is why there is no `push_bold`/`push_italics` here: `[b]`/`[i]` are not
+/// parsed, and the built-in 5x7 bitmap font has no weight or slant variants to
+/// render them with even if they were.
+fn richtext_push(tree: &mut SceneTree, node_id: NodeId, open: &str, close: &str) {
+    let joined = format!("{}{}", richtext_src(tree, node_id), open);
+    set_richtext(tree, node_id, joined);
+    let mut stack = richtext_tag_stack(tree, node_id);
+    stack.push(close.to_string());
+    set_richtext_tag_stack(tree, node_id, &stack);
+}
+
+/// Godot's `pop`: close the most recently pushed tag. `false` when nothing is open.
+fn richtext_pop(tree: &mut SceneTree, node_id: NodeId) -> bool {
+    let mut stack = richtext_tag_stack(tree, node_id);
+    let Some(close) = stack.pop() else {
+        return false;
+    };
+    let joined = format!("{}{}", richtext_src(tree, node_id), close);
+    set_richtext(tree, node_id, joined);
+    set_richtext_tag_stack(tree, node_id, &stack);
+    true
+}
+
+/// A `Color` as the `#rrggbbaa` BBCode `parse_bbcode_color` reads back.
+fn richtext_color_hex(c: Color) -> String {
+    let byte = |f: f32| (f.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}{:02x}",
+        byte(c.r),
+        byte(c.g),
+        byte(c.b),
+        byte(c.a)
+    )
+}
+
 fn set_richtext(tree: &mut SceneTree, node_id: NodeId, value: String) {
     if let Some(node) = tree.get_node_mut(node_id) {
         node.set_property("bbcode_text", Variant::String(value.clone()));
@@ -1627,6 +1781,9 @@ impl SceneAccess for SceneTreeAccessor {
         // `get_world_2d().direct_space_state.intersect_ray(..)` chain
         // unreachable even once `World2D` had the property registered.
         if is_phys_query_handle(node) {
+            if node == WORLD_3D_HANDLE && prop == "direct_space_state" {
+                return Variant::ObjectId(ObjectId::from_raw(SPACE_STATE_3D_HANDLE));
+            }
             if node == WORLD_2D_HANDLE && prop == "direct_space_state" {
                 return Variant::ObjectId(ObjectId::from_raw(SPACE_STATE_2D_HANDLE));
             }
@@ -2388,9 +2545,190 @@ impl SceneAccess for SceneTreeAccessor {
                 }
             }
             "get_world_2d" => Some(Variant::ObjectId(ObjectId::from_raw(WORLD_2D_HANDLE))),
+            // The 3D twin (pat-s3rrv.107). Like `World2D`, `World3D` and its
+            // space state are fixed singletons — one `PhysicsWorld3D` per tree —
+            // so they are constant handles rather than registry entries.
+            "get_world_3d" => Some(Variant::ObjectId(ObjectId::from_raw(WORLD_3D_HANDLE))),
             // Queries on the space-state handle. Guarded on the receiver being
             // that handle so these names cannot shadow a same-named script or
             // node method on an ordinary node.
+            // 3D ray query (pat-s3rrv.107).
+            //
+            // ⚠️ Reads the parameters off a `Variant::Resource` rather than a
+            // handle registry, which is where the 2D path keeps them. That is
+            // deliberate: `PhysicsRayQueryParameters3D` is a RefCounted class
+            // that already constructs from script and carries its own property
+            // map, so a second registry would be duplicate state that could
+            // disagree with the object the script is holding.
+            // 3D point query (pat-s3rrv.107): every body containing a point.
+            //
+            // ⚠️ `collision_mask` is set ON THE QUERY rather than pre-filtering
+            // the body iterator, because `intersect_bodies` already honours the
+            // mask, `exclude` and `max_results` itself. Filtering here as well
+            // would apply the mask twice — harmless today, but it would silently
+            // diverge the moment the library's own rule changes.
+            "intersect_point" if node == SPACE_STATE_3D_HANDLE => {
+                let params = match args.first() {
+                    Some(Variant::Resource(r)) => r,
+                    _ => return None,
+                };
+                let position = match params.properties.get("position") {
+                    Some(Variant::Vector3(v)) => *v,
+                    // No point to test: Godot answers an empty Array.
+                    _ => return Some(Variant::Array(Vec::new())),
+                };
+                let mut query = gdphysics3d::query::PhysicsPointQuery3D::new(position);
+                if let Some(Variant::Int(m)) = params.properties.get("collision_mask") {
+                    query.collision_mask = *m as u32;
+                }
+                let server = self.physics_3d()?;
+                let ids = query.intersect_bodies(server.world().bodies());
+                let out: Vec<Variant> = ids
+                    .into_iter()
+                    .map(|body_id| {
+                        let mut d = gdvariant::Dictionary::new();
+                        if let Some(nid) = server.node_for_body(body_id) {
+                            d.insert("collider", Variant::ObjectId(nid.object_id()));
+                        }
+                        Variant::Dictionary(d)
+                    })
+                    .collect();
+                Some(Variant::Array(out))
+            }
+            // The shape-based 3D queries (pat-s3rrv.107). All four decode
+            // their parameters through `shape_query_3d_from_params`, so the
+            // extent conversion and mask handling cannot drift between them.
+            //
+            // A params object with no usable shape yields Godot's empty answer
+            // for each — an Array, a full-travel `[1, 1]`, or an empty
+            // Dictionary — rather than a guessed shape, which would report
+            // contacts that do not exist.
+            "intersect_shape" if node == SPACE_STATE_3D_HANDLE => {
+                let Some(Variant::Resource(params)) = args.first() else {
+                    return None;
+                };
+                let Some(query) = shape_query_3d_from_params(params) else {
+                    return Some(Variant::Array(Vec::new()));
+                };
+                let server = self.physics_3d()?;
+                let hits = query.intersect(server.world().bodies());
+                let out: Vec<Variant> = hits
+                    .into_iter()
+                    .map(|hit| {
+                        let mut d = gdvariant::Dictionary::new();
+                        if let Some(nid) = server.node_for_body(hit.body_id) {
+                            d.insert("collider", Variant::ObjectId(nid.object_id()));
+                        }
+                        Variant::Dictionary(d)
+                    })
+                    .collect();
+                Some(Variant::Array(out))
+            }
+            // `cast_motion(params)` — `[safe, unsafe]` fractions of the
+            // params' `motion`, which is Godot's return shape.
+            "cast_motion" if node == SPACE_STATE_3D_HANDLE => {
+                let Some(Variant::Resource(params)) = args.first() else {
+                    return None;
+                };
+                let unobstructed = || {
+                    // Godot answers `[1, 1]` when nothing blocks the motion —
+                    // NOT an empty array, so `result[0]` is always indexable.
+                    Some(Variant::Array(vec![
+                        Variant::Float(1.0),
+                        Variant::Float(1.0),
+                    ]))
+                };
+                let Some(query) = shape_query_3d_from_params(params) else {
+                    return unobstructed();
+                };
+                let server = self.physics_3d()?;
+                let (safe, unsafe_) = query.cast_motion(server.world().bodies());
+                Some(Variant::Array(vec![
+                    Variant::Float(safe as f64),
+                    Variant::Float(unsafe_ as f64),
+                ]))
+            }
+            // `collide_shape(params)` — contact points as PAIRS, flattened into
+            // one Array exactly as Godot returns them (own point, then the
+            // other body's, per contact).
+            "collide_shape" if node == SPACE_STATE_3D_HANDLE => {
+                let Some(Variant::Resource(params)) = args.first() else {
+                    return None;
+                };
+                let Some(query) = shape_query_3d_from_params(params) else {
+                    return Some(Variant::Array(Vec::new()));
+                };
+                let server = self.physics_3d()?;
+                let pairs = query.collide_shape(server.world().bodies());
+                let mut out: Vec<Variant> = Vec::with_capacity(pairs.len() * 2);
+                for [a, b] in pairs {
+                    out.push(Variant::Vector3(a));
+                    out.push(Variant::Vector3(b));
+                }
+                Some(Variant::Array(out))
+            }
+            // `get_rest_info(params)` — the NEAREST contact as a Dictionary,
+            // empty on a miss so `if info:` works unguarded.
+            "get_rest_info" if node == SPACE_STATE_3D_HANDLE => {
+                let Some(Variant::Resource(params)) = args.first() else {
+                    return None;
+                };
+                let empty = || Some(Variant::Dictionary(gdvariant::Dictionary::new()));
+                let Some(query) = shape_query_3d_from_params(params) else {
+                    return empty();
+                };
+                let server = self.physics_3d()?;
+                let Some(info) = query.get_rest_info(server.world().bodies()) else {
+                    return empty();
+                };
+                let mut d = gdvariant::Dictionary::new();
+                d.insert("point", Variant::Vector3(info.point));
+                d.insert("normal", Variant::Vector3(info.normal));
+                d.insert("linear_velocity", Variant::Vector3(info.linear_velocity));
+                if let Some(nid) = server.node_for_body(info.collider) {
+                    d.insert("collider", Variant::ObjectId(nid.object_id()));
+                }
+                Some(Variant::Dictionary(d))
+            }
+            "intersect_ray" if node == SPACE_STATE_3D_HANDLE => {
+                let params = match args.first() {
+                    Some(Variant::Resource(r)) => r,
+                    // Godot only accepts the parameters object.
+                    _ => return None,
+                };
+                let v3 = |key: &str| match params.properties.get(key) {
+                    Some(Variant::Vector3(v)) => Some(*v),
+                    _ => None,
+                };
+                let (from, to) = match (v3("from"), v3("to")) {
+                    (Some(f), Some(t)) => (f, t),
+                    // Without both endpoints there is no ray. Godot answers an
+                    // empty Dictionary rather than erroring, so `if result:`
+                    // works unguarded.
+                    _ => return Some(Variant::Dictionary(gdvariant::Dictionary::new())),
+                };
+                let mask = match params.properties.get("collision_mask") {
+                    Some(Variant::Int(m)) => *m as u32,
+                    // Godot's default mask is all layers.
+                    _ => u32::MAX,
+                };
+                let world = self.physics_3d()?.world();
+                let query = gdphysics3d::query::PhysicsRayQuery3D::new(from, to);
+                let hit = match query.intersect(world.bodies().filter(|b| {
+                    // `collision_mask` selects which layers the ray sees.
+                    (b.collision_layer & mask) != 0
+                })) {
+                    Some(hit) => hit,
+                    None => return Some(Variant::Dictionary(gdvariant::Dictionary::new())),
+                };
+                let mut d = gdvariant::Dictionary::new();
+                d.insert("position", Variant::Vector3(hit.point));
+                d.insert("normal", Variant::Vector3(hit.normal));
+                if let Some(nid) = self.physics_3d()?.node_for_body(hit.body_id) {
+                    d.insert("collider", Variant::ObjectId(nid.object_id()));
+                }
+                Some(Variant::Dictionary(d))
+            }
             "intersect_ray" if node == SPACE_STATE_2D_HANDLE => {
                 let params = match args.first() {
                     Some(Variant::ObjectId(id)) => ray_params(id.raw())?,
@@ -2968,6 +3306,33 @@ impl SceneAccess for SceneTreeAccessor {
             // Written by `process_character_movement` from the platform the body
             // is standing on; ZERO until then.
             "get_platform_velocity" => Some(vel_prop(self.tree(), "platform_velocity")),
+            // Godot's `get_position_delta` (travel over the last
+            // `move_and_slide`) and `get_last_motion` (the LAST of the several
+            // motions a slide is split into) — pat-s3rrv.103.
+            //
+            // ⚠️ Deliberately two separate published properties rather than one
+            // reused value: they coincide only when the body hit nothing, so
+            // serving both from the same source reads as correct in any fixture
+            // that never collides, which is most of them.
+            //
+            // Both exist on CharacterBody2D *and* 3D (Vector2 / Vector3), so
+            // they go through the dimension-preserving reader.
+            "get_position_delta" => Some(vel_prop(self.tree(), "_position_delta")),
+            "get_last_motion" => Some(vel_prop(self.tree(), "_last_motion")),
+            // ⚠️ 3D ONLY. Godot gives `CharacterBody3D` this method and
+            // `CharacterBody2D` none at all — 2D angular velocity is a scalar,
+            // so there is no Vector2 form to fall back to and this must not go
+            // through `vel_prop`.
+            "get_platform_angular_velocity" => Some(Variant::Vector3(
+                match self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.get_property("_platform_angular_velocity"))
+                {
+                    Some(Variant::Vector3(v)) => v,
+                    _ => gdcore::math::Vector3::ZERO,
+                },
+            )),
 
             // -- RayCast2D script API (pat-0q2kx.32) --------------------------
             //
@@ -2982,12 +3347,8 @@ impl SceneAccess for SceneTreeAccessor {
             //
             // Keys match what `raycast2d::store_hit` publishes.
             "is_colliding" => Some(Variant::Bool(bool_prop(self.tree(), "_hit_colliding"))),
-            "get_collision_point" => {
-                Some(Variant::Vector2(vec2_prop(self.tree(), "_hit_point")))
-            }
-            "get_collision_normal" => {
-                Some(Variant::Vector2(vec2_prop(self.tree(), "_hit_normal")))
-            }
+            "get_collision_point" => Some(Variant::Vector2(vec2_prop(self.tree(), "_hit_point"))),
+            "get_collision_normal" => Some(Variant::Vector2(vec2_prop(self.tree(), "_hit_normal"))),
             "get_collider" => Some(
                 self.tree()
                     .get_node(nid)
@@ -2999,6 +3360,67 @@ impl SceneAccess for SceneTreeAccessor {
             // this a script could never observe a hit during `_physics_process`.
             "force_raycast_update" => {
                 self.force_raycast_update_2d(node);
+                Some(Variant::Nil)
+            }
+            // -- RayCast3D / ShapeCast3D exception list (pat-s3rrv.106) -------
+            //
+            // `add_exception(node)` excludes a body from the cast — the standard
+            // way a character stops its own raycast hitting itself. The Rust
+            // modules have carried `add_exception` / `remove_exception` /
+            // `clear_exceptions` since they landed; no script could reach them.
+            //
+            // ⚠️ Dispatched on the node's CLASS, unlike the property-backed arms
+            // above (`is_colliding` and friends read `_hit_colliding`, which
+            // both dimensions publish, so those are deliberately class-blind).
+            // The exception list is real per-module state, so sending a
+            // RayCast2D to the 3D module would silently write a list nothing
+            // reads. An unrecognised class falls through to `Nil` rather than
+            // guessing a module.
+            "add_exception" | "remove_exception" => {
+                let Some(Variant::ObjectId(oid)) = args.first() else {
+                    return Some(Variant::Nil);
+                };
+                let excluded = NodeId::from_object_id(*oid);
+                let adding = method == "add_exception";
+                // `node` is a raw object id here, as `force_raycast_update_2d`
+                // above also has to convert.
+                let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+                let class = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.class_name().to_string())
+                    .unwrap_or_default();
+                match class.as_str() {
+                    "RayCast3D" => {
+                        if adding {
+                            crate::raycast3d::add_exception(self.tree_mut(), nid, excluded);
+                        } else {
+                            crate::raycast3d::remove_exception(self.tree_mut(), nid, excluded);
+                        }
+                    }
+                    "ShapeCast3D" => {
+                        if adding {
+                            crate::shapecast3d::add_exception(self.tree_mut(), nid, excluded);
+                        } else {
+                            crate::shapecast3d::remove_exception(self.tree_mut(), nid, excluded);
+                        }
+                    }
+                    _ => {}
+                }
+                Some(Variant::Nil)
+            }
+            "clear_exceptions" => {
+                let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+                let class = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.class_name().to_string())
+                    .unwrap_or_default();
+                match class.as_str() {
+                    "RayCast3D" => crate::raycast3d::clear_exceptions(self.tree_mut(), nid),
+                    "ShapeCast3D" => crate::shapecast3d::clear_exceptions(self.tree_mut(), nid),
+                    _ => {}
+                }
                 Some(Variant::Nil)
             }
 
@@ -3641,6 +4063,70 @@ impl SceneAccess for SceneTreeAccessor {
             // All of them work on the same source string the draw arm reads, so
             // a script append shows up in the very next frame with no separate
             // model to fall out of sync.
+            // Godot's push/pop TAG STACK (pat-s3rrv.74). `push_color(c)` opens a
+            // run, `pop()` closes the most recent one — the API a log or chat
+            // box uses to build a line without hand-writing BBCode.
+            //
+            // 🔑 These emit into the SAME source string `append_text` appends
+            // to, which is the whole reason the stack needs no parallel
+            // document model: the draw arm re-parses that string every frame,
+            // so a push shows up in the next frame like any other edit.
+            "push_color" if is_rich_text_label(self.tree(), nid) => {
+                let c = match args.first() {
+                    Some(Variant::Color(c)) => *c,
+                    _ => return Some(Variant::Nil),
+                };
+                let open = format!("[color={}]", richtext_color_hex(c));
+                richtext_push(self.tree_mut(), nid, &open, "[/color]");
+                Some(Variant::Nil)
+            }
+            "push_bgcolor" if is_rich_text_label(self.tree(), nid) => {
+                let c = match args.first() {
+                    Some(Variant::Color(c)) => *c,
+                    _ => return Some(Variant::Nil),
+                };
+                let open = format!("[bgcolor={}]", richtext_color_hex(c));
+                richtext_push(self.tree_mut(), nid, &open, "[/bgcolor]");
+                Some(Variant::Nil)
+            }
+            "push_fgcolor" if is_rich_text_label(self.tree(), nid) => {
+                let c = match args.first() {
+                    Some(Variant::Color(c)) => *c,
+                    _ => return Some(Variant::Nil),
+                };
+                let open = format!("[fgcolor={}]", richtext_color_hex(c));
+                richtext_push(self.tree_mut(), nid, &open, "[/fgcolor]");
+                Some(Variant::Nil)
+            }
+            "push_underline" if is_rich_text_label(self.tree(), nid) => {
+                richtext_push(self.tree_mut(), nid, "[u]", "[/u]");
+                Some(Variant::Nil)
+            }
+            "push_strikethrough" if is_rich_text_label(self.tree(), nid) => {
+                richtext_push(self.tree_mut(), nid, "[s]", "[/s]");
+                Some(Variant::Nil)
+            }
+            // `push_meta(v)` is what makes a run clickable — the payload
+            // `meta_clicked` carries. The parser models it as `[url=...]`.
+            "push_meta" if is_rich_text_label(self.tree(), nid) => {
+                let Some(meta) = args.first().and_then(variant_string) else {
+                    return Some(Variant::Nil);
+                };
+                let open = format!("[url={meta}]");
+                richtext_push(self.tree_mut(), nid, &open, "[/url]");
+                Some(Variant::Nil)
+            }
+            // Godot's `pop()` returns nothing and is a no-op on an empty stack,
+            // so an unbalanced script misbehaves rather than crashing — the
+            // same forgiveness the engine gives.
+            "pop" if is_rich_text_label(self.tree(), nid) => {
+                richtext_pop(self.tree_mut(), nid);
+                Some(Variant::Nil)
+            }
+            "pop_all" if is_rich_text_label(self.tree(), nid) => {
+                while richtext_pop(self.tree_mut(), nid) {}
+                Some(Variant::Nil)
+            }
             "append_text" if is_rich_text_label(self.tree(), nid) => {
                 let extra = arg_str(0)?;
                 let joined = format!("{}{}", richtext_src(self.tree(), nid), extra);

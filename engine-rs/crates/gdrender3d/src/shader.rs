@@ -597,6 +597,61 @@ fn directional_shadow_fade(view_z: f32, max_distance: f32, fade_start: f32) -> f
     t * t * (3.0 - 2.0 * t)
 }
 
+/// The vector added to a fragment's position before the shadow-map lookup
+/// (Godot's normal-offset shadows).
+///
+/// Magnitude follows `light_storage.cpp`: the authored bias is in SHADOW-MAP
+/// TEXELS, so it is scaled by the texel size, positional lights carry an extra
+/// x10 (`:968`, which sits above Godot's spot/omni split and so covers both)
+/// while directional does not (`:724`), and the `1 - |dot|` term grows the
+/// offset as the surface turns edge-on to the light — where acne happens — and
+/// vanishes where it faces the light squarely.
+///
+/// 🔑 **For a DIRECTIONAL light the result is then made perpendicular to the
+/// light ray**, matching the directional `BIAS_FUNC`
+/// (`scene_forward_clustered.glsl:2287-2290`, `normal_bias -= light_dir *
+/// dot(light_dir, normal_bias)`). A normal offset is meant to slide the lookup
+/// ACROSS the shadow map; any component along the ray changes the sampled depth
+/// instead, which double-counts with `shadow_bias` and lifts the shadow off its
+/// caster.
+///
+/// ⚠️ Positional lights are deliberately NOT projected: Godot's omni and spot
+/// paths (`scene_forward_lights_inc.glsl:489`, `:780`) offset along the raw
+/// normal. The asymmetry is upstream's, not an oversight here.
+///
+/// ⓘ The projection is a no-op at both extremes — edge-on, the normal is
+/// already perpendicular to the ray, and face-on the `1 - |dot|` term has
+/// already zeroed the offset — so it only bites at intermediate angles.
+fn shadow_normal_offset(
+    kind: LightKind,
+    normal: Vector3,
+    light_dir: Vector3,
+    shadow_normal_bias: f32,
+) -> Vector3 {
+    let positional_scale = match kind {
+        LightKind::Directional => 1.0,
+        LightKind::Point | LightKind::Spot => 10.0,
+    };
+    let magnitude = shadow_normal_bias
+        * shadow_texel_size()
+        * positional_scale
+        * (1.0 - normal.dot(light_dir).abs());
+    let offset = normal * magnitude;
+    match kind {
+        LightKind::Directional => {
+            // Normalize defensively: the projection is only exact for a unit
+            // ray, and a zero-length direction must not produce NaNs.
+            let len = light_dir.length();
+            if len < 1e-6 {
+                return offset;
+            }
+            let dir = light_dir * (1.0 / len);
+            offset - dir * dir.dot(offset)
+        }
+        LightKind::Point | LightKind::Spot => offset,
+    }
+}
+
 /// Computes the shadow factor for a light at the given fragment position.
 ///
 /// Returns a value in `[0.0, 1.0]` where 1.0 = fully lit, 0.0 = fully shadowed.
@@ -611,32 +666,11 @@ fn compute_shadow_factor(
     if !light.shadow_enabled {
         return 1.0;
     }
-    // Godot's NORMAL-OFFSET shadows: push the sample point along the surface
-    // normal before looking it up (`scene_forward_lights_inc.glsl:489`):
-    //
-    //     normal_bias = normal * shadow_normal_bias * (1 - |dot(normal, light_dir)|)
-    //
-    // 🔑 The `1 - |dot|` term is the point. The offset grows as the surface
-    // turns EDGE-ON to the light — where acne actually happens — and vanishes
-    // where it faces the light squarely. A constant bias can only fix grazing
-    // acne by over-biasing everything, which detaches contact shadows.
-    //
-    // ⚠️ `shadow_normal_bias` is authored in SHADOW-MAP TEXELS, not world
-    // units, so it is scaled by the texel size here — Godot does the same
-    // multiply on the CPU before the shader sees it (`light_storage.cpp:724`).
-    // ⚠️ POSITIONAL lights carry an extra x10 (`light_storage.cpp:968`), which
-    // sits ABOVE Godot's `if (type == SPOT) ... else //omni` split and so
-    // applies to spot AND omni alike — not to omni alone, and not to
-    // directional, which uses the unscaled form at `:724`. Missing it makes
-    // every positional light's normal bias ten times too small.
-    let positional_scale = match light.kind {
-        LightKind::Directional => 1.0,
-        LightKind::Point | LightKind::Spot => 10.0,
-    };
-    let normal_offset = light.shadow_normal_bias
-        * shadow_texel_size()
-        * positional_scale
-        * (1.0 - normal.dot(light_dir).abs());
+    // Godot's normal-offset shadows: nudge the lookup position before
+    // sampling. See `shadow_normal_offset` for the scaling rules and for
+    // why the directional case is projected perpendicular to the ray.
+    let normal_offset_vec =
+        shadow_normal_offset(light.kind, normal, light_dir, light.shadow_normal_bias);
     // View-space depth of the TRUE fragment position, for the directional
     // shadow fade below. Taken before `frag_pos` is shadowed by the
     // normal-offset rebinding on the next line.
@@ -644,7 +678,7 @@ fn compute_shadow_factor(
         &uniforms.view_matrix,
         [frag_pos.x, frag_pos.y, frag_pos.z, 1.0],
     )[2];
-    let frag_pos = frag_pos + normal * normal_offset;
+    let frag_pos = frag_pos + normal_offset_vec;
     // Godot's `shadow_opacity` scales how dark the shadow is, so it multiplies
     // the OCCLUSION before it is turned into visibility: opacity 0 leaves the
     // fragment fully lit, opacity 1 is the old behaviour (pat-s3rrv.90).
@@ -1294,6 +1328,109 @@ mod tests {
         assert!(
             (directional - texel).abs() < 1e-6,
             "a directional light's offset is the bare texel-scaled bias"
+        );
+    }
+
+    /// 🔑 A DIRECTIONAL light's normal offset must be PERPENDICULAR to the
+    /// light ray.
+    ///
+    /// Godot's directional `BIAS_FUNC` strips the along-ray component
+    /// (`scene_forward_clustered.glsl:2287-2290`). The offset exists to slide
+    /// the lookup ACROSS the shadow map; a component along the ray changes the
+    /// sampled depth instead, double-counting with `shadow_bias` and lifting
+    /// the shadow off its caster.
+    ///
+    /// ⚠️ The fixture angle matters. At grazing incidence the normal is already
+    /// perpendicular to the ray, and face-on the `1 - |dot|` term has already
+    /// zeroed the offset — at BOTH extremes the projection is a no-op and this
+    /// test would pass without it. 45 degrees is where the two versions differ,
+    /// so the assertion below is paired with a check that the unprojected
+    /// offset really would have failed.
+    #[test]
+    fn a_directional_normal_offset_is_perpendicular_to_the_light_ray() {
+        let n = Vector3::UP;
+        let inv = 1.0 / 2.0f32.sqrt();
+        let light_dir = Vector3::new(inv, inv, 0.0); // 45 degrees to the normal
+
+        let offset = shadow_normal_offset(LightKind::Directional, n, light_dir, 1.0);
+        assert!(
+            offset.dot(light_dir).abs() < 1e-6,
+            "offset must have no component along the ray, got {}",
+            offset.dot(light_dir)
+        );
+
+        // The fixture is discriminating: without the projection the offset is
+        // `n * magnitude`, which at this angle is well off perpendicular.
+        let magnitude = shadow_texel_size() * (1.0 - n.dot(light_dir).abs());
+        let unprojected = n * magnitude;
+        assert!(
+            unprojected.dot(light_dir).abs() > 1e-4,
+            "fixture is not discriminating: the unprojected offset is already \
+             perpendicular"
+        );
+        // And the projection only removes that component — it does not flip or
+        // rescale the rest, so the result still points along the normal side.
+        assert!(offset.dot(n) > 0.0, "the offset must still push outward");
+    }
+
+    /// ⚠️ POSITIONAL lights are deliberately NOT projected.
+    ///
+    /// Godot's omni and spot paths offset along the raw normal
+    /// (`scene_forward_lights_inc.glsl:489`, `:780`) with no projection step.
+    /// The asymmetry with directional is upstream's; this pins it so the
+    /// projection is not "helpfully" generalised to every light later.
+    #[test]
+    fn a_positional_normal_offset_keeps_its_along_ray_component() {
+        let n = Vector3::UP;
+        let inv = 1.0 / 2.0f32.sqrt();
+        let light_dir = Vector3::new(inv, inv, 0.0);
+
+        for kind in [LightKind::Point, LightKind::Spot] {
+            let offset = shadow_normal_offset(kind, n, light_dir, 1.0);
+            assert!(
+                offset.dot(light_dir).abs() > 1e-6,
+                "{kind:?} must not be projected perpendicular to the ray"
+            );
+            // It is exactly the raw normal times the x10-scaled magnitude.
+            let expected = n * (shadow_texel_size() * 10.0 * (1.0 - n.dot(light_dir).abs()));
+            assert!((offset - expected).length() < 1e-6);
+        }
+    }
+
+    /// The projection is a no-op at both extremes, which is what makes it safe
+    /// to add: it changes nothing where the offset was already correct.
+    #[test]
+    fn the_normal_offset_ray_projection_changes_nothing_at_extremes() {
+        let n = Vector3::UP;
+
+        // Face-on: the `1 - |dot|` term zeroes the offset entirely.
+        let face_on = shadow_normal_offset(LightKind::Directional, n, Vector3::UP, 1.0);
+        assert!(face_on.length() < 1e-6, "got {face_on:?}");
+
+        // Grazing: the normal is already perpendicular, so the full
+        // texel-scaled offset survives the projection intact.
+        let grazing =
+            shadow_normal_offset(LightKind::Directional, n, Vector3::new(1.0, 0.0, 0.0), 1.0);
+        assert!(
+            (grazing.length() - shadow_texel_size()).abs() < 1e-6,
+            "grazing keeps the full texel-scaled bias, got {}",
+            grazing.length()
+        );
+    }
+
+    /// The x10 positional split, asserted through the production function
+    /// rather than by re-deriving the arithmetic in the test.
+    #[test]
+    fn the_positional_normal_offset_ten_times_scale_holds_via_the_helper() {
+        let n = Vector3::UP;
+        let grazing_dir = Vector3::new(1.0, 0.0, 0.0);
+        let directional =
+            shadow_normal_offset(LightKind::Directional, n, grazing_dir, 1.0).length();
+        let positional = shadow_normal_offset(LightKind::Point, n, grazing_dir, 1.0).length();
+        assert!(
+            (positional / directional - 10.0).abs() < 1e-4,
+            "got {}",
+            positional / directional
         );
     }
 

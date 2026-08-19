@@ -197,6 +197,59 @@ pub fn get_ticks_usec() -> u64 {
 
 /// Godot's fallback when `application/config/name` is unset
 /// (`OS::get_safe_dir_name` on an empty name).
+/// Whether the project should relaunch itself on exit, plus the command line to
+/// relaunch with (Godot's `OS.set_restart_on_exit`).
+///
+/// ⚠️ Both halves are stored together and REPLACED on every call, matching
+/// `OS::set_restart_on_exit`. So `set_restart_on_exit(false)` with the default
+/// empty argument list also clears any previously stored arguments — leaving
+/// stale arguments behind would relaunch a later `true` with a command line the
+/// caller never asked for.
+static RESTART_ON_EXIT: OnceLock<Mutex<(bool, Vec<String>)>> = OnceLock::new();
+
+fn restart_on_exit_slot() -> &'static Mutex<(bool, Vec<String>)> {
+    RESTART_ON_EXIT.get_or_init(|| Mutex::new((false, Vec::new())))
+}
+
+/// Godot's `OS.set_restart_on_exit(restart, arguments)`.
+pub fn set_restart_on_exit(restart: bool, arguments: Vec<String>) {
+    if let Ok(mut slot) = restart_on_exit_slot().lock() {
+        *slot = (restart, arguments);
+    }
+}
+
+/// Godot's `OS.is_restart_on_exit_set()`.
+pub fn is_restart_on_exit_set() -> bool {
+    restart_on_exit_slot().lock().map(|s| s.0).unwrap_or(false)
+}
+
+/// Godot's `OS.get_restart_on_exit_arguments()`.
+pub fn restart_on_exit_arguments() -> Vec<String> {
+    restart_on_exit_slot()
+        .lock()
+        .map(|s| s.1.clone())
+        .unwrap_or_default()
+}
+
+/// Whether the engine smooths the measured frame delta (Godot's
+/// `OS.delta_smoothing`).
+///
+/// ⚠️ Defaults to **true** — `OS.xml:898` gives the member `default="true"`,
+/// and on start-up it mirrors `application/run/delta_smoothing`. Defaulting to
+/// false would report smoothing as off in a fresh project where Godot reports
+/// it on.
+static DELTA_SMOOTHING: AtomicBool = AtomicBool::new(true);
+
+/// Godot's `OS.set_delta_smoothing(enabled)`.
+pub fn set_delta_smoothing(enabled: bool) {
+    DELTA_SMOOTHING.store(enabled, Ordering::Relaxed);
+}
+
+/// Godot's `OS.is_delta_smoothing_enabled()`.
+pub fn is_delta_smoothing_enabled() -> bool {
+    DELTA_SMOOTHING.load(Ordering::Relaxed)
+}
+
 const UNNAMED_PROJECT: &str = "[unnamed project]";
 
 static PROJECT_NAME: OnceLock<Mutex<String>> = OnceLock::new();
@@ -530,6 +583,55 @@ pub fn find_keycode_from_string(text: &str) -> i64 {
         }
     }
     0
+}
+
+/// `OS.request_permission(name)` — whether the named permission is available.
+///
+/// 🔑 **Godot's default is to GRANT, not to deny** (`core/os/os.h:349-350`: the
+/// base `request_permission`/`request_permissions` both `return true`). A
+/// platform with no permission gate has withheld nothing, so the honest answer
+/// is "already granted". Answering `false` would push a cross-platform script
+/// down its permission-denied branch on a desktop where the operation is in
+/// fact allowed — a wrong branch, not a missing feature.
+///
+/// Only Android overrides these; the parameter is kept so that override has the
+/// name to act on.
+pub fn request_permission(_name: &str) -> bool {
+    true
+}
+
+/// `OS.request_permissions()` — request every *dangerous* permission at once.
+/// Android-only in Godot; grants by default elsewhere, as above.
+pub fn request_permissions() -> bool {
+    true
+}
+
+/// `OS.get_granted_permissions()`.
+///
+/// ⚠️ **Empty even though [`request_permission`] answers `true`**, and the
+/// disagreement is deliberate. This list is not "what is permitted" — it is the
+/// set of *dangerous* permissions granted at runtime on Android, or the
+/// user-selected folders a sandboxed macOS app may reach. A desktop build has
+/// neither, so the list is empty while everything is still permitted. Deriving
+/// one of these two answers from the other is the tempting mistake.
+pub fn granted_permissions() -> Vec<String> {
+    Vec::new()
+}
+
+/// `OS.revoke_granted_permissions()` — clears the folder list a sandboxed macOS
+/// app accumulated. Nothing accumulates off that platform, so this is a no-op
+/// rather than an unimplemented error.
+pub fn revoke_granted_permissions() {}
+
+/// `OS.get_version_alias()` — the *branded* OS version ("Sequoia (15.0.0)",
+/// "11 (build 22000)").
+///
+/// ⚠️ This is the **operating system** version, not the engine version. Godot's
+/// base class returns [`version`] verbatim (`core/os/os.h:220`) and only
+/// Windows, macOS and Android override it with a marketing name, so delegating
+/// is the documented default rather than a shortcut.
+pub fn version_alias() -> String {
+    version()
 }
 
 #[cfg(test)]

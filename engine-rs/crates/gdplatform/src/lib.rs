@@ -36,6 +36,7 @@ pub mod stream_peer_tcp;
 pub mod tcp_multiplayer;
 pub mod thread;
 pub mod time;
+pub mod web_request_driver;
 pub mod webrtc_peer;
 pub mod websocket_multiplayer;
 pub mod websocket_peer;

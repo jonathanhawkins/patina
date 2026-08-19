@@ -5122,6 +5122,46 @@ pub fn register_3d_classes() {
             .signal(SignalInfo::new("finished"))
             .parent("GeometryInstance3D")
             .property(
+                PropertyInfo::new("draw_pass_1", Variant::Nil)
+                    .with_accessors("get_draw_pass_mesh", "set_draw_pass_mesh"),
+            )
+            .property(
+                PropertyInfo::new("draw_pass_2", Variant::Nil)
+                    .with_accessors("get_draw_pass_mesh", "set_draw_pass_mesh"),
+            )
+            .property(
+                PropertyInfo::new("draw_pass_3", Variant::Nil)
+                    .with_accessors("get_draw_pass_mesh", "set_draw_pass_mesh"),
+            )
+            .property(
+                PropertyInfo::new("draw_pass_4", Variant::Nil)
+                    .with_accessors("get_draw_pass_mesh", "set_draw_pass_mesh"),
+            )
+            .property(
+                PropertyInfo::new("draw_skin", Variant::Nil).with_accessors("get_skin", "set_skin"),
+            )
+            .property(
+                PropertyInfo::new("process_material", Variant::Nil)
+                    .with_accessors("get_process_material", "set_process_material"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "sub_emitter",
+                    Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                )
+                .with_accessors("get_sub_emitter", "set_sub_emitter"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "visibility_aabb",
+                    Variant::Aabb(gdcore::math3d::Aabb::new(
+                        Vector3::new(-4.0, -4.0, -4.0),
+                        Vector3::new(8.0, 8.0, 8.0),
+                    )),
+                )
+                .with_accessors("get_visibility_aabb", "set_visibility_aabb"),
+            )
+            .property(
                 PropertyInfo::new("trail_enabled", Variant::Bool(false))
                     .with_accessors("is_trail_enabled", "set_trail_enabled"),
             )
@@ -5332,6 +5372,136 @@ pub fn register_3d_classes() {
         ClassRegistration::new("CPUParticles3D")
             .signal(SignalInfo::new("finished"))
             .parent("GeometryInstance3D")
+            .property(
+                PropertyInfo::new("angle_curve", Variant::Nil)
+                    .with_accessors("get_param_curve", "set_param_curve"),
+            )
+            .property(
+                PropertyInfo::new("angular_velocity_curve", Variant::Nil)
+                    .with_accessors("get_param_curve", "set_param_curve"),
+            )
+            .property(
+                PropertyInfo::new("anim_offset_curve", Variant::Nil)
+                    .with_accessors("get_param_curve", "set_param_curve"),
+            )
+            .property(
+                PropertyInfo::new("anim_speed_curve", Variant::Nil)
+                    .with_accessors("get_param_curve", "set_param_curve"),
+            )
+            .property(
+                PropertyInfo::new("color_initial_ramp", Variant::Nil)
+                    .with_accessors("get_color_initial_ramp", "set_color_initial_ramp"),
+            )
+            .property(
+                PropertyInfo::new("color_ramp", Variant::Nil)
+                    .with_accessors("get_color_ramp", "set_color_ramp"),
+            )
+            .property(
+                PropertyInfo::new("damping_curve", Variant::Nil)
+                    .with_accessors("get_param_curve", "set_param_curve"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "emission_box_extents",
+                    Variant::Vector3(Vector3::new(1.0, 1.0, 1.0)),
+                )
+                .with_accessors("get_emission_box_extents", "set_emission_box_extents"),
+            )
+            .property(
+                PropertyInfo::new("emission_colors", Variant::PackedColorArray(Vec::new()))
+                    .with_accessors("get_emission_colors", "set_emission_colors"),
+            )
+            .property(
+                PropertyInfo::new("emission_normals", Variant::PackedVector3Array(Vec::new()))
+                    .with_accessors("get_emission_normals", "set_emission_normals"),
+            )
+            .property(
+                PropertyInfo::new("emission_points", Variant::PackedVector3Array(Vec::new()))
+                    .with_accessors("get_emission_points", "set_emission_points"),
+            )
+            .property(
+                PropertyInfo::new("emission_ring_axis", Variant::Vector3(Vector3::ZERO))
+                    .with_accessors("get_emission_ring_axis", "set_emission_ring_axis"),
+            )
+            .property(
+                PropertyInfo::new("emission_ring_cone_angle", Variant::Float(0.0)).with_accessors(
+                    "get_emission_ring_cone_angle",
+                    "set_emission_ring_cone_angle",
+                ),
+            )
+            .property(
+                PropertyInfo::new("emission_ring_height", Variant::Float(0.0))
+                    .with_accessors("get_emission_ring_height", "set_emission_ring_height"),
+            )
+            .property(
+                PropertyInfo::new("emission_ring_inner_radius", Variant::Float(0.0))
+                    .with_accessors(
+                        "get_emission_ring_inner_radius",
+                        "set_emission_ring_inner_radius",
+                    ),
+            )
+            .property(
+                PropertyInfo::new("emission_ring_radius", Variant::Float(0.0))
+                    .with_accessors("get_emission_ring_radius", "set_emission_ring_radius"),
+            )
+            .property(
+                PropertyInfo::new("emission_sphere_radius", Variant::Float(1.0))
+                    .with_accessors("get_emission_sphere_radius", "set_emission_sphere_radius"),
+            )
+            .property(
+                PropertyInfo::new("hue_variation_curve", Variant::Nil)
+                    .with_accessors("get_param_curve", "set_param_curve"),
+            )
+            .property(
+                PropertyInfo::new("linear_accel_curve", Variant::Nil)
+                    .with_accessors("get_param_curve", "set_param_curve"),
+            )
+            .property(
+                PropertyInfo::new("mesh", Variant::Nil).with_accessors("get_mesh", "set_mesh"),
+            )
+            .property(
+                PropertyInfo::new("orbit_velocity_curve", Variant::Nil)
+                    .with_accessors("get_param_curve", "set_param_curve"),
+            )
+            .property(
+                PropertyInfo::new("orbit_velocity_max", Variant::Float(0.0))
+                    .with_accessors("get_param_max", "set_param_max"),
+            )
+            .property(
+                PropertyInfo::new("orbit_velocity_min", Variant::Float(0.0))
+                    .with_accessors("get_param_min", "set_param_min"),
+            )
+            .property(
+                PropertyInfo::new("radial_accel_curve", Variant::Nil)
+                    .with_accessors("get_param_curve", "set_param_curve"),
+            )
+            .property(
+                PropertyInfo::new("scale_amount_curve", Variant::Nil)
+                    .with_accessors("get_param_curve", "set_param_curve"),
+            )
+            .property(
+                PropertyInfo::new("scale_curve_x", Variant::Nil)
+                    .with_accessors("get_scale_curve_x", "set_scale_curve_x"),
+            )
+            .property(
+                PropertyInfo::new("scale_curve_y", Variant::Nil)
+                    .with_accessors("get_scale_curve_y", "set_scale_curve_y"),
+            )
+            .property(
+                PropertyInfo::new("scale_curve_z", Variant::Nil)
+                    .with_accessors("get_scale_curve_z", "set_scale_curve_z"),
+            )
+            .property(
+                PropertyInfo::new("tangential_accel_curve", Variant::Nil)
+                    .with_accessors("get_param_curve", "set_param_curve"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "visibility_aabb",
+                    Variant::Aabb(gdcore::math3d::Aabb::new(Vector3::ZERO, Vector3::ZERO)),
+                )
+                .with_accessors("get_visibility_aabb", "set_visibility_aabb"),
+            )
             .property(PropertyInfo::new("amount", Variant::Int(8)))
             .property(PropertyInfo::new("angle_max", Variant::Float(0.0)))
             .property(PropertyInfo::new("angle_min", Variant::Float(0.0)))
@@ -6137,19 +6307,68 @@ pub fn register_3d_classes() {
     // same function) before this point, so the new parent resolves. Reparenting
     // onto a base that has not been registered yet silently severs the chain.
     register_class(
+        // The CSG family carried NO properties at all (pat-s3rrv.89), which is
+        // not cosmetic: ClassDB is what seeds a `.tscn` node's defaults
+        // (packed_scene.rs) and what GDScript introspection reads, so an
+        // unregistered property is absent from both. Every default below is
+        // transcribed from the vendored `modules/csg/doc_classes/*.xml`.
+        //
+        // ⚠️ `snap` is deliberately NOT registered. The XML marks it
+        // `deprecated="The CSG library no longer uses snapping."` and its body
+        // reads "This property does nothing" — and it carries no default there,
+        // so registering it would mean inventing a value for a no-op.
         ClassRegistration::new("CSGShape3D")
             .parent("GeometryInstance3D")
-            .abstract_class(),
+            .abstract_class()
+            // `operation`: 0 UNION, 1 INTERSECTION, 2 SUBTRACTION.
+            .property(PropertyInfo::new("operation", Variant::Int(0)))
+            .property(PropertyInfo::new("use_collision", Variant::Bool(false)))
+            .property(PropertyInfo::new("collision_layer", Variant::Int(1)))
+            .property(PropertyInfo::new("collision_mask", Variant::Int(1)))
+            .property(PropertyInfo::new("collision_priority", Variant::Float(1.0)))
+            .property(PropertyInfo::new("calculate_tangents", Variant::Bool(true))),
     );
     register_class(
         ClassRegistration::new("CSGPrimitive3D")
             .parent("CSGShape3D")
             .abstract_class()
-            .property(PropertyInfo::new("smooth_faces", Variant::Bool(true))),
+            // ⚠️ `smooth_faces` lives here rather than on the leaves, which is
+            // NOT where Godot puts it (sphere/cylinder/torus/polygon carry it;
+            // box does not). Left as-is deliberately: existing tests assert
+            // CSGTorus3D and CSGPolygon3D inherit it from this base, so moving
+            // it would break green tests to fix a box that over-reports one
+            // property. Recorded rather than silently corrected.
+            .property(PropertyInfo::new("smooth_faces", Variant::Bool(true)))
+            .property(PropertyInfo::new("flip_faces", Variant::Bool(false))),
     );
-    register_class(ClassRegistration::new("CSGBox3D").parent("CSGPrimitive3D"));
-    register_class(ClassRegistration::new("CSGSphere3D").parent("CSGPrimitive3D"));
-    register_class(ClassRegistration::new("CSGCylinder3D").parent("CSGPrimitive3D"));
+    register_class(
+        ClassRegistration::new("CSGBox3D")
+            .parent("CSGPrimitive3D")
+            .property(PropertyInfo::new(
+                "size",
+                Variant::Vector3(gdcore::math::Vector3::ONE),
+            ))
+            // Resource-valued members register as `Nil`, the convention the
+            // rest of this file already uses for object properties.
+            .property(PropertyInfo::new("material", Variant::Nil)),
+    );
+    register_class(
+        ClassRegistration::new("CSGSphere3D")
+            .parent("CSGPrimitive3D")
+            .property(PropertyInfo::new("radius", Variant::Float(0.5)))
+            .property(PropertyInfo::new("radial_segments", Variant::Int(12)))
+            .property(PropertyInfo::new("rings", Variant::Int(6)))
+            .property(PropertyInfo::new("material", Variant::Nil)),
+    );
+    register_class(
+        ClassRegistration::new("CSGCylinder3D")
+            .parent("CSGPrimitive3D")
+            .property(PropertyInfo::new("radius", Variant::Float(0.5)))
+            .property(PropertyInfo::new("height", Variant::Float(2.0)))
+            .property(PropertyInfo::new("sides", Variant::Int(8)))
+            .property(PropertyInfo::new("cone", Variant::Bool(false)))
+            .property(PropertyInfo::new("material", Variant::Nil)),
+    );
 
     // The three CSG primitives that were absent entirely (pat-0q2kx.194).
     //
@@ -10203,6 +10422,166 @@ pub fn register_3d_classes() {
         ClassRegistration::new("ParticleProcessMaterial")
             .signal(SignalInfo::new("emission_shape_changed"))
             .parent("Material")
+            .property(
+                PropertyInfo::new("alpha_curve", Variant::Nil)
+                    .with_accessors("get_alpha_curve", "set_alpha_curve"),
+            )
+            .property(
+                PropertyInfo::new("angle_curve", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("angular_velocity_curve", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("anim_offset_curve", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("anim_speed_curve", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("collision_bounce", Variant::Float(0.0))
+                    .with_accessors("get_collision_bounce", "set_collision_bounce"),
+            )
+            .property(
+                PropertyInfo::new("collision_friction", Variant::Float(0.0))
+                    .with_accessors("get_collision_friction", "set_collision_friction"),
+            )
+            .property(
+                PropertyInfo::new("color_initial_ramp", Variant::Nil)
+                    .with_accessors("get_color_initial_ramp", "set_color_initial_ramp"),
+            )
+            .property(
+                PropertyInfo::new("color_ramp", Variant::Nil)
+                    .with_accessors("get_color_ramp", "set_color_ramp"),
+            )
+            .property(
+                PropertyInfo::new("damping_curve", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("directional_velocity_curve", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("directional_velocity_max", Variant::Float(1.0))
+                    .with_accessors("get_param_max", "set_param_max"),
+            )
+            .property(
+                PropertyInfo::new("directional_velocity_min", Variant::Float(1.0))
+                    .with_accessors("get_param_min", "set_param_min"),
+            )
+            .property(
+                PropertyInfo::new("emission_color_texture", Variant::Nil)
+                    .with_accessors("get_emission_color_texture", "set_emission_color_texture"),
+            )
+            .property(
+                PropertyInfo::new("emission_curve", Variant::Nil)
+                    .with_accessors("get_emission_curve", "set_emission_curve"),
+            )
+            .property(
+                PropertyInfo::new("emission_normal_texture", Variant::Nil)
+                    .with_accessors("get_emission_normal_texture", "set_emission_normal_texture"),
+            )
+            .property(
+                PropertyInfo::new("emission_point_count", Variant::Int(1))
+                    .with_accessors("get_emission_point_count", "set_emission_point_count"),
+            )
+            .property(
+                PropertyInfo::new("emission_point_texture", Variant::Nil)
+                    .with_accessors("get_emission_point_texture", "set_emission_point_texture"),
+            )
+            .property(
+                PropertyInfo::new("emission_ring_axis", Variant::Vector3(Vector3::ZERO))
+                    .with_accessors("get_emission_ring_axis", "set_emission_ring_axis"),
+            )
+            .property(
+                PropertyInfo::new("emission_ring_cone_angle", Variant::Float(0.0)).with_accessors(
+                    "get_emission_ring_cone_angle",
+                    "set_emission_ring_cone_angle",
+                ),
+            )
+            .property(
+                PropertyInfo::new("emission_ring_height", Variant::Float(0.0))
+                    .with_accessors("get_emission_ring_height", "set_emission_ring_height"),
+            )
+            .property(
+                PropertyInfo::new("emission_ring_inner_radius", Variant::Float(0.0))
+                    .with_accessors(
+                        "get_emission_ring_inner_radius",
+                        "set_emission_ring_inner_radius",
+                    ),
+            )
+            .property(
+                PropertyInfo::new("emission_ring_radius", Variant::Float(0.0))
+                    .with_accessors("get_emission_ring_radius", "set_emission_ring_radius"),
+            )
+            .property(
+                PropertyInfo::new("hue_variation_curve", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("linear_accel_curve", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("orbit_velocity_curve", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("radial_accel_curve", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("radial_velocity_curve", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("scale_curve", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("scale_over_velocity_curve", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("sub_emitter_amount_at_collision", Variant::Int(0))
+                    .with_accessors(
+                        "get_sub_emitter_amount_at_collision",
+                        "set_sub_emitter_amount_at_collision",
+                    ),
+            )
+            .property(
+                PropertyInfo::new("sub_emitter_amount_at_end", Variant::Int(0)).with_accessors(
+                    "get_sub_emitter_amount_at_end",
+                    "set_sub_emitter_amount_at_end",
+                ),
+            )
+            .property(
+                PropertyInfo::new("sub_emitter_amount_at_start", Variant::Int(0)).with_accessors(
+                    "get_sub_emitter_amount_at_start",
+                    "set_sub_emitter_amount_at_start",
+                ),
+            )
+            .property(
+                PropertyInfo::new("sub_emitter_frequency", Variant::Float(0.0))
+                    .with_accessors("get_sub_emitter_frequency", "set_sub_emitter_frequency"),
+            )
+            .property(
+                PropertyInfo::new("tangential_accel_curve", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("turbulence_influence_over_life", Variant::Nil)
+                    .with_accessors("get_param_texture", "set_param_texture"),
+            )
+            .property(
+                PropertyInfo::new("velocity_limit_curve", Variant::Nil)
+                    .with_accessors("get_velocity_limit_curve", "set_velocity_limit_curve"),
+            )
             .property(PropertyInfo::new("angle_max", Variant::Float(0.0)))
             .property(PropertyInfo::new("angle_min", Variant::Float(0.0)))
             .property(PropertyInfo::new("anim_offset_max", Variant::Float(0.0)))
@@ -13394,7 +13773,14 @@ pub fn register_2d_classes() {
                 .parent("Range")
                 .property(PropertyInfo::new("fill_mode", Variant::Int(0)))
                 .property(PropertyInfo::new("show_percentage", Variant::Bool(true)))
-                .property(PropertyInfo::new("indeterminate", Variant::Bool(false))),
+                .property(PropertyInfo::new("indeterminate", Variant::Bool(false)))
+                // `= false` at scene/gui/progress_bar.h:40. The doc XML
+                // documents no default for this one, so the header is the
+                // oracle here rather than a guess from the name.
+                .property(PropertyInfo::new(
+                    "editor_preview_indeterminate",
+                    Variant::Bool(false),
+                )),
         );
     }
     // pat-s3rrv.69: the Range control family. Every default below comes from
@@ -13699,7 +14085,10 @@ pub fn register_2d_classes() {
                 .property(PropertyInfo::new("flip_h", Variant::Bool(false)))
                 .property(PropertyInfo::new("flip_v", Variant::Bool(false)))
                 .property(PropertyInfo::new("mouse_filter", Variant::Int(1)))
-                .property(PropertyInfo::new("stretch_mode", Variant::Int(0))),
+                .property(PropertyInfo::new("stretch_mode", Variant::Int(0)))
+                // The class's PRIMARY property, and it was the one missing.
+                // A Texture2D ref with no documented default, i.e. null.
+                .property(PropertyInfo::new("texture", Variant::Nil)),
         );
     }
     // pat-p0s82.29: VideoStreamPlayer is a high-use Control node; register the
@@ -16819,6 +17208,8 @@ pub fn register_2d_classes() {
             ClassRegistration::new("Theme")
                 .parent("Resource")
                 .property(PropertyInfo::new("default_base_scale", Variant::Float(0.0)))
+                // A Font ref with no documented default, i.e. null.
+                .property(PropertyInfo::new("default_font", Variant::Nil))
                 .property(PropertyInfo::new("default_font_size", Variant::Int(-1))),
         );
     }
@@ -18197,6 +18588,31 @@ pub fn register_root_window_chain() {
     if !class_exists("EngineDebugger") {
         // Likewise property-free.
         register_class(ClassRegistration::new("EngineDebugger").parent("Object"));
+    }
+    // The remaining singletons the interpreter already dispatches but ClassDB
+    // did not know existed (pat-s3rrv.108). Until now `ClassDB.class_exists("OS")`
+    // was false, so any tool script enumerating singleton classes through the
+    // reflection API saw nothing — while `OS.get_name()` worked fine, because
+    // the dispatch table and ClassDB are separate sources of truth.
+    //
+    // ⚠️ Registered BARE, exactly like `DisplayServer` above. `OS` does carry
+    // three documented properties (`low_processor_usage_mode`,
+    // `low_processor_usage_mode_sleep_usec`, `delta_smoothing`), and none of
+    // them is read anywhere in this workspace — advertising them would put
+    // settings in the inspector that silently do nothing, which is the failure
+    // this file already guards against for methods (see the
+    // "nothing unimplemented was advertised" assertion in the tests below).
+    if !class_exists("OS") {
+        register_class(ClassRegistration::new("OS").parent("Object"));
+    }
+    if !class_exists("Time") {
+        register_class(ClassRegistration::new("Time").parent("Object"));
+    }
+    if !class_exists("Performance") {
+        register_class(ClassRegistration::new("Performance").parent("Object"));
+    }
+    if !class_exists("ProjectSettings") {
+        register_class(ClassRegistration::new("ProjectSettings").parent("Object"));
     }
     if !class_exists("ClassDB") {
         register_class(

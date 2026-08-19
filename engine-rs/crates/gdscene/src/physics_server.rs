@@ -1275,6 +1275,16 @@ impl PhysicsServer {
                 body.angular_velocity = float_prop(tree, node_id, "angular_velocity", 0.0) as f32;
                 // Godot RigidBody2D gravity/damping properties.
                 body.gravity_scale = float_prop(tree, node_id, "gravity_scale", 1.0) as f32;
+                // `RigidBody2D.continuous_cd` (pat-s3rrv.100). Godot's CCDMode
+                // enum: 0 = DISABLED, 1 = CAST_RAY, 2 = CAST_SHAPE — the solver
+                // sweeps the same way for either non-disabled mode, so anything
+                // non-zero enables it.
+                //
+                // ⚠️ Until this read existed the property was a FALSE GREEN: it
+                // is registered in ClassDB, so a .tscn could author it and the
+                // inspector would show it, while `gdphysics2d::ccd` sat there
+                // with zero callers and the bullet went through the wall.
+                body.continuous_cd = u32_prop(tree, node_id, "continuous_cd", 0) != 0;
                 body.linear_damp = float_prop(tree, node_id, "linear_damp", 0.0) as f32;
                 body.angular_damp = float_prop(tree, node_id, "angular_damp", 0.0) as f32;
                 // StaticBody2D's conveyor surface (pat-s3rrv.101). Godot
@@ -2247,6 +2257,31 @@ impl PhysicsServer {
                 if body.body_type == BodyType::Static {
                     continue;
                 }
+                // ⚠️ An `AnimatableBody2D`'s transform is AUTHORED: animation
+                // moves the NODE, and `sync_to_physics` reads that motion into
+                // the body's constant velocity so riders are carried. Writing
+                // the integrated body position BACK applies the same motion a
+                // SECOND time — the platform advanced 4px per tick for a 2px
+                // animation step, which `animatable_body_carries_riders` caught
+                // at its fixture control (pat-s3rrv.93).
+                //
+                // 🔑 Physics READS an authored transform and never writes it.
+                //
+                // ⚠️ This must NOT skip `BodyType::Kinematic` generally.
+                // `CharacterBody2D` is kinematic too and genuinely needs the
+                // write-back, because `move_and_slide` moves it inside the
+                // solver — a broad kinematic skip would freeze every character.
+                // The test is the animatable CLASS plus its flag, including the
+                // "absent means ON" rule used at the `sync_to_physics` end:
+                // Godot defaults the property to true, so treating unset as off
+                // would leave every authored platform inert.
+                let animatable_authored = tree.get_node(node_id).is_some_and(|n| {
+                    n.class_name() == "AnimatableBody2D"
+                        && !matches!(n.get_property("sync_to_physics"), Variant::Bool(false))
+                });
+                if animatable_authored {
+                    continue;
+                }
                 // The body's transform is world-space; the node's `position` /
                 // `rotation` properties are PARENT-relative. Writing the world
                 // value straight into the local property re-applied the parent
@@ -2491,19 +2526,52 @@ impl PhysicsServer {
     /// [`script_move_and_collide`](Self::script_move_and_collide) sweep cannot
     /// drift apart on which bodies are solid.
     fn obstacle_bodies(&self, exclude: NodeId) -> Vec<&PhysicsBody2D> {
+        // The character's OWN body, so its collision exceptions can be honoured
+        // (pat-s3rrv.100).
+        //
+        // ⚠️ A `CharacterBody2D` carries no `BodyId` of its own — the solver
+        // type is built fresh from node properties each tick — so the exception
+        // test cannot live inside `move_and_slide_delta`. It has to happen where
+        // the obstacle list is built, which is here.
+        let self_body = self
+            .node_to_body
+            .get(&exclude)
+            .and_then(|id| self.world.get_body(*id));
+        // Asked of BOTH sides via `excludes`: the exception is stored on
+        // whichever body the script called the method on, but the effect is
+        // mutual, so testing one direction would make it depend on which of the
+        // pair happened to be the character.
+        let excepted = |other: &PhysicsBody2D| -> bool {
+            self_body.is_some_and(|me| PhysicsBody2D::excludes(me, other))
+        };
         self.node_to_body
             .iter()
             .filter_map(|(&other_node, &other_body_id)| {
                 if other_node == exclude {
                     return None;
                 }
-                self.world.get_body(other_body_id)
+                let other = self.world.get_body(other_body_id)?;
+                if excepted(other) {
+                    return None;
+                }
+                Some(other)
             })
             .chain(
                 self.tilemap_bodies
                     .values()
                     .flatten()
-                    .filter_map(|&tile_body| self.world.get_body(tile_body)),
+                    .filter_map(|&tile_body| {
+                        // ⚠️ The tilemap chain is filtered too. Painted tile
+                        // bodies have no scene node, so they never appear in
+                        // `node_to_body` — a character excepted from one would
+                        // still have collided with it if only the map half were
+                        // filtered.
+                        let other = self.world.get_body(tile_body)?;
+                        if excepted(other) {
+                            return None;
+                        }
+                        Some(other)
+                    }),
             )
             .collect()
     }

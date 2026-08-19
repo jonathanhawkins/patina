@@ -38,8 +38,21 @@ fn labelled(bbcode: &str, src: &str) -> (SceneTree, NodeId) {
     n.set_property("bbcode_enabled", Variant::Bool(true));
     n.set_property("bbcode_text", Variant::String(bbcode.to_owned()));
     let id = tree.add_child(root, n).unwrap();
-    gdscene::control::set_position(&mut tree, id, Vector2::new(0.0, 0.0));
-    gdscene::control::set_size(&mut tree, id, Vector2::new(300.0, 40.0));
+    // ⚠️ OFFSETS, not `set_size`. A Control's `size` is DERIVED: the render
+    // pass calls `resolve_control_layout`, which recomputes it from the
+    // anchors and offsets and OVERWRITES whatever `set_size` wrote. A
+    // hand-built node has both at 0, so the label resolved to ~ZERO WIDTH.
+    //
+    // 🔑 That is what made `append_text_appends_parsed_bbcode_and_reaches_the_draw`
+    // fail. At zero width every line "overflows", so `richtext_placements` took
+    // its WRAP path, and that path deliberately drops spaces (they become
+    // x-advance rather than draw items). The label rendered "startred". The
+    // run-by-run fast path — the one that keeps spaces — only runs for a line
+    // that FITS, which a zero-width rect never does.
+    gdscene::control::set_offset_left(&mut tree, id, 0.0);
+    gdscene::control::set_offset_top(&mut tree, id, 0.0);
+    gdscene::control::set_offset_right(&mut tree, id, 300.0);
+    gdscene::control::set_offset_bottom(&mut tree, id, 40.0);
     tree.attach_script(
         id,
         Box::new(GDScriptNodeInstance::from_source(src, id).expect("script parses")),

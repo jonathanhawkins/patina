@@ -85,10 +85,46 @@ pub fn apply_camera_post(pixels: &mut [Color], width: u32, height: u32, env: &En
             c = blend_glow(c, gi, GlowBlendMode::Softlight, white, intensity);
         }
 
+        // Godot's BCS block (`tonemap.glsl:916-947`) straddles the display
+        // encode, and that is the whole subtlety of it: **brightness is a
+        // linear multiply**, applied here, while contrast and saturation
+        // operate on the sRGB-ENCODED values below. Doing all three on one
+        // side of the encode is the natural implementation and it produces
+        // different pixels.
+        //
+        // Brightness multiplies relative luminance so the hue and saturation
+        // of a colour are unchanged, which only holds in linear encoding.
+        if env.adjustment_enabled {
+            let brightness = env.adjustment_brightness;
+            c = [c[0] * brightness, c[1] * brightness, c[2] * brightness];
+        }
+
         // Linear → sRGB for display.
         let mut r = linear_to_srgb_channel(c[0]);
         let mut g = linear_to_srgb_channel(c[1]);
         let mut b = linear_to_srgb_channel(c[2]);
+
+        if env.adjustment_enabled {
+            // Contrast pivots on 0.5 in the nonlinear encoding, where the
+            // darkest values are not hard-clipped as badly.
+            let contrast = env.adjustment_contrast;
+            r = 0.5 + (r - 0.5) * contrast;
+            g = 0.5 + (g - 0.5) * contrast;
+            b = 0.5 + (b - 0.5) * contrast;
+
+            // 🔑 Saturation greys towards an **even** 1/3 average of the three
+            // channels — `dot(vec3(1.0), color.rgb) * (1.0 / 3.0)`. A
+            // luminance weighting (Rec.601's 0.299/0.587/0.114, or Rec.709)
+            // is the textbook answer and is NOT what Godot does; upstream
+            // documents the choice as deliberate, "maintains compatibility
+            // with existing projects". Using luma would grey every colour to a
+            // different brightness than Godot's.
+            let saturation = env.adjustment_saturation;
+            let grey = (r + g + b) * (1.0 / 3.0);
+            r = grey + (r - grey) * saturation;
+            g = grey + (g - grey) * saturation;
+            b = grey + (b - grey) * saturation;
+        }
 
         // Godot use_debanding (tonemap.glsl): per-channel screen-space dither
         // applied AFTER the sRGB encode ("must be applied after encoding

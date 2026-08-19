@@ -3327,6 +3327,12 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "JSON") {
                             return call_json_static(member, &evaluated_args);
                         }
+                        // Performance singleton (pat-s3rrv.109). Inherent
+                        // because `get_custom_monitor` invokes a script
+                        // Callable, exactly like WorkerThreadPool's tasks.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "Performance") {
+                            return self.call_performance_static(member, &evaluated_args);
+                        }
                         // WorkerThreadPool singleton (pat-0q2kx.209). Inherent
                         // because its tasks invoke Callables.
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "WorkerThreadPool") {
@@ -12076,12 +12082,20 @@ impl Interpreter {
                         Ok(Variant::Nil)
                     }
                     "set_axis_velocity" => {
+                        // ⚠️ The argument is passed THROUGH, not coerced.
+                        // `RigidBody3D.set_axis_velocity` takes a `Vector3`, and
+                        // forcing every call to `Vector2` did not merely lose
+                        // the z component — the 3D server reads the property as
+                        // a `Vector3`, so a 3D call landed as a `Vector2` that
+                        // matched nothing and the whole request vanished.
+                        // The payload's own kind is the 2D/3D discriminator,
+                        // the same rule the node-property writers use.
+                        let axis = match args.first() {
+                            Some(v @ Variant::Vector3(_)) => v.clone(),
+                            _ => Variant::Vector2(vec2_arg(args, 0)),
+                        };
                         if let Some(ref mut access) = self.scene_access {
-                            access.set_node_property(
-                                id,
-                                "_pending_axis_velocity",
-                                Variant::Vector2(vec2_arg(args, 0)),
-                            );
+                            access.set_node_property(id, "_pending_axis_velocity", axis);
                         }
                         Ok(Variant::Nil)
                     }
@@ -13603,6 +13617,110 @@ impl Interpreter {
     }
 
     /// Invokes a Callable (lambda or method reference).
+    /// Dispatches the `Performance` singleton (pat-s3rrv.109).
+    ///
+    /// Inherent rather than a free function because `get_custom_monitor`
+    /// invokes a script Callable, which needs the interpreter itself — the
+    /// same reason `call_worker_thread_pool_static` is a method.
+    fn call_performance_static(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        match method {
+            "get_monitor" => {
+                let id = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Performance.get_monitor() needs a Performance.MONITOR_* id".into(),
+                        )));
+                    }
+                };
+                let Some(monitor) = gdcore::performance::monitor_from_index(id) else {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "Performance.get_monitor(): {id} is not a monitor id"
+                    ))));
+                };
+                let value = gdcore::performance::global().lock().unwrap().get(monitor);
+                Ok(Variant::Float(value))
+            }
+
+            "add_custom_monitor" => {
+                let name = args.first().map(arg_str).unwrap_or_default();
+                let Some(Variant::Callable(cb)) = args.get(1) else {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Performance.add_custom_monitor() needs an id and a Callable".into(),
+                    )));
+                };
+                let callable = (**cb).clone();
+                let extra = match args.get(2) {
+                    Some(Variant::Array(a)) => a.clone(),
+                    _ => Vec::new(),
+                };
+                PERFORMANCE_CUSTOM_MONITORS.with(|m| {
+                    let mut m = m.borrow_mut();
+                    // Godot rejects a duplicate id rather than replacing the
+                    // callable, so a second registration is a no-op here too.
+                    if !m.iter().any(|(n, _, _)| n == &name) {
+                        m.push((name, callable, extra));
+                    }
+                });
+                Ok(Variant::Nil)
+            }
+
+            "remove_custom_monitor" => {
+                let name = args.first().map(arg_str).unwrap_or_default();
+                PERFORMANCE_CUSTOM_MONITORS.with(|m| m.borrow_mut().retain(|(n, _, _)| n != &name));
+                Ok(Variant::Nil)
+            }
+
+            "has_custom_monitor" => {
+                let name = args.first().map(arg_str).unwrap_or_default();
+                let found = PERFORMANCE_CUSTOM_MONITORS
+                    .with(|m| m.borrow().iter().any(|(n, _, _)| n == &name));
+                Ok(Variant::Bool(found))
+            }
+
+            "get_custom_monitor" => {
+                let name = args.first().map(arg_str).unwrap_or_default();
+                // Cloned out of the RefCell BEFORE invoking: the Callable may
+                // itself touch Performance (a monitor that reads another
+                // monitor), and holding the borrow across the call would panic.
+                let entry = PERFORMANCE_CUSTOM_MONITORS.with(|m| {
+                    m.borrow()
+                        .iter()
+                        .find(|(n, _, _)| n == &name)
+                        .map(|(_, cb, extra)| (cb.clone(), extra.clone()))
+                });
+                match entry {
+                    Some((callable, extra)) => self.invoke_callable(&callable, &extra),
+                    // Godot returns a null Variant for an unknown id.
+                    None => Ok(Variant::Nil),
+                }
+            }
+
+            "get_custom_monitor_names" => {
+                let names = PERFORMANCE_CUSTOM_MONITORS.with(|m| {
+                    m.borrow()
+                        .iter()
+                        .map(|(n, _, _)| Variant::String(n.clone()))
+                        .collect::<Vec<_>>()
+                });
+                Ok(Variant::Array(names))
+            }
+
+            // Godot reports when a monitor last changed; nothing here tracks
+            // per-monitor write times, and reporting 0 is honest about that.
+            "get_monitor_modification_time" => Ok(Variant::Int(0)),
+
+            other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "Performance has no method '{other}'"
+            )))),
+        }
+    }
+
     fn invoke_callable(
         &mut self,
         callable: &CallableRef,
@@ -16931,6 +17049,20 @@ fn uniform_type_name(t: &gdserver2d::shader::UniformType) -> String {
 fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
     use gdcore::math::{Vector2, Vector2i, Vector3, Vector3i};
     match type_name {
+        // `Performance.TIME_FPS` and friends (pat-s3rrv.109). These are
+        // CLASS-scoped, not `@GlobalScope`, so `global_constant` never sees
+        // them and they have to resolve here.
+        "Performance" => gdcore::performance::monitor_from_const_name(member)
+            .map(|m| Variant::Int(m.to_index() as i64))
+            .or_else(|| match member {
+                "MONITOR_MAX" => Some(Variant::Int(
+                    gdcore::performance::MONITOR_CONST_NAMES.len() as i64
+                )),
+                // `Performance.MonitorType`, a separate enum from `Monitor`.
+                "MONITOR_TYPE_QUANTITY" => Some(Variant::Int(0)),
+                "MONITOR_TYPE_MEMORY" => Some(Variant::Int(1)),
+                _ => None,
+            }),
         "Vector2" => match member {
             "ZERO" => Some(Variant::Vector2(Vector2::ZERO)),
             "ONE" => Some(Variant::Vector2(Vector2::ONE)),
@@ -17416,6 +17548,7 @@ const BUILTIN_SINGLETONS: &[&str] = &[
     "JavaScriptBridge",
     "Marshalls",
     "OS",
+    "Performance",
     "PhysicsServer2D",
     "ProjectSettings",
     "RenderingServer",
@@ -17554,6 +17687,129 @@ pub fn reset_engine_singleton_state() {
     set_engine_frames_per_second(60.0);
 }
 
+/// Keycodes that do NOT produce a Unicode character, transcribed from Godot's
+/// `keycode_has_unicode` switch (`core/os/keyboard.cpp:248`) — 104 entries,
+/// sorted so the lookup can binary-search.
+///
+/// ⚠️ This is an explicit LIST, not `code & KEY_SPECIAL`. The bitmask shortcut
+/// is wrong: `KEY_KP_0` (4194438) and the rest of the keypad carry the special
+/// bit and DO produce characters, so masking would report every numpad digit as
+/// non-typing. Godot enumerates the exceptions for exactly that reason.
+///
+/// Generated from the vendored source and cross-checked against this crate's
+/// own `KEY_*` constants — all 104 names resolved, none dropped.
+const NON_UNICODE_KEYCODES: [i64; 104] = [
+    4194305, // KEY_ESCAPE
+    4194306, // KEY_TAB
+    4194307, // KEY_BACKTAB
+    4194308, // KEY_BACKSPACE
+    4194309, // KEY_ENTER
+    4194310, // KEY_KP_ENTER
+    4194311, // KEY_INSERT
+    4194312, // KEY_DELETE
+    4194313, // KEY_PAUSE
+    4194314, // KEY_PRINT
+    4194315, // KEY_SYSREQ
+    4194316, // KEY_CLEAR
+    4194317, // KEY_HOME
+    4194318, // KEY_END
+    4194319, // KEY_LEFT
+    4194320, // KEY_UP
+    4194321, // KEY_RIGHT
+    4194322, // KEY_DOWN
+    4194323, // KEY_PAGEUP
+    4194324, // KEY_PAGEDOWN
+    4194325, // KEY_SHIFT
+    4194326, // KEY_CTRL
+    4194327, // KEY_META
+    4194328, // KEY_ALT
+    4194329, // KEY_CAPSLOCK
+    4194330, // KEY_NUMLOCK
+    4194331, // KEY_SCROLLLOCK
+    4194332, // KEY_F1
+    4194333, // KEY_F2
+    4194334, // KEY_F3
+    4194335, // KEY_F4
+    4194336, // KEY_F5
+    4194337, // KEY_F6
+    4194338, // KEY_F7
+    4194339, // KEY_F8
+    4194340, // KEY_F9
+    4194341, // KEY_F10
+    4194342, // KEY_F11
+    4194343, // KEY_F12
+    4194344, // KEY_F13
+    4194345, // KEY_F14
+    4194346, // KEY_F15
+    4194347, // KEY_F16
+    4194348, // KEY_F17
+    4194349, // KEY_F18
+    4194350, // KEY_F19
+    4194351, // KEY_F20
+    4194352, // KEY_F21
+    4194353, // KEY_F22
+    4194354, // KEY_F23
+    4194355, // KEY_F24
+    4194356, // KEY_F25
+    4194357, // KEY_F26
+    4194358, // KEY_F27
+    4194359, // KEY_F28
+    4194360, // KEY_F29
+    4194361, // KEY_F30
+    4194362, // KEY_F31
+    4194363, // KEY_F32
+    4194364, // KEY_F33
+    4194365, // KEY_F34
+    4194366, // KEY_F35
+    4194370, // KEY_MENU
+    4194371, // KEY_HYPER
+    4194373, // KEY_HELP
+    4194376, // KEY_BACK
+    4194377, // KEY_FORWARD
+    4194378, // KEY_STOP
+    4194379, // KEY_REFRESH
+    4194380, // KEY_VOLUMEDOWN
+    4194381, // KEY_VOLUMEMUTE
+    4194382, // KEY_VOLUMEUP
+    4194388, // KEY_MEDIAPLAY
+    4194389, // KEY_MEDIASTOP
+    4194390, // KEY_MEDIAPREVIOUS
+    4194391, // KEY_MEDIANEXT
+    4194392, // KEY_MEDIARECORD
+    4194393, // KEY_HOMEPAGE
+    4194394, // KEY_FAVORITES
+    4194395, // KEY_SEARCH
+    4194396, // KEY_STANDBY
+    4194397, // KEY_OPENURL
+    4194398, // KEY_LAUNCHMAIL
+    4194399, // KEY_LAUNCHMEDIA
+    4194400, // KEY_LAUNCH0
+    4194401, // KEY_LAUNCH1
+    4194402, // KEY_LAUNCH2
+    4194403, // KEY_LAUNCH3
+    4194404, // KEY_LAUNCH4
+    4194405, // KEY_LAUNCH5
+    4194406, // KEY_LAUNCH6
+    4194407, // KEY_LAUNCH7
+    4194408, // KEY_LAUNCH8
+    4194409, // KEY_LAUNCH9
+    4194410, // KEY_LAUNCHA
+    4194411, // KEY_LAUNCHB
+    4194412, // KEY_LAUNCHC
+    4194413, // KEY_LAUNCHD
+    4194414, // KEY_LAUNCHE
+    4194415, // KEY_LAUNCHF
+    4194416, // KEY_GLOBE
+    4194417, // KEY_KEYBOARD
+    4194418, // KEY_JIS_EISU
+    4194419, // KEY_JIS_KANA
+];
+
+/// Godot's `OS.is_keycode_unicode(code)`.
+fn keycode_has_unicode(code: i64) -> bool {
+    NON_UNICODE_KEYCODES.binary_search(&code).is_err()
+}
+
 fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
     match method {
         "get_name" => {
@@ -17647,6 +17903,78 @@ fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
             let loc = os_locale();
             let lang = loc.split(['_', '-']).next().unwrap_or("en");
             Ok(Variant::String(lang.to_string()))
+        }
+        // `OS.set_restart_on_exit(restart, arguments)` and its two readers
+        // (pat-s3rrv.108) — how a project applies a setting change that needs a
+        // relaunch.
+        "set_restart_on_exit" => {
+            let restart = matches!(args.first(), Some(Variant::Bool(true)));
+            // Godot's parameter is a PackedStringArray, but a script that built
+            // the list with `[]` hands over a plain Array; both are accepted so
+            // the ordinary spelling works.
+            let arguments = match args.get(1) {
+                Some(Variant::PackedStringArray(v)) => v.clone(),
+                Some(Variant::Array(items)) => items
+                    .iter()
+                    .map(|v| match v {
+                        Variant::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            // ⚠️ Stored together and replaced wholesale, as Godot does — so
+            // `set_restart_on_exit(false)` also clears any arguments left from
+            // an earlier call rather than keeping them primed.
+            gdplatform::os::set_restart_on_exit(restart, arguments);
+            Ok(Variant::Nil)
+        }
+        "is_restart_on_exit_set" => Ok(Variant::Bool(gdplatform::os::is_restart_on_exit_set())),
+        "get_restart_on_exit_arguments" => Ok(Variant::PackedStringArray(
+            gdplatform::os::restart_on_exit_arguments(),
+        )),
+        // ⚠️ `delta_smoothing` defaults to TRUE (`OS.xml:898`), so the getter
+        // reports smoothing ON in a fresh project, as Godot does.
+        "set_delta_smoothing" => {
+            gdplatform::os::set_delta_smoothing(matches!(args.first(), Some(Variant::Bool(true))));
+            Ok(Variant::Nil)
+        }
+        "is_delta_smoothing_enabled" => {
+            Ok(Variant::Bool(gdplatform::os::is_delta_smoothing_enabled()))
+        }
+        // `OS.is_keycode_unicode(code)` — whether a keycode types a character.
+        // Text-input handling branches on this to decide whether a key event
+        // should insert something.
+        // -- Permissions (pat-s3rrv.108) --
+        //
+        // 🔑 Godot GRANTS by default (`core/os/os.h:349-352`) — a platform with
+        // no permission gate has withheld nothing. Only Android overrides.
+        "request_permission" => {
+            let name = os_str_arg(args, 0, "OS.request_permission()")?;
+            Ok(Variant::Bool(gdplatform::os::request_permission(&name)))
+        }
+        "request_permissions" => Ok(Variant::Bool(gdplatform::os::request_permissions())),
+        // ⚠️ Empty while `request_permission` answers `true`: this list is the
+        // runtime-granted *dangerous* permissions (Android) or the user-picked
+        // folders (sandboxed macOS), not "what is allowed".
+        "get_granted_permissions" => Ok(Variant::PackedStringArray(
+            gdplatform::os::granted_permissions(),
+        )),
+        "revoke_granted_permissions" => {
+            gdplatform::os::revoke_granted_permissions();
+            Ok(Variant::Nil)
+        }
+        "is_keycode_unicode" => {
+            let code = match args.first() {
+                Some(Variant::Int(i)) => *i,
+                Some(Variant::Float(f)) => *f as i64,
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "OS.is_keycode_unicode() takes a keycode int".into(),
+                    )))
+                }
+            };
+            Ok(Variant::Bool(keycode_has_unicode(code)))
         }
         "get_processor_count" => {
             let n = std::thread::available_parallelism()
@@ -17745,6 +18073,9 @@ fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
         }
         // -- Host identity --
         "get_version" => Ok(Variant::String(gdplatform::os::version())),
+        // ⚠️ The OS version, not the engine version — Godot's base class
+        // returns `get_version()` verbatim (`core/os/os.h:220`).
+        "get_version_alias" => Ok(Variant::String(gdplatform::os::version_alias())),
         "get_executable_path" => Ok(Variant::String(gdplatform::os::executable_path())),
         "get_distribution_name" => Ok(Variant::String(
             call_os_static("get_name", &[])?.to_string_lossy(),
@@ -18574,6 +18905,146 @@ fn call_displayserver_via_backend(
                 "DisplayServer.clipboard_set() takes a string".into(),
             )))),
         },
+        // `DisplayServer.get_name()` — the driver name. Previously unhandled, so
+        // it raised UndefinedFunction; Godot always answers, and a script
+        // branching on `== "web"` is the normal way to detect the web export.
+        "get_name" => Some(Ok(Variant::String(backend.display_name()))),
+        // Pointer mode (pat-s3rrv.108). Every mouse-look game calls
+        // `mouse_set_mode(MOUSE_MODE_CAPTURED)` in `_ready`.
+        "mouse_set_mode" => {
+            match args.first() {
+                Some(Variant::Int(m)) => backend.set_mouse_mode(*m),
+                // Godot's enum arrives as an Int, but a script computing one
+                // (`MOUSE_MODE_VISIBLE + 2`) can produce a Float.
+                Some(Variant::Float(f)) => backend.set_mouse_mode(*f as i64),
+                _ => {
+                    return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "DisplayServer.mouse_set_mode() takes a MouseMode int".into(),
+                    ))))
+                }
+            }
+            Some(Ok(Variant::Nil))
+        }
+        "mouse_get_mode" => Some(Ok(Variant::Int(backend.mouse_mode()))),
+        "mouse_get_position" => {
+            let (x, y) = backend.mouse_position();
+            Some(Ok(Variant::Vector2(gdcore::math::Vector2::new(
+                x as f32, y as f32,
+            ))))
+        }
+        // ⚠️ Two separate questions. `is_dark_mode()` is false both when the
+        // system is light AND when the platform cannot tell, so Godot exposes
+        // the supported flag to tell those apart — answering only the first
+        // would make "cannot tell" indistinguishable from "light".
+        "is_dark_mode_supported" => Some(Ok(Variant::Bool(backend.is_dark_mode_supported()))),
+        "is_dark_mode" => Some(Ok(Variant::Bool(backend.is_dark_mode()))),
+        // ⚠️ Godot's sentinel for "cannot determine" is -1.0, not 0 and not a
+        // plausible 60 (`DisplayServer.xml:1797`). Callers test for it.
+        "screen_get_refresh_rate" => Some(Ok(Variant::Float(backend.screen_refresh_rate()))),
+        // ⚠️ Vector2**i**, per the docs. Note the neighbouring
+        // `window_get_size` / `screen_get_size` arms answer `Vector2` while
+        // Godot documents Vector2i for those too — a pre-existing divergence I
+        // did not change here, because it would alter what every existing
+        // caller receives. New surface follows the docs.
+        "window_get_position" => {
+            let (x, y) = backend.window_position();
+            Some(Ok(Variant::Vector2i(gdcore::math::Vector2i::new(
+                x as i32, y as i32,
+            ))))
+        }
+        "is_touchscreen_available" => Some(Ok(Variant::Bool(backend.touchscreen_available()))),
+        "get_swap_cancel_ok" => Some(Ok(Variant::Bool(backend.swap_cancel_ok()))),
+        "window_get_vsync_mode" => Some(Ok(Variant::Int(backend.vsync_mode()))),
+        "window_set_vsync_mode" => {
+            match args.first() {
+                Some(Variant::Int(v)) => backend.set_vsync_mode(*v),
+                Some(Variant::Float(f)) => backend.set_vsync_mode(*f as i64),
+                _ => {
+                    return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "DisplayServer.window_set_vsync_mode() takes a VSyncMode int".into(),
+                    ))))
+                }
+            }
+            Some(Ok(Variant::Nil))
+        }
+        "screen_get_orientation" => Some(Ok(Variant::Int(backend.screen_orientation()))),
+        "screen_set_orientation" => {
+            match args.first() {
+                Some(Variant::Int(v)) => backend.set_screen_orientation(*v),
+                Some(Variant::Float(f)) => backend.set_screen_orientation(*f as i64),
+                _ => {
+                    return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "DisplayServer.screen_set_orientation() takes a ScreenOrientation int"
+                            .into(),
+                    ))))
+                }
+            }
+            Some(Ok(Variant::Nil))
+        }
+        // ⚠️ Rect2i, and it defaults to the WHOLE screen rather than a zero
+        // rect — "nowhere is safe to draw" is a far worse wrong answer than
+        // "all of it is".
+        "get_display_safe_area" => {
+            let (x, y, w, h) = backend.display_safe_area();
+            Some(Ok(Variant::Rect2i(gdcore::math::Rect2i::new(
+                gdcore::math::Vector2i::new(x as i32, y as i32),
+                gdcore::math::Vector2i::new(w as i32, h as i32),
+            ))))
+        }
+        // ⚠️ Godot's "unknown accent colour" is Color(0,0,0,0) — transparent,
+        // so a caller can test the alpha. Inventing a plausible blue would be
+        // indistinguishable from a real theme colour.
+        "get_accent_color" => {
+            let (r, g, b, a) = backend.accent_color();
+            Some(Ok(Variant::Color(gdcore::math::Color::new(r, g, b, a))))
+        }
+        // ⚠️ Identity by default. Godot implements the layout mapping only on
+        // Linux/macOS/Windows and hands the physical code back elsewhere;
+        // answering 0 would map every physical key to KEY_NONE.
+        "keyboard_get_keycode_from_physical" => match args.first() {
+            Some(Variant::Int(i)) => Some(Ok(Variant::Int(backend.keycode_from_physical(*i)))),
+            Some(Variant::Float(f)) => {
+                Some(Ok(Variant::Int(backend.keycode_from_physical(*f as i64))))
+            }
+            _ => Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                "DisplayServer.keyboard_get_keycode_from_physical() takes an int".into(),
+            )))),
+        },
+        // ⚠️ `Rect2`, NOT `Rect2i` — Godot types the cutouts as floats while
+        // `get_display_safe_area` right above is an int rect.
+        "get_display_cutouts" => Some(Ok(Variant::Array(
+            backend
+                .display_cutouts()
+                .into_iter()
+                .map(|(x, y, w, h)| {
+                    Variant::Rect2(gdcore::math::Rect2::new(
+                        gdcore::math::Vector2::new(x, y),
+                        gdcore::math::Vector2::new(w, h),
+                    ))
+                })
+                .collect(),
+        ))),
+        "ime_get_text" => Some(Ok(Variant::String(backend.ime_text()))),
+        "ime_get_selection" => {
+            let (caret, len) = backend.ime_selection();
+            Some(Ok(Variant::Vector2i(gdcore::math::Vector2i::new(
+                caret as i32,
+                len as i32,
+            ))))
+        }
+        "cursor_get_shape" => Some(Ok(Variant::Int(backend.cursor_shape()))),
+        "cursor_set_shape" => {
+            match args.first() {
+                Some(Variant::Int(v)) => backend.set_cursor_shape(*v),
+                Some(Variant::Float(f)) => backend.set_cursor_shape(*f as i64),
+                _ => {
+                    return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "DisplayServer.cursor_set_shape() takes a CursorShape int".into(),
+                    ))))
+                }
+            }
+            Some(Ok(Variant::Nil))
+        }
         "clipboard_get" => Some(Ok(Variant::String(backend.clipboard_get()))),
         "clipboard_has" => Some(Ok(Variant::Bool(backend.clipboard_has()))),
         "tts_speak" => {
@@ -22319,6 +22790,21 @@ thread_local! {
     /// so cannot bind a RefCounted handle.
     static WEBRTC_SIGNAL_CALLBACKS: std::cell::RefCell<HashMap<(u64, String), Vec<CallableRef>>> =
         std::cell::RefCell::new(HashMap::new());
+}
+
+thread_local! {
+    /// Script-registered `Performance` custom monitors, in registration order
+    /// (pat-s3rrv.109).
+    ///
+    /// ⚠️ Deliberately NOT stored in `gdcore`'s `PerformanceRegistry`, whose
+    /// callbacks are `Box<dyn Fn() -> f64 + Send + Sync>`. A script monitor is
+    /// a Callable that only the interpreter can evaluate, and the interpreter
+    /// is reachable from neither a `Send + Sync` closure nor the process-wide
+    /// registry. Godot evaluates these lazily at `get_custom_monitor` time too,
+    /// so reading them here rather than caching a per-frame value is also the
+    /// faithful behaviour.
+    static PERFORMANCE_CUSTOM_MONITORS: std::cell::RefCell<Vec<(String, CallableRef, Vec<Variant>)>> =
+        std::cell::RefCell::new(Vec::new());
 }
 
 /// Godot `WebRTCDataChannel` — the PacketPeer surface plus its SCTP

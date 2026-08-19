@@ -263,6 +263,15 @@ pub struct PhysicsBody2D {
     /// to a script, where a nondeterministic iteration order would make the
     /// result — and any test asserting it — differ run to run.
     pub collision_exceptions: Vec<BodyId>,
+    /// Sweep this body's motion each step so a fast mover cannot pass clean
+    /// through a static obstacle (Godot's `RigidBody2D.continuous_cd`).
+    ///
+    /// ⚠️ Godot types this as a `CCDMode` enum (DISABLED / CAST_RAY /
+    /// CAST_SHAPE) and Patina models it as a bool, matching the 3D twin
+    /// (`gdphysics3d::body::continuous_cd`): both non-disabled modes are swept
+    /// the same way here, so the distinction is between "sweep" and "do not"
+    /// rather than between two sweep shapes. Default OFF, as in Godot.
+    pub continuous_cd: bool,
 }
 
 impl PhysicsBody2D {
@@ -309,6 +318,7 @@ impl PhysicsBody2D {
             constant_linear_velocity: Vector2::ZERO,
             constant_angular_velocity: 0.0,
             collision_exceptions: Vec::new(),
+            continuous_cd: false,
         }
     }
 

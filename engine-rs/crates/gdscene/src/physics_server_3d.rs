@@ -1134,6 +1134,10 @@ impl PhysicsServer3D {
         let pending_torque = vec3_prop_3d(tree, nid, "_pending_torque", Vector3::ZERO);
         let pending_torque_impulse =
             vec3_prop_3d(tree, nid, "_pending_torque_impulse", Vector3::ZERO);
+        // `RigidBody3D.set_axis_velocity` (pat-s3rrv.105). Read as a Vector3:
+        // the interpreter now writes the argument through with its own kind, so
+        // a 3D call arrives as a Vector3 and a 2D one never reaches this server.
+        let axis_velocity = vec3_opt_prop_3d(tree, nid, "_pending_axis_velocity");
         // doc/classes/RigidBody3D.xml defaults.
         let gravity_scale = float_prop_3d(tree, nid, "gravity_scale", 1.0) as f32;
         let linear_damp = float_prop_3d(tree, nid, "linear_damp", 0.0) as f32;
@@ -1163,6 +1167,22 @@ impl PhysicsServer3D {
         }
         if let Some(v) = node_ang {
             body.angular_velocity = v;
+        }
+        // Godot: `axis = p_axis.normalized(); vel -= axis * axis.dot(vel); vel += p_axis`
+        // (`rigid_body_3d.cpp:463`). The component ALONG the axis is replaced
+        // and everything perpendicular is retained — which is why this runs
+        // after the plain `linear_velocity` write rather than instead of it.
+        //
+        // ⚠️ Guarded on a non-degenerate length: `Vector3::ZERO.normalized()`
+        // has no direction, and dividing by it would poison the velocity with
+        // NaN rather than doing nothing.
+        if let Some(av) = axis_velocity {
+            let len_sq = av.dot(av);
+            if len_sq > 1e-12 {
+                let dir = av * (1.0 / len_sq.sqrt());
+                let along = body.linear_velocity.dot(dir);
+                body.linear_velocity = body.linear_velocity - dir * along + av;
+            }
         }
         body.constant_force = constant_force;
         body.constant_torque = constant_torque;
@@ -1217,6 +1237,15 @@ impl PhysicsServer3D {
                     if !matches!(node.get_property(key), Variant::Nil) {
                         node.set_property(key, Variant::Vector3(Vector3::ZERO));
                     }
+                }
+                // ⚠️ Cleared to Nil, not to ZERO like the accumulators above.
+                // `set_axis_velocity` is ONE-SHOT — Godot applies it once, at
+                // the call — and a lingering value would re-apply the override
+                // every tick, pinning the body's velocity along that axis
+                // forever. Nil is also what the 2D server writes back, so
+                // "pending" stays distinguishable from "asked for zero".
+                if !matches!(node.get_property("_pending_axis_velocity"), Variant::Nil) {
+                    node.set_property("_pending_axis_velocity", Variant::Nil);
                 }
             }
         }
@@ -1400,6 +1429,69 @@ impl PhysicsServer3D {
         self.previous_contacts = current;
     }
 
+    /// Publishes each monitoring body's contact list onto its node as
+    /// `_body_contacts`, the same array the 2D server writes (pat-s3rrv.105).
+    ///
+    /// 🔑 This is what makes `get_contact_count()` / `get_colliding_bodies()`
+    /// work for a `RigidBody3D`. Those script arms read the node property and
+    /// hand each field straight back, so they are dimension-agnostic already —
+    /// the 3D gap was a missing PUBLISHER, not missing arms. Before this they
+    /// answered 0 for every 3D body however hard it was pressed against
+    /// something.
+    ///
+    /// ⚠️ Separate from `process_body_contact_signals` below, which reports
+    /// enter/exit EDGES and drains them. A body resting on the floor persists
+    /// and produces no edge, so publishing there would make a resting body
+    /// visible for exactly one frame.
+    fn publish_body_contacts(&mut self, tree: &mut SceneTree) {
+        // The solver already applies Godot's gate — a body only collects
+        // contacts while its own `contact_monitor` is set and it is under its
+        // `max_contacts_reported` budget — so an unmonitored body simply has an
+        // empty list and publishes one.
+        let records: Vec<(NodeId, Vec<Variant>)> = self
+            .node_to_body
+            .iter()
+            .filter_map(|(&nid, &body_id)| {
+                let body = self.world.get_body(body_id)?;
+                if !body.contact_monitor {
+                    return None;
+                }
+                let list = body
+                    .get_contacts()
+                    .iter()
+                    .map(|c| {
+                        let mut rec = gdvariant::Dictionary::new();
+                        // ⚠️ NEGATED. `ContactPoint3D.normal` runs from THIS
+                        // body toward the other, while Godot's
+                        // `get_contact_local_normal` points away from the
+                        // surface the body is resting against — up, for a body
+                        // on a floor. Publishing the raw normal would report
+                        // every floor contact as pointing down and silently
+                        // invert the standard floor test, exactly as the 2D
+                        // publisher documents.
+                        rec.insert("normal", Variant::Vector3(c.normal * -1.0));
+                        rec.insert("position", Variant::Vector3(c.position));
+                        rec.insert("depth", Variant::Float(c.depth as f64));
+                        rec.insert(
+                            "collider",
+                            self.node_for_body(c.other_body)
+                                .map(|n| Variant::ObjectId(n.object_id()))
+                                .unwrap_or(Variant::Nil),
+                        );
+                        Variant::Dictionary(rec)
+                    })
+                    .collect();
+                Some((nid, list))
+            })
+            .collect();
+
+        for (nid, list) in records {
+            if let Some(node) = tree.get_node_mut(nid) {
+                node.set_property("_body_contacts", Variant::Array(list));
+            }
+        }
+    }
+
     /// Emits `body_entered` / `body_exited` on `RigidBody3D` nodes whose
     /// `contact_monitor` is on, passing the other body's node `ObjectId`.
     ///
@@ -1535,6 +1627,55 @@ impl PhysicsServer3D {
         }
     }
 
+    /// The audio bus an `Area3D` imposes at `point`, if any — Godot's
+    /// `Area3D.audio_bus_override` / `audio_bus_name` (pat-s3rrv.102).
+    ///
+    /// Godot resolves this the same way it resolves the space overrides: every
+    /// area containing the point is a candidate and the one with the highest
+    /// `priority` wins (`area_3d.cpp`). An `AudioStreamPlayer3D` standing
+    /// inside such an area has its voice rerouted to that bus — the usual use
+    /// being a reverb bus for a cave or a room.
+    ///
+    /// ⚠️ This is a POINT test against the area's shape, not a body-overlap
+    /// query. An `AudioStreamPlayer3D` is not a physics body and never appears
+    /// in `_overlapping_bodies`, so the overlap machinery cannot answer this.
+    ///
+    /// Returns `None` when no overriding area contains the point, which leaves
+    /// the voice on whatever bus it already had.
+    pub fn audio_bus_at(&self, tree: &SceneTree, point: Vector3) -> Option<String> {
+        let mut best: Option<(f32, String)> = None;
+        for (&area_id, &node_id) in &self.area_to_node {
+            let Some(area) = self.world.get_area(area_id) else {
+                continue;
+            };
+            // The shape is stored in the area's local space, so the point has to
+            // come back to it before the containment test.
+            if !area.shape.contains_point(point - area.position) {
+                continue;
+            }
+            if !truthy_prop_3d(tree, node_id, "audio_bus_override", false) {
+                continue;
+            }
+            let bus = match tree
+                .get_node(node_id)
+                .map(|n| n.get_property("audio_bus_name"))
+            {
+                Some(Variant::String(name)) if !name.is_empty() => name,
+                // Godot's default bus name. An override with no name still
+                // means "route somewhere", and Master is where it routes.
+                _ => "Master".to_string(),
+            };
+            let better = match &best {
+                Some((p, _)) => area.priority > *p,
+                None => true,
+            };
+            if better {
+                best = Some((area.priority, bus));
+            }
+        }
+        best.map(|(_, bus)| bus)
+    }
+
     /// Publishes each `Area3D` node's current overlap set onto the node as
     /// `_overlapping_bodies`, which is what the script-facing
     /// `get_overlapping_bodies()` / `has_overlapping_bodies()` read.
@@ -1599,6 +1740,7 @@ impl PhysicsServer3D {
     /// events, so a frame loop that later calls them explicitly stays correct
     /// rather than firing everything twice.
     pub fn sync_from_physics(&mut self, tree: &mut SceneTree) {
+        self.publish_body_contacts(tree);
         for (&nid, &body_id) in &self.node_to_body {
             if let Some(body) = self.world.get_body(body_id) {
                 if body.body_type == BodyType3D::Rigid {

@@ -170,7 +170,29 @@ impl PartialEq for CallableRef {
                     unbind_count: bc,
                 },
             ) => a == b && ac == bc,
-            _ => false, // lambdas are never equal; mixed types are never equal
+            // Godot compares lambda callables BY REFERENCE — `compare_equal` is
+            // literally `return p_a == p_b;`
+            // (modules/gdscript/gdscript_lambda_callable.cpp:37-40). Two clones
+            // of one Callable share this `Arc`, so a lambda stored in an Array
+            // or a signal connection still equals the value the script holds;
+            // two separate evaluations of the same `func(): ...` expression each
+            // build a fresh `Arc` and are correctly unequal, matching Godot,
+            // where each evaluation produces a separate GDScriptLambdaCallable.
+            //
+            // ⚠️ Cast the fat pointer to a thin one before comparing.
+            // `Arc::ptr_eq` on a `dyn Trait` also compares the vtable address,
+            // which is not guaranteed unique per type and can give a false
+            // negative for two Arcs that really are the same allocation.
+            //
+            // ⚠️ Compares `body` only, deliberately. `captures` and
+            // `param_defaults` are per-instance data hanging off the same
+            // lambda; two Callables sharing a body Arc ARE the same lambda
+            // instance, and hashing the captures would make equality depend on
+            // runtime values Godot never consults (pat-s3rrv.67).
+            (CallableRef::Lambda { body: a, .. }, CallableRef::Lambda { body: b, .. }) => {
+                std::ptr::eq(Arc::as_ptr(a) as *const (), Arc::as_ptr(b) as *const ())
+            }
+            _ => false, // mixed callable types are never equal
         }
     }
 }
@@ -1466,6 +1488,74 @@ impl fmt::Display for VariantType {
 
 #[cfg(test)]
 mod tests {
+    /// 🔑 A LAMBDA CALLABLE EQUALS ITSELF, INCLUDING AFTER A CLONE.
+    ///
+    /// Godot: *"Lambda callables are only compared by reference"*
+    /// (`gdscript_lambda_callable.cpp:37-40`). `CallableRef` is
+    /// `#[derive(Clone)]`, so cloning bumps the body `Arc`'s refcount rather
+    /// than deep-copying — which is what lets a Callable survive being stored
+    /// in an Array or a signal connection and still compare equal to the value
+    /// the script is holding.
+    ///
+    /// ⚠️ Before this, `PartialEq` ended `_ => false` with the note "lambdas are
+    /// never equal", so `f == f` was FALSE. That silently broke every
+    /// remove-by-value path: `remove_visibility_filter(f)` could never match
+    /// (`scene_tree.rs`), because `Vec::retain` compares by equality.
+    #[test]
+    fn a_lambda_equals_its_own_clone() {
+        let f = CallableRef::Lambda {
+            params: vec!["x".into()],
+            body: std::sync::Arc::new(()),
+            captures: std::sync::Arc::new(std::collections::HashMap::new()),
+            param_defaults: std::sync::Arc::new(()),
+        };
+        let g = f.clone();
+        assert_eq!(f, g, "a cloned Callable must still be the same lambda");
+        assert_eq!(f, f, "and a lambda must equal itself");
+    }
+
+    /// 🔑 TWO SEPARATELY-BUILT LAMBDAS ARE NOT EQUAL.
+    ///
+    /// ⚠️ The other half, and the one that keeps the fix honest. Identical
+    /// parameter lists and identical (empty) captures must NOT make two
+    /// lambdas equal — in Godot each `func(): ...` evaluation produces its own
+    /// `GDScriptLambdaCallable`. A comparison that fell back to comparing
+    /// `params` would pass the test above and fail this one.
+    #[test]
+    fn two_distinct_lambdas_are_not_equal() {
+        let mk = || CallableRef::Lambda {
+            params: vec!["x".into()],
+            body: std::sync::Arc::new(()),
+            captures: std::sync::Arc::new(std::collections::HashMap::new()),
+            param_defaults: std::sync::Arc::new(()),
+        };
+        assert_ne!(
+            mk(),
+            mk(),
+            "two separate lambda instances must not compare equal, however \
+             identical their parameters look"
+        );
+    }
+
+    /// 🔑 A LAMBDA IS NEVER EQUAL TO A METHOD CALLABLE.
+    ///
+    /// The mixed-type arm still falls through to `false`; this pins that the
+    /// new Lambda arm did not widen it.
+    #[test]
+    fn a_lambda_is_not_equal_to_a_method() {
+        let lambda = CallableRef::Lambda {
+            params: vec![],
+            body: std::sync::Arc::new(()),
+            captures: std::sync::Arc::new(std::collections::HashMap::new()),
+            param_defaults: std::sync::Arc::new(()),
+        };
+        let method = CallableRef::Method {
+            target_id: 1,
+            method: "foo".into(),
+        };
+        assert_ne!(lambda, method);
+    }
+
     use super::*;
 
     #[test]

@@ -317,7 +317,62 @@ mod wasm {
     pub fn free(id: FetchId) {
         FETCHES.with(|m| m.borrow_mut().remove(&id));
     }
+
+    /// Adapts one in-flight fetch to the target-independent
+    /// [`FetchBackend`](crate::web_request_driver::FetchBackend), so the poll
+    /// and body-drain ordering rules live in a module that every build
+    /// type-checks and every test run exercises.
+    ///
+    /// 🔑 Everything below is plumbing on purpose. The rules this feeds are in
+    /// `web_request_driver`; nothing here decides anything, because code in this
+    /// `#[cfg(target_arch = "wasm32")]` module is never type-checked by a native
+    /// build nor run by any build in this repo.
+    pub struct WebFetchBackend {
+        id: FetchId,
+    }
+
+    impl WebFetchBackend {
+        /// Wraps a handle from [`create`].
+        pub fn new(id: FetchId) -> Self {
+            Self { id }
+        }
+
+        /// The handle, for [`free`] once the request is finished with.
+        pub fn id(&self) -> FetchId {
+            self.id
+        }
+    }
+
+    impl crate::web_request_driver::FetchBackend for WebFetchBackend {
+        fn state(&self) -> FetchState {
+            state(self.id)
+        }
+
+        fn http_status(&self) -> u16 {
+            http_status(self.id)
+        }
+
+        fn read_headers(&mut self) -> Option<Vec<String>> {
+            // The JS side yields already-parsed pairs, so there is no parse step
+            // here to fail — unlike `godot_js_fetch_read_headers`, which walks
+            // the raw block and can report failure.
+            Some(headers(self.id))
+        }
+
+        fn read_chunk(&mut self, out: &mut [u8]) -> usize {
+            read_chunk(self.id, out)
+        }
+
+        /// Drives the reader one step. The JS side re-arms itself from its own
+        /// promise callbacks upstream; this port models that pump explicitly.
+        fn pump(&mut self) {
+            poll(self.id);
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use wasm::{create, free, headers, http_status, is_chunked_response, poll, read_chunk, state};
+pub use wasm::{
+    create, free, headers, http_status, is_chunked_response, poll, read_chunk, state,
+    WebFetchBackend,
+};
