@@ -483,6 +483,22 @@ pub trait SceneAccess {
         None
     }
 
+    /// `SceneTree.create_timer(delay, process_always, process_in_physics,
+    /// ignore_time_scale)` (pat-s3rrv.35).
+    ///
+    /// Defaulted to [`create_timer`](Self::create_timer) so an implementor that
+    /// has no notion of the flags keeps working — it simply gets Godot's
+    /// default timer, which is what it produced before this method existed.
+    fn create_timer_with_flags(
+        &mut self,
+        seconds: f64,
+        _process_always: bool,
+        _process_in_physics: bool,
+        _ignore_time_scale: bool,
+    ) -> Option<(u64, String)> {
+        self.create_timer(seconds)
+    }
+
     /// Advance scene timers by `delta` and return fired signal names.
     fn process_timers(&mut self, _delta: f64) -> Vec<String> {
         Vec::new()
@@ -596,6 +612,38 @@ pub trait SceneAccess {
         None
     }
 
+    /// `AnimationPlayer.has_animation` (pat-s3rrv.43). `None` when the node has
+    /// no attached player, which is what lets the dispatch arms guard on it and
+    /// avoid shadowing a script's own method of the same name.
+    fn animation_player_has_animation(&self, _node: u64, _name: &str) -> Option<bool> {
+        None
+    }
+
+    /// `AnimationPlayer.get_animation_list` (pat-s3rrv.43).
+    fn animation_player_animation_list(&self, _node: u64) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Reads `AnimationPlayer.speed_scale` (pat-s3rrv.43).
+    fn animation_player_speed_scale(&self, _node: u64) -> Option<f64> {
+        None
+    }
+
+    /// `AnimationPlayer.play_section(name, start, end)` (pat-s3rrv.43).
+    ///
+    /// Godot's full signature also takes `custom_blend`, `custom_speed` and
+    /// `from_end`; the engine method carries all seven and this passes Godot's
+    /// defaults (-1.0 blend, 1.0 speed, not from_end) for the three a
+    /// three-argument script call omits.
+    fn animation_player_play_section(&mut self, _node: u64, _name: &str, _start: f64, _end: f64) {}
+
+    /// Writes `AnimationPlayer.speed_scale` (pat-s3rrv.43).
+    ///
+    /// The engine half is already live — `AnimationPlayer::advance` scales its
+    /// delta by `speed_scale * custom_speed` — so this is purely the missing
+    /// script-side setter.
+    fn animation_player_set_speed_scale(&mut self, _node: u64, _scale: f64) {}
+
     // -- Object introspection over the signal graph (pat-0q2kx.64) ----------
     //
     // Godot's `get_signal_connection_list` / `get_incoming_connections` /
@@ -693,6 +741,31 @@ pub trait SceneAccess {
     fn animation_tree_playback_call(
         &mut self,
         _handle: u64,
+        _method: &str,
+        _args: &[Variant],
+    ) -> Option<Variant> {
+        None
+    }
+
+    // -- Physics query parameter constructors (pat-s3rrv.26) ---------------
+
+    /// Dispatches a **static** call on a physics-query parameter type —
+    /// `PhysicsRayQueryParameters2D.create(from, to)` and its siblings.
+    ///
+    /// These arrive as a call on a TYPE NAME, not on a value, so they never
+    /// reach `call_method_on`/`call_node_method` and resolve to nothing. Godot's
+    /// space-query surface is unusable without them: `intersect_ray` takes only
+    /// a parameters object, and `create` is how a script obtains one.
+    ///
+    /// Lives on this trait rather than in the interpreter because the handle
+    /// registry belongs to the host — `gdscene` owns the physics world, and this
+    /// crate cannot depend on it.
+    ///
+    /// Returns `None` when `type_name` is not a query-parameter type, so the
+    /// caller falls through to ordinary identifier resolution.
+    fn physics_query_static_call(
+        &mut self,
+        _type_name: &str,
         _method: &str,
         _args: &[Variant],
     ) -> Option<Variant> {

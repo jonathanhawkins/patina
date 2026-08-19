@@ -627,10 +627,12 @@ fn animation_tree_blend_node_mixes_two_animations() {
         a: Box::new(AnimationNode::Animation {
             name: "idle".into(),
             position: 0.0,
+            opts: Default::default(),
         }),
         b: Box::new(AnimationNode::Animation {
             name: "walk".into(),
             position: 0.0,
+            opts: Default::default(),
         }),
         weight: 0.25,
     });
@@ -650,10 +652,12 @@ fn animation_tree_blend_node_weight_clamps_to_unit_interval() {
         a: Box::new(AnimationNode::Animation {
             name: "a".into(),
             position: 0.0,
+            opts: Default::default(),
         }),
         b: Box::new(AnimationNode::Animation {
             name: "b".into(),
             position: 0.0,
+            opts: Default::default(),
         }),
         weight: -1.0,
     });
@@ -663,10 +667,12 @@ fn animation_tree_blend_node_weight_clamps_to_unit_interval() {
         a: Box::new(AnimationNode::Animation {
             name: "a".into(),
             position: 0.0,
+            opts: Default::default(),
         }),
         b: Box::new(AnimationNode::Animation {
             name: "b".into(),
             position: 0.0,
+            opts: Default::default(),
         }),
         weight: 2.0,
     });
@@ -753,6 +759,7 @@ fn animation_tree_blend_state_machine_plays_current_state() {
         AnimationNode::Animation {
             name: "idle".into(),
             position: 0.0,
+            opts: Default::default(),
         },
     );
     sm.states.insert(
@@ -760,6 +767,7 @@ fn animation_tree_blend_state_machine_plays_current_state() {
         AnimationNode::Animation {
             name: "walk".into(),
             position: 0.0,
+            opts: Default::default(),
         },
     );
     sm.current = "idle".into();
@@ -780,6 +788,7 @@ fn animation_tree_blend_state_machine_transitions_on_condition() {
         AnimationNode::Animation {
             name: "idle".into(),
             position: 0.0,
+            opts: Default::default(),
         },
     );
     sm.states.insert(
@@ -787,6 +796,7 @@ fn animation_tree_blend_state_machine_transitions_on_condition() {
         AnimationNode::Animation {
             name: "walk".into(),
             position: 0.0,
+            opts: Default::default(),
         },
     );
     sm.current = "idle".into();
@@ -820,6 +830,7 @@ fn animation_tree_blend_state_machine_crossfade_blends_during_transition() {
         AnimationNode::Animation {
             name: "idle".into(),
             position: 0.0,
+            opts: Default::default(),
         },
     );
     sm.states.insert(
@@ -827,6 +838,7 @@ fn animation_tree_blend_state_machine_crossfade_blends_during_transition() {
         AnimationNode::Animation {
             name: "walk".into(),
             position: 0.0,
+            opts: Default::default(),
         },
     );
     sm.current = "idle".into();
@@ -864,6 +876,7 @@ fn animation_tree_blend_nested_state_machine_inside_blend_node() {
         AnimationNode::Animation {
             name: "idle".into(),
             position: 0.0,
+            opts: Default::default(),
         },
     );
     sm.states.insert(
@@ -871,6 +884,7 @@ fn animation_tree_blend_nested_state_machine_inside_blend_node() {
         AnimationNode::Animation {
             name: "walk".into(),
             position: 0.0,
+            opts: Default::default(),
         },
     );
     sm.current = "walk".into();
@@ -880,6 +894,7 @@ fn animation_tree_blend_nested_state_machine_inside_blend_node() {
         b: Box::new(AnimationNode::Animation {
             name: "aim".into(),
             position: 0.0,
+            opts: Default::default(),
         }),
         weight: 0.5,
     });
@@ -903,6 +918,7 @@ fn animation_tree_blend_advance_progresses_animation_position() {
     tree.set_root(AnimationNode::Animation {
         name: "ramp".into(),
         position: 0.0,
+        opts: Default::default(),
     });
 
     tree.advance(0.25);
@@ -914,6 +930,7 @@ fn blend3_anim_leaf(name: &str) -> AnimationNode {
     AnimationNode::Animation {
         name: name.into(),
         position: 0.0,
+        opts: Default::default(),
     }
 }
 

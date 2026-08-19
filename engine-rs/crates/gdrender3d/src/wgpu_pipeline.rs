@@ -14,8 +14,11 @@ use std::collections::HashMap;
 use gdcore::math::{srgb_to_linear_channel, Color, Vector3};
 use gdcore::math3d::Transform3D;
 
+use gdserver3d::decal::Decal3D;
 use gdserver3d::environment::{BackgroundMode, Environment3D};
-use gdserver3d::instance::{Instance3D, Instance3DId};
+use gdserver3d::fog_volume::FogVolume;
+use gdserver3d::instance::{GeometryInstanceSettings, Instance3D, Instance3DId};
+use gdserver3d::occluder::OccluderInstance3D;
 use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::{Material3D, ShadingMode};
 use gdserver3d::mesh::Mesh3D;
@@ -920,6 +923,93 @@ impl RenderPipeline3D {
             camera_layout,
             model_layout,
             light_layout,
+        }
+    }
+
+    /// Builds a variant of the standard pipeline with a different face-cull
+    /// mode (pat-s3rrv.30).
+    ///
+    /// On the GPU, cull mode is *pipeline state*, not a per-draw uniform, so a
+    /// material asking for `CULL_FRONT` or `CULL_DISABLED` cannot be honoured by
+    /// setting a flag — it needs its own pipeline. `RenderPipeline3D::new`
+    /// hardcodes `Face::Back`, which is why an authored `cull_mode` changed
+    /// nothing in the wgpu backend no matter what the scene said.
+    ///
+    /// Mirrors `new`'s descriptor exactly apart from `cull_mode`, and reuses
+    /// this pipeline's bind group layouts so the existing camera / model / light
+    /// bind groups stay valid across a pipeline switch.
+    pub fn build_cull_variant(
+        &self,
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        cull: Option<wgpu::Face>,
+        depth_write: bool,
+    ) -> wgpu::RenderPipeline {
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("patina-3d-shader-cull-variant"),
+            source: wgpu::ShaderSource::Wgsl(SHADER_3D_WGSL.into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("patina-3d-pipeline-layout-cull-variant"),
+            bind_group_layouts: &[
+                Some(&self.camera_layout),
+                Some(&self.model_layout),
+                Some(&self.light_layout),
+            ],
+            immediate_size: 0,
+        });
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("patina-3d-render-pipeline-cull-variant"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_module,
+                entry_point: Some("vs_main"),
+                buffers: &[GpuVertex::layout()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: cull,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                // pat-s3rrv.30: alpha-blended draws must NOT write depth
+                // (Godot's DEPTH_DRAW_OPAQUE_ONLY). Writing it lets whichever
+                // transparent surface happens to draw first depth-reject the
+                // one behind it, so "see-through" would depend on draw order.
+                depth_write_enabled: Some(depth_write),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    }
+
+    /// Maps a material's cull mode to wgpu's, so both backends read the same
+    /// enum (pat-s3rrv.30).
+    pub fn wgpu_cull_face(mode: crate::render_modes::CullMode) -> Option<wgpu::Face> {
+        match mode {
+            crate::render_modes::CullMode::Back => Some(wgpu::Face::Back),
+            crate::render_modes::CullMode::Front => Some(wgpu::Face::Front),
+            crate::render_modes::CullMode::Disabled => None,
         }
     }
 
@@ -1860,6 +1950,24 @@ struct GpuDrawEntry<'a> {
     roughness: f32,
     metallic: f32,
     shading_mode: u32,
+    /// Face-cull mode for this draw (pat-s3rrv.30). Flattened out of the
+    /// material like the fields above, because the draw loop needs it to pick a
+    /// pipeline — cull state is baked into the pipeline, not a uniform.
+    cull_mode: crate::render_modes::CullMode,
+    /// Transparency mode and its scissor threshold (pat-s3rrv.30).
+    ///
+    /// Used for the AlphaScissor decision below. With a flat albedo every texel
+    /// of the surface carries the SAME alpha, so "discard sub-threshold texels"
+    /// and "skip the draw" are the same thing — the per-draw test is exact here,
+    /// not an approximation. Per-texel scissor for a *textured* albedo would
+    /// need a threshold uniform and a `discard` in the WGSL, and is reported as
+    /// remaining scope.
+    transparency: crate::render_modes::Transparency,
+    /// See [`Self::transparency`].
+    alpha_scissor_threshold: f32,
+    /// Godot `depth_draw_mode` (pat-s3rrv.30); decides whether this draw writes
+    /// depth once its transparency is known.
+    depth_draw_mode: crate::render_modes::DepthDrawMode,
 }
 
 /// Resolves an albedo colour for a shader material, matching the software path's
@@ -1923,6 +2031,10 @@ fn instance_draw_entries(inst: &Instance3D) -> Vec<GpuDrawEntry<'_>> {
                     roughness: base.roughness,
                     metallic: base.metallic,
                     shading_mode: mode,
+                    cull_mode: base.cull_mode,
+                    transparency: base.transparency,
+                    alpha_scissor_threshold: base.alpha_scissor_threshold,
+                    depth_draw_mode: base.depth_draw_mode,
                 });
             }
         }
@@ -1935,6 +2047,10 @@ fn instance_draw_entries(inst: &Instance3D) -> Vec<GpuDrawEntry<'_>> {
             roughness: base.roughness,
             metallic: base.metallic,
             shading_mode: mode,
+            cull_mode: base.cull_mode,
+            transparency: base.transparency,
+            alpha_scissor_threshold: base.alpha_scissor_threshold,
+            depth_draw_mode: base.depth_draw_mode,
         });
     }
     entries
@@ -1952,9 +2068,29 @@ pub struct GpuRenderer3D {
     instances: HashMap<u64, Instance3D>,
     lights: Vec<Light3D>,
     reflection_probes: Vec<ReflectionProbe>,
+    /// Decals to project onto shaded geometry this frame (pat-s3rrv.29).
+    ///
+    /// The GPU backend used to drop these on the floor: the four env-effect
+    /// trait methods are DEFAULT NO-OPS on `RenderingServer3D`, the software
+    /// renderer overrode them and this one did not, and `gdeditor` ships with
+    /// `gpu-render` on by default — so a `.tscn` Decal changed nothing in the
+    /// editor viewport or in Play while the software tests stayed green.
+    decals: Vec<Decal3D>,
+    /// Fog volumes injecting local density, with their world transforms.
+    fog_volumes: Vec<crate::renderer::PlacedFogVolume>,
+    /// Occluders registered for this scene.
+    occluders: Vec<OccluderInstance3D>,
     next_id: u64,
     /// The texture format used for color attachments.
     pub target_format: wgpu::TextureFormat,
+    /// Pipeline variants of [`Self::editor_pipeline`] keyed by
+    /// `(cull mode, writes depth)` (pat-s3rrv.30).
+    ///
+    /// Both are baked into a wgpu pipeline rather than settable per draw, so a
+    /// material that culls FRONT, or an alpha-blended one that must not write
+    /// depth, needs its own pipeline. Built once on first use; the default
+    /// (Back, writes depth) is `editor_pipeline` itself.
+    editor_variants: Vec<(crate::render_modes::CullMode, bool, wgpu::RenderPipeline)>,
     /// Lazily-built pipeline for the editor color-only path. Uses a **non-sRGB**
     /// (`Bgra8Unorm`) target so shader output is written to bytes linearly,
     /// matching the software rasterizer's `color * 255` — which keeps GPU meshes
@@ -2027,6 +2163,23 @@ struct GpuDrawCall {
     roughness: f32,
     metallic: f32,
     shading_mode: u32,
+    /// Face-cull mode for this draw (pat-s3rrv.30), carried the same way as the
+    /// other flattened material fields above.
+    cull_mode: crate::render_modes::CullMode,
+    /// Transparency mode and its scissor threshold (pat-s3rrv.30).
+    ///
+    /// Used for the AlphaScissor decision below. With a flat albedo every texel
+    /// of the surface carries the SAME alpha, so "discard sub-threshold texels"
+    /// and "skip the draw" are the same thing — the per-draw test is exact here,
+    /// not an approximation. Per-texel scissor for a *textured* albedo would
+    /// need a threshold uniform and a `discard` in the WGSL, and is reported as
+    /// remaining scope.
+    transparency: crate::render_modes::Transparency,
+    /// See [`Self::transparency`].
+    alpha_scissor_threshold: f32,
+    /// Godot `depth_draw_mode` (pat-s3rrv.30); decides whether this draw writes
+    /// depth once its transparency is known.
+    depth_draw_mode: crate::render_modes::DepthDrawMode,
     /// When `Some`, a complete transpiled WGSL module for this draw's spatial
     /// shader material whose `fragment()` body is evaluated per-fragment (e.g. a
     /// UV-driven ALBEDO). The render pass builds a per-material pipeline from it
@@ -2083,6 +2236,10 @@ struct EditorTargets {
     /// View of `color_tex` used as the render-pass color attachment.
     color_view: wgpu::TextureView,
     /// Depth attachment view (used for z-testing; never read back).
+    /// Kept alongside the view so the editor path can copy depth back to the
+    /// CPU for the decal/fog-volume passes (pat-s3rrv.29) — a view cannot be
+    /// the source of `copy_texture_to_buffer`.
+    depth_tex: wgpu::Texture,
     depth_view: wgpu::TextureView,
     /// Persistent mappable buffer the color texture is copied into each frame.
     readback_buf: wgpu::Buffer,
@@ -2112,7 +2269,12 @@ impl EditorTargets {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // COPY_SRC so the editor path can read depth back to the CPU
+            // (pat-s3rrv.29). The decal and fog-volume passes are per-pixel
+            // reprojections and need the depth buffer; without this flag the
+            // copy is a validation error, so the effects could not run on the
+            // editor viewport at all.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2126,7 +2288,16 @@ impl EditorTargets {
             mapped_at_creation: false,
         });
 
-        Self { width: w, height: h, color_view, color_tex, depth_view, readback_buf, padded_row }
+        Self {
+            width: w,
+            height: h,
+            color_view,
+            color_tex,
+            depth_tex,
+            depth_view,
+            readback_buf,
+            padded_row,
+        }
     }
 }
 
@@ -2154,9 +2325,13 @@ impl GpuRenderer3D {
             instances: HashMap::new(),
             lights: Vec::new(),
             reflection_probes: Vec::new(),
+            decals: Vec::new(),
+            fog_volumes: Vec::new(),
+            occluders: Vec::new(),
             next_id: 1,
             target_format: format,
             editor_pipeline: None,
+            editor_variants: Vec::new(),
             editor_sky_pipeline: None,
             editor_targets: None,
             mesh_gpu_cache: HashMap::new(),
@@ -2173,6 +2348,12 @@ impl GpuRenderer3D {
         self.instances.clear();
         self.lights.clear();
         self.reflection_probes.clear();
+        // pat-s3rrv.29: env effects are per-scene like everything else here.
+        // Missing these would leak a previous scene's decals and fog into the
+        // next Play run — the editor reuses one renderer across scenes.
+        self.decals.clear();
+        self.fog_volumes.clear();
+        self.occluders.clear();
         self.next_id = 1;
     }
 
@@ -2263,6 +2444,10 @@ impl GpuRenderer3D {
                     roughness: entry.roughness,
                     metallic: entry.metallic,
                     shading_mode: entry.shading_mode,
+                    cull_mode: entry.cull_mode,
+                    transparency: entry.transparency,
+                    alpha_scissor_threshold: entry.alpha_scissor_threshold,
+                    depth_draw_mode: entry.depth_draw_mode,
                     custom_module: custom_module.clone(),
                 });
             }
@@ -2334,6 +2519,29 @@ impl GpuRenderer3D {
         if self.editor_pipeline.is_none() {
             self.editor_pipeline = Some(RenderPipeline3D::new(&self.ctx.device, format));
         }
+        // pat-s3rrv.30: build every (cull, depth-write) pipeline variant once.
+        // Both are pipeline state on the GPU, so a material that culls FRONT or
+        // an alpha-blended one that must not write depth cannot be served by
+        // flipping a uniform — it needs its own pipeline.
+        if self.editor_variants.is_empty() {
+            let base = self
+                .editor_pipeline
+                .as_ref()
+                .expect("editor pipeline just ensured");
+            let mut built = Vec::new();
+            for cull in [
+                crate::render_modes::CullMode::Back,
+                crate::render_modes::CullMode::Front,
+                crate::render_modes::CullMode::Disabled,
+            ] {
+                for depth_write in [true, false] {
+                    let face = RenderPipeline3D::wgpu_cull_face(cull);
+                    let p = base.build_cull_variant(&self.ctx.device, format, face, depth_write);
+                    built.push((cull, depth_write, p));
+                }
+            }
+            self.editor_variants = built;
+        }
         if self.editor_sky_pipeline.is_none() {
             self.editor_sky_pipeline = Some(SkyPipeline3D::new(&self.ctx.device, format));
         }
@@ -2353,6 +2561,8 @@ impl GpuRenderer3D {
         let device = &self.ctx.device;
         let queue = &self.ctx.queue;
         let pipeline = self.editor_pipeline.as_ref().unwrap();
+        // pat-s3rrv.30: the (cull, depth-write) variants, ensured above.
+        let variants = &self.editor_variants;
         let sky_pipeline = self.editor_sky_pipeline.as_ref().unwrap();
         let targets = self.editor_targets.as_ref().unwrap();
 
@@ -2494,6 +2704,35 @@ impl GpuRenderer3D {
                 if !inst.visible {
                     continue;
                 }
+                // pat-s3rrv.29: GeometryInstance3D settings, mirroring the
+                // software renderer's colour pass (renderer.rs:669-692). None of
+                // this was honoured here, so `cast_shadow = ShadowsOnly`,
+                // `visibility_range_end` and `transparency` authored in a .tscn
+                // were silently ignored by the SHIPPED (gpu-render) editor.
+                //
+                // `draws_geometry()` is false for ShadowsOnly — such an instance
+                // still exists for the shadow pass but must not appear in colour.
+                if !inst.draws_geometry() {
+                    continue;
+                }
+                if !inst.is_within_visibility_range(viewport.camera_transform.origin) {
+                    continue;
+                }
+                // Fully transparent means there is nothing to draw at all —
+                // `opacity_at_distance` folds `transparency` together with the
+                // VISIBILITY_RANGE_FADE_SELF ramp.
+                if inst
+                    .geometry
+                    .opacity_at_distance(
+                        viewport
+                            .camera_transform
+                            .origin
+                            .distance_to(inst.transform.origin),
+                    )
+                    <= 0.0
+                {
+                    continue;
+                }
                 // Expand multimesh + shader material into concrete draws (matching
                 // the software renderer), instead of drawing only a single mesh.
                 for entry in instance_draw_entries(inst) {
@@ -2501,6 +2740,36 @@ impl GpuRenderer3D {
                     if vertices.is_empty() {
                         continue;
                     }
+                    // pat-s3rrv.30: AlphaScissor. Same helper the software
+                    // rasterizer uses, so both backends make the identical
+                    // decision from the identical enum.
+                    if crate::render_modes::alpha_scissor_discard(
+                        entry.transparency,
+                        entry.albedo.a,
+                        entry.alpha_scissor_threshold,
+                    ) {
+                        continue;
+                    }
+                    // pat-s3rrv.30: bind the pipeline whose cull state matches
+                    // this material. The pass binds the Back-culling pipeline
+                    // once above, which was the ONLY state the wgpu backend
+                    // could express — an authored `cull_mode = Front` drew the
+                    // near faces exactly as if it had said nothing.
+                    // Alpha-blended draws must not write depth, or whichever
+                    // transparent surface happened to draw first would
+                    // depth-reject the one behind it and nothing would show
+                    // through — an order-dependent result from a HashMap
+                    // iteration, i.e. a coin flip.
+                    let want_depth = crate::render_modes::writes_depth(
+                        entry.depth_draw_mode,
+                        crate::render_modes::is_transparent(entry.transparency),
+                    );
+                    let chosen = variants
+                        .iter()
+                        .find(|(c, d, _)| *c == entry.cull_mode && *d == want_depth)
+                        .map(|(_, _, p)| p)
+                        .unwrap_or(&pipeline.pipeline);
+                    pass.set_pipeline(chosen);
                     let vertex_buf = create_buffer_init(
                         device,
                         queue,
@@ -2567,6 +2836,45 @@ impl GpuRenderer3D {
             },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
+        // pat-s3rrv.29: depth comes back too, because the decal and fog-volume
+        // passes reproject each pixel and cannot run without it. Encoded into
+        // THIS encoder, before the submit below — a copy recorded after the
+        // submit would never execute.
+        //
+        // Allocated per frame rather than cached on `EditorTargets`: this path
+        // already reallocates on resize, and depth readback only happens when
+        // the scene actually has env effects (see the early-out below).
+        let wants_depth = !self.decals.is_empty() || !self.fog_volumes.is_empty();
+        let depth_align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let depth_padded_row = (w * 4 + depth_align - 1) / depth_align * depth_align;
+        let depth_readback_buf = if wants_depth {
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("editor-depth-readback"),
+                size: depth_padded_row as u64 * h as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &targets.depth_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::DepthOnly,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buf,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(depth_padded_row),
+                        rows_per_image: Some(h),
+                    },
+                },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            Some(buf)
+        } else {
+            None
+        };
         queue.submit(std::iter::once(encoder.finish()));
 
         // Map, sync once, de-pad each row into a tight top-down BGRA buffer, then
@@ -2618,6 +2926,58 @@ impl GpuRenderer3D {
 
         let default_env = Environment3D::default();
         let env = viewport.environment.as_ref().unwrap_or(&default_env);
+
+        // pat-s3rrv.29: env effects, in the software renderer's exact order —
+        // decals modulate surface albedo first, then fog covers the result
+        // (renderer.rs:499-526). The acceptance compares these pixels against
+        // the software backend's, so the order is part of the contract.
+        //
+        // Calls the software implementations rather than reimplementing the
+        // projection math, so the two backends cannot drift.
+        if let Some(depth_buf) = depth_readback_buf {
+            let depth_slice = depth_buf.slice(..);
+            depth_slice.map_async(wgpu::MapMode::Read, |_| {});
+            device
+                .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+                .ok();
+            let depth_mapped = depth_slice.get_mapped_range();
+            let mut depth: Vec<f32> = Vec::with_capacity(w as usize * h as usize);
+            for row in 0..h {
+                let start = (row * depth_padded_row) as usize;
+                for col in 0..w {
+                    let o = start + (col * 4) as usize;
+                    depth.push(f32::from_le_bytes([
+                        depth_mapped[o],
+                        depth_mapped[o + 1],
+                        depth_mapped[o + 2],
+                        depth_mapped[o + 3],
+                    ]));
+                }
+            }
+            drop(depth_mapped);
+            depth_buf.unmap();
+
+            let fx_inv_proj = invert_projection(&projection_matrix);
+            crate::renderer::SoftwareRenderer3D::apply_decal_pass(
+                &mut pixels,
+                &depth,
+                w,
+                h,
+                &self.decals,
+                &fx_inv_proj,
+                &viewport.camera_transform,
+            );
+            crate::renderer::SoftwareRenderer3D::apply_fog_volume_pass(
+                &mut pixels,
+                &depth,
+                w,
+                h,
+                &self.fog_volumes,
+                &fx_inv_proj,
+                &viewport.camera_transform,
+            );
+        }
+
         crate::postprocess::apply_camera_post(&mut pixels, w, h, env);
 
         let mut data = Vec::with_capacity(w as usize * h as usize * 4);
@@ -2686,6 +3046,29 @@ impl GpuRenderer3D {
         if self.editor_pipeline.is_none() {
             self.editor_pipeline = Some(RenderPipeline3D::new(&self.ctx.device, color_format));
         }
+        // pat-s3rrv.30: build every (cull, depth-write) pipeline variant once.
+        // Both are pipeline state on the GPU, so a material that culls FRONT or
+        // an alpha-blended one that must not write depth cannot be served by
+        // flipping a uniform — it needs its own pipeline.
+        if self.editor_variants.is_empty() {
+            let base = self
+                .editor_pipeline
+                .as_ref()
+                .expect("editor pipeline just ensured");
+            let mut built = Vec::new();
+            for cull in [
+                crate::render_modes::CullMode::Back,
+                crate::render_modes::CullMode::Front,
+                crate::render_modes::CullMode::Disabled,
+            ] {
+                for depth_write in [true, false] {
+                    let face = RenderPipeline3D::wgpu_cull_face(cull);
+                    let p = base.build_cull_variant(&self.ctx.device, color_format, face, depth_write);
+                    built.push((cull, depth_write, p));
+                }
+            }
+            self.editor_variants = built;
+        }
         if self.editor_sky_pipeline.is_none() {
             self.editor_sky_pipeline = Some(SkyPipeline3D::new(&self.ctx.device, color_format));
         }
@@ -2697,6 +3080,8 @@ impl GpuRenderer3D {
         let device = &self.ctx.device;
         let queue = &self.ctx.queue;
         let pipeline = self.editor_pipeline.as_ref().unwrap();
+        // pat-s3rrv.30: the (cull, depth-write) variants, ensured above.
+        let variants = &self.editor_variants;
         let sky_pipeline = self.editor_sky_pipeline.as_ref().unwrap();
 
         // Build a per-material pipeline for any draw carrying a transpiled custom
@@ -2883,10 +3268,32 @@ impl GpuRenderer3D {
                 // Per-material custom pipeline (real per-fragment shader body)
                 // when this draw carries a transpiled module; otherwise the
                 // shared flat-albedo pipeline.
+                // pat-s3rrv.30: AlphaScissor, as in the editor path above.
+                if crate::render_modes::alpha_scissor_discard(
+                    call.transparency,
+                    call.albedo.a,
+                    call.alpha_scissor_threshold,
+                ) {
+                    continue;
+                }
+                // pat-s3rrv.30: a non-default cull mode also needs its own
+                // pipeline. A custom shader module still wins — it carries the
+                // material's actual fragment body, and re-culling it here would
+                // silently drop the shader; that combination is reported as
+                // remaining scope rather than resolved wrongly.
+                let want_depth = crate::render_modes::writes_depth(
+                    call.depth_draw_mode,
+                    crate::render_modes::is_transparent(call.transparency),
+                );
+                let mode_pipeline = variants
+                    .iter()
+                    .find(|(c, d, _)| *c == call.cull_mode && *d == want_depth)
+                    .map(|(_, _, p)| p);
                 let draw_pipeline = call
                     .custom_module
                     .as_deref()
                     .and_then(|m| custom_pipelines.get(m))
+                    .or(mode_pipeline)
                     .unwrap_or(&pipeline.pipeline);
                 pass.set_pipeline(draw_pipeline);
                 pass.set_bind_group(0, &camera_bg, &[]);
@@ -3057,6 +3464,25 @@ impl GpuRenderer3D {
         let default_env = gdserver3d::environment::Environment3D::default();
         let env = viewport.environment.as_ref().unwrap_or(&default_env);
         let fog_inv_proj = invert_projection(&projection_matrix);
+        // pat-s3rrv.29: decals project onto shaded surfaces BEFORE any fog
+        // covers the result, and local fog volumes layer on TOP of the
+        // environment fog. This is the software renderer's exact ordering
+        // (renderer.rs:499-526) rather than a plausible-looking one: the
+        // acceptance compares GPU pixels against software pixels, so a
+        // different order is a visible mismatch, not a stylistic choice.
+        //
+        // Both passes are the software implementations, called directly rather
+        // than reimplemented — one copy of the projection math means the two
+        // backends cannot drift apart.
+        crate::renderer::SoftwareRenderer3D::apply_decal_pass(
+            &mut pixels,
+            &depth,
+            w,
+            h,
+            &self.decals,
+            &fog_inv_proj,
+            &viewport.camera_transform,
+        );
         crate::renderer::SoftwareRenderer3D::apply_fog_pass(
             &mut pixels,
             &depth,
@@ -3066,6 +3492,15 @@ impl GpuRenderer3D {
             &fog_inv_proj,
             &viewport.camera_transform,
             &crate::renderer::sky_suns_from_lights(&self.lights),
+        );
+        crate::renderer::SoftwareRenderer3D::apply_fog_volume_pass(
+            &mut pixels,
+            &depth,
+            w,
+            h,
+            &self.fog_volumes,
+            &fog_inv_proj,
+            &viewport.camera_transform,
         );
         crate::postprocess::apply_camera_post(&mut pixels, w, h, env);
 
@@ -3169,6 +3604,40 @@ impl RenderingServer3D for GpuRenderer3D {
 
     fn remove_reflection_probe(&mut self, id: ReflectionProbeId) {
         self.reflection_probes.retain(|p| p.id != id);
+    }
+
+    // -- env effects (pat-s3rrv.29) ----------------------------------------
+    //
+    // These four were the trait's default no-ops. `SoftwareRenderer3D`
+    // overrode all of them and this backend did not, so the SHIPPED editor —
+    // `gdeditor`'s default feature is `gpu-render` — silently discarded every
+    // decal, fog volume, occluder and GeometryInstance3D setting a scene
+    // authored, while the software renderer's tests kept passing.
+
+    fn set_geometry_instance_settings(
+        &mut self,
+        id: Instance3DId,
+        settings: GeometryInstanceSettings,
+    ) {
+        // Stored on the instance itself, exactly as the software backend does
+        // — `Instance3D` already carries `geometry`, so both renderers read the
+        // settings from one place and cannot drift.
+        if let Some(inst) = self.instances.get_mut(&id.0) {
+            inst.geometry = settings;
+        }
+    }
+
+    fn add_fog_volume(&mut self, volume: FogVolume, transform: Transform3D) {
+        self.fog_volumes
+            .push(crate::renderer::PlacedFogVolume::new(volume, transform));
+    }
+
+    fn add_decal(&mut self, decal: Decal3D) {
+        self.decals.push(decal);
+    }
+
+    fn add_occluder(&mut self, occluder: OccluderInstance3D) {
+        self.occluders.push(occluder);
     }
 
     fn render_frame(&mut self, viewport: &Viewport3D) -> FrameData3D {

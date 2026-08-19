@@ -1823,7 +1823,10 @@ pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vect
             let m = get_margins(tree, container_id);
             arrange_margin(tree, &children, total, m);
         }
-        "CenterContainer" => arrange_center(tree, &children, total),
+        "CenterContainer" => {
+            let use_top_left = bool_prop_or_false(tree, container_id, "use_top_left");
+            arrange_center(tree, &children, total, use_top_left)
+        }
         "ScrollContainer" => {
             let scroll = get_scroll(tree, container_id);
             arrange_scroll(tree, container_id, &children, total, scroll);
@@ -1888,7 +1891,22 @@ pub fn arrange_panel_container(
 }
 
 /// Returns `true` for the container classes [`arrange_container`] lays out.
+///
+/// ClassDB inheritance FIRST, then the hardcoded list (pat-s3rrv.68) — the same
+/// order [`node_is_base_button`] already used. A `Container` subclass that is
+/// registered but absent from the list below now lays out instead of being
+/// silently treated as a plain Control, which is the bug that kept
+/// `CenterContainer` working only by virtue of being spelled out here.
+///
+/// ⚠️ The list is NOT redundant and must not be deleted. ClassDB is empty in
+/// unit tests that never call a `register_*_classes()` seeder, so
+/// `is_parent_class` answers `false` for everything there; the list is what
+/// keeps those fixtures laying out. It is the documented fallback, not dead
+/// code.
 pub fn is_container_class_name(class: &str) -> bool {
+    if gdobject::class_db::is_parent_class(class, "Container") {
+        return true;
+    }
     matches!(
         class,
         "VBoxContainer"
@@ -2392,14 +2410,27 @@ fn arrange_margin(tree: &mut SceneTree, children: &[NodeId], total: Vector2, m: 
 }
 
 /// CenterContainer: each child keeps its effective minimum size and is centered
-/// within the container.
-fn arrange_center(tree: &mut SceneTree, children: &[NodeId], total: Vector2) {
+/// within the container — or, with Godot's `use_top_left`, on the container's
+/// top-left corner (pat-s3rrv.68).
+fn arrange_center(tree: &mut SceneTree, children: &[NodeId], total: Vector2, use_top_left: bool) {
     for &c in children {
         let size = effective_min(tree, c);
-        let pos = Vector2::new(
-            ((total.x - size.x) * 0.5).max(0.0),
-            ((total.y - size.y) * 0.5).max(0.0),
-        );
+        // Godot's `use_top_left` (scene/gui/center_container.cpp): centre each
+        // child on the container's TOP-LEFT CORNER instead of inside its rect,
+        // which is how content that is allowed to overflow gets centred.
+        //
+        // ⚠️ The clamp to 0 is deliberately NOT applied in that mode. Every
+        // child straddles the corner, so a child larger than nothing at all has
+        // a negative origin by construction; clamping would pin it to (0, 0)
+        // and make the flag a no-op.
+        let pos = if use_top_left {
+            Vector2::new(-size.x * 0.5, -size.y * 0.5)
+        } else {
+            Vector2::new(
+                ((total.x - size.x) * 0.5).max(0.0),
+                ((total.y - size.y) * 0.5).max(0.0),
+            )
+        };
         set_position(tree, c, pos);
         set_size(tree, c, size);
     }

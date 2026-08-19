@@ -70,9 +70,10 @@ pub use reflection_probe::{
 };
 pub use server::{FrameData3D, RenderingServer3D};
 pub use shader::{
-    uniform_type_to_wgsl, uniform_type_wgsl_size, CompiledShader3D, DiagnosticSeverity,
-    FragmentContext3D, RenderModeFlags, Shader3D, ShaderCompiler3D, ShaderDiagnostic,
-    ShaderMaterial3D, ShaderProcessor3D, ShaderType3D, ShaderUniform3D, UniformType,
+    clear_compile_cache, uniform_type_to_wgsl, uniform_type_wgsl_size, CompiledShader3D,
+    DiagnosticSeverity, FragmentContext3D, RenderModeFlags, Shader3D, ShaderCompiler3D,
+    ShaderDiagnostic, ShaderMaterial3D, ShaderProcessor3D, ShaderType3D, ShaderUniform3D,
+    UniformType,
 };
 pub use skin::{skin_matrices, skin_mesh, skin_normal, skin_position, Skin, SkinBind};
 pub use sky::{

@@ -62,11 +62,11 @@ fn world() -> (MainLoop, NodeId, NodeId) {
     // its control run to move at all.
     ml.physics_server_mut()
         .set_gravity(Vector2::new(0.0, 980.0));
-    // ⚠️ THE thing that made this fixture inert: `MainLoop::step` does NOT
-    // register physics bodies — `sync_to_physics` only iterates bodies already
-    // in `node_to_body`, and `register_physics_bodies` is an explicit
-    // "call after loading a scene" step. Without it the RigidBody2D is not in
-    // the world at all, so it never falls and a pause test has nothing to gate.
+    // THE thing that made this fixture inert when it was written: `MainLoop::step`
+    // did NOT register physics bodies, so the RigidBody2D was never in the world
+    // and a pause test had nothing to gate. `sync_to_physics` re-scans the tree
+    // every tick since pat-s3rrv.25, but the explicit boot call is kept: it puts
+    // the body in the world before the first `step` rather than during it.
     ml.register_physics_bodies();
     (ml, faller, timer)
 }

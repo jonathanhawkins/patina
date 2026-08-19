@@ -977,6 +977,50 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("Node3D")
             .parent("Node")
+            // pat-s3rrv.24 — the 37 methods of doc/classes/Node3D.xml. The class
+            // carried its transform PROPERTIES but not a single method, so the
+            // whole transform API a 3D game calls — look_at, rotate_y, translate,
+            // to_global, orthonormalize — reflected as absent.
+            .method(MethodInfo::new("add_gizmo", 1))
+            .method(MethodInfo::new("clear_gizmos", 0))
+            .method(MethodInfo::new("clear_subgizmo_selection", 0))
+            .method(MethodInfo::new("force_update_transform", 0))
+            .method(MethodInfo::new("get_gizmos", 0))
+            .method(MethodInfo::new("get_global_transform_interpolated", 0))
+            .method(MethodInfo::new("get_parent_node_3d", 0))
+            .method(MethodInfo::new("get_world_3d", 0))
+            .method(MethodInfo::new("global_rotate", 2))
+            .method(MethodInfo::new("global_scale", 1))
+            .method(MethodInfo::new("global_translate", 1))
+            .method(MethodInfo::new("hide", 0))
+            .method(MethodInfo::new(
+                "is_local_transform_notification_enabled",
+                0,
+            ))
+            .method(MethodInfo::new("is_scale_disabled", 0))
+            .method(MethodInfo::new("is_transform_notification_enabled", 0))
+            .method(MethodInfo::new("is_visible_in_tree", 0))
+            .method(MethodInfo::new("look_at", 3))
+            .method(MethodInfo::new("look_at_from_position", 4))
+            .method(MethodInfo::new("orthonormalize", 0))
+            .method(MethodInfo::new("rotate", 2))
+            .method(MethodInfo::new("rotate_object_local", 2))
+            .method(MethodInfo::new("rotate_x", 1))
+            .method(MethodInfo::new("rotate_y", 1))
+            .method(MethodInfo::new("rotate_z", 1))
+            .method(MethodInfo::new("scale_object_local", 1))
+            .method(MethodInfo::new("set_disable_scale", 1))
+            .method(MethodInfo::new("set_identity", 0))
+            .method(MethodInfo::new("set_ignore_transform_notification", 1))
+            .method(MethodInfo::new("set_notify_local_transform", 1))
+            .method(MethodInfo::new("set_notify_transform", 1))
+            .method(MethodInfo::new("set_subgizmo_selection", 3))
+            .method(MethodInfo::new("show", 0))
+            .method(MethodInfo::new("to_global", 1))
+            .method(MethodInfo::new("to_local", 1))
+            .method(MethodInfo::new("translate", 1))
+            .method(MethodInfo::new("translate_object_local", 1))
+            .method(MethodInfo::new("update_gizmos", 0))
             .property(PropertyInfo::new(
                 "transform",
                 Variant::Transform3D(identity_transform),
@@ -1000,7 +1044,29 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("fov", Variant::Float(75.0)))
             .property(PropertyInfo::new("near", Variant::Float(0.05)))
             .property(PropertyInfo::new("far", Variant::Float(4000.0)))
-            .property(PropertyInfo::new("current", Variant::Bool(false))),
+            .property(PropertyInfo::new("current", Variant::Bool(false)))
+            // pat-s3rrv.24 — the 19 methods of doc/classes/Camera3D.xml,
+            // including the picking helpers (unproject_position,
+            // project_ray_normal/origin) and make_current.
+            .method(MethodInfo::new("clear_current", 1))
+            .method(MethodInfo::new("get_camera_projection", 0))
+            .method(MethodInfo::new("get_camera_rid", 0))
+            .method(MethodInfo::new("get_camera_transform", 0))
+            .method(MethodInfo::new("get_cull_mask_value", 1))
+            .method(MethodInfo::new("get_frustum", 0))
+            .method(MethodInfo::new("get_pyramid_shape_rid", 0))
+            .method(MethodInfo::new("is_position_behind", 1))
+            .method(MethodInfo::new("is_position_in_frustum", 1))
+            .method(MethodInfo::new("make_current", 0))
+            .method(MethodInfo::new("project_local_ray_normal", 1))
+            .method(MethodInfo::new("project_position", 2))
+            .method(MethodInfo::new("project_ray_normal", 1))
+            .method(MethodInfo::new("project_ray_origin", 1))
+            .method(MethodInfo::new("set_cull_mask_value", 2))
+            .method(MethodInfo::new("set_frustum", 4))
+            .method(MethodInfo::new("set_orthogonal", 3))
+            .method(MethodInfo::new("set_perspective", 3))
+            .method(MethodInfo::new("unproject_position", 1)),
     );
 
     // -- AudioListener3D --
@@ -1021,7 +1087,44 @@ pub fn register_3d_classes() {
 
     // -- MeshInstance3D (inherits GeometryInstance3D → VisualInstance3D → Node3D;
     //    cast_shadow and the rest of the geometry surface come from the base). --
-    register_class(ClassRegistration::new("MeshInstance3D").parent("GeometryInstance3D"));
+    // MeshInstance3D's real member surface (pat-s3rrv.23).
+    //
+    // This was a bare `ClassRegistration::new(..).parent(..)` with no members at
+    // all, which is not merely incomplete metadata: `SceneTree`'s script
+    // dispatch gates on `class_has_method`, so with an empty method table every
+    // `set_blend_shape_value` / `create_convex_collision` call from a script was
+    // rejected before it reached any implementation.
+    //
+    // Names and arities from doc/classes/MeshInstance3D.xml and extension_api.json
+    // (upstream/godot/scene/3d/mesh_instance_3d.cpp `_bind_methods`).
+    register_class(
+        ClassRegistration::new("MeshInstance3D")
+            .parent("GeometryInstance3D")
+            // `mesh` and `skin` are Resource-typed; Nil is the unset default the
+            // rest of this table uses for resource slots.
+            .property(PropertyInfo::new("mesh", Variant::Nil))
+            .property(PropertyInfo::new("skin", Variant::Nil))
+            .property(PropertyInfo::new(
+                "skeleton",
+                Variant::NodePath(gdcore::node_path::NodePath::empty()),
+            ))
+            // -- blend shapes: the surface this bead's animation path needs --
+            .method(MethodInfo::new("get_blend_shape_count", 0))
+            .method(MethodInfo::new("find_blend_shape_by_name", 1))
+            .method(MethodInfo::new("get_blend_shape_value", 1))
+            .method(MethodInfo::new("set_blend_shape_value", 2))
+            // -- materials --
+            .method(MethodInfo::new("get_surface_override_material_count", 0))
+            .method(MethodInfo::new("set_surface_override_material", 2))
+            .method(MethodInfo::new("get_surface_override_material", 1))
+            .method(MethodInfo::new("get_active_material", 1))
+            // -- editor-side mesh tools (the `Mesh` menu's server routes) --
+            .method(MethodInfo::new("create_trimesh_collision", 0))
+            .method(MethodInfo::new("create_convex_collision", 2))
+            .method(MethodInfo::new("create_multiple_convex_collisions", 1))
+            .method(MethodInfo::new("create_debug_tangents", 0))
+            .method(MethodInfo::new("create_outline", 1)),
+    );
 
     // -- MultiMeshInstance3D --
     register_class(ClassRegistration::new("MultiMeshInstance3D").parent("GeometryInstance3D"));
@@ -1041,6 +1144,118 @@ pub fn register_3d_classes() {
     // ⚠️ `ImporterMesh` inherits **Resource**, not Mesh. It is not a Mesh and
     // cannot be assigned where one is expected — `get_mesh()` is precisely the
     // conversion that produces a real `ArrayMesh`.
+    // pat-s3rrv.23 — the skinning resources this bead's own class list names
+    // but ClassDB never carried. `Skin` is the one that matters most: it is
+    // what binds a mesh to a Skeleton3D, so an unregistered Skin means a .tscn
+    // cannot carry one and no skinned mesh can be described, let alone posed.
+    //
+    // `SkeletonProfile` is registered alongside its Humanoid subclass because
+    // an unregistered base truncates the inheritance chain — `is_parent_class`
+    // would answer false for a class that does derive from it.
+    register_class(
+        ClassRegistration::new("Skin")
+            .parent("Resource")
+            .method(MethodInfo::new("add_bind", 2))
+            .method(MethodInfo::new("add_named_bind", 2))
+            .method(MethodInfo::new("clear_binds", 0))
+            .method(MethodInfo::new("get_bind_bone", 1))
+            .method(MethodInfo::new("get_bind_count", 0))
+            .method(MethodInfo::new("get_bind_name", 1))
+            .method(MethodInfo::new("get_bind_pose", 1))
+            .method(MethodInfo::new("set_bind_bone", 2))
+            .method(MethodInfo::new("set_bind_count", 1))
+            .method(MethodInfo::new("set_bind_name", 2))
+            .method(MethodInfo::new("set_bind_pose", 2)),
+    );
+    register_class(
+        ClassRegistration::new("MultiMesh")
+            .parent("Resource")
+            .property(PropertyInfo::new("instance_count", Variant::Int(0)))
+            .property(PropertyInfo::new(
+                "visible_instance_count",
+                Variant::Int(-1),
+            ))
+            .property(PropertyInfo::new("transform_format", Variant::Int(0)))
+            .property(PropertyInfo::new("use_colors", Variant::Bool(false)))
+            .property(PropertyInfo::new("use_custom_data", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "physics_interpolation_quality",
+                Variant::Int(0),
+            ))
+            .property(PropertyInfo::new(
+                "buffer",
+                Variant::PackedFloat32Array(Vec::new()),
+            ))
+            .method(MethodInfo::new("get_aabb", 0))
+            .method(MethodInfo::new("get_instance_color", 1))
+            .method(MethodInfo::new("get_instance_custom_data", 1))
+            .method(MethodInfo::new("get_instance_transform", 1))
+            .method(MethodInfo::new("get_instance_transform_2d", 1))
+            .method(MethodInfo::new("reset_instance_physics_interpolation", 1))
+            .method(MethodInfo::new("reset_instances_physics_interpolation", 0))
+            .method(MethodInfo::new("set_buffer_interpolated", 2))
+            .method(MethodInfo::new("set_instance_color", 2))
+            .method(MethodInfo::new("set_instance_custom_data", 2))
+            .method(MethodInfo::new("set_instance_transform", 2))
+            .method(MethodInfo::new("set_instance_transform_2d", 2)),
+    );
+    register_class(
+        ClassRegistration::new("BoneMap")
+            .parent("Resource")
+            .method(MethodInfo::new("find_profile_bone_name", 1))
+            .method(MethodInfo::new("get_skeleton_bone_name", 1))
+            .method(MethodInfo::new("set_skeleton_bone_name", 2)),
+    );
+    register_class(
+        ClassRegistration::new("SkeletonProfile")
+            .parent("Resource")
+            .property(PropertyInfo::new("bone_size", Variant::Int(0)))
+            .property(PropertyInfo::new("group_size", Variant::Int(0)))
+            .property(PropertyInfo::new(
+                "root_bone",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new(
+                "scale_base_bone",
+                Variant::String(String::new()),
+            ))
+            .method(MethodInfo::new("find_bone", 1))
+            .method(MethodInfo::new("get_bone_name", 1))
+            .method(MethodInfo::new("get_bone_parent", 1))
+            .method(MethodInfo::new("get_bone_tail", 1))
+            .method(MethodInfo::new("get_group", 1))
+            .method(MethodInfo::new("get_group_name", 1))
+            .method(MethodInfo::new("get_handle_offset", 1))
+            .method(MethodInfo::new("get_reference_pose", 1))
+            .method(MethodInfo::new("get_tail_direction", 1))
+            .method(MethodInfo::new("get_texture", 1))
+            .method(MethodInfo::new("is_required", 1))
+            .method(MethodInfo::new("set_bone_name", 2))
+            .method(MethodInfo::new("set_bone_parent", 2))
+            .method(MethodInfo::new("set_bone_tail", 2))
+            .method(MethodInfo::new("set_group", 2))
+            .method(MethodInfo::new("set_group_name", 2))
+            .method(MethodInfo::new("set_handle_offset", 2))
+            .method(MethodInfo::new("set_reference_pose", 2))
+            .method(MethodInfo::new("set_required", 2))
+            .method(MethodInfo::new("set_tail_direction", 2))
+            .method(MethodInfo::new("set_texture", 2)),
+    );
+    register_class(
+        ClassRegistration::new("SkeletonProfileHumanoid")
+            .parent("SkeletonProfile")
+            .property(PropertyInfo::new("bone_size", Variant::Int(56)))
+            .property(PropertyInfo::new("group_size", Variant::Int(4)))
+            .property(PropertyInfo::new(
+                "root_bone",
+                Variant::String(String::from("Root")),
+            ))
+            .property(PropertyInfo::new(
+                "scale_base_bone",
+                Variant::String(String::from("Hips")),
+            )),
+    );
+
     register_class(
         ClassRegistration::new("ImporterMesh")
             .parent("Resource")
@@ -1490,7 +1705,26 @@ pub fn register_3d_classes() {
     // XR node + server family (pat-p0s82.23). XRServer is the Object singleton
     // fed by the mock pose backend (gdplatform::xr); the spatial nodes place XR
     // tracking data into the scene. XROrigin3D is registered just above.
-    register_class(ClassRegistration::new("XRServer").parent("Object"));
+    // `TrackerType` (pat-s3rrv.42). Values are a BITMASK, taken from
+    // upstream/godot/doc/classes/XRServer.xml rather than from memory — hence
+    // 1/2/4/8/16/32/64, with TRACKER_ANY_KNOWN = 127 the OR of the known bits
+    // and TRACKER_ANY = 255 including the unknown bit. Registering only the two
+    // the acceptance names would leave the enum half-present, so the whole set
+    // goes in.
+    register_class(
+        ClassRegistration::new("XRServer")
+            .parent("Object")
+            .constant("TRACKER_HEAD", 1)
+            .constant("TRACKER_CONTROLLER", 2)
+            .constant("TRACKER_BASESTATION", 4)
+            .constant("TRACKER_ANCHOR", 8)
+            .constant("TRACKER_HAND", 16)
+            .constant("TRACKER_BODY", 32)
+            .constant("TRACKER_FACE", 64)
+            .constant("TRACKER_ANY_KNOWN", 127)
+            .constant("TRACKER_UNKNOWN", 128)
+            .constant("TRACKER_ANY", 255),
+    );
     register_class(
         // ⚠️ NOT abstract — `GDREGISTER_CLASS(XRNode3D)` in
         // register_scene_types.cpp, alongside XRCamera3D / XRController3D /
@@ -1606,7 +1840,33 @@ pub fn register_3d_classes() {
             .signal(SignalInfo::new("target_reached"))
             .signal(SignalInfo::new("navigation_finished"))
             .signal(SignalInfo::new("waypoint_reached").arg("details"))
-            .signal(SignalInfo::new("link_reached").arg("details")),
+            .signal(SignalInfo::new("link_reached").arg("details"))
+            // pat-s3rrv.20 — the full method surface from
+            // doc/classes/NavigationAgent3D.xml (20 methods). These were
+            // registered with properties and signals only, so
+            // `ClassDB.class_has_method("get_next_path_position")` answered
+            // false and the inspector/reflection surface was a lie about what
+            // the class offers.
+            .method(MethodInfo::new("distance_to_target", 0))
+            .method(MethodInfo::new("get_avoidance_layer_value", 1))
+            .method(MethodInfo::new("get_avoidance_mask_value", 1))
+            .method(MethodInfo::new("get_current_navigation_path", 0))
+            .method(MethodInfo::new("get_current_navigation_path_index", 0))
+            .method(MethodInfo::new("get_current_navigation_result", 0))
+            .method(MethodInfo::new("get_final_position", 0))
+            .method(MethodInfo::new("get_navigation_layer_value", 1))
+            .method(MethodInfo::new("get_navigation_map", 0))
+            .method(MethodInfo::new("get_next_path_position", 0))
+            .method(MethodInfo::new("get_path_length", 0))
+            .method(MethodInfo::new("get_rid", 0))
+            .method(MethodInfo::new("is_navigation_finished", 0))
+            .method(MethodInfo::new("is_target_reachable", 0))
+            .method(MethodInfo::new("is_target_reached", 0))
+            .method(MethodInfo::new("set_avoidance_layer_value", 2))
+            .method(MethodInfo::new("set_avoidance_mask_value", 2))
+            .method(MethodInfo::new("set_navigation_layer_value", 2))
+            .method(MethodInfo::new("set_navigation_map", 1))
+            .method(MethodInfo::new("set_velocity_forced", 1)),
     );
     // NavigationObstacle3D — the dynamic avoidance obstacle (pat-0q2kx.97).
     //
@@ -1712,7 +1972,68 @@ pub fn register_3d_classes() {
                 Variant::Float(0.01),
             )),
     );
-    register_class(ClassRegistration::new("Skeleton3D").parent("Node3D"));
+    // Skeleton3D's real member surface (pat-s3rrv.23).
+    //
+    // ⚠️ This registration had **zero** properties, methods and signals, and the
+    // consequence was not cosmetic: `class_has_method("Skeleton3D", ..)` answered
+    // false for everything, so the script dispatch gate rejected every
+    // `get_bone_count` / `set_bone_pose_*` call before it reached the (existing,
+    // working) `skeleton3d` implementation. The bone API was unreachable from
+    // GDScript no matter what the renderer did.
+    //
+    // Names and arities from upstream/godot/scene/3d/skeleton_3d.cpp
+    // `Skeleton3D::_bind_methods` and doc/classes/Skeleton3D.xml.
+    register_class(
+        ClassRegistration::new("Skeleton3D")
+            .parent("Node3D")
+            .property(PropertyInfo::new("motion_scale", Variant::Float(1.0)))
+            .property(PropertyInfo::new("show_rest_only", Variant::Bool(false)))
+            .property(PropertyInfo::new(
+                "animate_physical_bones",
+                Variant::Bool(true),
+            ))
+            // Godot `modifier_callback_mode_process`: 0 = physics, 1 = idle.
+            .property(PropertyInfo::new(
+                "modifier_callback_mode_process",
+                Variant::Int(1),
+            ))
+            // -- bone roster --
+            .method(MethodInfo::new("get_bone_count", 0))
+            .method(MethodInfo::new("add_bone", 1))
+            .method(MethodInfo::new("find_bone", 1))
+            .method(MethodInfo::new("get_bone_name", 1))
+            .method(MethodInfo::new("set_bone_name", 2))
+            .method(MethodInfo::new("get_bone_parent", 1))
+            .method(MethodInfo::new("set_bone_parent", 2))
+            .method(MethodInfo::new("get_bone_children", 1))
+            .method(MethodInfo::new("get_parentless_bones", 0))
+            .method(MethodInfo::new("clear_bones", 0))
+            .method(MethodInfo::new("get_version", 0))
+            // -- rest pose --
+            .method(MethodInfo::new("get_bone_rest", 1))
+            .method(MethodInfo::new("set_bone_rest", 2))
+            .method(MethodInfo::new("localize_rests", 0))
+            // -- live pose: what an animation or an IK modifier writes --
+            .method(MethodInfo::new("get_bone_pose", 1))
+            .method(MethodInfo::new("get_bone_pose_position", 1))
+            .method(MethodInfo::new("get_bone_pose_rotation", 1))
+            .method(MethodInfo::new("get_bone_pose_scale", 1))
+            .method(MethodInfo::new("set_bone_pose_position", 2))
+            .method(MethodInfo::new("set_bone_pose_rotation", 2))
+            .method(MethodInfo::new("set_bone_pose_scale", 2))
+            .method(MethodInfo::new("get_bone_global_pose", 1))
+            .method(MethodInfo::new("reset_bone_pose", 1))
+            .method(MethodInfo::new("reset_bone_poses", 0))
+            .method(MethodInfo::new("is_bone_enabled", 1))
+            .method(MethodInfo::new("set_bone_enabled", 2))
+            // -- signals (doc/classes/Skeleton3D.xml) --
+            .signal(SignalInfo::new("rest_updated"))
+            .signal(SignalInfo::new("pose_updated"))
+            .signal(SignalInfo::new("skeleton_updated"))
+            .signal(SignalInfo::new("bone_enabled_changed"))
+            .signal(SignalInfo::new("bone_list_changed"))
+            .signal(SignalInfo::new("show_rest_only_changed")),
+    );
     register_class(ClassRegistration::new("BoneAttachment3D").parent("Node3D"));
 
     // -- Skeleton modifier stack (pat-nzgdu.151, pat-nzgdu.182) ------------
@@ -2625,7 +2946,32 @@ pub fn register_3d_classes() {
     );
     register_class(ClassRegistration::new("AnimationNodeAnimation").parent("AnimationRootNode"));
     register_class(ClassRegistration::new("AnimationNodeBlendTree").parent("AnimationRootNode"));
-    register_class(ClassRegistration::new("AnimationNodeStateMachine").parent("AnimationRootNode"));
+    // pat-s3rrv.1 — likewise bare; these are the graph-editing methods a tool
+    // script or the editor uses to build a state machine at runtime.
+    register_class(
+        ClassRegistration::new("AnimationNodeStateMachine")
+            .parent("AnimationRootNode")
+            .method(MethodInfo::new("add_node", 3))
+            .method(MethodInfo::new("add_transition", 3))
+            .method(MethodInfo::new("get_graph_offset", 0))
+            .method(MethodInfo::new("get_node", 1))
+            .method(MethodInfo::new("get_node_list", 0))
+            .method(MethodInfo::new("get_node_name", 1))
+            .method(MethodInfo::new("get_node_position", 1))
+            .method(MethodInfo::new("get_transition", 1))
+            .method(MethodInfo::new("get_transition_count", 0))
+            .method(MethodInfo::new("get_transition_from", 1))
+            .method(MethodInfo::new("get_transition_to", 1))
+            .method(MethodInfo::new("has_node", 1))
+            .method(MethodInfo::new("has_transition", 2))
+            .method(MethodInfo::new("remove_node", 1))
+            .method(MethodInfo::new("remove_transition", 2))
+            .method(MethodInfo::new("remove_transition_by_index", 1))
+            .method(MethodInfo::new("rename_node", 2))
+            .method(MethodInfo::new("replace_node", 2))
+            .method(MethodInfo::new("set_graph_offset", 1))
+            .method(MethodInfo::new("set_node_position", 2)),
+    );
     register_class(ClassRegistration::new("AnimationNodeBlendSpace1D").parent("AnimationRootNode"));
     register_class(ClassRegistration::new("AnimationNodeBlendSpace2D").parent("AnimationRootNode"));
     register_class(
@@ -2646,7 +2992,28 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("AnimationNodeStateMachineTransition").parent("Resource"),
     );
-    register_class(ClassRegistration::new("AnimationNodeStateMachinePlayback").parent("Resource"));
+    // pat-s3rrv.1 — the playback object was registered BARE (name + parent
+    // only), so `$AnimationTree.get("parameters/playback").travel("jump")` —
+    // the documented way to drive a state machine from a script — named a
+    // method ClassDB did not know existed.
+    register_class(
+        ClassRegistration::new("AnimationNodeStateMachinePlayback")
+            .parent("Resource")
+            .method(MethodInfo::new("get_current_length", 0))
+            .method(MethodInfo::new("get_current_node", 0))
+            .method(MethodInfo::new("get_current_play_position", 0))
+            .method(MethodInfo::new("get_fading_from_length", 0))
+            .method(MethodInfo::new("get_fading_from_node", 0))
+            .method(MethodInfo::new("get_fading_from_play_position", 0))
+            .method(MethodInfo::new("get_fading_length", 0))
+            .method(MethodInfo::new("get_fading_position", 0))
+            .method(MethodInfo::new("get_travel_path", 0))
+            .method(MethodInfo::new("is_playing", 0))
+            .method(MethodInfo::new("next", 0))
+            .method(MethodInfo::new("start", 2))
+            .method(MethodInfo::new("stop", 0))
+            .method(MethodInfo::new("travel", 2)),
+    );
 
     // GPUParticles3D was registered BARE — name and parent only — so a `.tscn`
     // carrying a 3D emitter round-tripped without any of its properties and the
@@ -4009,6 +4376,188 @@ pub fn register_3d_classes() {
                 .property(PropertyInfo::new("space", Variant::Nil))
                 .property(PropertyInfo::new("navigation_map", Variant::Nil))
                 .property(PropertyInfo::new("direct_space_state", Variant::Nil)),
+        );
+    }
+    // pat-s3rrv.26 — the space-query family. `World2D.direct_space_state`
+    // above has existed as a property since pat-0q2kx, but every class it
+    // hands back was unregistered, so `get_world_2d().direct_space_state`
+    // named a type ClassDB had never heard of and no query could be described,
+    // let alone run. Surfaces from doc/classes/PhysicsDirectSpaceState*.xml and
+    // Physics*QueryParameters*.xml.
+    //
+    // RID-typed members follow World2D's convention directly above: Patina's
+    // Variant has no RID, so they register as Nil rather than inventing a type.
+    if !class_exists("PhysicsDirectSpaceState2D") {
+        register_class(
+            ClassRegistration::new("PhysicsDirectSpaceState2D")
+                .parent("Object")
+                .method(MethodInfo::new("cast_motion", 1))
+                .method(MethodInfo::new("collide_shape", 2))
+                .method(MethodInfo::new("get_rest_info", 1))
+                .method(MethodInfo::new("intersect_point", 2))
+                .method(MethodInfo::new("intersect_ray", 1))
+                .method(MethodInfo::new("intersect_shape", 2)),
+        );
+    }
+    if !class_exists("PhysicsRayQueryParameters2D") {
+        register_class(
+            ClassRegistration::new("PhysicsRayQueryParameters2D")
+                .parent("RefCounted")
+                .property(PropertyInfo::new(
+                    "collide_with_areas",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "collide_with_bodies",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new(
+                    "collision_mask",
+                    Variant::Int(0xFFFF_FFFF),
+                ))
+                .property(PropertyInfo::new(
+                    "from",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "to",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("hit_from_inside", Variant::Bool(false)))
+                .method(MethodInfo::new("create", 4)),
+        );
+    }
+    if !class_exists("PhysicsPointQueryParameters2D") {
+        register_class(
+            ClassRegistration::new("PhysicsPointQueryParameters2D")
+                .parent("RefCounted")
+                .property(PropertyInfo::new(
+                    "collide_with_areas",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "collide_with_bodies",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new(
+                    "collision_mask",
+                    Variant::Int(0xFFFF_FFFF),
+                ))
+                .property(PropertyInfo::new(
+                    "position",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("canvas_instance_id", Variant::Int(0))),
+        );
+    }
+    if !class_exists("PhysicsShapeQueryParameters2D") {
+        register_class(
+            ClassRegistration::new("PhysicsShapeQueryParameters2D")
+                .parent("RefCounted")
+                .property(PropertyInfo::new(
+                    "collide_with_areas",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "collide_with_bodies",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new(
+                    "collision_mask",
+                    Variant::Int(0xFFFF_FFFF),
+                ))
+                .property(PropertyInfo::new(
+                    "motion",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("margin", Variant::Float(0.0)))
+                .property(PropertyInfo::new("shape_rid", Variant::Nil))
+                .property(PropertyInfo::new(
+                    "transform",
+                    Variant::Transform2D(gdcore::math::Transform2D::IDENTITY),
+                )),
+        );
+    }
+    if !class_exists("PhysicsDirectSpaceState3D") {
+        register_class(
+            ClassRegistration::new("PhysicsDirectSpaceState3D")
+                .parent("Object")
+                .method(MethodInfo::new("cast_motion", 1))
+                .method(MethodInfo::new("collide_shape", 2))
+                .method(MethodInfo::new("get_rest_info", 1))
+                .method(MethodInfo::new("intersect_point", 2))
+                .method(MethodInfo::new("intersect_ray", 1))
+                .method(MethodInfo::new("intersect_shape", 2)),
+        );
+    }
+    if !class_exists("PhysicsRayQueryParameters3D") {
+        register_class(
+            ClassRegistration::new("PhysicsRayQueryParameters3D")
+                .parent("RefCounted")
+                .property(PropertyInfo::new(
+                    "collide_with_areas",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "collide_with_bodies",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new(
+                    "collision_mask",
+                    Variant::Int(0xFFFF_FFFF),
+                ))
+                .property(PropertyInfo::new("from", Variant::Vector3(Vector3::ZERO)))
+                .property(PropertyInfo::new("to", Variant::Vector3(Vector3::ZERO)))
+                .property(PropertyInfo::new("hit_from_inside", Variant::Bool(false)))
+                .property(PropertyInfo::new("hit_back_faces", Variant::Bool(true)))
+                .method(MethodInfo::new("create", 4)),
+        );
+    }
+    if !class_exists("PhysicsPointQueryParameters3D") {
+        register_class(
+            ClassRegistration::new("PhysicsPointQueryParameters3D")
+                .parent("RefCounted")
+                .property(PropertyInfo::new(
+                    "collide_with_areas",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "collide_with_bodies",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new(
+                    "collision_mask",
+                    Variant::Int(0xFFFF_FFFF),
+                ))
+                .property(PropertyInfo::new(
+                    "position",
+                    Variant::Vector3(Vector3::ZERO),
+                )),
+        );
+    }
+    if !class_exists("PhysicsShapeQueryParameters3D") {
+        register_class(
+            ClassRegistration::new("PhysicsShapeQueryParameters3D")
+                .parent("RefCounted")
+                .property(PropertyInfo::new(
+                    "collide_with_areas",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "collide_with_bodies",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new(
+                    "collision_mask",
+                    Variant::Int(0xFFFF_FFFF),
+                ))
+                .property(PropertyInfo::new("motion", Variant::Vector3(Vector3::ZERO)))
+                .property(PropertyInfo::new("margin", Variant::Float(0.0)))
+                .property(PropertyInfo::new("shape_rid", Variant::Nil))
+                .property(PropertyInfo::new(
+                    "transform",
+                    Variant::Transform3D(identity_transform),
+                )),
         );
     }
     if !class_exists("MissingNode") {
@@ -7230,6 +7779,16 @@ pub fn register_2d_classes() {
     if !class_exists("CheckBox") {
         register_class(ClassRegistration::new("CheckBox").parent("Button"));
     }
+    // pat-s3rrv.68: the toggle-switch themed variant of CheckBox. `CheckButton
+    // : Button` with NO members of its own (extension_api.json,
+    // scene/gui/check_button.cpp) — everything that differs is theme, and
+    // gdscene already draws it (`"CheckBox" | "CheckButton" =>` in
+    // control_render.rs) and lists it in BUTTON_CLASSES. Only the registration
+    // was missing, which kept it out of the editor's Create Node dialog
+    // entirely: create_dialog.rs enumerates `get_class_list()`.
+    if !class_exists("CheckButton") {
+        register_class(ClassRegistration::new("CheckButton").parent("Button"));
+    }
     if !class_exists("OptionButton") {
         register_class(
             ClassRegistration::new("OptionButton")
@@ -7262,6 +7821,18 @@ pub fn register_2d_classes() {
     }
     if !class_exists("MarginContainer") {
         register_class(ClassRegistration::new("MarginContainer").parent("Container"));
+    }
+    // pat-s3rrv.68: `CenterContainer : Container` with one property,
+    // `use_top_left` (bool, default false — scene/gui/center_container.cpp).
+    // When true, children are centered on the container's TOP-LEFT CORNER
+    // rather than inside its rect, which Godot uses to center content that is
+    // allowed to overflow. `arrange_center` in gdscene reads it.
+    if !class_exists("CenterContainer") {
+        register_class(
+            ClassRegistration::new("CenterContainer")
+                .parent("Container")
+                .property(PropertyInfo::new("use_top_left", Variant::Bool(false))),
+        );
     }
     // pat-nzgdu.109: the GraphEdit family. Hierarchy matches Godot 4.6:
     // GraphElement : Container, GraphNode/GraphFrame : GraphElement,
@@ -7636,7 +8207,33 @@ pub fn register_2d_classes() {
                 .signal(SignalInfo::new("target_reached"))
                 .signal(SignalInfo::new("navigation_finished"))
                 .signal(SignalInfo::new("waypoint_reached").arg("details"))
-                .signal(SignalInfo::new("link_reached").arg("details")),
+                .signal(SignalInfo::new("link_reached").arg("details"))
+                // pat-s3rrv.20 — the full method surface from
+                // doc/classes/NavigationAgent2D.xml (20 methods). These were
+                // registered with properties and signals only, so
+                // `ClassDB.class_has_method("get_next_path_position")` answered
+                // false and the inspector/reflection surface was a lie about what
+                // the class offers.
+                .method(MethodInfo::new("distance_to_target", 0))
+                .method(MethodInfo::new("get_avoidance_layer_value", 1))
+                .method(MethodInfo::new("get_avoidance_mask_value", 1))
+                .method(MethodInfo::new("get_current_navigation_path", 0))
+                .method(MethodInfo::new("get_current_navigation_path_index", 0))
+                .method(MethodInfo::new("get_current_navigation_result", 0))
+                .method(MethodInfo::new("get_final_position", 0))
+                .method(MethodInfo::new("get_navigation_layer_value", 1))
+                .method(MethodInfo::new("get_navigation_map", 0))
+                .method(MethodInfo::new("get_next_path_position", 0))
+                .method(MethodInfo::new("get_path_length", 0))
+                .method(MethodInfo::new("get_rid", 0))
+                .method(MethodInfo::new("is_navigation_finished", 0))
+                .method(MethodInfo::new("is_target_reachable", 0))
+                .method(MethodInfo::new("is_target_reached", 0))
+                .method(MethodInfo::new("set_avoidance_layer_value", 2))
+                .method(MethodInfo::new("set_avoidance_mask_value", 2))
+                .method(MethodInfo::new("set_navigation_layer_value", 2))
+                .method(MethodInfo::new("set_navigation_map", 1))
+                .method(MethodInfo::new("set_velocity_forced", 1)),
         );
     }
     // NavigationObstacle2D — the 2D dynamic avoidance obstacle (pat-0q2kx.97).
@@ -7913,7 +8510,22 @@ pub fn register_2d_classes() {
                 .parent("Node2D")
                 .abstract_class()
                 .property(PropertyInfo::new("collision_layer", Variant::Int(1)))
-                .property(PropertyInfo::new("collision_mask", Variant::Int(1))),
+                .property(PropertyInfo::new("collision_mask", Variant::Int(1)))
+                .property(PropertyInfo::new("collision_priority", Variant::Float(1.0)))
+                .property(PropertyInfo::new("disable_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("input_pickable", Variant::Bool(true)))
+                // pat-s3rrv.25 — the read-only half of Godot's shape-owner API,
+                // registered now that it has real dispatch (`scripting.rs`).
+                //
+                // ⚠️ Only these three. The mutators — `create_shape_owner`,
+                // `shape_owner_add_shape`, `shape_owner_set_transform`,
+                // `remove_shape_owner` and the rest — still have no dispatch, so
+                // registering them would make `has_method` answer true for
+                // methods that do nothing. Same rule as the physics body method
+                // surface: advertise what works, admit what does not.
+                .method(MethodInfo::new("get_shape_owners", 0))
+                .method(MethodInfo::new("shape_owner_get_shape_count", 1))
+                .method(MethodInfo::new("shape_owner_get_transform", 1)),
         );
     }
     if !class_exists("PhysicsBody2D") {
@@ -7924,7 +8536,21 @@ pub fn register_2d_classes() {
         );
     }
     if !class_exists("StaticBody2D") {
-        register_class(ClassRegistration::new("StaticBody2D").parent("PhysicsBody2D"));
+        // pat-s3rrv.25 — StaticBody2D was registered BARE. Its two properties are
+        // exactly what makes a static body a moving platform (a conveyor surface
+        // that imparts velocity without the body itself moving).
+        register_class(
+            ClassRegistration::new("StaticBody2D")
+                .parent("PhysicsBody2D")
+                .property(PropertyInfo::new(
+                    "constant_linear_velocity",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new(
+                    "constant_angular_velocity",
+                    Variant::Float(0.0),
+                )),
+        );
     }
 
     // -- Joint2D family (pat-0q2kx.114) --
@@ -7999,7 +8625,52 @@ pub fn register_2d_classes() {
                 .parent("PhysicsBody2D")
                 .property(PropertyInfo::new("mass", Variant::Float(1.0)))
                 .property(PropertyInfo::new("gravity_scale", Variant::Float(1.0)))
-                .property(PropertyInfo::new("freeze", Variant::Bool(false))),
+                .property(PropertyInfo::new("freeze", Variant::Bool(false)))
+                // pat-s3rrv.25 — the dynamics surface a .tscn authors; without it a rigid body loads with damping, inertia and CCD silently at zero.
+                .property(PropertyInfo::new(
+                    "linear_velocity",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("angular_velocity", Variant::Float(0.0)))
+                .property(PropertyInfo::new("linear_damp", Variant::Float(0.0)))
+                .property(PropertyInfo::new("linear_damp_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("angular_damp", Variant::Float(0.0)))
+                .property(PropertyInfo::new("angular_damp_mode", Variant::Int(0)))
+                .property(PropertyInfo::new("inertia", Variant::Float(0.0)))
+                .property(PropertyInfo::new(
+                    "center_of_mass",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("center_of_mass_mode", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "constant_force",
+                    Variant::Vector2(Vector2::ZERO),
+                ))
+                .property(PropertyInfo::new("constant_torque", Variant::Float(0.0)))
+                .property(PropertyInfo::new("sleeping", Variant::Bool(false)))
+                .property(PropertyInfo::new("can_sleep", Variant::Bool(true)))
+                .property(PropertyInfo::new("lock_rotation", Variant::Bool(false)))
+                .property(PropertyInfo::new("custom_integrator", Variant::Bool(false)))
+                .property(PropertyInfo::new("continuous_cd", Variant::Int(0)))
+                .property(PropertyInfo::new("contact_monitor", Variant::Bool(false)))
+                .property(PropertyInfo::new("max_contacts_reported", Variant::Int(0)))
+                .property(PropertyInfo::new("freeze_mode", Variant::Int(0)))
+                // pat-s3rrv.25 — RigidBody2D's force/impulse surface was
+                // absent from ClassDB even though every one of these has a
+                // live dispatch arm (`scripting.rs` maps them onto the
+                // `_pending_*` / `constant_*` bridge properties the server
+                // drains each tick). `has_method("apply_impulse")` answered
+                // false for a method that works.
+                .method(MethodInfo::new("apply_central_impulse", 1))
+                .method(MethodInfo::new("apply_impulse", 2))
+                .method(MethodInfo::new("apply_central_force", 1))
+                .method(MethodInfo::new("apply_force", 2))
+                .method(MethodInfo::new("apply_torque", 1))
+                .method(MethodInfo::new("apply_torque_impulse", 1))
+                .method(MethodInfo::new("add_constant_central_force", 1))
+                .method(MethodInfo::new("add_constant_force", 2))
+                .method(MethodInfo::new("add_constant_torque", 1))
+                .method(MethodInfo::new("set_axis_velocity", 1)),
         );
     }
     if !class_exists("CharacterBody2D") {
@@ -8013,7 +8684,53 @@ pub fn register_2d_classes() {
                 .property(PropertyInfo::new(
                     "floor_max_angle",
                     Variant::Float(0.785398),
-                )),
+                ))
+                // pat-s3rrv.25 — motion_mode alone switches move_and_slide between grounded and floating, so a .tscn authoring it was silently ignored.
+                .property(PropertyInfo::new("motion_mode", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "up_direction",
+                    Variant::Vector2(Vector2::new(0.0, -1.0)),
+                ))
+                .property(PropertyInfo::new("slide_on_ceiling", Variant::Bool(true)))
+                .property(PropertyInfo::new("max_slides", Variant::Int(4)))
+                .property(PropertyInfo::new(
+                    "wall_min_slide_angle",
+                    Variant::Float(0.2617994),
+                ))
+                .property(PropertyInfo::new(
+                    "floor_stop_on_slope",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new(
+                    "floor_constant_speed",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "floor_block_on_wall",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new("floor_snap_length", Variant::Float(1.0)))
+                .property(PropertyInfo::new("platform_on_leave", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "platform_floor_layers",
+                    Variant::Int(0xFFFF_FFFF),
+                ))
+                .property(PropertyInfo::new("platform_wall_layers", Variant::Int(0)))
+                .property(PropertyInfo::new("safe_margin", Variant::Float(0.08)))
+                // pat-s3rrv.25 — the CharacterBody2D methods every platformer
+                // script calls. All five dispatch through
+                // `SceneTreeAccessor` (`scripting.rs`).
+                //
+                // ⚠️ `move_and_collide`, `get_slide_collision`,
+                // `get_slide_collision_count`, `get_floor_normal` and
+                // `get_wall_normal` are deliberately NOT registered: they have
+                // no dispatch arm anywhere, so registering them would make
+                // `has_method` answer true for methods that do nothing.
+                .method(MethodInfo::new("move_and_slide", 0))
+                .method(MethodInfo::new("is_on_floor", 0))
+                .method(MethodInfo::new("is_on_wall", 0))
+                .method(MethodInfo::new("is_on_ceiling", 0))
+                .method(MethodInfo::new("get_real_velocity", 0)),
         );
     }
     if !class_exists("Area2D") {
@@ -8041,7 +8758,38 @@ pub fn register_2d_classes() {
                 .property(PropertyInfo::new(
                     "audio_bus_name",
                     Variant::StringName(gdcore::string_name::StringName::new("Master")),
-                )),
+                ))
+                // pat-s3rrv.25 — the gravity-override fields are the whole point of an Area2D.
+                .property(PropertyInfo::new("gravity", Variant::Float(980.0)))
+                .property(PropertyInfo::new(
+                    "gravity_direction",
+                    Variant::Vector2(Vector2::new(0.0, 1.0)),
+                ))
+                .property(PropertyInfo::new("gravity_point", Variant::Bool(false)))
+                .property(PropertyInfo::new(
+                    "gravity_point_center",
+                    Variant::Vector2(Vector2::new(0.0, 1.0)),
+                ))
+                .property(PropertyInfo::new(
+                    "gravity_point_unit_distance",
+                    Variant::Float(0.0),
+                ))
+                .property(PropertyInfo::new("gravity_space_override", Variant::Int(0)))
+                .property(PropertyInfo::new("linear_damp", Variant::Float(0.1)))
+                .property(PropertyInfo::new(
+                    "linear_damp_space_override",
+                    Variant::Int(0),
+                ))
+                .property(PropertyInfo::new("priority", Variant::Int(0)))
+                // pat-s3rrv.25 — Area2D's query surface. These read the
+                // `_overlapping_bodies` / `_overlapping_areas` mirrors the 2D
+                // server publishes each tick (pat-0q2kx.112).
+                .method(MethodInfo::new("get_overlapping_bodies", 0))
+                .method(MethodInfo::new("get_overlapping_areas", 0))
+                .method(MethodInfo::new("has_overlapping_bodies", 0))
+                .method(MethodInfo::new("has_overlapping_areas", 0))
+                .method(MethodInfo::new("overlaps_body", 1))
+                .method(MethodInfo::new("overlaps_area", 1)),
         );
     }
     if !class_exists("CollisionShape2D") {
@@ -11728,10 +12476,49 @@ pub fn register_networking_classes() {
 
     // -- MultiplayerSpawner / MultiplayerSynchronizer (pat-ikq04) --
     // Upstream: modules/multiplayer/multiplayer_spawner.* / multiplayer_synchronizer.*
+    // pat-s3rrv.17 — SceneReplicationConfig was not registered at all.
+    //
+    // It is the resource `MultiplayerSynchronizer.replication_config` points
+    // at, and the `.tscn`/`.tres` loader resolves `[sub_resource type=X]`
+    // generically against ClassDB — so an unregistered type means a scene
+    // carrying a replication config silently loses it on load, and the
+    // synchronizer has nothing to replicate. Registering it is a precondition
+    // for the runtime half of this bead, not merely reflection polish.
+    if !class_exists("SceneReplicationConfig") {
+        if !class_exists("Resource") {
+            register_class(ClassRegistration::new("Resource").parent("RefCounted"));
+        }
+        register_class(
+            ClassRegistration::new("SceneReplicationConfig")
+                .parent("Resource")
+                // 13 methods, from
+                // modules/multiplayer/doc_classes/SceneReplicationConfig.xml.
+                .method(MethodInfo::new("add_property", 2))
+                .method(MethodInfo::new("get_properties", 0))
+                .method(MethodInfo::new("has_property", 1))
+                .method(MethodInfo::new("property_get_index", 1))
+                .method(MethodInfo::new("property_get_replication_mode", 1))
+                .method(MethodInfo::new("property_get_spawn", 1))
+                .method(MethodInfo::new("property_get_sync", 1))
+                .method(MethodInfo::new("property_get_watch", 1))
+                .method(MethodInfo::new("property_set_replication_mode", 2))
+                .method(MethodInfo::new("property_set_spawn", 2))
+                .method(MethodInfo::new("property_set_sync", 2))
+                .method(MethodInfo::new("property_set_watch", 2))
+                .method(MethodInfo::new("remove_property", 1)),
+        );
+    }
     if !class_exists("MultiplayerSpawner") {
         register_class(
             ClassRegistration::new("MultiplayerSpawner")
                 .parent("Node")
+                // pat-s3rrv.17 — `spawn_path` is how a .tscn names the node the
+                // spawner replicates under; without it the property is dropped
+                // on load and the spawner has no target.
+                .property(PropertyInfo::new(
+                    "spawn_path",
+                    Variant::String(String::new()),
+                ))
                 .property(PropertyInfo::new(
                     "spawn_path",
                     Variant::String(String::new()),
@@ -11765,7 +12552,20 @@ pub fn register_networking_classes() {
                 .method(MethodInfo::new("get_replication_interval", 0))
                 .method(MethodInfo::new("set_replication_interval", 1))
                 .method(MethodInfo::new("get_net_id", 0))
-                .method(MethodInfo::new("set_net_id", 1)),
+                .method(MethodInfo::new("set_net_id", 1))
+                // pat-s3rrv.17 — the visibility surface from
+                // modules/multiplayer/doc_classes/MultiplayerSynchronizer.xml.
+                // Only the property getters/setters were registered, so the
+                // five methods a game actually calls to scope replication per
+                // peer reflected as absent.
+                .method(MethodInfo::new("add_visibility_filter", 1))
+                .method(MethodInfo::new("remove_visibility_filter", 1))
+                .method(MethodInfo::new("get_visibility_for", 1))
+                .method(MethodInfo::new("set_visibility_for", 2))
+                .method(MethodInfo::new("update_visibility", 1))
+                .property(PropertyInfo::new("delta_interval", Variant::Float(0.0)))
+                .property(PropertyInfo::new("public_visibility", Variant::Bool(true)))
+                .property(PropertyInfo::new("visibility_update_mode", Variant::Int(0))),
         );
     }
 
@@ -12253,7 +13053,25 @@ pub fn register_input_event_classes() {
             ClassRegistration::new("InputEvent")
                 .parent("RefCounted")
                 .abstract_class()
-                .property(PropertyInfo::new("device", Variant::Int(0))),
+                .property(PropertyInfo::new("device", Variant::Int(0)))
+                // pat-s3rrv.14 — the 13 InputEvent methods from
+                // doc/classes/InputEvent.xml. Registered on the abstract spine
+                // so every subclass reflects them, matching Godot: the family
+                // carried properties only, so `is_action_pressed` — the single
+                // most common input idiom — reflected as absent.
+                .method(MethodInfo::new("accumulate", 1))
+                .method(MethodInfo::new("as_text", 0))
+                .method(MethodInfo::new("get_action_strength", 2))
+                .method(MethodInfo::new("is_action", 2))
+                .method(MethodInfo::new("is_action_pressed", 3))
+                .method(MethodInfo::new("is_action_released", 2))
+                .method(MethodInfo::new("is_action_type", 0))
+                .method(MethodInfo::new("is_canceled", 0))
+                .method(MethodInfo::new("is_echo", 0))
+                .method(MethodInfo::new("is_match", 2))
+                .method(MethodInfo::new("is_pressed", 0))
+                .method(MethodInfo::new("is_released", 0))
+                .method(MethodInfo::new("xformed_by", 2)),
         );
     }
     if !class_exists("InputEventFromWindow") {
@@ -12268,6 +13086,8 @@ pub fn register_input_event_classes() {
         register_class(
             ClassRegistration::new("InputEventWithModifiers")
                 .parent("InputEventFromWindow")
+                .method(MethodInfo::new("get_modifiers_mask", 0))
+                .method(MethodInfo::new("is_command_or_control_pressed", 0))
                 .abstract_class()
                 .property(PropertyInfo::new(
                     "command_or_control_autoremap",
@@ -12309,7 +13129,16 @@ pub fn register_input_event_classes() {
                 .property(PropertyInfo::new("key_label", Variant::Int(0)))
                 .property(PropertyInfo::new("unicode", Variant::Int(0)))
                 .property(PropertyInfo::new("location", Variant::Int(0)))
-                .property(PropertyInfo::new("echo", Variant::Bool(false))),
+                .property(PropertyInfo::new("echo", Variant::Bool(false)))
+                // pat-s3rrv.14 — InputEventKey's own methods
+                // (doc/classes/InputEventKey.xml).
+                .method(MethodInfo::new("as_text_key_label", 0))
+                .method(MethodInfo::new("as_text_keycode", 0))
+                .method(MethodInfo::new("as_text_location", 0))
+                .method(MethodInfo::new("as_text_physical_keycode", 0))
+                .method(MethodInfo::new("get_key_label_with_modifiers", 0))
+                .method(MethodInfo::new("get_keycode_with_modifiers", 0))
+                .method(MethodInfo::new("get_physical_keycode_with_modifiers", 0)),
         );
     }
     if !class_exists("InputEventMouseButton") {
@@ -12441,6 +13270,40 @@ pub fn register_input_event_classes() {
                 .property(PropertyInfo::new("controller_number", Variant::Int(0)))
                 .property(PropertyInfo::new("controller_value", Variant::Int(0))),
         );
+    }
+    // pat-s3rrv.14 — the gesture family and Shortcut complete the 17-class
+    // hierarchy in upstream/godot/core/input/input_event.h. Without them
+    // `event is InputEventPanGesture` cannot even be asked.
+    if !class_exists("InputEventGesture") {
+        register_class(
+            ClassRegistration::new("InputEventGesture")
+                .parent("InputEventWithModifiers")
+                .abstract_class()
+                .property(PropertyInfo::new(
+                    "position",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                )),
+        );
+    }
+    if !class_exists("InputEventMagnifyGesture") {
+        register_class(
+            ClassRegistration::new("InputEventMagnifyGesture")
+                .parent("InputEventGesture")
+                .property(PropertyInfo::new("factor", Variant::Float(1.0))),
+        );
+    }
+    if !class_exists("InputEventPanGesture") {
+        register_class(
+            ClassRegistration::new("InputEventPanGesture")
+                .parent("InputEventGesture")
+                .property(PropertyInfo::new(
+                    "delta",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                )),
+        );
+    }
+    if !class_exists("InputEventShortcut") {
+        register_class(ClassRegistration::new("InputEventShortcut").parent("InputEvent"));
     }
 }
 
@@ -14619,5 +15482,784 @@ mod tests {
             .collect();
         assert!(shader_methods.contains(&"get_code".to_string()));
         assert!(shader_methods.contains(&"get_mode".to_string()));
+    }
+
+    // -- pat-s3rrv.20: NavigationAgent2D/3D method surface ------------------
+
+    /// Both navigation agents registered **properties and signals only** — zero
+    /// `.method(...)` entries — so `ClassDB` reported a class that offers no way
+    /// to drive it. A script's `agent.get_next_path_position()` fell through to
+    /// `UndefinedFunction`, and reflection told the inspector the same untruth.
+    ///
+    /// The surface and arities come from `doc/classes/NavigationAgent2D.xml` /
+    /// `NavigationAgent3D.xml` (20 methods each, identical lists).
+    #[test]
+    fn navigation_agents_expose_their_full_method_surface() {
+        let _guard = setup();
+        register_3d_classes();
+        register_2d_classes();
+
+        // (name, argument_count) exactly as the doc XML declares them.
+        let expected: &[(&str, usize)] = &[
+            ("distance_to_target", 0),
+            ("get_avoidance_layer_value", 1),
+            ("get_avoidance_mask_value", 1),
+            ("get_current_navigation_path", 0),
+            ("get_current_navigation_path_index", 0),
+            ("get_current_navigation_result", 0),
+            ("get_final_position", 0),
+            ("get_navigation_layer_value", 1),
+            ("get_navigation_map", 0),
+            ("get_next_path_position", 0),
+            ("get_path_length", 0),
+            ("get_rid", 0),
+            ("is_navigation_finished", 0),
+            ("is_target_reachable", 0),
+            ("is_target_reached", 0),
+            ("set_avoidance_layer_value", 2),
+            ("set_avoidance_mask_value", 2),
+            ("set_navigation_layer_value", 2),
+            ("set_navigation_map", 1),
+            ("set_velocity_forced", 1),
+        ];
+
+        for class in ["NavigationAgent2D", "NavigationAgent3D"] {
+            let info = get_class_info(class).unwrap_or_else(|| panic!("{class} registered"));
+            for (name, arity) in expected {
+                let m = info
+                    .methods
+                    .iter()
+                    .find(|m| m.name == *name)
+                    .unwrap_or_else(|| panic!("{class} is missing method `{name}`"));
+                // Arity is asserted, not just presence: a method registered with
+                // the wrong argument count still reflects as "present" and then
+                // mis-binds at the call site.
+                assert_eq!(m.argument_count, *arity, "{class}.{name} arity");
+            }
+        }
+    }
+
+    /// The methods are additive — the properties and signals the agents already
+    /// carried must survive, since a `.tscn` depends on them.
+    #[test]
+    fn navigation_agent_methods_do_not_displace_properties_or_signals() {
+        let _guard = setup();
+        register_2d_classes();
+
+        let info = get_class_info("NavigationAgent2D").expect("NavigationAgent2D registered");
+        let props: Vec<&str> = info.properties.iter().map(|p| p.name.as_str()).collect();
+        assert!(props.contains(&"target_position"));
+        assert!(props.contains(&"path_desired_distance"));
+
+        let signals: Vec<&str> = info.signals.iter().map(|s| s.name.as_str()).collect();
+        assert!(signals.contains(&"navigation_finished"));
+        assert!(signals.contains(&"waypoint_reached"));
+        assert!(signals.contains(&"link_reached"));
+    }
+
+    // -- pat-s3rrv.14: InputEvent method surface + gesture family ----------
+
+    /// The 13 InputEvent classes registered **properties only** — zero
+    /// `.method(...)` entries — so `is_action_pressed`, the single most common
+    /// input idiom in Godot, reflected as absent on every event class.
+    ///
+    /// Methods live on the abstract spine (`InputEvent`,
+    /// `InputEventWithModifiers`, `InputEventKey`) exactly as upstream declares
+    /// them, so subclasses inherit the surface rather than each re-listing it.
+    #[test]
+    fn input_events_expose_their_method_surface() {
+        let _guard = setup();
+        register_input_event_classes();
+
+        let base = get_class_info("InputEvent").expect("InputEvent registered");
+        let names: Vec<&str> = base.methods.iter().map(|m| m.name.as_str()).collect();
+        for m in [
+            "is_action",
+            "is_action_pressed",
+            "is_action_released",
+            "get_action_strength",
+            "is_pressed",
+            "is_released",
+            "is_echo",
+            "is_canceled",
+            "is_action_type",
+            "as_text",
+            "is_match",
+            "accumulate",
+            "xformed_by",
+        ] {
+            assert!(names.contains(&m), "InputEvent is missing `{m}`");
+        }
+
+        // Arity matters as much as presence: a method registered with the wrong
+        // argument count still reflects as "present" and then mis-binds.
+        let arity = |c: &str, n: &str| -> usize {
+            get_class_info(c)
+                .unwrap_or_else(|| panic!("{c} registered"))
+                .methods
+                .iter()
+                .find(|m| m.name == n)
+                .unwrap_or_else(|| panic!("{c}.{n} missing"))
+                .argument_count
+        };
+        assert_eq!(arity("InputEvent", "is_action_pressed"), 3);
+        assert_eq!(arity("InputEvent", "is_action"), 2);
+        assert_eq!(arity("InputEvent", "as_text"), 0);
+        assert_eq!(arity("InputEventKey", "get_keycode_with_modifiers"), 0);
+        assert_eq!(
+            arity("InputEventWithModifiers", "is_command_or_control_pressed"),
+            0
+        );
+    }
+
+    /// The gesture family and `InputEventShortcut` complete the 17-class
+    /// hierarchy of `upstream/godot/core/input/input_event.h`. Without them
+    /// `event is InputEventPanGesture` cannot even be asked.
+    #[test]
+    fn input_event_gesture_family_is_registered() {
+        let _guard = setup();
+        register_input_event_classes();
+
+        for c in [
+            "InputEventGesture",
+            "InputEventMagnifyGesture",
+            "InputEventPanGesture",
+            "InputEventShortcut",
+        ] {
+            assert!(class_exists(c), "{c} is not registered");
+        }
+        assert!(is_parent_class(
+            "InputEventGesture",
+            "InputEventWithModifiers"
+        ));
+        assert!(is_parent_class(
+            "InputEventMagnifyGesture",
+            "InputEventGesture"
+        ));
+        assert!(is_parent_class("InputEventPanGesture", "InputEventGesture"));
+        assert!(is_parent_class("InputEventShortcut", "InputEvent"));
+        // The gesture base is abstract upstream; only the two concrete
+        // subclasses are instantiable.
+        assert!(is_abstract("InputEventGesture"));
+        assert!(!is_abstract("InputEventPanGesture"));
+    }
+
+    // -- pat-s3rrv.17: multiplayer replication surface ---------------------
+
+    /// `SceneReplicationConfig` was not registered at all. It is the resource
+    /// `MultiplayerSynchronizer.replication_config` points at, and the
+    /// `.tscn`/`.tres` loader resolves `[sub_resource type=X]` generically
+    /// against ClassDB — so a scene carrying a replication config silently lost
+    /// it on load and the synchronizer had nothing to replicate.
+    #[test]
+    fn scene_replication_config_is_registered_with_its_methods() {
+        let _guard = setup();
+        register_networking_classes();
+
+        assert!(class_exists("SceneReplicationConfig"));
+        assert!(is_parent_class("SceneReplicationConfig", "Resource"));
+
+        let info = get_class_info("SceneReplicationConfig").expect("registered");
+        let names: Vec<&str> = info.methods.iter().map(|m| m.name.as_str()).collect();
+        for m in [
+            "add_property",
+            "remove_property",
+            "has_property",
+            "get_properties",
+            "property_get_index",
+            "property_set_sync",
+            "property_get_sync",
+            "property_set_spawn",
+            "property_get_spawn",
+            "property_set_watch",
+            "property_get_watch",
+            "property_set_replication_mode",
+            "property_get_replication_mode",
+        ] {
+            assert!(
+                names.contains(&m),
+                "SceneReplicationConfig is missing `{m}`"
+            );
+        }
+
+        // Arity, not just presence: the paired get/set differ by one argument
+        // and a wrong count mis-binds at the call site.
+        let arity = |n: &str| {
+            info.methods
+                .iter()
+                .find(|m| m.name == n)
+                .unwrap_or_else(|| panic!("{n} missing"))
+                .argument_count
+        };
+        assert_eq!(arity("add_property"), 2);
+        assert_eq!(arity("has_property"), 1);
+        assert_eq!(arity("get_properties"), 0);
+        assert_eq!(arity("property_set_sync"), 2);
+        assert_eq!(arity("property_get_sync"), 1);
+    }
+
+    /// The synchronizer carried only property getters/setters, so the five
+    /// methods a game calls to scope replication per peer reflected as absent;
+    /// the spawner was missing `spawn_path`, the property naming the node it
+    /// replicates under.
+    #[test]
+    fn replication_nodes_expose_visibility_and_spawn_path() {
+        let _guard = setup();
+        register_networking_classes();
+
+        let sync = get_class_info("MultiplayerSynchronizer").expect("registered");
+        let m: Vec<&str> = sync.methods.iter().map(|m| m.name.as_str()).collect();
+        for name in [
+            "add_visibility_filter",
+            "remove_visibility_filter",
+            "get_visibility_for",
+            "set_visibility_for",
+            "update_visibility",
+        ] {
+            assert!(
+                m.contains(&name),
+                "MultiplayerSynchronizer is missing `{name}`"
+            );
+        }
+        let p: Vec<&str> = sync.properties.iter().map(|p| p.name.as_str()).collect();
+        assert!(p.contains(&"public_visibility"));
+        assert!(p.contains(&"delta_interval"));
+        // Pre-existing properties must survive the addition.
+        assert!(p.contains(&"root_path"));
+        assert!(p.contains(&"replication_interval"));
+
+        let spawner = get_class_info("MultiplayerSpawner").expect("registered");
+        let sp: Vec<&str> = spawner.properties.iter().map(|p| p.name.as_str()).collect();
+        assert!(sp.contains(&"spawn_path"), "spawner needs spawn_path");
+        assert!(sp.contains(&"spawn_limit"));
+    }
+
+    // -- pat-s3rrv.24: Node3D / Camera3D method surface --------------------
+
+    /// Node3D carried its transform **properties** but not a single method, so
+    /// the entire transform API a 3D game calls — `look_at`, `rotate_y`,
+    /// `translate`, `to_global`, `orthonormalize` — reflected as absent, and
+    /// Camera3D's picking helpers likewise.
+    #[test]
+    fn node3d_and_camera3d_expose_their_transform_method_surface() {
+        let _guard = setup();
+        register_3d_classes();
+
+        let n = get_class_info("Node3D").expect("Node3D registered");
+        let names: Vec<&str> = n.methods.iter().map(|m| m.name.as_str()).collect();
+        for m in [
+            "look_at",
+            "look_at_from_position",
+            "rotate",
+            "rotate_x",
+            "rotate_y",
+            "rotate_z",
+            "rotate_object_local",
+            "translate",
+            "translate_object_local",
+            "global_translate",
+            "global_rotate",
+            "global_scale",
+            "scale_object_local",
+            "to_global",
+            "to_local",
+            "orthonormalize",
+            "set_identity",
+            "show",
+            "hide",
+            "is_visible_in_tree",
+            "get_parent_node_3d",
+            "force_update_transform",
+        ] {
+            assert!(names.contains(&m), "Node3D is missing `{m}`");
+        }
+
+        let c = get_class_info("Camera3D").expect("Camera3D registered");
+        let cnames: Vec<&str> = c.methods.iter().map(|m| m.name.as_str()).collect();
+        for m in [
+            "unproject_position",
+            "project_position",
+            "project_ray_normal",
+            "project_ray_origin",
+            "project_local_ray_normal",
+            "is_position_behind",
+            "is_position_in_frustum",
+            "make_current",
+            "clear_current",
+            "set_perspective",
+            "set_orthogonal",
+            "set_frustum",
+            "get_camera_transform",
+        ] {
+            assert!(cnames.contains(&m), "Camera3D is missing `{m}`");
+        }
+
+        // Arity is asserted because these are the ones easiest to get wrong:
+        // Godot's look_at takes (target, up, use_model_front) and
+        // project_position takes (screen_point, z_depth).
+        let arity = |info: &ClassInfo, n: &str| {
+            info.methods
+                .iter()
+                .find(|m| m.name == n)
+                .unwrap_or_else(|| panic!("{n} missing"))
+                .argument_count
+        };
+        assert_eq!(arity(&n, "look_at"), 3);
+        assert_eq!(arity(&n, "look_at_from_position"), 4);
+        assert_eq!(arity(&n, "rotate_y"), 1);
+        assert_eq!(arity(&n, "rotate"), 2);
+        assert_eq!(arity(&n, "orthonormalize"), 0);
+        assert_eq!(arity(&c, "unproject_position"), 1);
+        assert_eq!(arity(&c, "project_position"), 2);
+        assert_eq!(arity(&c, "set_perspective"), 3);
+
+        // Camera3D inherits Node3D's surface rather than redeclaring it.
+        assert!(is_parent_class("Camera3D", "Node3D"));
+        // The transform properties the methods operate on must survive.
+        let props: Vec<&str> = n.properties.iter().map(|p| p.name.as_str()).collect();
+        assert!(props.contains(&"transform"));
+        assert!(props.contains(&"position"));
+        assert!(props.contains(&"visible"));
+    }
+
+    // -- pat-s3rrv.26: physics space-query family --------------------------
+
+    /// `World2D.direct_space_state` has been a registered property for a while,
+    /// but **every class it hands back was unregistered** — so
+    /// `get_world_2d().direct_space_state` named a type ClassDB had never heard
+    /// of, and no query could be described, let alone run.
+    #[test]
+    fn physics_space_query_family_is_registered() {
+        let _guard = setup();
+        register_3d_classes();
+
+        for c in [
+            "PhysicsDirectSpaceState2D",
+            "PhysicsRayQueryParameters2D",
+            "PhysicsPointQueryParameters2D",
+            "PhysicsShapeQueryParameters2D",
+            "PhysicsDirectSpaceState3D",
+            "PhysicsRayQueryParameters3D",
+            "PhysicsPointQueryParameters3D",
+            "PhysicsShapeQueryParameters3D",
+        ] {
+            assert!(class_exists(c), "{c} is not registered");
+        }
+
+        // The space states are Objects; the parameter bundles are RefCounted
+        // resources a script constructs with `.new()`.
+        assert!(is_parent_class("PhysicsDirectSpaceState2D", "Object"));
+        assert!(is_parent_class("PhysicsRayQueryParameters2D", "RefCounted"));
+        assert!(is_parent_class(
+            "PhysicsShapeQueryParameters3D",
+            "RefCounted"
+        ));
+
+        // The six query entry points, on both dimensions.
+        for c in ["PhysicsDirectSpaceState2D", "PhysicsDirectSpaceState3D"] {
+            let info = get_class_info(c).unwrap_or_else(|| panic!("{c} registered"));
+            let names: Vec<&str> = info.methods.iter().map(|m| m.name.as_str()).collect();
+            for m in [
+                "intersect_ray",
+                "intersect_point",
+                "intersect_shape",
+                "cast_motion",
+                "collide_shape",
+                "get_rest_info",
+            ] {
+                assert!(names.contains(&m), "{c} is missing `{m}`");
+            }
+            // intersect_ray takes the parameter bundle only; intersect_point and
+            // intersect_shape take (params, max_results). A wrong count here
+            // mis-binds the max_results argument silently.
+            let arity = |n: &str| {
+                info.methods
+                    .iter()
+                    .find(|m| m.name == n)
+                    .unwrap_or_else(|| panic!("{c}.{n} missing"))
+                    .argument_count
+            };
+            assert_eq!(arity("intersect_ray"), 1, "{c}.intersect_ray");
+            assert_eq!(arity("intersect_point"), 2, "{c}.intersect_point");
+            assert_eq!(arity("intersect_shape"), 2, "{c}.intersect_shape");
+        }
+
+        // Ray parameters carry the endpoints and the mask a query is built from.
+        let ray = get_class_info("PhysicsRayQueryParameters2D").expect("registered");
+        let p: Vec<&str> = ray.properties.iter().map(|p| p.name.as_str()).collect();
+        for name in [
+            "from",
+            "to",
+            "collision_mask",
+            "collide_with_areas",
+            "collide_with_bodies",
+            "hit_from_inside",
+        ] {
+            assert!(p.contains(&name), "ray params missing `{name}`");
+        }
+        // Godot's static constructor: create(from, to, mask, exclude).
+        assert!(ray
+            .methods
+            .iter()
+            .any(|m| m.name == "create" && m.argument_count == 4));
+
+        // 3D rays add hit_back_faces, which the 2D form does not have.
+        let ray3 = get_class_info("PhysicsRayQueryParameters3D").expect("registered");
+        assert!(ray3.properties.iter().any(|p| p.name == "hit_back_faces"));
+        assert!(!p.contains(&"hit_back_faces"));
+    }
+
+    // -- pat-s3rrv.1: state-machine playback surface -----------------------
+
+    /// `AnimationNodeStateMachinePlayback` was registered **bare** — name and
+    /// parent only. So `$AnimationTree.get("parameters/playback").travel("jump")`,
+    /// the documented way to drive a state machine from a script, named methods
+    /// ClassDB did not know existed.
+    #[test]
+    fn animation_state_machine_playback_exposes_its_methods() {
+        let _guard = setup();
+        register_3d_classes();
+
+        let pb = get_class_info("AnimationNodeStateMachinePlayback").expect("registered");
+        assert!(is_parent_class(
+            "AnimationNodeStateMachinePlayback",
+            "Resource"
+        ));
+        let names: Vec<&str> = pb.methods.iter().map(|m| m.name.as_str()).collect();
+        for m in [
+            "travel",
+            "start",
+            "stop",
+            "next",
+            "is_playing",
+            "get_current_node",
+            "get_travel_path",
+            "get_current_length",
+            "get_current_play_position",
+            "get_fading_from_node",
+        ] {
+            assert!(names.contains(&m), "playback is missing `{m}`");
+        }
+
+        // `travel` and `start` each take (node, reset_on_teleport/reset) in
+        // Godot 4 — registering them as 1-arg is the easy mistake and would
+        // drop the reset flag silently.
+        let arity = |n: &str| {
+            pb.methods
+                .iter()
+                .find(|m| m.name == n)
+                .unwrap_or_else(|| panic!("{n} missing"))
+                .argument_count
+        };
+        assert_eq!(arity("travel"), 2);
+        assert_eq!(arity("start"), 2);
+        assert_eq!(arity("next"), 0);
+        assert_eq!(arity("get_travel_path"), 0);
+
+        // The graph-editing surface on the machine itself.
+        let sm = get_class_info("AnimationNodeStateMachine").expect("registered");
+        let sm_names: Vec<&str> = sm.methods.iter().map(|m| m.name.as_str()).collect();
+        for m in [
+            "add_node",
+            "remove_node",
+            "rename_node",
+            "has_node",
+            "get_node_list",
+            "add_transition",
+            "remove_transition",
+            "has_transition",
+            "get_transition_count",
+        ] {
+            assert!(sm_names.contains(&m), "state machine is missing `{m}`");
+        }
+        assert_eq!(
+            sm.methods
+                .iter()
+                .find(|m| m.name == "add_transition")
+                .expect("add_transition")
+                .argument_count,
+            3,
+            "add_transition takes (from, to, transition)"
+        );
+    }
+
+    // -- pat-s3rrv.23: skinning resource classes ---------------------------
+
+    /// `Skin` binds a mesh to a `Skeleton3D`. It was not registered at all, so
+    /// a `.tscn` could not carry one and no skinned mesh could be *described*,
+    /// which is upstream of any question about rendering it.
+    #[test]
+    fn skinning_resource_classes_are_registered() {
+        let _guard = setup();
+        register_3d_classes();
+
+        for c in [
+            "Skin",
+            "MultiMesh",
+            "BoneMap",
+            "SkeletonProfile",
+            "SkeletonProfileHumanoid",
+        ] {
+            assert!(class_exists(c), "{c} is not registered");
+            assert!(get_class_info(c).is_some(), "{c} has no ClassInfo");
+        }
+
+        // The base is registered alongside the subclass on purpose: an
+        // unregistered base truncates the chain and `is_parent_class` answers
+        // false for a class that genuinely derives from it.
+        assert!(is_parent_class(
+            "SkeletonProfileHumanoid",
+            "SkeletonProfile"
+        ));
+        assert!(is_parent_class("SkeletonProfile", "Resource"));
+        assert!(is_parent_class("Skin", "Resource"));
+
+        let skin = get_class_info("Skin").expect("Skin registered");
+        let names: Vec<&str> = skin.methods.iter().map(|m| m.name.as_str()).collect();
+        for m in [
+            "add_bind",
+            "add_named_bind",
+            "clear_binds",
+            "get_bind_count",
+            "set_bind_count",
+            "get_bind_bone",
+            "set_bind_bone",
+            "get_bind_pose",
+            "set_bind_pose",
+            "get_bind_name",
+            "set_bind_name",
+        ] {
+            assert!(names.contains(&m), "Skin is missing `{m}`");
+        }
+        // add_bind(bone, pose) — two arguments; registering it as one would
+        // drop the pose and bind every vertex to the rest transform.
+        assert_eq!(
+            skin.methods
+                .iter()
+                .find(|m| m.name == "add_bind")
+                .expect("add_bind")
+                .argument_count,
+            2
+        );
+
+        // The humanoid profile's defaults are its whole purpose — 56 bones in
+        // 4 groups, rooted at "Root" and scaled from "Hips".
+        let h = get_class_info("SkeletonProfileHumanoid").expect("registered");
+        let bone_size = h
+            .properties
+            .iter()
+            .find(|p| p.name == "bone_size")
+            .expect("bone_size");
+        assert_eq!(bone_size.default_value, Variant::Int(56));
+
+        // MultiMesh's instance bookkeeping, where -1 means "all visible".
+        let mm = get_class_info("MultiMesh").expect("registered");
+        let vis = mm
+            .properties
+            .iter()
+            .find(|p| p.name == "visible_instance_count")
+            .expect("visible_instance_count");
+        assert_eq!(vis.default_value, Variant::Int(-1));
+    }
+
+    // -- pat-s3rrv.25: physics body METHOD surface -------------------------
+
+    /// The 2D physics bodies had **zero** methods registered — `move_and_slide`,
+    /// `is_on_floor`, `apply_impulse`, `get_overlapping_bodies` and the rest all
+    /// returned 0 hits in this file — while every one of them has a live dispatch
+    /// arm in `gdscene::scripting` or the interpreter.
+    ///
+    /// So `has_method("move_and_slide")` answered **false** for the single most
+    /// called method in any Godot platformer, `get_method_list()` returned a body
+    /// with no behaviour, and editor completion offered none of it. The methods
+    /// worked; only the metadata describing them was missing, which is the kind
+    /// of gap that reads as "not implemented" to everything that introspects.
+    ///
+    /// ⚠️ This asserts the *absence* of the unimplemented ones too. Registering
+    /// `move_and_collide` or the `shape_owner_*` family would make `has_method`
+    /// answer true for methods with no dispatch arm at all — advertising API that
+    /// silently does nothing, which is worse than admitting it is missing.
+    #[test]
+    fn physics2d_bodies_expose_their_implemented_method_surface() {
+        let _guard = setup();
+        register_2d_classes();
+
+        let methods = |c: &str| -> Vec<(String, usize)> {
+            get_class_info(c)
+                .unwrap_or_else(|| panic!("{c} registered"))
+                .methods
+                .iter()
+                .map(|m| (m.name.clone(), m.argument_count))
+                .collect()
+        };
+
+        let has = |c: &str, name: &str, arity: usize| {
+            let ms = methods(c);
+            let found = ms
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("{c} must register `{name}` — got {ms:?}"));
+            assert_eq!(
+                found.1, arity,
+                "`{c}.{name}` arity: Godot's class_get_method_list reports every \
+                 parameter, defaulted ones included",
+            );
+        };
+
+        // CharacterBody2D — the platformer surface.
+        has("CharacterBody2D", "move_and_slide", 0);
+        has("CharacterBody2D", "is_on_floor", 0);
+        has("CharacterBody2D", "is_on_wall", 0);
+        has("CharacterBody2D", "is_on_ceiling", 0);
+        has("CharacterBody2D", "get_real_velocity", 0);
+
+        // RigidBody2D — force and impulse. `apply_impulse(impulse, position)`
+        // takes 2 in Godot with the position defaulted; `apply_central_impulse`
+        // takes 1 for the same reason.
+        has("RigidBody2D", "apply_impulse", 2);
+        has("RigidBody2D", "apply_central_impulse", 1);
+        has("RigidBody2D", "apply_force", 2);
+        has("RigidBody2D", "apply_central_force", 1);
+        has("RigidBody2D", "apply_torque", 1);
+        has("RigidBody2D", "apply_torque_impulse", 1);
+        has("RigidBody2D", "add_constant_force", 2);
+        has("RigidBody2D", "set_axis_velocity", 1);
+
+        // Area2D — the overlap queries.
+        has("Area2D", "get_overlapping_bodies", 0);
+        has("Area2D", "get_overlapping_areas", 0);
+        has("Area2D", "has_overlapping_bodies", 0);
+        has("Area2D", "overlaps_body", 1);
+        has("Area2D", "overlaps_area", 1);
+
+        // The other half of the contract: nothing unimplemented was advertised.
+        for (class, name) in [
+            ("PhysicsBody2D", "move_and_collide"),
+            ("CharacterBody2D", "get_slide_collision"),
+            ("CharacterBody2D", "get_floor_normal"),
+            ("RigidBody2D", "get_contact_count"),
+            ("CollisionObject2D", "shape_owner_set_transform"),
+            ("CollisionObject2D", "create_shape_owner"),
+        ] {
+            if let Some(info) = get_class_info(class) {
+                assert!(
+                    !info.methods.iter().any(|m| m.name == name),
+                    "`{class}.{name}` has no dispatch arm anywhere in the engine, \
+                     so registering it would make has_method() lie",
+                );
+            }
+        }
+    }
+
+    // -- pat-s3rrv.25: physics body property surface -----------------------
+
+    /// The 2D physics bodies carried a handful of properties each — CharacterBody2D
+    /// 2 of 15, RigidBody2D 3 of 22, Area2D 6 of 15, StaticBody2D **none** — so a
+    /// `.tscn` authoring the rest silently lost them on load and the body
+    /// simulated with defaults the scene never asked for.
+    #[test]
+    fn physics2d_bodies_carry_their_authored_property_surface() {
+        // `Vector2` is imported function-locally inside the register_* fns, not
+        // at module level, so the tests module cannot see it via `use super::*`.
+        use gdcore::math::Vector2;
+
+        let _guard = setup();
+        register_2d_classes();
+
+        let props = |c: &str| -> Vec<String> {
+            get_class_info(c)
+                .unwrap_or_else(|| panic!("{c} registered"))
+                .properties
+                .iter()
+                .map(|p| p.name.clone())
+                .collect()
+        };
+
+        // CharacterBody2D: `motion_mode` alone switches move_and_slide between
+        // grounded and floating, which is the difference between a platformer
+        // and a top-down game.
+        let ch = props("CharacterBody2D");
+        for n in [
+            "motion_mode",
+            "up_direction",
+            "max_slides",
+            "slide_on_ceiling",
+            "floor_stop_on_slope",
+            "floor_snap_length",
+            "platform_on_leave",
+            "safe_margin",
+            "wall_min_slide_angle",
+        ] {
+            assert!(ch.contains(&n.to_string()), "CharacterBody2D missing `{n}`");
+        }
+        assert!(ch.contains(&"velocity".to_string()), "pre-existing kept");
+
+        // Godot's up_direction default is (0, -1) — screen-up in 2D. A (0, 1)
+        // default would invert every floor check.
+        let up = get_class_info("CharacterBody2D")
+            .unwrap()
+            .properties
+            .iter()
+            .find(|p| p.name == "up_direction")
+            .expect("up_direction")
+            .default_value
+            .clone();
+        assert_eq!(up, Variant::Vector2(Vector2::new(0.0, -1.0)));
+
+        let rb = props("RigidBody2D");
+        for n in [
+            "linear_velocity",
+            "angular_velocity",
+            "linear_damp",
+            "angular_damp",
+            "inertia",
+            "center_of_mass",
+            "contact_monitor",
+            "max_contacts_reported",
+            "continuous_cd",
+            "lock_rotation",
+            "sleeping",
+            "can_sleep",
+        ] {
+            assert!(rb.contains(&n.to_string()), "RigidBody2D missing `{n}`");
+        }
+        assert!(rb.contains(&"mass".to_string()) && rb.contains(&"gravity_scale".to_string()));
+
+        // StaticBody2D was registered bare; these two are what make it a
+        // conveyor/moving platform.
+        let sb = props("StaticBody2D");
+        assert!(sb.contains(&"constant_linear_velocity".to_string()));
+        assert!(sb.contains(&"constant_angular_velocity".to_string()));
+
+        let ar = props("Area2D");
+        for n in [
+            "gravity",
+            "gravity_direction",
+            "gravity_point",
+            "gravity_space_override",
+            "linear_damp",
+            "priority",
+        ] {
+            assert!(ar.contains(&n.to_string()), "Area2D missing `{n}`");
+        }
+        // Godot's Area2D gravity default is 980.0, not 0 — a zero default would
+        // make every gravity-override area a no-op.
+        let g = get_class_info("Area2D")
+            .unwrap()
+            .properties
+            .iter()
+            .find(|p| p.name == "gravity")
+            .expect("gravity")
+            .default_value
+            .clone();
+        assert_eq!(g, Variant::Float(980.0));
+
+        let co = props("CollisionObject2D");
+        for n in ["collision_priority", "disable_mode", "input_pickable"] {
+            assert!(
+                co.contains(&n.to_string()),
+                "CollisionObject2D missing `{n}`"
+            );
+        }
     }
 }

@@ -59,7 +59,14 @@ pub fn import_image(path: &Path) -> EngineResult<Arc<Resource>> {
 /// `project.godot` / `.godot/`), and returns its absolute path. Returns
 /// `Ok(None)` when no sidecar exists (direct source loading is the fallback);
 /// returns an error when the sidecar names an artifact that cannot be found.
-fn resolve_import_artifact(source_path: &Path) -> EngineResult<Option<PathBuf>> {
+///
+/// Public since pat-s3rrv.47: the remap is not an image concern. Godot resolves
+/// EVERY imported resource through its `.import` sidecar, and the audio bridge
+/// had no remap lookup at all — so a project whose `music.ogg` had been
+/// replaced by `.godot/imported/music-<md5>.oggvorbisstr` found nothing on disk
+/// and played silence. Sharing this one implementation keeps the audio and
+/// image paths from drifting apart.
+pub fn resolve_import_artifact(source_path: &Path) -> EngineResult<Option<PathBuf>> {
     // The sidecar is "<full source filename>.import" (e.g. "icon.png.import").
     let mut sidecar_os = source_path.as_os_str().to_os_string();
     sidecar_os.push(".import");
@@ -69,18 +76,23 @@ fn resolve_import_artifact(source_path: &Path) -> EngineResult<Option<PathBuf>> 
     }
 
     let import = load_import_file(&sidecar)?;
-    let remap_path = import
-        .import_path()
-        .or_else(|| {
-            // Per-platform remaps (`path.s3tc`, `path.etc2`, …) — take the first.
-            import
-                .remap
-                .iter()
-                .filter(|(k, _)| k.starts_with("path."))
-                .map(|(_, v)| v.as_str())
-                .next()
-        })
-        .ok_or_else(|| EngineError::Parse(format!("{} has no [remap] path", sidecar.display())))?;
+    let remap_path = match import.import_path().or_else(|| {
+        // Per-platform remaps (`path.s3tc`, `path.etc2`, …) — take the first.
+        import
+            .remap
+            .iter()
+            .filter(|(k, _)| k.starts_with("path."))
+            .map(|(_, v)| v.as_str())
+            .next()
+    }) {
+        Some(p) => p,
+        // A sidecar with no `[remap] path` names no artifact — Godot's `keep`
+        // and `skip` importers, and any asset whose `.import` carries only
+        // `[params]`, are exactly this case, and they load from the SOURCE.
+        // This used to be a hard error, which made a params-only sidecar fail
+        // the whole load instead of configuring it (pat-s3rrv.50).
+        None => return Ok(None),
+    };
 
     let project_root = find_project_root(source_path).ok_or_else(|| {
         EngineError::NotFound(format!(
@@ -222,6 +234,127 @@ pub fn import_webp_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>
     res.set_property("has_pixel_data", Variant::Bool(has_pixels));
 
     Ok(Arc::new(res))
+}
+
+/// Decodes a `.tga` into the same pixel-bearing `Texture2D` shape
+/// [`import_image_bytes`] produces (pat-s3rrv.51).
+///
+/// `image_tga_bmp::decode_tga` has existed and compiled all along with **zero
+/// consumers** — the decoder was never the gap, the registration was. Godot
+/// accepts tga through `ResourceImporterTexture`
+/// (editor/import/resource_importer_texture.cpp), so `load("res://x.tga")` has
+/// to answer with the same contract every other image loader answers with, or
+/// the caller has to special-case which extension it asked for.
+pub fn import_tga(path: &Path) -> EngineResult<Arc<Resource>> {
+    // The `.import` sidecar is checked FIRST, exactly as the png/webp paths do:
+    // in a real imported project the source file may have been replaced by a
+    // compiled `.ctex` artifact, and skipping this would find nothing on disk.
+    if let Some(artifact) = resolve_import_artifact(path)? {
+        return load_ctex_file(&artifact);
+    }
+    let data = std::fs::read(path).map_err(EngineError::Io)?;
+    let decoded = crate::image_tga_bmp::decode_tga(&data)
+        .ok_or_else(|| EngineError::Parse(format!("TGA decode failed: {}", path.display())))?;
+    Ok(rgba8_texture_resource(
+        decoded.width,
+        decoded.height,
+        &decoded.rgba,
+        path,
+    ))
+}
+
+/// Decodes a `.bmp` into a `Texture2D`, as [`import_tga`] does for TGA
+/// (pat-s3rrv.51).
+pub fn import_bmp(path: &Path) -> EngineResult<Arc<Resource>> {
+    if let Some(artifact) = resolve_import_artifact(path)? {
+        return load_ctex_file(&artifact);
+    }
+    let data = std::fs::read(path).map_err(EngineError::Io)?;
+    let decoded = crate::image_tga_bmp::decode_bmp(&data)
+        .ok_or_else(|| EngineError::Parse(format!("BMP decode failed: {}", path.display())))?;
+    Ok(rgba8_texture_resource(
+        decoded.width,
+        decoded.height,
+        &decoded.rgba,
+        path,
+    ))
+}
+
+/// Decodes a Radiance `.hdr` into a `Texture2D` (pat-s3rrv.51).
+///
+/// ⚠️ HDR is the one format here whose pixels are NOT sRGB 8-bit. `decode_hdr`
+/// hands back tightly packed **linear** RGB floats, so the values go into the
+/// `Color`s unchanged rather than through a `/ 255.0` — dividing would crush a
+/// 4.0-nit highlight to 0.0157 and quietly destroy the dynamic range that is
+/// the entire reason to load an HDR. Alpha is 1.0; Radiance carries none.
+pub fn import_hdr(path: &Path) -> EngineResult<Arc<Resource>> {
+    if let Some(artifact) = resolve_import_artifact(path)? {
+        return load_ctex_file(&artifact);
+    }
+    let data = std::fs::read(path).map_err(EngineError::Io)?;
+    let decoded = crate::radiance_hdr::decode_hdr(&data)
+        .ok_or_else(|| EngineError::Parse(format!("HDR decode failed: {}", path.display())))?;
+
+    let mut res = Resource::new("Texture2D");
+    res.path = format!(
+        "res://{}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
+    res.set_property("width", Variant::Int(decoded.width as i64));
+    res.set_property("height", Variant::Int(decoded.height as i64));
+    res.set_property("format", Variant::String("RGBF".into()));
+    res.set_property("bit_depth", Variant::Int(32));
+    let colors: Vec<Variant> = decoded
+        .rgb
+        .chunks_exact(3)
+        .map(|px| Variant::Color(gdcore::math::Color::new(px[0], px[1], px[2], 1.0)))
+        .collect();
+    let has_pixels = !colors.is_empty();
+    res.set_property("pixels", Variant::Array(colors));
+    res.set_property("has_pixel_data", Variant::Bool(has_pixels));
+    Ok(Arc::new(res))
+}
+
+/// Builds the `Texture2D` shape every 8-bit image loader in this module
+/// produces, from tightly packed RGBA8 (pat-s3rrv.51).
+///
+/// Factored out so the tga/bmp paths cannot drift from the png/webp contract —
+/// a caller reads `width`/`height`/`pixels`/`has_pixel_data` without caring
+/// which extension it asked for, and that only holds if one function writes it.
+fn rgba8_texture_resource(width: usize, height: usize, rgba: &[u8], path: &Path) -> Arc<Resource> {
+    let mut res = Resource::new("Texture2D");
+    res.path = format!(
+        "res://{}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
+    res.set_property("width", Variant::Int(width as i64));
+    res.set_property("height", Variant::Int(height as i64));
+    res.set_property("format", Variant::String("RGBA".into()));
+    res.set_property("bit_depth", Variant::Int(8));
+    let colors: Vec<Variant> = rgba
+        .chunks_exact(4)
+        .map(|px| {
+            Variant::Color(gdcore::math::Color::new(
+                px[0] as f32 / 255.0,
+                px[1] as f32 / 255.0,
+                px[2] as f32 / 255.0,
+                px[3] as f32 / 255.0,
+            ))
+        })
+        .collect();
+    let has_pixels = !colors.is_empty();
+    res.set_property("pixels", Variant::Array(colors));
+    res.set_property("has_pixel_data", Variant::Bool(has_pixels));
+    Arc::new(res)
+}
+
+/// Loads a `.gltf`/`.glb` through the existing parser (pat-s3rrv.51).
+///
+/// `gltf_import::import_gltf` was reachable only by direct module call, so
+/// `load("res://model.glb")` answered "unsupported extension" while the parser
+/// sat one function away in the same crate.
+pub fn import_gltf_asset(path: &Path) -> EngineResult<Arc<Resource>> {
+    crate::gltf_import::import_gltf(path)
 }
 
 /// Loads a `source_color` image (PNG / WebP / `.ctex`, honoring a `.import`
@@ -478,6 +611,233 @@ fn decode_png_pixels(data: &[u8]) -> Option<Vec<(f32, f32, f32, f32)>> {
 }
 
 // ---------------------------------------------------------------------------
+// Texture import options (pat-s3rrv.50)
+// ---------------------------------------------------------------------------
+
+/// Godot's `process/channel_remap/*` enum
+/// (`upstream/godot/editor/import/resource_importer_texture.h:52-63`):
+/// `0..3` = R/G/B/A, `4..7` = the same inverted, `8` = Unused, `9` = Zero,
+/// `10` = One. `Unused` is resolved to Zero for RGB and One for alpha, exactly
+/// as `_remap_channels` does before its conversion loop (:487-491).
+fn remap_channel(code: i64, src: gdcore::math::Color, is_alpha: bool) -> f32 {
+    let code = if code == 8 {
+        if is_alpha {
+            10
+        } else {
+            9
+        }
+    } else {
+        code
+    };
+    match code {
+        0 => src.r,
+        1 => src.g,
+        2 => src.b,
+        3 => src.a,
+        4 => 1.0 - src.r,
+        5 => 1.0 - src.g,
+        6 => 1.0 - src.b,
+        7 => 1.0 - src.a,
+        9 => 0.0,
+        10 => 1.0,
+        // An out-of-range code keeps the channel — a scene from a newer Godot
+        // must not silently zero a texture.
+        _ => {
+            if is_alpha {
+                src.a
+            } else {
+                src.r
+            }
+        }
+    }
+}
+
+/// Bilinear resample of a `Color` grid. Godot resizes with `INTERPOLATE_CUBIC`
+/// (resource_importer_texture.cpp:832); bilinear is the simplification here —
+/// the dimensions and the overall image match, the interpolation kernel does
+/// not.
+fn resize_pixels(
+    src: &[gdcore::math::Color],
+    src_w: usize,
+    src_h: usize,
+    dst_w: usize,
+    dst_h: usize,
+) -> Vec<gdcore::math::Color> {
+    let mut out = Vec::with_capacity(dst_w * dst_h);
+    if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+        return out;
+    }
+    let x_ratio = src_w as f32 / dst_w as f32;
+    let y_ratio = src_h as f32 / dst_h as f32;
+    for y in 0..dst_h {
+        // Sample at pixel CENTRES, so a 2:1 downscale averages the pair it
+        // covers instead of leaning on the left/top edge.
+        let sy = ((y as f32 + 0.5) * y_ratio - 0.5).max(0.0);
+        let y0 = sy.floor() as usize;
+        let y1 = (y0 + 1).min(src_h - 1);
+        let fy = sy - y0 as f32;
+        for x in 0..dst_w {
+            let sx = ((x as f32 + 0.5) * x_ratio - 0.5).max(0.0);
+            let x0 = sx.floor() as usize;
+            let x1 = (x0 + 1).min(src_w - 1);
+            let fx = sx - x0 as f32;
+            let p = |ix: usize, iy: usize| src[iy.min(src_h - 1) * src_w + ix.min(src_w - 1)];
+            let (c00, c10, c01, c11) = (p(x0, y0), p(x1, y0), p(x0, y1), p(x1, y1));
+            let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+            let mix = |a: gdcore::math::Color, b: gdcore::math::Color, t: f32| {
+                gdcore::math::Color::new(
+                    lerp(a.r, b.r, t),
+                    lerp(a.g, b.g, t),
+                    lerp(a.b, b.b, t),
+                    lerp(a.a, b.a, t),
+                )
+            };
+            out.push(mix(mix(c00, c10, fx), mix(c01, c11, fx), fy));
+        }
+    }
+    out
+}
+
+/// Applies the `ResourceImporterTexture` options this engine can express to an
+/// already-decoded `Texture2D` resource (pat-s3rrv.50).
+///
+/// Before this, `[params]` was parsed into `ImportFile::other_sections` and had
+/// **zero** readers, so every one of these was silently discarded.
+///
+/// Applied in Godot's own order — channel remap, then alpha processing, then
+/// the size limit (resource_importer_texture.cpp:722-845). Options that need a
+/// mip chain or a GPU format Patina does not model (`compress/*`,
+/// `mipmaps/limit`, `roughness/*`, `hdr_*`) are recorded as properties instead
+/// of being silently dropped, so a consumer can see what was asked for.
+pub fn apply_texture_params(res: &Resource, params: &ImportParams) -> Resource {
+    let mut out = res.clone();
+
+    let mut width = match out.get_property("width") {
+        Some(Variant::Int(w)) => *w as usize,
+        _ => 0,
+    };
+    let mut height = match out.get_property("height") {
+        Some(Variant::Int(h)) => *h as usize,
+        _ => 0,
+    };
+    let mut pixels: Vec<gdcore::math::Color> = match out.get_property("pixels") {
+        Some(Variant::Array(a)) => a
+            .iter()
+            .filter_map(|v| match v {
+                Variant::Color(c) => Some(*c),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    if !pixels.is_empty() && pixels.len() == width * height {
+        // -- channel remap --
+        let remap = [
+            params.int("process/channel_remap/red").unwrap_or(0),
+            params.int("process/channel_remap/green").unwrap_or(1),
+            params.int("process/channel_remap/blue").unwrap_or(2),
+            params.int("process/channel_remap/alpha").unwrap_or(3),
+        ];
+        if remap != [0, 1, 2, 3] {
+            for c in pixels.iter_mut() {
+                let src = *c;
+                *c = gdcore::math::Color::new(
+                    remap_channel(remap[0], src, false),
+                    remap_channel(remap[1], src, false),
+                    remap_channel(remap[2], src, false),
+                    remap_channel(remap[3], src, true),
+                );
+            }
+        }
+
+        // -- normal map Y inversion --
+        if params.bool("process/normal_map_invert_y").unwrap_or(false) {
+            for c in pixels.iter_mut() {
+                c.g = 1.0 - c.g;
+            }
+        }
+
+        // -- premultiplied alpha --
+        if params.bool("process/premult_alpha").unwrap_or(false) {
+            for c in pixels.iter_mut() {
+                c.r *= c.a;
+                c.g *= c.a;
+                c.b *= c.a;
+            }
+        }
+
+        // -- size limit --
+        // Godot: only DOWNscales, and only when a side exceeds the limit; the
+        // longer side becomes the limit and the other keeps the aspect ratio by
+        // integer division (resource_importer_texture.cpp:824-843).
+        let limit = params.int("process/size_limit").unwrap_or(0);
+        if limit > 0 {
+            let limit = limit as usize;
+            if width > limit || height > limit {
+                let (new_w, new_h) = if width >= height {
+                    (limit, (height * limit / width).max(1))
+                } else {
+                    ((width * limit / height).max(1), limit)
+                };
+                pixels = resize_pixels(&pixels, width, height, new_w, new_h);
+                width = new_w;
+                height = new_h;
+            }
+        }
+
+        out.set_property("width", Variant::Int(width as i64));
+        out.set_property("height", Variant::Int(height as i64));
+        out.set_property(
+            "pixels",
+            Variant::Array(pixels.into_iter().map(Variant::Color).collect()),
+        );
+    }
+
+    // -- options recorded rather than applied --
+    // Patina holds one mip level and one uncompressed pixel array, so these
+    // cannot change the artifact here; recording them keeps the requested
+    // setting readable instead of dropping it on the floor.
+    if let Some(v) = params.bool("mipmaps/generate") {
+        out.set_property("mipmaps", Variant::Bool(v));
+    }
+    if let Some(v) = params.int("compress/mode") {
+        out.set_property("compress_mode", Variant::Int(v));
+    }
+    if let Some(v) = params.bool("process/fix_alpha_border") {
+        out.set_property("fix_alpha_border", Variant::Bool(v));
+    }
+    out
+}
+
+/// [`import_image`] with the source's `.import` options applied.
+///
+/// ⚠️ A sidecar that names a compiled artifact (`[remap] path`) is loaded
+/// as-is: Godot applied the options when it *produced* that `.ctex`, so
+/// applying them again here would double them — a premultiplied-alpha texture
+/// premultiplied twice, for instance. Patina has no import step, so the options
+/// are applied when — and only when — the LOOSE SOURCE is what gets decoded.
+pub fn import_image_with_params(path: &Path, params: &ImportParams) -> EngineResult<Arc<Resource>> {
+    if let Some(artifact) = resolve_import_artifact(path)? {
+        return load_ctex_file(&artifact);
+    }
+    let data = std::fs::read(path).map_err(EngineError::Io)?;
+    let res = import_image_bytes(&data, path)?;
+    Ok(Arc::new(apply_texture_params(&res, params)))
+}
+
+/// [`import_webp`] with the source's `.import` options applied. Same
+/// artifact-wins rule as [`import_image_with_params`].
+pub fn import_webp_with_params(path: &Path, params: &ImportParams) -> EngineResult<Arc<Resource>> {
+    if let Some(artifact) = resolve_import_artifact(path)? {
+        return load_ctex_file(&artifact);
+    }
+    let data = std::fs::read(path).map_err(EngineError::Io)?;
+    let res = import_webp_bytes(&data, path)?;
+    Ok(Arc::new(apply_texture_params(&res, params)))
+}
+
+// ---------------------------------------------------------------------------
 // WavImporter — WAV header metadata
 // ---------------------------------------------------------------------------
 
@@ -544,7 +904,136 @@ pub fn import_wav(path: &Path) -> EngineResult<Arc<Resource>> {
     res.set_property("audio_format", Variant::Int(audio_format as i64));
     res.set_property("length_seconds", Variant::Float(length_seconds));
 
+    // The `smpl` chunk's first loop, as Godot's ResourceImporterWAV reads it
+    // (pat-s3rrv.47). Without this a looping sample imported from any tracker
+    // or sampler played once and stopped: the loop points were in the file and
+    // nothing ever read them.
+    let (loop_mode, loop_begin, loop_end) = wav_smpl_loop(&data);
+    res.set_property("loop_mode", Variant::Int(loop_mode));
+    res.set_property("loop_begin", Variant::Int(loop_begin));
+    res.set_property("loop_end", Variant::Int(loop_end));
+
     Ok(Arc::new(res))
+}
+
+/// [`import_wav`] with the source's `.import` options applied (pat-s3rrv.50).
+///
+/// Godot's `ResourceImporterWAV` rewrites the SAMPLES for most of these
+/// (`force/mono` mixes down, `force/max_rate` resamples, `edit/trim` cuts
+/// silence, `edit/normalize` rescales). Patina's WAV importer is header-only —
+/// it decodes no sample data at all — so the options that describe the stream's
+/// SHAPE are applied to the metadata that stands in for it, and the ones that
+/// can only be expressed by rewriting samples are recorded as properties. Each
+/// is marked below, so nothing here reads as more complete than it is.
+///
+/// `length_seconds` is deliberately left alone by the shape options: mixing to
+/// mono or resampling changes the sample count, never the duration.
+pub fn apply_wav_params(res: &Resource, params: &ImportParams) -> Resource {
+    let mut out = res.clone();
+    let int_of = |r: &Resource, k: &str| match r.get_property(k) {
+        Some(Variant::Int(v)) => *v,
+        _ => 0,
+    };
+
+    // -- applied to the stream's shape --
+    if params.bool("force/mono").unwrap_or(false) {
+        out.set_property("channels", Variant::Int(1));
+    }
+    if params.bool("force/8_bit").unwrap_or(false) {
+        out.set_property("bit_depth", Variant::Int(8));
+    }
+    if params.bool("force/max_rate").unwrap_or(false) {
+        // Godot only ever downsamples to the cap; a file already below it is
+        // left where it is.
+        if let Some(cap) = params.float("force/max_rate_hz") {
+            let cap = cap.max(1.0) as i64;
+            let current = int_of(&out, "sample_rate");
+            if current > cap {
+                out.set_property("sample_rate", Variant::Int(cap));
+            }
+        }
+    }
+
+    // -- loop points: the importer's option WINS over the file's `smpl` chunk --
+    // Godot writes the editable loop back into the AudioStreamWAV, which is why
+    // an artist can loop a sample the sampler never marked (pat-s3rrv.47 read
+    // the chunk; this is the override on top of it).
+    if let Some(mode) = params.int("edit/loop_mode") {
+        out.set_property("loop_mode", Variant::Int(mode));
+    }
+    if let Some(begin) = params.int("edit/loop_begin") {
+        out.set_property("loop_begin", Variant::Int(begin));
+    }
+    if let Some(end) = params.int("edit/loop_end") {
+        out.set_property("loop_end", Variant::Int(end));
+    }
+
+    // -- recorded, not applied: these rewrite samples, which we do not hold --
+    if let Some(v) = params.bool("edit/trim") {
+        out.set_property("edit_trim", Variant::Bool(v));
+    }
+    if let Some(v) = params.bool("edit/normalize") {
+        out.set_property("edit_normalize", Variant::Bool(v));
+    }
+    if let Some(v) = params.int("compress/mode") {
+        out.set_property("compress_mode", Variant::Int(v));
+    }
+    out
+}
+
+/// [`import_wav`] with the source's `.import` options applied.
+pub fn import_wav_with_params(path: &Path, params: &ImportParams) -> EngineResult<Arc<Resource>> {
+    let res = import_wav(path)?;
+    Ok(Arc::new(apply_wav_params(&res, params)))
+}
+
+/// Reads the first loop out of a WAV `smpl` chunk as Godot's
+/// `AudioStreamWAV` loop fields (pat-s3rrv.47).
+///
+/// Returns `(loop_mode, loop_begin, loop_end)` with `loop_mode = 0`
+/// (`LOOP_DISABLED`) when the file carries no `smpl` chunk or declares zero
+/// loops — the overwhelmingly common case, and the behaviour every existing
+/// caller already saw.
+///
+/// ⚠️ The WAV loop `type` field and Godot's `LoopMode` are NOT the same
+/// numbering: WAV uses 0 = forward, 1 = alternating, 2 = backward, while Godot
+/// uses 0 = disabled, 1 = forward, 2 = ping-pong, 3 = backward. Copying the raw
+/// value across would turn every forward loop into a disabled one — silently,
+/// because a disabled loop just sounds like the old unlooped behaviour.
+///
+/// Godot reads only the FIRST loop (`resource_importer_wav.cpp`); a multi-loop
+/// sampler file is not an error, the extra loops are simply not represented.
+fn wav_smpl_loop(data: &[u8]) -> (i64, i64, i64) {
+    const DISABLED: (i64, i64, i64) = (0, 0, 0);
+    let Some((offset, size)) = find_chunk(data, b"smpl") else {
+        return DISABLED;
+    };
+    let chunk = &data[offset..];
+    // 36 bytes of header before the first loop struct, then 24 per loop.
+    if (size as usize) < 60 || chunk.len() < 60 {
+        return DISABLED;
+    }
+    let le32 = |at: usize| -> u32 {
+        u32::from_le_bytes([chunk[at], chunk[at + 1], chunk[at + 2], chunk[at + 3]])
+    };
+    if le32(28) == 0 {
+        // A `smpl` chunk that declares no loops. Present in plenty of files
+        // that carry only MIDI unity-note data, so this is not a malformed
+        // file — it just has nothing to loop.
+        return DISABLED;
+    }
+    let loop_type = le32(36 + 4);
+    let begin = le32(36 + 8) as i64;
+    let end = le32(36 + 12) as i64;
+    let mode = match loop_type {
+        0 => 1, // WAV forward   -> Godot LOOP_FORWARD
+        1 => 2, // WAV alternate -> Godot LOOP_PINGPONG
+        2 => 3, // WAV backward  -> Godot LOOP_BACKWARD
+        // An unknown type still means "this file wants to loop"; forward is
+        // the safe reading and matches Godot's own fallback.
+        _ => 1,
+    };
+    (mode, begin, end)
 }
 
 /// Finds a RIFF chunk by its 4-byte ID. Returns `(data_offset, data_size)`.
@@ -705,6 +1194,182 @@ impl ImportFile {
     /// Sets a `[deps]` entry (`source_file`, `dest_files`).
     pub fn set_dep(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.deps.insert(key.into(), value.into());
+    }
+}
+
+/// A `.import` file's `[params]` section, parsed into typed [`Variant`]s
+/// (pat-s3rrv.50).
+///
+/// The raw section is `HashMap<String, String>`, so a reader could not tell
+/// `true` from `"true"` from `1`. Every value here has been through
+/// [`crate::loader::parse_variant_value`], the same parser `.tres`/`.tscn`
+/// values go through, so `svg/scale=2.0` arrives as a `Float` and
+/// `force/mono=true` as a `Bool`.
+///
+/// Project-wide defaults (`[importer_defaults] <importer>={...}` in
+/// `project.godot`) fill in options the asset's own sidecar leaves out — the
+/// same precedence Godot uses: per-asset value, else project default, else the
+/// importer's built-in default.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ImportParams {
+    values: HashMap<String, Variant>,
+}
+
+impl ImportParams {
+    /// Parses a raw `[params]` map. A value the Variant parser rejects is kept
+    /// as a plain `String` rather than dropped, so an unrecognised option is
+    /// still visible to whoever knows how to read it.
+    pub fn from_raw(raw: &HashMap<String, String>) -> Self {
+        let values = raw
+            .iter()
+            .map(|(k, v)| {
+                let parsed = crate::loader::parse_variant_value(v)
+                    .unwrap_or_else(|_| Variant::String(v.clone()));
+                (k.clone(), parsed)
+            })
+            .collect();
+        Self { values }
+    }
+
+    /// The typed `[params]` of an already-parsed sidecar.
+    pub fn from_import_file(file: &ImportFile) -> Self {
+        match file.params() {
+            Some(raw) => Self::from_raw(raw),
+            None => Self::default(),
+        }
+    }
+
+    /// Fills in every key this set does not already carry. Used for the
+    /// `importer_defaults` fallback, so a per-asset value always wins.
+    pub fn fill_defaults(&mut self, defaults: &HashMap<String, Variant>) {
+        for (k, v) in defaults {
+            self.values.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+
+    /// `true` when no option is set at all — the signal that a load can take
+    /// the plain, param-free path.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Number of options carried.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// The raw [`Variant`] for an option.
+    pub fn get(&self, key: &str) -> Option<&Variant> {
+        self.values.get(key)
+    }
+
+    /// Sets an option (used by the editor's import dock and by tests).
+    pub fn set(&mut self, key: impl Into<String>, value: Variant) {
+        self.values.insert(key.into(), value);
+    }
+
+    /// An option as a bool. `Int`/`Float` count as booleans the way Godot's
+    /// `Variant` conversion does, so `1` reads as `true`.
+    pub fn bool(&self, key: &str) -> Option<bool> {
+        match self.values.get(key)? {
+            Variant::Bool(b) => Some(*b),
+            Variant::Int(i) => Some(*i != 0),
+            Variant::Float(f) => Some(*f != 0.0),
+            _ => None,
+        }
+    }
+
+    /// An option as an integer, accepting a `Float` written without a fraction.
+    pub fn int(&self, key: &str) -> Option<i64> {
+        match self.values.get(key)? {
+            Variant::Int(i) => Some(*i),
+            Variant::Float(f) => Some(*f as i64),
+            Variant::Bool(b) => Some(*b as i64),
+            _ => None,
+        }
+    }
+
+    /// An option as a float, accepting an `Int` (`svg/scale=2` is legal INI).
+    pub fn float(&self, key: &str) -> Option<f64> {
+        match self.values.get(key)? {
+            Variant::Float(f) => Some(*f),
+            Variant::Int(i) => Some(*i as f64),
+            _ => None,
+        }
+    }
+
+    /// An option as a string.
+    pub fn string(&self, key: &str) -> Option<&str> {
+        match self.values.get(key)? {
+            Variant::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The first of `keys` that is set, as a float. Godot spells the SVG scale
+    /// `svg/scale` on the texture importer and `base_scale` on the SVG one; a
+    /// caller should not have to care which importer wrote the sidecar.
+    pub fn float_any(&self, keys: &[&str]) -> Option<f64> {
+        keys.iter().find_map(|k| self.float(k))
+    }
+}
+
+/// Reads `[importer_defaults] <importer>={ "option": value, ... }` out of a
+/// parsed `project.godot` (pat-s3rrv.50).
+///
+/// Godot stores project-wide importer defaults as one Dictionary per importer
+/// name. Returns an empty map when the section, the importer key, or the
+/// dictionary shape is absent — a project without the section is the norm.
+pub fn project_importer_defaults(
+    project: &crate::project::GodotProjectFile,
+    importer: &str,
+) -> HashMap<String, Variant> {
+    let mut out = HashMap::new();
+    let Some(raw) = project
+        .sections
+        .get("importer_defaults")
+        .and_then(|s| s.get(importer))
+    else {
+        return out;
+    };
+    if let Ok(Variant::Dictionary(dict)) = crate::loader::parse_variant_value(raw) {
+        for (key, value) in dict.iter() {
+            if let Variant::String(k) = key {
+                out.insert(k.clone(), value.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The effective import options for a source file: its `<source>.import`
+/// `[params]`, with `[importer_defaults]` from the enclosing project filling
+/// the gaps.
+///
+/// `None` when there is no sidecar and no project default — the signal to load
+/// the file the plain way.
+pub fn load_source_params(source_path: &Path) -> Option<ImportParams> {
+    let mut sidecar_os = source_path.as_os_str().to_os_string();
+    sidecar_os.push(".import");
+    let sidecar = PathBuf::from(sidecar_os);
+    if !sidecar.exists() {
+        return None;
+    }
+    let file = load_import_file(&sidecar).ok()?;
+    let mut params = ImportParams::from_import_file(&file);
+    if let Some(importer) = file.importer() {
+        if let Some(root) = find_project_root(source_path) {
+            if let Ok(text) = std::fs::read_to_string(root.join("project.godot")) {
+                if let Ok(project) = crate::project::GodotProjectFile::parse(&text) {
+                    params.fill_defaults(&project_importer_defaults(&project, importer));
+                }
+            }
+        }
+    }
+    if params.is_empty() {
+        None
+    } else {
+        Some(params)
     }
 }
 
@@ -871,6 +1536,14 @@ pub fn load_import_file(path: &Path) -> EngineResult<ImportFile> {
 /// A loader function signature: takes a path, returns a resource.
 pub type LoaderFn = fn(&Path) -> EngineResult<Arc<Resource>>;
 
+/// A loader that also receives the source's `.import` options (pat-s3rrv.50).
+///
+/// Kept separate from [`LoaderFn`] rather than widening it: every existing
+/// `register` caller and every plain loader (`.tres`, `.gdshader`, …) has no
+/// use for import options, and changing the public signature would break them
+/// all for the four formats that do.
+pub type LoaderWithParamsFn = fn(&Path, &ImportParams) -> EngineResult<Arc<Resource>>;
+
 /// Registry that maps file extensions to loader functions.
 ///
 /// Call [`register`](ResourceFormatLoader::register) to add extension mappings,
@@ -878,6 +1551,10 @@ pub type LoaderFn = fn(&Path) -> EngineResult<Arc<Resource>>;
 #[derive(Default)]
 pub struct ResourceFormatLoader {
     loaders: HashMap<String, LoaderFn>,
+    /// Loaders that honour the source's `.import` `[params]`. Consulted first
+    /// when a sidecar carries options; `loaders` is the fallback and stays the
+    /// only path for formats that have no import options.
+    params_loaders: HashMap<String, LoaderWithParamsFn>,
 }
 
 impl ResourceFormatLoader {
@@ -903,12 +1580,32 @@ impl ResourceFormatLoader {
         rfl.register(".vs", vs_loader);
         rfl.register(".gdshader", load_gdshader);
         rfl.register(".gdshaderinc", load_gdshader);
+        // pat-s3rrv.51 — source-asset extensions whose decoders already existed
+        // and compiled with ZERO consumers. Godot resolves every one of these
+        // through a registered loader (core/io/image_loader.cpp,
+        // modules/gltf/), so `load()`, the editor and the renderer agree.
+        rfl.register(".tga", import_tga);
+        rfl.register(".bmp", import_bmp);
+        rfl.register(".hdr", import_hdr);
+        rfl.register(".gltf", import_gltf_asset);
+        rfl.register(".glb", import_gltf_asset);
+        // The formats Godot gives import options to (pat-s3rrv.50). Each still
+        // has a plain loader above, used when the asset has no sidecar.
+        rfl.register_with_params(".png", import_image_with_params);
+        rfl.register_with_params(".webp", import_webp_with_params);
+        rfl.register_with_params(".svg", crate::image_svg::import_svg_with_params);
+        rfl.register_with_params(".wav", import_wav_with_params);
         rfl
     }
 
     /// Registers a loader for the given extension (including the dot, e.g. `".png"`).
     pub fn register(&mut self, extension: &str, loader: LoaderFn) {
         self.loaders.insert(extension.to_lowercase(), loader);
+    }
+
+    /// Registers a loader that honours `.import` options for the extension.
+    pub fn register_with_params(&mut self, extension: &str, loader: LoaderWithParamsFn) {
+        self.params_loaders.insert(extension.to_lowercase(), loader);
     }
 
     /// Returns the number of registered extensions.
@@ -932,19 +1629,55 @@ impl ResourceFormatLoader {
         }
     }
 
-    /// Loads a resource by dispatching to the registered loader for its extension.
+    /// Loads a resource by dispatching to the registered loader for its
+    /// extension, applying the source's `.import` options when it has any.
+    ///
+    /// Godot persists each asset's importer settings in its `.import`
+    /// `[params]` section and the importer applies them when producing the
+    /// artifact. Patina parsed that section and then dropped it — nothing read
+    /// it, so `svg/scale`, `force/mono`, `process/size_limit` and the rest were
+    /// inert (pat-s3rrv.50). Looking the sidecar up here means every consumer
+    /// of the registry gets the configured asset, not just the ones that
+    /// remember to ask.
     pub fn load_resource(&self, path: &Path) -> EngineResult<Arc<Resource>> {
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| format!(".{}", e.to_lowercase()))
-            .unwrap_or_default();
+        match load_source_params(path) {
+            Some(params) => self.load_resource_with_params(path, &params),
+            None => self.load_plain(path),
+        }
+    }
 
+    /// Loads with an explicit option set, bypassing the sidecar lookup — the
+    /// entry point for a caller that already holds the params (the editor's
+    /// import dock previewing an unsaved change, for one).
+    pub fn load_resource_with_params(
+        &self,
+        path: &Path,
+        params: &ImportParams,
+    ) -> EngineResult<Arc<Resource>> {
+        let ext = Self::extension_of(path);
+        match self.params_loaders.get(&ext) {
+            Some(loader) => loader(path, params),
+            // A format with options but no params-aware loader still loads;
+            // the options simply do not apply to it.
+            None => self.load_plain(path),
+        }
+    }
+
+    /// The option-free load path.
+    fn load_plain(&self, path: &Path) -> EngineResult<Arc<Resource>> {
+        let ext = Self::extension_of(path);
         let loader = self.loaders.get(&ext).ok_or_else(|| {
             EngineError::NotFound(format!("no loader registered for extension '{ext}'"))
         })?;
-
         loader(path)
+    }
+
+    /// `".png"`-style lowercase extension, empty when the path has none.
+    fn extension_of(path: &Path) -> String {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{}", e.to_lowercase()))
+            .unwrap_or_default()
     }
 }
 
@@ -1565,7 +2298,17 @@ antialiased=true
         assert!(rfl.can_load(".ctex"));
         assert!(rfl.can_load(".gdshader"));
         assert!(rfl.can_load(".gdshaderinc"));
-        assert_eq!(rfl.extension_count(), 12);
+        // pat-s3rrv.51 added .tga/.bmp/.hdr/.gltf/.glb. This number was ALREADY
+        // stale before that — it read 12 while `with_defaults` registered 14 —
+        // so it was red at HEAD; the extension list and this count have to move
+        // together. `format_loader_covers_source_asset_extensions` pins the
+        // full list beside it.
+        assert!(rfl.can_load(".tga"));
+        assert!(rfl.can_load(".bmp"));
+        assert!(rfl.can_load(".hdr"));
+        assert!(rfl.can_load(".gltf"));
+        assert!(rfl.can_load(".glb"));
+        assert_eq!(rfl.extension_count(), 19);
     }
 
     #[test]

@@ -6,6 +6,11 @@
 
 use gdvariant::variant::Variant;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Re-exported so renderers can build a sampler without depending on
+/// `gdresource` themselves (pat-s3rrv.36).
+pub use gdresource::shader_ast::Sampler;
 
 /// The type of shader program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -379,6 +384,18 @@ pub enum FragmentInstruction {
     MultiplyColorRgb(FloatExpr),
     /// `COLOR *= <float>` — multiplies all channels by a scalar.
     MultiplyColor(FloatExpr),
+    /// The whole shader, parsed by the real GDShader front end (pat-s3rrv.36).
+    ///
+    /// The variants above are a five-shape line matcher that silently skips any
+    /// statement it cannot classify — a shader with a local variable or an `if`
+    /// produced *zero* instructions and rendered unshaded, with no diagnostic.
+    /// When `gdresource::shader_ast` can parse the source, the entire program is
+    /// carried here instead and evaluated per fragment.
+    ///
+    /// `Arc` because a program is parsed once per shader source and shared by
+    /// every fragment; `PartialEq` on the enum still works because
+    /// `ShaderProgram` derives it.
+    Program(Arc<gdresource::shader_ast::ShaderProgram>),
 }
 
 /// An expression that evaluates to a color value.
@@ -478,7 +495,52 @@ pub fn parse_fragment_body(source: &str) -> Vec<FragmentInstruction> {
         }
     }
 
+    // pat-s3rrv.36: when the line matcher above understood NOTHING, hand the
+    // whole source to the real GDShader front end.
+    //
+    // Deliberately a fallback rather than a replacement. A shader the matcher
+    // already handles keeps its exact existing path, so this cannot regress
+    // anything that renders correctly today; a shader that yields ZERO
+    // instructions — the reported bug, e.g. the repo's own
+    // fixtures/shaders/outline.gdshader — gets real evaluation instead of
+    // rendering unshaded and silent. Letting the AST preempt the matcher
+    // outright is the end state, but only once every built-in the matcher
+    // implies is populated for the AST path.
+    if instructions.is_empty() {
+        if let Ok(program) = gdresource::shader_ast::parse_shader(source) {
+            if program.function("fragment").is_some() {
+                return vec![FragmentInstruction::Program(Arc::new(program))];
+            }
+        }
+    }
+
     instructions
+}
+
+/// [`parse_fragment_body`] that also reports WHY a shader produced nothing
+/// (pat-s3rrv.36).
+///
+/// Godot treats an unparsable shader as a compile error with a line number;
+/// Patina dropped it silently, which is the root of this bead — a broken shader
+/// and a shader that legitimately does nothing were indistinguishable. The
+/// plain [`parse_fragment_body`] keeps its lossy signature so existing callers
+/// are untouched; a caller that wants to surface the error uses this instead.
+///
+/// `Ok` with an empty vec is still possible and still meaningful: it is a source
+/// with no `fragment()` function at all, which is legal.
+pub fn parse_fragment_body_checked(
+    source: &str,
+) -> Result<Vec<FragmentInstruction>, gdresource::shader_ast::ShaderError> {
+    let instructions = parse_fragment_body(source);
+    if !instructions.is_empty() {
+        return Ok(instructions);
+    }
+    // Nothing came out. Distinguish "there is no fragment() here" (fine) from
+    // "the source is broken" (a diagnostic the author needs).
+    match gdresource::shader_ast::parse_shader(source) {
+        Ok(_) => Ok(instructions),
+        Err(e) => Err(e),
+    }
 }
 
 /// Parses a `shader_type sky` program's `sky()` function body into the same
@@ -806,6 +868,78 @@ pub fn eval_color_expr(
     }
 }
 
+/// Converts a script/material uniform into a shader value (pat-s3rrv.36).
+///
+/// `None` for types with no shader equivalent (strings, node paths); the
+/// evaluator then reports the name as undeclared rather than silently reading a
+/// zero, which is the behaviour that made the old matcher untrustworthy.
+fn uniform_to_shader_value(v: &Variant) -> Option<gdresource::shader_ast::ShaderValue> {
+    use gdresource::shader_ast::ShaderValue as SV;
+    Some(match v {
+        Variant::Bool(b) => SV::Bool(*b),
+        Variant::Int(i) => SV::Int(*i),
+        Variant::Float(f) => SV::Float(*f as f32),
+        Variant::Vector2(v) => SV::Vec2([v.x, v.y]),
+        Variant::Vector3(v) => SV::Vec3([v.x, v.y, v.z]),
+        Variant::Color(c) => SV::Vec4([c.r, c.g, c.b, c.a]),
+        _ => return None,
+    })
+}
+
+/// Runs a parsed shader's `fragment()` for one pixel (pat-s3rrv.36).
+///
+/// Returns `None` when the shader fails to evaluate or `discard`s, leaving the
+/// caller's colour untouched — a `discard`ed fragment must not be written.
+fn eval_ast_fragment(
+    program: &gdresource::shader_ast::ShaderProgram,
+    ctx: &FragmentContext,
+    uniforms: &HashMap<String, Variant>,
+    env: &ShaderEnv,
+) -> Option<gdcore::math::Color> {
+    use gdresource::shader_ast::{eval_function, ShaderValue as SV, StageContext};
+
+    let uniform_values: HashMap<String, SV> = uniforms
+        .iter()
+        .filter_map(|(k, v)| uniform_to_shader_value(v).map(|sv| (k.clone(), sv)))
+        .collect();
+
+    // Godot's canvas_item fragment built-ins that this renderer can supply.
+    // COLOR arrives pre-modulated, matching the default `COLOR =
+    // texture(TEXTURE, UV) * MODULATE` the caller already applied.
+    let mut builtins: HashMap<String, SV> = HashMap::new();
+    builtins.insert(
+        "COLOR".to_string(),
+        SV::Vec4([ctx.color.r, ctx.color.g, ctx.color.b, ctx.color.a]),
+    );
+    builtins.insert("UV".to_string(), SV::Vec2([ctx.uv.0, ctx.uv.1]));
+    builtins.insert(
+        "SCREEN_UV".to_string(),
+        SV::Vec2([ctx.screen_uv.0, ctx.screen_uv.1]),
+    );
+    builtins.insert("TIME".to_string(), SV::Float(ctx.time));
+    builtins.insert(
+        "TEXTURE_PIXEL_SIZE".to_string(),
+        SV::Vec2([env.texture_pixel_size.0, env.texture_pixel_size.1]),
+    );
+
+    let mut stage = StageContext::new(uniform_values, builtins);
+    if let Some(sampler) = &env.sampler {
+        stage = stage.with_sampler(sampler.clone());
+    }
+
+    // A shader that fails at runtime leaves the pixel as the caller had it,
+    // rather than punching a hole in the sprite.
+    eval_function(program, "fragment", &mut stage).ok()?;
+    if stage.discarded {
+        return None;
+    }
+    match stage.builtins.get("COLOR") {
+        Some(SV::Vec4(c)) => Some(gdcore::math::Color::new(c[0], c[1], c[2], c[3])),
+        Some(SV::Vec3(c)) => Some(gdcore::math::Color::new(c[0], c[1], c[2], ctx.color.a)),
+        _ => None,
+    }
+}
+
 /// Executes parsed fragment instructions against a context.
 ///
 /// Returns the resulting output color.
@@ -814,10 +948,44 @@ pub fn execute_fragment(
     ctx: &FragmentContext,
     uniforms: &HashMap<String, Variant>,
 ) -> gdcore::math::Color {
+    execute_fragment_with_env(instructions, ctx, uniforms, &ShaderEnv::default())
+}
+
+/// Per-draw values the fragment stage needs that [`FragmentContext`] does not
+/// carry, because they belong to the *renderer* rather than the pixel
+/// (pat-s3rrv.36).
+///
+/// A separate struct rather than new `FragmentContext` fields: that type has
+/// ~16 construction sites, only some using `..Default::default()`, and every
+/// full literal would have to be edited. This also keeps the texture out of
+/// `gdserver2d` entirely — `Texture2D` lives in `gdrender2d`, so the sampler can
+/// only ever arrive as a caller-supplied closure.
+#[derive(Debug, Clone, Default)]
+pub struct ShaderEnv {
+    /// Resolves `texture(SAMPLER, uv)`. `None` samples transparent black.
+    pub sampler: Option<gdresource::shader_ast::Sampler>,
+    /// Godot's `TEXTURE_PIXEL_SIZE`: one texel in UV units. Zero when unknown,
+    /// which makes neighbour-tap shaders sample their own texel — visually a
+    /// no-op rather than a wrong offset.
+    pub texture_pixel_size: (f32, f32),
+}
+
+/// [`execute_fragment`] with renderer-supplied environment (pat-s3rrv.36).
+pub fn execute_fragment_with_env(
+    instructions: &[FragmentInstruction],
+    ctx: &FragmentContext,
+    uniforms: &HashMap<String, Variant>,
+    env: &ShaderEnv,
+) -> gdcore::math::Color {
     let mut color = ctx.color;
 
     for inst in instructions {
         match inst {
+            FragmentInstruction::Program(program) => {
+                if let Some(c) = eval_ast_fragment(program, ctx, uniforms, env) {
+                    color = c;
+                }
+            }
             FragmentInstruction::SetColor(expr) => {
                 color = eval_color_expr(expr, ctx, uniforms);
             }
@@ -983,6 +1151,15 @@ pub fn generate_canvas_item_wgsl(uniforms: &[ShaderUniform], source: &str) -> St
     let mut body = String::new();
     for inst in &instructions {
         match inst {
+            // pat-s3rrv.36: an AST-routed shader has no WGSL translation yet.
+            // This function returns a String and cannot decline, so the body is
+            // left empty for it and `unsupported_features` reports the reason —
+            // that is the channel callers already use to gate the GPU path.
+            // Emitting nothing WITHOUT that report would silently render an
+            // unshaded sprite on GPU while the CPU interpreter rendered it
+            // correctly, which is the exact class of silent divergence this
+            // bead exists to remove.
+            FragmentInstruction::Program(_) => continue,
             FragmentInstruction::SetColor(e) => {
                 body.push_str(&format!(
                     "    COLOR = {};\n",
@@ -1099,6 +1276,21 @@ fn contains_call(source: &str, name: &str) -> bool {
 /// within the supported subset. This is best-effort, not a full validator.
 pub fn unsupported_features(source: &str, shader_type: ShaderType) -> Vec<String> {
     let mut out = Vec::new();
+
+    // pat-s3rrv.36: a source only the GDShader AST front end can represent (a
+    // local variable, an `if`, a loop, a user function) has no WGSL translation.
+    // Detected by asking the parser rather than by string-matching for keywords,
+    // so this stays true as the front end grows.
+    if parse_fragment_body(source)
+        .iter()
+        .any(|i| matches!(i, FragmentInstruction::Program(_)))
+    {
+        out.push(
+            "shader language constructs beyond the WGSL translator (locals, \
+             control flow, user functions) — runs on the CPU interpreter"
+                .to_string(),
+        );
+    }
 
     if shader_type != ShaderType::CanvasItem {
         out.push(format!(

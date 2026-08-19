@@ -490,42 +490,26 @@ impl PhysicsWorld2D {
                     continue;
                 }
 
-                // Read shapes, positions, layers, and one-way info
-                let (
-                    shape_a,
-                    pos_a,
-                    rot_a,
-                    shape_b,
-                    pos_b,
-                    rot_b,
-                    layer_a,
-                    mask_a,
-                    layer_b,
-                    mask_b,
-                    ow_a,
-                    ow_dir_a,
-                    ow_b,
-                    ow_dir_b,
-                    vel_a,
-                    vel_b,
-                ) = {
+                // Read shapes, positions, layers, and velocities.
+                //
+                // One-way collision is NOT hoisted here: it rides on each
+                // `ShapeOwner2D` instead, because Godot puts the flag on the
+                // `CollisionShape2D` child (pat-s3rrv.25). A body-level hoist is
+                // what made a solid torso and a one-way foot sensor mutually
+                // exclusive.
+                let (owners_a, owners_b, layer_a, mask_a, layer_b, mask_b, vel_a, vel_b) = {
                     let a = &self.bodies[&id_a];
                     let b = &self.bodies[&id_b];
                     (
-                        a.shape,
-                        a.position,
-                        a.rotation,
-                        b.shape,
-                        b.position,
-                        b.rotation,
+                        // EVERY shape each body owns, in world space — an
+                        // authored `CollisionShape2D` offset is part of where the
+                        // geometry is, and a body may own several (pat-s3rrv.25).
+                        a.shape_owners(),
+                        b.shape_owners(),
                         a.collision_layer,
                         a.collision_mask,
                         b.collision_layer,
                         b.collision_mask,
-                        a.one_way_collision,
-                        a.one_way_direction,
-                        b.one_way_collision,
-                        b.one_way_direction,
                         a.linear_velocity,
                         b.linear_velocity,
                     )
@@ -536,66 +520,87 @@ impl PhysicsWorld2D {
                     continue;
                 }
 
-                // Build rotation-aware world transforms so the narrow-phase
-                // accounts for each body's orientation (SAT in world space).
-                let tf_a = body_transform(pos_a, rot_a);
-                let tf_b = body_transform(pos_b, rot_b);
+                // Every shape of A against every shape of B (pat-s3rrv.25).
+                // The owner lists came out of the borrow block above already
+                // rotation-aware and collider-offset-aware, so the narrow phase
+                // sees each shape where it actually is (SAT in world space).
+                //
+                // ⚠️ The `continue`s inside now skip a SHAPE pair rather than the
+                // whole body pair. With one shape each — every scene today —
+                // these loops run exactly once and that is the same statement.
+                // With several, it is also the behaviour Godot wants: one-way
+                // collision is a property of a shape, so a body's solid collider
+                // must still block even when its one-way collider lets you pass.
+                for owner_a in &owners_a {
+                    for owner_b in &owners_b {
+                        let (shape_a, tf_a) = (&owner_a.shape, &owner_a.transform);
+                        let (shape_b, tf_b) = (&owner_b.shape, &owner_b.transform);
+                        if let Some(result) =
+                            collision::test_collision(shape_a, tf_a, shape_b, tf_b)
+                        {
+                            if result.colliding && result.depth > 0.0 {
+                                // One-way collision check, per SHAPE: the flags
+                                // come off the owner, so A's solid collider still
+                                // blocks even when A's one-way collider lets B
+                                // through (pat-s3rrv.25).
+                                let approach_dir = vel_b - vel_a;
+                                if owner_a.one_way_collision
+                                    && approach_dir.dot(owner_a.one_way_direction) >= 0.0
+                                {
+                                    continue; // Body B is not approaching from the correct side of this shape of A
+                                }
+                                if owner_b.one_way_collision
+                                    && (-approach_dir).dot(owner_b.one_way_direction) >= 0.0
+                                {
+                                    continue; // Body A is not approaching from the correct side of this shape of B
+                                }
 
-                if let Some(result) = collision::test_collision(&shape_a, &tf_a, &shape_b, &tf_b) {
-                    if result.colliding && result.depth > 0.0 {
-                        // One-way collision check
-                        let approach_dir = vel_b - vel_a;
-                        if ow_a && approach_dir.dot(ow_dir_a) >= 0.0 {
-                            continue; // Body B is not approaching from the correct side of A
+                                let pair = if id_a.0 < id_b.0 {
+                                    (id_a, id_b)
+                                } else {
+                                    (id_b, id_a)
+                                };
+                                current_contacts.insert(pair);
+
+                                let state = if self.previous_contacts.contains(&pair) {
+                                    ContactState::Persisting
+                                } else {
+                                    ContactState::Entered
+                                };
+
+                                events.push(CollisionEvent {
+                                    body_a: id_a,
+                                    body_b: id_b,
+                                    contact_point: result.point,
+                                    normal: result.normal,
+                                    state,
+                                });
+
+                                // A box on a floor touches along an edge; the narrow
+                                // phase only reports its midpoint. Recovering the second
+                                // point is what stops a stacked box rocking corner to
+                                // corner.
+                                let manifold =
+                                    solver::build_manifold(shape_a, tf_a, shape_b, tf_b, &result);
+                                let (Some(body_a), Some(body_b)) =
+                                    (self.bodies.get(&id_a), self.bodies.get(&id_b))
+                                else {
+                                    continue;
+                                };
+                                if let Some(constraint) = ContactConstraint2D::new(
+                                    body_a,
+                                    body_b,
+                                    &manifold,
+                                    dt,
+                                    self.contact_solver.contact_bias,
+                                    self.contact_solver.max_penetration,
+                                ) {
+                                    constraints.push(constraint);
+                                }
+                            }
                         }
-                        if ow_b && (-approach_dir).dot(ow_dir_b) >= 0.0 {
-                            continue; // Body A is not approaching from the correct side of B
-                        }
-
-                        let pair = if id_a.0 < id_b.0 {
-                            (id_a, id_b)
-                        } else {
-                            (id_b, id_a)
-                        };
-                        current_contacts.insert(pair);
-
-                        let state = if self.previous_contacts.contains(&pair) {
-                            ContactState::Persisting
-                        } else {
-                            ContactState::Entered
-                        };
-
-                        events.push(CollisionEvent {
-                            body_a: id_a,
-                            body_b: id_b,
-                            contact_point: result.point,
-                            normal: result.normal,
-                            state,
-                        });
-
-                        // A box on a floor touches along an edge; the narrow
-                        // phase only reports its midpoint. Recovering the second
-                        // point is what stops a stacked box rocking corner to
-                        // corner.
-                        let manifold =
-                            solver::build_manifold(&shape_a, &tf_a, &shape_b, &tf_b, &result);
-                        let (Some(body_a), Some(body_b)) =
-                            (self.bodies.get(&id_a), self.bodies.get(&id_b))
-                        else {
-                            continue;
-                        };
-                        if let Some(constraint) = ContactConstraint2D::new(
-                            body_a,
-                            body_b,
-                            &manifold,
-                            dt,
-                            self.contact_solver.contact_bias,
-                            self.contact_solver.max_penetration,
-                        ) {
-                            constraints.push(constraint);
-                        }
-                    }
-                }
+                    } // shape_b
+                } // shape_a
             }
         }
 
@@ -739,10 +744,11 @@ impl PhysicsWorld2D {
             }
 
             // World -> local, mirroring point_query.
-            let local = body_transform(body.position, body.rotation)
-                .affine_inverse()
-                .xform(query.from);
-            if body.shape.contains_point(local) {
+            let starts_inside = body.shape_owners().into_iter().any(|o| {
+                o.shape
+                    .contains_point(o.transform.affine_inverse().xform(query.from))
+            });
+            if starts_inside {
                 if query.hit_from_inside {
                     // Godot reports an inside hit at the ray origin with a zero
                     // normal. Several bodies may contain `from`; pick the lowest
@@ -813,7 +819,7 @@ impl PhysicsWorld2D {
     /// for input picking (Godot `CollisionObject2D` picking / `_intersect_point`).
     ///
     /// The world point is transformed into each body's LOCAL space — using the
-    /// same rotation-aware [`body_transform`] convention the narrow-phase uses to
+    /// same rotation-aware [`PhysicsBody2D::shape_world_transform`] convention the
     /// place a body's shape in the world (see [`step_inner`](Self::step_inner)) —
     /// before the shape's [`Shape2D::contains_point`] test, which expects a
     /// shape-local point.
@@ -829,12 +835,18 @@ impl PhysicsWorld2D {
             .iter()
             .filter_map(|(&id, body)| {
                 // World -> local: invert the body's world transform, mirroring
-                // the `body_transform(pos, rot)` the narrow-phase builds to place
+                // the `shape_world_transform()` the narrow-phase builds to place
                 // this body's shape in the world.
-                let local = body_transform(body.position, body.rotation)
-                    .affine_inverse()
-                    .xform(world_point);
-                body.shape.contains_point(local).then_some(id)
+                // ANY collider the body owns, not just the first
+                // (pat-s3rrv.25). A picking click on an L-shaped body's second
+                // arm used to miss it entirely.
+                body.shape_owners()
+                    .into_iter()
+                    .any(|o| {
+                        o.shape
+                            .contains_point(o.transform.affine_inverse().xform(world_point))
+                    })
+                    .then_some(id)
             })
             .collect();
         // `BodyId` is not `Ord`; sort by its inner id for a deterministic order.
@@ -846,6 +858,35 @@ impl PhysicsWorld2D {
     /// `None` if the point hits no body. Convenience over [`point_query`].
     ///
     /// [`point_query`]: Self::point_query
+    /// Like [`point_query`](Self::point_query), but also reports **which**
+    /// collider of each body contained the point (pat-s3rrv.25).
+    ///
+    /// The index is into [`PhysicsBody2D::shape_owners`], i.e. `0` is the
+    /// primary shape and `1..` are `extra_shapes` in scene order — which is the
+    /// `shape_idx` Godot passes to `_input_event` and `_mouse_shape_enter`.
+    ///
+    /// Reports the FIRST matching collider per body rather than all of them:
+    /// Godot's picking delivers one `shape_idx` per object per event, and
+    /// overlapping colliders on one body would otherwise fire the handler twice
+    /// for a single click.
+    pub fn point_query_with_shape(&self, world_point: Vector2) -> Vec<(BodyId, usize)> {
+        let mut hits: Vec<(BodyId, usize)> = self
+            .bodies
+            .iter()
+            .filter_map(|(&id, body)| {
+                body.shape_owners()
+                    .into_iter()
+                    .position(|o| {
+                        o.shape
+                            .contains_point(o.transform.affine_inverse().xform(world_point))
+                    })
+                    .map(|idx| (id, idx))
+            })
+            .collect();
+        hits.sort_by_key(|(id, _)| id.0);
+        hits
+    }
+
     pub fn point_query_first(&self, world_point: Vector2) -> Option<BodyId> {
         self.point_query(world_point).into_iter().next()
     }
@@ -873,10 +914,15 @@ impl PhysicsWorld2D {
             if collision_mask != 0 && (body.collision_layer & collision_mask) == 0 {
                 continue;
             }
-            let body_tf = body_transform(body.position, body.rotation);
-            if let Some(result) =
-                collision::test_collision(shape, &transform, &body.shape, &body_tf)
-            {
+            let deepest = body
+                .shape_owners()
+                .into_iter()
+                .filter_map(|o| {
+                    collision::test_collision(shape, &transform, &o.shape, &o.transform)
+                })
+                .filter(|r| r.colliding)
+                .max_by(|a, b| a.depth.total_cmp(&b.depth));
+            if let Some(result) = deepest {
                 if result.colliding {
                     hits.push(ShapeCastHit {
                         body_id: id,
@@ -894,22 +940,111 @@ impl PhysicsWorld2D {
         });
         hits
     }
+
+    /// Godot `PhysicsDirectSpaceState2D.collide_shape` (pat-s3rrv.26).
+    ///
+    /// Contact points as **pairs**, in the documented order: for each pair the
+    /// first point lies on the *query* shape and the second on the collider
+    /// (`doc/classes/PhysicsDirectSpaceState2D.xml`). [`shape_cast`] reports one
+    /// contact on the collider surface plus an outward `normal` and a
+    /// penetration `depth`, so the query shape's matching point is that contact
+    /// pushed back along the normal by the penetration.
+    ///
+    /// [`shape_cast`]: Self::shape_cast
+    pub fn collide_shape(
+        &self,
+        shape: &Shape2D,
+        transform: Transform2D,
+        exclude: &[BodyId],
+        collision_mask: u32,
+        max_results: usize,
+    ) -> Vec<Vector2> {
+        let mut out = Vec::new();
+        for hit in self
+            .shape_cast(shape, transform, exclude, collision_mask)
+            .into_iter()
+            .take(max_results)
+        {
+            out.push(hit.point + hit.normal * (-hit.depth));
+            out.push(hit.point);
+        }
+        out
+    }
+
+    /// Godot `PhysicsDirectSpaceState2D.get_rest_info` (pat-s3rrv.26).
+    ///
+    /// The **nearest** contact when several overlap. [`shape_cast`] sorts
+    /// ascending by penetration depth, so that is simply its first hit.
+    ///
+    /// [`shape_cast`]: Self::shape_cast
+    pub fn shape_rest_info(
+        &self,
+        shape: &Shape2D,
+        transform: Transform2D,
+        exclude: &[BodyId],
+        collision_mask: u32,
+    ) -> Option<ShapeCastHit> {
+        self.shape_cast(shape, transform, exclude, collision_mask)
+            .into_iter()
+            .next()
+    }
+
+    /// Godot `PhysicsDirectSpaceState2D.cast_motion` (pat-s3rrv.26).
+    ///
+    /// `[safe, unsafe]` fractions of `motion`, each in `0..=1`: the largest
+    /// fraction that moves without colliding, and the smallest that collides.
+    ///
+    /// Godot's edge cases, both of which a bare bisection would get wrong:
+    /// `[1.0, 1.0]` when the whole motion is clear, and `[0.0, 0.0]` when the
+    /// shape already overlaps before moving at all.
+    pub fn cast_motion(
+        &self,
+        shape: &Shape2D,
+        transform: Transform2D,
+        motion: Vector2,
+        exclude: &[BodyId],
+        collision_mask: u32,
+    ) -> [f32; 2] {
+        let at = |frac: f32| {
+            let mut tf = transform;
+            tf.origin = transform.origin + motion * frac;
+            tf
+        };
+        if !self
+            .shape_cast(shape, at(0.0), exclude, collision_mask)
+            .is_empty()
+        {
+            return [0.0, 0.0];
+        }
+        if self
+            .shape_cast(shape, at(1.0), exclude, collision_mask)
+            .is_empty()
+        {
+            return [1.0, 1.0];
+        }
+        // `lo` is always clear and `hi` always collides, so the interval always
+        // brackets the transition; 16 halvings resolve it to ~1.5e-5 of the
+        // motion, finer than a pixel for any realistic motion length.
+        let (mut lo, mut hi) = (0.0f32, 1.0f32);
+        for _ in 0..16 {
+            let mid = (lo + hi) * 0.5;
+            if self
+                .shape_cast(shape, at(mid), exclude, collision_mask)
+                .is_empty()
+            {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        [lo, hi]
+    }
 }
 
 impl Default for PhysicsWorld2D {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Builds a body's world transform from its position and rotation (radians).
-///
-/// The basis carries the rotation so the narrow-phase can transform local
-/// shape geometry into world space, making collisions orientation-aware.
-fn body_transform(position: Vector2, rotation: f32) -> Transform2D {
-    let mut tf = Transform2D::rotated(rotation);
-    tf.origin = position;
-    tf
 }
 
 /// Ray-shape intersection test for a single body.
@@ -925,25 +1060,38 @@ fn raycast_shape(
     // was ray-tested as though it were still axis-aligned, which silently
     // reported hits on faces that had turned away (pat-0q2kx.32).
     //
-    // `body_transform` is rigid — rotation plus translation, no scale — so the
+    // `shape_world_transform` is rigid — rotation and translation, no scale — so
     // hit distance survives the round trip unchanged and a unit direction stays
     // unit-length.
-    let xform = body_transform(body.position, body.rotation);
-    let inv = xform.affine_inverse();
-    let hit = raycast_shape_local(
-        inv.xform(origin),
-        inv.basis_xform(dir),
-        max_distance,
-        &body.shape,
-        body.id,
-    )?;
-
-    Some(RaycastHit {
-        body_id: hit.body_id,
-        point: xform.xform(hit.point),
-        normal: xform.basis_xform(hit.normal),
-        distance: hit.distance,
-    })
+    // The NEAREST hit across every collider the body owns (pat-s3rrv.25).
+    //
+    // ⚠️ Nearest, not first and not deepest. A ray must report the surface it
+    // reaches soonest: on an L-shaped body whose second arm is closer to the
+    // origin, returning the first collider in scene order would place the hit
+    // point and normal on a face the ray passes *through* on its way, and a
+    // RayCast2D driving a wall-stick or a laser would aim at the wrong surface.
+    // Each collider is transformed back to world space with ITS OWN transform
+    // before the distances are compared.
+    body.shape_owners()
+        .into_iter()
+        .filter_map(|owner| {
+            let (shape, xform) = (owner.shape, owner.transform);
+            let inv = xform.affine_inverse();
+            let hit = raycast_shape_local(
+                inv.xform(origin),
+                inv.basis_xform(dir),
+                max_distance,
+                &shape,
+                body.id,
+            )?;
+            Some(RaycastHit {
+                body_id: hit.body_id,
+                point: xform.xform(hit.point),
+                normal: xform.basis_xform(hit.normal),
+                distance: hit.distance,
+            })
+        })
+        .min_by(|a, b| a.distance.total_cmp(&b.distance))
 }
 
 /// Ray-shape intersection with the shape at the origin, unrotated.

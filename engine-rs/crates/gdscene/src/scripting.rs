@@ -683,7 +683,9 @@ impl InputSnapshot {
 // ---------------------------------------------------------------------------
 
 use crate::scene_tree::SceneTree;
-use crate::tween::{EaseType, TransFunc, TweenId, TweenStep};
+use crate::tween::{
+    EaseType, TransFunc, Tween, TweenId, TweenPauseMode, TweenProcessMode, TweenStep,
+};
 use gdcore::id::ObjectId;
 use gdobject::signal::Connection;
 
@@ -752,6 +754,28 @@ impl SceneTreeAccessor {
         // server. The server is a sibling of the tree, never inside it, so this
         // borrow cannot alias the tree pointer.
         Some(unsafe { &*(addr as *const crate::physics_server::PhysicsServer) })
+    }
+
+    /// Maps a shape query's `exclude` list from NODE ids to `BodyId`s
+    /// (pat-s3rrv.26).
+    ///
+    /// Godot's `exclude` takes RIDs; Patina has none, so a script passes the
+    /// node objects. A node with no registered body drops out of the list rather
+    /// than becoming body 0 and excluding an unrelated body.
+    fn shape_query_exclude(
+        &self,
+        params: &ShapeParams2D,
+    ) -> Option<Vec<gdphysics2d::body::BodyId>> {
+        let phys = self.physics()?;
+        Some(
+            params
+                .exclude
+                .iter()
+                .filter_map(|raw| {
+                    phys.body_for_node(NodeId::from_object_id(ObjectId::from_raw(*raw)))
+                })
+                .collect(),
+        )
     }
 
     /// Mutable counterpart of [`Self::physics`].
@@ -1015,6 +1039,187 @@ fn is_playback_handle(raw: u64) -> bool {
     raw & 0xFF00_0000_0000_0000 == PLAYBACK_HANDLE_TAG
 }
 
+// -- Physics 2D space-query handles (pat-s3rrv.26) --------------------------
+//
+// Godot's query surface is a chain of *objects*:
+//
+//     get_world_2d().direct_space_state.intersect_ray(
+//         PhysicsRayQueryParameters2D.create(from, to))
+//
+// ClassDB knows all of these (registered by this bead's other half), which
+// makes a query *describable*; these handles make it *runnable*. The interpreter
+// routes any `ObjectId` receiver through `SceneAccess::call_node_method`
+// (interpreter.rs:11863), so a tagged id dispatches here without a new trait
+// method.
+//
+// `World2D` and the space state are **fixed singletons**: Patina has one
+// `PhysicsWorld2D` per tree (`PhysicsServer::world`), so there is nothing to key
+// a registry on. Only the query parameters carry per-call state and need one.
+const PHYS_QUERY_TAG: u64 = 0xA6_00_0000_0000_0000;
+/// `get_world_2d()`'s return value.
+const WORLD_2D_HANDLE: u64 = PHYS_QUERY_TAG | 0x01;
+/// `World2D.direct_space_state`'s value.
+const SPACE_STATE_2D_HANDLE: u64 = PHYS_QUERY_TAG | 0x02;
+/// Marks a ray-parameters handle; the low bits are its registry key.
+const RAY_PARAMS_BASE: u64 = PHYS_QUERY_TAG | 0x1000;
+
+/// One `PhysicsRayQueryParameters2D`.
+#[derive(Debug, Clone)]
+struct RayParams2D {
+    from: gdcore::math::Vector2,
+    to: gdcore::math::Vector2,
+    /// Node ids to skip — Godot's `exclude`, which takes RIDs but which scripts
+    /// populate from `get_rid()`/node references.
+    exclude: Vec<u64>,
+    /// Godot defaults this to all layers. ⚠️ A mask of 0 hits **nothing** here,
+    /// matching `RayQuery2D` (and Godot) rather than `raycast_filtered`, which
+    /// reads 0 as "every layer".
+    collision_mask: u32,
+}
+
+thread_local! {
+    static RAY_PARAMS: std::cell::RefCell<HashMap<u64, RayParams2D>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_RAY_PARAMS: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// `true` when `raw` names anything in the physics-query family.
+fn is_phys_query_handle(raw: u64) -> bool {
+    raw & 0xFF00_0000_0000_0000 == PHYS_QUERY_TAG
+}
+
+/// Mints a ray-parameters handle (`PhysicsRayQueryParameters2D.create`).
+fn new_ray_params_handle(from: gdcore::math::Vector2, to: gdcore::math::Vector2) -> u64 {
+    let seq = NEXT_RAY_PARAMS.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = RAY_PARAMS_BASE | seq;
+    RAY_PARAMS.with(|m| {
+        m.borrow_mut().insert(
+            raw,
+            RayParams2D {
+                from,
+                to,
+                exclude: Vec::new(),
+                collision_mask: u32::MAX,
+            },
+        )
+    });
+    raw
+}
+
+/// Reads back a ray-parameters handle's state.
+fn ray_params(raw: u64) -> Option<RayParams2D> {
+    RAY_PARAMS.with(|m| m.borrow().get(&raw).cloned())
+}
+
+/// Marks a shape-resource handle (`CircleShape2D` / `RectangleShape2D`).
+const SHAPE_BASE: u64 = PHYS_QUERY_TAG | 0x2000;
+/// Marks a `PhysicsShapeQueryParameters2D` handle.
+const SHAPE_PARAMS_BASE: u64 = PHYS_QUERY_TAG | 0x3000;
+
+/// One `PhysicsShapeQueryParameters2D`.
+///
+/// `shape` is the *handle* rather than the shape itself: Godot's script assigns
+/// a shape resource (`params.shape = circle`) and may keep mutating it
+/// afterwards, so the query has to read the shape's state at query time rather
+/// than snapshot it at assignment.
+#[derive(Debug, Clone)]
+struct ShapeParams2D {
+    shape: u64,
+    transform: gdcore::math::Transform2D,
+    /// Godot's `motion`, read only by `cast_motion`.
+    motion: gdcore::math::Vector2,
+    exclude: Vec<u64>,
+    collision_mask: u32,
+}
+
+thread_local! {
+    static SHAPES: std::cell::RefCell<HashMap<u64, gdphysics2d::shape::Shape2D>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_SHAPE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    static SHAPE_PARAMS: std::cell::RefCell<HashMap<u64, ShapeParams2D>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_SHAPE_PARAMS: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Mints a shape-resource handle (`CircleShape2D.new()` / `RectangleShape2D.new()`).
+fn new_shape_handle(shape: gdphysics2d::shape::Shape2D) -> u64 {
+    let seq = NEXT_SHAPE.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = SHAPE_BASE | seq;
+    SHAPES.with(|m| m.borrow_mut().insert(raw, shape));
+    raw
+}
+
+/// Mints a `PhysicsShapeQueryParameters2D` handle with Godot's defaults.
+fn new_shape_params_handle() -> u64 {
+    let seq = NEXT_SHAPE_PARAMS.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = SHAPE_PARAMS_BASE | seq;
+    SHAPE_PARAMS.with(|m| {
+        m.borrow_mut().insert(
+            raw,
+            ShapeParams2D {
+                shape: 0,
+                transform: gdcore::math::Transform2D::IDENTITY,
+                motion: gdcore::math::Vector2::ZERO,
+                exclude: Vec::new(),
+                collision_mask: u32::MAX,
+            },
+        )
+    });
+    raw
+}
+
+fn shape_for(raw: u64) -> Option<gdphysics2d::shape::Shape2D> {
+    SHAPES.with(|m| m.borrow().get(&raw).copied())
+}
+
+fn shape_mut<F: FnOnce(&mut gdphysics2d::shape::Shape2D)>(raw: u64, f: F) -> bool {
+    SHAPES.with(|m| match m.borrow_mut().get_mut(&raw) {
+        Some(s) => {
+            f(s);
+            true
+        }
+        None => false,
+    })
+}
+
+fn shape_params(raw: u64) -> Option<ShapeParams2D> {
+    SHAPE_PARAMS.with(|m| m.borrow().get(&raw).cloned())
+}
+
+fn shape_params_mut<F: FnOnce(&mut ShapeParams2D)>(raw: u64, f: F) -> bool {
+    SHAPE_PARAMS.with(|m| match m.borrow_mut().get_mut(&raw) {
+        Some(p) => {
+            f(p);
+            true
+        }
+        None => false,
+    })
+}
+
+/// Mutates a ray-parameters handle in place (the `exclude` / `collision_mask`
+/// setters a script assigns before running the query).
+fn ray_params_mut<F: FnOnce(&mut RayParams2D)>(raw: u64, f: F) -> bool {
+    RAY_PARAMS.with(|m| match m.borrow_mut().get_mut(&raw) {
+        Some(p) => {
+            f(p);
+            true
+        }
+        None => false,
+    })
+}
+
 /// The handle naming `(node, sm_name)`, minting one on first use.
 fn playback_handle_for(node: u64, sm_name: &str) -> u64 {
     PLAYBACK_HANDLES.with(|m| {
@@ -1108,6 +1313,18 @@ impl SceneAccess for SceneTreeAccessor {
     }
 
     fn get_node_property(&self, node: u64, prop: &str) -> Variant {
+        // `World2D.direct_space_state` (pat-s3rrv.26). Answered before the node
+        // lookup below because the receiver is a physics-query handle, not a
+        // node — `NodeId::from_object_id` on it would name nothing and the
+        // property would read back `Nil`, which is what made the documented
+        // `get_world_2d().direct_space_state.intersect_ray(..)` chain
+        // unreachable even once `World2D` had the property registered.
+        if is_phys_query_handle(node) {
+            if node == WORLD_2D_HANDLE && prop == "direct_space_state" {
+                return Variant::ObjectId(ObjectId::from_raw(SPACE_STATE_2D_HANDLE));
+            }
+            return Variant::Nil;
+        }
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         // An AnimationTree's `parameters/...` values live on the attached graph,
         // which evaluation reads and writes — so report those rather than the
@@ -1159,6 +1376,87 @@ impl SceneAccess for SceneTreeAccessor {
     }
 
     fn set_node_property(&mut self, node: u64, prop: &str, value: Variant) {
+        // pat-s3rrv.26 — assignments onto a `PhysicsRayQueryParameters2D`
+        // handle: `params.exclude = [body]`, `params.collision_mask = 2`.
+        //
+        // ⚠️ Checked before anything resolves `node` as a NodeId. These handles
+        // are tagged ids, not nodes, so the lookup below would miss (or land on
+        // an unrelated node) and the assignment would vanish silently — the
+        // query would then run with the DEFAULT filter and look like the filter
+        // was ignored, rather than like the setter was never wired.
+        if is_phys_query_handle(node) {
+            match prop {
+                // Godot's `exclude` takes RIDs. Patina has no RID, so a script
+                // passes the node objects themselves. Non-object entries are
+                // dropped rather than silently excluding body 0.
+                "exclude" => {
+                    let ids: Vec<u64> = match &value {
+                        Variant::Array(items) => items
+                            .iter()
+                            .filter_map(|v| match v {
+                                Variant::ObjectId(id) => Some(id.raw()),
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    // The same list serves both parameter kinds; only the one
+                    // whose registry holds this handle actually takes it.
+                    ray_params_mut(node, |p| p.exclude = ids.clone());
+                    shape_params_mut(node, |p| p.exclude = ids);
+                }
+                "collision_mask" => {
+                    if let Variant::Int(m) = &value {
+                        let mask = *m as u32;
+                        ray_params_mut(node, |p| p.collision_mask = mask);
+                        shape_params_mut(node, |p| p.collision_mask = mask);
+                    }
+                }
+                // -- shape resources: `circle.radius = 16`, `rect.size = v` ---
+                //
+                // Godot's `RectangleShape2D.size` is the FULL extent while
+                // `Shape2D::Rectangle` stores half-extents, so this halves it.
+                // Getting that backwards doubles every rectangle query and the
+                // overlap still "works", just against the wrong box.
+                "radius" => {
+                    if let Some(r) = variant_number(&value) {
+                        let r = r as f32;
+                        shape_mut(node, |s| {
+                            *s = gdphysics2d::shape::Shape2D::Circle { radius: r }
+                        });
+                    }
+                }
+                "size" => {
+                    if let Variant::Vector2(v) = &value {
+                        let half = gdcore::math::Vector2::new(v.x * 0.5, v.y * 0.5);
+                        shape_mut(node, |s| {
+                            *s = gdphysics2d::shape::Shape2D::Rectangle { half_extents: half }
+                        });
+                    }
+                }
+                // -- PhysicsShapeQueryParameters2D --------------------------
+                "shape" => {
+                    if let Variant::ObjectId(id) = &value {
+                        let raw = id.raw();
+                        shape_params_mut(node, |p| p.shape = raw);
+                    }
+                }
+                "transform" => {
+                    if let Variant::Transform2D(t) = &value {
+                        let t = *t;
+                        shape_params_mut(node, |p| p.transform = t);
+                    }
+                }
+                "motion" => {
+                    if let Variant::Vector2(v) = &value {
+                        let v = *v;
+                        shape_params_mut(node, |p| p.motion = v);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         // Route an AnimationTree's own properties into the attached graph so a
         // script driving it (`tree.set("parameters/conditions/run", true)`,
@@ -1309,6 +1607,15 @@ impl SceneAccess for SceneTreeAccessor {
 
     fn call_node_method(&mut self, node: u64, method: &str, args: &[Variant]) -> Option<Variant> {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // NavigationAgent2D/3D answer their own method surface (pat-s3rrv.20).
+        // First, so an agent getter cannot be shadowed by a generic node arm;
+        // it returns `None` for every non-agent node, so the table below is
+        // reached unchanged.
+        if let Some(value) =
+            crate::navigation_agents::call_agent_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
         // String-ish first argument, shared by the group/child/signal calls.
         let arg_str = |i: usize| -> Option<String> {
             match args.get(i) {
@@ -1334,6 +1641,322 @@ impl SceneAccess for SceneTreeAccessor {
         };
 
         match method {
+            // -- Physics 2D space queries (pat-s3rrv.26) ---------------------
+            //
+            // `get_world_2d()` is answered for any node: Patina has one
+            // `PhysicsWorld2D` per tree, so the handle is a singleton rather
+            // than something keyed on the caller.
+            "get_world_2d" => Some(Variant::ObjectId(ObjectId::from_raw(WORLD_2D_HANDLE))),
+            // Queries on the space-state handle. Guarded on the receiver being
+            // that handle so these names cannot shadow a same-named script or
+            // node method on an ordinary node.
+            "intersect_ray" if node == SPACE_STATE_2D_HANDLE => {
+                let params = match args.first() {
+                    Some(Variant::ObjectId(id)) => ray_params(id.raw())?,
+                    // Godot only accepts the parameters object.
+                    _ => return None,
+                };
+                // `exclude` carries NODE ids — that is what a script holds —
+                // while the world filters by `BodyId`, so map through the same
+                // registry `collider` uses in reverse. A node with no
+                // registered body drops out of the list instead of becoming
+                // body 0 and excluding an unrelated body.
+                //
+                // Bound before `world` so the two immutable borrows of `self`
+                // do not have to overlap a closure capture.
+                let exclude: Vec<_> = {
+                    let phys = self.physics()?;
+                    params
+                        .exclude
+                        .iter()
+                        .filter_map(|raw| {
+                            phys.body_for_node(NodeId::from_object_id(ObjectId::from_raw(*raw)))
+                        })
+                        .collect()
+                };
+                let world = self.physics()?.world();
+                // ⚠️ Built through the builder, not a struct literal:
+                // `RayQuery2D` derives no `Default`, and its
+                // `collide_with_bodies` / `hit_from_inside` defaults are part of
+                // Godot's semantics — `new` sets them, a literal would force me
+                // to restate them and drift.
+                let query = gdphysics2d::world::RayQuery2D::new(params.from, params.to)
+                    .with_collision_mask(params.collision_mask)
+                    .with_exclude(exclude);
+                // Godot answers an EMPTY Dictionary on a miss, never null, so a
+                // script can test `if result:` and index it without a guard.
+                let hit = match world.intersect_ray(&query) {
+                    Some(hit) => hit,
+                    None => return Some(Variant::Dictionary(gdvariant::Dictionary::new())),
+                };
+                // `collider` is the hit NODE, which is what a script actually
+                // uses (`result.collider.queue_free()`). `node_for_body` is the
+                // same reverse map `RayCast2D.get_collider` already relies on
+                // (physics_server.rs:895), so the two agree by construction.
+                let collider = self.physics().and_then(|p| p.node_for_body(hit.body_id));
+                let mut dict = gdvariant::Dictionary::new();
+                dict.insert(
+                    Variant::String("position".to_string()),
+                    Variant::Vector2(hit.point),
+                );
+                dict.insert(
+                    Variant::String("normal".to_string()),
+                    Variant::Vector2(hit.normal),
+                );
+                if let Some(node_id) = collider {
+                    dict.insert(
+                        Variant::String("collider".to_string()),
+                        Variant::ObjectId(node_id.object_id()),
+                    );
+                }
+                Some(Variant::Dictionary(dict))
+            }
+            // `intersect_shape(params, max_results)` — every body overlapping
+            // the parameters' shape at its transform, as an ARRAY of
+            // Dictionaries (empty when nothing overlaps).
+            //
+            // The narrowphase behind this (`PhysicsWorld2D::shape_cast`) was
+            // already correct and unit-tested; what was missing was any way for
+            // a script to name a shape at all, which is why the shape-resource
+            // constructors land in the same bead.
+            "intersect_shape" if node == SPACE_STATE_2D_HANDLE => {
+                let params = match args.first() {
+                    Some(Variant::ObjectId(id)) => shape_params(id.raw())?,
+                    _ => return None,
+                };
+                // A parameters object with no shape assigned overlaps nothing,
+                // rather than defaulting to some shape the script never chose.
+                let shape = shape_for(params.shape)?;
+                let max_results = match args.get(1) {
+                    Some(Variant::Int(n)) if *n >= 0 => *n as usize,
+                    _ => 32,
+                };
+                let exclude: Vec<_> = {
+                    let phys = self.physics()?;
+                    params
+                        .exclude
+                        .iter()
+                        .filter_map(|raw| {
+                            phys.body_for_node(NodeId::from_object_id(ObjectId::from_raw(*raw)))
+                        })
+                        .collect()
+                };
+                let hits = self.physics()?.world().shape_cast(
+                    &shape,
+                    params.transform,
+                    &exclude,
+                    params.collision_mask,
+                );
+                let mut out: Vec<Variant> = Vec::new();
+                for hit in hits.into_iter().take(max_results) {
+                    let Some(node_id) = self.physics().and_then(|p| p.node_for_body(hit.body_id))
+                    else {
+                        continue;
+                    };
+                    let mut entry = gdvariant::Dictionary::new();
+                    entry.insert(
+                        Variant::String("collider".to_string()),
+                        Variant::ObjectId(node_id.object_id()),
+                    );
+                    // Godot reports which shape OF THE COLLIDER was hit; Patina
+                    // registers one shape per body, so it is always index 0.
+                    entry.insert(Variant::String("shape".to_string()), Variant::Int(0));
+                    out.push(Variant::Dictionary(entry));
+                }
+                Some(Variant::Array(out))
+            }
+            // `collide_shape(params, max_results)` — contact points as PAIRS
+            // (first on the query shape, second on the collider), per
+            // doc/classes/PhysicsDirectSpaceState2D.xml. `max_results` counts
+            // Godot's *results*, i.e. pairs, so the returned array is twice it.
+            "collide_shape" if node == SPACE_STATE_2D_HANDLE => {
+                let params = match args.first() {
+                    Some(Variant::ObjectId(id)) => shape_params(id.raw())?,
+                    _ => return None,
+                };
+                let shape = shape_for(params.shape)?;
+                let max_results = match args.get(1) {
+                    Some(Variant::Int(n)) if *n >= 0 => *n as usize,
+                    _ => 32,
+                };
+                let exclude = self.shape_query_exclude(&params)?;
+                let points = self.physics()?.world().collide_shape(
+                    &shape,
+                    params.transform,
+                    &exclude,
+                    params.collision_mask,
+                    max_results,
+                );
+                Some(Variant::Array(
+                    points.into_iter().map(Variant::Vector2).collect(),
+                ))
+            }
+            // `cast_motion(params)` — `[safe, unsafe]` fractions of
+            // `params.motion`. Godot returns a PackedFloat32Array; Patina has no
+            // packed-float Variant, so it surfaces as a 2-element Array, which
+            // indexes identically from script (`result[0]`).
+            "cast_motion" if node == SPACE_STATE_2D_HANDLE => {
+                let params = match args.first() {
+                    Some(Variant::ObjectId(id)) => shape_params(id.raw())?,
+                    _ => return None,
+                };
+                let shape = shape_for(params.shape)?;
+                let exclude = self.shape_query_exclude(&params)?;
+                let fractions = self.physics()?.world().cast_motion(
+                    &shape,
+                    params.transform,
+                    params.motion,
+                    &exclude,
+                    params.collision_mask,
+                );
+                Some(Variant::Array(vec![
+                    Variant::Float(fractions[0] as f64),
+                    Variant::Float(fractions[1] as f64),
+                ]))
+            }
+            // `get_rest_info(params)` — the NEAREST contact, as a Dictionary.
+            // Godot answers an EMPTY Dictionary when nothing overlaps, the same
+            // contract `intersect_ray` uses, so `if info:` works unguarded.
+            "get_rest_info" if node == SPACE_STATE_2D_HANDLE => {
+                let params = match args.first() {
+                    Some(Variant::ObjectId(id)) => shape_params(id.raw())?,
+                    _ => return None,
+                };
+                let shape = shape_for(params.shape)?;
+                let exclude = self.shape_query_exclude(&params)?;
+                let hit = match self.physics()?.world().shape_rest_info(
+                    &shape,
+                    params.transform,
+                    &exclude,
+                    params.collision_mask,
+                ) {
+                    Some(hit) => hit,
+                    None => return Some(Variant::Dictionary(gdvariant::Dictionary::new())),
+                };
+                let mut dict = gdvariant::Dictionary::new();
+                dict.insert(
+                    Variant::String("point".to_string()),
+                    Variant::Vector2(hit.point),
+                );
+                dict.insert(
+                    Variant::String("normal".to_string()),
+                    Variant::Vector2(hit.normal),
+                );
+                // Godot documents `linear_velocity` as the colliding object's
+                // velocity — (0,0) for a static body, which falls out naturally.
+                let velocity = self
+                    .physics()
+                    .and_then(|p| p.world().get_body(hit.body_id).map(|b| b.linear_velocity))
+                    .unwrap_or(gdcore::math::Vector2::ZERO);
+                dict.insert(
+                    Variant::String("linear_velocity".to_string()),
+                    Variant::Vector2(velocity),
+                );
+                if let Some(node_id) = self.physics().and_then(|p| p.node_for_body(hit.body_id)) {
+                    dict.insert(
+                        Variant::String("collider".to_string()),
+                        Variant::ObjectId(node_id.object_id()),
+                    );
+                }
+                dict.insert(Variant::String("shape".to_string()), Variant::Int(0));
+                Some(Variant::Dictionary(dict))
+            }
+            // `intersect_point(params, max_results)` — Godot answers an ARRAY of
+            // Dictionaries (one per overlapping body), not a single hit, and an
+            // empty array when nothing is under the point.
+            "intersect_point" if node == SPACE_STATE_2D_HANDLE => {
+                let point = match args.first() {
+                    // Godot takes a PhysicsPointQueryParameters2D; a bare
+                    // Vector2 is accepted too so a script can query a position
+                    // without constructing a parameters object for it.
+                    Some(Variant::Vector2(v)) => *v,
+                    Some(Variant::ObjectId(id)) => ray_params(id.raw())?.from,
+                    _ => return None,
+                };
+                // Godot's `max_results` defaults to 32.
+                let max_results = match args.get(1) {
+                    Some(Variant::Int(n)) if *n >= 0 => *n as usize,
+                    _ => 32,
+                };
+                let bodies = self.physics()?.world().point_query(point);
+                let mut out: Vec<Variant> = Vec::new();
+                for body_id in bodies.into_iter().take(max_results) {
+                    let Some(node_id) = self.physics().and_then(|p| p.node_for_body(body_id))
+                    else {
+                        continue;
+                    };
+                    let mut entry = gdvariant::Dictionary::new();
+                    entry.insert(
+                        Variant::String("collider".to_string()),
+                        Variant::ObjectId(node_id.object_id()),
+                    );
+                    out.push(Variant::Dictionary(entry));
+                }
+                Some(Variant::Array(out))
+            }
+            // -- Node3D transform API (pat-s3rrv.24) -------------------------
+            //
+            // `gdscene::node3d` already implements all of this correctly; it was
+            // simply unreachable. `class_has_method` now answers true for these
+            // (the registration half of this bead), but registration only makes
+            // a method *reflectable* — a script call still has to land on an
+            // arm here, and there was none: `grep '"look_at"'` over both
+            // interpreter.rs and this file returned 0.
+            //
+            // Godot signatures from doc/classes/Node3D.xml. A malformed
+            // argument yields `None` (= "not handled") rather than a panic,
+            // matching how the 2D/3D force arms decline a call meant for the
+            // other dimension.
+            "look_at" => {
+                let target = vec3_arg(args, 0)?;
+                // `up` is optional in Godot and defaults to Vector3.UP.
+                match vec3_arg(args, 1) {
+                    Some(up) => crate::node3d::look_at(self.tree_mut(), nid, target, up),
+                    None => crate::node3d::look_at_default_up(self.tree_mut(), nid, target),
+                }
+                Some(Variant::Nil)
+            }
+            "translate" if !args.is_empty() && vec3_arg(args, 0).is_some() => {
+                // ⚠️ Guarded on a Vector3 first argument: `translate` is also
+                // Godot's *i18n* call (`Object.tr`-adjacent), which takes a
+                // String. Without the guard this arm would swallow every
+                // localisation call made on a node.
+                let offset = vec3_arg(args, 0)?;
+                crate::node3d::translate(self.tree_mut(), nid, offset);
+                Some(Variant::Nil)
+            }
+            "rotate" => {
+                let axis = vec3_arg(args, 0)?;
+                let angle = arg_f32(args, 1)?;
+                crate::node3d::rotate(self.tree_mut(), nid, axis, angle);
+                Some(Variant::Nil)
+            }
+            "rotate_x" | "rotate_y" | "rotate_z" => {
+                let angle = arg_f32(args, 0)?;
+                let axis = match method {
+                    "rotate_x" => gdcore::math::Vector3::new(1.0, 0.0, 0.0),
+                    "rotate_y" => gdcore::math::Vector3::new(0.0, 1.0, 0.0),
+                    _ => gdcore::math::Vector3::new(0.0, 0.0, 1.0),
+                };
+                crate::node3d::rotate(self.tree_mut(), nid, axis, angle);
+                Some(Variant::Nil)
+            }
+            "to_global" => {
+                let local = vec3_arg(args, 0)?;
+                Some(Variant::Vector3(crate::node3d::to_global(
+                    self.tree(),
+                    nid,
+                    local,
+                )))
+            }
+            "to_local" => {
+                let global = vec3_arg(args, 0)?;
+                Some(Variant::Vector3(crate::node3d::to_local(
+                    self.tree(),
+                    nid,
+                    global,
+                )))
+            }
             // -- CharacterBody2D motion --------------------------------------
             //
             // Godot's `move_and_slide()` moves the body inside the call. Patina
@@ -1611,6 +2234,41 @@ impl SceneAccess for SceneTreeAccessor {
             // phase holds no handle on the physics server — the same bridge
             // RayCast2D uses for `_hit_normal`. Godot returns an Array of nodes,
             // empty (never null) when nothing overlaps.
+            // -- shape owners (pat-s3rrv.25) --
+            //
+            // Godot's `CollisionObject2D` owns a list of shape owners, each with
+            // its own transform. Patina models one collider child as one owner
+            // holding one shape, so owner id == the index picking reports as
+            // `shape_idx` and `shape_owner_get_shape_count` is always 1.
+            //
+            // Answered from the SCENE rather than the physics world: shape owners
+            // are the collider children, so this is correct even for a node that
+            // has not been registered with the server yet — and the script phase
+            // holds no physics handle anyway.
+            "get_shape_owners" => {
+                let count =
+                    crate::physics_server::collider_local_transforms(self.tree(), nid).len();
+                Some(Variant::Array(
+                    (0..count).map(|i| Variant::Int(i as i64)).collect(),
+                ))
+            }
+            "shape_owner_get_shape_count" => {
+                // One shape per owner in Patina's model. Godot allows several,
+                // so this returns 1 rather than the body's total — a script
+                // iterating `0..shape_owner_get_shape_count(id)` must see one
+                // shape per owner, not every shape on the object.
+                let owners = crate::physics_server::collider_local_transforms(self.tree(), nid);
+                let idx = arg_f32(args, 0)?.max(0.0) as usize;
+                Some(Variant::Int(if idx < owners.len() { 1 } else { 0 }))
+            }
+            "shape_owner_get_transform" => {
+                let owners = crate::physics_server::collider_local_transforms(self.tree(), nid);
+                let idx = arg_f32(args, 0)?.max(0.0) as usize;
+                Some(match owners.get(idx) {
+                    Some(tf) => Variant::Transform2D(*tf),
+                    None => Variant::Transform2D(gdcore::math::Transform2D::IDENTITY),
+                })
+            }
             "get_overlapping_bodies" => Some(match self.tree().get_node(nid) {
                 Some(n) => match n.get_property("_overlapping_bodies") {
                     Variant::Array(items) => Variant::Array(items),
@@ -3065,7 +3723,22 @@ impl SceneAccess for SceneTreeAccessor {
     }
 
     fn create_timer(&mut self, seconds: f64) -> Option<(u64, String)> {
-        let id = self.tree_mut().create_timer(seconds);
+        self.create_timer_with_flags(seconds, true, false, false)
+    }
+
+    fn create_timer_with_flags(
+        &mut self,
+        seconds: f64,
+        process_always: bool,
+        process_in_physics: bool,
+        ignore_time_scale: bool,
+    ) -> Option<(u64, String)> {
+        let id = self.tree_mut().create_timer_with_flags(
+            seconds,
+            process_always,
+            process_in_physics,
+            ignore_time_scale,
+        );
         let signal = self
             .tree()
             .get_timer(id)
@@ -3164,6 +3837,40 @@ impl SceneAccess for SceneTreeAccessor {
         self.tree()
             .get_animation_player(nid)
             .map(|p| p.get_playing_speed())
+    }
+
+    fn animation_player_has_animation(&self, node: u64, name: &str) -> Option<bool> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_animation_player(nid)
+            .map(|p| p.has_animation(name))
+    }
+
+    fn animation_player_animation_list(&self, node: u64) -> Option<Vec<String>> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_animation_player(nid)
+            .map(|p| p.get_animation_list())
+    }
+
+    fn animation_player_speed_scale(&self, node: u64) -> Option<f64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().get_animation_player(nid).map(|p| p.speed_scale)
+    }
+
+    fn animation_player_play_section(&mut self, node: u64, name: &str, start: f64, end: f64) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        if let Some(p) = self.tree_mut().get_animation_player_mut(nid) {
+            // Godot's defaults for the three arguments a 3-arg call omits.
+            p.play_section(name, start, end, -1.0, 1.0, false);
+        }
+    }
+
+    fn animation_player_set_speed_scale(&mut self, node: u64, scale: f64) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        if let Some(p) = self.tree_mut().get_animation_player_mut(nid) {
+            p.speed_scale = scale;
+        }
     }
 
     // -- Object introspection over the signal graph (pat-0q2kx.64) ----------
@@ -3327,6 +4034,54 @@ impl SceneAccess for SceneTreeAccessor {
             group,
             gdobject::notification::Notification::new(what as i32),
         );
+    }
+
+    // -- Physics query parameter constructors (pat-s3rrv.26) ---------------
+
+    fn physics_query_static_call(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        args: &[Variant],
+    ) -> Option<Variant> {
+        // Godot: `PhysicsRayQueryParameters2D.create(from, to)` — a static
+        // factory returning a configured parameters object. `intersect_ray`
+        // accepts nothing else, so without this the whole query surface is
+        // unreachable from script no matter what ClassDB knows about it.
+        match (type_name, method) {
+            ("PhysicsRayQueryParameters2D", "create") => {
+                let from = match args.first() {
+                    Some(Variant::Vector2(v)) => *v,
+                    _ => return None,
+                };
+                let to = match args.get(1) {
+                    Some(Variant::Vector2(v)) => *v,
+                    _ => return None,
+                };
+                Some(Variant::ObjectId(ObjectId::from_raw(
+                    new_ray_params_handle(from, to),
+                )))
+            }
+            // `CircleShape2D.new()` / `RectangleShape2D.new()` — the shape
+            // resources `intersect_shape` takes. `gdphysics2d::Shape2D` has had
+            // these forever and `shape_cast` has been correct and unit-tested,
+            // but no script could build the argument, so the whole shape-query
+            // half of PhysicsDirectSpaceState2D was unreachable (pat-s3rrv.26).
+            //
+            // Defaults are Godot's: radius 10, size 20x20 (= half-extents 10).
+            ("CircleShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                new_shape_handle(gdphysics2d::shape::Shape2D::Circle { radius: 10.0 }),
+            ))),
+            ("RectangleShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                new_shape_handle(gdphysics2d::shape::Shape2D::Rectangle {
+                    half_extents: gdcore::math::Vector2::new(10.0, 10.0),
+                }),
+            ))),
+            ("PhysicsShapeQueryParameters2D", "new") => Some(Variant::ObjectId(
+                ObjectId::from_raw(new_shape_params_handle()),
+            )),
+            _ => None,
+        }
     }
 
     // -- AnimationNodeStateMachinePlayback (pat-s3rrv.1) --------------------
@@ -3568,6 +4323,136 @@ impl SceneAccess for SceneTreeAccessor {
                 let valid = self.tree_mut().get_tween_mut(tid)?.is_valid();
                 Some(Variant::Bool(valid))
             }
+            // -- PropertyTweener start-value verbs (pat-s3rrv.46) -----------
+            //
+            // Godot's `tween_property(...).from(v)` / `.from_current()` /
+            // `.as_relative()` all rewrite the tweener's START value, so they
+            // land on the most recently added step exactly like the setters
+            // above. ClassDB advertised all three and a call raised
+            // `UndefinedFunction` until this bead.
+            "from" => {
+                let v = args.first()?.clone();
+                self.with_last_step(tid, |s| s.start_value = v)?;
+                Some(handle)
+            }
+            "from_current" => {
+                // Re-sample the target's property NOW. `tween_property` already
+                // sampled at creation, so this only differs when the chain moved
+                // the node in between — which is precisely why Godot has it.
+                let target = {
+                    let tween = self.tree_mut().get_tween_mut(tid)?;
+                    let step = tween.steps.last()?;
+                    (step.target, step.property_path.clone())
+                };
+                let (raw, path) = target;
+                let owner = self.tree().tween_owner(tid)?;
+                let nid = match raw {
+                    Some(r) => NodeId::from_object_id(ObjectId::from_raw(r)),
+                    None => owner,
+                };
+                let (prop, sub) = crate::tween::split_property_path(&path);
+                let base = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.get_property(prop))
+                    .unwrap_or(Variant::Nil);
+                let current = match sub {
+                    Some(sn) => {
+                        crate::tween::read_subname(&base, sn).unwrap_or(Variant::Float(0.0))
+                    }
+                    None => base,
+                };
+                self.with_last_step(tid, |s| s.start_value = current)?;
+                Some(handle)
+            }
+            "as_relative" => {
+                // The final value becomes an OFFSET from the start value, so
+                // `tween_property(n, "position", Vector2(10, 0), 1).as_relative()`
+                // ends at start + (10, 0) instead of at (10, 0).
+                self.with_last_step(tid, |s| {
+                    if let Some(sum) = crate::tween::add_variants(&s.start_value, &s.end_value) {
+                        s.end_value = sum;
+                    }
+                })?;
+                Some(handle)
+            }
+
+            // -- subtween (pat-s3rrv.46) ------------------------------------
+            //
+            // `TweenStep::subtween` existed and nothing could reach it: the
+            // nested tween arrives as another live tween handle, which is taken
+            // out of the tree so the parent owns it — Godot's
+            // `tween_subtween(subtween)` does the same.
+            "tween_subtween" => {
+                let raw = variant_object_raw(args.first()?)?;
+                let sub_id = TweenId::from_raw(raw);
+                // A handle that names no live tween is not a subtween.
+                let nested = self.tree_mut().take_tween(sub_id)?;
+                self.push_tween_step(tid, TweenStep::subtween(nested))?;
+                Some(handle)
+            }
+
+            // -- process / pause modes (pat-s3rrv.46) ------------------------
+            "set_process_mode" => {
+                let v = variant_number(args.first()?)? as i64;
+                self.tree_mut()
+                    .get_tween_mut(tid)?
+                    .set_process_mode(TweenProcessMode::from_i64(v));
+                Some(handle)
+            }
+            "set_pause_mode" => {
+                let v = variant_number(args.first()?)? as i64;
+                self.tree_mut()
+                    .get_tween_mut(tid)?
+                    .set_pause_mode(TweenPauseMode::from_i64(v));
+                Some(handle)
+            }
+            // Godot's `set_ignore_time_scale(ignore = true)`.
+            "set_ignore_time_scale" => {
+                let ignore = !matches!(args.first(), Some(Variant::Bool(false)));
+                self.tree_mut()
+                    .get_tween_mut(tid)?
+                    .set_ignore_time_scale(ignore);
+                Some(handle)
+            }
+            "bind_node" => {
+                let raw = variant_object_raw(args.first()?)?;
+                self.tree_mut().get_tween_mut(tid)?.bind_node(raw);
+                Some(handle)
+            }
+
+            // -- introspection / manual stepping (pat-s3rrv.46) --------------
+            "get_total_elapsed_time" => {
+                let t = self.tree_mut().get_tween_mut(tid)?.get_total_elapsed_time();
+                Some(Variant::Float(t))
+            }
+            "get_loops_left" => {
+                let n = self.tree_mut().get_tween_mut(tid)?.get_loops_left();
+                Some(Variant::Int(n as i64))
+            }
+            // `custom_step(delta)` advances the tween by hand and reports
+            // whether it is still running. The property writes land on the next
+            // `process_tweens` pass, which is the same frame's phase.
+            "custom_step" => {
+                let delta = variant_number(args.first()?)?;
+                let running = self.tree_mut().get_tween_mut(tid)?.custom_step(delta);
+                Some(Variant::Bool(running))
+            }
+            // Godot's static `Tween.interpolate_value(initial, delta, elapsed,
+            // duration, trans_type, ease_type)`. Reached through a live handle
+            // here because Patina has no static-call path onto Tween.
+            "interpolate_value" => {
+                let initial = args.first()?.clone();
+                let delta = args.get(1)?.clone();
+                let elapsed = variant_number(args.get(2)?)?;
+                let duration = variant_number(args.get(3)?)?;
+                let trans = trans_func_from_i64(variant_number(args.get(4)?)? as i64);
+                let ease_type = ease_type_from_i64(variant_number(args.get(5)?)? as i64);
+                Some(Tween::interpolate_value(
+                    &initial, &delta, elapsed, duration, trans, ease_type,
+                ))
+            }
+
             // A live tween asked for a method Tween does not have: fall through
             // so the interpreter reports `UndefinedFunction` as it would for any
             // other object, rather than silently returning Nil.
@@ -3584,13 +4469,15 @@ impl SceneAccess for SceneTreeAccessor {
         // happened to be running from the project root (pat-u3l8c.12).
         // An unconfigured root is an Err here, which becomes `null` at the
         // call site, matching the "missing/unloadable scene → null" contract.
-        let resolved = gdcore::resolve_path(path).ok()?;
-        let source = std::fs::read_to_string(resolved).ok()?;
+        // Read through `FileAccess`, which serves a mounted `.pck` before disk
+        // (pat-s3rrv.34). The raw `std::fs::read_to_string` this replaces made
+        // `preload("res://bullet.tscn").instantiate()` fail outright in an
+        // exported game, where the scene exists only inside the pack.
+        let source = gdcore::file_access::FileAccess::read_file_string(path).ok()?;
         let scene = crate::packed_scene::PackedScene::from_tscn(&source).ok()?;
-        // Recursively resolve `instance=ExtResource` sub-scenes from disk.
+        // Recursively resolve `instance=ExtResource` sub-scenes the same way.
         let resolve = |sub: &str| -> Option<crate::packed_scene::PackedScene> {
-            let sub_resolved = gdcore::resolve_path(sub).ok()?;
-            let src = std::fs::read_to_string(sub_resolved).ok()?;
+            let src = gdcore::file_access::FileAccess::read_file_string(sub).ok()?;
             crate::packed_scene::PackedScene::from_tscn(&src).ok()
         };
         let tree = self.tree_mut();
@@ -3606,8 +4493,10 @@ impl SceneAccess for SceneTreeAccessor {
         // `res://` resolves against the project root (mirrors
         // `instantiate_packed_scene`); see the note there on why the previous
         // CWD-relative mapping broke `load("res://enemy.gd").new()`.
+        // `resolved` is still needed for the instance name below, but the bytes
+        // come from `FileAccess` so a packed script loads too (pat-s3rrv.34).
         let resolved = gdcore::resolve_path(path).ok()?;
-        let source = std::fs::read_to_string(&resolved).ok()?;
+        let source = gdcore::file_access::FileAccess::read_file_string(path).ok()?;
         let base_class = script_base_class(&source);
         // Name the instance after the script file stem, matching how a
         // developer thinks of `load("enemy.gd").new()`.

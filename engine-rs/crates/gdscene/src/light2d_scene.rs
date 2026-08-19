@@ -95,7 +95,9 @@ pub fn collect_lights_2d(tree: &SceneTree) -> Vec<Light2D> {
         };
         match node.class_name() {
             "PointLight2D" => {
-                let pos = crate::node2d::get_position(tree, id);
+                // GLOBAL, not local (pat-s3rrv.21): a torch parented to a moving
+                // player must light where the player is, not the origin.
+                let pos = crate::node2d::get_global_transform(tree, id).origin;
                 let mut light = Light2D::point(
                     pos,
                     prop_color(node, "color", Color::WHITE),
@@ -116,8 +118,19 @@ pub fn collect_lights_2d(tree: &SceneTree) -> Vec<Light2D> {
                 lights.push(light);
             }
             "DirectionalLight2D" => {
+                // Godot's DirectionalLight2D has NO `direction` property — the
+                // light vector comes from the node's global ROTATION
+                // (scene/2d/light_2d.cpp). Reading a `direction` that authored
+                // scenes never carry meant every directional light silently used
+                // the (0,-1) fallback regardless of how it was rotated
+                // (pat-s3rrv.21).
+                //
+                // At rotation 0 the light points down -Y, matching the previous
+                // default, and rotating the node sweeps it from there.
+                let rot = crate::node2d::get_global_rotation(tree, id);
+                let dir = Vector2::new(rot.sin(), -rot.cos());
                 let mut light = Light2D::directional(
-                    prop_vec2(node, "direction", Vector2::new(0.0, -1.0)),
+                    dir,
                     prop_color(node, "color", Color::WHITE),
                     prop_f32(node, "energy", 1.0),
                 );
@@ -132,8 +145,19 @@ pub fn collect_lights_2d(tree: &SceneTree) -> Vec<Light2D> {
     lights
 }
 
-/// Builds [`LightOccluder2D`] values from `LightOccluder2D` nodes (their
-/// `polygon` property supplies the occluder points).
+/// Builds [`LightOccluder2D`] values from `LightOccluder2D` nodes.
+///
+/// Godot stores the geometry in an `OccluderPolygon2D` **sub-resource**
+/// (`occluder = SubResource("…")`), not on the node
+/// (upstream/godot/scene/2d/light_occluder_2d.cpp), so the loader flattens it to
+/// `__occluder__polygon` / `__occluder__closed` / `__occluder__cull_mode` and
+/// this reads those first. Before pat-s3rrv.21 only a bare `polygon` on the node
+/// was consulted, which is `Nil` for every authored scene — `collect_occluders_2d`
+/// returned empty and 2D shadows never appeared from a real `.tscn`. The bare
+/// property is still honored so hand-built trees keep working.
+///
+/// Points are returned in WORLD space: an occluder parented under a moving
+/// `Node2D` must cast its shadow where the parent put it, not at the origin.
 pub fn collect_occluders_2d(tree: &SceneTree) -> Vec<LightOccluder2D> {
     let mut occluders = Vec::new();
     for id in tree.all_nodes_in_tree_order() {
@@ -143,15 +167,33 @@ pub fn collect_occluders_2d(tree: &SceneTree) -> Vec<LightOccluder2D> {
         if node.class_name() != "LightOccluder2D" {
             continue;
         }
-        let points = match node.get_property("polygon") {
+        let local_points = match node.get_property("__occluder__polygon") {
             Variant::PackedVector2Array(v) => v,
-            _ => continue,
+            // Fallback: geometry set directly on the node (hand-built trees).
+            _ => match node.get_property("polygon") {
+                Variant::PackedVector2Array(v) => v,
+                _ => continue,
+            },
         };
-        if points.len() < 2 {
+        if local_points.len() < 2 {
             continue;
         }
-        let mut occ = LightOccluder2D::new(points, prop_bool(node, "closed", true));
-        occ.light_mask = prop_u32(node, "light_mask", 1);
+        let xform = crate::node2d::get_global_transform(tree, id);
+        let points: Vec<Vector2> = local_points.into_iter().map(|p| xform.xform(p)).collect();
+
+        // `closed` lives on the sub-resource; fall back to the node, then to
+        // Godot's default of true.
+        let closed = match node.get_property("__occluder__closed") {
+            Variant::Bool(b) => b,
+            _ => prop_bool(node, "closed", true),
+        };
+        let mut occ = LightOccluder2D::new(points, closed);
+        // Godot's property is `occluder_light_mask`; `light_mask` is the
+        // CanvasItem one and is not what the shadow pass filters on.
+        occ.light_mask = match node.get_property("occluder_light_mask") {
+            Variant::Int(i) => i as u32,
+            _ => prop_u32(node, "light_mask", 1),
+        };
         occluders.push(occ);
     }
     occluders

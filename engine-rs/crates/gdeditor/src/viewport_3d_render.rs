@@ -255,7 +255,8 @@ fn build_mesh_for_primitive(path: &str) -> Mesh3D {
     use gdserver3d::primitive_mesh::{BoxMesh, CapsuleMesh, CylinderMesh, PlaneMesh, SphereMesh};
 
     let (marker, props) = split_mesh_marker(path);
-    // A file-backed mesh (an .obj ext-resource) renders its own geometry.
+    // A file-backed mesh (.obj, or a .glb/.gltf model since pat-s3rrv.31)
+    // renders its own geometry rather than the placeholder marker below.
     if let Some(mesh) = mesh_from_file(marker) {
         return mesh;
     }
@@ -471,10 +472,23 @@ fn split_mesh_marker(path: &str) -> (&str, std::collections::HashMap<String, f32
 /// placeholder — a missing asset should not blank the viewport.
 fn mesh_from_file(path: &str) -> Option<Mesh3D> {
     let lowered = path.to_ascii_lowercase();
+    let on_disk = path.strip_prefix("res://").unwrap_or(path);
+
+    // pat-s3rrv.31: glTF/glb. Both halves of this already existed and never met
+    // — `gdresource::gltf_import::import_gltf` produces the `Resource`, and
+    // `mesh3d_from_gltf_resource` converts it to a `Mesh3D`, but the converter's
+    // only caller was inside `RenderServer3DAdapter`, which has no production
+    // callers at all. So the editor's sole file-backed loader accepted `.obj`
+    // and nothing else, and every glTF model fell through to the placeholder
+    // marker cube.
+    if lowered.ends_with(".glb") || lowered.ends_with(".gltf") {
+        let resource = gdresource::gltf_import::import_gltf(std::path::Path::new(on_disk)).ok()?;
+        return gdscene::render_server_3d::mesh3d_from_gltf_resource(&resource);
+    }
+
     if !lowered.ends_with(".obj") {
         return None;
     }
-    let on_disk = path.strip_prefix("res://").unwrap_or(path);
     let source = std::fs::read_to_string(on_disk).ok()?;
     Mesh3D::from_obj(&source).ok()
 }

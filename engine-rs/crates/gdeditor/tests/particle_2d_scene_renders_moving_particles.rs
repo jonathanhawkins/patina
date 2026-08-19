@@ -10,17 +10,16 @@
 //! These tests prove the full wiring with a **scene-load-to-frame-output** path
 //! (not module math):
 //!   `.tscn` → `PackedScene::from_tscn` → `SceneTree` → `MainLoop::step` (which
-//!   advances the simulator) → `scene_bridge::render_scene_to_frame` → pixels.
+//!   advances the simulator) → `viewport_2d_render` (the ONE shipped canvas path) → pixels.
 //! They assert (a) an emitting node with a nonzero initial velocity accumulates
 //! live particles whose quads appear in the frame output at *moved* positions,
 //! and (b) a `one_shot` emitter drains to zero and then produces no draws.
 
 use gdcore::math::Color;
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
-use gdscene::scene_bridge::render_scene_to_frame;
+use gdeditor::viewport_2d_render::{build_runtime_render_list, rasterize_render_list};
 use gdscene::scene_tree::SceneTree;
 use gdscene::MainLoop;
-use gdrender2d::SoftwareRenderer;
 
 /// Load a `.tscn` string into a fresh `SceneTree`, returning the tree.
 fn load(tscn: &str) -> SceneTree {
@@ -39,9 +38,8 @@ fn is_lit(c: Color) -> bool {
 /// Render `ml`'s current tree and return (lit-pixel count, bottom-most lit y).
 /// `bottom_y` is `None` when nothing is drawn.
 fn render_stats(ml: &MainLoop, w: u32, h: u32) -> (usize, Option<usize>) {
-    let mut renderer = SoftwareRenderer::new();
-    let no_tex = |_p: &str| -> Option<gdcore::math::Vector2> { None };
-    let frame = render_scene_to_frame(ml.tree(), &mut renderer, w, h, Color::BLACK, &no_tex);
+    let items = build_runtime_render_list(ml.tree());
+    let frame = rasterize_render_list(&items, w, h, Color::BLACK, None);
     let width = frame.width as usize;
     let mut count = 0usize;
     let mut bottom_y: Option<usize> = None;

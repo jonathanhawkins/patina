@@ -85,6 +85,8 @@ impl TrackDescriptor {
             TrackType::Rotation3D => "[Rotation] ",
             TrackType::Scale3D => "[Scale] ",
             TrackType::BlendShape => "[Blend Shape] ",
+            TrackType::Bezier => "[Bezier] ",
+            TrackType::Animation => "[Animation] ",
         };
         format!("{}{}:{}", prefix, self.node_path, self.target_path)
     }
@@ -1235,6 +1237,29 @@ mod tests {
             TrackDescriptor::audio("BGM", "track1").display_label(),
             "[Audio] BGM:track1"
         );
+    }
+
+    /// The bézier and animation track types get their own labels (pat-s3rrv.44).
+    ///
+    /// `display_label`'s match over `TrackType` has no wildcard arm, so adding
+    /// those two variants in `gdscene` broke THIS crate — a downstream break the
+    /// bead's own test target could not have caught, because nothing in
+    /// `gdscene`'s test tree links `gdeditor`.
+    #[test]
+    fn display_label_covers_the_bezier_and_animation_track_types() {
+        let bezier = TrackDescriptor {
+            track_type: TrackType::Bezier,
+            node_path: "Sprite2D".to_string(),
+            target_path: "position:x".to_string(),
+        };
+        assert_eq!(bezier.display_label(), "[Bezier] Sprite2D:position:x");
+
+        let animation = TrackDescriptor {
+            track_type: TrackType::Animation,
+            node_path: "SubPlayer".to_string(),
+            target_path: "animation".to_string(),
+        };
+        assert_eq!(animation.display_label(), "[Animation] SubPlayer:animation");
     }
 
     #[test]

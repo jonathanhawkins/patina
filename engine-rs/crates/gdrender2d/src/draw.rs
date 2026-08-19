@@ -6,7 +6,10 @@ use std::collections::HashMap;
 
 use gdcore::math::{Color, Rect2, Transform2D, Vector2};
 use gdserver2d::canvas::NinePatchAxis;
-use gdserver2d::shader::{execute_fragment, FragmentContext, FragmentInstruction};
+use gdserver2d::material::{TextureFilter, TextureRepeat};
+use gdserver2d::shader::{
+    execute_fragment_with_env, FragmentContext, FragmentInstruction, Sampler, ShaderEnv,
+};
 use gdvariant::variant::Variant;
 
 use crate::canvas_material;
@@ -82,6 +85,113 @@ pub fn draw_texture_rect_transformed(
     source_rect: Option<Rect2>,
     modulate: Color,
 ) {
+    // Today's semantics, unchanged: point sampling with texel coordinates
+    // clamped to the texture. Every existing caller keeps its exact pixels.
+    draw_texture_rect_transformed_filtered(
+        fb,
+        texture,
+        xform,
+        rect,
+        source_rect,
+        modulate,
+        TextureFilter::Nearest,
+        TextureRepeat::Disabled,
+    );
+}
+
+/// Resolves a texel coordinate under a [`TextureRepeat`] mode (pat-s3rrv.28).
+///
+/// `Disabled` clamps to the edge texel, which is what the unfiltered blit has
+/// always done — so routing the old path through here cannot move a pixel.
+/// `ParentNode` is an *inheritance* marker, not a sampling mode: it must be
+/// resolved against the ancestor chain before drawing, and reaching here means
+/// nothing resolved it, so it degrades to Godot's default (`Disabled`) rather
+/// than silently tiling.
+fn wrap_texel(c: i64, size: u32, repeat: TextureRepeat) -> u32 {
+    let size_i = size as i64;
+    match repeat {
+        TextureRepeat::Enabled => c.rem_euclid(size_i) as u32,
+        // One period is TWO copies — forward then reversed — so the seam at each
+        // boundary shares an edge texel instead of jumping across the texture.
+        TextureRepeat::Mirror => {
+            let period = size_i * 2;
+            let m = c.rem_euclid(period);
+            if m < size_i {
+                m as u32
+            } else {
+                (period - 1 - m) as u32
+            }
+        }
+        TextureRepeat::ParentNode | TextureRepeat::Disabled => c.clamp(0, size_i - 1) as u32,
+    }
+}
+
+/// Samples `texture` at continuous texel coordinates under a filter/repeat pair.
+///
+/// `Nearest` truncates, matching the historical `as u32` cast exactly. `Linear`
+/// samples the 4 neighbours around the texel *centre* (hence the -0.5 bias);
+/// each neighbour goes through [`wrap_texel`], so filtering and repeating
+/// compose — a bilinear tap that crosses the right edge of a tiling texture
+/// wraps to the left edge instead of smearing the border.
+fn sample_texture(
+    texture: &Texture2D,
+    fx: f32,
+    fy: f32,
+    filter: TextureFilter,
+    repeat: TextureRepeat,
+) -> Color {
+    let at = |x: i64, y: i64| -> Color {
+        texture.get_pixel(
+            wrap_texel(x, texture.width, repeat),
+            wrap_texel(y, texture.height, repeat),
+        )
+    };
+    match filter {
+        TextureFilter::Linear => {
+            let (gx, gy) = (fx - 0.5, fy - 0.5);
+            let (x0, y0) = (gx.floor(), gy.floor());
+            let (wx, wy) = (gx - x0, gy - y0);
+            let (x0, y0) = (x0 as i64, y0 as i64);
+            let (c00, c10) = (at(x0, y0), at(x0 + 1, y0));
+            let (c01, c11) = (at(x0, y0 + 1), at(x0 + 1, y0 + 1));
+            let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+            let mix = |a: Color, b: Color, t: f32| {
+                Color::new(
+                    lerp(a.r, b.r, t),
+                    lerp(a.g, b.g, t),
+                    lerp(a.b, b.b, t),
+                    lerp(a.a, b.a, t),
+                )
+            };
+            mix(mix(c00, c10, wx), mix(c01, c11, wx), wy)
+        }
+        TextureFilter::Nearest | TextureFilter::ParentNode => at(fx as i64, fy as i64),
+    }
+}
+
+/// [`draw_texture_rect_transformed`] with an explicit texture filter and repeat
+/// mode (pat-s3rrv.28).
+///
+/// Godot resolves `CanvasItem.texture_filter` / `texture_repeat` down the parent
+/// chain and applies them per item; the served Play blit had them hardcoded to
+/// nearest + clamp, so `texture_filter = LINEAR` and `texture_repeat = ENABLED`
+/// were inert in the running game however they were authored.
+///
+/// ⚠️ `repeat` only changes anything when the sampled coordinates leave the
+/// texture — i.e. when `source_rect` is larger than the texture (the tiling
+/// case). Inside the rect, `u`/`v` are normalised to 0..1 by construction, so a
+/// test that does not oversize `source_rect` cannot tell the modes apart.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_texture_rect_transformed_filtered(
+    fb: &mut FrameBuffer,
+    texture: &Texture2D,
+    xform: Transform2D,
+    rect: Rect2,
+    source_rect: Option<Rect2>,
+    modulate: Color,
+    filter: TextureFilter,
+    repeat: TextureRepeat,
+) {
     if texture.width == 0 || texture.height == 0 {
         return;
     }
@@ -101,20 +211,16 @@ pub fn draw_texture_rect_transformed(
             let local = inv.xform(Vector2::new(px as f32 + 0.5, py as f32 + 0.5));
             let u = (local.x - rect.position.x) / rect.size.x;
             let v = (local.y - rect.position.y) / rect.size.y;
+            // Outside the quad entirely (the transformed AABB overshoots on a
+            // rotation) — not a repeat case, so it stays a skip for every mode.
             if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
                 continue;
             }
-            let (tx, ty) = match source_rect {
-                Some(sr) => (
-                    ((sr.position.x + u * sr.size.x) as u32).min(texture.width - 1),
-                    ((sr.position.y + v * sr.size.y) as u32).min(texture.height - 1),
-                ),
-                None => (
-                    ((u * texture.width as f32) as u32).min(texture.width - 1),
-                    ((v * texture.height as f32) as u32).min(texture.height - 1),
-                ),
+            let (fx, fy) = match source_rect {
+                Some(sr) => (sr.position.x + u * sr.size.x, sr.position.y + v * sr.size.y),
+                None => (u * texture.width as f32, v * texture.height as f32),
             };
-            let texel = texture.get_pixel(tx, ty);
+            let texel = sample_texture(texture, fx, fy, filter, repeat);
             let final_color = Color::new(
                 texel.r * modulate.r,
                 texel.g * modulate.g,
@@ -123,6 +229,106 @@ pub fn draw_texture_rect_transformed(
             );
             if final_color.a > 0.001 {
                 fb.blend_pixel(px, py, final_color);
+            }
+        }
+    }
+}
+
+/// [`draw_texture_rect_transformed_filtered`] with a canvas_item `fragment()`
+/// shader run per covered pixel (pat-s3rrv.28).
+///
+/// [`draw_texture_rect_shaded`] shades only an **axis-aligned** rect, which is
+/// all the dead `scene_bridge` path ever needed. The shipped Play path draws
+/// every sprite through its node's global [`Transform2D`], so a rotated or
+/// scaled `Sprite2D` carrying a `.gdshader` had no shaded blit to route to at
+/// all — the material was dropped and the plain texel drew instead.
+///
+/// `UV` spans 0..1 across `rect` (Godot's canvas_item UV for a textured quad)
+/// and the incoming `COLOR` is the sampled texel × `modulate`, the value
+/// Godot's default canvas_item fragment produces before any user code runs. An
+/// empty instruction list is a pure passthrough, so this agrees pixel-for-pixel
+/// with [`draw_texture_rect_transformed_filtered`] when the material carries no
+/// fragment body.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_texture_rect_transformed_shaded(
+    fb: &mut FrameBuffer,
+    texture: &Texture2D,
+    xform: Transform2D,
+    rect: Rect2,
+    source_rect: Option<Rect2>,
+    modulate: Color,
+    filter: TextureFilter,
+    repeat: TextureRepeat,
+    instructions: &[FragmentInstruction],
+    uniforms: &HashMap<String, Variant>,
+    time: f32,
+) {
+    if texture.width == 0 || texture.height == 0 {
+        return;
+    }
+    if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+        return;
+    }
+    if let Some(sr) = source_rect {
+        if sr.size.x <= 0.0 || sr.size.y <= 0.0 {
+            return;
+        }
+    }
+
+    // Built ONCE per draw call, not per pixel. The closure owns a clone of the
+    // texture because `Sampler` is `'static`; its taps go through
+    // `canvas_material::sample_texture` so `texture(TEXTURE, UV)` honours the
+    // same filter/repeat as the base sample below — sampling raw would make
+    // TEXTURE disagree with COLOR.
+    let shader_env = ShaderEnv {
+        sampler: Some({
+            let tex = texture.clone();
+            Sampler::new(move |_name, uv| {
+                let c = canvas_material::sample_texture(&tex, uv[0], uv[1], filter, repeat);
+                [c.r, c.g, c.b, c.a]
+            })
+        }),
+        texture_pixel_size: (
+            1.0 / texture.width.max(1) as f32,
+            1.0 / texture.height.max(1) as f32,
+        ),
+    };
+
+    let (x_start, y_start, x_end, y_end) = transformed_pixel_bounds(fb, xform, rect);
+    let inv = xform.affine_inverse();
+    for py in y_start..y_end {
+        for px in x_start..x_end {
+            let local = inv.xform(Vector2::new(px as f32 + 0.5, py as f32 + 0.5));
+            let u = (local.x - rect.position.x) / rect.size.x;
+            let v = (local.y - rect.position.y) / rect.size.y;
+            // Outside the quad entirely (the transformed AABB overshoots on a
+            // rotation) — the shader must not run for a pixel the item does not
+            // cover, or a full-screen `COLOR = tint` would paint the AABB.
+            if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
+                continue;
+            }
+            let (fx, fy) = match source_rect {
+                Some(sr) => (sr.position.x + u * sr.size.x, sr.position.y + v * sr.size.y),
+                None => (u * texture.width as f32, v * texture.height as f32),
+            };
+            let texel = sample_texture(texture, fx, fy, filter, repeat);
+            let base = Color::new(
+                texel.r * modulate.r,
+                texel.g * modulate.g,
+                texel.b * modulate.b,
+                texel.a * modulate.a,
+            );
+            let ctx = FragmentContext {
+                color: base,
+                uv: (u, v),
+                screen_uv: (u, v),
+                time,
+                // canvas_item shaders have no EYEDIR built-in.
+                ..Default::default()
+            };
+            let out = execute_fragment_with_env(instructions, &ctx, uniforms, &shader_env);
+            if out.a > 0.001 {
+                fb.blend_pixel(px, py, out);
             }
         }
     }
@@ -843,6 +1049,30 @@ pub fn draw_texture_rect_shaded(
     // borrowed mutably for the pixel writes.
     let tex_filter = fb.texture_filter;
     let tex_repeat = fb.texture_repeat;
+
+    // pat-s3rrv.36: give the shader front end a way to run `texture(TEXTURE, UV)`
+    // and read `TEXTURE_PIXEL_SIZE`. Built ONCE per draw call, not per pixel.
+    //
+    // The closure owns a clone of the texture because `Sampler` is `'static`:
+    // capturing the `&Texture2D` borrow would not satisfy that bound. That costs
+    // one pixel-buffer copy per draw call, which is why it is hoisted out of the
+    // loop. It samples through `canvas_material::sample_texture` so a shader's
+    // taps honour the same filter/repeat modes as the base sample below --
+    // sampling raw would make TEXTURE disagree with COLOR.
+    let shader_env = ShaderEnv {
+        sampler: Some({
+            let tex = texture.clone();
+            Sampler::new(move |_name, uv| {
+                let c = canvas_material::sample_texture(&tex, uv[0], uv[1], tex_filter, tex_repeat);
+                [c.r, c.g, c.b, c.a]
+            })
+        }),
+        texture_pixel_size: (
+            1.0 / texture.width.max(1) as f32,
+            1.0 / texture.height.max(1) as f32,
+        ),
+    };
+
     for py in y_min..y_max {
         for px in x_min..x_max {
             let u = (px as f32 - rect.position.x) / rect.size.x;
@@ -872,7 +1102,7 @@ pub fn draw_texture_rect_shaded(
                 // canvas_item shaders have no EYEDIR built-in.
                 ..Default::default()
             };
-            let out = execute_fragment(instructions, &ctx, uniforms);
+            let out = execute_fragment_with_env(instructions, &ctx, uniforms, &shader_env);
             if out.a > 0.001 {
                 fb.blend_pixel(px, py, out);
             }
@@ -950,6 +1180,143 @@ pub fn fill_rotated_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- pat-s3rrv.28: texture filter + repeat in the blit -------------------
+
+    /// A 2x1 texture: red at texel 0, blue at texel 1.
+    fn red_blue_strip() -> Texture2D {
+        Texture2D {
+            width: 2,
+            height: 1,
+            pixels: vec![Color::rgb(1.0, 0.0, 0.0), Color::rgb(0.0, 0.0, 1.0)],
+        }
+    }
+
+    /// Draws the strip into a 4px row through a `source_rect` spanning FOUR
+    /// texels — two tiles.
+    ///
+    /// ⚠️ The oversize source rect is what makes the repeat modes
+    /// distinguishable at all: inside the quad `u`/`v` are normalised to 0..1
+    /// by construction, so with a 1:1 source rect every mode samples the same
+    /// texels and the test would pass no matter what `repeat` did.
+    fn strip_reds(filter: TextureFilter, repeat: TextureRepeat) -> Vec<bool> {
+        let mut fb = FrameBuffer::new(4, 1, Color::BLACK);
+        draw_texture_rect_transformed_filtered(
+            &mut fb,
+            &red_blue_strip(),
+            Transform2D::IDENTITY,
+            Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(4.0, 1.0)),
+            Some(Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(4.0, 1.0))),
+            Color::WHITE,
+            filter,
+            repeat,
+        );
+        (0..4).map(|x| fb.get_pixel(x, 0).r > 0.5).collect()
+    }
+
+    #[test]
+    fn texture_repeat_enabled_tiles_where_disabled_smears_the_edge() {
+        // DISABLED clamps: texels 2 and 3 fall off the right edge, so the second
+        // tile repeats the last texel — red, blue, blue, blue.
+        assert_eq!(
+            strip_reds(TextureFilter::Nearest, TextureRepeat::Disabled),
+            vec![true, false, false, false],
+            "DISABLED must smear the edge texel across the second tile"
+        );
+
+        // ENABLED wraps, so the pattern repeats — red, blue, red, blue.
+        assert_eq!(
+            strip_reds(TextureFilter::Nearest, TextureRepeat::Enabled),
+            vec![true, false, true, false],
+            "ENABLED must tile the texture instead of clamping"
+        );
+    }
+
+    #[test]
+    fn texture_repeat_mirror_reverses_every_other_copy() {
+        // red, blue | blue, red — the seam shares an edge texel.
+        assert_eq!(
+            strip_reds(TextureFilter::Nearest, TextureRepeat::Mirror),
+            vec![true, false, false, true],
+            "MIRROR must reverse the second copy"
+        );
+    }
+
+    #[test]
+    fn texture_filter_linear_blends_between_texels() {
+        // Magnified 2x with NO source rect, so pixel 1 samples a quarter of the
+        // way from red toward blue rather than landing on a texel centre.
+        let draw = |filter: TextureFilter| {
+            let mut fb = FrameBuffer::new(4, 1, Color::BLACK);
+            draw_texture_rect_transformed_filtered(
+                &mut fb,
+                &red_blue_strip(),
+                Transform2D::IDENTITY,
+                Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(4.0, 1.0)),
+                None,
+                Color::WHITE,
+                filter,
+                TextureRepeat::Disabled,
+            );
+            fb.get_pixel(1, 0)
+        };
+
+        let nearest = draw(TextureFilter::Nearest);
+        assert!(
+            nearest.r > 0.99 && nearest.b < 0.01,
+            "NEAREST must pick a single texel outright, got r={} b={}",
+            nearest.r,
+            nearest.b
+        );
+
+        let linear = draw(TextureFilter::Linear);
+        assert!(
+            linear.r > 0.01 && linear.r < 0.99 && linear.b > 0.01,
+            "LINEAR must blend the neighbouring texels, got r={} b={}",
+            linear.r,
+            linear.b
+        );
+    }
+
+    /// The regression guard for the refactor itself: every existing caller goes
+    /// through the delegating wrapper, so it must produce byte-identical pixels
+    /// to the explicit nearest/clamp pair.
+    #[test]
+    fn the_unfiltered_entry_point_keeps_its_historical_pixels() {
+        let tex = red_blue_strip();
+        let rect = Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(4.0, 1.0));
+        let src = Some(Rect2::new(Vector2::new(0.0, 0.0), Vector2::new(4.0, 1.0)));
+
+        let mut old = FrameBuffer::new(4, 1, Color::BLACK);
+        draw_texture_rect_transformed(
+            &mut old,
+            &tex,
+            Transform2D::IDENTITY,
+            rect,
+            src,
+            Color::WHITE,
+        );
+
+        let mut explicit = FrameBuffer::new(4, 1, Color::BLACK);
+        draw_texture_rect_transformed_filtered(
+            &mut explicit,
+            &tex,
+            Transform2D::IDENTITY,
+            rect,
+            src,
+            Color::WHITE,
+            TextureFilter::Nearest,
+            TextureRepeat::Disabled,
+        );
+
+        for x in 0..4 {
+            let (a, b) = (old.get_pixel(x, 0), explicit.get_pixel(x, 0));
+            assert!(
+                (a.r - b.r).abs() < 1e-6 && (a.g - b.g).abs() < 1e-6 && (a.b - b.b).abs() < 1e-6,
+                "the delegating wrapper moved a pixel at x={x}"
+            );
+        }
+    }
 
     // pat-nzgdu.71: draw_line / draw_line_blended must honor their width
     // argument (a 6px line paints a band, not a single Bresenham row).

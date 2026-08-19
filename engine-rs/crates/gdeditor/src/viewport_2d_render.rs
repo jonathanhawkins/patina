@@ -21,6 +21,12 @@ use gdscene::node::NodeId;
 use gdscene::tilemap::{self, TILE_SET_PREFIX};
 use gdscene::{canvas_order, control, node2d, SceneTree};
 use gdscript_interop::canvas_server;
+use gdserver2d::material::{
+    BlendMode, CanvasItemMaterial, LightMode, TextureFilter, TextureRepeat,
+};
+use gdserver2d::shader::{
+    parse_fragment_body, FragmentInstruction, Shader, ShaderMaterial, ShaderType,
+};
 use gdvariant::Variant;
 
 use crate::texture_cache::TextureCache;
@@ -96,13 +102,31 @@ pub fn sprite_sheet_for_node(node: &gdscene::node::Node) -> SpriteSheet {
             _ => fallback,
         }
     };
-    // Godot exposes the cell as either `frame` or `frame_coords` (a
-    // column/row Vector2i); `frame_coords` wins when present, since that is the
-    // one the inspector writes for a sheet.
+    // Godot exposes the cell as either `frame` or `frame_coords` (a column/row
+    // Vector2i). They are two VIEWS OF ONE VALUE — setting either updates the
+    // other — so a `.tscn` serialises at most one of them.
+    //
+    // ⚠️ PRESENCE IS NOT THE DISCRIMINATOR, however much it looks like it.
+    // `packed_scene::node_with_class_defaults` seeds every ClassDB default onto
+    // the node before the scene's own values override a subset, so as soon as
+    // `register_2d_classes()` has run — which the editor and the runner both do
+    // at startup — `frame_coords` is ALWAYS present, as `Vector2i(0, 0)`.
+    // Letting mere presence win meant that seeded default silently beat an
+    // authored `frame`, pinning every sprite sheet to cell 0 in any real
+    // project. It read as "sheets are ignored" rather than as a precedence bug,
+    // and it hid until a test registered the ClassDB (pat-s3rrv.22).
+    //
+    // A NON-ZERO cell, by contrast, cannot have come from the default, so it is
+    // the one signal that `frame_coords` was actually authored. When both are
+    // zero the two agree anyway, so nothing is lost by preferring `frame`.
     let hframes = int("hframes", d.hframes).max(1);
-    let frame = match node.get_property("frame_coords") {
-        Variant::Vector2i(c) => c.y * hframes + c.x,
-        Variant::Vector2(c) => c.y as i32 * hframes + c.x as i32,
+    let authored_coords = match node.get_property("frame_coords") {
+        Variant::Vector2i(c) => Some((c.x, c.y)),
+        Variant::Vector2(c) => Some((c.x as i32, c.y as i32)),
+        _ => None,
+    };
+    let frame = match authored_coords {
+        Some((x, y)) if x != 0 || y != 0 => y * hframes + x,
         _ => int("frame", d.frame),
     };
     SpriteSheet {
@@ -238,8 +262,7 @@ pub struct ParticleQuad {
 }
 
 /// Edge length (px) of the solid quad drawn for a particle at scale 1 when the
-/// emitter has no usable texture. Matches the runtime bridge's
-/// `gdscene::scene_bridge` quad so both surfaces draw the same size.
+/// emitter has no usable texture.
 const PARTICLE_QUAD_SIZE: f32 = 4.0;
 
 /// One drawable item in the 2D viewport's render list.
@@ -284,6 +307,30 @@ pub struct Render2DItem {
     /// Resolved during collection because it needs the `CanvasLayer` ancestor's
     /// properties, which are gone by the time the view is applied.
     pub canvas_follow: CanvasFollow,
+    /// The node's `CanvasItemMaterial`, rebuilt from the `__canvas_material__*`
+    /// companions `packed_scene` flattens at load (pat-s3rrv.28).
+    ///
+    /// `None` — the overwhelmingly common case — composites with plain `Mix`.
+    /// Resolved during collection rather than at raster time because the
+    /// rasterizer has no `SceneTree` to read the companions back off.
+    pub canvas_material: Option<CanvasItemMaterial>,
+    /// The node's canvas_item `ShaderMaterial`, rebuilt from the `shader_code` /
+    /// `shader_path` + `shader_parameter/*` properties `packed_scene` leaves on
+    /// the node (pat-s3rrv.28).
+    ///
+    /// `Some` routes the item's textured draws through the shaded blit, so an
+    /// authored `.gdshader` rewrites `COLOR` in the running frame instead of
+    /// being loaded and ignored.
+    pub shader_material: Option<ShaderMaterial>,
+    /// `CanvasItem.texture_filter`, **already resolved** up the parent chain.
+    ///
+    /// Godot's `FILTER_PARENT_NODE` (0) is an inheritance marker, not a
+    /// sampling mode, and the chain terminates at the project default. It is
+    /// walked here — where the ancestors are still reachable — so what reaches
+    /// the blit is always a concrete mode.
+    pub texture_filter: TextureFilter,
+    /// `CanvasItem.texture_repeat`, resolved up the parent chain the same way.
+    pub texture_repeat: TextureRepeat,
     /// What to draw for this node.
     pub kind: Render2DKind,
 }
@@ -384,6 +431,14 @@ pub fn collect_canvas_items(tree: &SceneTree) -> Vec<Render2DItem> {
                     Variant::Int(i) => i as u32,
                     _ => 1,
                 },
+                // pat-s3rrv.28: the material and sampling state travel WITH
+                // the item, because the rasterizer has no `SceneTree`. The
+                // filter/repeat walks resolve Godot's PARENT_NODE inheritance
+                // here, where the ancestors are still in hand.
+                canvas_material: resolve_canvas_item_material(tree, id),
+                shader_material: resolve_canvas_shader_material(tree, id),
+                texture_filter: resolve_texture_filter(tree, id),
+                texture_repeat: resolve_texture_repeat(tree, id),
                 kind: render_kind_for(tree, id, node.class_name()),
             })
         })
@@ -433,9 +488,61 @@ pub fn collect_canvas_items(tree: &SceneTree) -> Vec<Render2DItem> {
                         // (pat-0q2kx.212). The host's `global_transform` already
                         // carries the layer transform, so `base` above does too.
                         canvas_follow: host.canvas_follow,
+                        // A `RenderingServer.canvas_item_*` item is parented to
+                        // the host node's canvas item, so it composites and
+                        // samples under the host's material exactly as a child
+                        // canvas item does in Godot.
+                        canvas_material: host.canvas_material,
+                        shader_material: host.shader_material.clone(),
+                        texture_filter: host.texture_filter,
+                        texture_repeat: host.texture_repeat,
                         kind,
                     });
                 }
+            }
+        }
+    }
+    // A node's own `_draw()` output (pat-s3rrv.22). Godot appends `_draw`
+    // commands to the SAME CanvasItem command list as the item's built-in
+    // drawing, which is why a `_draw` on a Sprite2D overlays the sprite rather
+    // than replacing it — so these are pushed AFTER the class-driven items.
+    //
+    // Until now the only consumer of `custom_draw_commands` was
+    // a canvas bridge module with no production caller (since removed): on the
+    // shipped path `RenderingServer.canvas_item_add_rect` drew but a script's
+    // `_draw` did not.
+    let hosts: Vec<Render2DItem> = items.clone();
+    for host in &hosts {
+        // `Render2DItem::node_id` is the raw u64; the store is keyed by NodeId.
+        let node = NodeId::from_object_id(gdcore::id::ObjectId::from_raw(host.node_id));
+        let cmds = tree.custom_draw_commands(node);
+        if cmds.is_empty() {
+            continue;
+        }
+        for cmd in cmds {
+            // A multiline/dashed command is a SET of disjoint segments, which no
+            // single polyline can express without drawing the connecting runs;
+            // each pair becomes its own Line item.
+            for (xf, kind) in draw_command_items(host.global_transform, cmd) {
+                items.push(Render2DItem {
+                    node_id: host.node_id,
+                    global_transform: xf,
+                    modulate: host.modulate,
+                    z_index: host.z_index,
+                    canvas_layer: host.canvas_layer,
+                    clip_rect: host.clip_rect,
+                    light_mask: host.light_mask,
+                    visibility_layer: host.visibility_layer,
+                    canvas_follow: host.canvas_follow,
+                    // `_draw` output goes on the SAME CanvasItem command list as
+                    // the node's built-in drawing, so it carries the node's
+                    // material and sampling modes too.
+                    canvas_material: host.canvas_material,
+                    shader_material: host.shader_material.clone(),
+                    texture_filter: host.texture_filter,
+                    texture_repeat: host.texture_repeat,
+                    kind,
+                });
             }
         }
     }
@@ -444,6 +551,72 @@ pub fn collect_canvas_items(tree: &SceneTree) -> Vec<Render2DItem> {
     // the tiebreaker within the same layer+z.
     items.sort_by_key(|i| (i.canvas_layer, i.z_index));
     items
+}
+
+/// Expands one `_draw` command into the render items it needs (pat-s3rrv.22).
+///
+/// Most commands are one item; `draw_multiline` and `draw_dashed_line` are sets
+/// of disjoint segments and become one `Line` item each, because a single
+/// polyline would draw the gaps too.
+fn draw_command_items(
+    base: Transform2D,
+    cmd: &gdserver2d::canvas::DrawCommand,
+) -> Vec<(Transform2D, Render2DKind)> {
+    use gdserver2d::canvas::DrawCommand as Dc;
+    match cmd {
+        Dc::DrawMultiline {
+            points,
+            color,
+            width,
+        } => points
+            .chunks_exact(2)
+            .map(|seg| {
+                (
+                    base,
+                    Render2DKind::Line {
+                        points: vec![seg[0], seg[1]],
+                        width: *width,
+                        color: *color,
+                    },
+                )
+            })
+            .collect(),
+        Dc::DrawDashedLine {
+            from,
+            to,
+            color,
+            width,
+            dash,
+        } => {
+            let delta = Vector2::new(to.x - from.x, to.y - from.y);
+            let len = (delta.x * delta.x + delta.y * delta.y).sqrt();
+            let step = dash.max(0.1);
+            if len <= f32::EPSILON {
+                return Vec::new();
+            }
+            let dir = Vector2::new(delta.x / len, delta.y / len);
+            let mut out = Vec::new();
+            let mut t = 0.0f32;
+            // Godot alternates dash / gap of the same length.
+            while t < len {
+                let end = (t + step).min(len);
+                out.push((
+                    base,
+                    Render2DKind::Line {
+                        points: vec![
+                            Vector2::new(from.x + dir.x * t, from.y + dir.y * t),
+                            Vector2::new(from.x + dir.x * end, from.y + dir.y * end),
+                        ],
+                        width: *width,
+                        color: *color,
+                    },
+                ));
+                t += step * 2.0;
+            }
+            out
+        }
+        other => draw_command_render(base, other).into_iter().collect(),
+    }
 }
 
 /// Maps one stored canvas command onto the render list's `(transform, kind)`.
@@ -513,6 +686,213 @@ fn canvas_command_render(
     }
 }
 
+/// Converts one GDScript `_draw()` command into a render item (pat-s3rrv.22).
+///
+/// `CanvasItem.draw_*` calls land in `SceneTree::custom_draw_commands` as
+/// `gdserver2d::canvas::DrawCommand`s. Until this existed the ONLY consumer of
+/// that store was a canvas bridge module with no production caller (since removed) —
+/// so `RenderingServer.canvas_item_add_rect` drew on the shipped path while a
+/// script's `_draw` did not, and the test that "proved" `_draw` asserted pixels
+/// through the dead bridge.
+///
+/// Follows the same convention as [`canvas_command_render`]: geometry that
+/// `Render2DKind` carries in local space stays in the kind, and geometry that
+/// the kind cannot express (a rect's position, a circle's centre) rides in the
+/// returned transform.
+///
+/// Returns `None` for a command the render list has no representation for, so
+/// an unsupported draw call is skipped rather than mis-drawn.
+fn draw_command_render(
+    base: Transform2D,
+    cmd: &gdserver2d::canvas::DrawCommand,
+) -> Option<(Transform2D, Render2DKind)> {
+    use gdserver2d::canvas::DrawCommand as Dc;
+
+    /// Godot strokes an unfilled rect as its four edges.
+    fn rect_outline(rect: &gdcore::math::Rect2) -> Vec<Vector2> {
+        let (w, h) = (rect.size.x, rect.size.y);
+        vec![
+            Vector2::new(0.0, 0.0),
+            Vector2::new(w, 0.0),
+            Vector2::new(w, h),
+            Vector2::new(0.0, h),
+            Vector2::new(0.0, 0.0),
+        ]
+    }
+
+    /// Samples a circular arc into a polyline, matching the circle
+    /// approximation `canvas_command_render` already uses.
+    fn arc_points(radius: f32, start: f32, end: f32, count: usize) -> Vec<Vector2> {
+        let count = count.max(2);
+        (0..=count)
+            .map(|i| {
+                let t = i as f32 / count as f32;
+                let a = start + (end - start) * t;
+                Vector2::new(radius * a.cos(), radius * a.sin())
+            })
+            .collect()
+    }
+
+    match cmd {
+        Dc::DrawRect {
+            rect,
+            color,
+            filled,
+        } => Some(if *filled {
+            (
+                base * Transform2D::translated(rect.position),
+                Render2DKind::ColorRect {
+                    size: rect.size,
+                    color: *color,
+                },
+            )
+        } else {
+            (
+                base * Transform2D::translated(rect.position),
+                Render2DKind::Line {
+                    points: rect_outline(rect),
+                    // `draw_rect`'s `width` is dropped upstream (the DrawCommand
+                    // carries none), so a 1px outline is the honest default.
+                    width: 1.0,
+                    color: *color,
+                },
+            )
+        }),
+        Dc::DrawCircle {
+            center,
+            radius,
+            color,
+        } => {
+            const SEGMENTS: usize = 32;
+            let points = (0..SEGMENTS)
+                .map(|i| {
+                    let a = (i as f32) * std::f32::consts::TAU / (SEGMENTS as f32);
+                    Vector2::new(radius * a.cos(), radius * a.sin())
+                })
+                .collect();
+            Some((
+                base * Transform2D::translated(*center),
+                Render2DKind::Polygon {
+                    points,
+                    color: *color,
+                },
+            ))
+        }
+        Dc::DrawLine {
+            from,
+            to,
+            color,
+            width,
+        } => Some((
+            base,
+            Render2DKind::Line {
+                points: vec![*from, *to],
+                width: *width,
+                color: *color,
+            },
+        )),
+        Dc::DrawPolyline {
+            points,
+            color,
+            width,
+            closed,
+        } => {
+            let mut pts = points.clone();
+            if *closed {
+                if let Some(first) = points.first() {
+                    pts.push(*first);
+                }
+            }
+            Some((
+                base,
+                Render2DKind::Line {
+                    points: pts,
+                    width: *width,
+                    color: *color,
+                },
+            ))
+        }
+        // Independent segments cannot be one polyline without drawing the
+        // connecting runs, so each pair is emitted by the caller instead.
+        Dc::DrawMultiline { .. } => None,
+        Dc::DrawDashedLine { .. } => None,
+        // A 9-slice needs per-corner/edge stretching that `Render2DKind` cannot
+        // express — drawing it as a plain stretched Sprite would silently
+        // distort the corners, so it is skipped until the render list grows a
+        // nine-patch kind. Matched explicitly rather than with a wildcard so a
+        // future `DrawCommand` variant fails this match instead of vanishing.
+        Dc::DrawNinePatch { .. } => None,
+        Dc::DrawArc {
+            center,
+            radius,
+            start_angle,
+            end_angle,
+            point_count,
+            color,
+            width,
+        } => Some((
+            base * Transform2D::translated(*center),
+            Render2DKind::Line {
+                points: arc_points(*radius, *start_angle, *end_angle, *point_count as usize),
+                width: *width,
+                color: *color,
+            },
+        )),
+        Dc::DrawPolygon { points, colors } => Some((
+            base,
+            Render2DKind::Polygon {
+                points: points.clone(),
+                // The rasterizer has no per-vertex interpolation, so the first
+                // colour fills — the same choice `gdserver2d` documents.
+                color: colors.first().copied().unwrap_or(Color::WHITE),
+            },
+        )),
+        Dc::DrawTextureRect {
+            texture_path,
+            rect,
+            modulate: _,
+        } => Some((
+            base * Transform2D::translated(rect.position),
+            Render2DKind::Sprite {
+                texture: texture_path.clone(),
+                offset: Vector2::ZERO,
+                flip_h: false,
+                flip_v: false,
+                sheet: SpriteSheet::default(),
+            },
+        )),
+        Dc::DrawTextureRegion {
+            texture_path,
+            rect,
+            source_rect: _,
+            modulate: _,
+        } => Some((
+            base * Transform2D::translated(rect.position),
+            Render2DKind::Sprite {
+                texture: texture_path.clone(),
+                offset: Vector2::ZERO,
+                flip_h: false,
+                flip_v: false,
+                sheet: SpriteSheet::default(),
+            },
+        )),
+        Dc::DrawString {
+            text,
+            position,
+            color: _,
+            font_size,
+        } => Some((
+            base * Transform2D::translated(*position),
+            Render2DKind::Text {
+                text: text.clone(),
+                font_size: *font_size as i64,
+                h_align: TextAlign::Left,
+                font_path: None,
+            },
+        )),
+    }
+}
+
 /// Appends `id` and its subtree to `out` in Godot's draw order.
 ///
 /// Children come from [`canvas_order::draw_ordered_children`], so a `y_sort_enabled`
@@ -553,6 +933,158 @@ fn clip_rect_for(tree: &SceneTree, id: NodeId) -> Option<Rect2> {
         cursor = tree.get_node(parent).and_then(|n| n.parent());
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// CanvasItemMaterial + shader + texture filter/repeat resolution (pat-s3rrv.28)
+// ---------------------------------------------------------------------------
+//
+// These four resolvers used to live in `gdscene::scene_bridge`, feeding
+// `gdrender2d::SoftwareRenderer` — a complete blend/filter/shader pipeline with
+// no production caller. That module is gone (pat-s3rrv.22 collapsed the two 2D
+// paths onto this one), so the logic is reimplemented here, against the render
+// list that actually ships. Without them an authored `CanvasItemMaterial`
+// composited as plain Mix, a `.gdshader` on a Sprite2D did nothing, and
+// `texture_filter = LINEAR` / `texture_repeat = ENABLED` were inert in the
+// running game however the scene set them.
+
+/// Reads an integer enum property, accepting the int or float form a `.tscn`
+/// may carry.
+fn enum_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<i64> {
+    match tree.get_node(node_id)?.get_property(key) {
+        Variant::Int(i) => Some(i),
+        Variant::Float(f) => Some(f as i64),
+        _ => None,
+    }
+}
+
+/// Builds the node's [`CanvasItemMaterial`] from the `__canvas_material__*`
+/// companions `packed_scene` flattens at load.
+///
+/// `None` when the node has no CanvasItemMaterial, which is the common case —
+/// the rasterizer then composites with plain `Mix`.
+fn resolve_canvas_item_material(tree: &SceneTree, node_id: NodeId) -> Option<CanvasItemMaterial> {
+    let node = tree.get_node(node_id)?;
+    // A material with every property defaulted flattens to an empty bag, so
+    // presence is recorded explicitly rather than inferred from the companions.
+    let present = matches!(
+        node.get_property("__canvas_material__present"),
+        Variant::Bool(true)
+    );
+    if !present {
+        return None;
+    }
+    // Godot's `CanvasItemMaterial.BlendMode`: MIX/ADD/SUB/MUL/PREMULT_ALPHA.
+    let blend_mode = match enum_prop(tree, node_id, "__canvas_material__blend_mode") {
+        Some(1) => BlendMode::Add,
+        Some(2) => BlendMode::Sub,
+        Some(3) => BlendMode::Mul,
+        Some(4) => BlendMode::PremultAlpha,
+        _ => BlendMode::Mix,
+    };
+    // `LightMode`: NORMAL/UNSHADED/LIGHT_ONLY. Carried through so the lighting
+    // pass can gate on it; `shade_runtime_canvas` does not consume it yet.
+    let light_mode = match enum_prop(tree, node_id, "__canvas_material__light_mode") {
+        Some(1) => LightMode::Unshaded,
+        Some(2) => LightMode::LightOnly,
+        _ => LightMode::Normal,
+    };
+    Some(CanvasItemMaterial {
+        blend_mode,
+        light_mode,
+    })
+}
+
+/// Resolves `texture_filter` up the ancestor chain (`FILTER_PARENT_NODE`).
+///
+/// Godot's enum: 0 = PARENT_NODE, 1 = NEAREST, 2 = LINEAR, 3/4 add mipmaps and
+/// 5..7 anisotropy — the software rasterizer has no mip chain, so the mipmap
+/// variants collapse onto their base filter rather than being ignored.
+///
+/// ⚠️ The walk is the point: reading only the node's own property looks right
+/// and silently drops inheritance, so a child left on the default PARENT_NODE
+/// would ignore the LINEAR its parent set.
+///
+/// The chain terminates at the project default
+/// (`rendering/textures/canvas_textures/default_texture_filter`, which Patina
+/// seeds as 1 = NEAREST), so a root node left on PARENT_NODE still samples.
+fn resolve_texture_filter(tree: &SceneTree, node_id: NodeId) -> TextureFilter {
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        match enum_prop(tree, id, "texture_filter") {
+            Some(1) | Some(3) => return TextureFilter::Nearest,
+            Some(2) | Some(4) => return TextureFilter::Linear,
+            Some(5) => return TextureFilter::Nearest,
+            Some(6) | Some(7) => return TextureFilter::Linear,
+            // 0 (PARENT_NODE) or absent: keep walking up.
+            _ => {}
+        }
+        current = tree.get_node(id).and_then(|n| n.parent());
+    }
+    TextureFilter::Nearest
+}
+
+/// Resolves `texture_repeat` up the ancestor chain (`REPEAT_PARENT_NODE`).
+///
+/// Godot's enum: 0 = PARENT_NODE, 1 = DISABLED, 2 = ENABLED, 3 = MIRROR. The
+/// chain terminates at the project default, which is DISABLED.
+fn resolve_texture_repeat(tree: &SceneTree, node_id: NodeId) -> TextureRepeat {
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        match enum_prop(tree, id, "texture_repeat") {
+            Some(1) => return TextureRepeat::Disabled,
+            Some(2) => return TextureRepeat::Enabled,
+            Some(3) => return TextureRepeat::Mirror,
+            _ => {}
+        }
+        current = tree.get_node(id).and_then(|n| n.parent());
+    }
+    TextureRepeat::Disabled
+}
+
+/// Resolves the node's canvas_item `ShaderMaterial` from the flat properties
+/// `packed_scene` leaves behind at load.
+///
+/// The source is either an inline `shader_code` (an `[sub_resource
+/// type="Shader"]` in the `.tscn`) or a `.gdshader` named by `shader_path`, and
+/// every `shader_parameter/*` property becomes a uniform override. The
+/// `ShaderMaterial` sub-resource itself is gone by this point — only the
+/// `SceneTree` survives — which is why the data travels on the node.
+///
+/// `None` when the node has no shader, which is the overwhelmingly common case,
+/// so the caller leaves the item unshaded and the plain blit runs.
+fn resolve_canvas_shader_material(tree: &SceneTree, node_id: NodeId) -> Option<ShaderMaterial> {
+    let node = tree.get_node(node_id)?;
+
+    let source = match node.get_property("shader_code") {
+        Variant::String(code) if !code.is_empty() => code,
+        _ => match node.get_property("shader_path") {
+            Variant::String(path) if !path.is_empty() => {
+                // `res://` resolves relative to the project root, as elsewhere.
+                let fs = path.strip_prefix("res://").unwrap_or(path.as_str());
+                let res = gdresource::importers::load_gdshader(std::path::Path::new(fs)).ok()?;
+                match res.get_property("code") {
+                    Some(Variant::String(code)) if !code.is_empty() => code.clone(),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        },
+    };
+
+    // Always CanvasItem here: this walk only ever builds 2D canvas items, and a
+    // spatial shader reaching a canvas item would be a scene authoring error
+    // rather than something to silently rasterize.
+    let mut material = ShaderMaterial::new();
+    material.shader = Some(Shader::new(ShaderType::CanvasItem, &source));
+    for (key, value) in node.properties() {
+        if let Some(name) = key.strip_prefix("shader_parameter/") {
+            if value != &Variant::Nil {
+                material.set_shader_parameter(name, value.clone());
+            }
+        }
+    }
+    Some(material)
 }
 
 /// Returns the `layer` index of `id`'s nearest `CanvasLayer` ancestor, or `0`
@@ -1127,6 +1659,14 @@ pub fn build_control_render_items(
             // ...and the default visibility layer, so a viewport using the
             // default cull mask still draws the editor's own chrome.
             visibility_layer: 1,
+            // Editor/UI chrome is not scene-authored, so it carries no material
+            // and samples with the project defaults. Concrete modes rather than
+            // `ParentNode`: these items never go through the ancestor walk, so
+            // an inheritance marker here would reach the blit unresolved.
+            canvas_material: None,
+            shader_material: None,
+            texture_filter: TextureFilter::Nearest,
+            texture_repeat: TextureRepeat::Disabled,
             kind,
         });
     }
@@ -1637,6 +2177,47 @@ pub fn rasterize_render_list_with_quality(
         // set, so a clipped item draws normally and everything it wrote outside its
         // clip rect is restored afterwards. Only clipped subtrees pay the copy.
         let clip_snapshot = item.clip_rect.map(|_| fb.pixels.clone());
+        // pat-s3rrv.28: the item's `CanvasItemMaterial` blend mode and its
+        // resolved sampling modes apply to EVERY draw the item makes — rects,
+        // lines, glyphs and textures alike — because `FrameBuffer::blend_pixel`
+        // is the only path to a pixel. Threading them through each `draw::`
+        // signature instead would miss whichever routine was added next.
+        //
+        // Restored on the way out for the same reason the clip snapshot is:
+        // items are rasterized flat here, so there is no draw-order stack to
+        // unwind. This mirrors `SoftwareRenderer::rasterize_item` exactly.
+        let prev_blend = fb.blend_mode;
+        let prev_filter = fb.texture_filter;
+        let prev_repeat = fb.texture_repeat;
+        fb.blend_mode = item
+            .canvas_material
+            .map(|m| m.blend_mode)
+            .unwrap_or(BlendMode::Mix);
+        fb.texture_filter = item.texture_filter;
+        fb.texture_repeat = item.texture_repeat;
+        // The item's canvas_item `fragment()` program, compiled ONCE per item
+        // rather than per pixel. `uniforms` merges the shader's declared
+        // defaults with the material's runtime parameter overrides, so editing
+        // a `shader_parameter/*` changes the pixels.
+        let shader_program: Option<(
+            Vec<FragmentInstruction>,
+            std::collections::HashMap<String, Variant>,
+        )> = item
+            .shader_material
+            .as_ref()
+            .and_then(|m| m.shader.as_ref().map(|sh| (m, sh)))
+            .map(|(m, sh)| {
+                let instructions = parse_fragment_body(&sh.source_code);
+                let mut uniforms: std::collections::HashMap<String, Variant> =
+                    std::collections::HashMap::new();
+                for u in &sh.uniforms {
+                    uniforms.insert(u.name.clone(), u.default_value.clone());
+                }
+                for (k, v) in &m.parameters {
+                    uniforms.insert(k.clone(), v.clone());
+                }
+                (instructions, uniforms)
+            });
         match &item.kind {
             Render2DKind::Sprite {
                 texture,
@@ -1680,14 +2261,46 @@ pub fn rasterize_render_list_with_quality(
                                 if *flip_h { -1.0 } else { 1.0 },
                                 if *flip_v { -1.0 } else { 1.0 },
                             ));
-                            draw::draw_texture_rect_transformed(
-                                &mut fb,
-                                tex,
-                                xform * flip,
-                                rect,
-                                Some(src),
-                                item.modulate,
-                            );
+                            // pat-s3rrv.28: an authored canvas_item shader
+                            // rewrites COLOR per fragment; without one this is
+                            // the plain blit, now carrying the item's resolved
+                            // filter/repeat instead of hardcoded nearest-clamp.
+                            match &shader_program {
+                                Some((instructions, uniforms)) => {
+                                    draw::draw_texture_rect_transformed_shaded(
+                                        &mut fb,
+                                        tex,
+                                        xform * flip,
+                                        rect,
+                                        Some(src),
+                                        item.modulate,
+                                        item.texture_filter,
+                                        item.texture_repeat,
+                                        instructions,
+                                        uniforms,
+                                        // TIME: this raster entry point is
+                                        // handed a finished render list with no
+                                        // clock attached, so an animated shader
+                                        // renders its t=0 frame rather than a
+                                        // wrong one. Feeding real time needs a
+                                        // parameter on the public signature and
+                                        // is left to its own bead.
+                                        0.0,
+                                    );
+                                }
+                                None => {
+                                    draw::draw_texture_rect_transformed_filtered(
+                                        &mut fb,
+                                        tex,
+                                        xform * flip,
+                                        rect,
+                                        Some(src),
+                                        item.modulate,
+                                        item.texture_filter,
+                                        item.texture_repeat,
+                                    );
+                                }
+                            }
                             drawn = true;
                         }
                     }
@@ -1712,13 +2325,15 @@ pub fn rasterize_render_list_with_quality(
                         let Some(tex) = cache.get(&cell.texture) else {
                             continue;
                         };
-                        draw::draw_texture_rect_transformed(
+                        draw::draw_texture_rect_transformed_filtered(
                             &mut fb,
                             tex,
                             xform,
                             cell.dest,
                             Some(cell.src),
                             item.modulate,
+                            item.texture_filter,
+                            item.texture_repeat,
                         );
                     }
                 }
@@ -1799,13 +2414,15 @@ pub fn rasterize_render_list_with_quality(
                                         tw * quad.scale,
                                         th * quad.scale,
                                     );
-                                    draw::draw_texture_rect_transformed(
+                                    draw::draw_texture_rect_transformed_filtered(
                                         &mut fb,
                                         tex,
                                         xform,
                                         rect,
                                         None,
                                         modulate(quad.color, item.modulate),
+                                        item.texture_filter,
+                                        item.texture_repeat,
                                     );
                                 }
                                 textured = true;
@@ -1855,6 +2472,9 @@ pub fn rasterize_render_list_with_quality(
         if let (Some(rect), Some(before)) = (item.clip_rect, clip_snapshot) {
             restore_outside_clip(&mut fb, rect, &before);
         }
+        fb.blend_mode = prev_blend;
+        fb.texture_filter = prev_filter;
+        fb.texture_repeat = prev_repeat;
     }
     fb
 }

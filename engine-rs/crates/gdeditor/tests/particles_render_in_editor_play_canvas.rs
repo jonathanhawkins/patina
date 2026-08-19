@@ -6,7 +6,7 @@
 //! GLOBAL space, so moving the emitter leaves the existing cloud behind
 //! (`scene/2d/gpu_particles_2d.cpp`, `doc/classes/GPUParticles2D.xml`).
 //!
-//! Patina simulated particles correctly and `gdscene::scene_bridge` could
+//! Patina simulated particles correctly and a dead canvas bridge module could
 //! rasterize them, but no production surface called it: neither
 //! `viewport_2d_render::build_runtime_render_list` (the Play canvas) nor
 //! `scene_renderer` (the edit viewport) had a particle arm, so particles were

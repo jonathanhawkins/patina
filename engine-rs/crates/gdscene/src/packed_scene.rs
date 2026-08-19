@@ -565,6 +565,56 @@ impl PackedScene {
             }
         }
 
+        // Flatten a `ParticleProcessMaterial` onto the emitter node
+        // (pat-s3rrv.39).
+        //
+        // Godot puts a particle system's motion parameters on a
+        // `ParticleProcessMaterial` sub-resource assigned to `process_material`,
+        // not on the node: `gravity`, `direction`, `spread`,
+        // `initial_velocity_min/max` and `color` all live there
+        // (upstream/godot/scene/resources/particle_process_material.cpp).
+        //
+        // `MainLoop`'s emitter setup already reads every one of those as a PLAIN
+        // node property — the comment at main_loop.rs:677 even says the flattener
+        // "lands [them] on the node ... so they are read the same way as every
+        // other material parameter". Nothing ever produced them: there was a
+        // flattener for `material_override`, `surface_material_override/0`,
+        // `physics_material_override`, SpriteFrames and TileSet, but none for
+        // `process_material`. So a Godot-authored particle scene parsed fine and
+        // then emitted with default motion — no gravity, no aimed direction.
+        //
+        // Unprefixed keys (not `__particle_material__*`) because that is exactly
+        // what the emitter reads. Only keys the resource carries are written, and
+        // never over a value already on the node: a scene or a hand-built test
+        // that sets `gravity` directly keeps winning, matching how the other
+        // flatteners avoid silently resetting unspecified fields.
+        for tmpl in &mut templates {
+            let Some(mat_id) = sub_ref_id(tmpl.properties.get("process_material")) else {
+                continue;
+            };
+            if sub_resources.get(&mat_id).map(String::as_str) != Some("ParticleProcessMaterial") {
+                continue;
+            }
+            let Some(props) = sub_resource_props.get(&mat_id) else {
+                continue;
+            };
+            for key in [
+                "direction",
+                "gravity",
+                "spread",
+                "initial_velocity_min",
+                "initial_velocity_max",
+                "color",
+            ] {
+                if tmpl.properties.contains_key(key) {
+                    continue;
+                }
+                if let Some(value) = props.get(key) {
+                    tmpl.properties.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+
         // Bake a `Curve2D`/`Curve3D` sub-resource into the polyline the path
         // driver samples (pat-0q2kx.104).
         //
@@ -866,6 +916,33 @@ impl PackedScene {
                     for (key, value) in shape_props {
                         tmpl.properties
                             .insert(format!("__shape__{key}"), value.clone());
+                    }
+                }
+            }
+        }
+
+        // `LightOccluder2D.occluder` is an `OccluderPolygon2D` sub-resource
+        // holding the actual geometry (`polygon`, `closed`, `cull_mode`) —
+        // upstream/godot/scene/2d/light_occluder_2d.cpp. Flattened here for the
+        // same reason as `__shape__*`: by render time the sub-resource is gone
+        // and the lighting pass can only see node properties (pat-s3rrv.21).
+        //
+        // Without this, `collect_occluders_2d` looked for a `polygon` directly
+        // on the node, found `Nil` for every Godot-authored scene, and returned
+        // ZERO occluders — so 2D shadows never appeared from a real `.tscn`.
+        for tmpl in &mut templates {
+            let resolved = match tmpl.properties.get("occluder") {
+                Some(Variant::String(s)) => s
+                    .strip_prefix("SubResource:")
+                    .map(|id| id.to_string())
+                    .filter(|id| sub_resources.contains_key(id)),
+                _ => None,
+            };
+            if let Some(occ_id) = resolved {
+                if let Some(occ_props) = sub_resource_props.get(&occ_id) {
+                    for (key, value) in occ_props {
+                        tmpl.properties
+                            .insert(format!("__occluder__{key}"), value.clone());
                     }
                 }
             }

@@ -14,14 +14,15 @@
 //! load. Every item composited as plain Mix and every texture sampled
 //! nearest-clamped.
 //!
-//! These drive the real `.tscn` -> `PackedScene` -> `build_canvas_viewport` ->
-//! `SoftwareRenderer` path and assert on pixels.
+//! These drive the real `.tscn` -> `PackedScene` -> `build_runtime_render_list` ->
+//! `rasterize_render_list` path and assert on pixels.
 
 use gdcore::math::{Color, Vector2};
-use gdrender2d::renderer::{FrameBuffer, SoftwareRenderer};
+use gdeditor::texture_cache::TextureCache;
+use gdeditor::viewport_2d_render::{build_runtime_render_list, rasterize_render_list};
+use gdrender2d::renderer::FrameBuffer;
 use gdrender2d::texture::Texture2D;
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
-use gdscene::scene_bridge::build_canvas_viewport;
 use gdscene::scene_tree::SceneTree;
 
 const W: u32 = 64;
@@ -64,14 +65,17 @@ blend_mode = 1
 "#;
 
 fn render_tscn(src: &str) -> FrameBuffer {
+    // ⚠️ Without a populated ClassDB there is no class chain, so
+    // `Node::is_class("CanvasItem")` is false for every node and
+    // `collect_canvas_items` filters the whole scene out and returns `[]`
+    // (pat-s3rrv.28).
+    gdobject::class_db::register_2d_classes();
     let scene = PackedScene::from_tscn(src).expect("scene parses");
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     add_packed_scene_to_tree(&mut tree, root, &scene).expect("scene instances");
-    let no_textures = |_p: &str| -> Option<Vector2> { None };
-    let viewport = build_canvas_viewport(&tree, W, H, BG, &no_textures);
-    let mut renderer = SoftwareRenderer::new();
-    gdrender2d::test_adapter::capture_frame(&mut renderer, &viewport)
+    let items = build_runtime_render_list(&tree);
+    rasterize_render_list(&items, W, H, BG, None)
 }
 
 /// **The acceptance test.** Two overlapping half-grey rects composite brighter
@@ -132,14 +136,25 @@ fn checker_scene(parent_filter: i32, child_filter: i32) -> String {
 texture_filter = {parent_filter}
 
 [node name="Sprite" type="Sprite2D" parent="."]
-position = Vector2(0, 0)
+position = Vector2(32, 32)
+scale = Vector2(16, 16)
 texture_filter = {child_filter}
 "#
     )
 }
 
 /// Renders a scene whose `Sprite2D` shows the 2×2 checker stretched to 32×32.
+///
+/// ⚠️ The `scale` is load-bearing: a `Sprite2D` draws at its texture's pixel
+/// size, so an unscaled 2×2 checker covers four pixels in the corner and NO
+/// filter can be told from any other — the assertions below would read the
+/// clear colour and compare nothing.
 fn render_checker(src: &str) -> FrameBuffer {
+    // ⚠️ Without a populated ClassDB there is no class chain, so
+    // `Node::is_class("CanvasItem")` is false for every node and
+    // `collect_canvas_items` filters the whole scene out and returns `[]`
+    // (pat-s3rrv.28).
+    gdobject::class_db::register_2d_classes();
     let scene = PackedScene::from_tscn(src).expect("scene parses");
     let mut tree = SceneTree::new();
     let root = tree.root_id();
@@ -153,13 +168,14 @@ fn render_checker(src: &str) -> FrameBuffer {
         "texture",
         gdvariant::Variant::String("res://checker.png".into()),
     );
-    let sizes = |p: &str| -> Option<Vector2> {
-        (p == "res://checker.png").then_some(Vector2::new(32.0, 32.0))
-    };
-    let viewport = build_canvas_viewport(&tree, W, H, BG, &sizes);
-    let mut renderer = SoftwareRenderer::new();
-    renderer.register_texture("res://checker.png", checker());
-    gdrender2d::test_adapter::capture_frame(&mut renderer, &viewport)
+    // The shipped path resolves textures through a TextureCache; the sprite's
+    // destination rect comes from the cached texture's own size, so no separate
+    // size closure is needed (pat-s3rrv.22).
+    let mut textures = TextureCache::new(".");
+    textures.insert("res://checker.png", checker());
+
+    let items = build_runtime_render_list(&tree);
+    rasterize_render_list(&items, W, H, BG, Some(&mut textures))
 }
 
 /// Whether any pixel on the row is a mid-grey — the signature of bilinear
@@ -180,7 +196,9 @@ fn texture_filter_resolves_through_parent_node() {
     // Parent NEAREST (1), child PARENT_NODE (0) -> hard edges.
     let inherited_nearest = render_checker(&checker_scene(1, 0));
 
-    let y = 8;
+    // The row through the middle of the magnified checker, where the texel
+    // boundary falls; row 8 is above the quad entirely.
+    let y = 32;
     assert!(
         has_intermediate(&inherited_linear, y),
         "LINEAR inherited from the parent must produce interpolated greys",
@@ -199,7 +217,7 @@ fn explicit_child_filter_beats_the_parent() {
     // Parent LINEAR, child explicitly NEAREST -> hard edges win.
     let child_nearest = render_checker(&checker_scene(2, 1));
     assert!(
-        !has_intermediate(&child_nearest, 8),
+        !has_intermediate(&child_nearest, 32),
         "an explicit NEAREST on the child must override the parent's LINEAR",
     );
 }

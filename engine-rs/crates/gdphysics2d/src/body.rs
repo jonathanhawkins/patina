@@ -5,7 +5,7 @@
 //! like mass, friction, and bounce. Rigid bodies support force/impulse
 //! application and velocity integration.
 
-use gdcore::math::Vector2;
+use gdcore::math::{Transform2D, Vector2};
 
 use crate::shape::Shape2D;
 
@@ -32,6 +32,68 @@ pub const DEFAULT_SLEEP_THRESHOLD_LINEAR: f32 = 2.0;
 /// radians (`servers/physics_2d/physics_server_2d.cpp:912`).
 pub const DEFAULT_SLEEP_THRESHOLD_ANGULAR: f32 = 8.0 * std::f32::consts::PI / 180.0;
 
+/// One collision shape owned by a [`PhysicsBody2D`], with its transform and its
+/// **own** one-way collision settings (pat-s3rrv.25).
+///
+/// Godot puts `one_way_collision` on the `CollisionShape2D` child, not on the
+/// body, so a platformer character can carry a solid torso collider and a
+/// one-way foot sensor at the same time. Patina lifted the flag to the body,
+/// which made those two states mutually exclusive; this struct is where the
+/// per-shape data lives instead.
+///
+/// ⚠️ [`transform`](Self::transform) means different things in the two places
+/// this struct appears, exactly as the `(Shape2D, Transform2D)` tuple it
+/// replaced did:
+///
+/// * in [`PhysicsBody2D::extra_shapes`] it is the collider's **local**
+///   transform, relative to the body;
+/// * in [`PhysicsBody2D::shape_owners`] it is the composed **world** transform.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapeOwner2D {
+    /// The collision geometry, already scaled at registration by `scale_shape`.
+    pub shape: Shape2D,
+    /// Local (in `extra_shapes`) or world (from `shape_owners`) transform.
+    pub transform: Transform2D,
+    /// Whether this shape blocks only contacts arriving against
+    /// [`one_way_direction`](Self::one_way_direction).
+    pub one_way_collision: bool,
+    /// Outward normal of the blocking face. Godot's default is the shape's
+    /// local "up", i.e. `(0, -1)`.
+    pub one_way_direction: Vector2,
+}
+
+impl ShapeOwner2D {
+    /// A solid (two-way) owner — the common case.
+    pub fn solid(shape: Shape2D, transform: Transform2D) -> Self {
+        Self {
+            shape,
+            transform,
+            one_way_collision: false,
+            one_way_direction: Vector2::new(0.0, -1.0),
+        }
+    }
+
+    /// Whether a body travelling `motion` passes through this shape instead of
+    /// being blocked by it (pat-0q2kx.113, made per-shape by pat-s3rrv.25).
+    ///
+    /// `one_way_direction` is the outward normal of the blocking face, so the
+    /// shape is solid when the mover approaches against that normal and
+    /// permeable when it travels with it.
+    ///
+    /// ⚠️ Zero motion is never passthrough — otherwise a character resting on a
+    /// one-way platform would drop out of it the moment it stopped.
+    pub fn passthrough_for(&self, motion: Vector2) -> bool {
+        if !self.one_way_collision {
+            return false;
+        }
+        let normal = self.one_way_direction.normalized();
+        if normal.length_squared() < 1e-8 || motion.length_squared() < 1e-8 {
+            return false;
+        }
+        motion.dot(normal) > 0.0
+    }
+}
+
 /// A 2D physics body with position, velocity, shape, and material properties.
 #[derive(Debug, Clone)]
 pub struct PhysicsBody2D {
@@ -49,6 +111,38 @@ pub struct PhysicsBody2D {
     pub angular_velocity: f32,
     /// Collision shape in local space.
     pub shape: Shape2D,
+    /// The collider's own transform relative to the body — Godot's shape-owner
+    /// transform (`CollisionObject2D::shape_owner_set_transform`, which
+    /// `collision_shape_2d.cpp::_update_in_shape_owner` feeds from the
+    /// `CollisionShape2D` child's own `position`/`rotation`).
+    ///
+    /// Identity for a collider sitting at the body's origin, which is why
+    /// nothing noticed it was missing: the default scene layout is the one case
+    /// where ignoring it happens to be right. Author a `CollisionShape2D` with a
+    /// non-zero `position` — a character whose collider sits at the feet, a
+    /// muzzle hitbox — and the body used to collide at the body's origin
+    /// instead, silently (pat-s3rrv.25).
+    ///
+    /// ⚠️ Rotation and translation only. Collider *scale* keeps going through
+    /// `scale_shape` at registration, which bakes it into the shape geometry.
+    /// Putting scale here would break the rigidity that `raycast_shape` relies
+    /// on to round-trip a hit distance through `affine_inverse` unchanged.
+    pub shape_transform: Transform2D,
+    /// Collider children beyond the first, as [`ShapeOwner2D`]s carrying each
+    /// child's local transform and one-way flags (pat-s3rrv.25).
+    ///
+    /// Godot gives a `CollisionObject2D` a list of shape owners, and Patina now
+    /// consults all of them: read these through
+    /// [`shape_owners`](Self::shape_owners), which every collision, sweep and
+    /// query path iterates. An L-shaped body is solid across both arms.
+    ///
+    /// Empty for every scene that authors a single collider, so single-collider
+    /// behaviour is byte-identical to before the list existed.
+    ///
+    /// Each entry carries its own `one_way_collision` / `one_way_direction`,
+    /// read from that collider child (pat-s3rrv.25). The body-level fields of
+    /// the same name belong to the PRIMARY shape, i.e. owner `0`.
+    pub extra_shapes: Vec<ShapeOwner2D>,
     /// Mass in arbitrary units. Must be > 0 for rigid bodies.
     pub mass: f32,
     /// Friction coefficient in [0, 1].
@@ -59,9 +153,17 @@ pub struct PhysicsBody2D {
     pub collision_layer: u32,
     /// Collision mask bitmask — which layers this body scans for collisions.
     pub collision_mask: u32,
-    /// If true, only collide when the other body approaches from the positive normal direction.
+    /// If true, only collide when the other body approaches from the positive
+    /// normal direction.
+    ///
+    /// This is the PRIMARY shape's flag — owner `0` of
+    /// [`shape_owners`](Self::shape_owners). Extra colliders carry their own in
+    /// [`extra_shapes`](Self::extra_shapes), so a body can be solid on one
+    /// collider and one-way on another (pat-s3rrv.25).
     pub one_way_collision: bool,
     /// The direction for one-way collision (default: up, i.e. negative Y).
+    ///
+    /// Primary shape only; see [`one_way_collision`](Self::one_way_collision).
     pub one_way_direction: Vector2,
     /// Multiplies the world gravity applied to this body (Godot `gravity_scale`).
     ///
@@ -139,6 +241,8 @@ impl PhysicsBody2D {
             linear_velocity: Vector2::ZERO,
             angular_velocity: 0.0,
             shape,
+            shape_transform: Transform2D::IDENTITY,
+            extra_shapes: Vec::new(),
             mass,
             friction: 0.5,
             bounce: 0.0,
@@ -197,6 +301,53 @@ impl PhysicsBody2D {
     /// Applies a continuous force (acceleration = force / mass) for the current step.
     ///
     /// Has no effect on static or kinematic bodies.
+    /// The world transform of this body's *shape*: the body's own transform
+    /// composed with the collider's local one (pat-s3rrv.25).
+    ///
+    /// Every place that used to build `Transform2D::from_rotation_origin(rotation,
+    /// position)` to hand the narrow-phase a world transform must use this
+    /// instead, or an authored collider offset is silently dropped. The
+    /// composition order is Godot's: `a * b` applies `b` first, so the shape's
+    /// local transform is applied before the body's.
+    ///
+    /// Rigid by construction — [`shape_transform`](Self::shape_transform) carries
+    /// no scale — so `affine_inverse` round-trips a distance unchanged.
+    pub fn shape_world_transform(&self) -> Transform2D {
+        Transform2D::from_rotation_origin(self.rotation, self.position) * self.shape_transform
+    }
+
+    /// Every collision shape this body owns, each with its **world** transform:
+    /// the primary shape first, then [`extra_shapes`](Self::extra_shapes).
+    ///
+    /// This is the seam the whole collision surface runs on (pat-s3rrv.25) —
+    /// body-vs-body, area-vs-body, area-vs-area, the character sweeps, the
+    /// point/ray queries and picking's `shape_idx` all iterate it.
+    ///
+    /// Yields exactly what `shape_world_transform` yields for its first item, so
+    /// converting a call site cannot change single-collider behaviour.
+    ///
+    /// Owner `0` carries the body-level `one_way_collision` /
+    /// `one_way_direction`; the extras carry their own. Every solver and sweep
+    /// asks the OWNER, never the body, so one collider on a body may be solid
+    /// while another lets a mover through (pat-s3rrv.25).
+    pub fn shape_owners(&self) -> Vec<ShapeOwner2D> {
+        let body_tf = Transform2D::from_rotation_origin(self.rotation, self.position);
+        let mut out = Vec::with_capacity(1 + self.extra_shapes.len());
+        out.push(ShapeOwner2D {
+            shape: self.shape,
+            transform: body_tf * self.shape_transform,
+            one_way_collision: self.one_way_collision,
+            one_way_direction: self.one_way_direction,
+        });
+        for extra in &self.extra_shapes {
+            out.push(ShapeOwner2D {
+                transform: body_tf * extra.transform,
+                ..*extra
+            });
+        }
+        out
+    }
+
     /// Wakes the body and restarts its sleep countdown (Godot's implicit wake
     /// on any impulse, force, or contact) — pat-0q2kx.116.
     ///

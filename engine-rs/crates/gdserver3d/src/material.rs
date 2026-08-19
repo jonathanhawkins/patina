@@ -123,6 +123,87 @@ impl Default for ShadingMode {
     }
 }
 
+/// Godot `BaseMaterial3D.Transparency` (pat-s3rrv.30).
+///
+/// These three enums live here, beside `StandardMaterial3D`, rather than in
+/// `gdrender3d::render_modes` where the logic was first written: `gdrender3d`
+/// depends on `gdserver3d` and not the other way round, so a material could not
+/// name a type defined over there. `render_modes` re-exports them, so there is
+/// still exactly one definition and both renderers agree on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Transparency {
+    /// Fully opaque (Godot `TRANSPARENCY_DISABLED`, the default).
+    #[default]
+    Disabled,
+    /// Alpha-blended; needs back-to-front sorting (`TRANSPARENCY_ALPHA`).
+    Alpha,
+    /// Alpha-tested: sub-threshold fragments are discarded, the rest opaque
+    /// (`TRANSPARENCY_ALPHA_SCISSOR`).
+    AlphaScissor,
+}
+
+impl Transparency {
+    /// Maps Godot's integer enum, as a `.tscn` stores it.
+    ///
+    /// Unknown values fall back to `Disabled` rather than panicking: a scene
+    /// authored in a newer Godot may carry a mode Patina has no rendering for,
+    /// and drawing it opaque is a better failure than refusing to load.
+    pub fn from_godot_int(value: i64) -> Self {
+        match value {
+            1 => Self::Alpha,
+            2 => Self::AlphaScissor,
+            _ => Self::Disabled,
+        }
+    }
+}
+
+/// Godot `BaseMaterial3D.CullMode` (pat-s3rrv.30).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CullMode {
+    /// Cull back faces — Godot's default (`CULL_BACK` = 0).
+    #[default]
+    Back,
+    /// Cull front faces (`CULL_FRONT` = 1).
+    Front,
+    /// Draw both faces (`CULL_DISABLED` = 2).
+    Disabled,
+}
+
+impl CullMode {
+    /// Maps Godot's integer enum. Note the ordering is Godot's, NOT
+    /// "disabled/back/front": 0 is Back, 1 is Front, 2 is Disabled.
+    pub fn from_godot_int(value: i64) -> Self {
+        match value {
+            1 => Self::Front,
+            2 => Self::Disabled,
+            _ => Self::Back,
+        }
+    }
+}
+
+/// Godot `BaseMaterial3D.DepthDrawMode` (pat-s3rrv.30).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DepthDrawMode {
+    /// Write depth only for opaque draws (`DEPTH_DRAW_OPAQUE_ONLY`, default).
+    #[default]
+    OpaqueOnly,
+    /// Always write depth (`DEPTH_DRAW_ALWAYS`).
+    Always,
+    /// Never write depth (`DEPTH_DRAW_DISABLED`).
+    Never,
+}
+
+impl DepthDrawMode {
+    /// Maps Godot's integer enum.
+    pub fn from_godot_int(value: i64) -> Self {
+        match value {
+            1 => Self::Always,
+            2 => Self::Never,
+            _ => Self::OpaqueOnly,
+        }
+    }
+}
+
 /// A 3D surface material.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Material3D {
@@ -138,6 +219,16 @@ pub struct Material3D {
     pub shading_mode: ShadingMode,
     /// Whether the material is double-sided.
     pub double_sided: bool,
+    /// Godot `transparency` (pat-s3rrv.30). Carried through from
+    /// `StandardMaterial3D` so the rasterizers can act on it — this is the
+    /// render-facing material, and a mode that stops here changes no pixels.
+    pub transparency: Transparency,
+    /// Godot `alpha_scissor_threshold` (default 0.5).
+    pub alpha_scissor_threshold: f32,
+    /// Godot `cull_mode`.
+    pub cull_mode: CullMode,
+    /// Godot `depth_draw_mode`.
+    pub depth_draw_mode: DepthDrawMode,
     /// Optional albedo texture (sRGB); its decoded texel multiplies [`albedo`]
     /// per-fragment at the sampled UV. `None` = flat albedo color.
     ///
@@ -174,6 +265,10 @@ impl Default for Material3D {
             emission: Color::new(0.0, 0.0, 0.0, 0.0),
             shading_mode: ShadingMode::Lambert,
             double_sided: false,
+            transparency: Transparency::Disabled,
+            alpha_scissor_threshold: 0.5,
+            cull_mode: CullMode::Back,
+            depth_draw_mode: DepthDrawMode::OpaqueOnly,
             albedo_texture: None,
             normal_texture: None,
             normal_scale: 1.0,
@@ -232,7 +327,22 @@ pub struct StandardMaterial3D {
     /// Shading model.
     pub shading_mode: ShadingMode,
     /// Whether the material is double-sided.
+    ///
+    /// Retained for existing callers; [`cull_mode`](Self::cull_mode) is the
+    /// fuller expression of the same idea. `double_sided` can say "cull
+    /// nothing" but cannot say "cull the FRONT faces", which is why an authored
+    /// `cull_mode = 1` had nowhere to land before pat-s3rrv.30.
     pub double_sided: bool,
+    /// Godot `transparency` (pat-s3rrv.30). Never parsed from `.tscn` before,
+    /// so an authored alpha material rendered fully opaque in both backends.
+    pub transparency: Transparency,
+    /// Godot `alpha_scissor_threshold`; meaningful only with
+    /// [`Transparency::AlphaScissor`]. Godot's default is 0.5.
+    pub alpha_scissor_threshold: f32,
+    /// Godot `cull_mode`.
+    pub cull_mode: CullMode,
+    /// Godot `depth_draw_mode`.
+    pub depth_draw_mode: DepthDrawMode,
 }
 
 impl Default for StandardMaterial3D {
@@ -250,6 +360,13 @@ impl Default for StandardMaterial3D {
             emission: Color::new(0.0, 0.0, 0.0, 0.0),
             shading_mode: ShadingMode::Lambert,
             double_sided: false,
+            transparency: Transparency::Disabled,
+            // Godot's own default; a scene that enables AlphaScissor without
+            // naming a threshold expects 0.5, not 0.0 (which would discard
+            // nothing and look like the feature is inert).
+            alpha_scissor_threshold: 0.5,
+            cull_mode: CullMode::Back,
+            depth_draw_mode: DepthDrawMode::OpaqueOnly,
         }
     }
 }
@@ -265,6 +382,15 @@ impl StandardMaterial3D {
             emission: self.emission,
             shading_mode: self.shading_mode,
             double_sided: self.double_sided,
+            // pat-s3rrv.30: mapped EXPLICITLY. The `..default()` below would
+            // otherwise silently reset each of these to its default, so an
+            // authored `transparency = Alpha` would reach this conversion and
+            // die here — the hardest kind of gap to spot, because both the
+            // parser and the renderer would look correct in isolation.
+            transparency: self.transparency,
+            alpha_scissor_threshold: self.alpha_scissor_threshold,
+            cull_mode: self.cull_mode,
+            depth_draw_mode: self.depth_draw_mode,
             ..Material3D::default()
         }
     }
@@ -325,6 +451,35 @@ impl StandardMaterial3D {
                 "normal_scale" => {
                     if let Variant::Float(f) = value {
                         mat.normal_scale = *f as f32;
+                    }
+                }
+                // pat-s3rrv.30: the render modes. This is the SECOND producer
+                // of a `StandardMaterial3D` (the `.tres`/resource path) beside
+                // `standard_material_from_props` for `.tscn` sub-resources —
+                // wiring only one would leave the modes working for scenes and
+                // silently inert for standalone material resources.
+                "transparency" => {
+                    if let Variant::Int(v) = value {
+                        mat.transparency = Transparency::from_godot_int(*v);
+                    }
+                }
+                "alpha_scissor_threshold" => match value {
+                    Variant::Float(f) => mat.alpha_scissor_threshold = *f as f32,
+                    Variant::Int(i) => mat.alpha_scissor_threshold = *i as f32,
+                    _ => {}
+                },
+                "cull_mode" => {
+                    if let Variant::Int(v) = value {
+                        mat.cull_mode = CullMode::from_godot_int(*v);
+                        // Keep the legacy flag in step: existing consumers read
+                        // `double_sided`, and Godot's CULL_DISABLED is exactly
+                        // what it means.
+                        mat.double_sided = mat.cull_mode == CullMode::Disabled;
+                    }
+                }
+                "depth_draw_mode" => {
+                    if let Variant::Int(v) = value {
+                        mat.depth_draw_mode = DepthDrawMode::from_godot_int(*v);
                     }
                 }
                 _ => {} // Ignore unknown properties.
@@ -509,6 +664,9 @@ mod tests {
             emission: Color::new(0.0, 0.0, 0.0, 0.0),
             shading_mode: ShadingMode::Phong,
             double_sided: false,
+            // The render-mode fields are irrelevant to this texture assertion
+            // (pat-s3rrv.30); take the defaults rather than restating them.
+            ..Default::default()
         };
         assert!(mat.has_textures());
         assert_eq!(

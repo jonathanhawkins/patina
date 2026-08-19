@@ -115,7 +115,13 @@ pub fn decode_ogg_reader<R: Read + Seek>(reader: R) -> Result<AudioBuffer, Decod
 
 /// Detects format from a byte header and decodes accordingly.
 ///
-/// Recognizes WAV (RIFF header) and OGG (OggS header).
+/// Recognizes WAV (RIFF header), OGG (OggS header) and MP3 (pat-s3rrv.47).
+///
+/// MP3 is checked LAST because it has no container magic — only an `ID3` tag or
+/// an 11-bit frame sync, loose enough to match arbitrary bytes. Ordering it
+/// after the two exact magics means it can never capture a WAV or an OGG. Until
+/// this branch existed `decode_mp3` had no caller on any runtime path, so an
+/// `.mp3` in a scene decoded to nothing however valid the file was.
 pub fn decode_auto(data: &[u8]) -> Result<AudioBuffer, DecodeError> {
     if data.len() < 4 {
         return Err(DecodeError::UnsupportedFormat("data too short".into()));
@@ -124,6 +130,8 @@ pub fn decode_auto(data: &[u8]) -> Result<AudioBuffer, DecodeError> {
         decode_wav(data)
     } else if &data[..4] == b"OggS" {
         decode_ogg(data)
+    } else if is_mp3(data) || data.starts_with(b"PATMP3") {
+        decode_mp3(data)
     } else {
         Err(DecodeError::UnsupportedFormat(format!(
             "unrecognized header: {:02x} {:02x} {:02x} {:02x}",

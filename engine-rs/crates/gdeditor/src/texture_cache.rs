@@ -107,12 +107,20 @@ impl Default for TextureCache {
 /// Loads a texture through the engine's registered resource format loaders
 /// (pat-0q2kx.45).
 ///
-/// This is what makes `.webp`, `.svg`, `.jpg` and `.ctex` render in the editor
-/// viewport, and what resolves a `.png` whose source was replaced by an imported
-/// artifact: each image importer checks for a `<source>.import` sidecar and loads
-/// the compiled `.godot/imported/*.ctex` instead. `None` when no loader claims the
-/// extension or the file cannot be decoded — the caller keeps its "failed load"
-/// cache entry rather than retrying every frame.
+/// This is what makes `.webp`, `.svg`, `.ctex` and — since pat-s3rrv.51 —
+/// `.tga`, `.bmp` and `.hdr` render in the editor viewport, and what resolves a
+/// `.png` whose source was replaced by an imported artifact: each image importer
+/// checks for a `<source>.import` sidecar and loads the compiled
+/// `.godot/imported/*.ctex` instead. `None` when no loader claims the extension
+/// or the file cannot be decoded — the caller keeps its "failed load" cache
+/// entry rather than retrying every frame.
+///
+/// ⚠️ `.jpg`/`.jpeg` is NOT in that list and never was, though this comment
+/// claimed it until pat-s3rrv.51. The JPEG decoder lives in
+/// `gdresource/src/texture_import.rs`, an ORPHANED module — not declared in that
+/// crate's `lib.rs`, so it has never been compiled — and no loader is registered
+/// for the extension. A stale doc costs more than a missing one: this is the
+/// first thing the next person on this path reads.
 fn load_via_format_loader(fs_path: &str) -> Option<Texture2D> {
     let resource = gdresource::importers::ResourceFormatLoader::with_defaults()
         .load_resource(std::path::Path::new(fs_path))

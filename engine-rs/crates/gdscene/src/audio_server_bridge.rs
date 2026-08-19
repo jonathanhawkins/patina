@@ -11,7 +11,7 @@
 //! real device.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gdaudio::import::AudioStreamLoader;
 use gdaudio::sample::AudioOutputStream;
@@ -173,10 +173,21 @@ impl AudioServerBridge {
     fn resolve_stream_path(&self, raw: &str) -> PathBuf {
         let stripped = raw.strip_prefix("res://").unwrap_or(raw);
         let Some(base) = &self.base_dir else {
-            return PathBuf::from(stripped);
+            let direct = PathBuf::from(stripped);
+            return import_artifact_for(&direct).unwrap_or(direct);
         };
         for ancestor in base.ancestors() {
             let candidate = ancestor.join(stripped);
+            // ⚠️ The remap is checked BEFORE `candidate.exists()`, and that
+            // order is the whole point (pat-s3rrv.47): after an editor import
+            // the loose source is routinely gone, leaving only
+            // `<source>.import` beside it and the artifact under
+            // `.godot/imported/`. Testing the source first would fall straight
+            // through to the next ancestor and the player would be silent for a
+            // project that is perfectly well formed.
+            if let Some(artifact) = import_artifact_for(&candidate) {
+                return artifact;
+            }
             if candidate.exists() {
                 return candidate;
             }
@@ -502,7 +513,7 @@ impl AudioServerBridge {
                 // A failed import used to be discarded here, so a missing or
                 // undecodable file was indistinguishable from success: the
                 // player just stayed silent. Report it (pat-0q2kx.6).
-                match self.importer.load_buffer(&path) {
+                match load_stream_buffer(&mut self.importer, &path) {
                     Ok(buffer) => player.set_stream(buffer),
                     Err(err) => {
                         // `warn!` alone is invisible in a default runner log, so
@@ -641,6 +652,90 @@ impl std::fmt::Debug for AudioServerBridge {
             .field("has_output", &self.output.is_some())
             .finish()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Editor import artifacts (pat-s3rrv.47)
+// ---------------------------------------------------------------------------
+
+/// The compiled artifact an `.import` sidecar redirects `source` to, if any.
+///
+/// Godot resolves EVERY imported resource through its sidecar; the audio bridge
+/// had no such lookup, so an imported project — where the loose `music.ogg` is
+/// replaced by `.godot/imported/music-<md5>.oggvorbisstr` — resolved to a path
+/// that is not on disk and played silence.
+///
+/// A sidecar that names a missing artifact is reported and treated as absent
+/// rather than propagated: the caller's next step is to try the loose source,
+/// which is a better outcome than refusing to resolve at all, and the warning
+/// keeps the broken import from being invisible.
+fn import_artifact_for(source: &Path) -> Option<PathBuf> {
+    match gdresource::importers::resolve_import_artifact(source) {
+        Ok(artifact) => artifact,
+        Err(err) => {
+            tracing::warn!(
+                source = %source.display(),
+                error = %err,
+                "audio .import sidecar could not be resolved to an artifact; \
+                 falling back to the loose source"
+            );
+            None
+        }
+    }
+}
+
+/// Decodes the stream at `path`, unwrapping an editor import artifact when the
+/// remap resolved to one (pat-s3rrv.47).
+///
+/// Plain sources keep going through [`AudioStreamLoader`] so they keep its
+/// cache; artifacts are read straight through, because each one is named by
+/// exactly one source and re-reading it is not the hot path.
+fn load_stream_buffer(
+    importer: &mut AudioStreamLoader,
+    path: &Path,
+) -> Result<AudioBuffer, String> {
+    let is_artifact = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| matches!(e.as_str(), "oggvorbisstr" | "mp3str" | "sample"));
+    if !is_artifact {
+        return importer.load_buffer(path).map_err(|e| e.to_string());
+    }
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    let payload = artifact_audio_payload(&data, &path.to_string_lossy())?;
+    gdaudio::decode::decode_auto(&payload).map_err(|e| e.to_string())
+}
+
+/// Extracts the codec payload (ogg / mp3 / wav bytes) from an audio import
+/// artifact.
+///
+/// Godot's `.oggvorbisstr` / `.mp3str` / `.sample` files are binary `Resource`s
+/// whose `data` property is a `PackedByteArray` holding the untouched codec
+/// stream, so the payload is decoded by the ordinary decoders once unwrapped.
+///
+/// An artifact that is NOT an `RSRC` container is returned as-is: some tooling
+/// writes the bare codec bytes under the artifact extension, and failing on
+/// that would be a regression for no gain.
+///
+/// ⚠️ Only the byte payload is recovered here. The container also carries
+/// `loop`/`loop_offset` and `bpm`/`beat_count` metadata which nothing consumes
+/// yet — see the bead's remaining scope rather than assuming it round-trips.
+fn artifact_audio_payload(data: &[u8], path: &str) -> Result<Vec<u8>, String> {
+    if !gdresource::res_loader::is_res_binary(data) {
+        return Ok(data.to_vec());
+    }
+    let res = gdresource::res_loader::load_res_binary(data, path).map_err(|e| e.to_string())?;
+    for key in ["data", "packed_data"] {
+        if let Some(Variant::PackedByteArray(bytes)) = res.get_property(key) {
+            if !bytes.is_empty() {
+                return Ok(bytes.clone());
+            }
+        }
+    }
+    Err(format!(
+        "audio import artifact {path} carries no non-empty `data` byte payload"
+    ))
 }
 
 #[cfg(test)]

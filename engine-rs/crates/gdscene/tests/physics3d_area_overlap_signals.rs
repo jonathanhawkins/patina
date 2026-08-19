@@ -6,8 +6,9 @@
 //! and space overrides were unreachable from a scene. These tests drive real
 //! `MainLoop::step` frames and assert on tree/script state.
 //!
-//! Note the 3D server registers lazily inside `sync_to_physics`, unlike the 2D one
-//! which needs an explicit `register_physics_bodies()`.
+//! Note the 3D server registers lazily inside `sync_to_physics`. The 2D server
+//! does too since pat-s3rrv.25; before that it needed an explicit
+//! `register_physics_bodies()` and never unregistered anything.
 
 use gdcore::math::Vector3;
 use gdobject::signal::Connection;

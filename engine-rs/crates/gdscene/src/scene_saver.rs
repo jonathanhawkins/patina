@@ -342,6 +342,8 @@ fn collect_animation_tables(tree: &SceneTree, node_ids: &[NodeId]) -> AnimationT
 
 /// Writes one `Animation`'s body: its length, loop mode, and track table.
 fn write_animation_body(out: &mut String, anim: &crate::animation::Animation) {
+    use crate::animation::TrackType;
+
     writeln!(out, "resource_name = \"{}\"", anim.name).unwrap();
     writeln!(out, "length = {}", format_float(anim.length)).unwrap();
     writeln!(out, "loop_mode = {}", loop_mode_to_int(anim.loop_mode)).unwrap();
@@ -373,6 +375,68 @@ fn write_animation_body(out: &mut String, anim: &crate::animation::Animation) {
 
         let keys = track.keyframes();
         let times: Vec<String> = keys.iter().map(|k| format_float(k.time)).collect();
+
+        // Bézier and animation tracks carry a different payload than
+        // `values`/`transitions`, so they are written whole here and skip the
+        // value-track body below (pat-s3rrv.44).
+        if track.track_type == TrackType::Bezier {
+            // Five floats per key — value, in_handle.x/y, out_handle.x/y — in
+            // the flat layout `Animation::_set` reads back as `rv[i * 5 + n]`.
+            let points: Vec<String> = keys
+                .iter()
+                .flat_map(|k| {
+                    let v = match &k.value {
+                        Variant::Float(f) => *f,
+                        Variant::Int(n) => *n as f64,
+                        _ => 0.0,
+                    };
+                    [
+                        v,
+                        k.in_handle.x as f64,
+                        k.in_handle.y as f64,
+                        k.out_handle.x as f64,
+                        k.out_handle.y as f64,
+                    ]
+                    .map(format_float)
+                })
+                .collect();
+            // Every handle is written as FREE (0): Patina stores the two handles
+            // independently, so claiming BALANCED/MIRRORED could contradict the
+            // points that follow it.
+            let modes: Vec<String> = keys.iter().map(|_| "0".to_string()).collect();
+            writeln!(out, "tracks/{i}/keys = {{").unwrap();
+            writeln!(
+                out,
+                "\"handle_modes\": PackedInt32Array({}),",
+                modes.join(", ")
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "\"points\": PackedFloat32Array({}),",
+                points.join(", ")
+            )
+            .unwrap();
+            writeln!(out, "\"times\": PackedFloat32Array({})", times.join(", ")).unwrap();
+            writeln!(out, "}}").unwrap();
+            continue;
+        }
+        if track.track_type == TrackType::Animation {
+            let clips: Vec<String> = keys
+                .iter()
+                .map(|k| match &k.value {
+                    Variant::String(s) => format!("\"{s}\""),
+                    Variant::StringName(s) => format!("\"{}\"", s.as_str()),
+                    _ => "\"\"".to_string(),
+                })
+                .collect();
+            writeln!(out, "tracks/{i}/keys = {{").unwrap();
+            writeln!(out, "\"clips\": PackedStringArray({}),", clips.join(", ")).unwrap();
+            writeln!(out, "\"times\": PackedFloat32Array({})", times.join(", ")).unwrap();
+            writeln!(out, "}}").unwrap();
+            continue;
+        }
+
         let transitions: Vec<String> = keys.iter().map(|_| "1".to_string()).collect();
         let values: Vec<String> = keys
             .iter()
@@ -568,6 +632,8 @@ fn track_type_to_tscn(t: crate::animation::TrackType) -> Option<&'static str> {
         TrackType::Rotation3D => "rotation_3d",
         TrackType::Scale3D => "scale_3d",
         TrackType::BlendShape => "blend_shape",
+        TrackType::Bezier => "bezier",
+        TrackType::Animation => "animation",
     })
 }
 

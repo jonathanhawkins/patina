@@ -48,8 +48,16 @@ func check():
     );
 }
 
-/// `get_type` reports the declared type verbatim, which is what binds the
-/// value to a uniform slot.
+/// `get_type` reports the declared type as Godot's `GlobalShaderParameterType`
+/// int enum, whichever spelling declared it.
+///
+/// ⚠️ This assertion changed in pat-s3rrv.33. It previously expected
+/// `String("color")`, which was the behaviour being fixed rather than the
+/// contract: Godot's `global_shader_parameter_get_type` returns
+/// `enum::RenderingServer.GlobalShaderParameterType`, so a script comparing the
+/// result against `RenderingServer.GLOBAL_VAR_TYPE_COLOR` could never match.
+/// Declaring by NAME here (as a `project.godot` `[shader_globals]` entry does)
+/// and reading back the INT is exactly the round trip that was broken.
 #[test]
 fn global_shader_parameter_get_type_reports_the_declared_type() {
     gdvariant::shader_globals::clear();
@@ -61,7 +69,11 @@ func check():
     RenderingServer.global_shader_parameter_add(\"sky_tint\", \"color\", 0)
     return RenderingServer.global_shader_parameter_get_type(\"sky_tint\")
 ";
-    assert_eq!(call_check(src), Variant::String("color".to_string()));
+    assert_eq!(
+        call_check(src),
+        Variant::Int(17),
+        "GLOBAL_VAR_TYPE_COLOR is 17 (doc/classes/RenderingServer.xml)"
+    );
 }
 
 /// `get_list` returns every declared name, sorted — an unstable order would

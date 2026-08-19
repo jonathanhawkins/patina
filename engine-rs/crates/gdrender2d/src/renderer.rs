@@ -673,14 +673,22 @@ impl SoftwareRenderer {
                 } => {
                     let pos = global_transform.xform(*position);
                     if let Some(ttf) = &self.ttf_font {
-                        // `font_size` is the bitmap scale; the bitmap cell is 7px
-                        // tall, so `scale × 7` gives the matching TTF pixel size.
-                        let px = (*font_size as f32) * 7.0;
+                        // pat-s3rrv.37: `font_size` is now the Godot PIXEL size,
+                        // used directly. It used to carry the quantised 5x7
+                        // bitmap scale, which this reconstructed as `scale * 7`
+                        // — so a Label authored at 16 and one at 20 both drew at
+                        // 14px, and the size layout measured never matched the
+                        // size actually drawn.
+                        let px = *font_size as f32;
                         let mut atlas = self.glyph_atlas.borrow_mut();
                         crate::ttf_font::draw_ttf_text(fb, &mut atlas, ttf, text, pos, px, *color);
                     } else {
+                        // The bitmap fallback still wants an integer cell scale,
+                        // so the pixel size is converted back here rather than at
+                        // the source (7px cell, minimum 1).
                         let bitmap_font = font::BitmapFont::builtin();
-                        font::draw_string(fb, &bitmap_font, pos, text, *color, *font_size);
+                        let cell_scale = (*font_size / 7).max(1);
+                        font::draw_string(fb, &bitmap_font, pos, text, *color, cell_scale);
                     }
                 }
                 DrawCommand::DrawNinePatch {

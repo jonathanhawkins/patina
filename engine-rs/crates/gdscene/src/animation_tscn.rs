@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 
-use gdcore::math::Vector3;
+use gdcore::math::{Vector2, Vector3};
 use gdcore::math3d::Quaternion;
 use gdvariant::Variant;
 
@@ -158,6 +158,11 @@ fn track_from_props(props: &HashMap<String, Variant>, idx: usize) -> Option<Anim
         {
             fill_transform_track(&mut track, track_type, keys, per_key_transition);
         }
+        // Both of these use `times` alongside a payload array that is neither
+        // `values` nor interleaved transform floats, so neither fits the
+        // dictionary/transform fillers (pat-s3rrv.44).
+        TrackType::Bezier => fill_bezier_track(&mut track, keys),
+        TrackType::Animation => fill_animation_track(&mut track, keys),
         _ => fill_dictionary_track(&mut track, track_type, keys, per_key_transition),
     }
 
@@ -166,8 +171,9 @@ fn track_from_props(props: &HashMap<String, Variant>, idx: usize) -> Option<Anim
 
 /// Maps a `.tscn` `tracks/N/type` string to a [`TrackType`].
 ///
-/// `bezier` and `animation` tracks are not modeled by Patina's sampler, so they
-/// are reported as unsupported rather than silently mis-sampled as value tracks.
+/// A type Patina cannot sample is reported as unsupported rather than silently
+/// mis-read as a value track, which would drive the property with the wrong
+/// curve instead of leaving it alone.
 fn tscn_track_type(name: &str) -> Option<TrackType> {
     match name {
         "value" => Some(TrackType::Property),
@@ -177,6 +183,8 @@ fn tscn_track_type(name: &str) -> Option<TrackType> {
         "rotation_3d" => Some(TrackType::Rotation3D),
         "scale_3d" => Some(TrackType::Scale3D),
         "blend_shape" => Some(TrackType::BlendShape),
+        "bezier" => Some(TrackType::Bezier),
+        "animation" => Some(TrackType::Animation),
         _ => None,
     }
 }
@@ -188,9 +196,86 @@ fn implicit_property_path(track_type: TrackType) -> Option<&'static str> {
         TrackType::Position3D => Some("position"),
         TrackType::Rotation3D => Some("quaternion"),
         TrackType::Scale3D => Some("scale"),
-        // A value/method/audio/blend-shape track with no subname has nothing to
-        // address; Godot's own cache build rejects it too.
+        // An animation track addresses a nested AnimationPlayer as a whole, not
+        // one of its properties, so its `path` carries no subname by design.
+        // The label mirrors how audio tracks use `property_path` (pat-s3rrv.44).
+        TrackType::Animation => Some("animation"),
+        // A value/method/audio/blend-shape/bezier track with no subname has
+        // nothing to address; Godot's own cache build rejects it too. A bézier
+        // track in particular MUST name a scalar subname such as `position:x`.
         _ => None,
+    }
+}
+
+/// Fills a bézier track from the `{"times": ..., "points": ...}` form
+/// (pat-s3rrv.44).
+///
+/// `points` is a FLAT array of **five floats per key** — `value`, `in_handle.x`,
+/// `in_handle.y`, `out_handle.x`, `out_handle.y` — matching Godot's
+/// `rv[i * 5 + n]` indexing in `animation.cpp`'s `_set`. It is not one entry per
+/// key, so a key count taken from `points.len()` rather than from `times` would
+/// be five times too large.
+///
+/// `handle_modes` (free / balanced / mirrored) is an EDITOR affordance that
+/// constrains how dragging one handle moves the other; it does not alter the
+/// sampled curve, so it is deliberately not read.
+fn fill_bezier_track(track: &mut AnimationTrack, keys: &Variant) {
+    let Variant::Dictionary(d) = keys else {
+        return;
+    };
+    let times = d.get("times").map(variant_to_f64_vec).unwrap_or_default();
+    let points = d.get("points").map(variant_to_f64_vec).unwrap_or_default();
+
+    for (i, &time) in times.iter().enumerate() {
+        let base = i * 5;
+        // A truncated `points` array must drop the unbacked keys rather than
+        // read a neighbour's handles as this key's value.
+        let Some(chunk) = points.get(base..base + 5) else {
+            break;
+        };
+        track.add_keyframe(KeyFrame::bezier(
+            time,
+            chunk[0],
+            Vector2::new(chunk[1] as f32, chunk[2] as f32),
+            Vector2::new(chunk[3] as f32, chunk[4] as f32),
+        ));
+    }
+}
+
+/// Fills an animation track from the `{"times": ..., "clips": ...}` form
+/// (pat-s3rrv.44).
+///
+/// Each key names the clip to start on the nested player at that time. Godot
+/// writes the clips as a `PackedStringArray`; `StringName` entries are accepted
+/// too, since a hand-written scene may spell them `&"name"`.
+fn fill_animation_track(track: &mut AnimationTrack, keys: &Variant) {
+    let Variant::Dictionary(d) = keys else {
+        return;
+    };
+    let times = d.get("times").map(variant_to_f64_vec).unwrap_or_default();
+    let clips: Vec<String> = match d.get("clips") {
+        Some(Variant::PackedStringArray(v)) => v.clone(),
+        Some(Variant::Array(items)) => items
+            .iter()
+            .map(|v| match v {
+                Variant::String(s) => s.clone(),
+                Variant::StringName(s) => s.as_str().to_string(),
+                // A non-string entry names no clip. It becomes an empty
+                // PLACEHOLDER rather than being dropped: `clips` is indexed in
+                // lockstep with `times`, so compacting it here would shift every
+                // later clip onto the wrong keyframe time.
+                _ => String::new(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    for (i, &time) in times.iter().enumerate() {
+        let Some(clip) = clips.get(i) else { break };
+        if clip.is_empty() {
+            continue;
+        }
+        track.add_keyframe(KeyFrame::linear(time, Variant::String(clip.clone())));
     }
 }
 
@@ -639,11 +724,25 @@ tracks/0/keys = {
         assert_eq!(kfs[1].value, Variant::Vector3(Vector3::new(5.0, 0.0, 0.0)));
     }
 
-    /// A bezier track is not mis-read as a value track.
+    /// `bezier` and `animation` now map to their own track types (pat-s3rrv.44).
+    ///
+    /// This test previously asserted both were `None`. That was the honest
+    /// contract while the sampler could not model them — mapping `bezier` to
+    /// `Property` would have driven the property along a straight line through
+    /// keys the artist curved. Now that both are sampled, the assertion inverts.
     #[test]
-    fn unsupported_track_type_is_skipped() {
-        assert!(tscn_track_type("bezier").is_none());
-        assert!(tscn_track_type("animation").is_none());
+    fn bezier_and_animation_map_to_their_own_track_types() {
+        assert_eq!(tscn_track_type("bezier"), Some(TrackType::Bezier));
+        assert_eq!(tscn_track_type("animation"), Some(TrackType::Animation));
+    }
+
+    /// A type Patina still cannot sample must stay unmapped rather than fall
+    /// back to a value track — the guard the inverted test above no longer
+    /// provides.
+    #[test]
+    fn a_genuinely_unknown_track_type_is_still_skipped() {
+        assert!(tscn_track_type("not_a_real_track_type").is_none());
+        assert!(tscn_track_type("").is_none());
     }
 
     /// `libraries` + `autoplay` produce a player whose clips are keyed the way

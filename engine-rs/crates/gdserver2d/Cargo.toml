@@ -8,5 +8,9 @@ repository.workspace = true
 [dependencies]
 gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
+# pat-s3rrv.36: the GDShader AST parser/evaluator lives here. Not a cycle --
+# gdresource depends only on gdcore/gdvariant/gdobject, none of which reach
+# back to this crate.
+gdresource = { path = "../gdresource" }
 thiserror.workspace = true
 tracing.workspace = true

@@ -23,7 +23,7 @@ use gdserver3d::sky::{PhysicalSkyMaterial, ProceduralSkyMaterial, SkyMaterial};
 use gdserver3d::viewport::Viewport3D;
 
 use crate::depth_buffer::DepthBuffer;
-use crate::rasterizer::{clip_to_screen, rasterize_triangle};
+use crate::rasterizer::clip_to_screen;
 use crate::shader::{
     fragment_shader_for_mode, CustomFragmentShader, FragmentShader, LightKind, LightUniform,
     MaterialTextures, ShaderUniforms, StandardVertexShader, VertexInput, VertexShader,
@@ -878,7 +878,23 @@ impl SoftwareRenderer3D {
                         None => continue,
                     };
 
-                    rasterize_triangle(
+                    // pat-s3rrv.30: face culling. `should_cull` has existed in
+                    // `render_modes` since pat-u3l8c.34 with ZERO consumers, so
+                    // the software renderer drew every face regardless of what
+                    // a material asked for — `cull_mode = Front` in particular
+                    // had no effect at all.
+                    //
+                    // Screen-space winding, so it must be decided here where the
+                    // projected vertices are, not inside the fragment shader.
+                    if crate::render_modes::should_cull(
+                        gdcore::math::Vector2::new(sv0.x, sv0.y),
+                        gdcore::math::Vector2::new(sv1.x, sv1.y),
+                        gdcore::math::Vector2::new(sv2.x, sv2.y),
+                        entry.material.cull_mode,
+                    ) {
+                        continue;
+                    }
+                    crate::rasterizer::rasterize_triangle_with_modes(
                         &sv0,
                         &sv1,
                         &sv2,
@@ -888,6 +904,9 @@ impl SoftwareRenderer3D {
                         h,
                         fragment_shader.as_ref(),
                         &uniforms,
+                        entry.material.transparency,
+                        entry.material.alpha_scissor_threshold,
+                        entry.material.depth_draw_mode,
                     );
                 }
             }

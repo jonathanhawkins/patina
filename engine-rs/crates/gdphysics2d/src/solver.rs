@@ -503,20 +503,30 @@ impl ContactCache2D {
     /// Rebuilt from scratch each step so pairs that stopped touching are
     /// evicted — otherwise a stale impulse would be re-applied the moment those
     /// two bodies met again.
+    /// ⚠️ Accumulates per body pair rather than replacing (pat-s3rrv.25). Today
+    /// a body pair contributes exactly one constraint, so this is a **no-op** —
+    /// `extend` into a fresh empty `Vec` is what `insert` did. It matters the
+    /// moment a pair can contribute several: multi-collider bodies produce one
+    /// constraint per *shape* pair, and `insert` would keep only the last, so
+    /// every other shape pair would silently lose its warm-start impulses and
+    /// stacks built on such bodies would jitter in a way that reads as a solver
+    /// bug rather than a caching one.
+    ///
+    /// Landing it now, while it provably changes nothing, is what keeps that
+    /// from being one more thing to get right during the multi-shape change.
+    /// `warm_start` already matches points by nearest anchor rather than by
+    /// index, so a longer list per pair needs nothing else.
     fn store(&mut self, constraints: &[ContactConstraint2D]) {
         self.points.clear();
         for c in constraints {
-            self.points.insert(
-                (c.body_a, c.body_b),
-                c.points
-                    .iter()
-                    .map(|p| CachedContactPoint2D {
-                        r_a: p.r_a,
-                        acc_normal: p.acc_normal,
-                        acc_tangent: p.acc_tangent,
-                    })
-                    .collect(),
-            );
+            self.points
+                .entry((c.body_a, c.body_b))
+                .or_default()
+                .extend(c.points.iter().map(|p| CachedContactPoint2D {
+                    r_a: p.r_a,
+                    acc_normal: p.acc_normal,
+                    acc_tangent: p.acc_tangent,
+                }));
         }
     }
 }
@@ -885,5 +895,81 @@ mod tests {
             "the conveyor must drag the box along +x, got {:?}",
             bodies[&falling.id].linear_velocity
         );
+    }
+
+    /// pat-s3rrv.25 — the cache keeps EVERY constraint recorded for a body pair,
+    /// not just the last one.
+    ///
+    /// `store` used to `insert` per `(body_a, body_b)` inside a loop over
+    /// constraints. That is correct while a pair contributes exactly one
+    /// constraint, which is true today — and silently wrong the moment
+    /// multi-collider bodies land, because they produce one constraint per
+    /// *shape* pair. Every shape pair but the last would lose its warm-start
+    /// impulses, and a stack built on such bodies would jitter in a way that
+    /// reads as a solver bug rather than a caching bug.
+    ///
+    /// Landing the accumulate form now, while it provably changes nothing, is
+    /// what keeps it from being one more thing to get right later. This test is
+    /// the proof that it accumulates, written against the shape the future
+    /// change will produce rather than the one the engine emits today.
+    #[test]
+    fn contact_cache_keeps_every_constraint_recorded_for_a_body_pair() {
+        // Anchors 100px apart — far outside `WARM_START_MATCH_TOLERANCE_SQ`, so
+        // the two points are unambiguously distinct to the nearest-anchor match.
+        let left = Vector2::new(-50.0, 0.0);
+        let right = Vector2::new(50.0, 0.0);
+
+        let mut cache = ContactCache2D::default();
+        cache.store(&[
+            one_point_constraint(1, 2, left, 7.0),
+            one_point_constraint(1, 2, right, 11.0),
+        ]);
+
+        let stored = cache
+            .points
+            .get(&(BodyId(1), BodyId(2)))
+            .expect("the pair must be cached");
+        assert_eq!(
+            stored.len(),
+            2,
+            "both constraints for the pair must survive — with `insert` the \
+             second overwrote the first and this read 1",
+        );
+
+        // The half that actually matters: each anchor gets ITS OWN impulse back,
+        // not the other one's. Accumulating into a longer list would be no use
+        // if warm-starting then handed a point its neighbour's history.
+        let mut fresh = one_point_constraint(1, 2, right, 0.0);
+        cache.warm_start(&mut fresh);
+        assert_eq!(
+            fresh.points[0].acc_normal, 11.0,
+            "the point at {right:?} must be warm-started from the constraint \
+             recorded at that anchor, not from the one at {left:?}",
+        );
+    }
+
+    /// A minimal single-point constraint for cache tests — built directly rather
+    /// than through `ContactConstraint2D::new` so the anchor and accumulated
+    /// impulse are exactly what the test asks for, with no solver arithmetic in
+    /// between.
+    fn one_point_constraint(a: u64, b: u64, r_a: Vector2, acc_normal: f32) -> ContactConstraint2D {
+        ContactConstraint2D {
+            body_a: BodyId(a),
+            body_b: BodyId(b),
+            normal: Vector2::new(0.0, -1.0),
+            friction: 0.5,
+            points: vec![ContactPoint2D {
+                r_a,
+                r_b: Vector2::ZERO,
+                mass_normal: 1.0,
+                mass_tangent: 1.0,
+                bias: 0.0,
+                bounce: 0.0,
+                surface_tangent: 0.0,
+                acc_normal,
+                acc_tangent: 0.0,
+                acc_bias: 0.0,
+            }],
+        }
     }
 }

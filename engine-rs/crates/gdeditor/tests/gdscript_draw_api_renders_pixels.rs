@@ -13,14 +13,14 @@
 //! `draw_polyline` reached nothing.
 //!
 //! This drives the whole chain end to end: script `_draw` -> `DrawCommand` ->
-//! `build_canvas_viewport` -> `SoftwareRenderer` -> framebuffer pixels. Nothing
+//! `build_runtime_render_list` -> `rasterize_render_list` -> framebuffer pixels —
+//! the ONE shipped canvas path (pat-s3rrv.22). Nothing
 //! is injected; the commands come only from the script.
 
 use gdcore::math::{Color, Vector2};
-use gdrender2d::renderer::{FrameBuffer, SoftwareRenderer};
-use gdrender2d::test_adapter::capture_frame;
+use gdeditor::viewport_2d_render::{build_runtime_render_list, rasterize_render_list};
+use gdrender2d::renderer::FrameBuffer;
 use gdscene::node::{Node, NodeId};
-use gdscene::scene_bridge::build_canvas_viewport;
 use gdscene::scene_tree::SceneTree;
 use gdscene::{node2d, GDScriptNodeInstance, MainLoop};
 use gdvariant::Variant;
@@ -48,6 +48,12 @@ func _draw():
 ";
 
 fn build() -> (MainLoop, NodeId) {
+    // ⚠️ Without a populated ClassDB there is no class chain, so
+    // `Node::is_class("CanvasItem")` is false for every node and the canvas
+    // walk filters the whole scene out and returns `[]` — which reads like the
+    // collapsed path lost the item rather than like the scene was never
+    // collected at all (pat-s3rrv.22).
+    gdobject::class_db::register_2d_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let node = tree
@@ -63,9 +69,8 @@ fn build() -> (MainLoop, NodeId) {
 /// the viewport from the nodes' own command lists, and the software renderer
 /// turns it into pixels.
 fn render(ml: &MainLoop) -> FrameBuffer {
-    let no_textures = |_p: &str| -> Option<Vector2> { None };
-    let viewport = build_canvas_viewport(ml.tree(), W, H, BG, &no_textures);
-    capture_frame(&mut SoftwareRenderer::new(), &viewport)
+    let items = build_runtime_render_list(ml.tree());
+    rasterize_render_list(&items, W, H, BG, None)
 }
 
 /// Pixel at `ORIGIN + offset`.
@@ -182,6 +187,12 @@ fn gdscript_draw_api_renders_pixels() {
 /// `polygon_raster` that had no caller.
 #[test]
 fn draw_polygon_fills_its_interior() {
+    // ⚠️ Without a populated ClassDB there is no class chain, so
+    // `Node::is_class("CanvasItem")` is false for every node and the canvas
+    // walk filters the whole scene out and returns `[]` — which reads like the
+    // collapsed path lost the item rather than like the scene was never
+    // collected at all (pat-s3rrv.22).
+    gdobject::class_db::register_2d_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let node = tree

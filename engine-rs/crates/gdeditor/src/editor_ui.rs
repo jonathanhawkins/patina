@@ -2325,6 +2325,15 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
           </div>
         </div>
         <div class="vp3d-tb-menu">
+          <button class="vp3d-tb-menubtn" id="vp3d-meshmenu-btn">Mesh</button>
+          <div class="vp3d-tb-dropdown" id="vp3d-meshmenu-dropdown" style="display:none;">
+            <div class="vp3d-mi" data-act="mesh-trimesh-collision">Create Trimesh Static Body</div>
+            <div class="vp3d-mi" data-act="mesh-convex-collision">Create Single Convex Collision Sibling</div>
+            <div class="vp3d-sep"></div>
+            <div class="vp3d-mi" data-act="mesh-navmesh">Create Navigation Mesh</div>
+          </div>
+        </div>
+        <div class="vp3d-tb-menu">
           <button class="vp3d-tb-menubtn" id="vp3d-viewmenu-btn">View</button>
           <div class="vp3d-tb-dropdown" id="vp3d-viewmenu-dropdown" style="display:none;">
             <div class="vp3d-mi" data-act="view-1"><span class="vp3d-check">&#10003;</span>1 Viewport</div>
@@ -7090,8 +7099,10 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     vpBind('vp3d-ungroup', function() { api('POST', '/api/viewport/3d/group', { grouped: false }).then(afterVp3dEdit); });
     vpBind('vp3d-sun-environ-settings', function() { openSunEnvironPopup(this); });
     setupVp3dMenu('vp3d-transform-menu-btn', 'vp3d-transform-dropdown');
+    setupVp3dMenu('vp3d-meshmenu-btn', 'vp3d-meshmenu-dropdown');
     setupVp3dMenu('vp3d-viewmenu-btn', 'vp3d-viewmenu-dropdown');
     bindVp3dMenuActions('vp3d-transform-dropdown');
+    bindVp3dMenuActions('vp3d-meshmenu-dropdown');
     bindVp3dMenuActions('vp3d-viewmenu-dropdown');
   }
   function vpBind(id, fn) { var el = document.getElementById(id); if (el) el.addEventListener('click', fn); }
@@ -7158,7 +7169,38 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     else if (act === 'view-origin') { api('POST', '/api/viewport/3d/view_flag', { flag: 'origin' }).then(apply3DState); }
     else if (act === 'view-grid') { api('POST', '/api/viewport/3d/view_flag', { flag: 'grid' }).then(apply3DState); }
     else if (act === 'view-settings') { openViewSettingsPopup(); }
+    // -- Mesh menu (pat-s3rrv.23) --
+    //
+    // `/api/mesh/create_collision` and `/api/navigation/bake` were both already
+    // in the server dispatch table and had ZERO references here, so a user had
+    // no way to reach them: Godot exposes both from the 3D viewport's Mesh
+    // menu (editor/scene/3d/mesh_instance_3d_editor_plugin.cpp).
+    //
+    // Both need the selected node — the server answers 400 on a missing
+    // `node_id` and 404 when it names nothing — so the click is a no-op with a
+    // toast rather than a request when nothing is selected.
+    else if (act === 'mesh-trimesh-collision') { meshCreateCollision('trimesh'); }
+    else if (act === 'mesh-convex-collision') { meshCreateCollision('convex'); }
+    else if (act === 'mesh-navmesh') {
+      // Both routes answer 400 on a missing `node_id`, so guard rather than
+      // send a request that can only fail. Silent early return is this file's
+      // established idiom for "nothing selected".
+      if (!selectedNodeId) return;
+      api('POST', '/api/navigation/bake', { node_id: selectedNodeId }).then(afterVp3dEdit);
+    }
     // 'view-1' is a no-op: Patina is single-viewport (already checked).
+  }
+  // Godot places the generated body as a sibling of the MeshInstance3D. The
+  // server's `placement` default is already "sibling", but it is sent
+  // explicitly so the request does not silently change meaning if that default
+  // ever moves.
+  function meshCreateCollision(kind) {
+    if (!selectedNodeId) return;
+    api('POST', '/api/mesh/create_collision', {
+      node_id: selectedNodeId,
+      kind: kind,
+      placement: 'sibling'
+    }).then(afterVp3dEdit);
   }
 
   // ---- Toolbar popups (Configure Snap / Transform Dialog / Settings) ----

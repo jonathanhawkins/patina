@@ -892,7 +892,7 @@ impl MainLoop {
         }
 
         // Publish live counts + per-particle draw data back onto the nodes so the
-        // render bridge (crate::scene_bridge) can rasterize each emitter's live
+        // canvas render list can rasterize each emitter's live
         // particles as billboard quads. Positions/colors/scales are stored under
         // internal (`_`-prefixed) keys so they never leak into oracle property
         // dumps or the editor inspector.
@@ -1639,7 +1639,20 @@ impl MainLoop {
                     }
                 }
                 "NavigationAgent2D" => {
-                    let current = crate::node2d::get_position(&self.tree, id);
+                    // GLOBAL, not local (pat-s3rrv.20). Godot's agent has no
+                    // transform of its own and simply rides its parent body, so
+                    // the global position is what makes path progress follow the
+                    // body. Reading the LOCAL position pinned every agent at its
+                    // authored offset — `(0,0)` for the standard "agent is a
+                    // child of the body" setup — which computed the path from the
+                    // world origin and handed `get_next_path_position` a value
+                    // that never changed, so no waypoint was ever consumed.
+                    //
+                    // This was masked while the agent wrote its own simulated
+                    // position back onto itself: that write moved the local
+                    // position each frame. Removing the self-write made the
+                    // latent bug reachable.
+                    let current = crate::node2d::get_global_position(&self.tree, id);
                     let target = match node.get_property("target_position") {
                         Variant::Vector2(v) => v,
                         _ => Vector2::ZERO,
@@ -1647,7 +1660,8 @@ impl MainLoop {
                     agents2.push((id, current, target));
                 }
                 "NavigationAgent3D" => {
-                    let current = crate::node3d::get_position(&self.tree, id);
+                    // GLOBAL, not local — see the 2D twin above (pat-s3rrv.20).
+                    let current = crate::node3d::get_global_transform(&self.tree, id).origin;
                     let target = match node.get_property("target_position") {
                         Variant::Vector3(v) => v,
                         _ => Vector3::ZERO,
@@ -1686,7 +1700,9 @@ impl MainLoop {
         self.nav_agents_3d.retain(|id, _| present3.contains(id));
 
         // Step 2D agents.
-        let mut updates2: Vec<(NodeId, Vector2, Vector2)> = Vec::new();
+        // `(agent node, next_path_position)` — the agent's own transform is no
+        // longer written, so no position rides along (pat-s3rrv.20).
+        let mut updates2: Vec<(NodeId, Vector2)> = Vec::new();
         // Nodes whose agent reached its goal this frame (emit signals once).
         let mut finished2: Vec<NodeId> = Vec::new();
         // Neighbor snapshot for path-following avoidance (pat-nzgdu.116). This
@@ -1705,6 +1721,24 @@ impl MainLoop {
                 (*id, *current, radius)
             })
             .collect();
+        // Copy the scene-authored tuning onto each backing agent before it is
+        // stepped (pat-s3rrv.20). `process_navigation` read only
+        // `target_position`, so a .tscn setting `path_desired_distance` or
+        // `target_desired_distance` was inert during path following —
+        // `AvoidanceNodeParams::apply` synced some of these, but only in the
+        // avoidance phase and only when `avoidance_enabled` was true.
+        //
+        // A separate pass, not inside the loop below: that loop holds `&mut` on
+        // `nav_agents_2d` via `entry()`, which cannot coexist with the
+        // `&self.tree` needed to read the node's properties.
+        for (id, _, _) in &agents2 {
+            let mut agent = self
+                .nav_agents_2d
+                .remove(id)
+                .unwrap_or_else(NavigationAgent2D::new);
+            crate::navigation_agents::sync_tuning_2d(&self.tree, *id, &mut agent);
+            self.nav_agents_2d.insert(*id, agent);
+        }
         for (id, current, target) in &agents2 {
             // Every other agent this frame — an agent must not avoid itself.
             let others: Vec<(Vector2, f32)> = neighbor_radii
@@ -1721,28 +1755,53 @@ impl MainLoop {
             if agent.path.is_empty() || (agent.target_position - *target).length() > 0.01 {
                 agent.set_target_position(*target, *current, &server2);
             }
-            let arrived = agent.is_navigation_finished()
-                || (agent.target_position - *current).length() <= agent.target_desired_distance;
-            let new_pos = if arrived {
-                *current
-            } else {
-                agent.step(*current, dt, &others)
-            };
-            let next = agent.get_next_path_position(new_pos);
+            // ⚠️ The agent is PASSIVE (pat-s3rrv.20). Godot's NavigationAgent2D
+            // never moves anything: it is a child of the body, it follows the
+            // body's transform, and it only *publishes* where to go next. The
+            // game moves the body —
+            //   `velocity = (agent.get_next_path_position() - global_position) …`
+            //   `move_and_slide()`
+            // — which is precisely what this bead's acceptance drives.
+            //
+            // This used to run `agent.step(..)`, an internal simulation of the
+            // agent walking its own path, and then write that simulated point
+            // back onto the agent node with `node2d::set_position`. Two things
+            // broke: the agent node teleported away from its authored position
+            // (and away from its parent body), and `next_path_position` was
+            // computed from the *simulated* point rather than the real one — so
+            // it advanced on its own schedule regardless of whether the body
+            // had actually moved.
+            //
+            // `get_next_path_position` is already the whole mechanism: it
+            // consumes waypoints against the position handed to it. Handing it
+            // the agent's real position makes progress follow the body, which
+            // is Godot's behaviour.
+            let next = agent.get_next_path_position(*current);
             // Fire `navigation_finished`/`target_reached` exactly once, the frame
             // the agent first reaches within `target_desired_distance` of the goal.
             let arrived_now = agent.is_navigation_finished()
-                || (agent.target_position - new_pos).length() <= agent.target_desired_distance;
+                || (agent.target_position - *current).length() <= agent.target_desired_distance;
             if arrived_now && !agent.finished_emitted {
                 agent.finished_emitted = true;
                 finished2.push(*id);
             }
-            updates2.push((*id, new_pos, next));
+            updates2.push((*id, next));
         }
-        for (id, new_pos, next) in updates2 {
-            crate::node2d::set_position(&mut self.tree, id, new_pos);
+        for (id, next) in updates2 {
+            // Publish only. The agent node's own transform is left alone.
             if let Some(node) = self.tree.get_node_mut(id) {
                 node.set_property("next_path_position", Variant::Vector2(next));
+            }
+        }
+        // Publish the rest of the frame's agent state for the script-facing
+        // getters, and fire the milestone signals NavAgentSignal has produced
+        // since pat-u3l8c.64 with no consumer (pat-s3rrv.20). remove/insert
+        // because both calls need `&mut self.tree` while the agent is borrowed.
+        for (id, _, _) in &agents2 {
+            if let Some(mut agent) = self.nav_agents_2d.remove(id) {
+                crate::navigation_agents::publish_state_2d(&mut self.tree, *id, &agent);
+                crate::navigation_agents::drain_and_emit_2d(&mut self.tree, *id, &mut agent);
+                self.nav_agents_2d.insert(*id, agent);
             }
         }
         for id in finished2 {
@@ -1751,8 +1810,18 @@ impl MainLoop {
         }
 
         // Step 3D agents.
-        let mut updates3: Vec<(NodeId, Vector3, Vector3)> = Vec::new();
+        // `(agent node, next_path_position)` — see the 2D twin (pat-s3rrv.20).
+        let mut updates3: Vec<(NodeId, Vector3)> = Vec::new();
         let mut finished3: Vec<NodeId> = Vec::new();
+        // 3D twin of the tuning sync above (pat-s3rrv.20).
+        for (id, _, _) in &agents3 {
+            let mut agent = self
+                .nav_agents_3d
+                .remove(id)
+                .unwrap_or_else(NavigationAgent3D::new);
+            crate::navigation_agents::sync_tuning_3d(&self.tree, *id, &mut agent);
+            self.nav_agents_3d.insert(*id, agent);
+        }
         for (id, current, target) in &agents3 {
             let agent = self
                 .nav_agents_3d
@@ -1761,26 +1830,33 @@ impl MainLoop {
             if agent.path.is_empty() || (agent.target_position - *target).length() > 0.01 {
                 agent.set_target_position(*target, *current, &server3);
             }
-            let arrived = agent.is_navigation_finished()
-                || (agent.target_position - *current).length() <= agent.target_desired_distance;
-            let new_pos = if arrived {
-                *current
-            } else {
-                agent.step(*current, dt, &[])
-            };
-            let next = agent.get_next_path_position(new_pos);
+            // Passive agent, same as the 2D path above (pat-s3rrv.20): no
+            // self-simulation and no write to the agent's own transform. The
+            // body moves; `get_next_path_position` consumes waypoints against
+            // the agent's real position.
+            let next = agent.get_next_path_position(*current);
             let arrived_now = agent.is_navigation_finished()
-                || (agent.target_position - new_pos).length() <= agent.target_desired_distance;
+                || (agent.target_position - *current).length() <= agent.target_desired_distance;
             if arrived_now && !agent.finished_emitted {
                 agent.finished_emitted = true;
                 finished3.push(*id);
             }
-            updates3.push((*id, new_pos, next));
+            updates3.push((*id, next));
         }
-        for (id, new_pos, next) in updates3 {
-            crate::node3d::set_position(&mut self.tree, id, new_pos);
+        for (id, next) in updates3 {
+            // Publish only. The agent node's own transform is left alone.
             if let Some(node) = self.tree.get_node_mut(id) {
                 node.set_property("next_path_position", Variant::Vector3(next));
+            }
+        }
+        // 3D twin of the publish pass above. There is no signal drain here:
+        // `NavigationAgent3D` has no `pending_signals` field at all, so it
+        // produces no milestones to emit (reported as remaining scope rather
+        // than papered over with a silent no-op).
+        for (id, _, _) in &agents3 {
+            if let Some(agent) = self.nav_agents_3d.remove(id) {
+                crate::navigation_agents::publish_state_3d(&mut self.tree, *id, &agent);
+                self.nav_agents_3d.insert(*id, agent);
             }
         }
         for id in finished3 {
@@ -2269,11 +2345,13 @@ impl MainLoop {
         // Resolve the hit bodies to their scene nodes first, so the physics
         // borrow is released before any script runs (a script reached through
         // `_input_event` can mutate the tree).
-        let hits: Vec<NodeId> = self
+        // Paired with the index of the collider actually struck, which is
+        // Godot's `shape_idx` (pat-s3rrv.25).
+        let hits_with_shape: Vec<(NodeId, usize)> = self
             .physics_server
-            .colliders_at_point(position)
+            .colliders_at_point_with_shape(position)
             .into_iter()
-            .filter(|nid| {
+            .filter(|(nid, _)| {
                 // Godot's default is `input_pickable = true`, so a collider that
                 // never mentions the property still picks.
                 self.tree.get_node(*nid).is_some_and(|n| {
@@ -2281,6 +2359,7 @@ impl MainLoop {
                 })
             })
             .collect();
+        let hits: Vec<NodeId> = hits_with_shape.iter().map(|(nid, _)| *nid).collect();
 
         // -- hover transitions (pat-0q2kx.199) --
         // Resolved before dispatch on purpose: enter/exit are notifications, not
@@ -2302,11 +2381,50 @@ impl MainLoop {
         // Exits precede entries, matching Godot: a pointer sliding from one
         // collider onto an overlapping one releases the old before taking the
         // new, so a script tracking "what am I over" never sees two at once.
+        //
+        // Both halves of Godot's contract fire here (pat-s3rrv.25). Patina used
+        // to emit only the SIGNALS, so `_mouse_enter`/`_mouse_exit` — the
+        // virtuals `CollisionObject2D.xml` documents, and the names an author
+        // reading those docs writes — did nothing at all. The near-miss made it
+        // hard to see: gdscene does dispatch `_mouse_entered`/`_mouse_exited`,
+        // but only on Controls (`scene_tree.rs` GUI stage) and those are signal
+        // names with an underscore glued on, not these virtuals. So the exact
+        // names the documentation gives were the ones that were dead.
+        //
+        // `shape_idx` is 0 for the same reason it is 0 in the picking dispatch
+        // below: a Patina body has exactly one shape.
+        // The shape/object pair nests the way Godot nests it: leaving reports the
+        // shape before the object, entering reports the object before the shape.
+        // The signal emission keeps its existing position so nothing that
+        // already depends on `mouse_entered`/`mouse_exited` ordering shifts.
+        // `shape_idx` for the collider actually under the pointer
+        // (pat-s3rrv.25). On EXIT the node is no longer in `hits_with_shape` —
+        // it has just left — so 0 is the honest answer there rather than a
+        // stale index from wherever the pointer used to be.
+        let shape_at = |nid: NodeId| -> i64 {
+            hits_with_shape
+                .iter()
+                .find(|(hit, _)| *hit == nid)
+                .map(|(_, idx)| *idx as i64)
+                .unwrap_or(0)
+        };
         for nid in exited {
             self.tree.emit_signal(nid, "mouse_exited", &[]);
+            let _ = self.tree.call_script_method(
+                nid,
+                "_mouse_shape_exit",
+                &[Variant::Int(shape_at(nid))],
+            );
+            let _ = self.tree.call_script_method(nid, "_mouse_exit", &[]);
         }
         for nid in entered {
             self.tree.emit_signal(nid, "mouse_entered", &[]);
+            let _ = self.tree.call_script_method(nid, "_mouse_enter", &[]);
+            let _ = self.tree.call_script_method(
+                nid,
+                "_mouse_shape_enter",
+                &[Variant::Int(shape_at(nid))],
+            );
         }
 
         let payload = crate::scene_tree::input_event_to_variant(event);
@@ -2319,17 +2437,38 @@ impl MainLoop {
             // a scene connecting `input_event` in the editor, with no script on
             // the collider at all — received nothing.
             //
-            // The signal carries just the event, matching the argument list the
-            // committed `_input_event` call above already established. Godot's
-            // full `(viewport, event, shape_idx)` is not reproducible yet:
-            // `colliders_at_point` returns node ids with the shape index already
-            // discarded, and passing a placeholder `0` would be wrong for any
-            // body with more than one shape.
-            self.tree
-                .emit_signal(nid, "input_event", &[payload.clone()]);
-            let _ = self
-                .tree
-                .call_script_method(nid, "_input_event", &[payload.clone()]);
+            // Godot's signature is `(viewport, event, shape_idx)` and Patina used
+            // to send the event alone (pat-s3rrv.25). That is not a missing
+            // extra: the interpreter REJECTS an arity mismatch outright
+            // (`interpreter.rs`: `args.len() > func.params.len()` is a
+            // `TypeError`) and `call_script_method` swallows the raise, so a
+            // handler written to Godot's documented signature — the one every
+            // doc and tutorial shows — silently never ran at all.
+            //
+            // Both arguments the old comment here called unreproducible are in
+            // fact available:
+            //   * `viewport` is `Node.get_viewport()`, already implemented in
+            //     `crate::viewport::get_viewport`, which walks to the nearest
+            //     enclosing `Viewport` and falls back to the root `Window`. A
+            //     collider inside a `SubViewport` correctly gets that.
+            //   * `shape_idx` is `0`, and that is a *value*, not a placeholder:
+            //     `PhysicsBody2D` holds exactly one shape (`body.rs`: `pub shape:
+            //     Shape2D`) and `find_collision_shape` keeps only the first
+            //     collider child, so index 0 is the only shape any Patina body
+            //     has. When multi-shape bodies land, `colliders_at_point` has to
+            //     start returning the struck index and this becomes a real
+            //     lookup — but sending nothing today does not make that future
+            //     change any easier, it just breaks every handler in the present.
+            let viewport =
+                Variant::ObjectId(crate::viewport::get_viewport(&self.tree, nid).object_id());
+            let shape_idx = hits_with_shape
+                .iter()
+                .find(|(hit, _)| *hit == nid)
+                .map(|(_, idx)| *idx as i64)
+                .unwrap_or(0);
+            let args = [viewport, payload.clone(), Variant::Int(shape_idx)];
+            self.tree.emit_signal(nid, "input_event", &args);
+            let _ = self.tree.call_script_method(nid, "_input_event", &args);
         }
     }
 
@@ -2435,11 +2574,19 @@ impl MainLoop {
         self.hovered_pickables_3d = current;
 
         // Exits precede entries, matching Godot and the 2D twin.
+        //
+        // ⚠️ `CollisionObject3D` has only `_mouse_enter`/`_mouse_exit` — no
+        // `_mouse_shape_enter`/`_mouse_shape_exit`. That asymmetry with the 2D
+        // twin above is Godot's, not an omission here: `CollisionObject3D.xml`
+        // documents two mouse virtuals where `CollisionObject2D.xml` documents
+        // four. Adding the shape pair in 3D would invent API (pat-s3rrv.25).
         for nid in exited {
             self.tree.emit_signal(nid, "mouse_exited", &[]);
+            let _ = self.tree.call_script_method(nid, "_mouse_exit", &[]);
         }
         for nid in entered {
             self.tree.emit_signal(nid, "mouse_entered", &[]);
+            let _ = self.tree.call_script_method(nid, "_mouse_enter", &[]);
         }
 
         let Some((nid, point, normal)) = hit else {
@@ -2450,19 +2597,29 @@ impl MainLoop {
         }
 
         // Godot's signature is
-        // `input_event(camera, event, event_position, normal, shape_idx)`.
+        // `input_event(camera, event, event_position, normal, shape_idx)` — all
+        // five, as of pat-s3rrv.25.
         //
-        // ⚠️ `shape_idx` is omitted, for the same reason the 2D twin omits it:
-        // the ray result carries a `BodyId3D`, not which of that body's shapes
-        // was struck, and a placeholder `0` would be silently wrong for any body
-        // with more than one shape. The four arguments that ARE emitted are the
-        // real values.
+        // `shape_idx` used to be omitted here because the ray result carries a
+        // `BodyId3D` rather than which of that body's shapes was struck.
+        // `PhysicsBody3D` holds exactly one shape (`body.rs`: `pub shape:
+        // Shape3D`), so `0` is the only index any 3D body has — a real value,
+        // not a placeholder.
+        //
+        // ⚠️ The 2D twin no longer sends a constant: 2D bodies and areas gained
+        // a collider list (pat-s3rrv.25) and picking reports the struck index.
+        // 3D stays `0` because `PhysicsBody3D` has no such list *yet* — when it
+        // gains one, this line becomes wrong in exactly the way the 2D one was. Sending four
+        // arguments to a five-parameter handler is not a partial delivery: the
+        // interpreter rejects the arity outright and the raise is swallowed, so
+        // a handler with Godot's documented signature never ran.
         let payload = crate::scene_tree::input_event_to_variant(event);
         let args = [
             Variant::ObjectId(camera.object_id()),
             payload.clone(),
             Variant::Vector3(point),
             Variant::Vector3(normal),
+            Variant::Int(0),
         ];
         self.tree.emit_signal(nid, "input_event", &args);
         let _ = self.tree.call_script_method(nid, "_input_event", &args);
@@ -2900,6 +3057,26 @@ impl MainLoop {
                 crate::animation::AnimationCallbackMode::Physics,
             );
 
+            // `TWEEN_PROCESS_PHYSICS` tweens advance here — once per fixed tick,
+            // in lockstep with the solver — instead of at render rate in the
+            // idle phase below (pat-s3rrv.46). Both deltas are `physics_dt` for
+            // the same reason the timer phase below passes it twice: the fixed
+            // step is not scaled, so there is no separate unscaled step to hand
+            // an `ignore_time_scale` tween here.
+            //
+            // ⚠️ Known gap: this loop does not run at all while the tree is
+            // paused (the accumulator is zeroed above, mirroring Godot's
+            // `PhysicsServer::set_active(false)`), so a tween that is BOTH
+            // `TWEEN_PROCESS_PHYSICS` and `TWEEN_PAUSE_PROCESS` still stops
+            // under pause. Godot keeps iterating physics frames while paused
+            // and filters per node; changing that is the pause-model work
+            // pat-0q2kx.140 left open, not this bead's.
+            self.tree.process_tweens_in_mode(
+                physics_dt,
+                physics_dt,
+                crate::tween::TweenProcessMode::Physics,
+            );
+
             // SceneTree.physics_frame fires before each physics tick's script
             // phase, mirroring Godot's per-tick emission (pat-nzgdu.84).
             let physics_frame_root = self.tree.root_id();
@@ -2944,6 +3121,18 @@ impl MainLoop {
                 // one and publish blends from different ticks.
                 self.physics_interpolation_3d.capture(&self.tree);
             }
+
+            // SceneTreeTimers created with `process_in_physics = true` advance
+            // here, on the fixed tick, and are skipped by the idle pass
+            // (pat-s3rrv.35).
+            //
+            // Both deltas are `physics_dt`: the physics step is the fixed
+            // `1.0 / physics_ticks_per_second` and is NOT scaled — time_scale
+            // changes how many ticks run, not how long each one is (the
+            // accumulator above is fed the scaled delta). So there is no
+            // separate unscaled step to hand an `ignore_time_scale` timer here,
+            // and passing one would be inventing a number.
+            self.tree.process_timers_phase(physics_dt, physics_dt, true);
 
             self.physics_accumulator -= physics_dt;
             self.physics_time += physics_dt;
@@ -3003,7 +3192,11 @@ impl MainLoop {
             // guard on purpose: Godot's SceneTree pause stops video with
             // everything else (pat-0q2kx.182).
             self.tree.process_video_players(delta_secs);
-            self.tree.process_tweens(delta_secs);
+            self.tree.process_tweens_in_mode(
+                delta_secs,
+                real_delta_secs,
+                crate::tween::TweenProcessMode::Idle,
+            );
 
             // -- skeleton phase (pat-0q2kx.3) --
             // Godot's NOTIFICATION_UPDATE_SKELETON: after the mixer has written
@@ -3063,6 +3256,20 @@ impl MainLoop {
             // A default-process_mode Timer stops while paused, which is why Godot's
             // pause menus use `Always` timers (pat-0q2kx.140).
             self.tree.process_timer_nodes(delta_secs);
+        } else {
+            // The one phase that does NOT stop dead at pause (pat-s3rrv.46).
+            // Godot decides per tween: `TWEEN_PAUSE_PROCESS` keeps a pause-menu
+            // animation moving, and `TWEEN_PAUSE_BOUND` follows the bound node,
+            // so an `Always` node's tween runs while a `Pausable` one's does
+            // not. `process_tweens_in_mode` applies `Tween::can_process` per
+            // tween, so this call advances exactly the survivors and is a no-op
+            // for everything else. It sits in the `else` arm so the unpaused
+            // frame's phase ORDER is untouched.
+            self.tree.process_tweens_in_mode(
+                delta_secs,
+                real_delta_secs,
+                crate::tween::TweenProcessMode::Idle,
+            );
         } // end of the `if !paused` simulation block (pat-0q2kx.140)
           //
           // The raycast and 3D-query phases sit inside this block too. That is
@@ -3116,7 +3323,10 @@ impl MainLoop {
         // deliver their timeout signals to parked awaits, and tick frame-based
         // awaits so `await get_tree().create_timer(t).timeout` resumes at
         // runtime instead of hanging forever.
-        self.tree.process_script_coroutines(delta_secs as f32);
+        // `real_delta_secs` is the driver's unscaled delta, which only
+        // `ignore_time_scale` timers consume (pat-s3rrv.35).
+        self.tree
+            .process_script_coroutines_unscaled(delta_secs as f32, real_delta_secs);
 
         // -- Input singleton mutations (pat-0q2kx.24) --
         // Scripts cannot reach the engine `InputState` (this loop owns it), so

@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::shader_tokenizer::{tokenize_shader_no_comments, ShaderToken, ShaderTokenSpan};
 
@@ -381,10 +382,24 @@ impl Parser {
                     }
                     self.skip_to_semicolon();
                 }
-                // `render_mode`, `struct` and `group_uniforms` are consumed but
-                // not modelled: they do not affect per-pixel evaluation, and
+                // `render_mode` and `group_uniforms` are consumed but not
+                // modelled: they do not affect per-pixel evaluation, and
                 // skipping them is honest about what this evaluator covers.
                 ShaderToken::RenderMode | ShaderToken::GroupUniforms => {
+                    self.skip_to_semicolon();
+                }
+                // `struct` likewise (pat-s3rrv.36). The comment here used to
+                // claim struct was consumed, but this arm did not exist, so
+                // `ShaderToken::Struct` fell through to the error below and a
+                // shader declaring ANY struct failed to parse in its entirety —
+                // taking its `fragment()` body with it.
+                //
+                // Skipped via the braced block, NOT `skip_to_semicolon`: a
+                // struct body is full of semicolons (`vec3 pos;`), so stopping
+                // at the first one would leave the parser inside the braces and
+                // turn a tolerated declaration into a cascade of errors.
+                ShaderToken::Struct => {
+                    self.skip_braced_block();
                     self.skip_to_semicolon();
                 }
                 ShaderToken::Uniform | ShaderToken::Varying | ShaderToken::Const => {
@@ -418,6 +433,37 @@ impl Parser {
         }
 
         Ok(program)
+    }
+
+    /// Consumes tokens through a balanced `{ … }`, leaving the parser just past
+    /// the closing brace (pat-s3rrv.36).
+    ///
+    /// Nesting-aware so a struct containing a braced initializer does not end
+    /// the skip early. A missing `{` consumes nothing, and an unterminated
+    /// block stops at EOF rather than looping.
+    fn skip_braced_block(&mut self) {
+        while !matches!(self.peek(), ShaderToken::LBrace | ShaderToken::Eof) {
+            self.advance();
+        }
+        if matches!(self.peek(), ShaderToken::Eof) {
+            return;
+        }
+        let mut depth = 0usize;
+        loop {
+            match self.peek() {
+                ShaderToken::LBrace => depth += 1,
+                ShaderToken::RBrace => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.advance();
+                        return;
+                    }
+                }
+                ShaderToken::Eof => return,
+                _ => {}
+            }
+            self.advance();
+        }
     }
 
     fn skip_to_semicolon(&mut self) {
@@ -832,6 +878,38 @@ impl Parser {
 /// `ALBEDO`, `ALPHA`, …). The caller seeds the inputs and reads the outputs
 /// back out after evaluation, which is what keeps this module free of any
 /// renderer-specific types.
+/// A caller-supplied texture sampler (pat-s3rrv.36).
+///
+/// `texture(TEXTURE, UV)` cannot be a pure function of [`ShaderValue`]s: the
+/// first argument names a sampler, and the pixels behind it live in whichever
+/// renderer is driving the shader. This closure is how a renderer hands the
+/// evaluator that lookup — it receives the sampler's NAME (`TEXTURE`,
+/// `SCREEN_TEXTURE`, a `uniform sampler2D`) plus normalized UV, and returns
+/// straight RGBA.
+///
+/// Wrapped in a newtype rather than exposed as a bare `Arc<dyn Fn>` so
+/// [`StageContext`] keeps its `Debug` and `Clone` derives; a closure is neither.
+#[derive(Clone)]
+pub struct Sampler(Arc<dyn Fn(&str, [f32; 2]) -> [f32; 4] + Send + Sync>);
+
+impl Sampler {
+    /// Wraps a sampling closure.
+    pub fn new(f: impl Fn(&str, [f32; 2]) -> [f32; 4] + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    /// Samples `name` at `uv`.
+    pub fn sample(&self, name: &str, uv: [f32; 2]) -> [f32; 4] {
+        (self.0)(name, uv)
+    }
+}
+
+impl std::fmt::Debug for Sampler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Sampler(<closure>)")
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StageContext {
     /// Uniform values by name.
@@ -840,6 +918,11 @@ pub struct StageContext {
     pub builtins: HashMap<String, ShaderValue>,
     /// Set when the shader executed `discard`.
     pub discarded: bool,
+    /// Texture lookup for `texture()` and friends, supplied by the renderer
+    /// driving this evaluation (pat-s3rrv.36). `None` makes every sample
+    /// transparent black rather than an error, so a shader that samples still
+    /// runs under a caller that has no textures to offer.
+    pub sampler: Option<Sampler>,
     /// Lexical scopes; the last is innermost.
     scopes: Vec<HashMap<String, ShaderValue>>,
 }
@@ -854,8 +937,15 @@ impl StageContext {
             uniforms,
             builtins,
             discarded: false,
+            sampler: None,
             scopes: Vec::new(),
         }
+    }
+
+    /// Attaches the renderer's texture lookup (pat-s3rrv.36).
+    pub fn with_sampler(mut self, sampler: Sampler) -> Self {
+        self.sampler = Some(sampler);
+        self
     }
 
     /// Reads a name from the innermost scope outward, then uniforms, then
@@ -1140,6 +1230,62 @@ fn swizzle_index(ch: char) -> Option<usize> {
     }
 }
 
+/// Evaluates `texture(sampler, uv)` / `textureLod(sampler, uv, lod)`
+/// (pat-s3rrv.36).
+///
+/// Argument 0 is taken as a NAME rather than a value, which is why this runs
+/// before the generic argument evaluation. Godot's `texture()` returns vec4 for
+/// a `sampler2D`, so that is what comes back here.
+///
+/// With no sampler attached the result is transparent black — the same thing a
+/// shader reads from an unbound texture unit — rather than an error, so a
+/// caller that has no textures can still run a shader that samples one.
+fn eval_texture_call(
+    program: &ShaderProgram,
+    name: &str,
+    args: &[Expr],
+    ctx: &mut StageContext,
+) -> Result<ShaderValue, ShaderError> {
+    if args.len() < 2 {
+        return Err(ShaderError {
+            message: format!("`{name}` takes at least 2 arguments"),
+            line: 0,
+            col: 0,
+        });
+    }
+    let sampler_name = match &args[0] {
+        Expr::Ident { name, .. } => name.clone(),
+        _ => {
+            return Err(ShaderError {
+                message: format!("`{name}`'s first argument must name a sampler"),
+                line: 0,
+                col: 0,
+            })
+        }
+    };
+    let uv = eval_expr(program, &args[1], ctx)?;
+    // `textureLod`'s third argument is a mip level. The software renderers have
+    // one mip, so it is evaluated (for side effects and to reject bad
+    // expressions) and then ignored, rather than silently unparsed.
+    for extra in &args[2..] {
+        eval_expr(program, extra, ctx)?;
+    }
+    let uv = match uv {
+        ShaderValue::Vec2(v) => v,
+        other => {
+            let c = other.components();
+            [
+                c.first().copied().unwrap_or(0.0),
+                c.get(1).copied().unwrap_or(0.0),
+            ]
+        }
+    };
+    Ok(ShaderValue::Vec4(match &ctx.sampler {
+        Some(sampler) => sampler.sample(&sampler_name, uv),
+        None => [0.0, 0.0, 0.0, 0.0],
+    }))
+}
+
 fn eval_expr(
     program: &ShaderProgram,
     expr: &Expr,
@@ -1210,6 +1356,13 @@ fn eval_expr(
             Ok(ShaderValue::from_components(&out))
         }
         Expr::Call { name, args } => {
+            // Texture lookups are intercepted BEFORE the arguments are
+            // evaluated (pat-s3rrv.36). `texture(TEXTURE, UV)` names a sampler
+            // in argument 0, and a sampler is not a `ShaderValue` — evaluating
+            // it eagerly would fail on an undeclared identifier.
+            if matches!(name.as_str(), "texture" | "textureLod") {
+                return eval_texture_call(program, name, args, ctx);
+            }
             let mut values = Vec::with_capacity(args.len());
             for a in args {
                 values.push(eval_expr(program, a, ctx)?);
@@ -1375,6 +1528,69 @@ fn call_builtin(name: &str, args: &[ShaderValue]) -> Result<ShaderValue, ShaderE
         "sqrt" => return unary(f32::sqrt),
         "fract" => return unary(|x| x - x.floor()),
         "sign" => return unary(f32::signum),
+        // pat-s3rrv.36: the rest of Godot's component-wise scalar set. These
+        // were missing entirely, so a shader calling any of them died with
+        // "unknown function" and — through the renderers' old line matcher —
+        // was silently skipped instead.
+        "asin" => return unary(f32::asin),
+        "acos" => return unary(f32::acos),
+        "atan" if args.len() == 1 => return unary(f32::atan),
+        "exp" => return unary(f32::exp),
+        "exp2" => return unary(f32::exp2),
+        "log" => return unary(f32::ln),
+        "log2" => return unary(f32::log2),
+        "radians" => return unary(f32::to_radians),
+        "degrees" => return unary(f32::to_degrees),
+        "sinh" => return unary(f32::sinh),
+        "cosh" => return unary(f32::cosh),
+        "tanh" => return unary(f32::tanh),
+        // GLSL rounds halfway cases to even; Rust's `round` goes away from
+        // zero, so `round(0.5)` would differ (1.0 vs GLSL's 0.0).
+        "round" => {
+            return unary(|x| {
+                let r = x.round();
+                if (x - x.trunc()).abs() == 0.5 && r % 2.0 != 0.0 {
+                    r - x.signum()
+                } else {
+                    r
+                }
+            })
+        }
+        "roundEven" => {
+            return unary(|x| {
+                let r = x.round();
+                if (x - x.trunc()).abs() == 0.5 && r % 2.0 != 0.0 {
+                    r - x.signum()
+                } else {
+                    r
+                }
+            })
+        }
+        "trunc" => return unary(f32::trunc),
+        "inversesqrt" => return unary(|x| 1.0 / x.sqrt()),
+        // Screen-space derivatives have no meaning in a per-fragment CPU
+        // evaluator with no neighbouring invocations. Godot's own software
+        // paths return 0 rather than failing, and 0 is the correct derivative
+        // of the constant this evaluator effectively sees.
+        "dFdx" | "dFdy" | "fwidth" => return unary(|_| 0.0),
+        "not" => {
+            let a = args.first().ok_or_else(unknown)?;
+            return Ok(ShaderValue::from_components(
+                &a.components()
+                    .iter()
+                    .map(|c| if *c == 0.0 { 1.0 } else { 0.0 })
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        // `any`/`all` collapse a boolean vector to one bool.
+        "any" => {
+            let a = args.first().ok_or_else(unknown)?;
+            return Ok(ShaderValue::Bool(a.components().iter().any(|c| *c != 0.0)));
+        }
+        "all" => {
+            let a = args.first().ok_or_else(unknown)?;
+            return Ok(ShaderValue::Bool(a.components().iter().all(|c| *c != 0.0)));
+        }
         _ => {}
     }
 
@@ -1406,6 +1622,10 @@ fn call_builtin(name: &str, args: &[ShaderValue]) -> Result<ShaderValue, ShaderE
     match name {
         "min" => return binary(f32::min),
         "max" => return binary(f32::max),
+        // Godot spells two-argument arctangent `atan(y, x)`, not `atan2`, but
+        // accept both — the one-argument form is handled with the other unary
+        // maths above (pat-s3rrv.36).
+        "atan" | "atan2" => return binary(f32::atan2),
         "pow" => return binary(f32::powf),
         "mod" => {
             return binary(|x, y| {
@@ -1505,6 +1725,119 @@ fn call_builtin(name: &str, args: &[ShaderValue]) -> Result<ShaderValue, ShaderE
             Ok(ShaderValue::from_components(
                 &comps.iter().map(|c| c / len).collect::<Vec<_>>(),
             ))
+        }
+        // pat-s3rrv.36: the geometric and comparison builtins Godot defines
+        // that this table was missing.
+        "distance" => {
+            let (a, b) = (
+                args.first().ok_or_else(unknown)?,
+                args.get(1).ok_or_else(unknown)?,
+            );
+            let (ac, bc) = (a.components(), b.components());
+            let sum: f32 = ac
+                .iter()
+                .zip(bc.iter())
+                .map(|(x, y)| (x - y) * (x - y))
+                .sum();
+            Ok(ShaderValue::Float(sum.sqrt()))
+        }
+        "cross" => {
+            let (a, b) = (
+                args.first().ok_or_else(unknown)?,
+                args.get(1).ok_or_else(unknown)?,
+            );
+            let (u, v) = (a.components(), b.components());
+            if u.len() < 3 || v.len() < 3 {
+                return Err(unknown());
+            }
+            Ok(ShaderValue::Vec3([
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ]))
+        }
+        // `reflect(I, N)` = I - 2*dot(N, I)*N, with N assumed normalized.
+        "reflect" => {
+            let (i, n) = (
+                args.first().ok_or_else(unknown)?,
+                args.get(1).ok_or_else(unknown)?,
+            );
+            let (ic, nc) = (i.components(), n.components());
+            let d: f32 = ic.iter().zip(nc.iter()).map(|(x, y)| x * y).sum();
+            Ok(ShaderValue::from_components(
+                &ic.iter()
+                    .zip(nc.iter())
+                    .map(|(x, y)| x - 2.0 * d * y)
+                    .collect::<Vec<_>>(),
+            ))
+        }
+        // `faceforward(N, I, Nref)` flips N away from I.
+        "faceforward" => {
+            let (n, i, nref) = (
+                args.first().ok_or_else(unknown)?,
+                args.get(1).ok_or_else(unknown)?,
+                args.get(2).ok_or_else(unknown)?,
+            );
+            let (nc, ic, rc) = (n.components(), i.components(), nref.components());
+            let d: f32 = rc.iter().zip(ic.iter()).map(|(x, y)| x * y).sum();
+            Ok(ShaderValue::from_components(
+                &nc.iter()
+                    .map(|c| if d < 0.0 { *c } else { -*c })
+                    .collect::<Vec<_>>(),
+            ))
+        }
+        // `refract(I, N, eta)`; total internal reflection returns 0, as GLSL
+        // specifies, rather than a NaN from the negative square root.
+        "refract" => {
+            let (i, n, eta) = (
+                args.first().ok_or_else(unknown)?,
+                args.get(1).ok_or_else(unknown)?,
+                args.get(2).ok_or_else(unknown)?,
+            );
+            let (ic, nc) = (i.components(), n.components());
+            let eta = eta.as_f32();
+            let d: f32 = nc.iter().zip(ic.iter()).map(|(x, y)| x * y).sum();
+            let k = 1.0 - eta * eta * (1.0 - d * d);
+            if k < 0.0 {
+                return Ok(ShaderValue::from_components(&vec![0.0; ic.len()]));
+            }
+            let scale = eta * d + k.sqrt();
+            Ok(ShaderValue::from_components(
+                &ic.iter()
+                    .zip(nc.iter())
+                    .map(|(x, y)| eta * x - scale * y)
+                    .collect::<Vec<_>>(),
+            ))
+        }
+        // Component-wise comparisons return a boolean vector, which this value
+        // model represents as 1.0/0.0 components — `any`/`all` then collapse it.
+        "lessThan" | "lessThanEqual" | "greaterThan" | "greaterThanEqual" | "equal"
+        | "notEqual" => {
+            let (a, b) = (
+                args.first().ok_or_else(unknown)?,
+                args.get(1).ok_or_else(unknown)?,
+            );
+            let (ac, bc) = (a.components(), b.components());
+            let out: Vec<f32> = ac
+                .iter()
+                .zip(bc.iter())
+                .map(|(x, y)| {
+                    let t = match name {
+                        "lessThan" => x < y,
+                        "lessThanEqual" => x <= y,
+                        "greaterThan" => x > y,
+                        "greaterThanEqual" => x >= y,
+                        "equal" => x == y,
+                        _ => x != y,
+                    };
+                    if t {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            Ok(ShaderValue::from_components(&out))
         }
         _ => Err(unknown()),
     }

@@ -12,6 +12,10 @@ use gdcore::math::{Color, Vector3};
 use gdvariant::variant::Variant;
 use std::collections::HashMap;
 
+/// Re-exported so renderers can build a sampler without depending on
+/// `gdresource` themselves (pat-s3rrv.36).
+pub use gdresource::shader_ast::Sampler;
+
 // Re-use the shader type and uniform type enums that mirror Godot's categories.
 
 /// The type of shader program.
@@ -430,6 +434,24 @@ impl CompiledShader3D {
 #[derive(Debug, Default)]
 pub struct ShaderCompiler3D;
 
+/// Memo for [`ShaderCompiler3D::compile_cached`] (pat-s3rrv.36).
+type CompileCacheKey = (ShaderType3D, String);
+static COMPILE_CACHE: std::sync::Mutex<Option<HashMap<CompileCacheKey, CompiledShader3D>>> =
+    std::sync::Mutex::new(None);
+
+fn compile_cache(
+) -> std::sync::MutexGuard<'static, Option<HashMap<CompileCacheKey, CompiledShader3D>>> {
+    COMPILE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Empties the compile cache -- for tests, and for an editor reloading a shader
+/// whose source changed on disk under the same identity (pat-s3rrv.36).
+pub fn clear_compile_cache() {
+    *compile_cache() = None;
+}
+
 impl ShaderCompiler3D {
     /// Creates a new shader compiler.
     pub fn new() -> Self {
@@ -442,10 +464,62 @@ impl ShaderCompiler3D {
     /// basic validation, and generates a WGSL program for GPU execution.
     /// Check [`CompiledShader3D::has_errors`] to determine if compilation
     /// succeeded.
+    /// [`compile`](Self::compile), memoized on `(shader_type, source)`
+    /// (pat-s3rrv.36).
+    ///
+    /// `CustomFragmentShader::from_material` (gdrender3d) calls `compile` for
+    /// EVERY instance on EVERY frame, so a scene with N shader-material
+    /// instances re-tokenized, re-parsed and re-generated WGSL N times per
+    /// frame for sources that never changed. This returns a clone of the cached
+    /// result instead, which still copies the struct but skips all of that work.
+    ///
+    /// Keyed by the full source text rather than a hash: shader sources are
+    /// small, and a hash collision would silently hand back the wrong program --
+    /// a bug that would be near-impossible to diagnose from the symptom.
+    pub fn compile_cached(&self, shader_type: ShaderType3D, source: &str) -> CompiledShader3D {
+        let key = (shader_type, source.to_string());
+        {
+            let guard = compile_cache();
+            if let Some(hit) = guard.as_ref().and_then(|m| m.get(&key)) {
+                return hit.clone();
+            }
+        }
+        // Compiled OUTSIDE the lock: compilation is the expensive part, and
+        // holding the mutex across it would serialize every renderer thread on
+        // the first frame. A concurrent duplicate compile is harmless -- both
+        // produce the same value and the second simply overwrites.
+        let compiled = self.compile(shader_type, source);
+        compile_cache()
+            .get_or_insert_with(HashMap::new)
+            .insert(key, compiled.clone());
+        compiled
+    }
+
     pub fn compile(&self, shader_type: ShaderType3D, source: &str) -> CompiledShader3D {
         let uniforms = parse_uniforms(source);
         let render_modes = parse_render_modes(source);
-        let diagnostics = validate_shader(source, shader_type);
+        let mut diagnostics = validate_shader(source, shader_type);
+
+        // pat-s3rrv.36: a source the GDShader front end cannot parse becomes a
+        // line-numbered diagnostic here, in the channel the editor already
+        // surfaces. `validate_shader` above only checks a handful of shapes, so
+        // before this a syntactically broken shader compiled "successfully",
+        // produced an empty fragment_body, and rendered as plain albedo with
+        // nothing to tell the author why. Godot reports these at compile time.
+        //
+        // Reported as a WARNING, not an Error: `has_errors()` gates WGSL
+        // generation and the GPU path, and the line matcher can still handle
+        // sources the AST rejects. Demoting a working shader to no-GPU because
+        // a stricter front end disliked it would be a regression.
+        if let Err(e) = gdresource::shader_ast::parse_shader(source) {
+            diagnostics.push(ShaderDiagnostic {
+                // `ShaderError::line` is 1-based; this field is 0-based.
+                line: e.line.saturating_sub(1),
+                severity: DiagnosticSeverity::Warning,
+                message: format!("shader language: {}", e.message),
+            });
+        }
+
         let wgsl_program = if diagnostics
             .iter()
             .any(|d| d.severity == DiagnosticSeverity::Error)
@@ -817,6 +891,13 @@ pub enum FragmentInstruction3D {
     SetAlpha(FloatExpr3D),
     /// `ALBEDO.rgb *= <float>` / `COLOR.rgb *= <float>` — scales RGB.
     MultiplyColorRgb(FloatExpr3D),
+    /// The whole shader, parsed by the real GDShader front end (pat-s3rrv.36).
+    ///
+    /// The variants above are a six-shape line matcher that silently skips any
+    /// statement it cannot classify. When `gdresource::shader_ast` can parse the
+    /// source, the entire program is carried here and evaluated per fragment,
+    /// mirroring `FragmentInstruction::Program` on the 2D side.
+    Program(std::sync::Arc<gdresource::shader_ast::ShaderProgram>),
 }
 
 /// An expression that evaluates to a color value in a 3D fragment shader.
@@ -921,6 +1002,30 @@ pub fn parse_fragment_body_3d(source: &str) -> Vec<FragmentInstruction3D> {
 
 /// Shared body walk for [`parse_fragment_body_3d`] and [`parse_sky_body_3d`].
 fn parse_named_body_3d(source: &str, func: &str) -> Vec<FragmentInstruction3D> {
+    let mut instructions = parse_named_body_3d_matched(source, func);
+    // pat-s3rrv.36: when the line matcher understood NOTHING, hand the whole
+    // source to the real front end. A fallback, not a replacement — a shader the
+    // matcher already handles keeps its exact path, so nothing that renders
+    // correctly today can regress. Mirrors the 2D side.
+    //
+    // Restricted to `fragment` on purpose: `parse_sky_body_3d` shares this
+    // function, but `execute_fragment_3d` evaluates a Program by calling its
+    // `fragment()` entry. A sky Program would therefore look for a function it
+    // does not have, silently produce nothing, and be harder to diagnose than
+    // the matcher's current behaviour. Extending the AST path to the sky stage
+    // means carrying the entry-point name in the variant.
+    if instructions.is_empty() && func == "fragment" {
+        if let Ok(program) = gdresource::shader_ast::parse_shader(source) {
+            if program.function(func).is_some() {
+                return vec![FragmentInstruction3D::Program(std::sync::Arc::new(program))];
+            }
+        }
+    }
+    instructions.shrink_to_fit();
+    instructions
+}
+
+fn parse_named_body_3d_matched(source: &str, func: &str) -> Vec<FragmentInstruction3D> {
     let mut instructions = Vec::new();
 
     let body = match extract_function_body_3d(source, func) {
@@ -1439,10 +1544,138 @@ pub fn execute_fragment_3d(
     uniforms: &HashMap<String, Variant>,
     sample_texture: &dyn Fn(&str, f32, f32) -> Color,
 ) -> Color {
+    execute_fragment_3d_with_env(
+        instructions,
+        ctx,
+        uniforms,
+        sample_texture,
+        &ShaderEnv3D::default(),
+    )
+}
+
+/// Converts a material parameter into a shader value (pat-s3rrv.36).
+fn uniform_to_shader_value_3d(v: &Variant) -> Option<gdresource::shader_ast::ShaderValue> {
+    use gdresource::shader_ast::ShaderValue as SV;
+    Some(match v {
+        Variant::Bool(b) => SV::Bool(*b),
+        Variant::Int(i) => SV::Int(*i),
+        Variant::Float(f) => SV::Float(*f as f32),
+        Variant::Vector2(v) => SV::Vec2([v.x, v.y]),
+        Variant::Vector3(v) => SV::Vec3([v.x, v.y, v.z]),
+        Variant::Color(c) => SV::Vec4([c.r, c.g, c.b, c.a]),
+        _ => return None,
+    })
+}
+
+/// Runs a parsed spatial shader's `fragment()` for one fragment (pat-s3rrv.36).
+///
+/// Returns `None` when evaluation fails or the shader `discard`s, leaving the
+/// caller's colour untouched.
+///
+/// Godot's spatial fragment stage writes ALBEDO (vec3) and ALPHA (float)
+/// separately, unlike canvas_item's single vec4 COLOR — so both are seeded and
+/// both are read back, with ALPHA winning over the albedo's own alpha when the
+/// shader set it.
+fn eval_ast_fragment_3d(
+    program: &gdresource::shader_ast::ShaderProgram,
+    ctx: &FragmentContext3D,
+    uniforms: &HashMap<String, Variant>,
+    env: &ShaderEnv3D,
+) -> Option<Color> {
+    use gdresource::shader_ast::{eval_function, ShaderValue as SV, StageContext};
+
+    let uniform_values: HashMap<String, SV> = uniforms
+        .iter()
+        .filter_map(|(k, v)| uniform_to_shader_value_3d(v).map(|sv| (k.clone(), sv)))
+        .collect();
+
+    let mut builtins: HashMap<String, SV> = HashMap::new();
+    builtins.insert(
+        "ALBEDO".to_string(),
+        SV::Vec3([ctx.albedo.r, ctx.albedo.g, ctx.albedo.b]),
+    );
+    builtins.insert("ALPHA".to_string(), SV::Float(ctx.albedo.a));
+    builtins.insert(
+        "COLOR".to_string(),
+        SV::Vec4([ctx.albedo.r, ctx.albedo.g, ctx.albedo.b, ctx.albedo.a]),
+    );
+    builtins.insert("UV".to_string(), SV::Vec2([ctx.uv.0, ctx.uv.1]));
+    builtins.insert(
+        "NORMAL".to_string(),
+        SV::Vec3([ctx.normal.x, ctx.normal.y, ctx.normal.z]),
+    );
+    builtins.insert(
+        "VERTEX".to_string(),
+        SV::Vec3([
+            ctx.world_position.x,
+            ctx.world_position.y,
+            ctx.world_position.z,
+        ]),
+    );
+    builtins.insert(
+        "VIEW".to_string(),
+        SV::Vec3([ctx.view_dir.x, ctx.view_dir.y, ctx.view_dir.z]),
+    );
+    builtins.insert("ROUGHNESS".to_string(), SV::Float(ctx.roughness));
+    builtins.insert("METALLIC".to_string(), SV::Float(ctx.metallic));
+    builtins.insert("TIME".to_string(), SV::Float(ctx.time));
+
+    let mut stage = StageContext::new(uniform_values, builtins);
+    if let Some(sampler) = &env.sampler {
+        stage = stage.with_sampler(sampler.clone());
+    }
+
+    eval_function(program, "fragment", &mut stage).ok()?;
+    if stage.discarded {
+        return None;
+    }
+
+    // ALPHA is authoritative when written; otherwise fall back to whatever the
+    // vec4 COLOR path produced, then to the incoming alpha.
+    let alpha = match stage.builtins.get("ALPHA") {
+        Some(v) => v.as_f32(),
+        None => ctx.albedo.a,
+    };
+    match stage.builtins.get("ALBEDO") {
+        Some(SV::Vec3(c)) => Some(Color::new(c[0], c[1], c[2], alpha)),
+        _ => match stage.builtins.get("COLOR") {
+            Some(SV::Vec4(c)) => Some(Color::new(c[0], c[1], c[2], c[3])),
+            _ => None,
+        },
+    }
+}
+
+/// Renderer-supplied environment for the AST fragment path (pat-s3rrv.36).
+///
+/// The legacy instruction arms take their texture lookup as a borrowed
+/// `&dyn Fn`, but `shader_ast::Sampler` is `'static`, so the AST path needs an
+/// OWNED closure. The renderer builds one cheaply by capturing an
+/// `Arc`-shared texture map — see `CustomFragmentShader::shade`.
+#[derive(Debug, Clone, Default)]
+pub struct ShaderEnv3D {
+    /// Resolves `texture(SAMPLER, uv)` for the AST path. `None` samples
+    /// transparent black.
+    pub sampler: Option<gdresource::shader_ast::Sampler>,
+}
+
+/// [`execute_fragment_3d`] with the environment the AST path needs
+/// (pat-s3rrv.36).
+pub fn execute_fragment_3d_with_env(
+    instructions: &[FragmentInstruction3D],
+    ctx: &FragmentContext3D,
+    uniforms: &HashMap<String, Variant>,
+    sample_texture: &dyn Fn(&str, f32, f32) -> Color,
+    env: &ShaderEnv3D,
+) -> Color {
     let mut color = ctx.albedo;
 
     for inst in instructions {
         match inst {
+            FragmentInstruction3D::Program(program) => {
+                if let Some(c) = eval_ast_fragment_3d(program, ctx, uniforms, env) {
+                    color = c;
+                }
+            }
             FragmentInstruction3D::SetColor(expr) => {
                 color = eval_color_expr_3d(expr, ctx, uniforms, sample_texture);
             }
@@ -1582,6 +1815,14 @@ pub fn fragment_body_to_wgsl_statements(
                     float_expr_to_wgsl(e)?
                 )
             }
+            // pat-s3rrv.36: an AST-routed shader has no WGSL translation yet.
+            // Declining the whole body (`None`) is the honest answer — the
+            // other arms already bail that way when an expression cannot be
+            // translated, and the caller falls back to the CPU interpreter,
+            // which CAN evaluate a Program. Emitting partial WGSL that silently
+            // dropped the fragment body would render the wrong thing on GPU
+            // while the CPU path rendered the right one.
+            FragmentInstruction3D::Program(_) => return None,
         };
         stmts.push(stmt);
     }

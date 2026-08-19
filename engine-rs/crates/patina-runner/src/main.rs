@@ -54,18 +54,28 @@ fn parse_args() -> Result<Args, String> {
 
     if args.len() < 2 {
         return Err(format!(
-            "Usage: {} <scene.tscn> [--frames N] [--delta D]",
+            "Usage: {} <scene.tscn|project.godot|game.pck> [--main-pack PACK] \
+             [--frames N] [--delta D]",
             args[0]
         ));
     }
 
-    let scene_path = args[1].clone();
+    // Godot spells the packed-game entry point `--main-pack <path>`
+    // (pat-s3rrv.34). Supporting it means the first argument is optional, so
+    // when it starts with `--` the positional target is left empty and flag
+    // parsing begins at index 1 instead of 2.
+    let starts_with_flag = args[1].starts_with("--");
+    let mut scene_path = if starts_with_flag {
+        String::new()
+    } else {
+        args[1].clone()
+    };
     let mut frames: u64 = 10;
     let mut delta: f64 = 1.0 / 60.0;
     let mut trace_frames = false;
     let mut event_trace = false;
 
-    let mut i = 2;
+    let mut i = if starts_with_flag { 1 } else { 2 };
     while i < args.len() {
         match args[i].as_str() {
             "--frames" => {
@@ -90,11 +100,19 @@ fn parse_args() -> Result<Args, String> {
             "--event-trace" => {
                 event_trace = true;
             }
+            "--main-pack" => {
+                i += 1;
+                scene_path = args.get(i).ok_or("--main-pack requires a path")?.clone();
+            }
             other => {
                 return Err(format!("unknown argument: {other}"));
             }
         }
         i += 1;
+    }
+
+    if scene_path.is_empty() {
+        return Err("no scene, project or pack given (pass a path or --main-pack)".to_string());
     }
 
     Ok(Args {
@@ -333,7 +351,41 @@ fn run_project_from_godot(arg_path: &Path, args: &Args) {
             process::exit(1);
         }
     };
+    run_booted_project(booted, &project_dir, args);
+}
 
+/// Boots an exported game from a `.pck` (pat-s3rrv.34).
+///
+/// Godot ships a game as a pack and boots it with no loose project tree at all;
+/// `boot_project_from_pck` already mounted-and-parsed that case, but nothing on
+/// the runner's CLI ever reached it, so `patina-runner game.pck` was not a
+/// runnable command. `res://` still points at the pack's own directory, so a
+/// file deliberately shipped beside the pack keeps resolving.
+fn run_project_from_pck(pck_path: &Path, args: &Args) {
+    let booted = match project_boot::boot_project_from_pck(pck_path, None) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("Error booting pack '{}': {e}", pck_path.display());
+            process::exit(1);
+        }
+    };
+    // Anything not in the pack resolves beside it, matching the fallback root
+    // `boot_project_from_pck` installs.
+    let base_dir = pck_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    run_booted_project(booted, &base_dir, args);
+}
+
+/// Runs a booted project's lifecycle, frames and JSON dump.
+///
+/// Shared by the `project.godot` and `.pck` entry points so a packed game runs
+/// through exactly the same loop configuration — physics settings, input map
+/// and physics-body registration included — rather than a parallel copy that
+/// could drift.
+fn run_booted_project(booted: project_boot::BootedProject, project_dir: &Path, args: &Args) {
+    let project_dir = project_dir.to_path_buf();
     let mut tree = booted.tree;
     if args.event_trace {
         tree.event_trace_mut().enable();
@@ -352,7 +404,7 @@ fn run_project_from_godot(arg_path: &Path, args: &Args) {
         node_count = tree.node_count(),
         autoloads = booted.autoload_roots.len(),
         actions = booted.input_map.actions().count(),
-        "booted project from project.godot"
+        "booted project"
     );
 
     let mut main_loop = MainLoop::new(tree);
@@ -426,6 +478,15 @@ fn main() {
     let arg_path = Path::new(&args.scene_path);
     if arg_path.is_dir() || arg_path.file_name().is_some_and(|n| n == "project.godot") {
         run_project_from_godot(arg_path, &args);
+        return;
+    }
+
+    // pat-s3rrv.34: a `.pck` argument boots the exported game inside it.
+    if arg_path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("pck"))
+    {
+        run_project_from_pck(arg_path, &args);
         return;
     }
 

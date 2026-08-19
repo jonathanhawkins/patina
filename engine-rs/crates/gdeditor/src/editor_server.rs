@@ -507,6 +507,22 @@ pub struct EditorState {
     pub debug_errors: Vec<(String, String)>,
     /// pat-j906k: whether the debugger skips breakpoints this session.
     pub debug_skip_breakpoints: bool,
+    /// pat-s3rrv.27: whether a Play session wants the script debugger attached.
+    ///
+    /// This is the *desired* state, not the live one. `EngineDebugger` lives in
+    /// a `thread_local!`, and the editor serves each connection on its own
+    /// thread while frames may be advanced by the driver thread — so attaching
+    /// inside the `/api/runtime/play` handler would bind the debugger to a
+    /// connection thread that dies with the response, leaving `is_active()`
+    /// false for the entire run. `advance_running_main_loop` reconciles the
+    /// thread-local against this flag before each step, which is correct on
+    /// whichever thread actually runs the scripts.
+    pub debug_attached: bool,
+    /// pat-s3rrv.27: `EngineDebugger.send_message()` captures drained from the
+    /// running session: (name, stringified args). Godot delivers these to the
+    /// editor's registered capture; Patina had them accumulating in a
+    /// thread-local `DEBUG_MESSAGES` that nothing ever read.
+    pub debug_messages: Vec<(String, Vec<String>)>,
     /// Misc debugger tab: Live Edit Root node path. Godot's ScriptEditorDebugger
     /// defaults this to "/root" and resets to it on "Clear"
     /// (script_editor_debugger.cpp:1603-1620).
@@ -927,6 +943,8 @@ impl EditorState {
             debug_state: "detached".to_string(),
             debug_errors: Vec::new(),
             debug_skip_breakpoints: false,
+            debug_attached: false,
+            debug_messages: Vec::new(),
             live_edit_root: "/root".to_string(),
             net_profiler_profiling: false,
             net_profiler_autostart: false,
@@ -13496,7 +13514,21 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         send_json(stream, r#"{"ok":true,"already_running":true}"#);
         return;
     }
+    // pat-s3rrv.27: the debugger must be live BEFORE the tree is built, because
+    // `build_play_tree` dispatches `_enter_tree`/`_ready` inline on this thread.
+    // A script asking `EngineDebugger.is_active()` in `_ready` — the acceptance
+    // case — is answered during that call, so attaching afterwards would report
+    // false for the very first scripts to run.
+    state.debug_attached = true;
+    state.debug_state = "running".to_string();
+    state.debug_messages.clear();
+    bind_engine_debugger(&state);
+
     let cloned = build_play_tree(&mut state);
+    // `_ready` has now run on THIS thread, so its `send_message` captures are in
+    // this thread's buffer. Drain them here; the per-frame drain runs on the
+    // driver thread and would never see them.
+    drain_engine_debugger_into(&mut state);
 
     let mut main_loop = MainLoop::new(cloned);
     main_loop.set_input_map(state.build_engine_input_map());
@@ -13638,6 +13670,15 @@ fn stop_running_instance(state: &mut EditorState) {
     state.is_paused = false;
     state.run_main_loop = None;
     state.runtime_frame_count = 0;
+    // pat-s3rrv.27: the debugger belongs to the session, so it goes away with
+    // it — `is_active()` must report false again once the game is not running.
+    // Set here rather than in `api_runtime_stop` so a script-requested quit,
+    // which shares this teardown, detaches too. The drained messages are kept:
+    // the editor's debugger panel should still show what the finished run sent,
+    // and the next Play clears them.
+    state.debug_attached = false;
+    state.debug_state = "detached".to_string();
+    gdscript_interop::interpreter::engine_debugger_detach();
     // pat-nzgdu.171: stop recording, but keep `movie_frames` so the finished
     // run's sequence can still be downloaded until the next Play clears it.
     state.movie_mode = false;
@@ -13698,6 +13739,62 @@ fn api_runtime_pause(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
 /// cadence is unchanged, but each frame advances game time by
 /// `delta * time_scale`). Engine input is drained after scripts run, mirroring
 /// the original step handler.
+/// Binds the thread-local `EngineDebugger` to this thread if the session wants
+/// one (pat-s3rrv.27).
+///
+/// `EngineDebugger` lives in a `thread_local!`, and the editor runs scripts on
+/// more than one thread: `_ready` is dispatched by `build_play_tree` on the
+/// connection thread serving `/api/runtime/play`, while `_process` runs on the
+/// driver thread (or on another connection thread via `/api/runtime/step`).
+/// Attaching in one place only would leave `is_active()` false for scripts run
+/// by the other. `attach()` is idempotent, so every script-running entry point
+/// calls this first.
+fn bind_engine_debugger(state: &EditorState) {
+    if state.debug_attached {
+        gdscript_interop::interpreter::engine_debugger_attach();
+        gdscript_interop::interpreter::engine_debugger_set_skipping_breakpoints(
+            state.debug_skip_breakpoints,
+        );
+    }
+}
+
+/// Drains what the scripts that just ran told the debugger, into the editor
+/// state the debugger panel reads (pat-s3rrv.27).
+///
+/// **Must be called on the same thread that ran the scripts.** `DEBUG_MESSAGES`
+/// is thread-local, so a `send_message` from `_ready` (connection thread) is
+/// invisible to a drain on the driver thread — draining only per-frame would
+/// silently strand exactly the messages the acceptance case sends.
+fn drain_engine_debugger_into(state: &mut EditorState) {
+    if !state.debug_attached {
+        return;
+    }
+    for (name, args) in gdscript_interop::interpreter::drain_engine_debugger_messages() {
+        let rendered: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        state.debug_messages.push((name, rendered));
+    }
+    // Godot's `debug()` suspends the game and hands the editor a stack. Patina
+    // cannot suspend a frame mid-step, so the break is surfaced as the paused
+    // state plus an Errors-tab entry: the editor learns the game broke and why,
+    // which is the observable half of the contract.
+    if let Some(brk) = gdscript_interop::interpreter::take_engine_debugger_break() {
+        state.debug_state = "paused".to_string();
+        let kind = if brk.is_error_breakpoint {
+            "error"
+        } else {
+            "breakpoint"
+        };
+        let language = brk.language.unwrap_or_else(|| "GDScript".to_string());
+        state.debug_errors.push((
+            kind.to_string(),
+            format!(
+                "{language}: execution broke ({}continuable)",
+                if brk.can_continue { "" } else { "not " }
+            ),
+        ));
+    }
+}
+
 fn advance_running_main_loop(state: &mut EditorState) -> u64 {
     // pat-nzgdu.171: Movie Maker records at a stable, fixed timestep. time_scale
     // must not change how much game time each captured frame advances, or the
@@ -13733,6 +13830,15 @@ fn advance_running_main_loop(state: &mut EditorState) -> u64 {
         .iter()
         .any(|name| gdplatform::input::Key::from_name(name).is_none());
     let input_snapshot = state.make_input_snapshot();
+    // pat-s3rrv.27: reconcile the thread-local `EngineDebugger` with the
+    // session's intent BEFORE stepping, because scripts run inside `step()` and
+    // must observe an attached debugger on *this* thread. Frames arrive here
+    // from either the driver thread or a `/api/runtime/step` connection thread,
+    // and `attach()` is idempotent, so doing it every frame is both cheap and
+    // the only thing that is correct on all of them. Attaching in the `play`
+    // handler instead would bind a connection thread that dies with the
+    // response — the feature would look wired and be inert.
+    bind_engine_debugger(state);
     if let Some(ref mut main_loop) = state.run_main_loop {
         if untyped_key_pressed {
             main_loop.set_input(input_snapshot);
@@ -13748,6 +13854,9 @@ fn advance_running_main_loop(state: &mut EditorState) -> u64 {
             });
         }
     }
+    // pat-s3rrv.27: drain what this frame's scripts told the debugger, on the
+    // same thread that just ran them.
+    drain_engine_debugger_into(state);
     // Clear per-frame input after scripts have run.
     state.clear_frame_input();
     let frame_count = state.runtime_frame_count;
@@ -17011,15 +17120,35 @@ fn api_get_debug_state(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
         .collect();
     let locals = format_var_list(&s.debug_locals);
     let globals = format_var_list(&s.debug_globals);
+    // pat-s3rrv.27: `EngineDebugger.send_message()` captures from the running
+    // session. Godot routes these to the editor's registered capture; this is
+    // the editor-side endpoint that finally reads them.
+    let messages: Vec<String> = s
+        .debug_messages
+        .iter()
+        .map(|(name, args)| {
+            let rendered: Vec<String> = args
+                .iter()
+                .map(|a| format!(r#""{}""#, a.replace('\\', "\\\\").replace('"', "\\\"")))
+                .collect();
+            format!(
+                r#"{{"name":"{}","args":[{}]}}"#,
+                name.replace('\\', "\\\\").replace('"', "\\\""),
+                rendered.join(","),
+            )
+        })
+        .collect();
     send_json(
         stream,
         &format!(
-            r#"{{"state":"{}","frames":[{}],"breakpoints":[{}],"locals":[{}],"globals":[{}]}}"#,
+            r#"{{"state":"{}","attached":{},"frames":[{}],"breakpoints":[{}],"locals":[{}],"globals":[{}],"messages":[{}]}}"#,
             s.debug_state,
+            s.debug_attached,
             frames.join(","),
             breakpoints.join(","),
             locals,
             globals,
+            messages.join(","),
         ),
     );
 }

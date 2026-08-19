@@ -24,6 +24,13 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 pub mod canvas;
 
+/// The engine handle that drives a `MainLoop` from animation-frame timestamps
+/// (pat-s3rrv.40).
+pub mod engine;
+
+/// Browser event → engine input translation (pat-s3rrv.41).
+pub mod browser_input;
+
 /// The web audio backend: the engine's `AudioServer` mixing into the ring an
 /// `AudioWorkletProcessor` drains (pat-u3l8c.112).
 ///

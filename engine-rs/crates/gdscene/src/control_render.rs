@@ -177,13 +177,46 @@ pub fn control_draw_items(
     theme: &Theme,
     viewport_size: Vector2,
 ) -> Vec<ControlDrawItem> {
+    control_draw_items_themed(
+        tree,
+        root,
+        theme,
+        &std::collections::HashMap::new(),
+        viewport_size,
+    )
+}
+
+/// [`control_draw_items`] with per-node theme resources (pat-s3rrv.38).
+///
+/// `node_themes` maps a node to the `Theme` its `theme` property resolved to.
+/// Each entry joins the chain for that node and its descendants, so an authored
+/// theme on a Panel reaches a Button several levels below it — the behaviour
+/// `control::resolve_theme_item` implemented and nothing ever called.
+///
+/// The plain [`control_draw_items`] forwards an empty map, so every existing
+/// caller keeps the previous single-theme behaviour exactly.
+pub fn control_draw_items_themed(
+    tree: &mut SceneTree,
+    root: NodeId,
+    theme: &Theme,
+    node_themes: &std::collections::HashMap<NodeId, Theme>,
+    viewport_size: Vector2,
+) -> Vec<ControlDrawItem> {
     let mut viewport = Viewport::new(
         viewport_size.x.max(1.0) as u32,
         viewport_size.y.max(1.0) as u32,
         Color::new(0.0, 0.0, 0.0, 0.0),
     );
     let mut fonts: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
-    render_control_tree_with_fonts(tree, root, theme, &mut viewport, viewport_size, &mut fonts);
+    render_control_tree_with_fonts(
+        tree,
+        root,
+        theme,
+        node_themes,
+        &mut viewport,
+        viewport_size,
+        &mut fonts,
+    );
 
     let mut out = Vec::new();
     // `get_sorted_items` orders by z, which the walk assigned in pre-order, so
@@ -289,7 +322,17 @@ pub fn render_control_tree(
     viewport_size: Vector2,
 ) {
     let mut fonts = std::collections::HashMap::new();
-    render_control_tree_with_fonts(tree, root, theme, viewport, viewport_size, &mut fonts);
+    // No per-node themes on this entry point — it keeps the single-theme
+    // behaviour (pat-s3rrv.38).
+    render_control_tree_with_fonts(
+        tree,
+        root,
+        theme,
+        &std::collections::HashMap::new(),
+        viewport,
+        viewport_size,
+        &mut fonts,
+    );
 }
 
 /// [`render_control_tree`] that also records each canvas item's
@@ -304,6 +347,7 @@ pub fn render_control_tree_with_fonts(
     tree: &mut SceneTree,
     root: NodeId,
     theme: &Theme,
+    node_themes: &std::collections::HashMap<NodeId, Theme>,
     viewport: &mut Viewport,
     viewport_size: Vector2,
     fonts: &mut std::collections::HashMap<u64, String>,
@@ -313,6 +357,7 @@ pub fn render_control_tree_with_fonts(
         tree,
         root,
         theme,
+        node_themes,
         viewport,
         Vector2::ZERO,
         viewport_size,
@@ -370,6 +415,7 @@ fn render_node(
     tree: &mut SceneTree,
     node_id: NodeId,
     theme: &Theme,
+    node_themes: &std::collections::HashMap<NodeId, Theme>,
     viewport: &mut Viewport,
     parent_global: Vector2,
     parent_size: Vector2,
@@ -378,6 +424,26 @@ fn render_node(
     parent_is_container: bool,
     fonts: &mut std::collections::HashMap<u64, String>,
 ) {
+    // pat-s3rrv.38: a theme assigned to THIS node joins the chain for it and
+    // everything below it.
+    //
+    // The walk is already top-down, so accumulating here gives Godot's
+    // precedence for free — a nearer theme merges over a farther one, and the
+    // node's own theme lands last and wins. That is why this is done during the
+    // descent rather than by walking back up per lookup: it is O(1) per node
+    // instead of O(depth), and every existing `theme.get_*` in this file keeps
+    // working untouched because it still receives one flat `&Theme`.
+    let merged;
+    let theme = match node_themes.get(&node_id) {
+        Some(own) => {
+            let mut t = theme.clone();
+            t.merge_with(own);
+            merged = t;
+            &merged
+        }
+        None => theme,
+    };
+
     if is_control(tree, node_id) {
         // Resolve this control's rect from anchors/offsets against the parent
         // rect. resolve_control_layout stores a parent-relative position.
@@ -457,6 +523,7 @@ fn render_node(
                 tree,
                 child,
                 theme,
+                node_themes,
                 viewport,
                 global_pos,
                 size,
@@ -489,6 +556,7 @@ fn render_node(
                 tree,
                 child,
                 theme,
+                node_themes,
                 viewport,
                 parent_global,
                 parent_size,
@@ -634,6 +702,50 @@ fn float_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<f64> {
 /// Resolves a StyleBox theme item to its background color. Default styleboxes
 /// are stored as `Variant::Color` (their flat background). Falls back to
 /// `fallback` when the item is missing or a different Variant type.
+/// The theme a Control actually draws with, flattened from Godot's resolution
+/// chain (pat-s3rrv.38).
+///
+/// Godot resolves each theme item through: the node's own theme resource, then
+/// each ancestor's nearest-first, then the project/ThemeDB default. Patina had
+/// `control::resolve_theme_item` implementing exactly that — with
+/// `theme_type_variation` support — and it had ZERO production callers, so a
+/// `theme` assigned in a `.tscn`, a theme on a parent, and `gui/theme/custom`
+/// all changed nothing on screen.
+///
+/// This flattens the chain into one `Theme` rather than resolving item by item,
+/// so the ~19 existing lookups and the 15 `stylebox_bg` call sites keep working
+/// unchanged. `Theme::merge_with` overwrites on collision, so merging from the
+/// DEFAULT outward — farthest ancestor first, the node's own theme last — gives
+/// exactly Godot's precedence.
+///
+/// Node-local `theme_override_*` properties are NOT folded in here: they are
+/// per-property and are already read straight off the node, which correctly
+/// leaves them beating everything this returns.
+pub fn effective_theme(
+    tree: &SceneTree,
+    node_id: NodeId,
+    node_themes: &std::collections::HashMap<NodeId, Theme>,
+    default: &Theme,
+) -> Theme {
+    // Walk up collecting the chain, nearest first...
+    let mut chain: Vec<&Theme> = Vec::new();
+    let mut current = Some(node_id);
+    while let Some(id) = current {
+        if let Some(t) = node_themes.get(&id) {
+            chain.push(t);
+        }
+        current = tree.get_node(id).and_then(|n| n.parent());
+    }
+
+    // ...then merge farthest-first so nearer themes overwrite farther ones and
+    // the node's own theme wins outright.
+    let mut out = default.clone();
+    for theme in chain.iter().rev() {
+        out.merge_with(theme);
+    }
+    out
+}
+
 fn stylebox_bg(theme: &Theme, control_type: &str, property: &str, fallback: Color) -> Color {
     // The generic Variant item wins when set — that is how `default_theme`
     // stores its colours. A Godot-authored `.tres` instead yields a *typed*
@@ -656,8 +768,49 @@ pub(crate) fn text_scale(font_size: i64) -> u32 {
     (font_size.max(1) as u32 / GLYPH_H as u32).max(1)
 }
 
+/// The built-in TTF face, parsed once (pat-s3rrv.37).
+///
+/// `TtfFont::builtin()` parses an embedded face, so it is memoized rather than
+/// rebuilt per measurement — layout measures every Control's text on every
+/// frame.
+fn builtin_face() -> &'static gdrender2d::TtfFont {
+    static FACE: std::sync::OnceLock<gdrender2d::TtfFont> = std::sync::OnceLock::new();
+    FACE.get_or_init(gdrender2d::TtfFont::builtin)
+}
+
+/// Width of `text` at an exact `font_size` in PIXELS, using the real font's
+/// advances and kerning (pat-s3rrv.37).
+///
+/// This is what Godot measures with — `Font::get_string_size` over the
+/// TextServer's shaped advances — and it is what the rasterizer actually draws,
+/// since the software renderer renders proportional TTF glyphs.
+///
+/// The [`text_width`] below is the placeholder it replaces: it charges every
+/// glyph a flat 5px and takes an integer SCALE rather than a pixel size, so
+/// `font_size` 16 and 20 both quantise to scale 2 and measure identically, and a
+/// measured width never matches the drawn width for any string.
+pub(crate) fn measure_text_px(text: &str, font_size: f32) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    builtin_face().measure_line(text, font_size.max(1.0))
+}
+
+/// Line height at an exact `font_size` in pixels (pat-s3rrv.37).
+///
+/// Godot's line height comes from the font's ascent + descent, not from a
+/// nominal glyph box. Until the ascent/descent accessors are threaded through,
+/// this uses the font size itself, which is already exact where `GLYPH_H`-based
+/// arithmetic was quantised.
+pub(crate) fn line_height_px(font_size: f32) -> f32 {
+    font_size.max(1.0)
+}
+
 /// Approximate pixel width of `text` at the given scale, using the nominal
 /// 5×7 monospace metrics.
+///
+/// ⚠️ PLACEHOLDER — superseded by [`measure_text_px`] (pat-s3rrv.37). Still used
+/// by callers that have not been converted to carry a pixel font size.
 pub(crate) fn text_width(text: &str, scale: u32) -> f32 {
     let n = text.chars().count() as f32;
     if n <= 0.0 {
@@ -933,8 +1086,17 @@ fn layout_label_lines(
     text: &str,
     rect: Rect2,
     color: Color,
-    scale: u32,
+    font_size: i64,
 ) -> Vec<DrawCommand> {
+    // pat-s3rrv.37: takes the Godot PIXEL font size and derives the placeholder
+    // 5x7 scale internally, rather than receiving the already-quantised scale.
+    //
+    // Behaviour-preserving on its own — `scale` below is exactly what the caller
+    // used to pass. The point is that the true font size is now in scope here,
+    // which is the prerequisite for this function emitting a pixel `font_size`
+    // on its ControlDrawItem::Text (the family-(c) change). Without it, the emit
+    // site at the end of this function had no access to the real size at all.
+    let scale = text_scale(font_size);
     use gdrender2d::text_layout::{align_offset, break_lines_word, ellipsis_word_count, HAlign};
 
     // Godot: AUTOWRAP_OFF 0, ARBITRARY 1, WORD 2, WORD_SMART 3.
@@ -1000,7 +1162,7 @@ fn layout_label_lines(
                 rect.position.y + row as f32 * line_height,
             ),
             color,
-            font_size: scale,
+            font_size: font_size.max(1) as u32,
         });
     }
     out
@@ -1149,7 +1311,7 @@ fn draw_control(
                     text,
                     position,
                     color: font_color,
-                    font_size: scale,
+                    font_size: font_size.max(1) as u32,
                 });
             }
         }
@@ -1162,14 +1324,16 @@ fn draw_control(
                     .or_else(|| theme.get_color("Label", "font_color"))
                     .unwrap_or(Color::WHITE);
                 let font_size = theme.get_font_size("Label", "font_size").unwrap_or(16);
-                let scale = text_scale(font_size);
+                // `scale` is no longer computed here — `layout_label_lines` now
+                // takes the pixel font size and derives it internally
+                // (pat-s3rrv.37).
                 // Lay the text out instead of drawing one flush-left line
                 // (pat-0q2kx.149). `gdrender2d::text_layout` implemented word
                 // breaking, alignment and ellipsis trimming with unit tests but
                 // had ZERO consumers anywhere in the workspace, so an authored
                 // `autowrap_mode`/`horizontal_alignment`/`text_overrun_behavior`
                 // changed nothing on screen.
-                for cmd in layout_label_lines(tree, node_id, &text, rect, font_color, scale) {
+                for cmd in layout_label_lines(tree, node_id, &text, rect, font_color, font_size) {
                     out.push(cmd);
                 }
             }
@@ -1255,7 +1419,7 @@ fn draw_control(
                                 text: span.text,
                                 position: Vector2::new(x, y),
                                 color: span.color,
-                                font_size: scale,
+                                font_size: font_size.max(1) as u32,
                             });
                             x += w + GLYPH_GAP * scale as f32;
                         }
@@ -1280,7 +1444,7 @@ fn draw_control(
                                         text: ch.to_string(),
                                         position: Vector2::new(gx, y) + fx.offset,
                                         color: fx.color,
-                                        font_size: scale,
+                                        font_size: font_size.max(1) as u32,
                                     });
                                 }
                                 // Advance by the un-offset width: the effect
@@ -1359,7 +1523,7 @@ fn draw_control(
                         text: placeholder,
                         position: Vector2::new(rect.position.x, baseline_y),
                         color,
-                        font_size: scale,
+                        font_size: font_size.max(1) as u32,
                     });
                 }
             } else {
@@ -1370,7 +1534,7 @@ fn draw_control(
                     text: shown.clone(),
                     position: Vector2::new(rect.position.x, baseline_y),
                     color: font_color,
-                    font_size: scale,
+                    font_size: font_size.max(1) as u32,
                 });
             }
 
@@ -1420,7 +1584,7 @@ fn draw_control(
                             text: span.text,
                             position: Vector2::new(x, y),
                             color: span.color,
-                            font_size: scale,
+                            font_size: font_size.max(1) as u32,
                         });
                         x += w + GLYPH_GAP * scale as f32;
                     }
@@ -1508,7 +1672,7 @@ fn draw_control(
                         rect.position.y + (rect.size.y - th) * 0.5,
                     ),
                     color: border,
-                    font_size: scale,
+                    font_size: font_size.max(1) as u32,
                 });
             }
         }
@@ -1562,7 +1726,7 @@ fn draw_control(
                         rect.position.y + (rect.size.y - th) * 0.5,
                     ),
                     color: font_color,
-                    font_size: scale,
+                    font_size: font_size.max(1) as u32,
                 });
             }
             // Down-arrow indicator on the right edge (small filled triangle
@@ -1608,7 +1772,8 @@ fn draw_control(
             let font_color_off = theme
                 .get_color("ItemList", "font_disabled_color")
                 .unwrap_or(Color::new(0.5, 0.5, 0.5, 1.0));
-            let scale = text_scale(theme.get_font_size("ItemList", "font_size").unwrap_or(16));
+            let font_size = theme.get_font_size("ItemList", "font_size").unwrap_or(16);
+            let scale = text_scale(font_size);
             let th = GLYPH_H * scale as f32;
             let list = crate::item_views::load_item_list(tree, node_id);
             for (i, row) in crate::item_views::item_row_rects(list.item_count(), rect)
@@ -1639,7 +1804,7 @@ fn draw_control(
                         } else {
                             font_color
                         },
-                        font_size: scale,
+                        font_size: font_size.max(1) as u32,
                     });
                 }
             }
@@ -1670,7 +1835,8 @@ fn draw_control(
             let font_color_off = theme
                 .get_color("TabBar", "font_unselected_color")
                 .unwrap_or(Color::new(0.7, 0.7, 0.7, 1.0));
-            let scale = text_scale(crate::control::get_font_size(tree, node_id));
+            let font_size = crate::control::get_font_size(tree, node_id);
+            let scale = text_scale(font_size);
             let th = GLYPH_H * scale as f32;
             let current = float_prop(tree, node_id, "current_tab").unwrap_or(-1.0) as i64;
             let titles = crate::item_views::tab_titles(tree, node_id);
@@ -1704,7 +1870,7 @@ fn draw_control(
                         } else {
                             font_color_off
                         },
-                        font_size: scale,
+                        font_size: font_size.max(1) as u32,
                     });
                 }
             }
@@ -1753,7 +1919,8 @@ fn draw_control(
             let font_color_off = theme
                 .get_color("TabContainer", "font_unselected_color")
                 .unwrap_or(Color::new(0.7, 0.7, 0.7, 1.0));
-            let scale = text_scale(crate::control::get_font_size(tree, node_id));
+            let font_size = crate::control::get_font_size(tree, node_id);
+            let scale = text_scale(font_size);
             let th = GLYPH_H * scale as f32;
             for (i, (x, w)) in crate::control::tab_rects(tree, node_id)
                 .into_iter()
@@ -1782,7 +1949,7 @@ fn draw_control(
                             rect.position.y + (tab_bar_h - th) * 0.5,
                         ),
                         color: if selected { font_color } else { font_color_off },
-                        font_size: scale,
+                        font_size: font_size.max(1) as u32,
                     });
                 }
             }

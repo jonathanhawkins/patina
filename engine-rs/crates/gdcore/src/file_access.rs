@@ -10,7 +10,10 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+// `Read`/`Seek`/`Write` are no longer imported directly: every call now goes
+// through `FileBackend`, whose supertrait bounds bring those methods into scope
+// (pat-s3rrv.34). `SeekFrom` is a type, so it still needs its import.
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
@@ -89,6 +92,29 @@ pub trait MountedPack: Send + Sync {
     fn removed_files(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// Entries this pack supplies directly inside `res_dir` (pat-s3rrv.34).
+    ///
+    /// Returns bare names, not full paths, matching what `DirAccess.get_files`
+    /// and `get_directories` hand a script. Immediate children only — a pack
+    /// stores a flat path list, so without this every nested file would surface
+    /// as a sibling of the directory being listed.
+    ///
+    /// Defaulted to empty so a pack format that cannot enumerate stays
+    /// trait-compatible; `DirAccess` then simply lists nothing extra rather
+    /// than failing.
+    fn list_dir(&self, _res_dir: &str) -> PackDirListing {
+        PackDirListing::default()
+    }
+}
+
+/// Immediate children of a directory inside a mounted pack (pat-s3rrv.34).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PackDirListing {
+    /// File names directly in the directory.
+    pub files: Vec<String>,
+    /// Subdirectory names directly in the directory.
+    pub dirs: Vec<String>,
 }
 
 struct PackMount {
@@ -173,6 +199,109 @@ pub fn pack_has_file(path: &str) -> bool {
     with_mounts(|mounts| mounts.iter().any(|m| m.pack.has_file(path)))
 }
 
+/// The canonical spelling of a `res://` directory used as a pack lookup key
+/// (pat-s3rrv.34).
+///
+/// Strips a trailing slash so `res://scenes` and `res://scenes/` are one
+/// directory, but leaves the root as `res://` — trimming that would produce
+/// `res:`, and every prefix match against it would then fail.
+///
+/// Public because [`MountedPack::list_dir`] implementors must key on exactly
+/// the same spelling this passes them.
+pub fn normalize_pack_dir(dir: &str) -> String {
+    if dir == "res://" || dir == "res:/" {
+        return "res://".to_string();
+    }
+    dir.trim_end_matches('/').to_string()
+}
+
+/// Joins a relative path onto a normalized `res://` directory (pat-s3rrv.34).
+///
+/// Resolves `.` and `..` textually, because a `res://` path inside a pack has
+/// no filesystem to canonicalize against. Ascending past the root clamps there,
+/// matching how `res://` behaves as its own root rather than wrapping into the
+/// host filesystem.
+fn join_res_dir(base: &str, relative: &str) -> String {
+    let mut segments: Vec<&str> = base
+        .trim_start_matches("res://")
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    for segment in relative.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    if segments.is_empty() {
+        "res://".to_string()
+    } else {
+        format!("res://{}", segments.join("/"))
+    }
+}
+
+/// Immediate children of `dir` across every mounted pack (pat-s3rrv.34).
+///
+/// Names are merged and de-duplicated, so a file present in two mounts is
+/// listed once. Entries a pack *removes* are dropped, matching
+/// [`pack_has_file`] — a patch pack that deletes a file must not leave it
+/// visible in a directory listing.
+///
+/// Returns empty for a non-`res://` path: only `res://` can come from a pack.
+pub fn pack_list_dir(dir: &str) -> PackDirListing {
+    if !dir.starts_with("res://") {
+        return PackDirListing::default();
+    }
+    let normalized = normalize_pack_dir(dir);
+    // The root keeps its own trailing slash — `res://a` joins as `res://a/x`,
+    // but the root joins as `res://x`, not `res:///x`.
+    let prefix = if normalized == "res://" {
+        normalized.clone()
+    } else {
+        format!("{normalized}/")
+    };
+    let mut files: Vec<String> = Vec::new();
+    let mut dirs: Vec<String> = Vec::new();
+    // Removals are gathered in their own lock scope FIRST. Calling
+    // `pack_removes` from inside the `with_mounts` closure below would take a
+    // second read lock on `PACK_MOUNTS` while the first is still held, which
+    // deadlocks if a writer is queued between them. `pack_has_file` sequences
+    // the same two reads for the same reason.
+    let removed: Vec<String> =
+        with_mounts(|mounts| mounts.iter().flat_map(|m| m.pack.removed_files()).collect());
+    with_mounts(|mounts| {
+        for mount in mounts.iter() {
+            let listing = mount.pack.list_dir(&normalized);
+            for name in listing.files {
+                let full = format!("{prefix}{name}");
+                if !removed.contains(&full) && !files.contains(&name) {
+                    files.push(name);
+                }
+            }
+            for name in listing.dirs {
+                if !dirs.contains(&name) {
+                    dirs.push(name);
+                }
+            }
+        }
+    });
+    files.sort();
+    dirs.sort();
+    PackDirListing { files, dirs }
+}
+
+/// Whether any mounted pack supplies entries inside `dir` (pat-s3rrv.34).
+///
+/// `DirAccess::open` uses this to accept a `res://` directory that exists only
+/// inside a pack, where there is no real directory on disk to stat.
+pub fn pack_has_dir(dir: &str) -> bool {
+    let listing = pack_list_dir(dir);
+    !listing.files.is_empty() || !listing.dirs.is_empty()
+}
+
 /// Reads `path` from the highest-priority mounted pack that supplies it.
 pub fn read_from_packs(path: &str) -> Option<Vec<u8>> {
     if !path.starts_with("res://") || pack_removes(path) {
@@ -254,6 +383,17 @@ impl FileMode {
 // FileAccess
 // ---------------------------------------------------------------------------
 
+/// The IO surface a [`FileAccess`] handle reads and writes through
+/// (pat-s3rrv.34).
+///
+/// Exists so one handle type can be backed either by an OS file or by bytes
+/// from a mounted resource pack. Every `FileAccess` read/write funnels through
+/// `with_file_mut`, so widening that one bound from `&mut File` to this trait
+/// is what makes packed reads work everywhere at once, rather than each method
+/// growing its own pack branch.
+pub trait FileBackend: std::io::Read + std::io::Write + std::io::Seek {}
+impl<T: std::io::Read + std::io::Write + std::io::Seek> FileBackend for T {}
+
 /// A Godot-compatible file handle for reading and writing binary or text data.
 ///
 /// Mirrors the core of Godot's `FileAccess` class: open with a mode, read/write
@@ -265,6 +405,15 @@ pub struct FileAccess {
     path: PathBuf,
     mode: FileMode,
     file: Option<File>,
+    /// In-memory contents when this handle was served from a mounted resource
+    /// pack (pat-s3rrv.34).
+    ///
+    /// `FileAccess::open` used to go straight to the OS, so in an exported game
+    /// — where `res://` lives only inside a `.pck` — every script-side
+    /// `FileAccess.open("res://…")` failed even though `read_file_bytes` had
+    /// been pack-first all along. Only the static helper consulted the packs;
+    /// the handle API did not.
+    packed: Option<std::io::Cursor<Vec<u8>>>,
     last_error: Option<String>,
     /// When true, multi-byte typed reads/writes use big-endian order
     /// (Godot `FileAccess.set_big_endian`); default little-endian.
@@ -289,11 +438,38 @@ impl FileAccess {
             opts.create(true);
         }
 
+        // pat-s3rrv.34: a pack is a read-only archive, so opening a packed path
+        // for writing fails the way Godot's `FileAccessPack` does
+        // (ERR_FILE_CANT_WRITE) instead of quietly creating a loose file beside
+        // the pack — that file would shadow nothing, since the pack still wins
+        // every read, so the write would appear to succeed and then vanish.
+        if mode.is_write() && pack_has_file(path) {
+            return Err(EngineError::InvalidOperation(format!(
+                "{path} is served by a mounted pack and cannot be written"
+            )));
+        }
+
+        // Mounted packs answer reads first, matching the precedence
+        // `read_file_bytes` already used.
+        if mode.is_read() && !mode.is_write() {
+            if let Some(bytes) = read_from_packs(path) {
+                return Ok(Self {
+                    path: resolved,
+                    mode,
+                    file: None,
+                    packed: Some(std::io::Cursor::new(bytes)),
+                    last_error: None,
+                    big_endian: false,
+                });
+            }
+        }
+
         let file = opts.open(&resolved).map_err(EngineError::from)?;
         Ok(Self {
             path: resolved,
             mode,
             file: Some(file),
+            packed: None,
             last_error: None,
             big_endian: false,
         })
@@ -365,8 +541,24 @@ impl FileAccess {
 
     fn with_file_mut<F, T>(&mut self, f: F) -> EngineResult<T>
     where
-        F: FnOnce(&mut File) -> std::io::Result<T>,
+        F: FnOnce(&mut dyn FileBackend) -> std::io::Result<T>,
     {
+        // pat-s3rrv.34: a pack-served handle reads from memory. Checked first
+        // because such a handle has no `file` at all, and the closed-file error
+        // below would otherwise report it as closed.
+        if let Some(cursor) = self.packed.as_mut() {
+            return match f(cursor) {
+                Ok(v) => {
+                    self.last_error = None;
+                    Ok(v)
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    self.last_error = Some(msg.clone());
+                    Err(EngineError::Io(e))
+                }
+            };
+        }
         let Some(file) = self.file.as_mut() else {
             let err = "file is closed".to_string();
             self.last_error = Some(err.clone());
@@ -573,6 +765,10 @@ impl FileAccess {
     /// Closes the file handle. Subsequent IO returns an error.
     pub fn close(&mut self) {
         self.file = None;
+        // The in-memory pack backend must be dropped too (pat-s3rrv.34).
+        // Clearing only `file` would leave a packed handle readable after
+        // `close()`, so "closed" would mean nothing for an exported game.
+        self.packed = None;
         self.last_error = None;
     }
 }
@@ -653,6 +849,13 @@ impl FileAccess {
 #[derive(Debug)]
 pub struct DirAccess {
     path: PathBuf,
+    /// The `res://` spelling this handle was opened with, normalized
+    /// (pat-s3rrv.34).
+    ///
+    /// Kept alongside the resolved filesystem path because a mounted pack is
+    /// keyed by `res://` path and `path` has already lost that spelling. `None`
+    /// for `user://` and plain filesystem directories, which no pack can supply.
+    res_path: Option<String>,
     entries: Vec<DirEntry>,
     index: usize,
     include_navigational: bool,
@@ -670,9 +873,15 @@ struct DirEntry {
 
 impl DirAccess {
     /// Opens a directory at `path` (`res://` / `user://` supported).
+    ///
+    /// A `res://` directory that exists only inside a mounted `.pck` opens too
+    /// (pat-s3rrv.34): an exported game has no project tree on disk, so
+    /// requiring a real directory here made every packed listing fail.
     pub fn open(path: &str) -> EngineResult<Self> {
         let resolved = resolve_path(path)?;
-        if !resolved.is_dir() {
+        let res_path = path.starts_with("res://").then(|| normalize_pack_dir(path));
+        let in_pack = res_path.as_deref().map(pack_has_dir).unwrap_or(false);
+        if !resolved.is_dir() && !in_pack {
             return Err(EngineError::NotFound(format!(
                 "not a directory: {}",
                 resolved.display()
@@ -680,6 +889,7 @@ impl DirAccess {
         }
         Ok(Self {
             path: resolved,
+            res_path,
             entries: Vec::new(),
             index: 0,
             include_navigational: false,
@@ -707,25 +917,61 @@ impl DirAccess {
     /// Starts a new directory listing. Call [`get_next`](Self::get_next) to iterate.
     pub fn list_dir_begin(&mut self) -> EngineResult<()> {
         let mut entries = Vec::new();
-        let read = fs::read_dir(&self.path).map_err(|e| {
-            self.last_error = Some(e.to_string());
-            EngineError::from(e)
-        })?;
-        for entry in read {
-            let entry = entry.map_err(|e| {
-                self.last_error = Some(e.to_string());
-                EngineError::from(e)
-            })?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            if !self.include_navigational && (name == "." || name == "..") {
-                continue;
+        // A pack-only directory has nothing on disk to read. That is not an
+        // error when a mount supplies entries for it (pat-s3rrv.34) — but a
+        // genuinely missing directory must still fail, so the read error is
+        // only swallowed when the pack has something to offer.
+        match fs::read_dir(&self.path) {
+            Ok(read) => {
+                for entry in read {
+                    let entry = entry.map_err(|e| {
+                        self.last_error = Some(e.to_string());
+                        EngineError::from(e)
+                    })?;
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    if !self.include_navigational && (name == "." || name == "..") {
+                        continue;
+                    }
+                    if !self.include_hidden && name.starts_with('.') && name != "." && name != ".."
+                    {
+                        continue;
+                    }
+                    entries.push(DirEntry { name, is_dir });
+                }
             }
-            if !self.include_hidden && name.starts_with('.') && name != "." && name != ".." {
-                continue;
+            Err(e) => {
+                if !self.res_path.as_deref().map(pack_has_dir).unwrap_or(false) {
+                    self.last_error = Some(e.to_string());
+                    return Err(EngineError::from(e));
+                }
             }
-            entries.push(DirEntry { name, is_dir });
         }
+
+        // Entries the mount supplies, minus the ones already found on disk.
+        if let Some(res_path) = self.res_path.as_deref() {
+            let listing = pack_list_dir(res_path);
+            // Snapshot the disk names first. A closure that inspected `entries`
+            // directly would hold a borrow of it across the pushes below (E0502).
+            let on_disk: Vec<(String, bool)> =
+                entries.iter().map(|e| (e.name.clone(), e.is_dir)).collect();
+            let known =
+                |name: &str, is_dir: bool| on_disk.iter().any(|(n, d)| n == name && *d == is_dir);
+            for name in listing.dirs {
+                if (self.include_hidden || !name.starts_with('.')) && !known(&name, true) {
+                    entries.push(DirEntry { name, is_dir: true });
+                }
+            }
+            for name in listing.files {
+                if (self.include_hidden || !name.starts_with('.')) && !known(&name, false) {
+                    entries.push(DirEntry {
+                        name,
+                        is_dir: false,
+                    });
+                }
+            }
+        }
+
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         self.entries = entries;
         self.index = 0;
@@ -761,8 +1007,45 @@ impl DirAccess {
     /// Splits `dir`'s entries into `(files, directories)`, sorted, honoring the
     /// hidden / navigational settings and excluding `.import` sidecars from the
     /// file list (Godot hides import metadata from `get_files`).
+    /// Merges the entries a mounted pack supplies for `res_path` into `files` /
+    /// `dirs` (pat-s3rrv.34).
+    ///
+    /// Additive rather than exclusive: Godot's `PackedData` shadows loose files
+    /// but does not hide the directory they sit in, so a project running with a
+    /// patch pack mounted over a real tree must list the union of both. Names
+    /// already present are skipped, so a file supplied by both appears once.
+    fn merge_pack_entries(
+        res_path: Option<&str>,
+        include_hidden: bool,
+        files: &mut Vec<String>,
+        dirs: &mut Vec<String>,
+    ) {
+        let Some(res_path) = res_path else {
+            return;
+        };
+        let listing = pack_list_dir(res_path);
+        for name in listing.files {
+            if !include_hidden && name.starts_with('.') {
+                continue;
+            }
+            // `.import` sidecars stay hidden here exactly as they are on disk.
+            if !name.ends_with(".import") && !files.contains(&name) {
+                files.push(name);
+            }
+        }
+        for name in listing.dirs {
+            if !include_hidden && name.starts_with('.') {
+                continue;
+            }
+            if !dirs.contains(&name) {
+                dirs.push(name);
+            }
+        }
+    }
+
     fn split_entries(
         dir: &Path,
+        res_path: Option<&str>,
         include_hidden: bool,
         include_navigational: bool,
     ) -> (Vec<String>, Vec<String>) {
@@ -784,6 +1067,7 @@ impl DirAccess {
                 }
             }
         }
+        Self::merge_pack_entries(res_path, include_hidden, &mut files, &mut dirs);
         files.sort();
         dirs.sort();
         (files, dirs)
@@ -792,23 +1076,37 @@ impl DirAccess {
     /// The non-directory file names in this directory, excluding `.import`
     /// sidecars (Godot `DirAccess.get_files`).
     pub fn get_files(&self) -> Vec<String> {
-        Self::split_entries(&self.path, self.include_hidden, self.include_navigational).0
+        Self::split_entries(
+            &self.path,
+            self.res_path.as_deref(),
+            self.include_hidden,
+            self.include_navigational,
+        )
+        .0
     }
 
     /// The subdirectory names in this directory (Godot `DirAccess.get_directories`).
     pub fn get_directories(&self) -> Vec<String> {
-        Self::split_entries(&self.path, self.include_hidden, self.include_navigational).1
+        Self::split_entries(
+            &self.path,
+            self.res_path.as_deref(),
+            self.include_hidden,
+            self.include_navigational,
+        )
+        .1
     }
 
     /// Static: file names at `path` (`res://` / `user://` resolved), excluding
     /// `.import` sidecars (Godot `DirAccess.get_files_at`).
     pub fn get_files_at(path: &str) -> EngineResult<Vec<String>> {
-        Ok(Self::split_entries(&resolve_path(path)?, false, false).0)
+        let res_path = path.starts_with("res://").then(|| normalize_pack_dir(path));
+        Ok(Self::split_entries(&resolve_path(path)?, res_path.as_deref(), false, false).0)
     }
 
     /// Static: subdirectory names at `path` (Godot `DirAccess.get_directories_at`).
     pub fn get_directories_at(path: &str) -> EngineResult<Vec<String>> {
-        Ok(Self::split_entries(&resolve_path(path)?, false, false).1)
+        let res_path = path.starts_with("res://").then(|| normalize_pack_dir(path));
+        Ok(Self::split_entries(&resolve_path(path)?, res_path.as_deref(), false, false).1)
     }
 
     /// The absolute path of this directory as a string (Godot `get_current_dir`).
@@ -820,13 +1118,25 @@ impl DirAccess {
     /// absolute / `res://` path). Errors if the target is not a directory.
     pub fn change_dir(&mut self, path: &str) -> EngineResult<()> {
         let target = self.resolve_child(path)?;
-        if !target.is_dir() {
+        // The `res://` spelling is tracked alongside the filesystem path so a
+        // pack listing keeps working after a change_dir (pat-s3rrv.34).
+        let res_target = if path.starts_with("res://") {
+            Some(normalize_pack_dir(path))
+        } else {
+            self.res_path
+                .as_deref()
+                .filter(|_| !Path::new(path).is_absolute())
+                .map(|base| join_res_dir(base, path))
+        };
+        let in_pack = res_target.as_deref().map(pack_has_dir).unwrap_or(false);
+        if !target.is_dir() && !in_pack {
             return Err(EngineError::NotFound(format!(
                 "not a directory: {}",
                 target.display()
             )));
         }
         self.path = target;
+        self.res_path = res_target;
         Ok(())
     }
 
@@ -893,6 +1203,12 @@ impl DirAccess {
 
     /// Returns `true` if `path` exists as a directory.
     pub fn dir_exists(path: &str) -> bool {
+        // A directory that exists only inside a mounted pack counts, mirroring
+        // `FileAccess::file_exists` (pat-s3rrv.34). Checked before resolving so
+        // it still answers `true` for a pack mounted without a project root.
+        if path.starts_with("res://") && pack_has_dir(&normalize_pack_dir(path)) {
+            return true;
+        }
         match resolve_path(path) {
             Ok(p) => p.is_dir(),
             Err(_) => false,

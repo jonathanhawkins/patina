@@ -115,6 +115,177 @@ pub fn import_svg(path: &Path) -> EngineResult<Arc<Resource>> {
     import_svg_bytes(&data, path, 1.0)
 }
 
+/// Substitutes colors in an SVG source string, as Godot's
+/// `ImageLoaderSVG::_replace_color_property`
+/// (`upstream/godot/modules/svg/image_loader_svg.cpp:44-64`) does.
+///
+/// Godot rewrites the `fill="`, `stroke="` and `stop-color="` attributes in the
+/// SVG **text** before rasterizing, rather than recoloring the finished pixels
+/// — which is why an antialiased edge ends up the new color rather than a blend
+/// of the old one. `color_map` keys and values are `Color`s; a `#rgb`/`#rrggbb`
+/// attribute that parses to a key is replaced by the value's `#rrggbb`.
+fn replace_svg_colors(source: &str, color_map: &[(Color, Color)]) -> String {
+    const PREFIXES: [&str; 3] = ["fill=\"", "stroke=\"", "stop-color=\""];
+    let mut out = source.to_string();
+    for prefix in PREFIXES {
+        let mut search_from = 0usize;
+        while let Some(found) = out[search_from..].find(prefix) {
+            let value_start = search_from + found + prefix.len();
+            let Some(rel_end) = out[value_start..].find('"') else {
+                break;
+            };
+            let value_end = value_start + rel_end;
+            let value = out[value_start..value_end].trim().to_string();
+            let replacement = parse_html_color(&value).and_then(|c| {
+                color_map
+                    .iter()
+                    .find(|(from, _)| colors_match(*from, c))
+                    .map(|(_, to)| color_to_html(*to))
+            });
+            match replacement {
+                Some(hex) => {
+                    out.replace_range(value_start..value_end, &hex);
+                    search_from = value_start + hex.len();
+                }
+                None => search_from = value_end,
+            }
+        }
+    }
+    out
+}
+
+/// `#rgb` / `#rrggbb` / `#rrggbbaa` to a [`Color`]. Named CSS colors are not
+/// resolved — Godot converts through its own `Color(String)` constructor, which
+/// does know them; anything unparsed here simply is not substituted.
+fn parse_html_color(value: &str) -> Option<Color> {
+    let hex = value.trim().strip_prefix('#')?;
+    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    let f = |b: u8| b as f32 / 255.0;
+    match hex.len() {
+        3 => {
+            let d = |i: usize| u8::from_str_radix(&hex[i..i + 1], 16).ok().map(|v| v * 17);
+            Some(Color::new(f(d(0)?), f(d(1)?), f(d(2)?), 1.0))
+        }
+        6 => Some(Color::new(f(byte(0)?), f(byte(2)?), f(byte(4)?), 1.0)),
+        8 => Some(Color::new(
+            f(byte(0)?),
+            f(byte(2)?),
+            f(byte(4)?),
+            f(byte(6)?),
+        )),
+        _ => None,
+    }
+}
+
+/// `#rrggbb` for an SVG attribute (Godot writes `to_html(false)` — no alpha).
+fn color_to_html(c: Color) -> String {
+    let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", b(c.r), b(c.g), b(c.b))
+}
+
+/// Color equality at 8-bit precision, which is the precision an SVG attribute
+/// carries — comparing f32s exactly would miss `#ff0000` vs a map key built
+/// from `1.0, 0.0, 0.0` on a different rounding path.
+fn colors_match(a: Color, b: Color) -> bool {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    q(a.r) == q(b.r) && q(a.g) == q(b.g) && q(a.b) == q(b.b)
+}
+
+/// Scales saturation toward luminance, Godot's `saturation` SVG option.
+fn apply_saturation(colors: &mut [Color], saturation: f32) {
+    for c in colors.iter_mut() {
+        // Rec. 709 luma, the same weights Godot's `Color::get_luminance` uses.
+        let lum = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+        c.r = lum + (c.r - lum) * saturation;
+        c.g = lum + (c.g - lum) * saturation;
+        c.b = lum + (c.b - lum) * saturation;
+    }
+}
+
+/// Loads a loose `.svg` with its `.import` options applied (pat-s3rrv.50).
+///
+/// * `svg/scale` (the texture importer's spelling) or `base_scale` (the
+///   DPITexture importer's) sets the rasterization scale — the option that was
+///   hardcoded to `1.0` here, so every vector asset in a project imported at the
+///   wrong size.
+/// * `color_map` substitutes colors in the SVG source before rasterizing (see
+///   the caveat on [`svg_color_map`]).
+/// * `saturation` scales the result's saturation.
+/// * `compress` is recorded; Patina stores one uncompressed pixel array.
+pub fn import_svg_with_params(
+    path: &Path,
+    params: &crate::importers::ImportParams,
+) -> EngineResult<Arc<Resource>> {
+    let data = std::fs::read(path).map_err(EngineError::Io)?;
+    let scale = params
+        .float_any(&["svg/scale", "base_scale"])
+        .unwrap_or(1.0) as f32;
+
+    let color_map = svg_color_map(params);
+    let source_owned;
+    let bytes: &[u8] = if color_map.is_empty() {
+        &data
+    } else {
+        match std::str::from_utf8(&data) {
+            Ok(text) => {
+                source_owned = replace_svg_colors(text, &color_map);
+                source_owned.as_bytes()
+            }
+            // A non-UTF-8 SVG cannot be text-substituted; rasterize it as-is
+            // rather than failing the load over an option.
+            Err(_) => &data,
+        }
+    };
+
+    let (width, height, mut colors) = rasterize_svg_bytes(bytes, scale)?;
+    if let Some(sat) = params.float("saturation") {
+        if (sat - 1.0).abs() > f32::EPSILON as f64 {
+            apply_saturation(&mut colors, sat as f32);
+        }
+    }
+
+    let mut res = Resource::new("Texture2D");
+    res.path = format!(
+        "res://{}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
+    res.set_property("width", Variant::Int(width as i64));
+    res.set_property("height", Variant::Int(height as i64));
+    res.set_property("format", Variant::String("RGBA".into()));
+    res.set_property("bit_depth", Variant::Int(8));
+    res.set_property(
+        "pixels",
+        Variant::Array(colors.into_iter().map(Variant::Color).collect()),
+    );
+    res.set_property("has_pixel_data", Variant::Bool(true));
+    if let Some(compress) = params.bool("compress") {
+        res.set_property("compress", Variant::Bool(compress));
+    }
+    Ok(Arc::new(res))
+}
+
+/// The `color_map` option as `(from, to)` color pairs.
+///
+/// ⚠️ Godot stores this as a Dictionary keyed by `Color`, and
+/// this crate's dictionary parser only accepts **quoted string** keys — so
+/// a real Godot `color_map` currently parses to a plain string and yields no
+/// pairs here, leaving the SVG uncoloured rather than mis-coloured. The
+/// substitution below is the finished half; teaching the dictionary parser
+/// non-string keys is the other, and it belongs with the parser rather than
+/// with this importer.
+fn svg_color_map(params: &crate::importers::ImportParams) -> Vec<(Color, Color)> {
+    match params.get("color_map") {
+        Some(Variant::Dictionary(dict)) => dict
+            .iter()
+            .filter_map(|(k, v)| match (k, v) {
+                (Variant::Color(from), Variant::Color(to)) => Some((*from, *to)),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

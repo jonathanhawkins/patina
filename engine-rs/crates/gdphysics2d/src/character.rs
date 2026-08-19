@@ -113,40 +113,50 @@ const DEFAULT_FLOOR_MAX_ANGLE: f32 = std::f32::consts::FRAC_PI_4;
 /// as having no player input (px/s).
 const STOP_ON_SLOPE_LATERAL_EPS: f32 = 1e-3;
 
-/// Whether a one-way platform should be ignored for a body travelling `motion`
-/// (pat-0q2kx.113).
+/// Deepest collision between `shape` at `tf` and **any** collider `other` owns
+/// (pat-s3rrv.25).
 ///
-/// Godot's `one_way_collision` blocks only contacts arriving from the platform's
-/// **front** side: you jump up *through* it and land *on* it. `one_way_direction`
-/// is the outward normal of the blocking face, so the platform is solid when the
-/// body approaches against that normal and passthrough when it travels with it.
+/// Character sweeps used to test against `other.shape` alone. Once
+/// body-vs-body learned to iterate every shape, that left the player as the one
+/// thing in the scene that could walk through a platform's second collider
+/// while a RigidBody2D bounced off it — the worst place for the engine to be
+/// inconsistent.
 ///
-/// ⚠️ A body with zero motion is never passed through — otherwise a character
-/// resting on a one-way platform would fall out of it the moment it stopped.
-fn one_way_passthrough(body: &PhysicsBody2D, motion: Vector2) -> bool {
-    if !body.one_way_collision {
-        return false;
-    }
-    let normal = body.one_way_direction.normalized();
-    if normal.length_squared() < 1e-8 || motion.length_squared() < 1e-8 {
-        return false;
-    }
-    // Moving *along* the outward normal means leaving through the back face —
-    // e.g. jumping upward through a platform whose normal points up.
-    motion.dot(normal) > 0.0
-}
-
-/// The obstacle's world transform, **including its rotation** (pat-0q2kx.113).
+/// Returns the DEEPEST hit rather than the first: the sweeps below pick the
+/// deepest contact to resolve against, so surfacing a shallower one from an
+/// earlier shape would depenetrate against the wrong surface.
 ///
-/// ⚠️ This used to be `Transform2D::translated(body.position)`, which silently
-/// discarded `PhysicsBody2D::rotation`. Every obstacle was therefore collided
-/// against as if axis-aligned, so a rotated slope behaved like a flat box: the
-/// contact normal came back axis-aligned and a 30° ramp was classified as a
-/// wall instead of a floor. The rotation is available on the body and the
-/// narrow phase already handles oriented shapes — only this conversion was
-/// dropping it.
-fn body_transform(body: &PhysicsBody2D) -> Transform2D {
-    Transform2D::from_rotation_origin(body.rotation, body.position)
+/// With one collider — every scene until multi-shape bodies are authored — this
+/// is exactly `test_collision` against that shape.
+///
+/// ⚠️ Inherited invariant from pat-0q2kx.113, kept here because the helper that
+/// used to carry it (`body_transform`) is gone: the obstacle transform **must
+/// include the body's rotation**. It once read
+/// `Transform2D::translated(body.position)`, which silently dropped it, so every
+/// obstacle collided as if axis-aligned and a 30° ramp came back with an
+/// axis-aligned normal — classified as a wall instead of a floor. `shape_owners`
+/// composes `from_rotation_origin(rotation, position)` with each collider's own
+/// transform, so rotation is included; do not "simplify" it back to a
+/// translation.
+fn deepest_hit_against(
+    shape: &Shape2D,
+    tf: &Transform2D,
+    other: &PhysicsBody2D,
+    motion: Vector2,
+) -> Option<collision::CollisionResult> {
+    other
+        .shape_owners()
+        .into_iter()
+        // One-way collision is a property of the SHAPE, not the body
+        // (pat-s3rrv.25). Filtering here rather than at the call sites is what
+        // lets a platform body carry a solid collider and a one-way collider at
+        // once: the solid one still blocks in the same sweep that the one-way
+        // one is passed through. `ShapeOwner2D::passthrough_for` carries the
+        // pat-0q2kx.113 rule unchanged, including "zero motion never passes".
+        .filter(|owner| !owner.passthrough_for(motion))
+        .filter_map(|owner| collision::test_collision(shape, tf, &owner.shape, &owner.transform))
+        .filter(|r| r.colliding && r.depth > 0.0)
+        .max_by(|a, b| a.depth.total_cmp(&b.depth))
 }
 
 /// Splits `motion` into steps small enough that a moving body cannot pass
@@ -200,10 +210,12 @@ pub fn test_motion(
 
     let overlaps_at = |pos: Vector2, other: &PhysicsBody2D| -> bool {
         let tf = Transform2D::from_rotation_origin(rotation, pos);
-        let other_tf = body_transform(other);
-        collision::test_collision(shape, &tf, &other.shape, &other_tf)
-            .map(|r| r.colliding && r.depth > 0.0)
-            .unwrap_or(false)
+        // `Vector2::ZERO` = no one-way filtering. `test_motion` never applied
+        // it, and `passthrough_for` treats zero motion as "never passes", so
+        // this path is byte-identical to before one-way moved onto the shape
+        // owner (pat-s3rrv.25). Godot's `test_move` does honour one-way; wiring
+        // it here is a behaviour change this bead does not own.
+        deepest_hit_against(shape, &tf, other, Vector2::ZERO).is_some()
     };
 
     // Anything already touching at the start is not an obstacle to this motion.
@@ -371,15 +383,7 @@ impl CharacterBody2D {
                     let tf_probe = Transform2D::translated(probe);
                     let hit = bodies.iter().any(|body| {
                         (self.collision_mask & body.collision_layer) != 0
-                            && !one_way_passthrough(body, step)
-                            && collision::test_collision(
-                                &self.shape,
-                                &tf_probe,
-                                &body.shape,
-                                &body_transform(body),
-                            )
-                            .map(|r| r.colliding && r.depth > 0.0)
-                            .unwrap_or(false)
+                            && deepest_hit_against(&self.shape, &tf_probe, body, step).is_some()
                     });
                     if hit {
                         blocked = true;
@@ -412,15 +416,10 @@ impl CharacterBody2D {
             let mut deepest: Option<(collision::CollisionResult, usize)> = None;
 
             for (idx, body) in bodies.iter().enumerate() {
-                if (self.collision_mask & body.collision_layer) == 0
-                    || one_way_passthrough(body, motion)
-                {
+                if (self.collision_mask & body.collision_layer) == 0 {
                     continue;
                 }
-                let tf_body = body_transform(body);
-                if let Some(result) =
-                    collision::test_collision(&self.shape, &tf_target, &body.shape, &tf_body)
-                {
+                if let Some(result) = deepest_hit_against(&self.shape, &tf_target, body, motion) {
                     if result.colliding
                         && result.depth > 0.0
                         && (deepest.is_none() || result.depth > deepest.as_ref().unwrap().0.depth)
@@ -537,9 +536,12 @@ impl CharacterBody2D {
             if (self.collision_mask & body.collision_layer) == 0 {
                 continue;
             }
-            let tf_body = body_transform(body);
+            // The snap probe travels DOWN toward the floor, against a one-way
+            // platform's outward normal, so the platform is solid for it — which
+            // is what `passthrough_for` already answers. Passing the real snap
+            // motion keeps a one-way platform snappable (pat-s3rrv.25).
             if let Some(result) =
-                collision::test_collision(&self.shape, &tf_target, &body.shape, &tf_body)
+                deepest_hit_against(&self.shape, &tf_target, body, -up * self.floor_snap_length)
             {
                 if !result.colliding || result.depth <= 0.0 {
                     continue;
@@ -653,9 +655,10 @@ impl CharacterBody2D {
                 continue;
             }
 
-            let tf_body = body_transform(body);
-            if let Some(result) =
-                collision::test_collision(&self.shape, &tf_target, &body.shape, &tf_body)
+            // `move_and_collide` never applied one-way filtering, and zero
+            // motion means `passthrough_for` always answers false, so this stays
+            // exactly as it was (pat-s3rrv.25).
+            if let Some(result) = deepest_hit_against(&self.shape, &tf_target, body, Vector2::ZERO)
             {
                 if result.colliding
                     && result.depth > 0.0

@@ -11,10 +11,15 @@ repository.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Wasm-safe engine core linked into the web runtime. Heavier subsystems
-# (gdscene -> gdaudio -> cpal, gdrender3d -> native wgpu backends) require
-# native-dep cfg-gating and are staged in the follow-up web beads
-# (pat-u3l8c.110-.113).
+# Wasm-safe engine core linked into the web runtime.
+#
+# The note that used to sit here said gdscene was held back because
+# `gdscene -> gdaudio -> cpal` and `gdrender3d -> native wgpu` needed cfg-gating,
+# staged as pat-u3l8c.110-.113. Both have since landed and it is now stale
+# (verified pat-s3rrv.40): gdaudio declares cpal under
+# `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`, and gdrender3d's
+# wgpu/pollster/bytemuck sit behind its optional `gpu` feature, which gdscene
+# does not enable. So gdscene brings no native-only crate onto wasm32.
 gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
 # The engine's real mixer (AudioServer + AudioMixer) plus the web device layer
@@ -23,6 +28,16 @@ gdvariant = { path = "../gdvariant" }
 # targets is what lets the mixer -> ring -> worklet-block path in `audio` be
 # unit-tested on the host instead of only in a browser (pat-u3l8c.112).
 gdaudio = { path = "../gdaudio" }
+
+# pat-s3rrv.40: MainLoop + FrameDriver live here, and the web entry needs both to
+# drive frames from requestAnimationFrame. Not a cycle — nothing in the
+# workspace depends on patina-web; it is the wasm leaf.
+gdscene = { path = "../gdscene" }
+
+# pat-s3rrv.41: InputEvent / Key / MouseButton / GamepadAxis live here. Wasm-safe
+# — winit and softbuffer are optional and off by default, and the crate already
+# carries a `cfg(target_arch = "wasm32")` dependency section.
+gdplatform = { path = "../gdplatform" }
 
 # Browser bindings are only needed when actually targeting wasm32; keeping them
 # target-gated keeps native `cargo test -p patina-web` dependency-light.

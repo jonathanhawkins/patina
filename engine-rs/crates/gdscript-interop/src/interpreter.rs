@@ -143,13 +143,30 @@ fn resource_fs_path(path: &str) -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from(path.strip_prefix("res://").unwrap_or(path)))
 }
 
+/// Reads a resource's text, consulting mounted `.pck` packs before disk
+/// (pat-s3rrv.34).
+///
+/// Falls back to [`resource_fs_path`] when `FileAccess` cannot serve it, which
+/// keeps the pre-existing no-project-root behaviour: `FileAccess` treats an
+/// unconfigured `res://` root as an error, while this resolver degrades to a
+/// CWD-relative path. Dropping that fallback would have broken every caller
+/// that loads a resource without configuring a root first.
+fn read_resource_source(path: &str) -> Option<String> {
+    if let Ok(text) = gdcore::file_access::FileAccess::read_file_string(path) {
+        return Some(text);
+    }
+    std::fs::read_to_string(resource_fs_path(path)).ok()
+}
+
 /// Parses a text resource (`.tres`/`.res`) into a [`ResourceRef`] carrying the
 /// class name and properties declared in the file.
 ///
 /// Returns `None` when the file is missing or does not parse, leaving the
 /// caller to fall back to a path-only placeholder.
 fn load_text_resource(path: &str) -> Option<ResourceRef> {
-    let source = std::fs::read_to_string(resource_fs_path(path)).ok()?;
+    // Pack-first (pat-s3rrv.34): `load("res://theme.tres")` must work in an
+    // exported game, where the file exists only inside the pack.
+    let source = read_resource_source(path)?;
     let resource = gdresource::TresLoader::new()
         .parse_str(&source, path)
         .ok()?;
@@ -2927,6 +2944,20 @@ impl Interpreter {
                             ) {
                                 return result;
                             }
+                            // Physics query parameter constructors —
+                            // `PhysicsRayQueryParameters2D.create(from, to)`
+                            // (pat-s3rrv.26). Same "call on a type name" shape
+                            // as the vector constructors above; the host owns
+                            // the handle registry, so it answers.
+                            if let Some(ref mut access) = self.scene_access {
+                                if let Some(result) = access.physics_query_static_call(
+                                    type_name,
+                                    member,
+                                    &evaluated_args,
+                                ) {
+                                    return Ok(result);
+                                }
+                            }
                         }
                         // Handle Input singleton: Input.is_action_pressed(), etc.
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "Input") {
@@ -3190,6 +3221,19 @@ impl Interpreter {
                                 if class_name == "RandomNumberGenerator" {
                                     return Ok(Variant::ObjectId(new_rng_handle()));
                                 }
+                                // GLTFDocument/GLTFState are RefCounted and are
+                                // how a script loads a .glb at RUNTIME rather
+                                // than through the import pipeline
+                                // (pat-s3rrv.49). FBXDocument/FBXState inherit
+                                // the same surface in Godot, so they mint the
+                                // same handles — the parser dispatches on the
+                                // file's own magic, not on the class name.
+                                if class_name == "GLTFDocument" || class_name == "FBXDocument" {
+                                    return Ok(Variant::ObjectId(new_gltf_document_handle()));
+                                }
+                                if class_name == "GLTFState" || class_name == "FBXState" {
+                                    return Ok(Variant::ObjectId(new_gltf_state_handle()));
+                                }
                                 // AStar2D/AStar3D/AStarGrid2D are RefCounted
                                 // (extension_api.json is_refcounted=true). The
                                 // pathfinder itself lives in `gdscene::astar`,
@@ -3206,6 +3250,30 @@ impl Interpreter {
                                             return Ok(Variant::ObjectId(
                                                 gdcore::id::ObjectId::from_raw(raw),
                                             ));
+                                        }
+                                    }
+                                }
+                                // Shape resources and the shape-query parameters
+                                // object (pat-s3rrv.26). All RefCounted in
+                                // Godot, and all owned by the scene layer for
+                                // the same reason AStar is: the shapes live in
+                                // `gdphysics2d`, which this crate cannot name
+                                // without a dependency cycle. Reuses the
+                                // existing physics-query seam rather than adding
+                                // another trait method.
+                                if matches!(
+                                    class_name.as_str(),
+                                    "CircleShape2D"
+                                        | "RectangleShape2D"
+                                        | "PhysicsShapeQueryParameters2D"
+                                ) {
+                                    if let Some(access) = self.scene_access.as_mut() {
+                                        if let Some(v) = access.physics_query_static_call(
+                                            class_name.as_str(),
+                                            "new",
+                                            &[],
+                                        ) {
+                                            return Ok(v);
                                         }
                                     }
                                 }
@@ -4191,11 +4259,27 @@ impl Interpreter {
             // Godot: `await get_tree().create_timer(t).timeout`
             // Patina: `await create_timer(t)` or `await create_timer(t).timeout`
             "create_timer" | "wait_seconds" => {
-                if args.len() != 1 {
+                // Godot: `create_timer(delay, process_always = true,
+                // process_in_physics = false, ignore_time_scale = false)`
+                // (pat-s3rrv.35). Previously only the 1-arg form was accepted,
+                // so the canonical spelling with any flag raised outright.
+                if args.is_empty() || args.len() > 4 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "create_timer() takes exactly 1 argument".into(),
+                        "create_timer() takes 1 to 4 arguments".into(),
                     )));
                 }
+                // Godot's own truthiness: only `false` and `null` are false, so
+                // `create_timer(1.0, 0)` behaves as a script author expects.
+                let flag = |i: usize, default: bool| match args.get(i) {
+                    None => default,
+                    Some(Variant::Bool(b)) => *b,
+                    Some(Variant::Nil) => false,
+                    Some(Variant::Int(n)) => *n != 0,
+                    Some(_) => true,
+                };
+                let process_always = flag(1, true);
+                let process_in_physics = flag(2, false);
+                let ignore_time_scale = flag(3, false);
                 let secs = match &args[0] {
                     Variant::Float(f) => *f,
                     Variant::Int(i) => *i as f64,
@@ -4208,7 +4292,12 @@ impl Interpreter {
                 };
                 // Prefer SceneTree-backed timer when scene access is available.
                 if let Some(ref mut access) = self.scene_access {
-                    if let Some((id, signal_name)) = access.create_timer(secs) {
+                    if let Some((id, signal_name)) = access.create_timer_with_flags(
+                        secs,
+                        process_always,
+                        process_in_physics,
+                        ignore_time_scale,
+                    ) {
                         let mut d = Dictionary::new();
                         d.insert("__await_kind", Variant::String("signal".into()));
                         d.insert("name", Variant::String(signal_name.clone()));
@@ -6741,7 +6830,26 @@ impl Interpreter {
             // and `gdserver3d`'s shader resolver already depend on.
             "global_shader_parameter_add" => {
                 let name = args.first().map(arg_str).unwrap_or_default();
-                let type_name = args.get(1).map(arg_str).unwrap_or_default();
+                // pat-s3rrv.33: Godot types argument 1 as
+                // `GlobalShaderParameterType`, an INT enum. This used to run
+                // `arg_str` over it, and `arg_str` stringifies any Variant — so
+                // a correct script passing `RenderingServer.GLOBAL_VAR_TYPE_COLOR`
+                // silently stored the type name "17" and every later lookup
+                // missed. A false green: the call succeeded and nothing worked.
+                //
+                // The string form is still accepted because `project.godot`'s
+                // `[shader_globals]` block declares types by name ("color").
+                let type_name = match args.get(1) {
+                    Some(Variant::Int(v)) => gdvariant::shader_globals::type_name_for_enum(*v)
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                "global_shader_parameter_add: {v} is not a \
+                                 RenderingServer.GlobalShaderParameterType value"
+                            )))
+                        })?,
+                    other => other.map(arg_str).unwrap_or_default(),
+                };
                 let value = args.get(2).cloned().unwrap_or(Variant::Nil);
                 gdvariant::shader_globals::add(&name, &type_name, value);
                 Ok(Variant::Nil)
@@ -6773,10 +6881,13 @@ impl Interpreter {
             "global_shader_parameter_get" => Ok(gdvariant::shader_globals::get(
                 &args.first().map(arg_str).unwrap_or_default(),
             )),
-            "global_shader_parameter_get_type" => Ok(gdvariant::shader_globals::get_type(
+            // pat-s3rrv.33: Godot returns the INT enum here, not a type name.
+            // Returning a String meant a script comparing against
+            // `RenderingServer.GLOBAL_VAR_TYPE_COLOR` never matched.
+            "global_shader_parameter_get_type" => Ok(gdvariant::shader_globals::get_type_enum(
                 &args.first().map(arg_str).unwrap_or_default(),
             )
-            .map(Variant::String)
+            .map(Variant::Int)
             .unwrap_or(Variant::Nil)),
             // Godot types this PackedStringArray.
             "global_shader_parameter_get_list" => Ok(Variant::PackedStringArray(
@@ -8032,6 +8143,178 @@ impl Interpreter {
         Ok(ret)
     }
 
+    /// `GLTFDocument` methods (pat-s3rrv.49).
+    ///
+    /// A method rather than a free function because `generate_scene` has to
+    /// create nodes, and the only route to the scene tree from this crate is
+    /// `SceneAccess` — gdscene depends on gdscript-interop, never the reverse,
+    /// so naming a `Node` type here would be a dependency cycle.
+    fn call_gltf_document_instance(
+        &mut self,
+        _id: gdcore::id::ObjectId,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        match method {
+            // `append_from_file(path, state, flags = 0, base_path = "")`
+            "append_from_file" | "append_from_buffer" => {
+                let state = gltf_state_arg(args, 1).ok_or_else(|| {
+                    RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "GLTFDocument.{method}() needs a GLTFState as its second \
+                         argument, the way Godot's does"
+                    )))
+                })?;
+                // Godot returns an Error code (0 == OK) rather than raising, so
+                // a script can branch on a bad file. Only a wrong-typed STATE
+                // raises above, because that is a program bug, not a bad asset.
+                let (bytes, path) = if method == "append_from_file" {
+                    let Some(Variant::String(p)) = args.first() else {
+                        return Ok(Variant::Int(GLTF_ERR_INVALID_PARAMETER));
+                    };
+                    match gdcore::file_access::FileAccess::read_file_bytes(p) {
+                        Ok(b) => (b, p.clone()),
+                        // Same disk fallback `read_resource_source` uses:
+                        // FileAccess treats an unconfigured `res://` root as an
+                        // error, and plenty of callers never configure one.
+                        Err(_) => match std::fs::read(resource_fs_path(p)) {
+                            Ok(b) => (b, p.clone()),
+                            Err(_) => return Ok(Variant::Int(GLTF_ERR_FILE_CANT_OPEN)),
+                        },
+                    }
+                } else {
+                    let bytes = match args.first() {
+                        Some(Variant::PackedByteArray(b)) => b.clone(),
+                        _ => return Ok(Variant::Int(GLTF_ERR_INVALID_PARAMETER)),
+                    };
+                    let base = match args.get(2) {
+                        Some(Variant::String(p)) => p.clone(),
+                        _ => String::new(),
+                    };
+                    (bytes, base)
+                };
+                match gdresource::gltf_import::import_gltf_bytes(
+                    &bytes,
+                    std::path::Path::new(&path),
+                ) {
+                    Ok(doc) => {
+                        if set_gltf_state_document(state, doc) {
+                            Ok(Variant::Int(0))
+                        } else {
+                            Ok(Variant::Int(GLTF_ERR_INVALID_PARAMETER))
+                        }
+                    }
+                    Err(_) => Ok(Variant::Int(GLTF_ERR_FILE_CORRUPT)),
+                }
+            }
+            "generate_scene" => {
+                let state = gltf_state_arg(args, 0).ok_or_else(|| {
+                    RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "GLTFDocument.generate_scene() needs a GLTFState".to_string(),
+                    ))
+                })?;
+                let Some(doc) = gltf_state_document(state) else {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "GLTFDocument.generate_scene() was given a GLTFState that \
+                         nothing has been appended into yet"
+                            .to_string(),
+                    )));
+                };
+                self.gltf_generate_scene(&doc)
+            }
+            _ => Err(gltf_unsupported("GLTFDocument", method)),
+        }
+    }
+
+    /// Builds a live node tree from a parsed glTF document and returns its root.
+    ///
+    /// Mirrors Godot's `generate_scene`: one root, then one node per glTF node
+    /// in document order, parented by the document's own `children` lists, with
+    /// a `MeshInstance3D` wherever a node references a mesh.
+    ///
+    /// ⚠️ Parenting runs in a SECOND pass. glTF permits a child to appear
+    /// before its parent in the `nodes` array, so wiring during the first pass
+    /// would drop any forward reference on the floor.
+    fn gltf_generate_scene(
+        &mut self,
+        doc: &gdresource::resource::Resource,
+    ) -> Result<Variant, RuntimeError> {
+        let no_access = || {
+            RuntimeError::new(RuntimeErrorKind::TypeError(
+                "GLTFDocument.generate_scene() needs a scene tree to build into".to_string(),
+            ))
+        };
+        let scene_name = match doc.get_property("scene_name") {
+            Some(Variant::String(s)) if !s.is_empty() => s.clone(),
+            _ => "Scene".to_string(),
+        };
+        let root = {
+            let access = self.scene_access.as_mut().ok_or_else(no_access)?;
+            access
+                .create_node("Node3D", &scene_name)
+                .ok_or_else(no_access)?
+        };
+
+        let nodes: Vec<Variant> = match doc.get_property("nodes") {
+            Some(Variant::Array(a)) => a.clone(),
+            _ => Vec::new(),
+        };
+
+        // Pass 1: create every node, remembering its id by glTF index.
+        let mut created: Vec<u64> = Vec::with_capacity(nodes.len());
+        for (i, entry) in nodes.iter().enumerate() {
+            let Variant::Dictionary(d) = entry else {
+                continue;
+            };
+            let name = match d.get("name") {
+                Some(Variant::String(s)) if !s.is_empty() => s.clone(),
+                _ => format!("Node{i}"),
+            };
+            // A glTF node carrying a mesh becomes a MeshInstance3D, which is
+            // what makes the generated tree render; everything else is a plain
+            // Node3D transform carrier.
+            let has_mesh = matches!(d.get("mesh"), Some(Variant::Int(_)));
+            let class = if has_mesh { "MeshInstance3D" } else { "Node3D" };
+            let access = self.scene_access.as_mut().ok_or_else(no_access)?;
+            let id = access.create_node(class, &name).ok_or_else(no_access)?;
+            if let Some(Variant::Int(mesh)) = d.get("mesh") {
+                access.set_node_property(id, "gltf_mesh_index", Variant::Int(*mesh));
+            }
+            created.push(id);
+        }
+
+        // Pass 2: parent them. Anything no node claims as a child hangs off the
+        // root, which is exactly glTF's own scene-roots rule.
+        let mut claimed = vec![false; created.len()];
+        for (i, entry) in nodes.iter().enumerate() {
+            let Variant::Dictionary(d) = entry else {
+                continue;
+            };
+            let Some(Variant::Array(kids)) = d.get("children") else {
+                continue;
+            };
+            let Some(&parent) = created.get(i) else {
+                continue;
+            };
+            for kid in kids {
+                let Variant::Int(ki) = kid else { continue };
+                let ki = *ki as usize;
+                if let Some(&child) = created.get(ki) {
+                    let access = self.scene_access.as_mut().ok_or_else(no_access)?;
+                    access.add_child(parent, child);
+                    claimed[ki] = true;
+                }
+            }
+        }
+        for (i, &id) in created.iter().enumerate() {
+            if !claimed[i] {
+                let access = self.scene_access.as_mut().ok_or_else(no_access)?;
+                access.add_child(root, id);
+            }
+        }
+
+        Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(root)))
+    }
+
     fn call_method_on(
         &mut self,
         obj: &Variant,
@@ -8090,6 +8373,15 @@ impl Interpreter {
             }
             if is_rng_handle(*oid) {
                 return call_rng_instance(*oid, method, args);
+            }
+            // glTF runtime API (pat-s3rrv.49). The state's getters are pure, so
+            // they answer without `self`; the document's `generate_scene` needs
+            // the scene layer to create nodes and therefore stays a method.
+            if is_gltf_state_handle(*oid) {
+                return call_gltf_state_instance(*oid, method, args);
+            }
+            if is_gltf_document_handle(*oid) {
+                return self.call_gltf_document_instance(*oid, method, args);
             }
             // AStar objects live in the scene layer (pat-s3rrv.19); forward on
             // the handle tag. A `None` means the handle died, so fall through
@@ -10042,6 +10334,100 @@ impl Interpreter {
                                 "no scene access".into(),
                             )))
                         }
+                    }
+                    // AnimationPlayer query verbs (pat-s3rrv.43). Guarded the
+                    // same way as the playback verbs below, so a script's own
+                    // `has_animation()` on another node is not shadowed.
+                    "has_animation"
+                        if self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.animation_player_is_playing(id))
+                            .is_some() =>
+                    {
+                        let name = arg_as_string(args, 0, "has_animation")?;
+                        Ok(Variant::Bool(
+                            self.scene_access
+                                .as_ref()
+                                .and_then(|a| a.animation_player_has_animation(id, &name))
+                                .unwrap_or(false),
+                        ))
+                    }
+                    "get_animation_list"
+                        if self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.animation_player_is_playing(id))
+                            .is_some() =>
+                    {
+                        Ok(Variant::PackedStringArray(
+                            self.scene_access
+                                .as_ref()
+                                .and_then(|a| a.animation_player_animation_list(id))
+                                .unwrap_or_default(),
+                        ))
+                    }
+                    "get_speed_scale"
+                        if self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.animation_player_is_playing(id))
+                            .is_some() =>
+                    {
+                        Ok(Variant::Float(
+                            self.scene_access
+                                .as_ref()
+                                .and_then(|a| a.animation_player_speed_scale(id))
+                                .unwrap_or(1.0),
+                        ))
+                    }
+                    "play_section"
+                        if self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.animation_player_is_playing(id))
+                            .is_some() =>
+                    {
+                        let name = arg_as_string(args, 0, "play_section")?;
+                        let num = |i: usize| match args.get(i) {
+                            Some(Variant::Float(f)) => Some(*f),
+                            Some(Variant::Int(v)) => Some(*v as f64),
+                            _ => None,
+                        };
+                        // Godot allows omitting either bound. -1 is the
+                        // sentinel; `set_section` applies a range only when
+                        // `end > start`, so an omitted pair leaves the player
+                        // unsectioned rather than installing a bogus one. It
+                        // does NOT expand -1 into the clip's own bounds.
+                        let start = num(1).unwrap_or(-1.0);
+                        let end = num(2).unwrap_or(-1.0);
+                        if let Some(ref mut access) = self.scene_access {
+                            access.animation_player_play_section(id, &name, start, end);
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "set_speed_scale"
+                        if self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.animation_player_is_playing(id))
+                            .is_some() =>
+                    {
+                        // Same Float-or-Int idiom the `seek` arm uses: a script
+                        // writing `speed_scale = 2` must work as well as `2.0`.
+                        let scale = match args.first() {
+                            Some(Variant::Float(f)) => *f,
+                            Some(Variant::Int(i)) => *i as f64,
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "set_speed_scale() expects a number".into(),
+                                )))
+                            }
+                        };
+                        if let Some(ref mut access) = self.scene_access {
+                            access.animation_player_set_speed_scale(id, scale);
+                        }
+                        Ok(Variant::Nil)
                     }
                     // AnimationPlayer-only playback verbs (pat-0q2kx.52).
                     //
@@ -14774,10 +15160,9 @@ fn string_format(fmt: &str, values: &[Variant]) -> String {
 /// empty source, so `get_shader_uniform_list()` reports nothing instead of
 /// silently claiming the shader declares no uniforms.
 fn read_resource_text(path: &str) -> Option<String> {
-    let resolved = gdcore::resolve_path(path)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string());
-    std::fs::read_to_string(resolved).ok()
+    // Pack-first (pat-s3rrv.34): a shader packed into a `.pck` must load in an
+    // exported game exactly as it does from a loose project tree.
+    read_resource_source(path)
 }
 
 /// Godot's shader type keyword for a parsed uniform type (pat-0q2kx.144).
@@ -14872,6 +15257,23 @@ fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
         // exposes the frame-pacing state as singleton properties, which is how
         // scripts actually spell them.
         "Engine" => engine_static_property(member),
+        // Godot RenderingServer.GlobalShaderParameterType (pat-s3rrv.33).
+        //
+        // `RenderingServer` was not a recognised static-member holder at all, so
+        // `RenderingServer.GLOBAL_VAR_TYPE_COLOR` fell through to `None` — which
+        // is why the canonical spelling of `global_shader_parameter_add` could
+        // not even be written in a script.
+        //
+        // Derived from the same table that maps the enum to a type name, rather
+        // than a second hand-written list: two lists would be free to disagree,
+        // and disagreeing here means `add` and `get_type` stop round-tripping.
+        "RenderingServer" => member.strip_prefix("GLOBAL_VAR_TYPE_").and_then(|suffix| {
+            if suffix == "MAX" {
+                // Not a type, the count — Godot exposes it as the enum's bound.
+                return Some(Variant::Int(29));
+            }
+            gdvariant::shader_globals::enum_for_type_name_by_const_suffix(suffix).map(Variant::Int)
+        }),
         // Godot FileAccess.ModeFlags
         "FileAccess" => match member {
             "READ" => Some(Variant::Int(1)),
@@ -14886,7 +15288,22 @@ fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
         // prefixes delegate their member to the flat @GlobalScope constant
         // table (pat-nzgdu.7).
         _ => crate::variant_math::static_member(type_name, member)
-            .or_else(|| crate::global_constants::global_enum_member(type_name, member)),
+            .or_else(|| crate::global_constants::global_enum_member(type_name, member))
+            // pat-s3rrv.42: finally, any integer constant ClassDB knows for this
+            // class — `XRServer.TRACKER_HAND`, `XRHandTracker.HAND_JOINT_WRIST`,
+            // and every other registered class enum.
+            //
+            // ClassDB already stored these and the interpreter already read them,
+            // but ONLY through an explicit `ClassDB.class_get_integer_constant(
+            // "XRServer", "TRACKER_HAND")` call. The member-access spelling every
+            // real script uses resolved to nothing.
+            //
+            // Deliberately LAST in the chain. A @GlobalScope name that also exists
+            // as a class constant must keep resolving to the global value, so this
+            // may only answer where the two above are silent. Returning `None` for
+            // an unknown member is what preserves the UndefinedVariable error —
+            // answering 0 would turn every typo into a silent zero.
+            .or_else(|| gdobject::class_get_integer_constant(type_name, member).map(Variant::Int)),
     }
 }
 
@@ -15115,6 +15532,19 @@ fn call_dir_access_instance(
         "list_dir_end" => DirAccess::with_handle_mut(id, |da| {
             da.list_dir_end();
             Ok(Variant::Nil)
+        })
+        .map_err(engine_err_to_runtime),
+        // pat-s3rrv.34: `get_files`/`get_directories` existed on the Rust
+        // `DirAccess` but were never bound, so the one-call form every script
+        // actually uses — `DirAccess.open("res://").get_files()` — raised an
+        // unknown-method error and only the `list_dir_begin`/`get_next` loop
+        // worked. Godot returns a PackedStringArray from both.
+        "get_files" => {
+            DirAccess::with_handle_mut(id, |da| Ok(Variant::PackedStringArray(da.get_files())))
+                .map_err(engine_err_to_runtime)
+        }
+        "get_directories" => DirAccess::with_handle_mut(id, |da| {
+            Ok(Variant::PackedStringArray(da.get_directories()))
         })
         .map_err(engine_err_to_runtime),
         "make_dir" => {
@@ -17233,6 +17663,221 @@ fn call_stream_peer_instance(
             "StreamPeerBuffer has no method '{method}'"
         )))
     })
+}
+
+// ---------------------------------------------------------------------------
+// GLTFDocument / GLTFState (pat-s3rrv.49)
+// ---------------------------------------------------------------------------
+//
+// Godot's runtime glTF path is
+// `var d = GLTFDocument.new(); var s = GLTFState.new()
+//  d.append_from_file(path, s); var n = d.generate_scene(s)`
+// (upstream/godot/modules/gltf/gltf_document.cpp). The whole family was
+// ClassDB-registered with correct parents, properties and method arities and
+// NOTHING dispatched a single call, so `GLTFDocument.new()` raised — a
+// registered, introspectable class family no script could reach.
+//
+// A real parser already existed at `gdresource::gltf_import`; this is the seam
+// that connects the two. `GLTFDocument` is stateless (Godot keeps the parsed
+// document on the STATE, not the document), so its handle carries no payload
+// and exists only so `.new()` returns something with the right identity.
+
+// Godot `Error` codes, the same values `global_constants.rs` resolves those
+// names to. `append_from_*` RETURNS one rather than raising, because Godot's
+// does — a script is expected to branch on a bad asset.
+const GLTF_ERR_FILE_CANT_OPEN: i64 = 12; // ERR_FILE_CANT_OPEN
+const GLTF_ERR_FILE_CORRUPT: i64 = 16; // ERR_FILE_CORRUPT
+const GLTF_ERR_INVALID_PARAMETER: i64 = 31; // ERR_INVALID_PARAMETER
+
+/// Tags an `ObjectId` issued by [`new_gltf_document_handle`]; joins the
+/// ConfigFile / FileAccess / RNG tag family (0xCF / 0xFA / 0xB9).
+const GLTF_DOCUMENT_HANDLE_TAG: u64 = 0x6D00_0000_0000_0000;
+/// Tags an `ObjectId` issued by [`new_gltf_state_handle`].
+const GLTF_STATE_HANDLE_TAG: u64 = 0x6E00_0000_0000_0000;
+
+thread_local! {
+    /// Parsed documents, keyed by `GLTFState` handle sequence.
+    ///
+    /// `None` until an `append_from_*` succeeds: Godot lets a script construct
+    /// a bare `GLTFState`, and every getter must answer emptily rather than
+    /// raise until something has been appended into it.
+    static GLTF_STATES: std::cell::RefCell<
+        HashMap<u64, Option<std::sync::Arc<gdresource::resource::Resource>>>,
+    > = std::cell::RefCell::new(HashMap::new());
+    static NEXT_GLTF_STATE: std::cell::Cell<u64> = std::cell::Cell::new(1);
+    static NEXT_GLTF_DOCUMENT: std::cell::Cell<u64> = std::cell::Cell::new(1);
+}
+
+/// Mints a fresh `GLTFDocument` handle.
+fn new_gltf_document_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_GLTF_DOCUMENT.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    gdcore::id::ObjectId::from_raw(GLTF_DOCUMENT_HANDLE_TAG | seq)
+}
+
+/// Mints a fresh, empty `GLTFState` handle.
+fn new_gltf_state_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_GLTF_STATE.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    GLTF_STATES.with(|m| {
+        m.borrow_mut().insert(seq, None);
+    });
+    gdcore::id::ObjectId::from_raw(GLTF_STATE_HANDLE_TAG | seq)
+}
+
+/// Returns `true` when `id` was issued by [`new_gltf_document_handle`].
+fn is_gltf_document_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == GLTF_DOCUMENT_HANDLE_TAG
+}
+
+/// Returns `true` when `id` was issued by [`new_gltf_state_handle`].
+fn is_gltf_state_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == GLTF_STATE_HANDLE_TAG
+}
+
+/// The parsed document behind a `GLTFState` handle, if one has been appended.
+fn gltf_state_document(
+    id: gdcore::id::ObjectId,
+) -> Option<std::sync::Arc<gdresource::resource::Resource>> {
+    let seq = id.raw() & 0x00FF_FFFF_FFFF_FFFF;
+    GLTF_STATES.with(|m| m.borrow().get(&seq).cloned().flatten())
+}
+
+/// Stores a freshly parsed document into a `GLTFState` handle.
+///
+/// Returns `false` if the handle is dead, which the caller reports as an error
+/// rather than silently succeeding — a script that appended into a freed state
+/// has a bug worth surfacing.
+fn set_gltf_state_document(
+    id: gdcore::id::ObjectId,
+    doc: std::sync::Arc<gdresource::resource::Resource>,
+) -> bool {
+    let seq = id.raw() & 0x00FF_FFFF_FFFF_FFFF;
+    GLTF_STATES.with(|m| {
+        let mut map = m.borrow_mut();
+        match map.get_mut(&seq) {
+            Some(slot) => {
+                *slot = Some(doc);
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+/// Godot raises rather than returning a default for a method it cannot honour.
+fn gltf_unsupported(class: &str, method: &str) -> RuntimeError {
+    RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+        "{class}.{method}() is registered but not implemented in Patina yet \
+         (pat-s3rrv.49). It raises rather than returning a default so a script \
+         cannot mistake an empty answer for a real one."
+    )))
+}
+
+/// The `GLTFState` argument every `GLTFDocument` method takes.
+fn gltf_state_arg(args: &[Variant], index: usize) -> Option<gdcore::id::ObjectId> {
+    match args.get(index) {
+        Some(Variant::ObjectId(oid)) if is_gltf_state_handle(*oid) => Some(*oid),
+        _ => None,
+    }
+}
+
+/// `GLTFState` accessors, answered from the parsed document.
+///
+/// Only the getters the parser can genuinely answer are wired; everything else
+/// raises through [`gltf_unsupported`] instead of returning an empty array that
+/// a script would read as "this glTF has no skins".
+fn call_gltf_state_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    _args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let doc = gltf_state_document(id);
+    // A bare `GLTFState.new()` with nothing appended answers emptily rather
+    // than raising: Godot allows constructing one and querying it.
+    // `Resource::get_property` hands back `Option<&Variant>`, so this clones
+    // rather than moving out of the Arc.
+    let prop = |key: &str| -> Variant {
+        doc.as_ref()
+            .and_then(|d| d.get_property(key))
+            .cloned()
+            .unwrap_or(Variant::Nil)
+    };
+    let array_or_empty = |key: &str| -> Variant {
+        match prop(key) {
+            Variant::Array(a) => Variant::Array(a),
+            _ => Variant::Array(Vec::new()),
+        }
+    };
+    match method {
+        "get_nodes" => Ok(array_or_empty("nodes")),
+        "get_materials" => Ok(array_or_empty("materials")),
+        "get_textures" => Ok(array_or_empty("textures")),
+        "get_images" => Ok(array_or_empty("images")),
+        "get_cameras" => Ok(array_or_empty("cameras")),
+        "get_lights" => Ok(array_or_empty("lights")),
+        "get_root_nodes" => Ok(array_or_empty("scene_roots")),
+        // Godot's `get_meshes()` returns one entry per MESH. The parser keeps
+        // its geometry as one subresource per PRIMITIVE, each tagged with the
+        // `mesh_index`/`mesh_name` it came from, and sets no `meshes` property
+        // at all — so this regroups them rather than reading a key that does
+        // not exist. Returning `array_or_empty("meshes")` here would answer 0
+        // for every document ever parsed, which is worse than raising.
+        "get_meshes" => {
+            let count = match prop("mesh_count") {
+                Variant::Int(i) if i > 0 => i as usize,
+                _ => 0,
+            };
+            let mut names: Vec<String> = vec![String::new(); count];
+            if let Some(d) = doc.as_ref() {
+                for sub in d.subresources.values() {
+                    let (Some(Variant::Int(idx)), Some(Variant::String(name))) = (
+                        sub.get_property("mesh_index"),
+                        sub.get_property("mesh_name"),
+                    ) else {
+                        continue;
+                    };
+                    if let Some(slot) = names.get_mut(*idx as usize) {
+                        slot.clone_from(name);
+                    }
+                }
+            }
+            Ok(Variant::Array(
+                names
+                    .into_iter()
+                    .map(|name| {
+                        let mut d = Dictionary::new();
+                        d.insert("name", Variant::String(name));
+                        Variant::Dictionary(d)
+                    })
+                    .collect(),
+            ))
+        }
+        "get_base_path" => Ok(Variant::String(
+            doc.as_ref()
+                .and_then(|d| {
+                    std::path::Path::new(&d.path)
+                        .parent()
+                        .and_then(|p| p.to_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_default(),
+        )),
+        "get_filename" => Ok(Variant::String(
+            doc.as_ref().map(|d| d.path.clone()).unwrap_or_default(),
+        )),
+        "get_scene_name" => Ok(match prop("scene_name") {
+            Variant::String(s) => Variant::String(s),
+            _ => Variant::String(String::new()),
+        }),
+        _ => Err(gltf_unsupported("GLTFState", method)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -22105,6 +22750,12 @@ fn is_node_class_name(name: &str) -> bool {
             | "AnimationPlayer"
             | "CanvasLayer"
             | "ColorRect"
+            // Godot's navigation agents inherit `Node`, so a script may
+            // construct one and add it under a body exactly like any other node
+            // (pat-s3rrv.20). Omitting them here made `NavigationAgent2D.new()`
+            // fail before a single method could be called on the result.
+            | "NavigationAgent2D"
+            | "NavigationAgent3D"
     )
 }
 

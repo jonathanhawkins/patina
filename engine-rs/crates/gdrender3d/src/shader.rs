@@ -710,7 +710,12 @@ pub struct CustomFragmentShader {
     /// `texture(sampler, uv)` fragment expression. Populated via
     /// [`CustomFragmentShader::set_texture`] (Variants cannot carry pixels, so
     /// textures are injected separately from `parameters`).
-    textures: std::collections::HashMap<String, Arc<TextureImage>>,
+    /// `Arc`-shared as a whole (pat-s3rrv.36), not just per-entry: the AST
+    /// fragment path needs an OWNED `'static` sampler closure, and cloning the
+    /// map per fragment to build one would be a per-pixel allocation. Sharing
+    /// the map makes it a refcount bump. `set_texture` uses `Arc::make_mut`,
+    /// so binding a texture is still a plain mutation from the caller's view.
+    textures: Arc<std::collections::HashMap<String, Arc<TextureImage>>>,
     /// Shader `TIME` built-in, injectable via [`CustomFragmentShader::set_time`].
     /// Frame-loop plumbing to the RenderingServer is a documented follow-up;
     /// the setter makes time-animated shaders testable now.
@@ -723,18 +728,22 @@ impl CustomFragmentShader {
     /// Compiles the attached shader (if any) and captures the runtime
     /// parameters. If no shader is attached, uses an empty compiled shader.
     pub fn from_material(material: &gdserver3d::ShaderMaterial3D) -> Self {
+        // pat-s3rrv.36: `compile_cached`, not `compile`. This runs for every
+        // instance on every frame (gdrender3d/src/renderer.rs, inside the entry
+        // loop), so an unmemoized compile re-tokenized, re-parsed and
+        // re-generated WGSL N times per frame for sources that never changed.
         let compiler = gdserver3d::ShaderCompiler3D::new();
         let compiled = if let Some(shader) = &material.shader {
-            compiler.compile(shader.shader_type, &shader.source_code)
+            compiler.compile_cached(shader.shader_type, &shader.source_code)
         } else {
-            compiler.compile(gdserver3d::ShaderType3D::Spatial, "")
+            compiler.compile_cached(gdserver3d::ShaderType3D::Spatial, "")
         };
         let fragment_body = compiled.fragment_body.clone();
         Self {
             compiled,
             parameters: material.parameters.clone(),
             fragment_body,
-            textures: std::collections::HashMap::new(),
+            textures: Arc::new(std::collections::HashMap::new()),
             time: 0.0,
         }
     }
@@ -750,7 +759,7 @@ impl CustomFragmentShader {
             compiled,
             parameters,
             fragment_body,
-            textures: std::collections::HashMap::new(),
+            textures: Arc::new(std::collections::HashMap::new()),
             time: 0.0,
         }
     }
@@ -776,7 +785,10 @@ impl CustomFragmentShader {
     /// Binds a texture to a `sampler2D` uniform by name for the CPU
     /// `texture(sampler, uv)` fragment expression.
     pub fn set_texture(&mut self, name: &str, texture: Arc<TextureImage>) {
-        self.textures.insert(name.to_string(), texture);
+        // Copy-on-write: clones the map only if a sampler built earlier still
+        // holds a reference to it, which is what keeps an in-flight render
+        // seeing a consistent set of bindings.
+        Arc::make_mut(&mut self.textures).insert(name.to_string(), texture);
     }
 }
 
@@ -803,7 +815,27 @@ impl FragmentShader for CustomFragmentShader {
             // Sample bound textures by sampler2D uniform name; a missing
             // binding yields opaque white (a neutral placeholder). The closure
             // is passed inline so it coerces to the higher-ranked `&dyn Fn`.
-            gdserver3d::shader::execute_fragment_3d(
+            // pat-s3rrv.36: the legacy instruction arms take the borrowed
+            // closure below; the AST arm needs an OWNED `'static` sampler, so
+            // it captures a clone of the Arc-shared texture map — a refcount
+            // bump, not a copy of the bindings.
+            let env = gdserver3d::shader::ShaderEnv3D {
+                sampler: Some({
+                    let textures = Arc::clone(&self.textures);
+                    gdserver3d::shader::Sampler::new(move |name: &str, uv: [f32; 2]| {
+                        match textures.get(name) {
+                            Some(tex) => {
+                                let c = tex.sample_bilinear(uv[0], uv[1]);
+                                [c.r, c.g, c.b, c.a]
+                            }
+                            // A missing binding is opaque white, the same
+                            // neutral placeholder the borrowed closure uses.
+                            None => [1.0, 1.0, 1.0, 1.0],
+                        }
+                    })
+                }),
+            };
+            gdserver3d::shader::execute_fragment_3d_with_env(
                 &self.fragment_body,
                 &ctx,
                 &self.parameters,
@@ -811,6 +843,7 @@ impl FragmentShader for CustomFragmentShader {
                     Some(tex) => tex.sample_bilinear(u, v),
                     None => Color::new(1.0, 1.0, 1.0, 1.0),
                 },
+                &env,
             )
         };
 

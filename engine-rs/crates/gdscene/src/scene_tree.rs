@@ -23,7 +23,7 @@ use crate::lifecycle::LifecycleManager;
 use crate::node::{Node, NodeId};
 use crate::sprite_frames::{AnimatedSpritePlayback, SpriteFrames};
 use crate::trace::{EventTrace, TraceEvent, TraceEventType};
-use crate::tween::{Tween, TweenId};
+use crate::tween::{Tween, TweenId, TweenProcessMode};
 
 /// Stable FNV-1a hash of a node path, used as the RPC `node_path` key on the
 /// wire (pat-u3l8c.75). Deterministic across builds so two peers agree on the
@@ -88,6 +88,18 @@ struct ReplicationState {
     synchronizers: HashMap<NodeId, gdplatform::network::MultiplayerSynchronizer>,
     /// Nodes already registered, so a re-scan does not reset their state.
     registered: HashSet<NodeId>,
+    /// Children already announced under each spawner's `spawn_path`.
+    ///
+    /// The outbound spawn pass diffs the live children against this set, so a
+    /// node is announced exactly once no matter how many frames it lives for.
+    announced: HashMap<NodeId, HashSet<NodeId>>,
+    /// Monotonic milliseconds accumulated from the frame delta.
+    ///
+    /// `MultiplayerSynchronizer::poll_outbound` compares this against its
+    /// `last_sync_ms` to honour `replication_interval`. A frame counter would
+    /// not do: the interval is declared in seconds, so it has to be measured in
+    /// wall time the way Godot's `SceneReplicationInterface` does.
+    clock_ms: u64,
 }
 
 /// One-shot timer created by [`SceneTree::create_timer`] (Godot SceneTreeTimer).
@@ -101,6 +113,22 @@ pub struct SceneTreeTimer {
     pub done: bool,
     /// Signal name for awaiters (`timeout` or `timeout_<id>`).
     pub signal_name: String,
+    /// Godot `create_timer(..., process_always)`, default `true`.
+    ///
+    /// When false the timer stops while the tree is paused — the flag exists so
+    /// a pause menu's own timers can keep running while gameplay ones freeze
+    /// (`SceneTree::process_timers` skips them when `paused`).
+    pub process_always: bool,
+    /// Godot `create_timer(..., process_in_physics)`, default `false`.
+    ///
+    /// Advances on the fixed physics tick instead of the idle frame, so its
+    /// resolution follows `physics_ticks_per_second` rather than the render rate.
+    pub process_in_physics: bool,
+    /// Godot `create_timer(..., ignore_time_scale)`, default `false`.
+    ///
+    /// Uses the driver's real delta, so `Engine.time_scale = 0.5` does not
+    /// stretch it — what a UI timeout during bullet-time needs.
+    pub ignore_time_scale: bool,
 }
 
 /// Flags controlling what [`SceneTree::duplicate_node`] copies, mirroring
@@ -529,6 +557,7 @@ impl SceneTree {
             Synchronizer {
                 root_path: String,
                 interval_ms: u32,
+                properties: Vec<String>,
             },
         }
 
@@ -573,12 +602,33 @@ impl SceneTree {
                         Variant::Int(i) if i > 0 => (i as u32).saturating_mul(1000),
                         _ => 0,
                     };
+                    // Which properties replicate. Godot keeps this in a
+                    // `SceneReplicationConfig` resource; until that is loadable
+                    // the `.tscn` carries the same list as
+                    // `_sync_properties = ["position", …]`. An empty list means
+                    // nothing syncs — `poll_outbound` already returns early on
+                    // an empty snapshot, so a synchronizer with no config is
+                    // inert rather than guessing at `position`.
+                    let properties = match node.get_property("_sync_properties") {
+                        Variant::Array(items) => items
+                            .iter()
+                            .filter_map(|v| match v {
+                                Variant::String(s) if !s.is_empty() => Some(s.clone()),
+                                Variant::StringName(s) if !s.as_str().is_empty() => {
+                                    Some(s.as_str().to_string())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>(),
+                        _ => Vec::new(),
+                    };
                     pending.push((
                         id,
                         Pending::Synchronizer {
                             root_path: variant_as_path_string(&node.get_property("root_path"))
                                 .unwrap_or_default(),
                             interval_ms,
+                            properties,
                         },
                     ));
                 }
@@ -603,9 +653,13 @@ impl SceneTree {
                 Pending::Synchronizer {
                     root_path,
                     interval_ms,
+                    properties,
                 } => {
                     let mut sync = MultiplayerSynchronizer::new(interval_ms);
                     sync.set_root_path(root_path);
+                    for name in properties {
+                        sync.add_property(name);
+                    }
                     self.replication.synchronizers.insert(id, sync);
                 }
             }
@@ -646,6 +700,225 @@ impl SceneTree {
         }
 
         self.replication.replicator = replicator;
+    }
+
+    /// Peers a replication frame should be addressed to (pat-s3rrv.17).
+    ///
+    /// ⚠️ Falls back to [`PeerId::SERVER`] when the peer list is empty, which is
+    /// the normal case rather than an edge case: `MultiplayerAPI::peers` is
+    /// populated from `PeerConnected` signals, and a peer installed directly
+    /// with `set_multiplayer_peer` — how the engine, the editor and every test
+    /// attach one — never runs that handshake. Gating replication on a
+    /// non-empty list therefore sent *nothing, ever*. The RPC path already had
+    /// this right: it addresses `authority_map.get(..).unwrap_or(PeerId::SERVER)`
+    /// (network.rs:358-362) rather than consulting `get_peers`.
+    fn replication_targets(&self) -> Vec<gdplatform::network::PeerId> {
+        use gdplatform::network::PeerId;
+
+        // `get_peers` answers Godot's signed peer ids; `PeerId` is unsigned, and
+        // a non-positive id is not a real peer.
+        let peers: Vec<PeerId> = self
+            .multiplayer
+            .get_peers()
+            .into_iter()
+            .filter(|id| *id > 0)
+            .map(|id| PeerId(id as u32))
+            .collect();
+        if peers.is_empty() {
+            vec![PeerId::SERVER]
+        } else {
+            peers
+        }
+    }
+
+    /// Emits SPAWN frames for children added under a `MultiplayerSpawner`'s
+    /// `spawn_path` since the last poll (pat-s3rrv.17).
+    ///
+    /// Godot's `SceneReplicationInterface` watches the spawn path and replicates
+    /// each new child to every peer; this is the same diff, driven from the
+    /// SceneTree poll.
+    fn poll_replication_spawns(&mut self) {
+        use gdplatform::network::{encode_spawn_packet, Packet, TransferMode};
+
+        if self.replication.spawners.is_empty() {
+            return;
+        }
+        let peers = self.replication_targets();
+
+        // Phase 1 — diff live children against what has already been announced.
+        let mut pending: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
+        for (spawner_id, spawner) in &self.replication.spawners {
+            let path = spawner.get_spawn_path();
+            let parent = if path.is_empty() {
+                Some(*spawner_id)
+            } else {
+                self.get_node_or_null(*spawner_id, path)
+            };
+            let Some(parent) = parent else {
+                continue;
+            };
+            let Some(parent_node) = self.get_node(parent) else {
+                continue;
+            };
+            let known = self.replication.announced.get(spawner_id);
+            let fresh: Vec<NodeId> = parent_node
+                .children()
+                .iter()
+                .copied()
+                .filter(|child| known.map(|k| !k.contains(child)).unwrap_or(true))
+                .collect();
+            if !fresh.is_empty() {
+                pending.push((*spawner_id, fresh));
+            }
+        }
+        if pending.is_empty() {
+            return;
+        }
+
+        // Phase 2 — announce each new child exactly once, to every peer.
+        //
+        // ⚠️ Deliberately NOT `spawn_and_notify` per peer: that calls `spawn()`
+        // internally, which allocates a fresh `net_id` every time, so one child
+        // would arrive at N peers under N different ids and later SYNC frames
+        // would address a node the receiver never mapped. Spawn once, then fan
+        // the same encoded packet out.
+        let sender = self.multiplayer.peer_mut().map(|p| p.get_unique_id());
+        let Some(sender) = sender else {
+            return;
+        };
+        for (spawner_id, children) in pending {
+            for child in children {
+                // Resolved in its own statement so the `spawners` borrow ends
+                // before `announced` is touched below — nesting that mutation
+                // inside a `match` on `spawners.get_mut(..)` would hold two
+                // borrows into `self.replication` at once.
+                let request = self
+                    .replication
+                    .spawners
+                    .get_mut(&spawner_id)
+                    .and_then(|spawner| spawner.spawn("").ok());
+                let Some(request) = request else {
+                    // Spawn limit reached, or no spawnable scene registered:
+                    // still mark the child announced so a failing spawner does
+                    // not retry it on every frame forever.
+                    self.replication
+                        .announced
+                        .entry(spawner_id)
+                        .or_default()
+                        .insert(child);
+                    continue;
+                };
+                let encoded = encode_spawn_packet(&request);
+                let net_id = request.net_id;
+                // Bind any synchronizer inside the spawned subtree to this
+                // spawn's `net_id`.
+                //
+                // ⚠️ Without this the whole sync path is dead on arrival: a
+                // `MultiplayerSynchronizer` starts at `net_id` 0, so its SYNC
+                // frames address 0, while the receiver's replicator mapped the
+                // node under the spawn's id — `apply_sync` would look up 0,
+                // find nothing, and silently drop every update. Godot gets this
+                // for free because the synchronizer *is* part of the spawned
+                // scene and shares its object id.
+                let mut subtree = Vec::new();
+                self.collect_subtree_top_down(child, &mut subtree);
+                for id in subtree {
+                    if let Some(sync) = self.replication.synchronizers.get_mut(&id) {
+                        sync.set_net_id(net_id);
+                    }
+                }
+
+                if let Some(peer) = self.multiplayer.peer_mut() {
+                    for to in &peers {
+                        let _ = peer.send_packet(
+                            *to,
+                            Packet {
+                                sender,
+                                channel: 0,
+                                data: encoded.clone(),
+                                transfer_mode: TransferMode::Reliable,
+                            },
+                        );
+                    }
+                }
+                self.replication
+                    .announced
+                    .entry(spawner_id)
+                    .or_default()
+                    .insert(child);
+            }
+        }
+    }
+
+    /// Emits SYNC frames for every registered `MultiplayerSynchronizer` whose
+    /// `replication_interval` has elapsed (pat-s3rrv.17).
+    ///
+    /// Mirrors Godot's `SceneReplicationInterface::_send_sync`: snapshot the
+    /// configured properties off the live node, hand them to the synchronizer,
+    /// and let it decide (on `replication_interval`) whether this tick actually
+    /// sends. Values travel as binary Variants, so a `Vector3` or `Color`
+    /// survives the trip.
+    fn poll_replication_outbound(&mut self) {
+        if self.replication.synchronizers.is_empty() {
+            return;
+        }
+        let peers = self.replication_targets();
+
+        // Phase 1 — read the live values. Borrows the node arena immutably, so
+        // it cannot be fused with the write-back below.
+        let mut snapshots: Vec<(NodeId, Vec<(String, Variant)>)> = Vec::new();
+        for (id, sync) in &self.replication.synchronizers {
+            if sync.properties_to_sync.is_empty() {
+                continue;
+            }
+            // Godot's `root_path` defaults to ".." — the synchronizer replicates
+            // its *parent*, not itself.
+            let root_path = sync.get_root_path();
+            let root = if root_path.is_empty() {
+                Some(*id)
+            } else {
+                self.get_node_or_null(*id, root_path)
+            };
+            let Some(root) = root else {
+                continue;
+            };
+            let Some(node) = self.get_node(root) else {
+                continue;
+            };
+            let values: Vec<(String, Variant)> = sync
+                .properties_to_sync
+                .iter()
+                .map(|name| (name.clone(), node.get_property(name)))
+                // An unset property reads back `Nil`; replicating that would
+                // clobber a real value on the receiving peer.
+                .filter(|(_, value)| !value.is_nil())
+                .collect();
+            if !values.is_empty() {
+                snapshots.push((*id, values));
+            }
+        }
+
+        // Phase 2 — write the snapshot into each synchronizer.
+        for (id, values) in snapshots {
+            if let Some(sync) = self.replication.synchronizers.get_mut(&id) {
+                for (name, value) in values {
+                    sync.set_property_value(&name, value);
+                }
+            }
+        }
+
+        // Phase 3 — send. `multiplayer` and `replication` are disjoint fields,
+        // so both can be borrowed mutably here.
+        let now_ms = self.replication.clock_ms;
+        let Some(peer) = self.multiplayer.peer_mut() else {
+            return;
+        };
+        for sync in self.replication.synchronizers.values_mut() {
+            for to in &peers {
+                // `force = false`: the synchronizer applies its own interval.
+                let _ = sync.poll_outbound(peer, *to, now_ms, false);
+            }
+        }
     }
 
     /// The node an inbound spawn should be parented under: the `spawn_path` of
@@ -738,6 +1011,15 @@ impl SceneTree {
         if !spawns.is_empty() || !syncs.is_empty() {
             self.apply_replication_packets(spawns, syncs);
         }
+        // Outbound replication runs after inbound so a value that arrived this
+        // frame is not immediately echoed back to its sender.
+        self.replication.clock_ms = self
+            .replication
+            .clock_ms
+            .saturating_add((delta * 1000.0).max(0.0) as u64);
+        self.register_replication_nodes();
+        self.poll_replication_spawns();
+        self.poll_replication_outbound();
 
         let root = self.root_id;
         for event in self.multiplayer.take_events() {
@@ -853,7 +1135,25 @@ impl SceneTree {
     /// Returns the timer id. Advance with [`process_timers`]; when finished the
     /// timer is marked `done` and its `signal_name` is available via
     /// [`take_timeout_signals`].
+    /// Godot's defaults: `process_always = true`, everything else false.
     pub fn create_timer(&mut self, seconds: f64) -> u64 {
+        self.create_timer_with_flags(seconds, true, false, false)
+    }
+
+    /// `SceneTree.create_timer(delay, process_always, process_in_physics,
+    /// ignore_time_scale)` (pat-s3rrv.35).
+    ///
+    /// Kept separate from [`create_timer`](Self::create_timer) rather than
+    /// widening that signature: it has callers across three crates, and Rust has
+    /// no default arguments, so a widened signature would have to be edited in
+    /// at every one of them for no gain.
+    pub fn create_timer_with_flags(
+        &mut self,
+        seconds: f64,
+        process_always: bool,
+        process_in_physics: bool,
+        ignore_time_scale: bool,
+    ) -> u64 {
         let id = self.next_timer_id;
         self.next_timer_id = self.next_timer_id.saturating_add(1);
         let signal_name = format!("timeout_{id}");
@@ -862,6 +1162,9 @@ impl SceneTree {
             time_left: seconds.max(0.0),
             done: false,
             signal_name,
+            process_always,
+            process_in_physics,
+            ignore_time_scale,
         });
         id
     }
@@ -874,11 +1177,32 @@ impl SceneTree {
     /// Advance all SceneTreeTimers by `delta` seconds. Completed timers stay
     /// until drained by [`take_timeout_signals`].
     pub fn process_timers(&mut self, delta: f64) {
+        self.process_timers_phase(delta, delta, false);
+    }
+
+    /// Advances the timers belonging to one phase of the frame (pat-s3rrv.35).
+    ///
+    /// Mirrors Godot's `SceneTree::process_timers(delta, physics_frame)`: a
+    /// timer is advanced by the idle pass or by the physics tick, never both,
+    /// selected by its `process_in_physics` flag. `delta` is the scaled frame
+    /// delta; `unscaled_delta` is the driver's real one, used for timers created
+    /// with `ignore_time_scale`.
+    ///
+    /// Timers without `process_always` are frozen while the tree is paused.
+    pub fn process_timers_phase(&mut self, delta: f64, unscaled_delta: f64, in_physics: bool) {
+        let paused = self.paused;
         for t in &mut self.scene_timers {
-            if t.done {
+            if t.done || t.process_in_physics != in_physics {
                 continue;
             }
-            t.time_left -= delta;
+            if paused && !t.process_always {
+                continue;
+            }
+            t.time_left -= if t.ignore_time_scale {
+                unscaled_delta
+            } else {
+                delta
+            };
             if t.time_left <= 0.0 {
                 t.time_left = 0.0;
                 t.done = true;
@@ -913,8 +1237,20 @@ impl SceneTree {
     /// script — and their timeout signals wake the parked awaits; each script
     /// then advances its own frame-based awaits.
     pub fn process_script_coroutines(&mut self, delta: f32) {
-        // Advance one-shot SceneTreeTimers once and collect fired timeout signals.
-        self.process_timers(delta as f64);
+        self.process_script_coroutines_unscaled(delta, delta as f64);
+    }
+
+    /// [`process_script_coroutines`](Self::process_script_coroutines) with the
+    /// driver's real delta alongside the scaled one (pat-s3rrv.35).
+    ///
+    /// Only `ignore_time_scale` timers read `unscaled_delta`; everything else
+    /// uses `delta`. `MainLoop::step` calls this form because it is the only
+    /// caller that knows both, and the plain form forwards `delta` for both so
+    /// no existing caller changes behaviour.
+    pub fn process_script_coroutines_unscaled(&mut self, delta: f32, unscaled_delta: f64) {
+        // The single idle-phase advance for SceneTreeTimers. Physics-phase
+        // timers are advanced by the caller's fixed-step loop instead.
+        self.process_timers_phase(delta as f64, unscaled_delta, false);
         let fired = self.take_timeout_signals();
 
         // Temporarily remove each script while it runs so a resumed coroutine
@@ -2504,6 +2840,10 @@ impl SceneTree {
         for node_id in node_ids {
             // Advance the player and gather everything we need while only the
             // player is borrowed, so we can then mutate nodes and scripts.
+            // Gathered inside the player borrow below, but kept out of the
+            // returned tuple: widening that tuple would re-indent the whole
+            // match arm, and this file carries other agents' uncommitted work.
+            let mut clip_starts: Vec<(String, String)> = Vec::new();
             let (values, skip, method_calls, audio_keys, root_motion, root_node, signals, current) =
                 match self.animation_players.get_mut(&node_id) {
                     Some(player) => {
@@ -2517,6 +2857,9 @@ impl SceneTree {
                         let skip: std::collections::HashSet<String> =
                             player.non_property_track_paths().into_iter().collect();
                         let method_calls = player.method_calls_in_range(prev, curr);
+                        // Animation-track keys crossed this frame; started on
+                        // the nested players below (pat-s3rrv.44).
+                        clip_starts = player.animation_clip_starts_in_range(prev, curr);
                         // Audio keys crossed this frame; applied below like
                         // method tracks (pat-0q2kx.157).
                         let audio_keys = audio_keys_in_range(player, prev, curr);
@@ -2575,7 +2918,12 @@ impl SceneTree {
                     }
                 };
                 if let Some(node) = self.nodes.get_mut(&target) {
-                    node.set_property(&path, value);
+                    // `path` may address a COMPONENT of a compound property
+                    // (`position:x`) — Godot's bézier tracks always do, and a
+                    // value track may. A flat `set_property` would create a
+                    // literal `"position:x"` entry that nothing reads
+                    // (pat-s3rrv.44).
+                    set_animated_property_path(node, &path, value);
                 }
             }
 
@@ -2603,6 +2951,36 @@ impl SceneTree {
                     }
                 };
                 self.call_script_with_access(target, &call.method, &call.args);
+            }
+
+            // Start each crossed animation-track clip on the nested
+            // `AnimationPlayer` the track names, resolved relative to
+            // `base_node` exactly like property and method tracks
+            // (pat-s3rrv.44). This is how a "cutscene" clip drives a character's
+            // own player rather than duplicating its tracks.
+            for (track_node_path, clip) in clip_starts {
+                let target = if track_node_path.is_empty() || track_node_path == "." {
+                    base_node
+                } else {
+                    match self.get_node_or_null(base_node, &track_node_path) {
+                        Some(t) => t,
+                        None => continue,
+                    }
+                };
+                // Self-targeting would recurse into the player currently being
+                // advanced, restarting it every frame it crosses its own key.
+                if target == node_id {
+                    continue;
+                }
+                if let Some(sub) = self.animation_players.get_mut(&target) {
+                    // Godot's reserved `[stop]` clip name halts the nested
+                    // player instead of naming a clip to play.
+                    if clip == "[stop]" {
+                        sub.stop();
+                    } else if sub.has_animation(&clip) {
+                        sub.play(&clip);
+                    }
+                }
             }
 
             // Fire audio-track keys at the `AudioStreamPlayer` named by the
@@ -2727,8 +3105,8 @@ impl SceneTree {
             let frame_changed = playback.frame != previous_frame;
             // The texture the current frame shows. Publishing it as the node's
             // own `texture` is what makes an AnimatedSprite2D actually draw
-            // (pat-0q2kx.100): both 2D render paths — the editor viewport's
-            // `render_kind_for` and `scene_bridge`'s `sprite_commands` — resolve
+            // (pat-0q2kx.100): the 2D render path — the viewport's
+            // `render_kind_for` — resolves
             // a sprite's pixels from that property, so the animation reaches the
             // canvas through the same route a plain Sprite2D does rather than a
             // second, parallel one.
@@ -2866,7 +3244,12 @@ impl SceneTree {
                     }
                 };
                 if let Some(node) = self.nodes.get_mut(&target) {
-                    node.set_property(&path, value);
+                    // `path` may address a COMPONENT of a compound property
+                    // (`position:x`) — Godot's bézier tracks always do, and a
+                    // value track may. A flat `set_property` would create a
+                    // literal `"position:x"` entry that nothing reads
+                    // (pat-s3rrv.44).
+                    set_animated_property_path(node, &path, value);
                 }
             }
         }
@@ -2913,6 +3296,41 @@ impl SceneTree {
     /// them*, so `tween_callback`, `tween_method` and `finished` silently never
     /// fired — including from Rust.
     pub fn process_tweens(&mut self, delta: f64) {
+        self.process_tweens_in_mode(delta, delta, TweenProcessMode::Idle);
+    }
+
+    /// The node that created a tween — the default `bind_node` target and the
+    /// node a step with no explicit `target` writes to.
+    pub fn tween_owner(&self, tween_id: TweenId) -> Option<NodeId> {
+        self.tweens.get(&tween_id).map(|(owner, _)| *owner)
+    }
+
+    /// Removes a tween from the tree and hands it back, so it can be nested
+    /// inside another tween as a `tween_subtween` step (pat-s3rrv.46). The id
+    /// is dead afterwards, exactly as in Godot, where the parent takes
+    /// ownership of the subtween.
+    pub fn take_tween(&mut self, tween_id: TweenId) -> Option<Tween> {
+        self.tweens.remove(&tween_id).map(|(_, t)| t)
+    }
+
+    /// The mode-aware half of [`process_tweens`](Self::process_tweens): advances
+    /// only the tweens whose [`TweenProcessMode`] matches this phase and whose
+    /// [`Tween::can_process`] says they survive the tree's current pause state
+    /// (pat-s3rrv.46).
+    ///
+    /// Before this, `can_process` had no production caller at all and the whole
+    /// phase sat inside `MainLoop`'s blanket `if !paused` guard, so a
+    /// `TWEEN_PAUSE_PROCESS` pause-menu tween froze with the game and a
+    /// `TWEEN_PROCESS_PHYSICS` tween ran at render rate.
+    ///
+    /// `unscaled_delta` is the same frame's delta without `Engine.time_scale`
+    /// applied; a tween with `ignore_time_scale` set advances on that one.
+    pub fn process_tweens_in_mode(
+        &mut self,
+        delta: f64,
+        unscaled_delta: f64,
+        mode: TweenProcessMode,
+    ) {
         let mut completed = Vec::new();
         // Collected while the `self.tweens` borrow is live and dispatched after
         // it ends: `call_script_with_access` / `emit_signal` take `&mut self`,
@@ -2920,12 +3338,54 @@ impl SceneTree {
         let mut method_calls: Vec<(NodeId, String, Variant)> = Vec::new();
         let mut callbacks: Vec<(NodeId, String)> = Vec::new();
         let mut finished: Vec<(TweenId, NodeId)> = Vec::new();
+        // `step_finished(idx)` / `loop_finished(count)`: declared in ClassDB
+        // since the Tween family was registered and never emitted until
+        // pat-s3rrv.46.
+        let mut step_finished: Vec<(TweenId, i64)> = Vec::new();
+        let mut loop_finished: Vec<(TweenId, i64)> = Vec::new();
 
+        let paused = self.paused;
         let tween_ids: Vec<TweenId> = self.tweens.keys().copied().collect();
         for tween_id in tween_ids {
+            // Phase + pause gate, resolved before the mutable borrow because
+            // `should_process_node` needs `&self` too. Godot's `bind_node`
+            // defaults to the node that created the tween, which is exactly the
+            // owner recorded here, so `Bound` always has a node to follow.
+            let (in_phase, allowed, bound_gone) = match self.tweens.get(&tween_id) {
+                Some((owner, tween)) => {
+                    let bound = tween
+                        .bound_node
+                        .map(|raw| NodeId::from_object_id(gdcore::id::ObjectId::from_raw(raw)))
+                        .unwrap_or(*owner);
+                    // Only an EXPLICIT `bind_node` target counts as "gone": the
+                    // owner is absent in plenty of Rust-side fixtures that add a
+                    // tween without a node, and killing those would change
+                    // long-standing behaviour.
+                    let gone = tween.bound_node.is_some() && self.nodes.get(&bound).is_none();
+                    (
+                        tween.process_mode == mode,
+                        tween.can_process(paused, Some(self.should_process_node(bound))),
+                        gone,
+                    )
+                }
+                None => continue,
+            };
+            // Godot's `bind_node` kills the tween with its node.
+            if bound_gone {
+                completed.push(tween_id);
+                continue;
+            }
+            if !in_phase || !allowed {
+                continue;
+            }
             if let Some((node_id, tween)) = self.tweens.get_mut(&tween_id) {
                 let owner = *node_id;
-                let done = tween.advance(delta);
+                let step = if tween.ignore_time_scale {
+                    unscaled_delta
+                } else {
+                    delta
+                };
+                let done = tween.advance(step);
 
                 // Godot's `tween_property(object, ...)` names the target
                 // explicitly, so a step may write to a node other than the one
@@ -2962,6 +3422,12 @@ impl SceneTree {
                 for method in tween.poll_callbacks() {
                     callbacks.push((owner, method));
                 }
+                for idx in tween.take_step_finished() {
+                    step_finished.push((tween_id, idx));
+                }
+                for count in tween.take_loop_finished() {
+                    loop_finished.push((tween_id, count));
+                }
                 if tween.take_just_finished() {
                     finished.push((tween_id, owner));
                 }
@@ -2977,6 +3443,16 @@ impl SceneTree {
         }
         for (node_id, method) in callbacks {
             self.call_script_with_access(node_id, &method, &[]);
+        }
+        for (tween_id, idx) in step_finished {
+            let tween_as_source =
+                NodeId::from_object_id(gdcore::id::ObjectId::from_raw(tween_id.raw()));
+            self.emit_signal(tween_as_source, "step_finished", &[Variant::Int(idx)]);
+        }
+        for (tween_id, count) in loop_finished {
+            let tween_as_source =
+                NodeId::from_object_id(gdcore::id::ObjectId::from_raw(tween_id.raw()));
+            self.emit_signal(tween_as_source, "loop_finished", &[Variant::Int(count)]);
         }
         for (tween_id, owner) in finished {
             // Godot emits `finished` on the *Tween object*, not on the node, so
@@ -3386,8 +3862,8 @@ impl SceneTree {
     /// Runs `_draw` on every node with a pending redraw and stores the commands
     /// it emitted — the NOTIFICATION_DRAW half of Godot's redraw cycle.
     ///
-    /// Call this before building a frame; [`crate::scene_bridge`] folds the
-    /// stored commands into each node's `CanvasItem`. A node whose script has no
+    /// Call this before building a frame; the canvas render list folds the
+    /// stored commands into each node's render items. A node whose script has no
     /// `_draw` still clears its pending flag (and its old commands), matching
     /// Godot where a redraw with no `_draw` override empties the item.
     pub fn flush_pending_redraws(&mut self) {
@@ -4261,7 +4737,12 @@ impl SceneTree {
     /// notification and has its `_process()` called before the next node is
     /// processed.
     pub fn process_frame_with_scripts(&mut self, delta: f64) {
-        self.process_timers(delta);
+        // NO `process_timers` here (pat-s3rrv.35). `MainLoop::step` calls both
+        // this and `process_script_coroutines`, which also advances timers, so
+        // every SceneTreeTimer lost 2×delta per frame and
+        // `await create_timer(1.0).timeout` fired after ~0.5 s. The coroutine
+        // pass is the single owner because it is the one that then drains
+        // `take_timeout_signals` to wake the parked awaits.
         let ids: Vec<NodeId> = self
             .all_nodes_in_process_order()
             .into_iter()
@@ -4750,6 +5231,34 @@ fn audio_keys_in_range(
         }
     }
     out
+}
+
+/// Writes an animated value into `node`, decomposing a Godot property path that
+/// addresses a COMPONENT of a compound property (`position:x`) (pat-s3rrv.44).
+///
+/// The node's property bag is flat, so a bare `set_property("position:x", ..)`
+/// would insert a key nothing ever reads — the animation would run and the
+/// sprite would not move. Bézier tracks always key a scalar this way, and value
+/// tracks may.
+///
+/// This reuses the tween layer's `split_property_path`/`write_subname` rather
+/// than re-deriving the component table: the two paths must agree on what
+/// `position:x` means, and a second implementation is a second thing to drift.
+/// A subname that names no component of the base value (or a base that is still
+/// `Nil` because nothing seeded it) leaves the property untouched, which is the
+/// same conservative choice the tween path makes.
+fn set_animated_property_path(node: &mut Node, path: &str, value: Variant) {
+    match crate::tween::split_property_path(path) {
+        (prop, Some(sub)) => {
+            let base = node.get_property(prop);
+            if let Some(updated) = crate::tween::write_subname(&base, sub, &value) {
+                node.set_property(prop, updated);
+            }
+        }
+        (prop, None) => {
+            node.set_property(prop, value);
+        }
+    }
 }
 
 fn apply_root_motion_delta(node: &mut Node, delta: &crate::animation::RootMotionDelta) {
@@ -6597,6 +7106,7 @@ mod tests {
             anim_tree.set_root(crate::animation_tree::AnimationNode::Animation {
                 name: "run".into(),
                 position: 0.0,
+                opts: crate::animation_tree::AnimationLeafOptions::default(),
             });
             (tree, sprite, tree_node, anim_tree)
         }

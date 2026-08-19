@@ -58,6 +58,19 @@ pub struct KeyFrame {
     pub value: Variant,
     /// How to transition *to* this keyframe from the previous one.
     pub transition: TransitionType,
+    /// Bézier-track incoming control handle.
+    ///
+    /// Only read for [`TrackType::Bezier`]; zero on every other track type.
+    /// This is a `(time, value)` offset **relative to this key's own point**,
+    /// not an absolute position — Godot forms the control point as
+    /// `Vector2(duration, value) + in_handle`
+    /// (`upstream/godot/scene/resources/animation.cpp`,
+    /// `bezier_track_interpolate`). Its `x` is normally negative, since the
+    /// incoming handle reaches backwards in time.
+    pub in_handle: Vector2,
+    /// Bézier-track outgoing control handle, relative to this key's point (see
+    /// [`KeyFrame::in_handle`]). Its `x` is normally positive.
+    pub out_handle: Vector2,
 }
 
 impl KeyFrame {
@@ -67,6 +80,24 @@ impl KeyFrame {
             time,
             value,
             transition,
+            in_handle: Vector2::ZERO,
+            out_handle: Vector2::ZERO,
+        }
+    }
+
+    /// Creates a Bézier keyframe: a scalar value plus its two control handles.
+    ///
+    /// Both handles are offsets relative to `(time, value)` — see
+    /// [`KeyFrame::in_handle`]. Zero handles make the segment a straight line,
+    /// which is why a bézier track with unset handles samples linearly rather
+    /// than degenerately.
+    pub fn bezier(time: f64, value: f64, in_handle: Vector2, out_handle: Vector2) -> Self {
+        Self {
+            time,
+            value: Variant::Float(value),
+            transition: TransitionType::Linear,
+            in_handle,
+            out_handle,
         }
     }
 
@@ -101,6 +132,19 @@ pub enum TrackType {
     Scale3D,
     /// Animates a mesh blend-shape weight (`Variant::Float`).
     BlendShape,
+    /// A Bézier curve over a single scalar property (pat-s3rrv.44).
+    ///
+    /// Keyframe values are `Variant::Float`, and the curve between two keys is
+    /// set by the left key's `out_handle` and the right key's `in_handle`
+    /// rather than by a [`TransitionType`]. Distinct from
+    /// [`TransitionType::CubicBezier`], which is a per-key *easing preset*
+    /// applied to an ordinary property track — a bézier TRACK carries its own
+    /// control points per key and always drives a scalar.
+    Bezier,
+    /// Starts a named clip on another `AnimationPlayer` at each keyframe time
+    /// (pat-s3rrv.44). Keyframe values are `Variant::String` clip names, and
+    /// `node_path` addresses the nested player.
+    Animation,
 }
 
 impl TrackType {
@@ -114,6 +158,8 @@ impl TrackType {
             "rotation_3d" => Some(Self::Rotation3D),
             "scale_3d" => Some(Self::Scale3D),
             "blend_shape" => Some(Self::BlendShape),
+            "bezier" => Some(Self::Bezier),
+            "animation" => Some(Self::Animation),
             _ => None,
         }
     }
@@ -128,6 +174,8 @@ impl TrackType {
             Self::Rotation3D => "rotation_3d",
             Self::Scale3D => "scale_3d",
             Self::BlendShape => "blend_shape",
+            Self::Bezier => "bezier",
+            Self::Animation => "animation",
         }
     }
 }
@@ -313,11 +361,23 @@ impl AnimationTrack {
             return None;
         }
 
+        // A bézier track carries its curve in the keys' own handles, so it does
+        // not reach the transition/interpolation logic below at all
+        // (pat-s3rrv.44).
+        if self.track_type == TrackType::Bezier {
+            return self.sample_bezier(time);
+        }
+
         // Discrete update mode (pat-u3l8c.102): step function — return the value
         // of the most-recent key at-or-before `time` (or the first key when
         // `time` precedes all keys), with no interpolation. `Continuous` and
         // `Capture` fall through to the interpolating path below unchanged.
-        if self.update_mode == TrackUpdateMode::Discrete {
+        //
+        // An animation track is inherently discrete: its value names a clip to
+        // start, and interpolating between two clip NAMES is meaningless
+        // (pat-s3rrv.44).
+        if self.update_mode == TrackUpdateMode::Discrete || self.track_type == TrackType::Animation
+        {
             let mut chosen = &self.keyframes[0];
             for kf in &self.keyframes {
                 if kf.time <= time {
@@ -393,6 +453,69 @@ impl AnimationTrack {
         }
 
         Some(last.value.clone())
+    }
+
+    /// Samples a [`TrackType::Bezier`] track, mirroring Godot's
+    /// `Animation::bezier_track_interpolate`
+    /// (`upstream/godot/scene/resources/animation.cpp`).
+    ///
+    /// The control polygon is expressed in **segment-local time**: the left key
+    /// sits at `x = 0` and the right key at `x = duration`, with each handle
+    /// added as an offset to its own endpoint. Because the curve is parametric,
+    /// the parameter that reaches a given time is *not* `elapsed / duration` —
+    /// Godot binary-searches it, and this reproduces that search (including its
+    /// fixed 10 iterations) so sampled values agree with Godot's.
+    ///
+    /// Godot does not loop-wrap bézier tracks; times outside the key range
+    /// clamp to the end values.
+    fn sample_bezier(&self, time: f64) -> Option<Variant> {
+        let keys = &self.keyframes;
+        let first = keys.first()?;
+        let last = keys.last()?;
+        if keys.len() == 1 || time <= first.time {
+            return Some(Variant::Float(bezier_key_value(first)));
+        }
+        if time >= last.time {
+            return Some(Variant::Float(bezier_key_value(last)));
+        }
+        // `time` is strictly inside the range, so a preceding key exists and is
+        // not the final one.
+        let i = keys.iter().rposition(|k| k.time <= time)?;
+        let (a, b) = (&keys[i], keys.get(i + 1)?);
+
+        let duration = (b.time - a.time) as f32;
+        if duration < 1e-10 {
+            return Some(Variant::Float(bezier_key_value(b)));
+        }
+        let elapsed = (time - a.time) as f32;
+
+        let start = Vector2::new(0.0, bezier_key_value(a) as f32);
+        let start_out = Vector2::new(start.x + a.out_handle.x, start.y + a.out_handle.y);
+        let end = Vector2::new(duration, bezier_key_value(b) as f32);
+        let end_in = Vector2::new(end.x + b.in_handle.x, end.y + b.in_handle.y);
+
+        let (mut low, mut high) = (0.0f32, 1.0f32);
+        for _ in 0..10 {
+            let middle = (low + high) / 2.0;
+            if bezier_point(start, start_out, end_in, end, middle).x < elapsed {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+
+        let low_pos = bezier_point(start, start_out, end_in, end, low);
+        let high_pos = bezier_point(start, start_out, end_in, end, high);
+        let span = high_pos.x - low_pos.x;
+        // Godot divides unguarded here; a degenerate bracket would yield NaN and
+        // silently poison the driven property, so collapse to the low endpoint.
+        let value = if span.abs() < 1e-10 {
+            low_pos.y
+        } else {
+            let c = (elapsed - low_pos.x) / span;
+            low_pos.y + (high_pos.y - low_pos.y) * c
+        };
+        Some(Variant::Float(value as f64))
     }
 
     /// Applies the non-default per-track [`TrackInterpolation`] curve to the
@@ -997,6 +1120,22 @@ impl AnimationPlayer {
         self.position
     }
 
+    /// Godot's `AnimationPlayer.has_animation` (pat-s3rrv.43).
+    pub fn has_animation(&self, name: &str) -> bool {
+        self.animations.contains_key(name)
+    }
+
+    /// Godot's `AnimationPlayer.get_animation_list` (pat-s3rrv.43).
+    ///
+    /// Sorted, because the backing map iterates arbitrarily and Godot returns a
+    /// stable list — an unsorted result would make any script iterating it, and
+    /// any test asserting on it, nondeterministic.
+    pub fn get_animation_list(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.animations.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
     /// Advances the playback position by `delta` seconds (scaled by `speed_scale`).
     pub fn advance(&mut self, delta: f64) {
         if !self.playing {
@@ -1239,6 +1378,48 @@ impl AnimationPlayer {
         result
     }
 
+    /// Animation-track keys crossed in `(prev_time, curr_time]`, as
+    /// `(node_path, clip_name)` pairs (pat-s3rrv.44).
+    ///
+    /// Mirrors [`method_calls_in_range`](Self::method_calls_in_range): an
+    /// animation track *fires* at its key rather than holding a value, so it is
+    /// gathered by crossing rather than by sampling, and a key the playhead
+    /// jumped over is not silently lost. Playing backwards crosses keys in the
+    /// reverse direction, which the same range test handles.
+    pub fn animation_clip_starts_in_range(
+        &self,
+        prev_time: f64,
+        curr_time: f64,
+    ) -> Vec<(String, String)> {
+        let anim = match self.current.as_ref().and_then(|n| self.animations.get(n)) {
+            Some(a) => a,
+            None => return Vec::new(),
+        };
+        let mut starts = Vec::new();
+        for track in &anim.tracks {
+            if track.track_type != TrackType::Animation {
+                continue;
+            }
+            for kf in track.keyframes() {
+                let crossed = if curr_time >= prev_time {
+                    kf.time > prev_time && kf.time <= curr_time
+                } else {
+                    kf.time < prev_time && kf.time >= curr_time
+                };
+                if !crossed {
+                    continue;
+                }
+                // Godot's own spelling for "stop the sub-animation" is the
+                // reserved clip name `[stop]`; it is forwarded verbatim so the
+                // tree layer can act on it rather than trying to play it.
+                if let Variant::String(clip) = &kf.value {
+                    starts.push((track.node_path.clone(), clip.clone()));
+                }
+            }
+        }
+        starts
+    }
+
     /// Returns the method-track invocations whose keyframes were crossed while
     /// advancing playback from `prev_time` to `curr_time`.
     ///
@@ -1328,7 +1509,13 @@ impl AnimationPlayer {
         let mut paths = Vec::new();
         if let Some(anim) = self.current.as_ref().and_then(|n| self.animations.get(n)) {
             for track in &anim.tracks {
-                if track.track_type == TrackType::Method {
+                // An animation track's sampled value is a CLIP NAME, not a
+                // property value — writing it would put the string into a
+                // property called `animation` on the nested player
+                // (pat-s3rrv.44). It is dispatched by
+                // `animation_clip_starts_in_range` instead.
+                if track.track_type == TrackType::Method || track.track_type == TrackType::Animation
+                {
                     paths.push(track.property_path.clone());
                 }
             }
@@ -1389,6 +1576,32 @@ fn variant_to_vec3(value: Variant) -> Option<gdcore::math::Vector3> {
 // ---------------------------------------------------------------------------
 // cubic_bezier_y
 // ---------------------------------------------------------------------------
+
+/// Evaluates a cubic Bézier at parameter `t`, over four control points in the
+/// plane (Godot's `Vector2::bezier_interpolate`).
+///
+/// Unlike [`cubic_bezier_y`], the endpoints here are explicit rather than fixed
+/// at `(0,0)`/`(1,1)`: a bézier TRACK's segment spans arbitrary times and
+/// values, so neither axis can be assumed normalized.
+fn bezier_point(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: f32) -> Vector2 {
+    let omt = 1.0 - t;
+    let (omt2, t2) = (omt * omt, t * t);
+    let (a, b, c, d) = (omt2 * omt, 3.0 * omt2 * t, 3.0 * omt * t2, t2 * t);
+    Vector2::new(
+        p0.x * a + p1.x * b + p2.x * c + p3.x * d,
+        p0.y * a + p1.y * b + p2.y * c + p3.y * d,
+    )
+}
+
+/// Reads a bézier key's scalar value, tolerating the `Int` spelling a
+/// hand-written `.tscn` may use for a whole number.
+fn bezier_key_value(k: &KeyFrame) -> f64 {
+    match &k.value {
+        Variant::Float(f) => *f,
+        Variant::Int(i) => *i as f64,
+        _ => 0.0,
+    }
+}
 
 /// Evaluates a cubic Bézier easing curve at linear parameter `t ∈ [0,1]`.
 ///

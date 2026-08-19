@@ -25,10 +25,9 @@
 use gdcore::math::{Color, Vector2};
 use gdplatform::input::{InputEvent, MouseButton};
 use gdscene::node::{Node, NodeId};
-use gdscene::scene_bridge::build_canvas_viewport;
+use gdeditor::viewport_2d_render::{build_runtime_render_list, Render2DItem, Render2DKind};
 use gdscene::scene_tree::SceneTree;
 use gdscene::GDScriptNodeInstance;
-use gdserver2d::canvas::DrawCommand;
 use gdvariant::Variant;
 
 /// Reads a script variable back off the node's script instance.
@@ -40,19 +39,14 @@ fn script_var(tree: &SceneTree, node: NodeId, name: &str) -> Option<Variant> {
         .map(|p| p.default_value)
 }
 
-/// Every draw command the canvas bridge produces for the whole tree, flattened.
-/// Going through [`build_canvas_viewport`] rather than reading the tree's
+/// Every render item the shipped canvas walk produces for the whole tree.
+///
+/// Going through [`build_runtime_render_list`] rather than reading the tree's
 /// stored commands is the point: it proves `_draw` output actually reaches the
-/// render list, not just a side table nothing consumes.
-fn rendered_commands(tree: &SceneTree) -> Vec<DrawCommand> {
-    let no_textures = |_p: &str| -> Option<Vector2> { None };
-    let viewport =
-        build_canvas_viewport(tree, 200, 200, Color::new(0.0, 0.0, 0.0, 1.0), &no_textures);
-    viewport
-        .get_sorted_items()
-        .into_iter()
-        .flat_map(|item| item.commands.iter().cloned())
-        .collect()
+/// render list, not just a side table nothing consumes (pat-s3rrv.22 — that
+/// side table's only reader used to be a module with no production caller).
+fn rendered_commands(tree: &SceneTree) -> Vec<Render2DItem> {
+    build_runtime_render_list(tree)
 }
 
 fn attach(tree: &mut SceneTree, node: NodeId, source: &str) {
@@ -83,6 +77,12 @@ fn control(name: &str, class: &str, x: f32, y: f32, w: f32, h: f32) -> Node {
 #[test]
 fn script_draw_and_gui_input_virtuals() {
     // -- (1) `_draw` + `queue_redraw` reach the render list ------------------
+    // ⚠️ Without a populated ClassDB there is no class chain, so
+    // `Node::is_class("CanvasItem")` is false for every node and the canvas
+    // walk filters the whole scene out and returns `[]` — which reads like the
+    // collapsed path lost the item rather than like the scene was never
+    // collected at all (pat-s3rrv.22).
+    gdobject::class_db::register_2d_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let painter = tree
@@ -109,22 +109,20 @@ func _draw():
     let commands = rendered_commands(&tree);
     let drawn = commands
         .iter()
-        .find(|c| matches!(c, DrawCommand::DrawRect { .. }))
+        .find(|i| matches!(i.kind, Render2DKind::ColorRect { .. }))
         .unwrap_or_else(|| {
-            panic!("the script's _draw rect must reach the canvas viewport, got {commands:?}")
+            panic!("the script's _draw rect must reach the render list, got {commands:?}")
         });
-    match drawn {
-        DrawCommand::DrawRect {
-            rect,
-            color,
-            filled,
-        } => {
-            assert_eq!(rect.position, Vector2::new(10.0, 20.0));
-            assert_eq!(rect.size, Vector2::new(30.0, 40.0));
+    match &drawn.kind {
+        Render2DKind::ColorRect { size, color } => {
+            // A filled `draw_rect` becomes a ColorRect; the rect's own position
+            // rides in the item transform (the Painter node is at the origin,
+            // so the global origin IS the rect position).
+            assert_eq!(drawn.global_transform.origin, Vector2::new(10.0, 20.0));
+            assert_eq!(*size, Vector2::new(30.0, 40.0));
             assert_eq!(*color, Color::new(1.0, 0.0, 0.0, 1.0));
-            assert!(*filled, "draw_rect(.., filled = true) must fill");
         }
-        other => panic!("expected DrawRect, got {other:?}"),
+        other => panic!("expected a filled rect (ColorRect), got {other:?}"),
     }
 
     // -- (2) `_gui_input` + `accept_event()` stops propagation ---------------
@@ -132,6 +130,7 @@ func _draw():
     // A MOUSE_FILTER_PASS child normally bubbles to its ancestor Control
     // (pat-0q2kx.18). `accept_event()` in the child's handler must end the walk,
     // so the parent's `_gui_input` never runs.
+    gdobject::class_db::register_2d_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let panel = tree
@@ -180,6 +179,7 @@ func _gui_input(event):
     );
 
     // -- (3) `str(obj)` consults `_to_string` --------------------------------
+    gdobject::class_db::register_2d_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let target = tree.add_child(root, Node::new("Target", "Node2D")).unwrap();
@@ -216,6 +216,7 @@ func _ready():
 /// can only be reached through the interpreter, not the scene accessor.
 #[test]
 fn to_string_override_answers_for_self_and_print() {
+    gdobject::class_db::register_2d_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let node = tree.add_child(root, Node::new("Thing", "Node2D")).unwrap();
@@ -243,6 +244,7 @@ func _to_string():
 /// the override must not be invented for every object.
 #[test]
 fn without_the_override_str_keeps_the_default_form() {
+    gdobject::class_db::register_2d_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let node = tree.add_child(root, Node::new("Plain", "Node2D")).unwrap();
@@ -271,6 +273,7 @@ func _ready():
 /// assertion.
 #[test]
 fn draw_runs_once_per_queued_redraw() {
+    gdobject::class_db::register_2d_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let node = tree
@@ -305,7 +308,7 @@ func _draw():
     assert!(
         rendered_commands(&tree)
             .iter()
-            .any(|c| matches!(c, DrawCommand::DrawCircle { .. })),
+            .any(|i| matches!(i.kind, Render2DKind::Polygon { .. })),
         "commands from the previous redraw must persist across frames"
     );
 
@@ -323,6 +326,7 @@ func _draw():
 /// draws nothing, and must not leak into the next redraw's command list.
 #[test]
 fn draw_calls_outside_draw_are_dropped() {
+    gdobject::class_db::register_2d_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let node = tree
@@ -351,6 +355,7 @@ func _process(delta):
 /// than replaces: a `_draw` on a `ColorRect` overlays the rect's own fill.
 #[test]
 fn custom_draw_appends_to_the_nodes_own_drawing() {
+    gdobject::class_db::register_2d_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let mut rect = Node::new("Backdrop", "ColorRect");
@@ -378,12 +383,12 @@ func _draw():
     assert!(
         commands
             .iter()
-            .any(|c| matches!(c, DrawCommand::DrawLine { width, .. } if *width == 2.0)),
+            .any(|i| matches!(&i.kind, Render2DKind::Line { width, .. } if *width == 2.0)),
         "draw_line must carry its width through, got {commands:?}"
     );
     assert!(
         commands.iter().any(
-            |c| matches!(c, DrawCommand::DrawString { text, font_size, .. } if text == "hi" && *font_size == 24)
+            |i| matches!(&i.kind, Render2DKind::Text { text, font_size, .. } if text == "hi" && *font_size == 24)
         ),
         "draw_string must carry its text and font_size through, got {commands:?}"
     );
@@ -395,6 +400,7 @@ func _draw():
 /// must NOT be routed through the virtuals.
 #[test]
 fn get_and_set_virtuals_back_dynamic_properties() {
+    gdobject::class_db::register_2d_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let holder = tree.add_child(root, Node::new("Holder", "Node2D")).unwrap();
@@ -463,6 +469,7 @@ func _ready():
 /// script publishes dynamic properties to reflection and the inspector.
 #[test]
 fn get_property_list_merges_the_script_virtual() {
+    gdobject::class_db::register_2d_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let holder = tree.add_child(root, Node::new("Holder", "Node2D")).unwrap();

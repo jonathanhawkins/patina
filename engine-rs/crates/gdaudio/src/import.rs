@@ -48,6 +48,13 @@ pub enum AudioFormat {
     Wav,
     /// OGG Vorbis.
     OggVorbis,
+    /// MPEG-1/2 Audio Layer III (pat-s3rrv.47).
+    ///
+    /// `decode::decode_mp3` has existed since pat-p0s82.13, but nothing could
+    /// reach it: this enum had no MP3 variant, so `from_extension` rejected
+    /// `.mp3` and `decode_auto` sniffed only RIFF/OggS. An `.mp3` named by any
+    /// scene decoded to nothing and the player stayed silent.
+    Mp3,
 }
 
 impl AudioFormat {
@@ -56,6 +63,7 @@ impl AudioFormat {
         match ext.to_ascii_lowercase().as_str() {
             "wav" => Some(AudioFormat::Wav),
             "ogg" => Some(AudioFormat::OggVorbis),
+            "mp3" => Some(AudioFormat::Mp3),
             _ => None,
         }
     }
@@ -69,6 +77,14 @@ impl AudioFormat {
             Some(AudioFormat::Wav)
         } else if &data[..4] == b"OggS" {
             Some(AudioFormat::OggVorbis)
+        } else if crate::decode::is_mp3(data) {
+            // Checked LAST, and deliberately so: MP3 has no container magic,
+            // only an `ID3` tag or an 11-bit frame sync, which is loose enough
+            // to match arbitrary bytes. Running it after the two exact magics
+            // means no WAV or OGG can be captured by it, and the worst case for
+            // a non-audio file is a decode error naming MP3 instead of a
+            // detection failure — strictly more information than `None`.
+            Some(AudioFormat::Mp3)
         } else {
             None
         }
@@ -234,6 +250,7 @@ pub fn decode_audio_data(data: &[u8], format: AudioFormat) -> Result<AudioBuffer
     match format {
         AudioFormat::Wav => decode::decode_wav(data),
         AudioFormat::OggVorbis => decode::decode_ogg(data),
+        AudioFormat::Mp3 => decode::decode_mp3(data),
     }
 }
 
@@ -299,7 +316,10 @@ mod tests {
             AudioFormat::from_extension("OGG"),
             Some(AudioFormat::OggVorbis)
         );
-        assert_eq!(AudioFormat::from_extension("mp3"), None);
+        // pat-s3rrv.47 flipped this: `.mp3` used to be rejected here, which is
+        // what made `decode_mp3` unreachable from every scene.
+        assert_eq!(AudioFormat::from_extension("mp3"), Some(AudioFormat::Mp3));
+        assert_eq!(AudioFormat::from_extension("MP3"), Some(AudioFormat::Mp3));
         assert_eq!(AudioFormat::from_extension(""), None);
     }
 
@@ -446,13 +466,67 @@ mod tests {
     #[test]
     fn loader_unsupported_extension_returns_error() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("music.mp3");
+        // ⚠️ NOT `.mp3` any more. This test used to use one, back when `.mp3`
+        // was the stock example of an extension the loader rejected; since
+        // pat-s3rrv.47 it resolves to `AudioFormat::Mp3` and the failure moves
+        // to the decoder, so the case now needs a genuinely unknown extension
+        // to still be testing detection.
+        let path = dir.path().join("music.xyz");
         // Write RIFF-less data so header detection also fails.
         std::fs::write(&path, b"NOT_AUDIO_DATA_HERE").unwrap();
 
         let mut loader = AudioStreamLoader::new();
         let err = loader.load_file(&path).unwrap_err();
         assert!(matches!(err, ImportError::UnsupportedFormat(_)));
+    }
+
+    /// An `.mp3` whose bytes are not MP3 fails in the DECODER, not in format
+    /// detection — the distinction that proves `.mp3` is now a recognised
+    /// format rather than an unknown one (pat-s3rrv.47).
+    #[test]
+    fn loader_mp3_extension_is_recognised_and_fails_in_the_decoder() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("music.mp3");
+        std::fs::write(&path, b"NOT_AUDIO_DATA_HERE").unwrap();
+
+        let mut loader = AudioStreamLoader::new();
+        let err = loader.load_file(&path).unwrap_err();
+        assert!(
+            matches!(err, ImportError::Decode { .. }),
+            "an .mp3 must reach the decoder; got {err:?}. `UnsupportedFormat`              here means the extension is still being rejected up front."
+        );
+    }
+
+    /// The whole point of the bead: an `.mp3` file decodes through the loader
+    /// into real samples. Uses the `PATMP3` fixture form `decode_mp3` already
+    /// supports, so this needs no MP3 encoder in the test tree.
+    #[test]
+    fn loader_decodes_an_mp3_file_into_samples() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("tone.mp3");
+        std::fs::write(&path, make_patmp3_bytes(44100, 1, &[0.0, 0.5, -0.5, 0.25])).unwrap();
+
+        let mut loader = AudioStreamLoader::new();
+        let import = loader.load_file(&path).unwrap();
+        assert_eq!(import.info.format, AudioFormat::Mp3);
+        assert_eq!(import.info.sample_rate, 44100);
+        assert_eq!(import.buffer.samples.len(), 4);
+        assert!(
+            import.buffer.samples.iter().any(|s| *s != 0.0),
+            "the decoded buffer must carry non-zero samples",
+        );
+    }
+
+    /// Builds the `PATMP3` fixture container `decode_mp3` accepts:
+    /// `PATMP3` + u32 sample_rate + u16 channels + f32 samples.
+    fn make_patmp3_bytes(sample_rate: u32, channels: u16, samples: &[f32]) -> Vec<u8> {
+        let mut out = b"PATMP3".to_vec();
+        out.extend_from_slice(&sample_rate.to_le_bytes());
+        out.extend_from_slice(&channels.to_le_bytes());
+        for s in samples {
+            out.extend_from_slice(&s.to_le_bytes());
+        }
+        out
     }
 
     #[test]

@@ -87,10 +87,11 @@ fn world_from(scene_src: &str) -> (PhysicsServer, SceneTree, gdscene::NodeId) {
         .expect("Platform node");
 
     let mut server = PhysicsServer::new();
-    // `sync_to_physics` only walks bodies that are *already* registered — it
-    // iterates `node_to_body`, which is empty until `register_bodies` fills it.
-    // Without this the world stays empty and `body_for_node` returns `None`,
-    // which is how this helper had been failing (pat-0q2kx.115).
+    // Registers the scene's bodies before the sync. This helper had been failing
+    // without it (pat-0q2kx.115): `sync_to_physics` used to only walk bodies
+    // *already* in `node_to_body`, so the world stayed empty and `body_for_node`
+    // returned `None`. It re-scans the tree itself since pat-s3rrv.25; the
+    // explicit call is kept so the registration is pinned to this line.
     server.register_bodies(&tree);
     server.sync_to_physics(&mut tree);
     (server, tree, platform)

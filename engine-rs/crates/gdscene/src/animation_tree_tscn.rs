@@ -33,10 +33,10 @@ use std::collections::HashMap;
 use gdcore::math::Vector2;
 use gdvariant::Variant;
 
-use crate::animation::Animation;
+use crate::animation::{Animation, LoopMode};
 use crate::animation_tree::{
-    AnimationNode, AnimationTree, BlendSpace1D, BlendSpace2D, OneShot, StateMachine,
-    StateTransition,
+    AnimationLeafOptions, AnimationNode, AnimationPlayMode, AnimationTree, BlendSpace1D,
+    BlendSpace2D, BlendSpaceBlendMode, OneShot, OneShotMixMode, StateMachine, StateTransition,
 };
 use crate::node::NodeId;
 use crate::packed_scene::PackedScene;
@@ -196,9 +196,33 @@ pub fn build_animation_node(
     match class.as_str() {
         "AnimationNodeAnimation" => {
             let name = string_of(props.get("animation"))?;
+            // Godot's leaf options (pat-s3rrv.45): the play direction and the
+            // custom timeline. Every one of these was dropped at load, so a
+            // `play_mode = 1` leaf played forwards and a custom timeline was
+            // ignored entirely.
+            let mut opts = AnimationLeafOptions::default();
+            if let Some(v) = int_of(props.get("play_mode")) {
+                opts.play_mode = AnimationPlayMode::from_godot_int(v);
+            }
+            if let Some(Variant::Bool(b)) = props.get("use_custom_timeline") {
+                opts.use_custom_timeline = *b;
+            }
+            if let Some(v) = float_of(props.get("timeline_length")) {
+                opts.timeline_length = v as f64;
+            }
+            if let Some(Variant::Bool(b)) = props.get("stretch_time_scale") {
+                opts.stretch_time_scale = *b;
+            }
+            if let Some(v) = float_of(props.get("start_offset")) {
+                opts.start_offset = v as f64;
+            }
+            if let Some(v) = int_of(props.get("loop_mode")) {
+                opts.loop_mode = loop_mode_from_godot_int(v);
+            }
             Some(AnimationNode::Animation {
                 name,
                 position: 0.0,
+                opts,
             })
         }
         "AnimationNodeStateMachine" => build_state_machine(scene, props, animations),
@@ -313,6 +337,27 @@ fn build_blend_space_1d(
     if space.points().is_empty() {
         return None;
     }
+
+    // The 1D parameter surface (pat-s3rrv.45), previously dropped exactly as
+    // the 2D one was. `blend_mode` is the one that changes what a frame
+    // samples; the bounds and the grid step are editor properties that must
+    // still survive the load.
+    if let Some(v) = float_of(props.get("min_space")) {
+        space.min_space = v;
+    }
+    if let Some(v) = float_of(props.get("max_space")) {
+        space.max_space = v;
+    }
+    if let Some(v) = float_of(props.get("snap")) {
+        space.snap = v;
+    }
+    if let Some(Variant::Bool(b)) = props.get("sync") {
+        space.sync = *b;
+    }
+    if let Some(v) = int_of(props.get("blend_mode")) {
+        space.blend_mode = BlendSpaceBlendMode::from_godot_int(v);
+    }
+
     Some(AnimationNode::BlendSpace1D(space))
 }
 
@@ -332,6 +377,36 @@ fn build_blend_space_2d(
     if space.points().is_empty() {
         return None;
     }
+
+    // The blend-space parameter surface (pat-s3rrv.45). Each of these was
+    // previously dropped, which is why a 9-point space snapped between clips:
+    // without `triangles` there was nothing to blend barycentrically over.
+    if let Some(Variant::Vector2(v)) = props.get("min_space") {
+        space.min_space = *v;
+    }
+    if let Some(Variant::Vector2(v)) = props.get("max_space") {
+        space.max_space = *v;
+    }
+    if let Some(Variant::Vector2(v)) = props.get("snap") {
+        space.snap = *v;
+    }
+    if let Some(Variant::Bool(b)) = props.get("auto_triangles") {
+        space.auto_triangles = *b;
+    }
+    if let Some(Variant::Bool(b)) = props.get("sync") {
+        space.sync = *b;
+    }
+    if let Some(v) = int_of(props.get("blend_mode")) {
+        space.blend_mode = BlendSpaceBlendMode::from_godot_int(v);
+    }
+    // `triangles` is a FLAT PackedInt32Array of point-index triples, not a list
+    // of triples — a trailing partial group is ignored rather than read past.
+    if let Some(tri) = props.get("triangles") {
+        for chunk in packed_ints(tri).chunks_exact(3) {
+            space.add_triangle(chunk[0] as usize, chunk[1] as usize, chunk[2] as usize);
+        }
+    }
+
     Some(AnimationNode::BlendSpace2D(space))
 }
 
@@ -462,14 +537,31 @@ fn build_blend_tree_node(
             let base = input(0)?;
             let shot = input(1)?;
             let hold = clip_length(&shot, animations);
-            AnimationNode::OneShot(
-                OneShot::new(base, shot)
-                    .with_fades(
-                        float_of(props.get("fadein_time")).unwrap_or(0.0) as f64,
-                        float_of(props.get("fadeout_time")).unwrap_or(0.0) as f64,
-                    )
-                    .with_shot_length(hold),
-            )
+            let mut one_shot = OneShot::new(base, shot)
+                .with_fades(
+                    float_of(props.get("fadein_time")).unwrap_or(0.0) as f64,
+                    float_of(props.get("fadeout_time")).unwrap_or(0.0) as f64,
+                )
+                .with_shot_length(hold);
+            // The rest of Godot's one-shot surface (pat-s3rrv.45). Each of
+            // these was parsed by nothing, so a scene's `mix_mode = 1` shot
+            // blended instead of adding and an `autorestart` shot fired once.
+            if let Some(v) = int_of(props.get("mix_mode")) {
+                one_shot.mix_mode = OneShotMixMode::from_godot_int(v);
+            }
+            if let Some(Variant::Bool(b)) = props.get("autorestart") {
+                one_shot.autorestart = *b;
+            }
+            if let Some(v) = float_of(props.get("autorestart_delay")) {
+                one_shot.autorestart_delay = v as f64;
+            }
+            if let Some(v) = float_of(props.get("autorestart_random_delay")) {
+                one_shot.autorestart_random_delay = v as f64;
+            }
+            if let Some(Variant::Bool(b)) = props.get("break_loop_at_end") {
+                one_shot.break_loop_at_end = *b;
+            }
+            AnimationNode::OneShot(one_shot)
         }
         // Nested containers and leaves reuse the generic conversion.
         _ => build_animation_node(scene, sub_id, animations)?,
@@ -533,6 +625,36 @@ fn float_of(value: Option<&Variant>) -> Option<f32> {
 }
 
 /// Reads an integer value (a connection's input index).
+/// Reads a flat integer sequence out of any shape Godot writes for a packed
+/// int property — `PackedInt32Array`, `PackedInt64Array`, or a plain `Array` of
+/// numbers. An unrelated Variant yields an empty list, so a malformed
+/// `triangles` entry drops the triangulation rather than panicking.
+fn packed_ints(value: &Variant) -> Vec<i64> {
+    match value {
+        Variant::PackedInt32Array(a) => a.iter().map(|i| *i as i64).collect(),
+        Variant::PackedInt64Array(a) => a.clone(),
+        Variant::Array(items) => items
+            .iter()
+            .filter_map(|v| match v {
+                Variant::Int(i) => Some(*i),
+                Variant::Float(f) => Some(*f as i64),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Godot's `Animation.LoopMode` integer (`0 = NONE, 1 = LINEAR, 2 = PINGPONG`),
+/// as an `AnimationNodeAnimation`'s custom timeline serializes it.
+fn loop_mode_from_godot_int(v: i64) -> LoopMode {
+    match v {
+        1 => LoopMode::Linear,
+        2 => LoopMode::PingPong,
+        _ => LoopMode::None,
+    }
+}
+
 fn int_of(value: Option<&Variant>) -> Option<i64> {
     match value {
         Some(Variant::Int(i)) => Some(*i),

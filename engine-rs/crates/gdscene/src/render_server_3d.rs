@@ -17,7 +17,8 @@ use gdserver3d::instance::{
 use gdserver3d::label3d::Label3D;
 use gdserver3d::light::{Light3D, Light3DId, LightType, OmniShadowMode};
 use gdserver3d::material::{
-    Material3D, ShadingMode, StandardMaterial3D, TextureImage, TextureSlot,
+    CullMode, DepthDrawMode, Material3D, ShadingMode, StandardMaterial3D, TextureImage,
+    TextureSlot, Transparency,
 };
 use gdserver3d::mesh::{Mesh3D, PrimitiveType};
 use gdserver3d::reflection_probe::ReflectionProbeId;
@@ -2137,6 +2138,23 @@ pub fn standard_material_from_props(props: &HashMap<String, Variant>) -> Standar
             _ => ShadingMode::Phong,
         },
         double_sided: matches!(props.get("cull_mode"), Some(Variant::Int(2))),
+        // pat-s3rrv.30: these four were never read, so a `.tscn` authoring
+        // `transparency = 1` (Alpha) or `cull_mode = 1` (Front) rendered exactly
+        // as if it had said nothing at all. `cull_mode` WAS read, but only to
+        // answer "is it 2?" — which cannot express Front-culling.
+        transparency: match props.get("transparency") {
+            Some(Variant::Int(v)) => Transparency::from_godot_int(*v),
+            _ => Transparency::Disabled,
+        },
+        alpha_scissor_threshold: number("alpha_scissor_threshold", 0.5),
+        cull_mode: match props.get("cull_mode") {
+            Some(Variant::Int(v)) => CullMode::from_godot_int(*v),
+            _ => CullMode::Back,
+        },
+        depth_draw_mode: match props.get("depth_draw_mode") {
+            Some(Variant::Int(v)) => DepthDrawMode::from_godot_int(*v),
+            _ => DepthDrawMode::OpaqueOnly,
+        },
     }
 }
 

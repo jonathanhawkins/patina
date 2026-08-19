@@ -17,15 +17,156 @@ use std::collections::HashMap;
 use gdcore::math::Vector2;
 use gdvariant::Variant;
 
-use crate::animation::{interpolate_variant, Animation};
+use crate::animation::{interpolate_variant, Animation, LoopMode};
 use crate::node::NodeId;
 use crate::scene_tree::SceneTree;
+
+/// Direction an [`AnimationNode::Animation`] leaf plays in
+/// (Godot `AnimationNodeAnimation.PlayMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnimationPlayMode {
+    /// `PLAY_MODE_FORWARD` (0). Godot's default.
+    #[default]
+    Forward,
+    /// `PLAY_MODE_BACKWARD` (1): the clip runs from its end to its start.
+    Backward,
+}
+
+impl AnimationPlayMode {
+    /// Godot's `PlayMode` integer (`0 = FORWARD, 1 = BACKWARD`).
+    pub fn from_godot_int(v: i64) -> Self {
+        match v {
+            1 => Self::Backward,
+            _ => Self::Forward,
+        }
+    }
+}
+
+/// The `AnimationNodeAnimation` options an
+/// [`AnimationNode::Animation`] leaf carries (pat-s3rrv.45).
+///
+/// Godot lets a leaf play a *window* of its clip on its own timeline rather
+/// than the whole clip end to end: `start_offset` moves the window's start,
+/// `timeline_length` sets its length, `loop_mode` decides what happens at the
+/// end of it, and `stretch_time_scale` makes the whole clip fit that length
+/// instead of playing a slice of it
+/// (`upstream/godot/scene/animation/animation_blend_tree.cpp`,
+/// `doc/classes/AnimationNodeAnimation.xml`). None of it existed here: the leaf
+/// held only a name and a position, so every one of these properties was
+/// dropped at load.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AnimationLeafOptions {
+    /// Play the clip forward or backward.
+    pub play_mode: AnimationPlayMode,
+    /// Use the custom timeline below instead of the clip's own.
+    pub use_custom_timeline: bool,
+    /// Length of the custom timeline, in seconds.
+    pub timeline_length: f64,
+    /// Fit the whole clip into `timeline_length` rather than playing that many
+    /// seconds of it.
+    pub stretch_time_scale: bool,
+    /// Where in the clip the custom timeline starts, in seconds.
+    pub start_offset: f64,
+    /// What happens at the end of the custom timeline.
+    pub loop_mode: LoopMode,
+}
+
+impl AnimationLeafOptions {
+    /// Whether the custom timeline is in force. A zero or negative
+    /// `timeline_length` is not a timeline, so the clip's own is used — Godot
+    /// clamps the property to a positive value in its setter.
+    fn custom(&self) -> bool {
+        self.use_custom_timeline && self.timeline_length > 0.0
+    }
+
+    /// Playback rate multiplier. With `stretch_time_scale` the clip is squeezed
+    /// or stretched so all of it fits `timeline_length`; otherwise it plays at
+    /// its authored rate and the timeline just bounds the window.
+    fn time_scale(&self, clip_length: f64) -> f64 {
+        if self.custom() && self.stretch_time_scale && clip_length > 0.0 {
+            clip_length / self.timeline_length
+        } else {
+            1.0
+        }
+    }
+
+    /// Length of the playable window, in the CLIP's time base. Without a custom
+    /// timeline that is the whole clip; with one it is `timeline_length`
+    /// scaled by [`time_scale`](Self::time_scale), so a stretched timeline
+    /// spans the entire clip and an unstretched one spans that many seconds of
+    /// it. Never longer than what remains after `start_offset`.
+    fn window(&self, clip_length: f64) -> f64 {
+        if !self.custom() {
+            return clip_length;
+        }
+        let requested = self.timeline_length * self.time_scale(clip_length);
+        let remaining = (clip_length - self.start_offset).max(0.0);
+        requested.min(remaining).max(0.0)
+    }
+
+    /// Advances `position` by `delta` and applies the window's end behaviour.
+    ///
+    /// `position` is *progress through the window*, always counting up — the
+    /// play direction is applied when sampling
+    /// ([`sample_time`](Self::sample_time)), not here. Negating both would
+    /// cancel out and a backward leaf would play forwards.
+    ///
+    /// Without a custom timeline this is the pre-existing `rem_euclid` wrap, so
+    /// a default leaf behaves exactly as before.
+    fn advance(&self, position: f64, delta: f64, clip_length: f64) -> f64 {
+        let window = self.window(clip_length).max(f64::EPSILON);
+        let raw = position + delta * self.time_scale(clip_length);
+        if !self.custom() {
+            return raw.rem_euclid(window);
+        }
+        match self.loop_mode {
+            LoopMode::Linear => raw.rem_euclid(window),
+            // Hold the far end: a non-looping custom timeline stops there.
+            LoopMode::None => raw.clamp(0.0, window),
+            LoopMode::PingPong => {
+                let span = window * 2.0;
+                let folded = raw.rem_euclid(span);
+                if folded <= window {
+                    folded
+                } else {
+                    span - folded
+                }
+            }
+        }
+    }
+
+    /// The clip time to sample for `position` — the window offset plus
+    /// `start_offset`, and mirrored for a backward leaf so it starts at the end
+    /// of the window rather than the beginning.
+    fn sample_time(&self, position: f64, clip_length: f64) -> f64 {
+        let window = self.window(clip_length).max(f64::EPSILON);
+        let within = position.clamp(0.0, window);
+        let from_start = match self.play_mode {
+            AnimationPlayMode::Forward => within,
+            AnimationPlayMode::Backward => window - within,
+        };
+        let t = self.start_offset + from_start;
+        if clip_length > 0.0 {
+            t.clamp(0.0, clip_length)
+        } else {
+            t
+        }
+    }
+}
 
 /// A node in the animation graph.
 #[derive(Debug, Clone)]
 pub enum AnimationNode {
     /// Plays a single animation by name.
-    Animation { name: String, position: f64 },
+    ///
+    /// `opts` is Godot's `AnimationNodeAnimation` surface — play direction and
+    /// the custom timeline. It defaults to "play the clip forward, on its own
+    /// timeline", which is what every leaf did before pat-s3rrv.45.
+    Animation {
+        name: String,
+        position: f64,
+        opts: AnimationLeafOptions,
+    },
     /// Blends two child nodes by a scalar weight in `[0,1]`.
     Blend2 {
         a: Box<AnimationNode>,
@@ -120,11 +261,39 @@ pub struct BlendSpace1D {
     /// Shared playback clock (seconds), advanced by the tree each frame so the
     /// blended clips play over time rather than being frozen at t=0.
     pub elapsed: f64,
+    /// Lower bound of the coordinate space (Godot default `-1`). Editor
+    /// bounds: `_process`
+    /// (upstream/godot/scene/animation/animation_blend_space_1d.cpp:293-410)
+    /// never clamps `blend_position` — a position past the last point simply
+    /// plays that point at full weight, which the sampler already does.
+    pub min_space: f32,
+    /// Upper bound of the coordinate space (Godot default `1`). Editor bounds,
+    /// as with [`BlendSpace1D::min_space`].
+    pub max_space: f32,
+    /// The editor grid's quantisation step (Godot default `0.1`). Not applied
+    /// to `blend_position` at runtime — the property is
+    /// `PROPERTY_USAGE_NO_EDITOR` upstream (animation_blend_space_1d.cpp:118).
+    pub snap: f32,
+    /// INTERPOLATED blends the two bracketing points; DISCRETE and CARRY each
+    /// pick the single nearest one, CARRY keeping the shared playhead
+    /// (animation_blend_space_1d.cpp:363-410).
+    pub blend_mode: BlendSpaceBlendMode,
+    /// Godot's `sync`: keep unselected inputs advancing. Patina drives every
+    /// point off one shared clock (`elapsed`), so unselected clips never fall
+    /// behind and this is stored for round-tripping rather than acted on.
+    pub sync: bool,
 }
 
 impl BlendSpace1D {
+    /// A blend space with Godot's own property defaults (`-1`..`1`, snap
+    /// `0.1`). `Default::default()` would give a zero-width space.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            min_space: -1.0,
+            max_space: 1.0,
+            snap: 0.1,
+            ..Default::default()
+        }
     }
 
     pub fn add_point(&mut self, position: f32, animation: impl Into<String>) {
@@ -138,8 +307,38 @@ impl BlendSpace1D {
     }
 }
 
-/// A 2D blend space — uses bilinear interpolation over a grid-aligned set
-/// of four points, or nearest-neighbor for any other configuration.
+/// How a blend space combines its points (Godot `AnimationNodeBlendSpace2D.BlendMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlendSpaceBlendMode {
+    /// Barycentric (2D) / linear (1D) mix of the surrounding points.
+    #[default]
+    Interpolated,
+    /// Snap to the single nearest point, restarting it.
+    Discrete,
+    /// Snap to the single nearest point but keep the shared playhead, so
+    /// switching direction does not restart the clip.
+    Carry,
+}
+
+impl BlendSpaceBlendMode {
+    /// Godot's `BlendMode` integer (`0 = INTERPOLATED, 1 = DISCRETE, 2 = CARRY`).
+    pub fn from_godot_int(v: i64) -> Self {
+        match v {
+            1 => Self::Discrete,
+            2 => Self::Carry,
+            _ => Self::Interpolated,
+        }
+    }
+}
+
+/// A 2D blend space (pat-s3rrv.45).
+///
+/// Points are triangulated — from the serialized `triangles` list, or
+/// automatically when that is absent — and the position's containing triangle
+/// blends its three clips by barycentric weight, matching
+/// `upstream/godot/scene/animation/animation_blend_space_2d.cpp` `_blend_node`.
+/// A position outside the hull projects onto the nearest triangle edge rather
+/// than snapping to an arbitrary nearest point.
 #[derive(Debug, Clone, Default)]
 pub struct BlendSpace2D {
     points: Vec<(Vector2, String)>,
@@ -147,19 +346,133 @@ pub struct BlendSpace2D {
     /// Shared playback clock (seconds), advanced by the tree each frame so the
     /// blended clips play over time rather than being frozen at t=0.
     pub elapsed: f64,
+    /// Explicit triangulation as index triples, from the `.tscn` `triangles`
+    /// `PackedInt32Array`. Empty means "triangulate on demand".
+    triangles: Vec<[usize; 3]>,
+    /// Godot's `auto_triangles`: derive the triangulation when none was
+    /// serialized. Defaults to Godot's own default of `true`.
+    pub auto_triangles: bool,
+    /// Lower corner of the coordinate space (Godot default `(-1, -1)`).
+    /// Editor bounds — see [`BlendSpace2D::effective_position`].
+    pub min_space: Vector2,
+    /// Upper corner of the coordinate space (Godot default `(1, 1)`).
+    /// Editor bounds — see [`BlendSpace2D::effective_position`].
+    pub max_space: Vector2,
+    /// The editor grid's quantisation step (Godot default `(0.1, 0.1)`).
+    /// Not applied to `blend_position` at runtime — see
+    /// [`BlendSpace2D::effective_position`].
+    pub snap: Vector2,
+    /// INTERPOLATED / DISCRETE / CARRY.
+    pub blend_mode: BlendSpaceBlendMode,
+    /// Godot's `sync`: keep unselected inputs advancing. Patina drives every
+    /// point off one shared clock (`elapsed`), so unselected clips never fall
+    /// behind and this is stored for round-tripping rather than acted on.
+    pub sync: bool,
 }
 
 impl BlendSpace2D {
+    /// A blend space with Godot's own property defaults.
+    ///
+    /// `Default::default()` cannot be used directly here: it would give
+    /// `auto_triangles = false`, so a hand-built space would never triangulate
+    /// and every sample would fall back to a two-point blend. Godot's defaults
+    /// are `auto_triangles` on and `(-1,-1)`..`(1,1)` bounds.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            auto_triangles: true,
+            min_space: Vector2::new(-1.0, -1.0),
+            max_space: Vector2::new(1.0, 1.0),
+            ..Default::default()
+        }
     }
 
     pub fn add_point(&mut self, position: Vector2, animation: impl Into<String>) {
         self.points.push((position, animation.into()));
     }
 
+    /// Adds an explicit triangle by point index (the `.tscn` `triangles` form).
+    ///
+    /// Out-of-range indices are rejected rather than stored: a stale triangle
+    /// list referring to a deleted point would otherwise panic at sample time.
+    pub fn add_triangle(&mut self, a: usize, b: usize, c: usize) -> bool {
+        let n = self.points.len();
+        if a >= n || b >= n || c >= n || a == b || b == c || a == c {
+            return false;
+        }
+        self.triangles.push([a, b, c]);
+        true
+    }
+
+    /// The explicit triangles, if any were serialized.
+    pub fn triangles(&self) -> &[[usize; 3]] {
+        &self.triangles
+    }
+
+    /// The position the blend actually samples at.
+    ///
+    /// ⚠️ Deliberately just `blend_position`. `snap`, `min_space` and
+    /// `max_space` are **editor-only** in Godot: `_blend_node`
+    /// (upstream/godot/scene/animation/animation_blend_space_2d.cpp:454-490)
+    /// reads `get_parameter(blend_position)` and neither quantises nor clamps
+    /// it, `snap` is declared `PROPERTY_USAGE_NO_EDITOR` (:711) for the editor
+    /// grid, and `min_space`/`max_space` are only validated against each other
+    /// in their setters (:248-272). An earlier pass through this bead snapped
+    /// and clamped here, which would quantise every real scene that sets
+    /// `snap` — a parity bug, not a feature.
+    ///
+    /// A position outside the point cloud is still bounded, but by the geometry
+    /// rather than by the box: [`closest_triangle_on_hull`] projects it onto the
+    /// nearest triangle edge, which is what Godot does at
+    /// animation_blend_space_2d.cpp:485.
+    ///
+    /// The three properties are still parsed and stored, because they are real
+    /// serialized properties that must survive a load/save round trip and be
+    /// readable from a script.
+    pub fn effective_position(&self) -> Vector2 {
+        self.blend_position
+    }
+
+    /// The triangulation to blend over: the serialized one when present,
+    /// otherwise a computed one when `auto_triangles` is set.
+    ///
+    /// Godot's editor writes `triangles` even with `auto_triangles` on, so the
+    /// explicit list wins — recomputing would risk disagreeing with the
+    /// triangulation the scene was authored against.
+    pub fn effective_triangles(&self) -> Vec<[usize; 3]> {
+        if !self.triangles.is_empty() {
+            return self.triangles.clone();
+        }
+        if !self.auto_triangles {
+            return Vec::new();
+        }
+        let positions: Vec<Vector2> = self.points.iter().map(|(p, _)| *p).collect();
+        delaunay_triangulate(&positions)
+    }
+
     pub fn points(&self) -> &[(Vector2, String)] {
         &self.points
+    }
+}
+
+/// How a [`OneShot`] combines its shot with its base
+/// (Godot `AnimationNodeOneShot.MixMode`, `animation_blend_tree.h`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OneShotMixMode {
+    /// `MIX_MODE_BLEND` (0): crossfade between base and shot. Godot's default.
+    #[default]
+    Blend,
+    /// `MIX_MODE_ADD` (1): add the shot on top of the base, so a hit reaction
+    /// layers over a walk rather than replacing it.
+    Add,
+}
+
+impl OneShotMixMode {
+    /// Godot's `MixMode` integer (`0 = BLEND, 1 = ADD`).
+    pub fn from_godot_int(v: i64) -> Self {
+        match v {
+            1 => Self::Add,
+            _ => Self::Blend,
+        }
     }
 }
 
@@ -174,6 +487,24 @@ pub struct OneShot {
     pub trigger_param: String,
     pub elapsed: f64,
     pub active: bool,
+    /// BLEND (crossfade) or ADD (layer on top) — Godot `mix_mode`.
+    pub mix_mode: OneShotMixMode,
+    /// Godot `autorestart`: fire again on its own once the shot has finished.
+    pub autorestart: bool,
+    /// Seconds to wait before an `autorestart` fires again.
+    pub autorestart_delay: f64,
+    /// Extra random seconds added to `autorestart_delay`, drawn per restart
+    /// (Godot `autorestart_random_delay`).
+    pub autorestart_random_delay: f64,
+    /// Godot `break_loop_at_end`: let a looping shot clip finish its current
+    /// loop instead of being cut off at `shot_length`.
+    pub break_loop_at_end: bool,
+    /// The hold phase actually in force. Equals `shot_length` unless
+    /// `break_loop_at_end` rounds it up to a whole number of shot-clip loops;
+    /// recomputed each advance, where the clip library is in hand.
+    hold: f64,
+    /// Countdown to the next `autorestart`, armed when the shot ends.
+    restart_in: Option<f64>,
     prev_trigger: bool,
     /// Last `parameters/<name>/request` value seen through a wrapping
     /// [`AnimationNode::Named`], so a request only acts on its rising edge
@@ -359,6 +690,13 @@ impl OneShot {
             trigger_param: String::new(),
             elapsed: 0.0,
             active: false,
+            mix_mode: OneShotMixMode::default(),
+            autorestart: false,
+            autorestart_delay: 1.0,
+            autorestart_random_delay: 0.0,
+            break_loop_at_end: false,
+            hold: 0.0,
+            restart_in: None,
             prev_trigger: false,
             prev_request: ONE_SHOT_REQUEST_NONE,
         }
@@ -369,6 +707,9 @@ impl OneShot {
         reset_node_time(&mut self.shot);
         self.active = true;
         self.elapsed = 0.0;
+        // An explicit fire cancels a pending autorestart rather than stacking
+        // with it — otherwise the shot would restart again right after this one.
+        self.restart_in = None;
     }
 
     /// Stops the shot immediately, leaving only `base` (Godot
@@ -376,13 +717,15 @@ impl OneShot {
     pub fn abort(&mut self) {
         self.active = false;
         self.elapsed = 0.0;
+        // Godot's abort stops the node, so a queued autorestart dies with it.
+        self.restart_in = None;
     }
 
     /// Jumps to the start of the fade-out phase (Godot
     /// `ONE_SHOT_REQUEST_FADE_OUT`). A no-op when the shot is not active.
     pub fn fade_out_now(&mut self) {
         if self.active {
-            self.elapsed = self.elapsed.max(self.fade_in + self.shot_length);
+            self.elapsed = self.elapsed.max(self.fade_in + self.hold);
         }
     }
 
@@ -394,7 +737,49 @@ impl OneShot {
 
     pub fn with_shot_length(mut self, shot_length: f64) -> Self {
         self.shot_length = shot_length.max(0.0);
+        self.hold = self.shot_length;
         self
+    }
+
+    /// Sets Godot's `mix_mode` (BLEND or ADD).
+    pub fn with_mix_mode(mut self, mode: OneShotMixMode) -> Self {
+        self.mix_mode = mode;
+        self
+    }
+
+    /// Sets Godot's `autorestart` group: whether to fire again on its own, and
+    /// after how long.
+    pub fn with_autorestart(mut self, enabled: bool, delay: f64, random_delay: f64) -> Self {
+        self.autorestart = enabled;
+        self.autorestart_delay = delay.max(0.0);
+        self.autorestart_random_delay = random_delay.max(0.0);
+        self
+    }
+
+    /// `true` while the shot is waiting out an `autorestart` delay — Godot's
+    /// `internal_active` is set for exactly this window, where the node is
+    /// still doing something but nothing is blended.
+    pub fn is_waiting_to_restart(&self) -> bool {
+        self.restart_in.is_some()
+    }
+
+    /// Ends the shot, arming an `autorestart` when one is configured.
+    fn finish(&mut self) {
+        self.active = false;
+        self.elapsed = 0.0;
+        self.restart_in = if self.autorestart {
+            // Godot draws the extra delay per restart from the global RNG
+            // (`Math::randf()`), so a run with `autorestart_random_delay = 0`
+            // is the deterministic case a test pins.
+            let jitter = if self.autorestart_random_delay > 0.0 {
+                gdcore::rng::randf_range(0.0, self.autorestart_random_delay)
+            } else {
+                0.0
+            };
+            Some(self.autorestart_delay + jitter)
+        } else {
+            None
+        };
     }
 
     pub fn with_trigger(mut self, param: impl Into<String>) -> Self {
@@ -403,7 +788,7 @@ impl OneShot {
     }
 
     pub fn total_duration(&self) -> f64 {
-        self.fade_in + self.shot_length + self.fade_out
+        self.fade_in + self.hold + self.fade_out
     }
 
     /// Blend factor applied to `shot` at the current elapsed time.
@@ -419,7 +804,7 @@ impl OneShot {
                 1.0
             };
         }
-        let hold_end = self.fade_in + self.shot_length;
+        let hold_end = self.fade_in + self.hold;
         if e < hold_end {
             return 1.0;
         }
@@ -1015,7 +1400,20 @@ impl AnimationTree {
         // blend space). Named children are handled inside `advance_node`.
         apply_named_params("", &mut root, params);
         advance_node(&mut root, delta, &self.animations, params);
+
+        // Godot's graph nodes push read-back values into the parameter map as
+        // they process — `parameters/<name>/active` is how a script asks
+        // "is that one-shot still playing?" (`animation_blend_tree.cpp`
+        // `AnimationNodeOneShot::_process` sets `active`/`internal_active`).
+        // Collected before `root` goes back so nothing borrows the tree twice,
+        // and written unconditionally: publishing only on a change would leave
+        // the parameter `Nil` for a node that never fired.
+        let mut published: Vec<(String, Variant)> = Vec::new();
+        collect_published_params("", &root, &mut published);
         self.root = Some(root);
+        for (path, value) in published {
+            self.params.insert(path, value);
+        }
     }
 
     /// Samples the current values of the graph as `(property_path, value)` pairs.
@@ -1165,6 +1563,72 @@ fn param_path(name: &str, param: &str) -> String {
     }
 }
 
+/// Gathers the parameters a graph node *publishes* back, as
+/// `(parameters/<name>/<param>, value)` pairs.
+///
+/// The read direction of [`apply_named_params`]: Godot's one-shot writes
+/// `active` (blending right now) and `internal_active` (still doing something,
+/// including waiting out an `autorestart` delay), and a script polls them.
+/// Walks the same shapes `advance_node` does, so a one-shot nested inside a
+/// blend tree publishes under its own name.
+fn collect_published_params(name: &str, node: &AnimationNode, out: &mut Vec<(String, Variant)>) {
+    match node {
+        AnimationNode::OneShot(one_shot) => {
+            out.push((param_path(name, "active"), Variant::Bool(one_shot.active)));
+            out.push((
+                param_path(name, "internal_active"),
+                Variant::Bool(one_shot.active || one_shot.is_waiting_to_restart()),
+            ));
+            collect_published_params(name, &one_shot.base, out);
+            collect_published_params(name, &one_shot.shot, out);
+        }
+        AnimationNode::Named { name, inner } => collect_published_params(name, inner, out),
+        AnimationNode::Blend2 { a, b, .. } => {
+            collect_published_params(name, a, out);
+            collect_published_params(name, b, out);
+        }
+        AnimationNode::Blend3 { a, b, c, .. } => {
+            collect_published_params(name, a, out);
+            collect_published_params(name, b, out);
+            collect_published_params(name, c, out);
+        }
+        AnimationNode::Add2 { base, add, .. } => {
+            collect_published_params(name, base, out);
+            collect_published_params(name, add, out);
+        }
+        AnimationNode::Add3 { base, neg, pos, .. } => {
+            collect_published_params(name, base, out);
+            collect_published_params(name, neg, out);
+            collect_published_params(name, pos, out);
+        }
+        AnimationNode::Sub2 { base, sub, .. } => {
+            collect_published_params(name, base, out);
+            collect_published_params(name, sub, out);
+        }
+        AnimationNode::TimeScale { child, .. } | AnimationNode::TimeSeek { child, .. } => {
+            collect_published_params(name, child, out)
+        }
+        AnimationNode::Transition(t) => {
+            for (_, input) in &t.inputs {
+                collect_published_params(name, input, out);
+            }
+        }
+        AnimationNode::BlendTree(bt) => {
+            for node in bt.nodes.values() {
+                collect_published_params(name, node, out);
+            }
+        }
+        AnimationNode::StateMachine(sm) => {
+            for state in sm.states.values() {
+                collect_published_params(name, state, out);
+            }
+        }
+        AnimationNode::Animation { .. }
+        | AnimationNode::BlendSpace1D(_)
+        | AnimationNode::BlendSpace2D(_) => {}
+    }
+}
+
 /// Copies the `parameters/<name>/...` entries addressed to a
 /// [`AnimationNode::Named`] wrapper onto the node it wraps, before that node is
 /// advanced. Mirrors how Godot's graph nodes read their own parameters.
@@ -1249,10 +1713,16 @@ fn advance_node(
     params: EvalParams<'_>,
 ) {
     match node {
-        AnimationNode::Animation { name, position } => {
+        AnimationNode::Animation {
+            name,
+            position,
+            opts,
+        } => {
             if let Some(anim) = library.get(name) {
-                let length = anim.length.max(f64::EPSILON);
-                *position = (*position + delta).rem_euclid(length);
+                // `opts` carries the play direction and the custom timeline; a
+                // default leaf still wraps at the clip's own length, which is
+                // exactly what this line used to do unconditionally.
+                *position = opts.advance(*position, delta, anim.length);
             }
         }
         AnimationNode::Blend2 { a, b, .. } => {
@@ -1630,21 +2100,54 @@ fn advance_one_shot(
     };
 
     if !one_shot.active && trigger && !one_shot.prev_trigger {
-        one_shot.active = true;
-        one_shot.elapsed = 0.0;
-        reset_node_time(&mut one_shot.shot);
+        one_shot.fire();
     }
     one_shot.prev_trigger = trigger;
+
+    // `break_loop_at_end` lets a looping shot finish the loop it is in, so the
+    // hold is rounded up to a whole number of the shot clip's lengths. Resolved
+    // here rather than in `with_shot_length` because it needs the clip library,
+    // and it is refreshed every frame so a directly-assigned `shot_length`
+    // (a public field) can never leave a stale hold behind.
+    one_shot.hold = resolved_one_shot_hold(one_shot, library);
 
     advance_node(&mut one_shot.base, delta, library, params);
     if one_shot.active {
         one_shot.elapsed += delta;
         advance_node(&mut one_shot.shot, delta, library, params);
         if one_shot.elapsed >= one_shot.total_duration() {
-            one_shot.active = false;
-            one_shot.elapsed = 0.0;
+            one_shot.finish();
+        }
+    } else if let Some(remaining) = one_shot.restart_in {
+        // Godot's autorestart: the node stays "internally active" through the
+        // delay, then fires itself again.
+        let left = remaining - delta;
+        if left <= 0.0 {
+            one_shot.fire();
+        } else {
+            one_shot.restart_in = Some(left);
         }
     }
+}
+
+/// The hold phase a one-shot should use: its configured `shot_length`, or —
+/// with `break_loop_at_end` — that length rounded up to a whole number of the
+/// shot clip's loops, so the clip is never cut mid-loop.
+fn resolved_one_shot_hold(one_shot: &OneShot, library: &HashMap<String, Animation>) -> f64 {
+    if !one_shot.break_loop_at_end {
+        return one_shot.shot_length;
+    }
+    let Some(name) = node_clip_name(&one_shot.shot) else {
+        return one_shot.shot_length;
+    };
+    let Some(anim) = library.get(name) else {
+        return one_shot.shot_length;
+    };
+    if anim.length <= 0.0 {
+        return one_shot.shot_length;
+    }
+    let loops = (one_shot.shot_length / anim.length).ceil().max(1.0);
+    loops * anim.length
 }
 
 fn sample_node(
@@ -1652,8 +2155,12 @@ fn sample_node(
     library: &HashMap<String, Animation>,
 ) -> Vec<(TrackKey, Variant)> {
     match node {
-        AnimationNode::Animation { name, position } => match library.get(name) {
-            Some(anim) => sample_clip_targeted(anim, *position),
+        AnimationNode::Animation {
+            name,
+            position,
+            opts,
+        } => match library.get(name) {
+            Some(anim) => sample_clip_targeted(anim, opts.sample_time(*position, anim.length)),
             None => Vec::new(),
         },
         AnimationNode::Blend2 { a, b, weight } => {
@@ -1680,7 +2187,13 @@ fn sample_node(
                 return base;
             }
             let shot = sample_node(&one_shot.shot, library);
-            blend_value_lists(&base, &shot, one_shot.blend_factor())
+            match one_shot.mix_mode {
+                // MIX_MODE_BLEND crossfades; MIX_MODE_ADD layers the shot on
+                // top at the same weight, which is what makes a hit reaction
+                // read over a walk instead of replacing it.
+                OneShotMixMode::Blend => blend_value_lists(&base, &shot, one_shot.blend_factor()),
+                OneShotMixMode::Add => add_value_lists(&base, &shot, one_shot.blend_factor(), 1.0),
+            }
         }
         AnimationNode::BlendSpace1D(space) => sample_blend_space_1d(space, library),
         AnimationNode::BlendSpace2D(space) => sample_blend_space_2d(space, library),
@@ -1766,7 +2279,32 @@ fn sample_blend_space_1d(
     }
     let x = space.blend_position;
 
-    // Clamp to ends — the single active clip still plays over time.
+    // DISCRETE / CARRY pick the single nearest point instead of blending;
+    // CARRY keeps the shared playhead so turning around does not restart the
+    // clip (animation_blend_space_1d.cpp:363-410).
+    if space.blend_mode != BlendSpaceBlendMode::Interpolated {
+        let time = match space.blend_mode {
+            BlendSpaceBlendMode::Carry => space.elapsed,
+            _ => 0.0,
+        };
+        let nearest = space
+            .points
+            .iter()
+            .min_by(|a, b| {
+                (a.0 - x)
+                    .abs()
+                    .partial_cmp(&(b.0 - x).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(_, name)| name.clone());
+        return match nearest {
+            Some(name) => sample_clip_at(library, &name, time),
+            None => Vec::new(),
+        };
+    }
+
+    // Past either end, the nearest point plays alone — Godot's `point_lower ==
+    // -1` / `point_higher == -1` arms, not a clamp of the position itself.
     if x <= space.points[0].0 {
         return sample_clip_at(library, &space.points[0].1, space.elapsed);
     }
@@ -1804,6 +2342,108 @@ fn sample_blend_space_1d(
     Vec::new()
 }
 
+/// Delaunay-triangulates `points`, backing `auto_triangles` (pat-s3rrv.45).
+///
+/// Bowyer-Watson: start from a super-triangle enclosing every point, insert
+/// points one at a time removing any triangle whose circumcircle contains the
+/// new point, and re-fill the resulting cavity. Triangles touching a
+/// super-triangle vertex are dropped at the end.
+///
+/// Returns empty for fewer than 3 points, or when every point is collinear —
+/// both are genuinely untriangulable, and the caller blends along a segment
+/// instead.
+fn delaunay_triangulate(points: &[Vector2]) -> Vec<[usize; 3]> {
+    if points.len() < 3 {
+        return Vec::new();
+    }
+
+    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for p in points {
+        min_x = min_x.min(p.x);
+        min_y = min_y.min(p.y);
+        max_x = max_x.max(p.x);
+        max_y = max_y.max(p.y);
+    }
+    let dx = (max_x - min_x).max(1e-6);
+    let dy = (max_y - min_y).max(1e-6);
+    let span = dx.max(dy) * 100.0;
+    let mid = Vector2::new((min_x + max_x) * 0.5, (min_y + max_y) * 0.5);
+
+    // Super-triangle vertices live past the real ones, at indices n, n+1, n+2.
+    let n = points.len();
+    let mut verts: Vec<Vector2> = points.to_vec();
+    verts.push(Vector2::new(mid.x - span, mid.y - span));
+    verts.push(Vector2::new(mid.x + span, mid.y - span));
+    verts.push(Vector2::new(mid.x, mid.y + span));
+
+    let mut tris: Vec<[usize; 3]> = vec![[n, n + 1, n + 2]];
+
+    for i in 0..n {
+        let p = verts[i];
+        // Triangles whose circumcircle contains `p` are no longer Delaunay.
+        let mut cavity: Vec<[usize; 2]> = Vec::new();
+        tris.retain(|t| {
+            if in_circumcircle(p, verts[t[0]], verts[t[1]], verts[t[2]]) {
+                cavity.push([t[0], t[1]]);
+                cavity.push([t[1], t[2]]);
+                cavity.push([t[2], t[0]]);
+                false
+            } else {
+                true
+            }
+        });
+        // Only edges on the cavity BOUNDARY survive — an edge shared by two
+        // removed triangles is interior and must not be re-filled, or the
+        // result overlaps itself.
+        for a in 0..cavity.len() {
+            let e = cavity[a];
+            let shared = cavity.iter().enumerate().any(|(b, o)| {
+                b != a && ((o[0] == e[0] && o[1] == e[1]) || (o[0] == e[1] && o[1] == e[0]))
+            });
+            if !shared {
+                tris.push([e[0], e[1], i]);
+            }
+        }
+    }
+
+    tris.retain(|t| t.iter().all(|v| *v < n));
+    tris
+}
+
+/// Whether `p` lies inside the circumcircle of triangle `abc`.
+///
+/// The standard determinant test, with the sign flipped for a clockwise
+/// triangle so winding order does not invert the result.
+fn in_circumcircle(p: Vector2, a: Vector2, b: Vector2, c: Vector2) -> bool {
+    let ax = a.x - p.x;
+    let ay = a.y - p.y;
+    let bx = b.x - p.x;
+    let by = b.y - p.y;
+    let cx = c.x - p.x;
+    let cy = c.y - p.y;
+
+    let det = (ax * ax + ay * ay) * (bx * cy - cx * by) - (bx * bx + by * by) * (ax * cy - cx * ay)
+        + (cx * cx + cy * cy) * (ax * by - bx * ay);
+
+    // Twice the signed area of abc; its sign is the winding.
+    let orient = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+    if orient > 0.0 {
+        det > 0.0
+    } else {
+        det < 0.0
+    }
+}
+
+/// Samples a 2D blend space (pat-s3rrv.45).
+///
+/// Mirrors `AnimationNodeBlendSpace2D::_blend_node`
+/// (`upstream/godot/scene/animation/animation_blend_space_2d.cpp`): snap and
+/// clamp the position into the configured space, then blend the three clips of
+/// the containing triangle by barycentric weight. DISCRETE and CARRY pick a
+/// single point instead; a position outside every triangle projects onto the
+/// nearest edge rather than snapping to whichever point happens to be closest,
+/// which is what made an off-hull position pop between clips before.
 fn sample_blend_space_2d(
     space: &BlendSpace2D,
     library: &HashMap<String, Animation>,
@@ -1811,72 +2451,191 @@ fn sample_blend_space_2d(
     if space.points.is_empty() {
         return Vec::new();
     }
-    // Bilinear interpolation over an axis-aligned grid of four points; fall
-    // back to nearest neighbor otherwise.
-    if space.points.len() == 4 {
-        if let Some(values) = bilinear_sample(space, library) {
-            return values;
-        }
-    }
-    nearest_point(space, library)
-}
+    let p = space.effective_position();
 
-fn bilinear_sample(
-    space: &BlendSpace2D,
-    library: &HashMap<String, Animation>,
-) -> Option<Vec<(TrackKey, Variant)>> {
-    let mut xs: Vec<f32> = space.points.iter().map(|(p, _)| p.x).collect();
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    xs.dedup();
-    let mut ys: Vec<f32> = space.points.iter().map(|(p, _)| p.y).collect();
-    ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    ys.dedup();
-    if xs.len() != 2 || ys.len() != 2 {
-        return None;
+    // DISCRETE restarts the chosen clip; CARRY keeps the shared playhead so
+    // turning around mid-stride does not snap the animation back to frame 0.
+    if space.blend_mode != BlendSpaceBlendMode::Interpolated {
+        let time = match space.blend_mode {
+            BlendSpaceBlendMode::Carry => space.elapsed,
+            _ => 0.0,
+        };
+        return nearest_point_at(space, library, p, time);
     }
-    let (x0, x1) = (xs[0], xs[1]);
-    let (y0, y1) = (ys[0], ys[1]);
 
-    let find = |px: f32, py: f32| -> Option<&str> {
-        space
-            .points
-            .iter()
-            .find(|(p, _)| (p.x - px).abs() < 1e-5 && (p.y - py).abs() < 1e-5)
-            .map(|(_, n)| n.as_str())
+    if space.points.len() == 1 {
+        return sample_clip_at(library, &space.points[0].1, space.elapsed);
+    }
+
+    let triangles = space.effective_triangles();
+    if triangles.is_empty() {
+        // Fewer than 3 points (or all collinear) cannot form a triangle; blend
+        // the two nearest along their connecting segment instead of snapping.
+        return blend_two_nearest(space, library, p);
+    }
+
+    // The containing triangle, else the closest point on the hull.
+    let (tri, weights) = match triangles.iter().find_map(|t| {
+        barycentric_weights(
+            p,
+            space.points[t[0]].0,
+            space.points[t[1]].0,
+            space.points[t[2]].0,
+        )
+        .map(|w| (*t, w))
+    }) {
+        Some(found) => found,
+        None => match closest_triangle_on_hull(space, &triangles, p) {
+            Some(found) => found,
+            None => return blend_two_nearest(space, library, p),
+        },
     };
-    let n00 = find(x0, y0)?;
-    let n10 = find(x1, y0)?;
-    let n01 = find(x0, y1)?;
-    let n11 = find(x1, y1)?;
 
-    let bx = ((space.blend_position.x - x0) / (x1 - x0)).clamp(0.0, 1.0);
-    let by = ((space.blend_position.y - y0) / (y1 - y0)).clamp(0.0, 1.0);
-
-    let a00 = library.get(n00)?;
-    let a10 = library.get(n10)?;
-    let a01 = library.get(n01)?;
-    let a11 = library.get(n11)?;
-
-    let bottom = blend_clips_targeted(a00, a10, 0.0, 0.0, bx);
-    let top = blend_clips_targeted(a01, a11, 0.0, 0.0, bx);
-    Some(blend_value_lists(&bottom, &top, by))
+    blend_three_clips(space, library, tri, weights)
 }
 
-fn nearest_point(
+/// Blends the three clips of `tri` by barycentric `weights`.
+///
+/// Composed from the existing two-way [`blend_value_lists`] rather than a new
+/// N-way helper: `lerp(lerp(A, B, wb/(wa+wb)), C, wc)` expands exactly to
+/// `wa*A + wb*B + wc*C`, so this is the true weighted sum, not an approximation.
+fn blend_three_clips(
     space: &BlendSpace2D,
     library: &HashMap<String, Animation>,
+    tri: [usize; 3],
+    weights: [f32; 3],
+) -> Vec<(TrackKey, Variant)> {
+    let sampled: Vec<Vec<(TrackKey, Variant)>> = tri
+        .iter()
+        .map(|i| sample_clip_at(library, &space.points[*i].1, space.elapsed))
+        .collect();
+
+    let (wa, wb, wc) = (weights[0], weights[1], weights[2]);
+    let ab_total = wa + wb;
+    // With wa+wb == 0 the first two contribute nothing and C is the whole
+    // result; the ratio below would be 0/0.
+    if ab_total <= f32::EPSILON {
+        return sampled[2].clone();
+    }
+    let ab = blend_value_lists(&sampled[0], &sampled[1], wb / ab_total);
+    blend_value_lists(&ab, &sampled[2], wc)
+}
+
+/// Samples the point nearest `p`, at clip time `time`.
+fn nearest_point_at(
+    space: &BlendSpace2D,
+    library: &HashMap<String, Animation>,
+    p: Vector2,
+    time: f64,
 ) -> Vec<(TrackKey, Variant)> {
     let mut best: Option<(&str, f32)> = None;
     for (pos, name) in &space.points {
-        let d = (*pos - space.blend_position).length_squared();
+        let d = (*pos - p).length_squared();
         if best.map(|(_, bd)| d < bd).unwrap_or(true) {
             best = Some((name.as_str(), d));
         }
     }
-    match best.and_then(|(n, _)| library.get(n)) {
-        Some(anim) => sample_clip_targeted(anim, 0.0),
+    match best {
+        Some((n, _)) => sample_clip_at(library, n, time),
         None => Vec::new(),
     }
+}
+
+/// Blends the two points nearest `p` along the segment joining them.
+///
+/// The degenerate path: 2 points, or 3+ collinear points that yield no
+/// triangle. Still a blend rather than a snap, so a 2-point 2D space behaves
+/// like a 1D one instead of popping.
+fn blend_two_nearest(
+    space: &BlendSpace2D,
+    library: &HashMap<String, Animation>,
+    p: Vector2,
+) -> Vec<(TrackKey, Variant)> {
+    let mut order: Vec<usize> = (0..space.points.len()).collect();
+    order.sort_by(|a, b| {
+        let da = (space.points[*a].0 - p).length_squared();
+        let db = (space.points[*b].0 - p).length_squared();
+        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if order.len() < 2 {
+        return sample_clip_at(library, &space.points[order[0]].1, space.elapsed);
+    }
+    let (ia, ib) = (order[0], order[1]);
+    let (pa, pb) = (space.points[ia].0, space.points[ib].0);
+    let seg = pb - pa;
+    let len_sq = seg.length_squared();
+    let t = if len_sq <= f32::EPSILON {
+        0.0
+    } else {
+        (((p - pa).x * seg.x + (p - pa).y * seg.y) / len_sq).clamp(0.0, 1.0)
+    };
+    let a = sample_clip_at(library, &space.points[ia].1, space.elapsed);
+    let b = sample_clip_at(library, &space.points[ib].1, space.elapsed);
+    blend_value_lists(&a, &b, t)
+}
+
+/// Barycentric weights of `p` in triangle `abc`, or `None` if `p` lies outside.
+///
+/// A small negative tolerance keeps a point exactly on a shared edge inside
+/// exactly one of the two triangles rather than falling through both and being
+/// treated as off-hull.
+fn barycentric_weights(p: Vector2, a: Vector2, b: Vector2, c: Vector2) -> Option<[f32; 3]> {
+    let v0 = b - a;
+    let v1 = c - a;
+    let v2 = p - a;
+    let den = v0.x * v1.y - v1.x * v0.y;
+    if den.abs() <= 1e-12 {
+        return None; // degenerate (collinear) triangle
+    }
+    let wb = (v2.x * v1.y - v1.x * v2.y) / den;
+    let wc = (v0.x * v2.y - v2.x * v0.y) / den;
+    let wa = 1.0 - wb - wc;
+    const TOL: f32 = -1e-5;
+    (wa >= TOL && wb >= TOL && wc >= TOL).then_some([
+        wa.clamp(0.0, 1.0),
+        wb.clamp(0.0, 1.0),
+        wc.clamp(0.0, 1.0),
+    ])
+}
+
+/// For a position outside every triangle: the triangle whose edge is closest,
+/// with the weights of the projected point on that edge.
+///
+/// Godot clamps to the hull this way so leaving the space slides along its
+/// boundary. Returning the nearest POINT instead would jump between clips as
+/// the position moved parallel to an edge.
+fn closest_triangle_on_hull(
+    space: &BlendSpace2D,
+    triangles: &[[usize; 3]],
+    p: Vector2,
+) -> Option<([usize; 3], [f32; 3])> {
+    let mut best: Option<([usize; 3], [f32; 3], f32)> = None;
+    for tri in triangles {
+        let pts = [
+            space.points[tri[0]].0,
+            space.points[tri[1]].0,
+            space.points[tri[2]].0,
+        ];
+        for (i, j) in [(0usize, 1usize), (1, 2), (2, 0)] {
+            let (a, b) = (pts[i], pts[j]);
+            let seg = b - a;
+            let len_sq = seg.length_squared();
+            let t = if len_sq <= f32::EPSILON {
+                0.0
+            } else {
+                (((p - a).x * seg.x + (p - a).y * seg.y) / len_sq).clamp(0.0, 1.0)
+            };
+            let proj = Vector2::new(a.x + seg.x * t, a.y + seg.y * t);
+            let d = (proj - p).length_squared();
+            if best.as_ref().map(|(_, _, bd)| d < *bd).unwrap_or(true) {
+                let mut w = [0.0f32; 3];
+                w[i] = 1.0 - t;
+                w[j] = t;
+                best = Some((*tri, w, d));
+            }
+        }
+    }
+    best.map(|(tri, w, _)| (tri, w))
 }
 
 /// Samples every track of `anim` at `time`, keyed by `(node_path, property)` so
@@ -2094,6 +2853,7 @@ mod tests {
         AnimationNode::Animation {
             name: name.into(),
             position: 0.0,
+            opts: AnimationLeafOptions::default(),
         }
     }
 
@@ -2392,6 +3152,7 @@ mod tests {
         tree.set_root(AnimationNode::Animation {
             name: "idle".into(),
             position: 0.0,
+            opts: AnimationLeafOptions::default(),
         });
         assert_eq!(float_of(&tree.get_current_values(), "x"), 3.0);
     }
@@ -2452,6 +3213,7 @@ mod tests {
             AnimationNode::Animation {
                 name: "run".into(),
                 position: 0.0,
+                opts: AnimationLeafOptions::default(),
             },
         );
         sm.current = "run".into();
@@ -2472,6 +3234,7 @@ mod tests {
         AnimationNode::Animation {
             name: name.into(),
             position: 0.0,
+            opts: AnimationLeafOptions::default(),
         }
     }
 
@@ -2731,10 +3494,12 @@ mod tests {
             AnimationNode::Animation {
                 name: "base".into(),
                 position: 0.0,
+                opts: AnimationLeafOptions::default(),
             },
             AnimationNode::Animation {
                 name: "hit".into(),
                 position: 0.0,
+                opts: AnimationLeafOptions::default(),
             },
         )
         .with_shot_length(0.5);
@@ -2779,10 +3544,12 @@ mod tests {
                     AnimationNode::Animation {
                         name: "base".into(),
                         position: 0.0,
+                        opts: AnimationLeafOptions::default(),
                     },
                     AnimationNode::Animation {
                         name: "hit".into(),
                         position: 0.0,
+                        opts: AnimationLeafOptions::default(),
                     },
                 )
                 .with_shot_length(10.0),
@@ -2819,6 +3586,7 @@ mod tests {
         tree.set_root(AnimationNode::Animation {
             name: "walk".into(),
             position: 0.0,
+            opts: AnimationLeafOptions::default(),
         });
 
         let targeted = tree.get_current_values_targeted();

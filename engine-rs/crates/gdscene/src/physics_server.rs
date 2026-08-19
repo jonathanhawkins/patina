@@ -13,13 +13,13 @@
 //! 3. [`sync_from_physics`](PhysicsServer::sync_from_physics) — pull
 //!    updated transforms back into the scene tree.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use gdcore::math::{Vector2, Vector2i};
+use gdcore::math::{Transform2D, Vector2, Vector2i};
 use gdphysics2d::area2d::{
     Area2D, AreaId, AreaOverlapEvent, AreaSpaceOverride, AreaStore, OverlapEvent, OverlapState,
 };
-use gdphysics2d::body::{BodyId, BodyType, PhysicsBody2D};
+use gdphysics2d::body::{BodyId, BodyType, PhysicsBody2D, ShapeOwner2D};
 use gdphysics2d::character::CharacterBody2D as PhysicsCharacterBody2D;
 use gdphysics2d::shape::Shape2D;
 use gdphysics2d::world::{CollisionEvent, ContactState, PhysicsWorld2D};
@@ -355,6 +355,137 @@ fn find_collision_shape(tree: &SceneTree, parent_id: NodeId) -> Option<Shape2D> 
     None
 }
 
+/// The local transform of the collider child that [`find_collision_shape`]
+/// selected — Godot's shape-owner transform (pat-s3rrv.25).
+///
+/// `collision_shape_2d.cpp::_update_in_shape_owner` calls
+/// `shape_owner_set_transform(owner_id, get_transform())`, so a
+/// `CollisionShape2D`'s own `position`/`rotation` place its geometry relative to
+/// the body. Patina read the body's transform and nothing else, so an authored
+/// collider offset — a character whose collider sits at the feet, a hitbox on a
+/// muzzle — collided at the body origin instead, silently.
+///
+/// ⚠️ Walks the children with the **same** disabled-skipping order as
+/// `find_collision_shape`, so the transform returned always belongs to the shape
+/// that was actually taken. Reading the first child unconditionally would pair a
+/// disabled collider's offset with an enabled collider's geometry, which is
+/// worse than the bug being fixed: it would be wrong on scenes that currently
+/// work.
+///
+/// Scale is deliberately excluded — it keeps flowing through `scale_shape`,
+/// which bakes it into the geometry. `PhysicsBody2D::shape_world_transform`
+/// documents why that split matters.
+fn find_collision_shape_transform(tree: &SceneTree, parent_id: NodeId) -> Option<Transform2D> {
+    let children = tree.get_node(parent_id)?.children().to_vec();
+    for child_id in children {
+        if bool_prop(tree, child_id, "disabled", false) {
+            continue;
+        }
+        if shape_from_node(tree, child_id).is_some() {
+            let offset = crate::node2d::get_position(tree, child_id);
+            let rotation = crate::node2d::get_rotation(tree, child_id);
+            return Some(Transform2D::from_rotation_origin(rotation, offset));
+        }
+    }
+    None
+}
+
+/// Every collider child *after* the one [`find_collision_shape`] selected, as
+/// [`ShapeOwner2D`]s already scaled by `scale` (pat-s3rrv.25).
+///
+/// Godot gives a `CollisionObject2D` a list of shape owners and Patina now
+/// consults all of them: body-vs-body, both area-vs-body sites, area-vs-area,
+/// the character sweeps and every query iterate `shape_owners()`.
+///
+/// Each entry carries the child's OWN `one_way_collision` flag, because Godot
+/// puts that flag on the
+/// `CollisionShape2D` node. Lifting it to the body — which is what
+/// `one_way_collision_for` still does for the PRIMARY shape — made "solid torso
+/// plus one-way foot sensor" impossible to express.
+///
+/// The walk **must** stay identical to `find_collision_shape` /
+/// `find_collision_shape_transform` / `collider_local_transforms` — same
+/// `disabled` skip, same "usable shape" test, same child order — so that
+/// "everything after the first" means the same thing to all four. A different
+/// order here would pair one collider's geometry with another's offset, and the
+/// script-facing shape-owner ids would stop matching picking's `shape_idx`.
+///
+/// Scale is applied to the offset exactly as the single-shape path applies it,
+/// because the geometry is scaled too; the rotation is left alone.
+fn extra_collision_shapes(
+    tree: &SceneTree,
+    parent_id: NodeId,
+    scale: Vector2,
+) -> Vec<ShapeOwner2D> {
+    let Some(children) = tree.get_node(parent_id).map(|n| n.children().to_vec()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut seen_first = false;
+    for child_id in children {
+        if bool_prop(tree, child_id, "disabled", false) {
+            continue;
+        }
+        let Some(shape) = shape_from_node(tree, child_id) else {
+            continue;
+        };
+        if !seen_first {
+            // This is the one the single-shape path already took.
+            seen_first = true;
+            continue;
+        }
+        let offset = crate::node2d::get_position(tree, child_id);
+        let rotation = crate::node2d::get_rotation(tree, child_id);
+        let mut tf = Transform2D::from_rotation_origin(rotation, offset);
+        tf.origin = Vector2::new(tf.origin.x * scale.x, tf.origin.y * scale.y);
+        out.push(ShapeOwner2D {
+            shape: scale_shape(shape, scale),
+            transform: tf,
+            one_way_collision: bool_prop(tree, child_id, "one_way_collision", false),
+            // Same direction the PRIMARY shape gets: `PhysicsBody2D::new` seeds
+            // `one_way_direction` to world up and `one_way_collision_for` never
+            // rewrites it. Deriving it from the collider's rotation here instead
+            // would make owner 0 and owner 1 disagree on a rotated platform —
+            // turning the blocking face with the collider is a real gap, but it
+            // belongs to both shapes at once, not to this one.
+            one_way_direction: Vector2::new(0.0, -1.0),
+        });
+    }
+    out
+}
+
+/// The local transform of every usable collider child, in shape-owner order
+/// (pat-s3rrv.25).
+///
+/// This is what Godot's `CollisionObject2D.get_shape_owners()` enumerates and
+/// what `shape_owner_get_transform(id)` returns — index `i` is owner `i`.
+///
+/// ⚠️ Lives here, beside `find_collision_shape` and
+/// `find_collision_shape_transform`, so every child walk in the engine stays in
+/// one file with the same `disabled` skip and the same usable-shape test. A
+/// second walk written elsewhere would drift, and the script-facing owner ids
+/// would stop matching the `shape_idx` picking reports.
+///
+/// Transforms are the child's OWN, unscaled: `shape_owner_get_transform` is
+/// defined relative to the body, and the accumulated scale belongs to the
+/// geometry rather than to this value.
+pub(crate) fn collider_local_transforms(tree: &SceneTree, parent_id: NodeId) -> Vec<Transform2D> {
+    let Some(children) = tree.get_node(parent_id).map(|n| n.children().to_vec()) else {
+        return Vec::new();
+    };
+    children
+        .into_iter()
+        .filter(|&c| !bool_prop(tree, c, "disabled", false))
+        .filter(|&c| shape_from_node(tree, c).is_some())
+        .map(|c| {
+            Transform2D::from_rotation_origin(
+                crate::node2d::get_rotation(tree, c),
+                crate::node2d::get_position(tree, c),
+            )
+        })
+        .collect()
+}
+
 /// Whether `parent_id` has any `CollisionShape2D` child at all, enabled or not.
 ///
 /// Distinguishes "this body's shapes are all disabled" (no collision, per Godot)
@@ -379,24 +510,31 @@ fn has_collision_shape_child(tree: &SceneTree, parent_id: NodeId) -> bool {
         })
 }
 
-/// One-way collision settings from a body's first enabled `CollisionShape2D`
-/// child, as `(enabled, margin)`.
+/// One-way collision settings of the collider child that
+/// [`find_collision_shape`] selected, as `(enabled, margin)`.
 ///
-/// Godot puts `one_way_collision` on the *shape* node, while the solver needs it on
-/// the body, so it is lifted here (collision_shape_2d.cpp). The direction is the
-/// shape's local "up" — Godot blocks motion coming from the side the shape faces,
-/// which for an unrotated platform is straight up.
+/// Godot puts `one_way_collision` on the *shape* node (collision_shape_2d.cpp).
+/// Every collider AFTER the first carries its own flag on its
+/// [`ShapeOwner2D`](gdphysics2d::body::ShapeOwner2D); this lifts the FIRST one
+/// onto the body, where `PhysicsBody2D::shape_owners` hands it back as owner
+/// `0`. The direction is the shape's local "up" — Godot blocks motion coming
+/// from the side the shape faces, which for an unrotated platform is straight
+/// up.
+///
+/// ⚠️ Walks with the same `disabled` skip and the same `shape_from_node` test as
+/// `find_collision_shape`, so the flag returned belongs to the shape actually
+/// taken. It used to require `class_name() == "CollisionShape2D"`, which is a
+/// DIFFERENT filter: on a body whose first collider is a `CollisionPolygon2D`,
+/// that walk skipped past it and lifted a later sibling's one-way flag onto the
+/// polygon — the exact cross-wiring the "four walkers stay in lockstep" rule
+/// exists to prevent.
 fn one_way_collision_for(tree: &SceneTree, parent_id: NodeId) -> Option<(bool, f32)> {
     let children = tree.get_node(parent_id)?.children().to_vec();
     for child_id in children {
         if bool_prop(tree, child_id, "disabled", false) {
             continue;
         }
-        let is_shape = tree
-            .get_node(child_id)
-            .map(|n| n.class_name() == "CollisionShape2D")
-            .unwrap_or(false);
-        if !is_shape {
+        if shape_from_node(tree, child_id).is_none() {
             continue;
         }
         let enabled = bool_prop(tree, child_id, "one_way_collision", false);
@@ -851,6 +989,28 @@ impl PhysicsServer {
     /// Bodies and areas both, because physics picking targets either and an
     /// `Area2D` is the usual click target. Bodies come first, then areas, each
     /// group in id order, so the result is deterministic.
+    /// Like [`colliders_at_point`](Self::colliders_at_point) but pairs each node
+    /// with the **index of the collider that was struck** (pat-s3rrv.25).
+    ///
+    /// That index is Godot's `shape_idx`, the third argument of
+    /// `CollisionObject2D._input_event` and the argument of
+    /// `_mouse_shape_enter`/`_mouse_shape_exit`. Picking used to send a constant
+    /// `0`, which was correct only while a body could own one shape; multi-shape
+    /// bodies made it silently wrong for every hit on a second collider.
+    pub fn colliders_at_point_with_shape(&self, world_point: Vector2) -> Vec<(NodeId, usize)> {
+        let bodies = self
+            .world
+            .point_query_with_shape(world_point)
+            .into_iter()
+            .filter_map(|(id, idx)| self.node_for_body(id).map(|n| (n, idx)));
+        let areas = self
+            .area_store
+            .point_query_with_shape(world_point)
+            .into_iter()
+            .filter_map(|(id, idx)| self.area_to_node.get(&id).copied().map(|n| (n, idx)));
+        bodies.chain(areas).collect()
+    }
+
     pub fn colliders_at_point(&self, world_point: Vector2) -> Vec<NodeId> {
         let bodies = self
             .world
@@ -945,6 +1105,32 @@ impl PhysicsServer {
 
                 let mass = float_prop(tree, node_id, "mass", 1.0) as f32;
                 let mut body = PhysicsBody2D::new(BodyId(0), body_type, pos, shape, mass);
+                // The collider child's own offset/rotation relative to the body
+                // (pat-s3rrv.25). The origin is scaled by the same accumulated
+                // scale already baked into the geometry above: a body scaled 2x
+                // carries an offset collider twice as far from its origin, and
+                // scaling the shape without scaling the offset would pull the
+                // collider back toward the body as the body grew.
+                //
+                // ⚠️ Read once, at registration. A `CollisionShape2D` that MOVES
+                // at runtime (a crouch animation retargeting the collider) still
+                // keeps its original offset — `register_bodies` skips bodies it
+                // has already registered, so nothing re-reads this. Making it
+                // live means re-walking the collider children inside
+                // `sync_to_physics` every tick; that is a real follow-up, not
+                // something to slip in unmeasured.
+                if let Some(mut shape_tf) = find_collision_shape_transform(tree, node_id) {
+                    shape_tf.origin = Vector2::new(
+                        shape_tf.origin.x * node_scale.x,
+                        shape_tf.origin.y * node_scale.y,
+                    );
+                    body.shape_transform = shape_tf;
+                }
+                // Colliders beyond the first. Collected now so the one part of
+                // the multi-shape change with a subtle ordering requirement is
+                // already done and tested; the narrow phase does not consult
+                // them yet (pat-s3rrv.25).
+                body.extra_shapes = extra_collision_shapes(tree, node_id, node_scale);
                 body.collision_layer = u32_prop(tree, node_id, "collision_layer", 1);
                 body.collision_mask = u32_prop(tree, node_id, "collision_mask", 1);
                 body.bounce = float_prop(tree, node_id, "bounce", 0.0) as f32;
@@ -1001,10 +1187,55 @@ impl PhysicsServer {
                 // `gravity_point_center` below stays `pos + <node-relative
                 // offset>`, which is now correctly world-space.
                 let pos = crate::node2d::get_global_position(tree, node_id);
-                let shape =
-                    find_collision_shape(tree, node_id).unwrap_or(Shape2D::Circle { radius: 16.0 });
+                // Same three-way fallback as the body path (pat-0q2kx.28, applied
+                // to areas by pat-s3rrv.25): a usable shape wins; shape children
+                // that exist but are all `disabled` mean NO collision, per Godot,
+                // which the degenerate rect expresses; only a body authored with
+                // no shape children at all keeps the legacy default circle.
+                //
+                // Areas used the circle for both of the last two cases, so an
+                // `Area2D` whose only collider was disabled still monitored a
+                // 16px blob. It also disagreed with the per-tick sync below,
+                // which does use the three-way form — registration and sync
+                // resolving the same scene differently is worse than either
+                // answer alone.
+                let base_shape = match find_collision_shape(tree, node_id) {
+                    Some(s) => s,
+                    None if has_collision_shape_child(tree, node_id) => Shape2D::Rectangle {
+                        half_extents: Vector2::ZERO,
+                    },
+                    None => Shape2D::Circle { radius: 16.0 },
+                };
+                // Accumulated scale, exactly as the body path does it
+                // (pat-s3rrv.25). The area path used its shape RAW, so an
+                // `Area2D` under a scaled parent monitored the region it would
+                // have covered at scale 1 — a trigger drawn twice as wide in the
+                // editor fired at its authored size. Bodies had been scaling
+                // since pat-0q2kx.31; areas simply never got the same treatment,
+                // which is why a body and an area drawn the same size under the
+                // same scaled parent disagreed about their own extent.
+                let node_scale = crate::node2d::get_global_scale(tree, node_id);
+                let shape = scale_shape(base_shape, node_scale);
 
                 let mut area = Area2D::new(AreaId(0), pos, shape);
+                // The collider child's own offset/rotation (pat-s3rrv.25), in
+                // the same scaled space the geometry above was baked into.
+                //
+                // ⚠️ These two lines are ONE change. The offset was correctly
+                // taken *unscaled* while the area's geometry was unscaled; now
+                // that `scale_shape` runs above, an unscaled offset would leave
+                // the collider behind as the area grew. Scaling geometry and
+                // offset are not independent decisions — changing either alone
+                // reintroduces the mismatch.
+                if let Some(mut shape_tf) = find_collision_shape_transform(tree, node_id) {
+                    shape_tf.origin = Vector2::new(
+                        shape_tf.origin.x * node_scale.x,
+                        shape_tf.origin.y * node_scale.y,
+                    );
+                    area.shape_transform = shape_tf;
+                }
+                // Colliders beyond the first, same as bodies (pat-s3rrv.25).
+                area.extra_shapes = extra_collision_shapes(tree, node_id, node_scale);
                 area.collision_layer = u32_prop(tree, node_id, "collision_layer", 1);
                 area.collision_mask = u32_prop(tree, node_id, "collision_mask", 1);
                 area.monitoring = bool_prop(tree, node_id, "monitoring", true);
@@ -1051,6 +1282,166 @@ impl PhysicsServer {
         // Joints come last: they resolve `node_a`/`node_b` to BodyIds, so every
         // body has to be in `node_to_body` before this runs (pat-0q2kx.114).
         self.register_joints(tree, &all_ids);
+    }
+
+    /// Makes the physics world track the scene tree: registers nodes that have
+    /// appeared and frees the ones that have left (pat-s3rrv.25).
+    ///
+    /// Godot does this per node — `CollisionObject2D::_notification` calls
+    /// `PhysicsServer2D::body_set_space`/`area_set_space` on
+    /// `NOTIFICATION_ENTER_TREE` and clears the space on `NOTIFICATION_EXIT_TREE`
+    /// (`scene/2d/physics/collision_object_2d.cpp`), so a body instanced
+    /// mid-game simulates on the very next physics tick and a freed one stops
+    /// colliding immediately.
+    ///
+    /// Patina built 2D bodies exactly once. `register_bodies` was reachable only
+    /// through `MainLoop::register_physics_bodies`, which the runner calls a
+    /// single time before the frame loop starts, and nothing ever removed a
+    /// scene-node body — `world.remove_body` was called only from the
+    /// `PhysicsServer2D` RID-free path and tilemap regeneration. So
+    /// `add_child(preload("res://Bullet.tscn").instantiate())` produced a
+    /// RigidBody2D that never fell, never collided and emitted no signals, and
+    /// `queue_free()` on a body left a permanent ghost collider. The 3D server
+    /// already re-scanned the tree every tick inside its own `sync_to_physics`
+    /// (`physics_server_3d.rs`); this is the 2D half of that.
+    ///
+    /// Cheap to re-run: the body, area and joint passes all skip nodes already
+    /// in their maps, and the tilemap pass is fingerprinted.
+    pub fn sync_registrations(&mut self, tree: &SceneTree) {
+        self.register_bodies(tree);
+        self.prune_departed_nodes(tree);
+    }
+
+    /// Frees every registration whose scene node has left the tree.
+    ///
+    /// Kept separate from `register_bodies` so that function stays a pure "add
+    /// what is missing" pass for its existing callers.
+    fn prune_departed_nodes(&mut self, tree: &SceneTree) {
+        let live: HashSet<NodeId> = tree.all_nodes_in_tree_order().into_iter().collect();
+
+        let stale_bodies: Vec<NodeId> = self
+            .node_to_body
+            .keys()
+            .filter(|nid| !live.contains(nid))
+            .copied()
+            .collect();
+        let mut removed_bodies: HashSet<BodyId> = HashSet::new();
+        for nid in stale_bodies {
+            if let Some(body_id) = self.node_to_body.remove(&nid) {
+                self.body_to_node.remove(&body_id);
+                let _ = self.world.remove_body(body_id);
+                removed_bodies.insert(body_id);
+            }
+        }
+
+        // Removing a body must WAKE whatever was resting on it. Godot's space
+        // destroys a departing body's contacts, and a destroyed contact wakes
+        // both islands; `World2D::remove_body` only drops the body out of the
+        // map, so its neighbours keep whatever sleep state they had.
+        //
+        // That is not a detail — it is the difference between the fix working
+        // and only appearing to. A body that has been resting for more than
+        // `time_before_sleep` (0.5s) is asleep and does not integrate, so
+        // freeing the platform under it leaves it hanging in mid-air on a
+        // support that no longer exists. The registration is already correct at
+        // that point and the scene still looks broken. This is exactly how
+        // `physics2d_freed_body_stops_colliding` first failed: the body sat at
+        // y=185.3 before the free and at y=185.3 after it, to the decimal.
+        //
+        // `last_collision_events` holds the previous step's contacts, which for
+        // a body at rest is the persistent pair being dissolved here. Waking is
+        // safe to over-apply — Godot wakes liberally, and a body with nothing
+        // to do simply falls asleep again after its countdown.
+        if !removed_bodies.is_empty() {
+            let to_wake: Vec<BodyId> = self
+                .last_collision_events
+                .iter()
+                .filter_map(|event| {
+                    if removed_bodies.contains(&event.body_a) {
+                        Some(event.body_b)
+                    } else if removed_bodies.contains(&event.body_b) {
+                        Some(event.body_a)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for body_id in to_wake {
+                if let Some(body) = self.world.get_body_mut(body_id) {
+                    body.wake();
+                }
+            }
+        }
+
+        let stale_areas: Vec<NodeId> = self
+            .node_to_area
+            .keys()
+            .filter(|nid| !live.contains(nid))
+            .copied()
+            .collect();
+        for nid in stale_areas {
+            if let Some(area_id) = self.node_to_area.remove(&nid) {
+                self.area_to_node.remove(&area_id);
+                let _ = self.area_store.remove_area(area_id);
+            }
+        }
+
+        // A joint goes when its own node leaves, and also when either body it
+        // constrains does: `World2D::remove_body` only drops the body, so a
+        // joint left behind would keep solving against a `BodyId` that no
+        // longer resolves. Dropping the `node_to_joint` entry too lets
+        // `register_joints` rebuild the joint if its endpoints come back.
+        // Collected up front rather than filtered in place: the predicate reads
+        // `self.world`, and a closure holding that borrow while
+        // `self.node_to_joint` is iterated is the same shape that already bit
+        // `register_joints` (see its `target_a`/`target_b` note).
+        let joint_entries: Vec<(NodeId, gdphysics2d::joint::JointId)> = self
+            .node_to_joint
+            .iter()
+            .map(|(&nid, &jid)| (nid, jid))
+            .collect();
+        let mut stale_joints: Vec<NodeId> = Vec::new();
+        for (nid, joint_id) in joint_entries {
+            let dead = if !live.contains(&nid) {
+                true
+            } else {
+                match self.world.get_joint(joint_id) {
+                    Some(joint) => {
+                        let base = joint.base();
+                        self.world.get_body(base.body_a).is_none()
+                            || self.world.get_body(base.body_b).is_none()
+                    }
+                    None => true,
+                }
+            };
+            if dead {
+                stale_joints.push(nid);
+            }
+        }
+        for nid in stale_joints {
+            if let Some(joint_id) = self.node_to_joint.remove(&nid) {
+                let _ = self.world.remove_joint(joint_id);
+            }
+        }
+
+        // Tile bodies have no scene node of their own — they belong to the
+        // `TileMapLayer`/`TileMap` that painted them, so they leave with it.
+        // `register_tilemap_bodies` walks the nodes that are present, so a
+        // departed map's bodies would otherwise sit in the world forever.
+        let stale_maps: Vec<NodeId> = self
+            .tilemap_bodies
+            .keys()
+            .filter(|nid| !live.contains(nid))
+            .copied()
+            .collect();
+        for nid in stale_maps {
+            if let Some(body_ids) = self.tilemap_bodies.remove(&nid) {
+                for body_id in body_ids {
+                    let _ = self.world.remove_body(body_id);
+                }
+            }
+            self.tilemap_fingerprints.remove(&nid);
+        }
     }
 
     /// Builds static collision bodies from `TileMapLayer`/`TileMap` tiles
@@ -1286,6 +1677,13 @@ impl PhysicsServer {
     /// `set_property("position", ...)` calls (e.g. teleporting a body) are
     /// picked up by the physics engine and the area-overlap detector.
     pub fn sync_to_physics(&mut self, tree: &mut SceneTree) {
+        // Track the tree before reading transforms off it, so a node added
+        // since the last tick is simulated on this one and a node freed since
+        // the last tick stops colliding on this one (pat-s3rrv.25). Mirrors the
+        // 3D server, which does its scan at the head of its own
+        // `sync_to_physics`.
+        self.sync_registrations(tree);
+
         for (&node_id, &body_id) in &self.node_to_body {
             // Snapshot the node's transform, script-set velocity, and any
             // accumulated force/impulse bridge properties before mutably
@@ -1314,9 +1712,61 @@ impl PhysicsServer {
                 Some(Variant::Vector2(v)) => Some(v),
                 _ => None,
             };
+            // The collider child, re-read each tick — both its transform and its
+            // geometry (pat-s3rrv.25). Godot re-pushes both on any change:
+            // `collision_shape_2d.cpp::_update_in_shape_owner` for the transform,
+            // and `_shape_changed` for the shape itself. Read once at
+            // registration, a crouch animation dropping the collider, a door's
+            // hitbox swinging, or a hitbox that grows for one attack frame all
+            // did nothing.
+            let node_scale = crate::node2d::get_global_scale(tree, node_id);
+            let collider_tf = find_collision_shape_transform(tree, node_id).map(|mut tf| {
+                tf.origin = Vector2::new(tf.origin.x * node_scale.x, tf.origin.y * node_scale.y);
+                tf
+            });
+            // Mirrors `register_bodies`' fallback exactly, which is what makes
+            // enabling/disabling a collider at runtime work:
+            //   * a usable shape -> that shape, scaled;
+            //   * shape children exist but none usable (all `disabled`, or the
+            //     sub-resource did not resolve) -> the degenerate rect that
+            //     collides with nothing, per Godot (pat-0q2kx.28);
+            //   * NO shape children at all -> `None`, leaving whatever was
+            //     registered. That last arm matters: the older test-convention
+            //     scenes get a default 16px circle at registration, and
+            //     overwriting it here would silently strip their collision.
+            let collider_shape = match find_collision_shape(tree, node_id) {
+                Some(s) => Some(scale_shape(s, node_scale)),
+                None if has_collision_shape_child(tree, node_id) => Some(Shape2D::Rectangle {
+                    half_extents: Vector2::ZERO,
+                }),
+                None => None,
+            };
+
+            let extra_shapes = extra_collision_shapes(tree, node_id, node_scale);
 
             let mut is_rigid = false;
             if let Some(body) = self.world.get_body_mut(body_id) {
+                // Ahead of the per-type match: a collider's shape and offset are
+                // geometry, not motion, so they apply to static, kinematic and
+                // rigid bodies alike.
+                if let Some(tf) = collider_tf {
+                    body.shape_transform = tf;
+                }
+                // Compared before assigning rather than written unconditionally.
+                // `Shape2D` is `Copy + PartialEq`, so this is the whole guard —
+                // the common case (nothing changed) leaves the body's shape
+                // field untouched instead of rewriting it 60 times a second.
+                if let Some(sh) = collider_shape {
+                    if sh != body.shape {
+                        body.shape = sh;
+                    }
+                }
+                // Kept live for the same reason as the primary shape above: a
+                // collider list that only reflected registration would drift the
+                // moment a hitbox moved or was toggled.
+                if body.extra_shapes != extra_shapes {
+                    body.extra_shapes = extra_shapes;
+                }
                 match body.body_type {
                     BodyType::Kinematic => {
                         body.position = scene_pos;
@@ -1409,7 +1859,37 @@ impl PhysicsServer {
             let monitoring = bool_prop(tree, node_id, "monitoring", true);
             let monitorable = bool_prop(tree, node_id, "monitorable", true);
             let point_offset = vec2_prop(tree, node_id, "gravity_point_center", Vector2::ZERO);
+            // The area's own collider, transform AND geometry, re-read per tick
+            // for the same reasons as the body loop above (pat-s3rrv.25). Kept in
+            // step with bodies deliberately: an Area2D and a StaticBody2D whose
+            // colliders both animate must not start disagreeing about where they
+            // are or how big they are. The area registration path uses the same
+            // `scale_shape` as bodies, so the same fallback arms apply here.
+            let node_scale = crate::node2d::get_global_scale(tree, node_id);
+            let collider_tf = find_collision_shape_transform(tree, node_id).map(|mut tf| {
+                tf.origin = Vector2::new(tf.origin.x * node_scale.x, tf.origin.y * node_scale.y);
+                tf
+            });
+            let collider_shape = match find_collision_shape(tree, node_id) {
+                Some(s) => Some(scale_shape(s, node_scale)),
+                None if has_collision_shape_child(tree, node_id) => Some(Shape2D::Rectangle {
+                    half_extents: Vector2::ZERO,
+                }),
+                None => None,
+            };
+            let extra_shapes = extra_collision_shapes(tree, node_id, node_scale);
             if let Some(area) = self.area_store.get_area_mut(area_id) {
+                if let Some(tf) = collider_tf {
+                    area.shape_transform = tf;
+                }
+                if let Some(sh) = collider_shape {
+                    if sh != area.shape {
+                        area.shape = sh;
+                    }
+                }
+                if area.extra_shapes != extra_shapes {
+                    area.extra_shapes = extra_shapes;
+                }
                 // Areas had the identical local-as-world bug as bodies.
                 area.position = position;
                 // Overlap tests build the area's transform from this, so a

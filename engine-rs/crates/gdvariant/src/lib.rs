@@ -15,6 +15,10 @@ pub mod dictionary;
 mod fuzz_variant;
 pub mod hash;
 pub mod serialize;
+// pat-s3rrv.8: Godot's Array/Dictionary are refcounted handles, not values
+// ("Arrays are always passed by reference" — doc/classes/Array.xml). These are
+// the shared-storage types `Variant::Array`/`Variant::Dictionary` will hold.
+pub mod shared;
 // pat-0q2kx.225: the project-wide global shader parameter store. Lives here
 // because gdserver3d (shader resolve) and gdscript-interop (the RenderingServer
 // script surface) must share it, and gdvariant is their only common dependency
@@ -26,4 +30,5 @@ pub mod variant;
 pub use binary::{decode_variant, encode_variant, VariantDecodeError, VariantEncodeError};
 pub use conversion::ConversionError;
 pub use dictionary::Dictionary;
+pub use shared::{ContainerError, ContainerType, SharedArray, SharedDictionary};
 pub use variant::{CallableRef, ResourceRef, Variant, VariantType};

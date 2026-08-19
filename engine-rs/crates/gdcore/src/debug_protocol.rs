@@ -675,12 +675,226 @@ impl DebugClient {
 pub const DEFAULT_DEBUG_PORT: u16 = 6007;
 
 // ---------------------------------------------------------------------------
+// Transport (pat-s3rrv.27)
+// ---------------------------------------------------------------------------
+
+/// A line-oriented byte channel the debug protocol can ride.
+///
+/// Everything above this point — `DebugCommand`/`DebugEvent` and their JSON —
+/// is transport-independent, but `DebugServer`/`DebugSession`/`DebugClient`
+/// hardwired `std::net::TcpStream`. A browser cannot open a TCP socket at all,
+/// and Godot's own web export uses the WebSocket remote-debugger peer rather
+/// than the TCP one (`core/debugger/remote_debugger_peer_websocket.cpp`), so
+/// the TCP-only protocol could never serve the editor's web runtime.
+///
+/// The framing stays exactly as it was — one JSON object per line — so a
+/// transport only has to move whole lines.
+pub trait DebugTransport {
+    /// Sends one framed line (without its trailing newline).
+    fn send_line(&mut self, line: &str) -> io::Result<()>;
+    /// Receives one framed line, or `None` if none is available yet.
+    ///
+    /// Returning `None` rather than blocking is what lets a channel be polled
+    /// from a frame loop that must not stall.
+    fn recv_line(&mut self) -> io::Result<Option<String>>;
+}
+
+/// Sends and receives protocol frames over any [`DebugTransport`].
+///
+/// This is the transport-agnostic half of `DebugSession`: same messages, same
+/// line framing, no assumption about sockets.
+pub struct DebugChannel<T: DebugTransport> {
+    transport: T,
+}
+
+impl<T: DebugTransport> DebugChannel<T> {
+    /// Wraps a transport.
+    pub fn new(transport: T) -> Self {
+        Self { transport }
+    }
+
+    /// Borrows the underlying transport (to drain or feed it).
+    pub fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
+    }
+
+    /// Sends a command (editor → game).
+    pub fn send_command(&mut self, cmd: &DebugCommand) -> io::Result<()> {
+        self.transport.send_line(&cmd.to_json())
+    }
+
+    /// Sends an event (game → editor).
+    pub fn send_event(&mut self, event: &DebugEvent) -> io::Result<()> {
+        self.transport.send_line(&event.to_json())
+    }
+
+    /// Polls for a command. `Ok(None)` means "nothing yet", which is distinct
+    /// from a malformed frame — that is an error, not silence.
+    pub fn recv_command(&mut self) -> io::Result<Option<DebugCommand>> {
+        match self.transport.recv_line()? {
+            None => Ok(None),
+            Some(line) => DebugCommand::from_json(line.trim())
+                .map(Some)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid debug command")),
+        }
+    }
+
+    /// Polls for an event.
+    pub fn recv_event(&mut self) -> io::Result<Option<DebugEvent>> {
+        match self.transport.recv_line()? {
+            None => Ok(None),
+            Some(line) => DebugEvent::from_json(line.trim())
+                .map(Some)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid debug event")),
+        }
+    }
+}
+
+/// An in-memory transport whose frames are moved by the embedder.
+///
+/// This is what the editor uses: the game side writes frames into `outgoing`,
+/// the editor server drains them with [`take_outgoing`](Self::take_outgoing) and
+/// ships them over whatever channel it already has (WebSocket or an HTTP poll),
+/// then feeds replies back with [`push_incoming`](Self::push_incoming). No
+/// sockets are opened, so it works in a browser build.
+#[derive(Debug, Default)]
+pub struct QueueTransport {
+    outgoing: Vec<String>,
+    incoming: std::collections::VecDeque<String>,
+}
+
+impl QueueTransport {
+    /// A transport with empty queues.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Takes every frame written since the last call, in order.
+    pub fn take_outgoing(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.outgoing)
+    }
+
+    /// Queues a frame that arrived from the other end.
+    pub fn push_incoming(&mut self, line: impl Into<String>) {
+        self.incoming.push_back(line.into());
+    }
+
+    /// Whether anything is waiting to be read.
+    pub fn has_incoming(&self) -> bool {
+        !self.incoming.is_empty()
+    }
+}
+
+impl DebugTransport for QueueTransport {
+    fn send_line(&mut self, line: &str) -> io::Result<()> {
+        self.outgoing.push(line.to_string());
+        Ok(())
+    }
+
+    fn recv_line(&mut self) -> io::Result<Option<String>> {
+        Ok(self.incoming.pop_front())
+    }
+}
+
+/// The existing TCP session satisfies the same trait, so the abstraction is
+/// demonstrably not shaped around the in-memory case alone.
+impl DebugTransport for DebugSession {
+    fn send_line(&mut self, line: &str) -> io::Result<()> {
+        writeln!(self.writer, "{}", line)?;
+        self.writer.flush()
+    }
+
+    fn recv_line(&mut self) -> io::Result<Option<String>> {
+        self.set_read_timeout(Some(Duration::from_millis(1)))?;
+        let mut line = String::new();
+        match self.reader.read_line(&mut line) {
+            Ok(0) => Ok(None),
+            Ok(_) => Ok(Some(line)),
+            // A poll that found nothing is silence, not failure — same handling
+            // as `try_recv_command` above, which solves this on the same socket.
+            Err(ref e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// pat-s3rrv.27: a command survives a full round trip over a transport that
+    /// is not a socket — which is the whole point, since a browser has none.
+    #[test]
+    fn queue_transport_round_trips_a_command_without_tcp() {
+        let mut game = DebugChannel::new(QueueTransport::new());
+        let cmd = DebugCommand::SetBreakpoint {
+            script: "res://p.gd".to_string(),
+            line: 42,
+        };
+        game.send_command(&cmd).expect("send");
+
+        // The embedder moves the frames; here that is just this test.
+        let wire = game.transport_mut().take_outgoing();
+        assert_eq!(wire.len(), 1, "one command is one framed line: {wire:?}");
+        assert!(
+            !wire[0].contains('\n'),
+            "framing is one JSON object per line, so a frame carries no newline: {:?}",
+            wire[0]
+        );
+
+        let mut editor = DebugChannel::new(QueueTransport::new());
+        editor.transport_mut().push_incoming(wire[0].clone());
+        let got = editor.recv_command().expect("recv").expect("a command");
+        assert_eq!(got, cmd, "the command must survive the round trip");
+    }
+
+    /// An empty queue is silence, not failure — a frame loop polls this every
+    /// tick and must not treat "nothing yet" as an error.
+    #[test]
+    fn polling_an_empty_transport_yields_none_not_an_error() {
+        let mut ch = DebugChannel::new(QueueTransport::new());
+        assert!(ch.recv_command().expect("poll must not error").is_none());
+        assert!(ch.recv_event().expect("poll must not error").is_none());
+    }
+
+    /// A malformed frame IS an error, though: silently dropping it would hide a
+    /// protocol mismatch behind the same `None` that means "idle".
+    #[test]
+    fn a_malformed_frame_is_an_error_not_silence() {
+        let mut ch = DebugChannel::new(QueueTransport::new());
+        ch.transport_mut().push_incoming("{not json at all");
+        let err = ch
+            .recv_command()
+            .expect_err("a bad frame must not read as idle");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// Events travel the same way, so the game→editor direction is covered too.
+    #[test]
+    fn queue_transport_round_trips_an_event() {
+        let mut game = DebugChannel::new(QueueTransport::new());
+        let event = DebugEvent::Error {
+            message: "boom".to_string(),
+        };
+        game.send_event(&event).expect("send");
+        let wire = game.transport_mut().take_outgoing();
+
+        let mut editor = DebugChannel::new(QueueTransport::new());
+        editor.transport_mut().push_incoming(wire[0].clone());
+        assert_eq!(
+            editor.recv_event().expect("recv").expect("an event"),
+            event,
+            "the event must survive the round trip"
+        );
+    }
 
     #[test]
     fn command_json_roundtrip_set_breakpoint() {

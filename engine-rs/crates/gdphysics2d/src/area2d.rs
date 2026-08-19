@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use gdcore::math::{Transform2D, Vector2};
 
-use crate::body::{BodyId, PhysicsBody2D};
+use crate::body::{BodyId, PhysicsBody2D, ShapeOwner2D};
 use crate::collision;
 use crate::shape::Shape2D;
 
@@ -85,6 +85,29 @@ pub struct Area2D {
     pub position: Vector2,
     /// Collision shape in local space.
     pub shape: Shape2D,
+    /// The collider child's own transform relative to the area — Godot's
+    /// shape-owner transform, the `Area2D` twin of
+    /// [`PhysicsBody2D::shape_transform`](crate::body::PhysicsBody2D::shape_transform)
+    /// (pat-s3rrv.25).
+    ///
+    /// Bodies honoured their collider's offset before areas did, which left the
+    /// engine inconsistent in the most confusing possible way: a body and an
+    /// area authored with the same offset collider would disagree about where
+    /// they were. Rotation and translation only — scale stays baked into the
+    /// geometry by `scale_shape`.
+    pub shape_transform: Transform2D,
+    /// Collider children beyond the first, as [`ShapeOwner2D`]s carrying each
+    /// child's local transform — the `Area2D` twin of
+    /// [`PhysicsBody2D::extra_shapes`](crate::body::PhysicsBody2D::extra_shapes)
+    /// (pat-s3rrv.25).
+    ///
+    /// Bodies got their list first, which briefly left an area with two
+    /// colliders monitoring through only one while a body with two was solid on
+    /// both. This closes that.
+    ///
+    /// The owner's one-way fields are carried for shape only: an area never
+    /// blocks anything, so nothing on the area path reads them.
+    pub extra_shapes: Vec<ShapeOwner2D>,
     /// Collision layer bitmask — which layers this area occupies.
     pub collision_layer: u32,
     /// Collision mask bitmask — which layers this area scans for overlaps.
@@ -153,6 +176,8 @@ impl Area2D {
             id,
             position,
             shape,
+            shape_transform: Transform2D::IDENTITY,
+            extra_shapes: Vec::new(),
             collision_layer: 1,
             collision_mask: 1,
             monitoring: true,
@@ -173,9 +198,34 @@ impl Area2D {
         }
     }
 
-    /// This area's world transform, honouring its rotation (pat-0q2kx.112).
+    /// Every collision shape this area owns, each with its **world** transform:
+    /// the primary shape first, then [`extra_shapes`](Self::extra_shapes)
+    /// (pat-s3rrv.25).
+    ///
+    /// The `Area2D` twin of `PhysicsBody2D::shape_owners`. Its first element is
+    /// exactly what [`transform`](Self::transform) pairs with `shape`, so
+    /// converting a call site cannot change single-collider behaviour.
+    pub fn shape_owners(&self) -> Vec<ShapeOwner2D> {
+        let base = Transform2D::from_rotation_origin(self.rotation, self.position);
+        let mut out = Vec::with_capacity(1 + self.extra_shapes.len());
+        out.push(ShapeOwner2D::solid(self.shape, base * self.shape_transform));
+        for extra in &self.extra_shapes {
+            out.push(ShapeOwner2D {
+                transform: base * extra.transform,
+                ..*extra
+            });
+        }
+        out
+    }
+
+    /// This area's world transform, honouring its rotation (pat-0q2kx.112) and
+    /// its collider child's own offset (pat-s3rrv.25).
+    ///
+    /// Every overlap test in this module places the area's shape through here,
+    /// so composing the shape transform once covers body-vs-area and
+    /// area-vs-area alike. Order is Godot's: `a * b` applies `b` first.
     pub fn transform(&self) -> Transform2D {
-        Transform2D::from_rotation_origin(self.rotation, self.position)
+        Transform2D::from_rotation_origin(self.rotation, self.position) * self.shape_transform
     }
 
     /// Returns this area's gravity contribution at `body_pos`.
@@ -268,17 +318,54 @@ impl AreaStore {
     /// without this, physics picking finds nothing for the common case.
     ///
     /// [`PhysicsWorld2D::point_query`]: crate::world::PhysicsWorld2D::point_query
+    /// Like [`point_query`](Self::point_query) but also reports **which**
+    /// collider of each area contained the point — the `shape_idx` Godot passes
+    /// to `_input_event` / `_mouse_shape_enter` (pat-s3rrv.25).
+    ///
+    /// First matching collider per area, matching the body-side rule: Godot
+    /// delivers one `shape_idx` per object per event.
+    pub fn point_query_with_shape(&self, world_point: Vector2) -> Vec<(AreaId, usize)> {
+        let mut hits: Vec<(AreaId, usize)> = self
+            .areas
+            .iter()
+            .filter_map(|(&id, area)| {
+                area.shape_owners()
+                    .into_iter()
+                    .position(|owner| {
+                        owner
+                            .shape
+                            .contains_point(owner.transform.affine_inverse().xform(world_point))
+                    })
+                    .map(|idx| (id, idx))
+            })
+            .collect();
+        hits.sort_by_key(|(id, _)| id.0);
+        hits
+    }
+
     pub fn point_query(&self, world_point: Vector2) -> Vec<AreaId> {
         let mut hits: Vec<AreaId> = self
             .areas
             .iter()
             .filter_map(|(&id, area)| {
-                // World -> local, the same inversion `point_query` applies to a
-                // body, so a rotated area picks on its rotated shape.
-                let mut tf = Transform2D::rotated(area.rotation);
-                tf.origin = area.position;
-                let local = tf.affine_inverse().xform(world_point);
-                area.shape.contains_point(local).then_some(id)
+                // World -> local through `shape_owners`, so a rotated area picks
+                // on its rotated shape AND an area with several colliders — or
+                // one authored at an offset — picks on all of them.
+                //
+                // ⚠️ This used to rebuild the transform by hand as
+                // `rotated(rotation)` + origin, which silently dropped
+                // `shape_transform`. Area picking therefore ignored an authored
+                // collider offset even after overlap detection honoured it
+                // (pat-s3rrv.25) — the same area answered two different
+                // questions about where it was.
+                area.shape_owners()
+                    .into_iter()
+                    .any(|owner| {
+                        owner
+                            .shape
+                            .contains_point(owner.transform.affine_inverse().xform(world_point))
+                    })
+                    .then_some(id)
             })
             .collect();
         // `AreaId` is not `Ord`; sort by its inner id for a deterministic order.
@@ -315,7 +402,8 @@ impl AreaStore {
                 continue;
             }
 
-            let tf_area = area.transform();
+            // Constant per area, so computed outside the body loop.
+            let area_owners = area.shape_owners();
 
             for body in bodies.values() {
                 // Layer/mask filtering
@@ -323,14 +411,29 @@ impl AreaStore {
                     continue;
                 }
 
-                let tf_body = Transform2D::from_rotation_origin(body.rotation, body.position);
-
-                if let Some(result) =
-                    collision::test_collision(&area.shape, &tf_area, &body.shape, &tf_body)
-                {
-                    if result.colliding && result.depth > 0.0 {
-                        current_overlaps.insert((area.id, body.id));
-                    }
+                // Every collider the body owns, so a body whose SECOND
+                // CollisionShape2D is the one inside the area still registers
+                // (pat-s3rrv.25). Matches the body-vs-body loop in `world.rs`;
+                // an Area2D and a StaticBody2D must not disagree about whether a
+                // two-collider body is touching them.
+                //
+                // The area side iterates its own owners too, so a two-collider
+                // Area2D monitors through both.
+                let overlaps = area_owners.iter().any(|area_owner| {
+                    body.shape_owners().into_iter().any(|body_owner| {
+                        matches!(
+                            collision::test_collision(
+                                &area_owner.shape,
+                                &area_owner.transform,
+                                &body_owner.shape,
+                                &body_owner.transform,
+                            ),
+                            Some(r) if r.colliding && r.depth > 0.0
+                        )
+                    })
+                });
+                if overlaps {
+                    current_overlaps.insert((area.id, body.id));
                 }
             }
         }
@@ -373,7 +476,9 @@ impl AreaStore {
     /// (`colliding && depth > 0`) so gravity/damp overrides and enter/exit
     /// events agree on what "inside" means.
     fn overlapping_areas_sorted(&self, body: &PhysicsBody2D) -> Vec<&Area2D> {
-        let tf_body = Transform2D::from_rotation_origin(body.rotation, body.position);
+        // Computed once rather than per area: the owner list is the same for
+        // every area tested against this body (pat-s3rrv.25).
+        let owners = body.shape_owners();
         let mut overlapping: Vec<&Area2D> = self
             .areas
             .values()
@@ -384,11 +489,19 @@ impl AreaStore {
                 if (area.collision_mask & body.collision_layer) == 0 {
                     return false;
                 }
-                let tf_area = area.transform();
-                matches!(
-                    collision::test_collision(&area.shape, &tf_area, &body.shape, &tf_body),
-                    Some(r) if r.colliding && r.depth > 0.0
-                )
+                area.shape_owners().into_iter().any(|area_owner| {
+                    owners.iter().any(|body_owner| {
+                        matches!(
+                            collision::test_collision(
+                                &area_owner.shape,
+                                &area_owner.transform,
+                                &body_owner.shape,
+                                &body_owner.transform,
+                            ),
+                            Some(r) if r.colliding && r.depth > 0.0
+                        )
+                    })
+                })
             })
             .collect();
         overlapping.sort_by(|a, b| a.priority.cmp(&b.priority));
@@ -597,7 +710,6 @@ impl AreaStore {
             if !a.monitoring {
                 continue;
             }
-            let tf_a = a.transform();
             for b in self.areas.values() {
                 if a.id == b.id {
                     continue;
@@ -613,11 +725,21 @@ impl AreaStore {
                 if (a.collision_mask & b.collision_layer) == 0 {
                     continue;
                 }
-                let tf_b = b.transform();
-                if let Some(result) = collision::test_collision(&a.shape, &tf_a, &b.shape, &tf_b) {
-                    if result.colliding && result.depth > 0.0 {
-                        current.insert((a.id, b.id));
-                    }
+                let touching = a.shape_owners().into_iter().any(|oa| {
+                    b.shape_owners().into_iter().any(|ob| {
+                        matches!(
+                            collision::test_collision(
+                                &oa.shape,
+                                &oa.transform,
+                                &ob.shape,
+                                &ob.transform,
+                            ),
+                            Some(r) if r.colliding && r.depth > 0.0
+                        )
+                    })
+                });
+                if touching {
+                    current.insert((a.id, b.id));
                 }
             }
         }

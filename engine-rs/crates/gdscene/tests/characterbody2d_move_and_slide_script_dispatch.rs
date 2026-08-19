@@ -105,11 +105,11 @@ fn platformer_scene(scripts: &[&str]) -> (MainLoop, Vec<NodeId>) {
         ids.push(body_id);
     }
 
-    // `MainLoop::step` does *not* register physics bodies — `register_bodies` is
-    // the only site that populates `node_to_body` (`physics_server.rs:635`) and
-    // nothing calls it internally, so without this the character step iterates an
-    // empty map and every body silently stays put. `sync_to_physics` only syncs
-    // bodies that are *already* registered.
+    // The explicit boot registration, mirroring `patina-runner`. Since
+    // pat-s3rrv.25 `sync_to_physics` also re-scans the tree every tick, so this
+    // is no longer the *only* thing standing between the fixture and an empty
+    // `node_to_body` — but it still registers the scene one step earlier, before
+    // the first `step`, which is what the assertions below are written against.
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();
     (ml, ids)

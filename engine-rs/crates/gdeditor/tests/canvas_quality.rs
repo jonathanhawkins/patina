@@ -88,6 +88,12 @@ fn rect_item(origin: Vector2) -> Render2DItem {
         light_mask: 1,
         visibility_layer: 1,
         canvas_follow: CanvasFollow::DefaultCanvas,
+        // pat-s3rrv.28: no material and the project-default sampling modes, so
+        // these quality assertions keep compositing exactly as they did.
+        canvas_material: None,
+        shader_material: None,
+        texture_filter: Default::default(),
+        texture_repeat: Default::default(),
         kind: Render2DKind::ColorRect {
             size: Vector2::new(20.0, 20.0),
             color: Color::new(1.0, 0.0, 0.0, 1.0),

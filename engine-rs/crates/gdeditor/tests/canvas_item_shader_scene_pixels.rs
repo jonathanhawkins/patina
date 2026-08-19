@@ -6,22 +6,22 @@
 //! but **nothing called it**. `grep canvas_item_set_material` found exactly one
 //! hit, its own definition. Two links were missing: `packed_scene` flattened a
 //! ShaderMaterial only for the 3D `material_override`/`surface_material_override`
-//! slots, never the CanvasItem `material` property, and `scene_bridge::visit` —
-//! the sole place a `SceneTree` becomes a render list — built every `CanvasItem`
-//! without a material. So an authored 2D shader was dropped at load and, even if
+//! slots, never the CanvasItem `material` property, and the scene-to-render-list
+//! walk — the sole place a `SceneTree` becomes a render list — built every
+//! `CanvasItem` without a material. So an authored 2D shader was dropped at load and, even if
 //! it had survived, never reached the rasterizer.
 //!
 //! These drive the real path: `.tscn` text → `PackedScene::from_tscn` →
-//! `add_packed_scene_to_tree` → `scene_bridge::render_scene_to_frame` → pixels.
+//! `add_packed_scene_to_tree` → `viewport_2d_render` (the ONE shipped canvas path) → pixels.
 //! No test-only shims, and the shader forms used here are the ones
 //! `gdrender2d/tests/canvas_item_shader.rs` already proves the interpreter
 //! supports, so a failure here means the *wiring* broke, not the shader language.
 
 use gdcore::math::{Color, Vector2};
-use gdrender2d::renderer::SoftwareRenderer;
+use gdeditor::texture_cache::TextureCache;
+use gdeditor::viewport_2d_render::{build_runtime_render_list, rasterize_render_list};
 use gdrender2d::texture::Texture2D;
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
-use gdscene::scene_bridge::render_scene_to_frame;
 use gdscene::scene_tree::SceneTree;
 use gdvariant::Variant;
 
@@ -58,25 +58,23 @@ material = SubResource("ShaderMaterial_1")
 /// authored `position` is applied — the shading claim should not rest on the
 /// transform half of the pipeline.
 fn render(tscn: &str) -> Vec<Color> {
+    // ⚠️ Without a populated ClassDB there is no class chain, so
+    // `Node::is_class("CanvasItem")` is false for every node and
+    // `collect_canvas_items` filters the whole scene out and returns `[]`
+    // (pat-s3rrv.28).
+    gdobject::class_db::register_2d_classes();
     let scene = PackedScene::from_tscn(tscn).expect("scene must parse");
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     add_packed_scene_to_tree(&mut tree, root, &scene).expect("scene must instance");
 
-    let mut renderer = SoftwareRenderer::new();
-    renderer.register_texture("tex", Texture2D::solid(SIZE, SIZE, Color::WHITE));
-    let texture_size = |path: &str| -> Option<Vector2> {
-        (path == "tex").then(|| Vector2::new(SIZE as f32, SIZE as f32))
-    };
+    // The shipped path resolves textures through a TextureCache rather than a
+    // size closure + renderer registry (pat-s3rrv.22).
+    let mut textures = TextureCache::new(".");
+    textures.insert("tex", Texture2D::solid(SIZE, SIZE, Color::WHITE));
 
-    let frame = render_scene_to_frame(
-        &tree,
-        &mut renderer,
-        SIZE,
-        SIZE,
-        Color::BLACK,
-        &texture_size,
-    );
+    let items = build_runtime_render_list(&tree);
+    let frame = rasterize_render_list(&items, SIZE, SIZE, Color::BLACK, Some(&mut textures));
     assert_eq!(frame.pixels.len(), (SIZE * SIZE) as usize, "frame extent");
     frame.pixels
 }
@@ -168,7 +166,7 @@ fn scene_shader_uv_gradient_varies_across_the_sprite() {
 /// A `ColorRect`'s ShaderMaterial reaches the node as flat properties — the
 /// `packed_scene` half of this bead — even though its pixels are not yet shaded.
 ///
-/// `scene_bridge` sets the material on every CanvasItem it builds, ColorRect
+/// The canvas walk sets the material on every CanvasItem it builds, ColorRect
 /// included, but `rasterize_item` consults the shader only for
 /// `DrawCommand::DrawTextureRect` (gdrender2d/src/renderer.rs:416); `DrawRect`,
 /// which is what `color_rect_commands` emits, has no shader branch at all. So
@@ -189,6 +187,11 @@ shader_parameter/strength = 0.25
 [node name="Rect" type="ColorRect"]
 material = SubResource("ShaderMaterial_1")
 "#;
+    // ⚠️ Without a populated ClassDB there is no class chain, so
+    // `Node::is_class("CanvasItem")` is false for every node and
+    // `collect_canvas_items` filters the whole scene out and returns `[]`
+    // (pat-s3rrv.28).
+    gdobject::class_db::register_2d_classes();
     let scene = PackedScene::from_tscn(tscn).expect("scene must parse");
     let nodes = scene.instance().expect("scene must instance");
     let rect = &nodes[0];

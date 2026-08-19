@@ -7,16 +7,15 @@
 
 use gdcore::math::Vector2;
 
-/// Face-cull mode (Godot `cull_disabled`/`cull_back`/`cull_front`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CullMode {
-    /// Draw both faces.
-    Disabled,
-    /// Cull back (clockwise, area <= 0) faces — Godot default.
-    Back,
-    /// Cull front (counter-clockwise, area >= 0) faces.
-    Front,
-}
+/// The mode enums are defined beside `StandardMaterial3D` in `gdserver3d` and
+/// re-exported here (pat-s3rrv.30).
+///
+/// They started out defined in this module, which made them unusable by the
+/// very struct that needs to carry them: `gdrender3d` depends on `gdserver3d`,
+/// not the reverse. Re-exporting keeps one definition, so a material's
+/// `cull_mode` and [`should_cull`]'s parameter are the same type by
+/// construction rather than by convention.
+pub use gdserver3d::material::{CullMode, DepthDrawMode, Transparency};
 
 /// Signed area of a screen-space triangle; positive = counter-clockwise (the
 /// front-facing winding), negative = clockwise (back-facing).
@@ -34,17 +33,6 @@ pub fn should_cull(a: Vector2, b: Vector2, c: Vector2, mode: CullMode) -> bool {
     }
 }
 
-/// Material transparency mode (Godot `blend_mode`/alpha handling subset).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Transparency {
-    /// Fully opaque.
-    Disabled,
-    /// Alpha-blended (needs back-to-front sorting).
-    Alpha,
-    /// Alpha-tested: fragments below the threshold are discarded, then opaque.
-    AlphaScissor,
-}
-
 /// Whether the material must be depth-sorted / blended as transparent.
 pub fn is_transparent(transparency: Transparency) -> bool {
     matches!(transparency, Transparency::Alpha)
@@ -53,17 +41,6 @@ pub fn is_transparent(transparency: Transparency) -> bool {
 /// For `AlphaScissor`, whether a fragment with the given `alpha` is discarded.
 pub fn alpha_scissor_discard(transparency: Transparency, alpha: f32, threshold: f32) -> bool {
     matches!(transparency, Transparency::AlphaScissor) && alpha < threshold
-}
-
-/// Depth-buffer write policy (Godot `depth_draw_*`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DepthDrawMode {
-    /// Write depth only for opaque draws (Godot default).
-    OpaqueOnly,
-    /// Always write depth.
-    Always,
-    /// Never write depth.
-    Never,
 }
 
 /// Whether a fragment writes to the depth buffer given its transparency.

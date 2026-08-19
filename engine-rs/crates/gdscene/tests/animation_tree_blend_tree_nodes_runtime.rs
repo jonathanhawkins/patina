@@ -11,7 +11,7 @@
 //! a blend tree in a scene was inert. This exercises the wired evaluators.
 
 use gdscene::animation::{Animation, AnimationTrack, KeyFrame};
-use gdscene::animation_tree::{AnimationNode, AnimationTree, BlendTree};
+use gdscene::animation_tree::{AnimationLeafOptions, AnimationNode, AnimationTree, BlendTree};
 use gdvariant::Variant;
 
 /// A one-second clip holding `value` on a track named `track`.
@@ -28,6 +28,7 @@ fn leaf(name: &str) -> AnimationNode {
     AnimationNode::Animation {
         name: name.into(),
         position: 0.0,
+        opts: AnimationLeafOptions::default(),
     }
 }
 

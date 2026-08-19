@@ -336,6 +336,40 @@ fn bounce_out(t: f64) -> f64 {
     }
 }
 
+/// Adds two `Variant`s componentwise for the *relative* tween forms
+/// (`PropertyTweener.as_relative`, `Tween.interpolate_value`).
+///
+/// `gdvariant`'s `Add` operator only covers the scalar and string cases, and
+/// `as_relative()` on a `Vector2` position is the single most common use of the
+/// verb — that arm must not silently produce `Nil` (pat-s3rrv.46). Returns
+/// `None` for a pair with no meaningful sum, so the caller can keep the
+/// absolute value rather than writing a junk one.
+pub fn add_variants(a: &Variant, b: &Variant) -> Option<Variant> {
+    use gdcore::math::{Vector2i, Vector3i};
+    Some(match (a, b) {
+        (Variant::Int(x), Variant::Int(y)) => Variant::Int(x.wrapping_add(*y)),
+        (Variant::Float(x), Variant::Float(y)) => Variant::Float(x + y),
+        (Variant::Int(x), Variant::Float(y)) => Variant::Float(*x as f64 + y),
+        (Variant::Float(x), Variant::Int(y)) => Variant::Float(x + *y as f64),
+        (Variant::Vector2(x), Variant::Vector2(y)) => {
+            Variant::Vector2(Vector2::new(x.x + y.x, x.y + y.y))
+        }
+        (Variant::Vector2i(x), Variant::Vector2i(y)) => {
+            Variant::Vector2i(Vector2i::new(x.x + y.x, x.y + y.y))
+        }
+        (Variant::Vector3(x), Variant::Vector3(y)) => {
+            Variant::Vector3(Vector3::new(x.x + y.x, x.y + y.y, x.z + y.z))
+        }
+        (Variant::Vector3i(x), Variant::Vector3i(y)) => {
+            Variant::Vector3i(Vector3i::new(x.x + y.x, x.y + y.y, x.z + y.z))
+        }
+        (Variant::Color(x), Variant::Color(y)) => {
+            Variant::Color(Color::new(x.r + y.r, x.g + y.g, x.b + y.b, x.a + y.a))
+        }
+        _ => return None,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // TweenStep
 // ---------------------------------------------------------------------------
@@ -526,6 +560,45 @@ pub enum TweenPauseMode {
     Process,
 }
 
+/// Which main-loop phase advances a `Tween`
+/// (Godot `Tween.TweenProcessMode`, `scene/animation/tween.h:70`).
+///
+/// This is the *phase* selector and is independent of [`TweenPauseMode`], which
+/// decides whether the tween runs at all while the tree is paused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TweenProcessMode {
+    /// Advance on the fixed physics tick, in lockstep with the solver — what a
+    /// tween driving a body needs (`TWEEN_PROCESS_PHYSICS`, value 0).
+    Physics,
+    /// Advance on the idle (render) frame. Godot's default
+    /// (`TWEEN_PROCESS_IDLE`, value 1).
+    #[default]
+    Idle,
+}
+
+impl TweenProcessMode {
+    /// Maps Godot's `TweenProcessMode` integer (PHYSICS=0, IDLE=1) onto the
+    /// enum. Any other value falls back to Godot's default, `IDLE`.
+    pub fn from_i64(v: i64) -> Self {
+        match v {
+            0 => Self::Physics,
+            _ => Self::Idle,
+        }
+    }
+}
+
+impl TweenPauseMode {
+    /// Maps Godot's `TweenPauseMode` integer (BOUND=0, STOP=1, PROCESS=2) onto
+    /// the enum. Any other value falls back to Godot's default, `BOUND`.
+    pub fn from_i64(v: i64) -> Self {
+        match v {
+            1 => Self::Stop,
+            2 => Self::Process,
+            _ => Self::Bound,
+        }
+    }
+}
+
 /// A procedural animation that tweens property values over time.
 ///
 /// Supports sequential and parallel step execution, easing, delays, and looping.
@@ -533,6 +606,15 @@ pub enum TweenPauseMode {
 pub struct Tween {
     /// How this tween responds to tree pause (Godot `set_pause_mode`).
     pub pause_mode: TweenPauseMode,
+    /// Which main-loop phase advances this tween (Godot `set_process_mode`).
+    pub process_mode: TweenProcessMode,
+    /// When set, the tween advances on the unscaled frame delta and ignores
+    /// `Engine.time_scale` (Godot `set_ignore_time_scale`).
+    pub ignore_time_scale: bool,
+    /// The node this tween is bound to, as a raw `ObjectId`
+    /// (Godot `bind_node`). `None` means "the node that created the tween",
+    /// which is what `Node.create_tween()` binds to in Godot.
+    pub bound_node: Option<u64>,
     /// The steps in this tween.
     pub steps: Vec<TweenStep>,
     /// Whether the tween is currently running.
@@ -556,6 +638,15 @@ pub struct Tween {
     killed: bool,
     /// Set for one drain when the tween completes (Godot `finished` signal).
     finished_pending: bool,
+    /// Seconds of tween time elapsed since creation, scaled by `speed_scale`
+    /// (Godot `get_total_elapsed_time`).
+    total_elapsed: f64,
+    /// Loops completed so far; the argument Godot passes to `loop_finished`.
+    loops_done: i64,
+    /// Step indices that finished since the last drain (Godot `step_finished`).
+    step_finished_pending: Vec<i64>,
+    /// Completed-loop counts since the last drain (Godot `loop_finished`).
+    loop_finished_pending: Vec<i64>,
 }
 
 impl Tween {
@@ -563,6 +654,9 @@ impl Tween {
     pub fn new() -> Self {
         Self {
             pause_mode: TweenPauseMode::default(),
+            process_mode: TweenProcessMode::default(),
+            ignore_time_scale: false,
+            bound_node: None,
             steps: Vec::new(),
             running: false,
             loops: 1,
@@ -572,6 +666,10 @@ impl Tween {
             paused: false,
             killed: false,
             finished_pending: false,
+            total_elapsed: 0.0,
+            loops_done: 0,
+            step_finished_pending: Vec::new(),
+            loop_finished_pending: Vec::new(),
         }
     }
 
@@ -650,6 +748,10 @@ impl Tween {
             return true;
         }
 
+        // Godot's `get_total_elapsed_time` counts the tween's own time, so it
+        // advances by the same scaled delta the steps consume.
+        self.total_elapsed += delta * self.speed_scale;
+
         // Process steps in groups: sequential steps form barriers,
         // parallel steps run together with the previous sequential step.
         let mut remaining = delta * self.speed_scale;
@@ -659,10 +761,12 @@ impl Tween {
             if group.is_empty() {
                 // All steps complete — check loops.
                 if self.loops == -1 {
+                    self.complete_loop();
                     self.reset_steps();
                     continue;
                 }
                 self.loops -= 1;
+                self.complete_loop();
                 if self.loops <= 0 {
                     self.running = false;
                     self.finished_pending = true;
@@ -692,6 +796,12 @@ impl Tween {
                         sub.advance(advance_by);
                     }
                 }
+                // Godot emits `step_finished(idx)` as each tweener completes.
+                // `current_step_group` only ever returns incomplete steps, so a
+                // step can cross this edge exactly once per loop (pat-s3rrv.46).
+                if self.steps[idx].is_complete() {
+                    self.step_finished_pending.push(idx as i64);
+                }
             }
             remaining -= advance_by;
 
@@ -705,10 +815,12 @@ impl Tween {
         let all_done = self.steps.iter().all(|s| s.is_complete());
         if all_done {
             if self.loops == -1 {
+                self.complete_loop();
                 self.reset_steps();
                 return false;
             }
             self.loops -= 1;
+            self.complete_loop();
             if self.loops <= 0 {
                 self.running = false;
                 self.finished_pending = true;
@@ -866,6 +978,97 @@ impl Tween {
     /// `finished` signal.
     pub fn take_just_finished(&mut self) -> bool {
         std::mem::take(&mut self.finished_pending)
+    }
+
+    // -- pause / process modes (pat-s3rrv.46) --------------------------------
+
+    /// Sets which main-loop phase advances this tween (Godot
+    /// `set_process_mode`).
+    pub fn set_process_mode(&mut self, mode: TweenProcessMode) {
+        self.process_mode = mode;
+    }
+
+    /// Sets how this tween responds to tree pause (Godot `set_pause_mode`).
+    pub fn set_pause_mode(&mut self, mode: TweenPauseMode) {
+        self.pause_mode = mode;
+    }
+
+    /// When enabled the tween advances on the unscaled delta, so
+    /// `Engine.time_scale` does not slow it down (Godot
+    /// `set_ignore_time_scale`).
+    pub fn set_ignore_time_scale(&mut self, ignore: bool) {
+        self.ignore_time_scale = ignore;
+    }
+
+    /// Binds the tween to a node (Godot `bind_node`): the node whose process
+    /// mode [`TweenPauseMode::Bound`] follows, and whose disappearance kills the
+    /// tween. Takes the raw `ObjectId` a script hands over.
+    pub fn bind_node(&mut self, node: u64) {
+        self.bound_node = Some(node);
+    }
+
+    /// Seconds of tween time elapsed since creation (Godot
+    /// `get_total_elapsed_time`). Scaled by `speed_scale`, like the steps.
+    pub fn get_total_elapsed_time(&self) -> f64 {
+        self.total_elapsed
+    }
+
+    /// Loops still to run, `-1` while looping forever (Godot `get_loops_left`).
+    pub fn get_loops_left(&self) -> i32 {
+        if self.loops < 0 {
+            -1
+        } else {
+            self.loops.max(0)
+        }
+    }
+
+    /// Advances the tween manually by `delta` seconds and reports whether it is
+    /// still running (Godot `custom_step`). Unlike [`advance`](Tween::advance)
+    /// this is what a script drives directly, outside the main loop's phases.
+    pub fn custom_step(&mut self, delta: f64) -> bool {
+        self.advance(delta);
+        self.running && !self.killed
+    }
+
+    /// Drains the step indices that finished since the last call — the argument
+    /// stream for Godot's `step_finished(idx)` signal.
+    pub fn take_step_finished(&mut self) -> Vec<i64> {
+        std::mem::take(&mut self.step_finished_pending)
+    }
+
+    /// Drains the completed-loop counts since the last call — the argument
+    /// stream for Godot's `loop_finished(loop_count)` signal.
+    pub fn take_loop_finished(&mut self) -> Vec<i64> {
+        std::mem::take(&mut self.loop_finished_pending)
+    }
+
+    /// Records one completed loop for [`take_loop_finished`](Tween::take_loop_finished).
+    fn complete_loop(&mut self) {
+        self.loops_done += 1;
+        self.loop_finished_pending.push(self.loops_done);
+    }
+
+    /// Godot's static `Tween.interpolate_value(initial, delta, elapsed,
+    /// duration, trans_type, ease_type)`: the value an equivalent tweener would
+    /// hold at `elapsed`, without creating a tween at all.
+    ///
+    /// `delta` is the *offset* from `initial`, not the destination — the same
+    /// relative form [`TweenStep`] uses for `as_relative`.
+    pub fn interpolate_value(
+        initial: &Variant,
+        delta: &Variant,
+        elapsed: f64,
+        duration: f64,
+        trans_func: TransFunc,
+        ease_type: EaseType,
+    ) -> Variant {
+        let final_value = add_variants(initial, delta).unwrap_or_else(|| initial.clone());
+        if duration <= 0.0 {
+            return final_value;
+        }
+        let t = (elapsed / duration).clamp(0.0, 1.0);
+        let eased = ease(t, ease_type, trans_func);
+        interpolate_variant(initial, &final_value, eased as f32).unwrap_or(final_value)
     }
 }
 

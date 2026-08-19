@@ -130,6 +130,92 @@ pub fn get_type(name: &str) -> Option<String> {
         .map(|p| p.type_name.clone())
 }
 
+/// Godot's `RenderingServer.GlobalShaderParameterType`, in enum order
+/// (pat-s3rrv.33).
+///
+/// The index IS the enum value — `GLOBAL_VAR_TYPE_BOOL = 0` through
+/// `GLOBAL_VAR_TYPE_SAMPLEREXT = 28`, per
+/// `upstream/godot/doc/classes/RenderingServer.xml`. The strings are the names
+/// a `project.godot` `[shader_globals]` block uses, so one table serves both
+/// spellings and they cannot drift apart.
+const GLOBAL_VAR_TYPE_NAMES: [&str; 29] = [
+    "bool",
+    "bvec2",
+    "bvec3",
+    "bvec4",
+    "int",
+    "ivec2",
+    "ivec3",
+    "ivec4",
+    "rect2i",
+    "uint",
+    "uvec2",
+    "uvec3",
+    "uvec4",
+    "float",
+    "vec2",
+    "vec3",
+    "vec4",
+    "color",
+    "rect2",
+    "mat2",
+    "mat3",
+    "mat4",
+    "transform_2d",
+    "transform",
+    "sampler2D",
+    "sampler2DArray",
+    "sampler3D",
+    "samplerCube",
+    "samplerEXT",
+];
+
+/// Maps a `GlobalShaderParameterType` enum value to its canonical type name.
+///
+/// Out-of-range values return `None` rather than clamping: a script passing a
+/// bogus enum should not silently declare a `bool`.
+pub fn type_name_for_enum(value: i64) -> Option<&'static str> {
+    usize::try_from(value)
+        .ok()
+        .and_then(|i| GLOBAL_VAR_TYPE_NAMES.get(i).copied())
+}
+
+/// Maps a canonical type name back to its enum value.
+///
+/// Case-insensitive because `project.godot` writes `"color"` while the sampler
+/// names are conventionally camel-cased (`sampler2DArray`), and a project
+/// should not have to guess which spelling Patina stores.
+pub fn enum_for_type_name(name: &str) -> Option<i64> {
+    GLOBAL_VAR_TYPE_NAMES
+        .iter()
+        .position(|n| n.eq_ignore_ascii_case(name))
+        .map(|i| i as i64)
+}
+
+/// Maps a `GLOBAL_VAR_TYPE_<SUFFIX>` constant suffix to its enum value.
+///
+/// The suffix is exactly the uppercased type name — `color` → `COLOR`,
+/// `transform_2d` → `TRANSFORM_2D`, `sampler2DArray` → `SAMPLER2DARRAY` — so
+/// the script-facing constants are derived from the same table as the storage
+/// type names instead of a parallel hand-written list that could drift.
+pub fn enum_for_type_name_by_const_suffix(suffix: &str) -> Option<i64> {
+    GLOBAL_VAR_TYPE_NAMES
+        .iter()
+        .position(|n| n.to_ascii_uppercase() == suffix)
+        .map(|i| i as i64)
+}
+
+/// `RenderingServer.global_shader_parameter_get_type`, as Godot's int enum.
+///
+/// Returns `None` for an undeclared parameter, and also for a declared one
+/// whose stored type name is not a known `GlobalShaderParameterType` — that can
+/// only happen if something wrote a raw string past the mapping, which is
+/// exactly the bug this replaces (pat-s3rrv.33: an int enum reached
+/// `arg_str` and was stored verbatim as the type name "17").
+pub fn get_type_enum(name: &str) -> Option<i64> {
+    get_type(name).and_then(|t| enum_for_type_name(&t))
+}
+
 /// `RenderingServer.global_shader_parameter_get_list`, sorted.
 ///
 /// Sorted because the backing map iterates arbitrarily; an unstable list would

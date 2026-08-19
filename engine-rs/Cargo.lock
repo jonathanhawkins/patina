@@ -898,6 +898,7 @@ dependencies = [
  "gdresource",
  "gdscene",
  "gdscript-interop",
+ "gdserver2d",
  "gdserver3d",
  "gdvariant",
  "regex",
@@ -1047,6 +1048,7 @@ name = "gdserver2d"
 version = "0.1.0"
 dependencies = [
  "gdcore",
+ "gdresource",
  "gdvariant",
  "thiserror 2.0.18",
  "tracing",
@@ -1057,6 +1059,7 @@ name = "gdserver3d"
 version = "0.1.0"
 dependencies = [
  "gdcore",
+ "gdresource",
  "gdvariant",
  "thiserror 2.0.18",
  "tracing",
@@ -2159,7 +2162,9 @@ dependencies = [
  "console_error_panic_hook",
  "gdaudio",
  "gdcore",
+ "gdplatform",
  "gdrender3d",
+ "gdscene",
  "gdvariant",
  "wasm-bindgen",
  "wasm-bindgen-futures",

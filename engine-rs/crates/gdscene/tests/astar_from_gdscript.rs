@@ -105,11 +105,14 @@ fn astar_classes_reachable_from_gdscript() {
                \x20   stage = 1\n\
                \x20   var a = AStar2D.new()\n\
                \x20   stage = 2\n\
-               \x20   a.add_point(1, Vector2(0, 0), 1.0)\n\
+               \x20   var p1 = Vector2(0, 0)\n\
+               \x20   a.add_point(1, p1, 1.0)\n\
                \x20   stage = 3\n\
-               \x20   a.add_point(2, Vector2(10, 0), 1.0)\n\
+               \x20   var p2 = Vector2(10, 0)\n\
+               \x20   a.add_point(2, p2, 1.0)\n\
                \x20   stage = 4\n\
-               \x20   a.add_point(3, Vector2(20, 0), 1.0)\n\
+               \x20   var p3 = Vector2(20, 0)\n\
+               \x20   a.add_point(3, p3, 1.0)\n\
                \x20   stage = 5\n\
                \x20   a.connect_points(1, 2, true)\n\
                \x20   stage = 6\n\
@@ -125,23 +128,59 @@ fn astar_classes_reachable_from_gdscript() {
                \x20   stage = 11\n\
                \x20   var g = AStarGrid2D.new()\n\
                \x20   stage = 12\n\
-               \x20   g.set_region(Vector2i(0, 0), Vector2i(5, 5))\n\
+               \x20   var r0 = Vector2i(0, 0)\n\
+               \x20   var rs = Vector2i(5, 5)\n\
+               \x20   g.set_region(r0, rs)\n\
                \x20   stage = 13\n\
                \x20   g.update()\n\
                \x20   stage = 14\n\
                \x20   g.set_diagonal_mode(1)\n\
                \x20   stage = 15\n\
-               \x20   g.set_point_solid(Vector2i(1, 0), true)\n\
+               \x20   var s0 = Vector2i(1, 0)\n\
+               \x20   g.set_point_solid(s0, true)\n\
                \x20   stage = 16\n\
-               \x20   g.set_point_solid(Vector2i(1, 1), true)\n\
+               \x20   var s1 = Vector2i(1, 1)\n\
+               \x20   g.set_point_solid(s1, true)\n\
                \x20   stage = 17\n\
-               \x20   solid_marked = g.is_point_solid(Vector2i(1, 0))\n\
+               \x20   solid_marked = g.is_point_solid(s0)\n\
                \x20   stage = 18\n\
-               \x20   var q = g.get_id_path(Vector2i(0, 0), Vector2i(2, 0))\n\
+               \x20   var gz = Vector2i(2, 0)\n\
+               \x20   var q = g.get_id_path(r0, gz)\n\
                \x20   stage = 19\n\
                \x20   grid_len = q.size()\n\
                \x20   stage = 20\n";
-    let (ml, node) = run_script(src);
+    let (mut ml, node) = run_script(src);
+
+    // `stage 0` with the bump as statement 1 means `_ready` never executed at
+    // all. Distinguish "the body was mangled at parse time" from "it ran and
+    // threw": Patina's parser can produce garbage statements rather than an
+    // error (a mis-parsed construct leaves tokens unconsumed), in which case
+    // `_ready` may not survive as a method at all.
+    // Run `_ready` through the tree path, which installs `SceneTreeAccessor`.
+    // Calling `ScriptInstance::call_method` directly does NOT: it leaves
+    // `scene_access` as `None`, so the `.new()` arm cannot fire and the script
+    // dies with `undefined variable: 'AStar2D'` — an artefact of the harness,
+    // not the bug. `call_script_method` returns `None` when the call raised
+    // (scene_tree.rs:3381), which with `has_method` already asserted below is
+    // an unambiguous "it raised".
+    let ran = ml.tree_mut().call_script_method(node, "_ready", &[]);
+    assert!(
+        ran.is_some(),
+        "_ready raised even with SceneTreeAccessor installed — the fault is in \
+         the AStar call path, not the harness"
+    );
+
+    let script = ml.tree().get_script(node).expect("script attached");
+    assert!(
+        script.has_method("_ready"),
+        "the script parsed but produced no `_ready` method — the body was \
+         mangled at parse time, so no AStar call ever ran. Methods present: {:?}",
+        script
+            .list_methods()
+            .iter()
+            .map(|m| m.name.clone())
+            .collect::<Vec<_>>()
+    );
 
     assert_eq!(
         int_var(ml.tree(), node, "stage"),
@@ -224,7 +263,8 @@ fn astar3d_round_trips_vector3_positions() {
                \x20   stage = 1\n\
                \x20   var a = AStar3D.new()\n\
                \x20   stage = 2\n\
-               \x20   a.add_point(7, Vector3(1, 2, 3), 1.0)\n\
+               \x20   var p7 = Vector3(1, 2, 3)\n\
+               \x20   a.add_point(7, p7, 1.0)\n\
                \x20   stage = 3\n\
                \x20   count = a.get_point_count()\n\
                \x20   stage = 4\n\
@@ -243,4 +283,103 @@ fn astar3d_round_trips_vector3_positions() {
         3.0,
         "a Vector3 position must survive the Variant round trip"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Bisect: which statement raises?
+// ---------------------------------------------------------------------------
+//
+// `stage` counters were useless here: `call_script_method` discards the script
+// variable writes when the call raises, so every var reads its initialiser no
+// matter how far `_ready` actually got. Progress must therefore be measured
+// from OUTSIDE the script — one probe per prefix, each asserting only that the
+// call did not raise. With `--no-fail-fast` a single run names the first
+// prefix that fails, and that prefix's last line is the culprit.
+
+/// Runs `stmts` as the body of `_ready` and reports whether the call completed
+/// without raising.
+///
+/// Takes statements as a slice and applies the indent **in Rust**, not inside
+/// the string literal: a `\`-continuation strips the leading whitespace of the
+/// next line, which silently un-indents GDScript and produces a parse failure
+/// that looks like a feature bug. That trap has cost this bead two cycles
+/// already.
+///
+/// Deliberately ignores script variables — `call_script_method` discards their
+/// writes when the call raises, so they read their initialisers regardless of
+/// how far execution actually got.
+fn ready_survives(stmts: &[&str]) -> bool {
+    let body: String = stmts.iter().map(|s| format!("    {s}\n")).collect();
+    let src = format!("extends Node\nfunc _ready():\n{body}");
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    let node = tree
+        .add_child(root, Node::new("Probe", "Node"))
+        .expect("child adds");
+    let script = GDScriptNodeInstance::from_source(&src, node).expect("script parses");
+    tree.attach_script(node, Box::new(script));
+    let mut ml = MainLoop::new(tree);
+    ml.tree_mut()
+        .call_script_method(node, "_ready", &[])
+        .is_some()
+}
+
+const MK2D: &str = "var a = AStar2D.new()";
+const P0: &str = "var p = Vector2(0, 0)";
+const ADD1: &str = "a.add_point(1, p, 1.0)";
+const Q0: &str = "var q = Vector2(10, 0)";
+const ADD2: &str = "a.add_point(2, q, 1.0)";
+const CONN: &str = "a.connect_points(1, 2, true)";
+const MKGRID: &str = "var g = AStarGrid2D.new()";
+const O0: &str = "var o = Vector2i(0, 0)";
+const Z5: &str = "var z = Vector2i(5, 5)";
+const REGION: &str = "g.set_region(o, z)";
+const UPDATE: &str = "g.update()";
+
+#[test]
+fn probe_1_construct_astar2d() {
+    assert!(ready_survives(&[MK2D]));
+}
+
+#[test]
+fn probe_2_add_point() {
+    assert!(ready_survives(&[MK2D, P0, ADD1]));
+}
+
+#[test]
+fn probe_3_connect_points() {
+    assert!(ready_survives(&[MK2D, P0, ADD1, Q0, ADD2, CONN]));
+}
+
+#[test]
+fn probe_4_get_point_path() {
+    assert!(ready_survives(&[
+        MK2D,
+        P0,
+        ADD1,
+        Q0,
+        ADD2,
+        CONN,
+        "var r = a.get_point_path(1, 2)",
+    ]));
+}
+
+#[test]
+fn probe_5_grid_construct_and_region() {
+    assert!(ready_survives(&[MKGRID, O0, Z5, REGION, UPDATE]));
+}
+
+#[test]
+fn probe_6_grid_solid_and_path() {
+    assert!(ready_survives(&[
+        MKGRID,
+        O0,
+        Z5,
+        REGION,
+        UPDATE,
+        "var c = Vector2i(1, 0)",
+        "g.set_point_solid(c, true)",
+        "var t = Vector2i(2, 0)",
+        "var path = g.get_id_path(o, t)",
+    ]));
 }

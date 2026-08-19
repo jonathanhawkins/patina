@@ -26,6 +26,11 @@ gdplatform = { path = "../gdplatform" }
 gdresource = { path = "../gdresource" }
 gdscript-interop = { path = "../gdscript-interop" }
 gdserver3d = { path = "../gdserver3d" }
+# The `DrawCommand` type a script's `_draw()` emits (pat-s3rrv.22). Already an
+# indirect dependency through gdscene, which stores them on the SceneTree; named
+# directly so the canvas render list can convert them. gdserver2d depends only on
+# gdcore/gdvariant, so this adds no cycle.
+gdserver2d = { path = "../gdserver2d" }
 regex = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }

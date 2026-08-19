@@ -30,18 +30,36 @@
 //!   h            u16      image height
 //!   mipmaps      u32      extra mip levels
 //!   format       u32      Image::Format enum
-//! Data (level 0 read, remaining mip levels skipped):
+//! Data (level 0 becomes the pixels; later levels are validated, not decoded):
 //!   PNG/WEBP:    u32 size + `size` bytes (an embedded PNG/WebP file), per level
-//!   IMAGE:       raw pixel bytes (w*h*bpp for level 0), per level
+//!   IMAGE:       raw pixel bytes, per level, back to back with NO size prefix
 //! ```
 //!
 //! # Support
 //!
-//! - `DATA_FORMAT_PNG`: decoded by reusing the crate's PNG importer.
-//! - `DATA_FORMAT_IMAGE`: raw uncompressed `L8`/`LA8`/`RGB8`/`RGBA8`.
-//! - `DATA_FORMAT_WEBP` / `DATA_FORMAT_BASIS_UNIVERSAL` and other
-//!   `Image::Format`s return a clear [`EngineError::Unsupported`] (this build
-//!   has no WebP/Basis decoder). Only mip level 0 is read.
+//! - `DATA_FORMAT_PNG` / `DATA_FORMAT_WEBP`: decoded by reusing the crate's
+//!   PNG/WebP importers.
+//! - `DATA_FORMAT_IMAGE`, uncompressed: `L8`/`LA8`/`RGB8`/`RGBA8`.
+//! - `DATA_FORMAT_IMAGE`, VRAM-compressed (pat-s3rrv.48): `DXT1` (BC1), `DXT5`
+//!   (BC3), `DXT3` (BC2), `DXT5_RA_AS_RG`, `RGTC_R` (BC4) and `RGTC_RG` (BC5),
+//!   decoded to
+//!   RGBA8 through
+//!   [`crate::block_compression`]. `compress/mode = VRAM Compressed` is the
+//!   default of Godot's "3D" texture preset, so this is how most 3D textures in
+//!   a real project are stored.
+//! - Every other `Image::Format` — BC7/BC6H, the ETC/ETC2 family, ASTC —
+//!   and `DATA_FORMAT_BASIS_UNIVERSAL` return an [`EngineError::Unsupported`]
+//!   that **names the format**, so a project that fails to load says which
+//!   encoder produced it.
+//!
+//! # Mip chains
+//!
+//! `DATA_FORMAT_IMAGE` stores levels contiguously with no per-level framing, so
+//! finding level 1 means computing level 0's exact size — for block formats,
+//! `ceil(w/4) * ceil(h/4) * block_bytes`, with the chain flooring at 4x4 rather
+//! than 1x1 (`Image::get_format_min_pixel_size`). Level 0 supplies `pixels`;
+//! the remaining levels are read to prove the file carries what its header
+//! promises, and the total is reported as `mipmap_count`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -50,6 +68,7 @@ use gdcore::error::{EngineError, EngineResult};
 use gdcore::math::Color;
 use gdvariant::Variant;
 
+use crate::block_compression;
 use crate::importers::{import_image_bytes, import_webp_bytes};
 use crate::resource::Resource;
 
@@ -70,6 +89,184 @@ const IMG_FORMAT_L8: u32 = 0;
 const IMG_FORMAT_LA8: u32 = 1;
 const IMG_FORMAT_RGB8: u32 = 4;
 const IMG_FORMAT_RGBA8: u32 = 5;
+
+// Block-compressed Image::Format values (pat-s3rrv.48). Ordinals counted from
+// `FORMAT_L8 = 0` in upstream/godot/core/io/image.h; `compress/mode = VRAM
+// Compressed` is the default of Godot's "3D" texture preset, so these are the
+// common storage for any 3D texture in a real project.
+const IMG_FORMAT_DXT1: u32 = 17; // BC1
+const IMG_FORMAT_DXT3: u32 = 18; // BC2
+const IMG_FORMAT_DXT5: u32 = 19; // BC3
+const IMG_FORMAT_RGTC_R: u32 = 20; // BC4
+const IMG_FORMAT_RGTC_RG: u32 = 21; // BC5
+const IMG_FORMAT_BPTC_RGBA: u32 = 22; // BC7
+const IMG_FORMAT_BPTC_RGBF: u32 = 23;
+const IMG_FORMAT_BPTC_RGBFU: u32 = 24;
+const IMG_FORMAT_ETC: u32 = 25;
+const IMG_FORMAT_ETC2_R11: u32 = 26;
+const IMG_FORMAT_ETC2_R11S: u32 = 27;
+const IMG_FORMAT_ETC2_RG11: u32 = 28;
+const IMG_FORMAT_ETC2_RG11S: u32 = 29;
+const IMG_FORMAT_ETC2_RGB8: u32 = 30;
+const IMG_FORMAT_ETC2_RGBA8: u32 = 31;
+const IMG_FORMAT_ETC2_RGB8A1: u32 = 32;
+const IMG_FORMAT_ETC2_RA_AS_RG: u32 = 33;
+const IMG_FORMAT_DXT5_RA_AS_RG: u32 = 34;
+const IMG_FORMAT_ASTC_4X4: u32 = 35;
+const IMG_FORMAT_ASTC_4X4_HDR: u32 = 36;
+const IMG_FORMAT_ASTC_8X8: u32 = 37;
+const IMG_FORMAT_ASTC_8X8_HDR: u32 = 38;
+
+/// `FORMAT_BIT_HAS_MIPMAPS` from `scene/resources/compressed_texture.h:56` —
+/// set in the OUTER header's `df` word when the file carries a mip chain.
+const CTEX_FORMAT_BIT_HAS_MIPMAPS: u32 = 1 << 23;
+
+/// Every block-compressed format is stored as 4x4 texel blocks, and its mip
+/// chain floors at 4x4 rather than 1x1 (`Image::get_format_min_pixel_size`,
+/// core/io/image.cpp). ASTC 8x8 is the one exception and is not decoded here.
+const BLOCK_DIM: u32 = 4;
+
+/// How a `DATA_FORMAT_IMAGE` payload is laid out for one `Image::Format`.
+enum ImageLayout {
+    /// Tightly packed 8-bit channels: `w * h * bpp` bytes per level.
+    Raw {
+        bpp: usize,
+        format_str: &'static str,
+    },
+    /// 4x4 block-compressed: `ceil(w/4) * ceil(h/4) * block_bytes` per level.
+    /// `decode` turns one level's bytes into RGBA8.
+    Block {
+        block_bytes: usize,
+        decode: fn(&[u8], usize, usize) -> Option<Vec<u8>>,
+        name: &'static str,
+    },
+}
+
+/// Maps an `Image::Format` ordinal onto its payload layout, or names the format
+/// in an `Unsupported` error.
+///
+/// Formats whose decoder does not exist yet are named individually rather than
+/// lumped together: "ETC2_RGBA8 is not supported" tells you which encoder the
+/// project used, where the old blanket message did not.
+fn image_layout(img_format: u32) -> EngineResult<ImageLayout> {
+    let unsupported = |name: &str| {
+        EngineError::Unsupported(format!(
+            ".ctex Image::Format {img_format} ({name}) has no decoder in this build"
+        ))
+    };
+    Ok(match img_format {
+        IMG_FORMAT_L8 => ImageLayout::Raw {
+            bpp: 1,
+            format_str: "L",
+        },
+        IMG_FORMAT_LA8 => ImageLayout::Raw {
+            bpp: 2,
+            format_str: "LA",
+        },
+        IMG_FORMAT_RGB8 => ImageLayout::Raw {
+            bpp: 3,
+            format_str: "RGB",
+        },
+        IMG_FORMAT_RGBA8 => ImageLayout::Raw {
+            bpp: 4,
+            format_str: "RGBA",
+        },
+        // BC1: 8 bytes per block. Godot writes DXT1 for opaque VRAM textures.
+        IMG_FORMAT_DXT1 => ImageLayout::Block {
+            block_bytes: 8,
+            decode: block_compression::decode_bc1,
+            name: "DXT1",
+        },
+        // BC3: 16 bytes per block (alpha ramp + colour block).
+        IMG_FORMAT_DXT5 => ImageLayout::Block {
+            block_bytes: 16,
+            decode: block_compression::decode_bc3,
+            name: "DXT5",
+        },
+        // BC3 with the channels swizzled for normal maps. The block layout is
+        // identical, so it decodes; consumers that care about the swizzle read
+        // the `format` property.
+        IMG_FORMAT_DXT5_RA_AS_RG => ImageLayout::Block {
+            block_bytes: 16,
+            decode: block_compression::decode_bc3,
+            name: "DXT5_RA_AS_RG",
+        },
+        // BC2: explicit 4-bit alpha per texel over a BC1 colour block.
+        IMG_FORMAT_DXT3 => ImageLayout::Block {
+            block_bytes: 16,
+            decode: block_compression::decode_bc2,
+            name: "DXT3",
+        },
+        // BC4/BC5: one and two BC4-style channel blocks. Godot decompresses
+        // these to R8/RG8, so the unused channels stay zero and alpha opaque
+        // (pat-s3rrv.48).
+        IMG_FORMAT_RGTC_R => ImageLayout::Block {
+            block_bytes: 8,
+            decode: block_compression::decode_bc4,
+            name: "RGTC_R/BC4",
+        },
+        IMG_FORMAT_RGTC_RG => ImageLayout::Block {
+            block_bytes: 16,
+            decode: block_compression::decode_bc5,
+            name: "RGTC_RG/BC5",
+        },
+        IMG_FORMAT_BPTC_RGBA => return Err(unsupported("BPTC_RGBA/BC7")),
+        IMG_FORMAT_BPTC_RGBF => return Err(unsupported("BPTC_RGBF/BC6H signed")),
+        IMG_FORMAT_BPTC_RGBFU => return Err(unsupported("BPTC_RGBFU/BC6H unsigned")),
+        IMG_FORMAT_ETC => return Err(unsupported("ETC1")),
+        IMG_FORMAT_ETC2_R11 => return Err(unsupported("ETC2_R11")),
+        IMG_FORMAT_ETC2_R11S => return Err(unsupported("ETC2_R11S")),
+        IMG_FORMAT_ETC2_RG11 => return Err(unsupported("ETC2_RG11")),
+        IMG_FORMAT_ETC2_RG11S => return Err(unsupported("ETC2_RG11S")),
+        IMG_FORMAT_ETC2_RGB8 => return Err(unsupported("ETC2_RGB8")),
+        IMG_FORMAT_ETC2_RGBA8 => return Err(unsupported("ETC2_RGBA8")),
+        IMG_FORMAT_ETC2_RGB8A1 => return Err(unsupported("ETC2_RGB8A1")),
+        IMG_FORMAT_ETC2_RA_AS_RG => return Err(unsupported("ETC2_RA_AS_RG")),
+        IMG_FORMAT_ASTC_4X4 => return Err(unsupported("ASTC_4x4")),
+        IMG_FORMAT_ASTC_4X4_HDR => return Err(unsupported("ASTC_4x4_HDR")),
+        IMG_FORMAT_ASTC_8X8 => return Err(unsupported("ASTC_8x8")),
+        IMG_FORMAT_ASTC_8X8_HDR => return Err(unsupported("ASTC_8x8_HDR")),
+        other => {
+            return Err(EngineError::Unsupported(format!(
+                ".ctex uncompressed Image::Format {other} is not supported (only L8/LA8/RGB8/RGBA8 and DXT1/DXT5)"
+            )))
+        }
+    })
+}
+
+impl ImageLayout {
+    /// Byte size of one mip level at `w` x `h`.
+    fn level_size(&self, w: u32, h: u32) -> EngineResult<usize> {
+        let overflow = || EngineError::Parse(".ctex image size overflow".into());
+        match self {
+            Self::Raw { bpp, .. } => (w as usize)
+                .checked_mul(h as usize)
+                .and_then(|n| n.checked_mul(*bpp))
+                .ok_or_else(overflow),
+            Self::Block { block_bytes, .. } => {
+                let bx = (w as usize).div_ceil(BLOCK_DIM as usize);
+                let by = (h as usize).div_ceil(BLOCK_DIM as usize);
+                bx.checked_mul(by)
+                    .and_then(|n| n.checked_mul(*block_bytes))
+                    .ok_or_else(overflow)
+            }
+        }
+    }
+
+    /// Dimensions of the next mip level down.
+    ///
+    /// Godot halves with a floor of `get_format_min_pixel_size` — 1 for packed
+    /// formats, 4 for block-compressed ones (`Image::_get_dst_image_size`).
+    /// Using 1 for a block format under-counts every small level and desyncs
+    /// the cursor for the rest of the chain.
+    fn next_level(&self, w: u32, h: u32) -> (u32, u32) {
+        let floor = match self {
+            Self::Raw { .. } => 1,
+            Self::Block { .. } => BLOCK_DIM,
+        };
+        ((w >> 1).max(floor), (h >> 1).max(floor))
+    }
+}
 
 /// A bounds-checked little-endian cursor for `.ctex` parsing.
 struct CtexCursor<'a> {
@@ -128,7 +325,9 @@ pub fn load_ctex_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>> 
     }
     let _width = c.u32()?; // original texture width
     let _height = c.u32()?; // original texture height
-    let _df = c.u32()?; // FORMAT_BIT_* flags
+                            // pat-s3rrv.48: `df` carries FORMAT_BIT_HAS_MIPMAPS, which says whether a
+                            // mip chain follows level 0.
+    let df = c.u32()?;
     let _mipmap_limit = c.u32()?;
     c.u32()?; // reserved
     c.u32()?;
@@ -138,7 +337,7 @@ pub fn load_ctex_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>> 
     let data_format = c.u32()?;
     let w = c.u16()? as u32;
     let h = c.u16()? as u32;
-    let _mipmaps = c.u32()?; // extra mip levels; we read level 0 only
+    let mipmaps = c.u32()?; // mip levels BEYOND level 0
     let img_format = c.u32()?;
 
     match data_format {
@@ -161,28 +360,74 @@ pub fn load_ctex_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>> 
             "Basis Universal .ctex is not supported".into(),
         )),
         CTEX_DATA_FORMAT_IMAGE => {
-            let (bpp, format_str) = match img_format {
-                IMG_FORMAT_L8 => (1usize, "L"),
-                IMG_FORMAT_LA8 => (2, "LA"),
-                IMG_FORMAT_RGB8 => (3, "RGB"),
-                IMG_FORMAT_RGBA8 => (4, "RGBA"),
-                other => {
-                    return Err(EngineError::Unsupported(format!(
-                        ".ctex uncompressed Image::Format {other} is not supported (only L8/LA8/RGB8/RGBA8)"
-                    )))
+            let layout = image_layout(img_format)?;
+
+            // Levels are stored back to back with NO per-level size prefix —
+            // unlike the PNG/WebP arms above, where each level is length-framed.
+            // `load_image_from_file` (compressed_texture.cpp) reads the whole
+            // chain as one run, so the only way to find level 1 is to compute
+            // level 0's exact byte length.
+            let level0_size = layout.level_size(w, h)?;
+            let level0 = c.take(level0_size)?;
+
+            // Walk the rest of the chain. Nothing here needs the bytes yet —
+            // level 0 is what becomes pixels — but reading them proves the file
+            // actually carries the levels its header advertises, so a truncated
+            // artifact is an error instead of a texture with a silent hole.
+            let extra_levels = if (df & CTEX_FORMAT_BIT_HAS_MIPMAPS) != 0 || mipmaps > 0 {
+                mipmaps
+            } else {
+                0
+            };
+            let (mut lw, mut lh) = layout.next_level(w, h);
+            for _ in 0..extra_levels {
+                let size = layout.level_size(lw, lh)?;
+                c.take(size)?;
+                let (nw, nh) = layout.next_level(lw, lh);
+                lw = nw;
+                lh = nh;
+            }
+            // Godot counts `mipmaps` as levels BEYOND level 0, so a texture with
+            // one extra level has two levels in total. `mipmap_count` reports
+            // the total, which is what a renderer allocating storage needs.
+            let mipmap_count = extra_levels.saturating_add(1);
+
+            let tex = match &layout {
+                ImageLayout::Raw { bpp, format_str } => {
+                    build_raw_texture(w, h, level0, *bpp, *format_str, path)
+                }
+                ImageLayout::Block { decode, name, .. } => {
+                    // The block decoders hand back tightly packed RGBA8, which
+                    // is exactly what `build_raw_texture` consumes, so a
+                    // VRAM-compressed texture ends up the same Resource shape as
+                    // a PNG-sourced one — the point of the bead.
+                    let rgba = (*decode)(level0, w as usize, h as usize).ok_or_else(|| {
+                        EngineError::Parse(format!(".ctex {name} payload is too short for {w}x{h}"))
+                    })?;
+                    build_raw_texture(w, h, rgba.as_slice(), 4, "RGBA", path)
                 }
             };
-            let level0 = (w as usize)
-                .checked_mul(h as usize)
-                .and_then(|n| n.checked_mul(bpp))
-                .ok_or_else(|| EngineError::Parse(".ctex image size overflow".into()))?;
-            let raw = c.take(level0)?;
-            Ok(build_raw_texture(w, h, raw, bpp, format_str, path))
+            Ok(with_mipmap_count(tex, mipmap_count))
         }
         other => Err(EngineError::Parse(format!(
             "unknown .ctex data format {other}"
         ))),
     }
+}
+
+/// Records how many mip levels the artifact carries, including level 0
+/// (pat-s3rrv.48).
+///
+/// Takes the `Arc` by value and mutates through `Arc::get_mut`: the resource has
+/// just been built and is not shared yet, so this always succeeds. If it ever
+/// were shared, the count is simply omitted rather than the load failing —
+/// a missing hint is recoverable, a panic is not.
+fn with_mipmap_count(res: Arc<Resource>, levels: u32) -> Arc<Resource> {
+    let mut res = res;
+    if let Some(r) = Arc::get_mut(&mut res) {
+        r.set_property("mipmap_count", Variant::Int(levels as i64));
+    }
+    res
 }
 
 /// Builds a `Texture2D` [`Resource`] from tightly-packed 8-bit pixel data,
@@ -337,6 +582,22 @@ mod tests {
         d
     }
 
+    /// A `.ctex` wrapping a real WebP file, mirroring [`build_ctex_png`]'s
+    /// layout — level 0 is a `u32` size followed by the embedded file.
+    fn build_ctex_webp(width: u32, height: u32, webp: &[u8]) -> Vec<u8> {
+        let mut d = ctex_header(width, height);
+        ctex_inner(
+            &mut d,
+            CTEX_DATA_FORMAT_WEBP,
+            width as u16,
+            height as u16,
+            IMG_FORMAT_RGBA8,
+        );
+        d.extend_from_slice(&(webp.len() as u32).to_le_bytes()); // level-0 size
+        d.extend_from_slice(webp);
+        d
+    }
+
     fn build_ctex_image(width: u32, height: u32, img_format: u32, raw: &[u8]) -> Vec<u8> {
         let mut d = ctex_header(width, height);
         ctex_inner(
@@ -459,13 +720,45 @@ mod tests {
     }
 
     #[test]
-    fn ctex_webp_unsupported() {
+    fn ctex_webp_payload_decodes_to_pixels() {
+        // Replaces `ctex_webp_unsupported`, which was RED AT HEAD and pinned a
+        // limitation that no longer exists (pat-s3rrv.48): WebP `.ctex` was
+        // implemented by pat-nzgdu.8 — it is the format Godot's DEFAULT 2D
+        // texture importer writes — but the test kept asserting an error whose
+        // message contained "WebP". Nothing produces that message any more, so
+        // the assertion could only ever fail. A stale test is worse than a
+        // missing one: it reads as coverage while pinning the opposite of the
+        // contract.
+        let webp = include_bytes!("../fixtures/icon.webp");
+        let d = build_ctex_webp(256, 256, webp);
+        let res = load_ctex_bytes(&d, Path::new("w.ctex")).expect("WebP .ctex decodes");
+        assert_eq!(res.class_name, "Texture2D");
+        assert_eq!(res.get_property("width"), Some(&Variant::Int(256)));
+        assert_eq!(res.get_property("height"), Some(&Variant::Int(256)));
+        // Pixels, not just a header: the whole point of the WebP arm is that a
+        // `.ctex`-sourced texture matches a source-image one.
+        match res.get_property("pixels") {
+            Some(Variant::Array(px)) => assert_eq!(
+                px.len(),
+                256 * 256,
+                "one Color per pixel, or the payload was not really decoded",
+            ),
+            other => panic!("expected a pixels array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ctex_webp_truncated_payload_errors() {
+        // The honest half of the old test: a WebP `.ctex` whose level-0 payload
+        // is missing must fail on the BOUNDS CHECK rather than be mistaken for
+        // an unsupported format. Every cursor read is length-checked, and this
+        // pins that the WebP arm is no exception.
         let mut d = ctex_header(1, 1);
         ctex_inner(&mut d, CTEX_DATA_FORMAT_WEBP, 1, 1, IMG_FORMAT_RGBA8);
         let err = load_ctex_bytes(&d, Path::new("w.ctex"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("WebP"), "got: {err}");
+        assert!(err.contains("truncated"), "got: {err}");
     }
 
     #[test]
@@ -563,7 +856,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("12 bytes"), "got: {err}");
-        assert!(save_ctex_image_rgba8(1, 1, &[0u8; 4]).is_ok(), "1x1 is fine");
+        assert!(
+            save_ctex_image_rgba8(1, 1, &[0u8; 4]).is_ok(),
+            "1x1 is fine"
+        );
         // Zero-sized is consistent (0 bytes) and must encode rather than error.
         assert!(save_ctex_image_rgba8(0, 0, &[]).is_ok());
     }

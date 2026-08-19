@@ -46,12 +46,12 @@
 //! magic at the start, or via the end-of-file trailer `[data_size: u64][magic]`.
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use gdcore::error::{EngineError, EngineResult};
-use gdcore::file_access::{FileAccess, MountedPack};
+use gdcore::file_access::{FileAccess, MountedPack, PackDirListing};
 
 use crate::loader::{ResourceLoader, TresLoader};
 use crate::resource::Resource;
@@ -900,6 +900,46 @@ impl MountedPack for PckMount {
 
     fn removed_files(&self) -> Vec<String> {
         self.loader.archive().removed.clone()
+    }
+
+    /// Enumerates the immediate children of `res_dir` (pat-s3rrv.34).
+    ///
+    /// A PCK directory holds a flat list of full `res://` paths — there are no
+    /// directory records at all — so subdirectories are *derived* from the path
+    /// segments. `res://a/b/c.txt` therefore makes `a` a child of the root and
+    /// `b` a child of `res://a`, even though neither has an entry of its own.
+    /// Without this derivation `DirAccess` would report every nested file as a
+    /// sibling of the directory being listed.
+    fn list_dir(&self, res_dir: &str) -> PackDirListing {
+        let normalized = gdcore::file_access::normalize_pack_dir(res_dir);
+        let prefix = if normalized == "res://" {
+            normalized.clone()
+        } else {
+            format!("{normalized}/")
+        };
+
+        let mut files = BTreeSet::new();
+        let mut dirs = BTreeSet::new();
+        for path in self.loader.file_paths() {
+            let Some(rest) = path.strip_prefix(&prefix) else {
+                continue;
+            };
+            match rest.split_once('/') {
+                // Nested deeper: its first segment is a subdirectory of this one.
+                Some((dir, _)) if !dir.is_empty() => {
+                    dirs.insert(dir.to_string());
+                }
+                Some(_) => {}
+                None if !rest.is_empty() => {
+                    files.insert(rest.to_string());
+                }
+                None => {}
+            }
+        }
+        PackDirListing {
+            files: files.into_iter().collect(),
+            dirs: dirs.into_iter().collect(),
+        }
     }
 }
 

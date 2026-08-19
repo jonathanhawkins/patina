@@ -15,7 +15,8 @@
 
 use gdscene::animation::{Animation, AnimationTrack, KeyFrame};
 use gdscene::animation_tree::{
-    advance_and_apply, AnimationNode, AnimationTree, BlendSpace1D, StateMachine,
+    advance_and_apply, AnimationLeafOptions, AnimationNode, AnimationTree, BlendSpace1D,
+    StateMachine,
 };
 use gdscene::node::{Node, NodeId};
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
@@ -89,6 +90,7 @@ fn state_machine_drives_node_property_over_time() {
         AnimationNode::Animation {
             name: "run".into(),
             position: 0.0,
+            opts: AnimationLeafOptions::default(),
         },
     );
     sm.current = "run".into();

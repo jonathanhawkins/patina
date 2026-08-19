@@ -144,6 +144,139 @@ pub fn rasterize_triangle(
     }
 }
 
+/// Rasterizes a triangle honouring a material's transparency mode
+/// (pat-s3rrv.30).
+///
+/// [`rasterize_triangle`] writes every fragment opaquely and depth-tests
+/// *before* shading, which is right for opaque geometry and wrong for both
+/// transparent modes:
+///
+/// - **AlphaScissor** needs the shaded alpha to decide whether the fragment
+///   exists at all, so the depth write must not happen until after shading —
+///   otherwise a discarded fragment still occludes whatever is behind it.
+/// - **Alpha** blends over the destination and, per Godot's default
+///   `DEPTH_DRAW_OPAQUE_ONLY`, does not write depth at all; it still *tests*
+///   against it so geometry in front continues to occlude.
+#[allow(clippy::too_many_arguments)]
+pub fn rasterize_triangle_with_modes(
+    v0: &ScreenVertex,
+    v1: &ScreenVertex,
+    v2: &ScreenVertex,
+    pixels: &mut [Color],
+    depth_buf: &mut DepthBuffer,
+    width: u32,
+    height: u32,
+    fragment_shader: &dyn FragmentShader,
+    uniforms: &ShaderUniforms,
+    transparency: crate::render_modes::Transparency,
+    alpha_scissor_threshold: f32,
+    depth_draw_mode: crate::render_modes::DepthDrawMode,
+) {
+    use crate::render_modes::{alpha_scissor_discard, is_transparent, writes_depth, Transparency};
+
+    // Opaque materials keep the original path exactly — same ordering, same
+    // early depth rejection, so nothing about existing rendering changes.
+    if transparency == Transparency::Disabled {
+        rasterize_triangle(
+            v0,
+            v1,
+            v2,
+            pixels,
+            depth_buf,
+            width,
+            height,
+            fragment_shader,
+            uniforms,
+        );
+        return;
+    }
+
+    let min_x = v0.x.min(v1.x).min(v2.x).max(0.0) as i32;
+    let max_x = v0.x.max(v1.x).max(v2.x).min(width as f32 - 1.0) as i32;
+    let min_y = v0.y.min(v1.y).min(v2.y).max(0.0) as i32;
+    let max_y = v0.y.max(v1.y).max(v2.y).min(height as f32 - 1.0) as i32;
+    if min_x > max_x || min_y > max_y {
+        return;
+    }
+
+    let area = edge_function(v0.x, v0.y, v1.x, v1.y, v2.x, v2.y);
+    if area.abs() < 1e-6 {
+        return;
+    }
+    let inv_area = 1.0 / area;
+    let blended = is_transparent(transparency);
+    let write_depth = writes_depth(depth_draw_mode, blended);
+
+    for py in min_y..=max_y {
+        for px in min_x..=max_x {
+            let cx = px as f32 + 0.5;
+            let cy = py as f32 + 0.5;
+            let mut b0 = edge_function(v1.x, v1.y, v2.x, v2.y, cx, cy) * inv_area;
+            let mut b1 = edge_function(v2.x, v2.y, v0.x, v0.y, cx, cy) * inv_area;
+            let mut b2 = edge_function(v0.x, v0.y, v1.x, v1.y, cx, cy) * inv_area;
+            if b0 < 0.0 || b1 < 0.0 || b2 < 0.0 {
+                continue;
+            }
+            b0 = b0.max(0.0);
+            b1 = b1.max(0.0);
+            b2 = b2.max(0.0);
+
+            let z_recip = b0 * v0.w_recip + b1 * v1.w_recip + b2 * v2.w_recip;
+            if z_recip <= 0.0 {
+                continue;
+            }
+            let z_correct = 1.0 / z_recip;
+            let depth = b0 * v0.depth + b1 * v1.depth + b2 * v2.depth;
+            let ux = px as u32;
+            let uy = py as u32;
+
+            // Test only — the write is deferred until the fragment is known to
+            // survive, and skipped entirely when the mode says so.
+            if depth >= depth_buf.get(ux, uy) {
+                continue;
+            }
+
+            let pc0 = b0 * v0.w_recip * z_correct;
+            let pc1 = b1 * v1.w_recip * z_correct;
+            let pc2 = b2 * v2.w_recip * z_correct;
+            let interpolated =
+                VertexOutput::barycentric(&v0.vertex, &v1.vertex, &v2.vertex, pc0, pc1, pc2);
+            let frag_input = FragmentInput {
+                world_position: interpolated.world_position,
+                world_normal: interpolated.world_normal,
+                uv: interpolated.uv,
+                depth,
+            };
+            let color = fragment_shader.process(&frag_input, uniforms);
+
+            if alpha_scissor_discard(transparency, color.a, alpha_scissor_threshold) {
+                continue;
+            }
+
+            let idx = (uy * width + ux) as usize;
+            if blended {
+                // Standard source-over: the destination shows through by
+                // (1 - alpha), which is what "the far quad's colour is visible
+                // through the near one" means in the acceptance.
+                let dst = pixels[idx];
+                let a = color.a.clamp(0.0, 1.0);
+                pixels[idx] = Color::new(
+                    color.r * a + dst.r * (1.0 - a),
+                    color.g * a + dst.g * (1.0 - a),
+                    color.b * a + dst.b * (1.0 - a),
+                    (a + dst.a * (1.0 - a)).clamp(0.0, 1.0),
+                );
+            } else {
+                pixels[idx] = color;
+            }
+
+            if write_depth {
+                depth_buf.test_and_set(ux, uy, depth);
+            }
+        }
+    }
+}
+
 /// 2D edge function (signed area of parallelogram).
 fn edge_function(ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) -> f32 {
     (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
