@@ -13,6 +13,8 @@ pub mod display;
 pub mod drag_drop;
 pub mod enet_multiplayer;
 pub mod export;
+pub mod fetch_state;
+pub mod fetch_web;
 pub mod http_client;
 pub mod http_request;
 pub mod input;
@@ -20,6 +22,7 @@ pub mod input;
 /// semantics elsewhere (pat-u3l8c.115). Distinct from [`web::JsBridge`], which
 /// stays as the call-recording stub the export tooling asserts against.
 pub mod js_bridge;
+pub mod multiplayer_peer_handles;
 pub mod multiplayer_peer_state;
 pub mod native_menu;
 pub mod network;
@@ -34,7 +37,6 @@ pub mod tcp_multiplayer;
 pub mod thread;
 pub mod time;
 pub mod webrtc_peer;
-pub mod multiplayer_peer_handles;
 pub mod websocket_multiplayer;
 pub mod websocket_peer;
 pub mod window;
@@ -64,6 +66,11 @@ pub use http_request::{
     HTTPRequest, HttpMethod, HttpRequestConfig, HttpResponse, HttpResultCode, RequestCompleted,
 };
 pub use input::{ActionBinding, InputEvent, InputMap, InputSnapshot, InputState, Key, MouseButton};
+pub use multiplayer_peer_handles::{
+    is_multiplayer_peer_handle, new_multiplayer_peer_handle, new_offline_multiplayer_peer_handle,
+    new_ws_multiplayer_peer_handle, release_multiplayer_peer_handle, take_multiplayer_peer,
+    with_multiplayer_peer, MultiplayerPeerHandle,
+};
 pub use network::{
     decode_confirm_path, decode_rpc_packet, decode_rpc_packet_cached, decode_simplify_path,
     decode_spawn_packet, decode_sync_packet, encode_confirm_path, encode_rpc_call,
@@ -87,11 +94,6 @@ pub use signing::{
 pub use stream_peer_tcp::{StreamPeerTCP, StreamPeerTcpError, StreamPeerTcpStatus};
 pub use tcp_multiplayer::TcpMultiplayerPeer;
 pub use time::Timer;
-pub use multiplayer_peer_handles::{
-    is_multiplayer_peer_handle, new_multiplayer_peer_handle, new_offline_multiplayer_peer_handle,
-    new_ws_multiplayer_peer_handle, release_multiplayer_peer_handle, take_multiplayer_peer,
-    with_multiplayer_peer, MultiplayerPeerHandle,
-};
 pub use websocket_peer::{Frame, Opcode, WebSocketError, WebSocketPeer, WebSocketState, WriteMode};
 pub use window::{HeadlessWindow, WindowConfig, WindowEvent, WindowId, WindowManager};
 

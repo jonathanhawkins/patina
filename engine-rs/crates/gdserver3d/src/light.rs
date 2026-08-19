@@ -384,6 +384,16 @@ pub struct Light3D {
     /// [`ShadowFilterQuality::Hard`] (a binary edge, matching the previous
     /// behavior); a soft level produces penumbrae.
     pub shadow_filter_quality: ShadowFilterQuality,
+    /// Whether this light SUBTRACTS light instead of adding it (Godot's
+    /// `Light3D.light_negative`, default `false`).
+    ///
+    /// Godot implements it as a sign flip on the light's energy —
+    /// `float sign = light->negative ? -1 : 1;` then
+    /// `energy = sign * param[ENERGY] * fade`
+    /// (upstream/godot/servers/rendering/renderer_rd/storage_rd/light_storage.cpp:840).
+    /// It is a shading-time negation, NOT a colour change: the authored colour
+    /// is untouched and only the contribution's sign changes.
+    pub negative: bool,
     /// Colour temperature in Kelvin (Godot's `Light3D.light_temperature`).
     /// 6500 is daylight-neutral. The tint is applied into
     /// [`color`](Self::color) when a scene sets the property; this field keeps
@@ -407,6 +417,70 @@ pub struct Light3D {
     pub distance_fade_shadow: f32,
     /// Length of the distance fade transition (`distance_fade_length`).
     pub distance_fade_length: f32,
+    /// Godot's `Light3D.shadow_bias`, in WORLD UNITS.
+    ///
+    /// Offsets the shadow comparison so a surface does not shadow itself
+    /// ("acne") at the cost of detaching contact shadows ("peter-panning").
+    ///
+    /// ⚠️ The defaults are PER CLASS and the overrides are not where you would
+    /// guess (`doc/classes/*.xml`): the base `Light3D` value is **0.1**, which
+    /// `DirectionalLight3D` inherits by declaring nothing at all; `OmniLight3D`
+    /// also inherits 0.1; only `SpotLight3D` overrides it, to **0.03**. Seeding
+    /// one shared default would be wrong for spot lights specifically.
+    pub shadow_bias: f32,
+    /// Godot's `DirectionalLight3D.directional_shadow_max_distance`: how far
+    /// from the camera this light's shadows are drawn at all.
+    ///
+    /// ⚠️ Declared on `DirectionalLight3D` only, but stored as a base `Light3D`
+    /// param (`LIGHT_PARAM_SHADOW_MAX_DISTANCE`). It is inert for positional
+    /// lights, whose shadows are bounded by their own `range` instead.
+    pub directional_shadow_max_distance: f32,
+    /// Godot's `DirectionalLight3D.directional_shadow_fade_start`: the fraction
+    /// of [`Self::directional_shadow_max_distance`] at which the shadow starts
+    /// fading out, so it dissolves instead of ending on a visible edge.
+    ///
+    /// ⚠️ Godot clamps this to **0.999** at use
+    /// (`light_storage.cpp:753`, commented "using 1.0 would break smoothstep")
+    /// — at exactly 1.0 the fade's two edges coincide and the interpolation
+    /// divides by zero. The clamp belongs at the point of use, not here: the
+    /// authored value must round-trip.
+    pub directional_shadow_fade_start: f32,
+    /// Godot's `Light3D.light_specular`: how much this light contributes to
+    /// SPECULAR highlights, independently of its diffuse contribution.
+    ///
+    /// 🔑 **Not the material's `SPECULAR`.** That one feeds the Fresnel F0
+    /// (`0.16 * spec^2`, which is where the shader's hardcoded 0.04 comes from);
+    /// this scales the light's specular term. Conflating them changes the
+    /// dielectric response instead of the light.
+    ///
+    /// ⚠️ The defaults and the application factor CANCEL, which is why wiring
+    /// this is invisible at default values: base `Light3D` is **1.0** (inherited
+    /// by `DirectionalLight3D`) and used raw (`light_storage.cpp:665`), while
+    /// `OmniLight3D` and `SpotLight3D` default to **0.5** and are multiplied by
+    /// **2.0** (`:891`) — so every light type has an effective specular of 1.0
+    /// out of the box. Wiring the 0.5 WITHOUT the x2 would halve every
+    /// positional light's highlights.
+    pub specular: f32,
+    /// Godot's `Light3D.shadow_normal_bias`, in SHADOW-MAP TEXELS.
+    ///
+    /// 🔑 **NOT the same units as [`shadow_bias`](Self::shadow_bias).** Godot
+    /// pre-multiplies this by the shadow map's texel size before it reaches the
+    /// shader (`light_storage.cpp:724`, and `:968` with an extra x10 for omni
+    /// lights specifically), so the authored number is texel-relative while
+    /// `shadow_bias` is in world units. Treating them alike scales this one by
+    /// whatever the texel size happens to be.
+    ///
+    /// Applied by offsetting the sample point ALONG THE SURFACE NORMAL, scaled
+    /// by `1 - |dot(normal, light_dir)|` — so it grows as the surface turns
+    /// edge-on to the light and vanishes when it faces the light squarely. That
+    /// is what targets grazing-angle acne, which a constant bias can only fix by
+    /// detaching contact shadows.
+    ///
+    /// ⚠️ Per-class defaults again: base `Light3D` is **2.0**, inherited by
+    /// `DirectionalLight3D`; `OmniLight3D` and `SpotLight3D` both override to
+    /// **1.0**. Note this is the opposite shape to `shadow_bias`, where the base
+    /// is inherited by omni and only spot overrides.
+    pub shadow_normal_bias: f32,
     /// Shadow darkness, 0..1 (Godot's `shadow_opacity`).
     pub shadow_opacity: f32,
     /// Layers whose meshes cast shadows from this light
@@ -425,6 +499,40 @@ pub struct Light3D {
     /// Whether PSSM splits blend across their boundaries
     /// (`directional_shadow_blend_splits`).
     pub blend_splits: bool,
+}
+
+/// The maximum number of lights one frame can shade with.
+///
+/// 🔑 **Lives here so the collectors and the renderers cannot disagree.** The
+/// wgpu path uploads a fixed `array<LightData, N>` and truncates anything past
+/// it *silently*; the scene-side collectors decide how many lights to hand over.
+/// When those two numbers were written independently the editor collected at
+/// most 4 directional + 8 positional = 12, leaving four GPU slots permanently
+/// unused — and any future raise on either side would have started dropping
+/// lights with no diagnostic at all.
+///
+/// ⚠️ The WGSL array length is a literal in the shader source and cannot be
+/// derived from this constant; `wgpu_pipeline` asserts the two agree.
+pub const MAX_SCENE_LIGHTS: usize = 16;
+
+/// Godot's `light_cull_mask` test: does this light touch a mesh on `layers`?
+///
+/// 🔑 **BOTH SIDES ARE BITMASKS, so this is an INTERSECTION — not an index
+/// lookup.** `VisualInstance3D.layers` is itself a mask (`0b101` means "on
+/// layers 1 and 3"), exactly like `light_cull_mask`, and Godot tests them with
+/// a plain bitwise AND.
+///
+/// ⚠️ The tempting mistake is to reuse [`Light3D::affects_layer`], which takes a
+/// 1-based layer NUMBER and shifts by it. Feeding it a mask agrees with the
+/// right answer for every single-layer mask — including `1`, the default that
+/// almost every mesh has — and then silently mislights anything on layer 3 or
+/// above: mask `0b101` would be read as "layer 5". It would look correct in
+/// every simple scene.
+///
+/// Free rather than a method so the RENDERER's own light uniform calls exactly
+/// this instead of re-deriving the test.
+pub fn cull_mask_matches_layers(cull_mask: u32, layers: u32) -> bool {
+    cull_mask & layers != 0
 }
 
 impl Light3D {
@@ -449,6 +557,7 @@ impl Light3D {
             projector: None,
             shadow_blur: 0.0,
             shadow_filter_quality: ShadowFilterQuality::Hard,
+            negative: false,
             temperature: 6500.0,
             cull_mask: u32::MAX,
             indirect_energy: 1.0,
@@ -457,6 +566,11 @@ impl Light3D {
             distance_fade_begin: 40.0,
             distance_fade_shadow: 50.0,
             distance_fade_length: 10.0,
+            directional_shadow_max_distance: 100.0,
+            directional_shadow_fade_start: 0.8,
+            specular: 1.0,
+            shadow_normal_bias: 2.0,
+            shadow_bias: 0.1,
             shadow_opacity: 1.0,
             shadow_caster_mask: u32::MAX,
             editor_only: false,
@@ -488,6 +602,7 @@ impl Light3D {
             projector: None,
             shadow_blur: 0.0,
             shadow_filter_quality: ShadowFilterQuality::Hard,
+            negative: false,
             temperature: 6500.0,
             cull_mask: u32::MAX,
             indirect_energy: 1.0,
@@ -496,6 +611,11 @@ impl Light3D {
             distance_fade_begin: 40.0,
             distance_fade_shadow: 50.0,
             distance_fade_length: 10.0,
+            directional_shadow_max_distance: 100.0,
+            directional_shadow_fade_start: 0.8,
+            specular: 0.5,
+            shadow_normal_bias: 1.0,
+            shadow_bias: 0.1,
             shadow_opacity: 1.0,
             shadow_caster_mask: u32::MAX,
             editor_only: false,
@@ -527,6 +647,7 @@ impl Light3D {
             projector: None,
             shadow_blur: 0.0,
             shadow_filter_quality: ShadowFilterQuality::Hard,
+            negative: false,
             temperature: 6500.0,
             cull_mask: u32::MAX,
             indirect_energy: 1.0,
@@ -535,6 +656,11 @@ impl Light3D {
             distance_fade_begin: 40.0,
             distance_fade_shadow: 50.0,
             distance_fade_length: 10.0,
+            directional_shadow_max_distance: 100.0,
+            directional_shadow_fade_start: 0.8,
+            specular: 0.5,
+            shadow_normal_bias: 1.0,
+            shadow_bias: 0.03,
             shadow_opacity: 1.0,
             shadow_caster_mask: u32::MAX,
             editor_only: false,
@@ -555,7 +681,18 @@ impl Light3D {
         if !(1..=32).contains(&layer) {
             return false;
         }
-        self.cull_mask & (1 << (layer - 1)) != 0
+        cull_mask_matches_layers(self.cull_mask, 1 << (layer - 1))
+    }
+
+    /// Whether this light touches a mesh whose `VisualInstance3D.layers` MASK is
+    /// `layers` — the form the shading loop uses.
+    ///
+    /// ⚠️ Distinct from [`affects_layer`](Self::affects_layer), which takes a
+    /// 1-based layer NUMBER. Passing a mask to that one is right for every
+    /// single-layer mask and wrong from layer 3 up; see
+    /// [`cull_mask_matches_layers`].
+    pub fn affects_layers(&self, layers: u32) -> bool {
+        cull_mask_matches_layers(self.cull_mask, layers)
     }
 
     /// The RGB tint this light's colour temperature applies

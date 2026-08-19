@@ -265,11 +265,22 @@ impl HttpClient {
         }
         head.push_str("User-Agent: PatinaEngine/1.0 (gdplatform)\r\n");
         head.push_str("Accept: */*\r\n");
-        head.push_str("Accept-Encoding: identity\r\n");
-        head.push_str("Connection: close\r\n");
 
         let lower_keys: std::collections::HashSet<String> =
             headers.keys().map(|k| k.to_ascii_lowercase()).collect();
+
+        // ⚠️ Only when the caller did not ask for an encoding (pat-s3rrv.78).
+        // This line used to be unconditional, which meant a caller supplying
+        // `Accept-Encoding` got TWO conflicting values on the wire — the
+        // hardcoded `identity` first, theirs second. Servers are free to honour
+        // either, so `HTTPRequest.accept_gzip` would have worked or not
+        // depending on the server, which is the worst way for it to fail.
+        // Callers that send no Accept-Encoding are unaffected: they still get
+        // `identity`, exactly as before.
+        if !lower_keys.contains("accept-encoding") {
+            head.push_str("Accept-Encoding: identity\r\n");
+        }
+        head.push_str("Connection: close\r\n");
         for (k, v) in headers {
             head.push_str(&format!("{k}: {v}\r\n"));
         }

@@ -45,6 +45,10 @@ fn body_type_for_class_3d(class_name: &str) -> Option<BodyType3D> {
         // `physical_bones_start_simulation()` hands it to the solver
         // (pat-0q2kx.203).
         "PhysicalBone3D" => Some(BodyType3D::Kinematic),
+        // ⚠️ Kinematic, NOT Static, though Godot parents it to StaticBody3D:
+        // an animated platform must be driven by the scene tree every tick
+        // (pat-s3rrv.93). Mirrors `AnimatableBody2D` in `physics_server.rs`.
+        "AnimatableBody3D" => Some(BodyType3D::Kinematic),
         _ => None,
     }
 }
@@ -426,6 +430,11 @@ pub(crate) fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Sh
 pub struct PhysicsServer3D {
     world: PhysicsWorld3D,
     node_to_body: HashMap<NodeId, BodyId3D>,
+    /// Per-tick world-space motion of each `AnimatableBody3D` whose
+    /// `sync_to_physics` is on — a DISPLACEMENT, converted to a velocity by
+    /// [`step`](Self::step), which is the half of the pair that has `dt`
+    /// (pat-s3rrv.93). The 3D twin of `PhysicsServer::animatable_motion`.
+    animatable_motion: HashMap<BodyId3D, Vector3>,
     /// `Area3D` nodes registered into the world, both directions (pat-0q2kx.35).
     node_to_area: HashMap<NodeId, AreaId3D>,
     area_to_node: HashMap<AreaId3D, NodeId>,
@@ -461,6 +470,7 @@ impl PhysicsServer3D {
         Self {
             world: PhysicsWorld3D::new(),
             node_to_body: HashMap::new(),
+            animatable_motion: HashMap::new(),
             node_to_area: HashMap::new(),
             area_to_node: HashMap::new(),
             last_overlap_events: Vec::new(),
@@ -479,6 +489,7 @@ impl PhysicsServer3D {
         Self {
             world: PhysicsWorld3D::new(),
             node_to_body: HashMap::new(),
+            animatable_motion: HashMap::new(),
             node_to_area: HashMap::new(),
             area_to_node: HashMap::new(),
             last_overlap_events: Vec::new(),
@@ -607,7 +618,24 @@ impl PhysicsServer3D {
                             let rotation = gdcore::math3d::Quaternion::from_euler(
                                 node3d::get_rotation(tree, nid),
                             );
+                            // ⚠️ Absent `sync_to_physics` means ON (it defaults
+                            // to true in Godot), and the displacement has to be
+                            // taken BEFORE `b.position` is overwritten below.
+                            // Recorded even when zero, so a platform that stops
+                            // moving — or has the flag turned off — actually
+                            // stops carrying instead of keeping last tick's
+                            // velocity (pat-s3rrv.93).
+                            let animatable = class == "AnimatableBody3D";
+                            let synced = truthy_prop_3d(tree, nid, "sync_to_physics", true);
                             if let Some(b) = self.world.get_body_mut(body_id) {
+                                if animatable {
+                                    let delta = if synced {
+                                        position - b.position
+                                    } else {
+                                        Vector3::ZERO
+                                    };
+                                    self.animatable_motion.insert(body_id, delta);
+                                }
                                 b.position = position;
                                 b.rotation = rotation;
                             }
@@ -1250,6 +1278,23 @@ impl PhysicsServer3D {
     /// Steps the 3D physics simulation by `dt` seconds, then records this step's
     /// area enter/exit events for [`process_overlap_signals`](Self::process_overlap_signals).
     pub fn step(&mut self, dt: f32) {
+        // An AnimatableBody3D's per-tick displacement becomes the body's
+        // velocity for the step about to run (pat-s3rrv.93) — the value
+        // `CharacterBody3D`'s carry reads off the floor body it stands on
+        // (`gdphysics3d/src/character.rs` takes `platform_velocity` from that
+        // body's `linear_velocity` and adds it straight into its motion).
+        //
+        // ⚠️ **`linear_velocity`, NOT `constant_linear_velocity`.** The latter
+        // is the conveyor field — friction drag from a surface that does not
+        // itself move — and no carry path reads it. Mirrors the 2D server.
+        if dt > 0.0 {
+            let motions: Vec<(BodyId3D, Vector3)> = self.animatable_motion.drain().collect();
+            for (body_id, delta) in motions {
+                if let Some(body) = self.world.get_body_mut(body_id) {
+                    body.linear_velocity = delta / dt;
+                }
+            }
+        }
         self.world.step(dt);
         self.detect_body_contacts();
         if self.world.area_count() > 0 {

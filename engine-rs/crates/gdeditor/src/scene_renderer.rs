@@ -41,6 +41,7 @@ const COLOR_SPRITE2D: Color = Color::new(0.3, 0.5, 1.0, 1.0); // blue
 const COLOR_CAMERA2D: Color = Color::new(0.2, 0.9, 0.3, 1.0); // green
 const COLOR_COLLISION: Color = Color::new(0.0, 0.85, 0.3, 0.7); // green outline
 const COLOR_AREA2D: Color = Color::new(0.3, 0.5, 1.0, 0.15); // blue tint
+const COLOR_NAVMESH: Color = Color::new(0.1, 1.0, 0.7, 0.8); // navmesh cyan (Godot navigation_server_2d.cpp:231)
 const COLOR_CHARBODY: Color = Color::new(0.3, 0.5, 1.0, 1.0); // blue outline
 const COLOR_RIGIDBODY: Color = Color::new(1.0, 0.85, 0.0, 1.0); // yellow outline
 const COLOR_STATICBODY: Color = Color::new(0.5, 0.5, 0.5, 1.0); // gray outline
@@ -297,6 +298,11 @@ fn render_scene_inner(
             "CollisionShape2D" => {
                 draw_collision_shape_from_node(&mut fb, node, pos, z, is_selected)
             }
+            // A baked NavigationRegion2D shows its navmesh, the same way a
+            // CollisionShape2D shows its shape (pat-s3rrv.82). Unbaked regions
+            // fall through to nothing drawn, which is what "not baked yet"
+            // should look like.
+            "NavigationRegion2D" => draw_navigation_region(&mut fb, node, pos, z),
             "CharacterBody2D" => draw_physics_body(&mut fb, pos, z, COLOR_CHARBODY, node),
             "RigidBody2D" => draw_physics_body(&mut fb, pos, z, COLOR_RIGIDBODY, node),
             "StaticBody2D" => draw_static_body(&mut fb, pos, z),
@@ -865,6 +871,41 @@ fn draw_collision_shape(fb: &mut FrameBuffer, pos: Vector2, zoom: f32) {
 /// Supports `shape_type` property values: "circle", "rectangle", "capsule".
 /// Falls back to a default circle when no shape_type is set.
 /// When `selected`, also draws resize handles.
+/// Draws a baked `NavigationRegion2D`'s navmesh as closed polygon outlines.
+///
+/// ⚠️ `pos` is the region's GLOBAL position already mapped into screen space by
+/// the caller (`world_pos * zoom + offset`), and the polygons come back in
+/// node-LOCAL space, so each point is `pos + v * zoom`. Using the pre-offset
+/// points from `navigation_overlay_2d` here would apply the position twice.
+///
+/// ⚠️ Outlines rather than filled faces: Godot shades the faces too, but
+/// `gdrender2d::draw` has fill primitives only for rects and circles, and every
+/// other debug overlay in this file (collision shapes included) is drawn as an
+/// outline. Filling needs a polygon rasterizer, which is its own piece of work.
+///
+/// Edges close the loop — a polygon of N points draws N segments, not N - 1 —
+/// so a region never renders as an open fan.
+fn draw_navigation_region(
+    fb: &mut FrameBuffer,
+    node: &gdscene::node::Node,
+    pos: Vector2,
+    zoom: f32,
+) {
+    for points in crate::navigation_overlay::navigation_polygons_local(node) {
+        for i in 0..points.len() {
+            let a = points[i];
+            let b = points[(i + 1) % points.len()];
+            draw::draw_line_blended(
+                fb,
+                Vector2::new(pos.x + a.x * zoom, pos.y + a.y * zoom),
+                Vector2::new(pos.x + b.x * zoom, pos.y + b.y * zoom),
+                COLOR_NAVMESH,
+                1.0,
+            );
+        }
+    }
+}
+
 fn draw_collision_shape_from_node(
     fb: &mut FrameBuffer,
     node: &gdscene::node::Node,

@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 
 use gdcore::error::EngineResult;
+use gdcore::math::Vector3;
+use gdcore::math3d::Basis;
 use gdvariant::Variant;
 
 use crate::packed_scene::PackedScene;
@@ -39,6 +41,67 @@ impl MeshLibrary {
     pub fn get_item(&self, id: i32) -> Option<&MeshLibraryItem> {
         self.items.get(&id)
     }
+    /// Loads a Godot `MeshLibrary` `.tres` (pat-s3rrv.89).
+    ///
+    /// A `GridMap` node references its library by PATH; nothing ever turned that
+    /// path into items, so `mesh_instances()` returned empty for every cell and
+    /// a populated grid could not resolve to geometry.
+    ///
+    /// Godot writes one flat property block per item — `item/<id>/name`,
+    /// `item/<id>/mesh`, plus `mesh_transform` / `shapes` / `navigation_mesh` /
+    /// `preview`. Only the name and the mesh path are read here; the rest is
+    /// data the GridMap render path does not consume yet.
+    ///
+    /// An item with a name but **no** mesh is skipped: it contributes no
+    /// geometry, and admitting it would put an entry with an empty path into the
+    /// library for the render path to try to load.
+    ///
+    /// Returns `Ok(None)` when the resource is not a `MeshLibrary`.
+    pub fn from_tres(source: &str) -> EngineResult<Option<MeshLibrary>> {
+        let resource = gdresource::TresLoader::new().parse_str(source, "res://meshlibrary.tres")?;
+        if resource.class_name != "MeshLibrary" {
+            return Ok(None);
+        }
+
+        // Collect both fields before building items: `properties()` iterates a
+        // HashMap, so `name` and `mesh` arrive in either order.
+        let mut names: HashMap<i32, String> = HashMap::new();
+        let mut meshes: HashMap<i32, String> = HashMap::new();
+        for (key, value) in resource.properties() {
+            let Some(rest) = key.strip_prefix("item/") else {
+                continue;
+            };
+            let Some((id_text, field)) = rest.split_once('/') else {
+                continue;
+            };
+            let Ok(id) = id_text.parse::<i32>() else {
+                continue;
+            };
+            match (field, value) {
+                ("name", Variant::String(name)) => {
+                    names.insert(id, name.clone());
+                }
+                ("mesh", Variant::String(reference)) => {
+                    // The loader stores `ExtResource("id")` as a string with an
+                    // `ExtResource:` prefix; the path lives on the header entry.
+                    if let Some(ext_id) = reference.strip_prefix("ExtResource:") {
+                        if let Some(ext) = resource.ext_resources.get(ext_id) {
+                            meshes.insert(id, ext.path.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut library = MeshLibrary::new();
+        for (id, mesh_path) in meshes {
+            let name = names.get(&id).cloned().unwrap_or_default();
+            library.set_item(id, name, mesh_path);
+        }
+        Ok(Some(library))
+    }
+
     pub fn item_count(&self) -> usize {
         self.items.len()
     }
@@ -50,6 +113,152 @@ pub struct GridCell {
     pub x: i32,
     pub y: i32,
     pub z: i32,
+}
+
+/// Godot's 24 orthogonal cell orientations (`_ortho_bases`, grid_map.cpp:461).
+///
+/// ⚠️ **TRANSPOSED on the way in, deliberately.** Godot's nine-argument
+/// `Basis(xx, xy, xz, yx, yy, yz, zx, zy, zz)` constructor fills ROWS
+/// (`core/math/basis.h:211`), while this engine's `Basis` stores COLUMNS
+/// (`x`/`y`/`z` are the column vectors). Copying the numbers across in source
+/// order would transpose every rotation — and entry 0 is the identity, which
+/// reads correct under either convention, so the mistake would survive any test
+/// that only checked an unrotated cell. [`orientation_basis`] has a test that
+/// pins an asymmetric entry for exactly that reason.
+const ORTHO_BASES: [Basis; 24] = [
+    Basis {
+        x: Vector3::new(1.0, 0.0, 0.0),
+        y: Vector3::new(0.0, 1.0, 0.0),
+        z: Vector3::new(0.0, 0.0, 1.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, 1.0, 0.0),
+        y: Vector3::new(-1.0, 0.0, 0.0),
+        z: Vector3::new(0.0, 0.0, 1.0),
+    },
+    Basis {
+        x: Vector3::new(-1.0, 0.0, 0.0),
+        y: Vector3::new(0.0, -1.0, 0.0),
+        z: Vector3::new(0.0, 0.0, 1.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, -1.0, 0.0),
+        y: Vector3::new(1.0, 0.0, 0.0),
+        z: Vector3::new(0.0, 0.0, 1.0),
+    },
+    Basis {
+        x: Vector3::new(1.0, 0.0, 0.0),
+        y: Vector3::new(0.0, 0.0, 1.0),
+        z: Vector3::new(0.0, -1.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, 1.0, 0.0),
+        y: Vector3::new(0.0, 0.0, 1.0),
+        z: Vector3::new(1.0, 0.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(-1.0, 0.0, 0.0),
+        y: Vector3::new(0.0, 0.0, 1.0),
+        z: Vector3::new(0.0, 1.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, -1.0, 0.0),
+        y: Vector3::new(0.0, 0.0, 1.0),
+        z: Vector3::new(-1.0, 0.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(1.0, 0.0, 0.0),
+        y: Vector3::new(0.0, -1.0, 0.0),
+        z: Vector3::new(0.0, 0.0, -1.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, 1.0, 0.0),
+        y: Vector3::new(1.0, 0.0, 0.0),
+        z: Vector3::new(0.0, 0.0, -1.0),
+    },
+    Basis {
+        x: Vector3::new(-1.0, 0.0, 0.0),
+        y: Vector3::new(0.0, 1.0, 0.0),
+        z: Vector3::new(0.0, 0.0, -1.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, -1.0, 0.0),
+        y: Vector3::new(-1.0, 0.0, 0.0),
+        z: Vector3::new(0.0, 0.0, -1.0),
+    },
+    Basis {
+        x: Vector3::new(1.0, 0.0, 0.0),
+        y: Vector3::new(0.0, 0.0, -1.0),
+        z: Vector3::new(0.0, 1.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, 1.0, 0.0),
+        y: Vector3::new(0.0, 0.0, -1.0),
+        z: Vector3::new(-1.0, 0.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(-1.0, 0.0, 0.0),
+        y: Vector3::new(0.0, 0.0, -1.0),
+        z: Vector3::new(0.0, -1.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, -1.0, 0.0),
+        y: Vector3::new(0.0, 0.0, -1.0),
+        z: Vector3::new(1.0, 0.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, 0.0, -1.0),
+        y: Vector3::new(0.0, 1.0, 0.0),
+        z: Vector3::new(1.0, 0.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, 0.0, -1.0),
+        y: Vector3::new(-1.0, 0.0, 0.0),
+        z: Vector3::new(0.0, 1.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, 0.0, -1.0),
+        y: Vector3::new(0.0, -1.0, 0.0),
+        z: Vector3::new(-1.0, 0.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, 0.0, -1.0),
+        y: Vector3::new(1.0, 0.0, 0.0),
+        z: Vector3::new(0.0, -1.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, 0.0, 1.0),
+        y: Vector3::new(0.0, -1.0, 0.0),
+        z: Vector3::new(1.0, 0.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, 0.0, 1.0),
+        y: Vector3::new(1.0, 0.0, 0.0),
+        z: Vector3::new(0.0, 1.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, 0.0, 1.0),
+        y: Vector3::new(0.0, 1.0, 0.0),
+        z: Vector3::new(-1.0, 0.0, 0.0),
+    },
+    Basis {
+        x: Vector3::new(0.0, 0.0, 1.0),
+        y: Vector3::new(-1.0, 0.0, 0.0),
+        z: Vector3::new(0.0, -1.0, 0.0),
+    },
+];
+
+/// The rotation for Godot's 24-way orthogonal cell orientation index.
+///
+/// Out-of-range values answer with the identity rather than panicking: the field
+/// is 5 bits and can physically hold 0..31, so a hand-authored or corrupt scene
+/// can carry 24..31, and a malformed cell should draw unrotated rather than take
+/// the editor down.
+pub fn orientation_basis(orientation: u8) -> Basis {
+    ORTHO_BASES
+        .get(orientation as usize)
+        .copied()
+        .unwrap_or(Basis::IDENTITY)
 }
 
 /// One decoded `data/cells` entry, including the orientation and layer that
@@ -125,6 +334,32 @@ impl GridMap {
                     cell.z as f32 * self.cell_size,
                 );
                 out.push((pos, item.mesh_path.clone()));
+            }
+        }
+        out
+    }
+
+    /// Instance list for rendering, keeping each cell's rotation:
+    /// `(world position, basis, mesh path)`.
+    ///
+    /// ⚠️ Prefer this over [`mesh_instances`](Self::mesh_instances) in a render
+    /// path. That one drops the orientation, so every cell draws unrotated —
+    /// which on a tiled map reads as the art being authored wrong rather than as
+    /// missing data.
+    pub fn mesh_instances_oriented(&self) -> Vec<(Vector3, Basis, String)> {
+        let mut out = Vec::new();
+        for (cell, id) in &self.cells {
+            if let Some(item) = self.mesh_library.get_item(*id) {
+                let pos = Vector3::new(
+                    cell.x as f32 * self.cell_size,
+                    cell.y as f32 * self.cell_size,
+                    cell.z as f32 * self.cell_size,
+                );
+                out.push((
+                    pos,
+                    orientation_basis(self.cell_orientation(*cell)),
+                    item.mesh_path.clone(),
+                ));
             }
         }
         out
@@ -254,6 +489,118 @@ impl GridMap {
         }
 
         Ok(Some(grid))
+    }
+
+    /// Loads a `GridMap` from a **live scene node**, the form the editor and
+    /// Play paths actually hold (pat-s3rrv.89).
+    ///
+    /// [`GridMap::from_tscn`] parses `.tscn` *source* and resolves the mesh
+    /// library through the `PackedScene`. By render time that scene is gone and
+    /// only the `SceneTree` remains, so nothing on the runtime side could build
+    /// a `GridMap` at all — which is why the render list has never emitted one.
+    ///
+    /// The property reads mirror `from_tscn` exactly, with one difference:
+    /// `mesh_library` on an instanced node is an `ExtResource` reference whose
+    /// resolved path `packed_scene` parked in the `__extres__mesh_library`
+    /// companion, so that is preferred and the raw value is the fallback.
+    ///
+    /// Returns `None` for a node that is not a `GridMap`.
+    pub fn from_node(
+        tree: &crate::scene_tree::SceneTree,
+        node_id: crate::node::NodeId,
+    ) -> Option<GridMap> {
+        let node = tree.get_node(node_id)?;
+        if node.class_name() != "GridMap" {
+            return None;
+        }
+
+        let mut grid = GridMap::new();
+
+        // Godot stores a per-axis Vector3; this subset keeps one uniform size
+        // and takes x, exactly as `from_tscn` does.
+        if let Variant::Vector3(v) = node.get_property("cell_size") {
+            grid.cell_size = v.x;
+        }
+
+        match node.get_property("__extres__mesh_library") {
+            Variant::String(path) => grid.mesh_library_resource = Some(path),
+            // No companion: an un-instanced or hand-built node may carry the
+            // path directly. An unresolved `ExtResource("…")` reference is NOT
+            // a path, so it is rejected rather than stored as one.
+            _ => {
+                if let Variant::String(raw) = node.get_property("mesh_library") {
+                    if !raw.starts_with("ExtResource(") && !raw.starts_with("SubResource:") {
+                        grid.mesh_library_resource = Some(raw);
+                    }
+                }
+            }
+        }
+
+        // `data = { "cells": PackedInt32Array(...) }`.
+        if let Variant::Dictionary(dict) = node.get_property("data") {
+            if let Some(Variant::PackedInt32Array(cells)) = dict.get("cells") {
+                grid.load_cells(cells);
+            }
+        }
+
+        Some(grid)
+    }
+}
+
+#[cfg(test)]
+mod tests_orientation {
+    use super::*;
+
+    /// 🔑 The orientation table is not transposed.
+    ///
+    /// ⚠️ Orientation 1 is Godot's `Basis(0, -1, 0, 1, 0, 0, 0, 0, 1)` — a +90°
+    /// turn about Z, which sends +X to +Y. Under a transposed table it would send
+    /// +X to -Y instead: the same rotation backwards, which on a tiled map looks
+    /// like the art was authored wrong rather than like a matrix bug.
+    ///
+    /// Entry 0 is the identity and is symmetric, so it passes under BOTH
+    /// conventions and can never catch this. That is exactly why the assertion
+    /// below uses an asymmetric entry.
+    #[test]
+    fn gridmap_orientation_basis_is_not_transposed() {
+        let turned = orientation_basis(1).xform(Vector3::new(1.0, 0.0, 0.0));
+        assert!(
+            (turned.x - 0.0).abs() < 1e-6
+                && (turned.y - 1.0).abs() < 1e-6
+                && (turned.z - 0.0).abs() < 1e-6,
+            "orientation 1 must send +X to +Y (a +90 degree turn about Z); got \
+             {turned:?}. A result of (0, -1, 0) means the table was copied in \
+             Godot's ROW order into this engine's COLUMN-major Basis",
+        );
+    }
+
+    /// The identity orientation leaves a cell alone, and every entry is a pure
+    /// rotation (no scale, no reflection).
+    #[test]
+    fn gridmap_orientation_basis_covers_all_24() {
+        assert_eq!(
+            orientation_basis(0),
+            Basis::IDENTITY,
+            "orientation 0 is Godot's default and must not rotate",
+        );
+        for o in 0u8..24 {
+            let b = orientation_basis(o);
+            // An orthonormal rotation maps the unit axes to unit vectors.
+            for v in [
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ] {
+                let r = b.xform(v);
+                let len = (r.x * r.x + r.y * r.y + r.z * r.z).sqrt();
+                assert!(
+                    (len - 1.0).abs() < 1e-6,
+                    "orientation {o} is not a rotation: it scales a unit axis to {len}",
+                );
+            }
+        }
+        // Out of range is the identity, not a panic: the field is 5 bits.
+        assert_eq!(orientation_basis(31), Basis::IDENTITY);
     }
 }
 

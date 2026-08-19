@@ -46,7 +46,98 @@ impl ShadowMap {
     /// Tests whether a world-space point is in shadow.
     ///
     /// Returns a shadow factor: 0.0 = fully lit, 1.0 = fully in shadow.
+    /// [`sample`](Self::sample) with the light's authored `shadow_bias`, in
+    /// WORLD UNITS.
+    ///
+    /// 🔑 The stored comparison is in NORMALIZED post-divide depth, so a world
+    /// bias has to be scaled by the shadow frustum's depth range before it means
+    /// anything here — Godot's 0.1 becomes ≈0.001 against the 0.1..100 range,
+    /// where the constant this replaces was 0.005. Feeding the raw 0.1 straight
+    /// in would be a hundred times too large and detach every shadow from its
+    /// caster.
+    ///
+    /// ⚠️ EXACT for the DIRECTIONAL light's orthographic projection, where
+    /// normalized depth is linear in world depth. A SpotLight3D uses a
+    /// perspective projection (`spot_light_proj_matrix`), where it is not — the
+    /// true conversion varies with the fragment's own depth. This is a uniform
+    /// approximation for that case: right at the far plane, increasingly
+    /// conservative closer in. Doing it exactly needs the view-space depth at
+    /// the sample point, which is computed inside `sample` and not exposed.
+    pub fn sample_with_bias(&self, world_pos: Vector3, world_bias: f32) -> f32 {
+        let range = (SHADOW_FAR - SHADOW_NEAR).max(1e-6);
+        self.sample_normalized_bias(world_pos, world_bias / range)
+    }
+
+    /// Percentage-closer filtering: averages `taps` samples spread over a disc
+    /// of `blur` shadow-map texels, giving a soft penumbra instead of a hard
+    /// edge (Godot's `Light3D.shadow_blur` + `shadow_filter_quality`).
+    ///
+    /// ⚠️ ADDITIVE BY CONSTRUCTION. `ShadowFilterQuality::Hard` is Godot's
+    /// default and reports **1** tap, and a single tap with any blur reduces to
+    /// exactly `sample_with_bias` — same call, same result. Nothing softens
+    /// until a scene asks for it.
+    ///
+    /// ⚠️ The offsets are applied in WORLD space along the shadow map's own
+    /// view axes, not in screen space and not to the world position blindly.
+    /// The light's view matrix is stored column-major, so its first two ROWS —
+    /// `m[0][0..2]` and `m[1][0..2]` read down the columns — are the light's
+    /// right and up vectors. Offsetting along world X/Y instead would smear the
+    /// penumbra along whichever way the light happens to face, and would
+    /// collapse entirely for a light pointing down +X.
+    ///
+    /// Taps walk a Vogel/golden-angle spiral: it needs no lookup table, spreads
+    /// evenly for ANY tap count (4, 8 and 16 are the quality levels, but the
+    /// distribution does not care), and unlike a square kernel it has no
+    /// preferred axis for edges to align with.
+    pub fn sample_with_bias_filtered(
+        &self,
+        world_pos: Vector3,
+        world_bias: f32,
+        taps: u32,
+        blur: f32,
+    ) -> f32 {
+        if taps <= 1 || blur <= 0.0 {
+            return self.sample_with_bias(world_pos, world_bias);
+        }
+        // World size of one texel of this map, so `blur` stays in texels the way
+        // Godot authors it.
+        let texel = 2.0 * SHADOW_EXTENT / SHADOW_MAP_SIZE as f32;
+        let radius = blur * texel;
+        let right = Vector3::new(
+            self.view_matrix[0][0],
+            self.view_matrix[1][0],
+            self.view_matrix[2][0],
+        );
+        let up = Vector3::new(
+            self.view_matrix[0][1],
+            self.view_matrix[1][1],
+            self.view_matrix[2][1],
+        );
+
+        // Golden angle in radians: pi * (3 - sqrt(5)).
+        const GOLDEN_ANGLE: f32 = 2.399_963_2;
+        let mut sum = 0.0;
+        for i in 0..taps {
+            // sqrt spacing keeps the samples area-uniform rather than bunched
+            // at the centre; the +0.5 keeps the first tap off the exact origin.
+            let t = (i as f32 + 0.5) / taps as f32;
+            let r = radius * t.sqrt();
+            let a = i as f32 * GOLDEN_ANGLE;
+            let offset = right * (r * a.cos()) + up * (r * a.sin());
+            sum += self.sample_with_bias(world_pos + offset, world_bias);
+        }
+        sum / taps as f32
+    }
+
+    /// Tests a point with the module's default normalized bias.
+    ///
+    /// Kept so its seven existing callers — all tests — are unaffected by the
+    /// authored-bias work.
     pub fn sample(&self, world_pos: Vector3) -> f32 {
+        self.sample_normalized_bias(world_pos, SHADOW_BIAS)
+    }
+
+    fn sample_normalized_bias(&self, world_pos: Vector3, bias: f32) -> f32 {
         // Transform to light space.
         let view_pos = mat4_mul_point(&self.view_matrix, world_pos);
         let clip = mat4_mul_point4(&self.proj_matrix, view_pos);
@@ -79,7 +170,7 @@ impl ShadowMap {
         }
 
         // Compare: if fragment is farther than stored depth + bias, it's in shadow.
-        if depth > stored_depth + SHADOW_BIAS {
+        if depth > stored_depth + bias {
             1.0
         } else {
             0.0
@@ -195,7 +286,14 @@ fn generate_spot_shadow_map(light: &Light3D, instances: &[Instance3D]) -> Shadow
     let mut depth_buf = DepthBuffer::new(size, size);
     let view_matrix = spot_light_view_matrix(light);
     let proj_matrix = spot_light_proj_matrix(light);
-    rasterize_instances_into_shadow(instances, &view_matrix, &proj_matrix, &mut depth_buf, size);
+    rasterize_instances_into_shadow(
+        instances,
+        light.shadow_caster_mask,
+        &view_matrix,
+        &proj_matrix,
+        &mut depth_buf,
+        size,
+    );
     ShadowMap {
         light_id: light.id,
         depth: depth_buf,
@@ -212,15 +310,36 @@ fn generate_spot_shadow_map(light: &Light3D, instances: &[Instance3D]) -> Shadow
 /// in the colour pass, and `ShadowsOnly` is the reverse. This is the single
 /// chokepoint for the directional, spot and cascade shadow maps, so filtering
 /// here covers all three.
+/// Whether `inst` contributes to a shadow map for a light whose
+/// `shadow_caster_mask` is `caster_mask`.
+///
+/// Godot tests `instance->layer_mask & light_get_shadow_caster_mask(light)`
+/// alongside the per-instance `can_cast_shadows`
+/// (`renderer_scene_cull.cpp:2415`). Both are BITMASKS and the test is an
+/// intersection — reading either as an index agrees for every single-layer mask
+/// (including the default 1) and diverges from layer 3 up.
+///
+/// ⚠️ One predicate on purpose. The 2D and omni-cubemap rasterizers filter
+/// separately, and a caster mask honoured in one but not the other means a mesh
+/// that is excluded from a spot light's shadow and included in an omni's — the
+/// same divergence class the `cast_shadow` filter already warns about below.
+///
+/// ⚠️ An instance on NO layer (`layers == 0`) casts nothing, whatever the mask
+/// says. That is Godot's behaviour and falls out of the intersection.
+pub fn casts_into_shadow(inst: &Instance3D, caster_mask: u32) -> bool {
+    inst.casts_shadow() && (inst.geometry.layers & caster_mask) != 0
+}
+
 fn rasterize_instances_into_shadow(
     instances: &[Instance3D],
+    caster_mask: u32,
     view_matrix: &[[f32; 4]; 4],
     proj_matrix: &[[f32; 4]; 4],
     depth_buf: &mut DepthBuffer,
     size: u32,
 ) {
     for inst in instances {
-        if !inst.casts_shadow() {
+        if !casts_into_shadow(inst, caster_mask) {
             continue;
         }
         let mesh = match &inst.mesh {
@@ -320,10 +439,11 @@ fn generate_omni_shadow_cubemap(light: &Light3D, instances: &[Instance3D]) -> Sh
 
     for face in CubeFace::ALL {
         for inst in instances {
-            // Same cast_shadow filter as the 2D shadow path (pat-nzgdu.76) —
-            // an omni light must not shadow from an instance the directional
-            // path already excluded.
-            if !inst.casts_shadow() {
+            // Same filter as the 2D shadow path (pat-nzgdu.76), through the
+            // SHARED predicate — an omni light must not shadow from an instance
+            // the directional path already excluded, and that now includes
+            // `shadow_caster_mask` (pat-s3rrv.90).
+            if !casts_into_shadow(inst, light.shadow_caster_mask) {
                 continue;
             }
             let mesh = match &inst.mesh {
@@ -460,7 +580,14 @@ fn generate_directional_shadow_map(light: &Light3D, instances: &[Instance3D]) ->
     let mut depth_buf = DepthBuffer::new(size, size);
     let view_matrix = directional_light_view_matrix(light);
     let proj_matrix = directional_light_proj_matrix();
-    rasterize_instances_into_shadow(instances, &view_matrix, &proj_matrix, &mut depth_buf, size);
+    rasterize_instances_into_shadow(
+        instances,
+        light.shadow_caster_mask,
+        &view_matrix,
+        &proj_matrix,
+        &mut depth_buf,
+        size,
+    );
     ShadowMap {
         light_id: light.id,
         depth: depth_buf,
@@ -895,6 +1022,333 @@ mod tests {
             "point beside occluder should be lit, got factor={shadow}"
         );
     }
+
+    /// 🔑 A WORLD-SPACE BIAS MUST BE SCALED BY THE SHADOW FRUSTUM'S DEPTH RANGE.
+    ///
+    /// The stored comparison is in NORMALIZED post-divide depth. Godot's
+    /// directional default of 0.1 WORLD units is ≈0.001 against the 0.1..100
+    /// range this module projects with — feeding the raw 0.1 in would be a
+    /// hundred times too large and detach every shadow from its caster.
+    ///
+    /// ⚠️ Asserted as a RATIO between two calls rather than an absolute, so the
+    /// test still means the same thing if `SHADOW_NEAR`/`SHADOW_FAR` change.
+    #[test]
+    fn a_world_space_bias_is_converted_to_normalized_depth() {
+        let mut map = ShadowMap {
+            light_id: Light3DId(1),
+            size: 4,
+            depth: crate::depth_buffer::DepthBuffer::new(4, 4),
+            view_matrix: identity(),
+            proj_matrix: identity(),
+        };
+        // An occluder at depth 0 everywhere; the fragment sits just behind it by
+        // a margin that straddles the two biases below.
+        map.depth.clear(0.0);
+        let range = SHADOW_FAR - SHADOW_NEAR;
+
+        // A world bias whose normalized value is comfortably BELOW the margin:
+        // the fragment stays in shadow.
+        let small = 0.001 * range; // → 0.001 normalized
+        let frag = Vector3::new(0.0, 0.0, 0.01);
+        assert_eq!(
+            map.sample_with_bias(frag, small),
+            1.0,
+            "a bias smaller than the depth margin leaves the fragment shadowed"
+        );
+
+        // A world bias whose normalized value EXCEEDS the margin: now lit.
+        let large = 0.1 * range; // → 0.1 normalized, ten times the margin
+        assert_eq!(
+            map.sample_with_bias(frag, large),
+            0.0,
+            "a bias larger than the depth margin lifts the fragment out of shadow"
+        );
+    }
+
+    /// The unbiased entry point is unchanged, so its existing callers are not
+    /// affected by the authored-bias work.
+    ///
+    /// ⚠️ This is the regression guard for the refactor: `sample` now delegates
+    /// to a shared helper, and a wrong default there would move every shadow in
+    /// the engine while all the new assertions above still passed.
+    #[test]
+    fn the_unbiased_sampler_still_uses_the_module_default() {
+        let mut map = ShadowMap {
+            light_id: Light3DId(1),
+            size: 4,
+            depth: crate::depth_buffer::DepthBuffer::new(4, 4),
+            view_matrix: identity(),
+            proj_matrix: identity(),
+        };
+        map.depth.clear(0.0);
+        // Straddle SHADOW_BIAS (0.005) from both sides.
+        let inside = Vector3::new(0.0, 0.0, SHADOW_BIAS * 0.5);
+        let beyond = Vector3::new(0.0, 0.0, SHADOW_BIAS * 2.0);
+        assert_eq!(map.sample(inside), 0.0, "within the default bias: lit");
+        assert_eq!(map.sample(beyond), 1.0, "past the default bias: shadowed");
+    }
+
+    // -- Light3D.shadow_caster_mask -----------------------------------------
+
+    /// A directional shadow map for a light with `caster_mask`, cast by a single
+    /// cube on render layer(s) `layers`, floating above the origin.
+    fn shadow_of_cube_on_layers(layers: u32, caster_mask: u32) -> ShadowMap {
+        use gdcore::math3d::{Basis, Transform3D};
+        use gdserver3d::instance::{Instance3D, Instance3DId};
+
+        let mut caster = Light3D::directional(Light3DId(1));
+        caster.shadow_enabled = true;
+        caster.direction = Vector3::new(0.0, -1.0, 0.0);
+        caster.shadow_caster_mask = caster_mask;
+
+        let mut occluder = Instance3D::new(Instance3DId(1));
+        occluder.mesh = Some(Mesh3D::cube(4.0));
+        occluder.visible = true;
+        occluder.geometry.layers = layers;
+        occluder.transform = Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(0.0, 5.0, 0.0),
+        };
+
+        generate_shadow_maps(&[caster], &[occluder])
+            .into_iter()
+            .next()
+            .expect("a shadow-enabled directional light produces one map")
+    }
+
+    /// 🔑 `shadow_caster_mask` DECIDES WHICH MESHES CAST INTO THIS LIGHT'S
+    /// SHADOW MAP — and it is a BITMASK intersected with the instance's layers.
+    ///
+    /// Godot tests `instance->layer_mask & light_get_shadow_caster_mask(light)`
+    /// (`renderer_scene_cull.cpp:2415`).
+    ///
+    /// ⚠️ The high-layer case is not padding. Reading either side as an INDEX
+    /// rather than a mask agrees for every single-layer value including the
+    /// default 1, so a fixture using only layer 1 cannot tell the two apart —
+    /// the same trap `light_cull_mask` hit on this bead.
+    #[test]
+    fn shadow_caster_mask_selects_which_layers_cast() {
+        let under = Vector3::ZERO;
+
+        // Default mask admits the default layer: the positive control, without
+        // which every "not shadowed" assertion below is satisfied by a fixture
+        // that never cast a shadow at all.
+        let included = shadow_of_cube_on_layers(1, u32::MAX);
+        assert!(
+            included.sample(under) > 0.5,
+            "the cube must actually shadow the origin under the default mask, \
+             or the rest of this test proves nothing; got {}",
+            included.sample(under)
+        );
+
+        // A mask that excludes the cube's only layer drops it from the map.
+        let excluded = shadow_of_cube_on_layers(1, 0b10);
+        assert!(
+            excluded.sample(under) < 0.5,
+            "a caster mask without the cube's layer must leave the origin \
+             unshadowed; got {}",
+            excluded.sample(under)
+        );
+
+        // Layer 5 against a mask naming layer 5 — both far above any value an
+        // index-vs-mask confusion would agree on.
+        let high = 1u32 << 4;
+        assert!(
+            shadow_of_cube_on_layers(high, high).sample(under) > 0.5,
+            "a layer-5 cube must cast into a mask that names layer 5"
+        );
+        assert!(
+            shadow_of_cube_on_layers(high, 1).sample(under) < 0.5,
+            "and must NOT cast into a mask naming only layer 1"
+        );
+    }
+
+    /// 🔑 AN INSTANCE ON NO LAYER CASTS NOTHING, WHATEVER THE MASK SAYS.
+    ///
+    /// Godot's behaviour, and it falls out of the intersection rather than
+    /// needing a special case — `0 & anything == 0`. Worth pinning because the
+    /// obvious "empty means unrestricted" reading is the opposite.
+    #[test]
+    fn an_instance_on_no_layer_casts_no_shadow() {
+        assert!(
+            shadow_of_cube_on_layers(0, u32::MAX).sample(Vector3::ZERO) < 0.5,
+            "layers == 0 must cast nothing even under an all-ones caster mask"
+        );
+    }
+
+    /// 🔑 THE OMNI CUBEMAP PATH APPLIES THE SAME MASK.
+    ///
+    /// ⚠️ The two rasterizers filter in separate loops. A caster mask honoured
+    /// in one and ignored in the other means a mesh excluded from a spot
+    /// light's shadow and included in an omni's — which is why both go through
+    /// the shared `casts_into_shadow` predicate.
+    #[test]
+    fn the_omni_cubemap_path_honours_the_same_caster_mask() {
+        use gdserver3d::instance::{Instance3D, Instance3DId};
+        use gdserver3d::light::OmniShadowMode;
+
+        let light_pos = Vector3::new(1.2, 0.0, 2.2);
+        let rel = Vector3::new(0.0, 0.0, -1.5);
+
+        let cube_with_mask = |caster_mask: u32| {
+            let mut light = Light3D::point(Light3DId(1), light_pos);
+            light.range = 20.0;
+            light.shadow_enabled = true;
+            light.omni_shadow_mode = OmniShadowMode::Cube;
+            light.shadow_caster_mask = caster_mask;
+
+            let mut inst = Instance3D::new(Instance3DId(1));
+            inst.mesh = Some(Mesh3D::cube(0.6));
+            inst.transform.origin = light_pos + rel;
+
+            let maps = generate_omni_shadow_cubemaps(&[light], &[inst]);
+            maps[0]
+                .as_ref()
+                .expect("cube-mode light must get a map")
+                .sample(rel)
+        };
+
+        // Positive control first: the occluder is recorded at roughly its own
+        // distance when the mask admits it.
+        let dist = rel.length();
+        let recorded = cube_with_mask(u32::MAX);
+        assert!(
+            recorded < dist + 0.35,
+            "the occluder must be recorded under the default mask, got \
+             {recorded} for a distance of {dist}"
+        );
+
+        // Excluded, the texel keeps the `f32::MAX` that `ShadowCubemap::new`
+        // clears every face to. Asserted EXACTLY rather than as "further than
+        // the occluder": the strong form is "nothing was ever written here",
+        // and a merely-larger depth would also be satisfied by the cube being
+        // rasterized to the wrong face.
+        let masked_out = cube_with_mask(0b10);
+        assert_eq!(
+            masked_out,
+            f32::MAX,
+            "a caster mask without the instance's layer must leave the cubemap \
+             texel untouched; recorded={recorded} when the mask admitted it"
+        );
+    }
+
+    // -- Light3D.shadow_blur / shadow_filter_quality (PCF) -------------------
+
+    /// 🔑 GODOT'S DEFAULT FILTER QUALITY CHANGES NOTHING AT ALL.
+    ///
+    /// `ShadowFilterQuality::Hard` reports **1** tap and is the default, so the
+    /// filtered path must reduce to exactly the unfiltered one — not
+    /// approximately, bit-for-bit, because it is the same call. Same for any
+    /// tap count with a zero blur radius.
+    ///
+    /// ⚠️ This is the assertion that makes the whole feature additive. Without
+    /// it, wiring PCF would soften every shadow in every existing scene.
+    #[test]
+    fn hard_quality_and_zero_blur_are_exactly_the_unfiltered_sample() {
+        use gdserver3d::light::ShadowFilterQuality;
+
+        let map = shadow_of_cube_on_layers(1, u32::MAX);
+        for probe in [
+            Vector3::ZERO,
+            Vector3::new(1.5, 0.0, 0.0),
+            Vector3::new(2.0, 0.0, 0.0),
+            Vector3::new(6.0, 0.0, 0.0),
+        ] {
+            let plain = map.sample_with_bias(probe, 0.1);
+            assert_eq!(
+                map.sample_with_bias_filtered(probe, 0.1, ShadowFilterQuality::Hard.taps(), 1.0),
+                plain,
+                "Hard is 1 tap and must be the unfiltered result at {probe:?}"
+            );
+            assert_eq!(
+                map.sample_with_bias_filtered(probe, 0.1, 16, 0.0),
+                plain,
+                "a zero blur radius must also collapse to one tap at {probe:?}"
+            );
+        }
+    }
+
+    /// 🔑 A SOFT QUALITY PRODUCES A PENUMBRA AT THE SHADOW EDGE.
+    ///
+    /// The occluder is a 4-unit cube centred over the origin, so its hard shadow
+    /// edge sits at x = ±2. A hard sample there is a step — exactly 0 or 1;
+    /// filtering across the edge must land strictly between the two.
+    ///
+    /// ⚠️ Both ends are asserted as well. A filter that returned "somewhere
+    /// between 0 and 1" everywhere would pass the penumbra check alone while
+    /// having destroyed the shadow — deep inside must stay fully occluded and
+    /// well outside must stay fully lit.
+    #[test]
+    fn a_soft_filter_quality_produces_a_penumbra_only_at_the_edge() {
+        use gdserver3d::light::ShadowFilterQuality;
+
+        let map = shadow_of_cube_on_layers(1, u32::MAX);
+        let taps = ShadowFilterQuality::High.taps();
+        let blur = 4.0;
+        let filtered =
+            |x: f32| map.sample_with_bias_filtered(Vector3::new(x, 0.0, 0.0), 0.1, taps, blur);
+
+        let inside = filtered(0.0);
+        let edge = filtered(2.0);
+        let outside = filtered(6.0);
+
+        assert!(
+            inside > 0.99,
+            "deep inside the shadow must stay fully occluded, got {inside}"
+        );
+        assert!(
+            outside < 0.01,
+            "well outside must stay fully lit, got {outside}"
+        );
+        assert!(
+            edge > 0.01 && edge < 0.99,
+            "the edge must be a partial average — a penumbra — got {edge}; a \
+             hard sample there is exactly 0.0 or 1.0"
+        );
+    }
+
+    /// 🔑 THE TAP OFFSETS FOLLOW THE LIGHT'S OWN AXES, NOT WORLD X/Y.
+    ///
+    /// ⚠️ The obvious implementation offsets the world position along world X
+    /// and Y. For this fixture — a light pointing straight down −Y — the world-Y
+    /// component runs ALONG the light direction, so half the kernel collapses
+    /// onto the same texel and the penumbra narrows or vanishes. Reading the
+    /// light's right/up out of its view matrix is what keeps the disc
+    /// perpendicular to the light for any orientation.
+    ///
+    /// Asserted as a property rather than by rotating the fixture: every tap
+    /// must land in the shadow map's own plane, so sweeping the edge produces a
+    /// MONOTONIC ramp from occluded to lit. A collapsed kernel gives a step.
+    #[test]
+    fn the_penumbra_ramps_monotonically_across_the_edge() {
+        use gdserver3d::light::ShadowFilterQuality;
+
+        let map = shadow_of_cube_on_layers(1, u32::MAX);
+        let taps = ShadowFilterQuality::High.taps();
+        let samples: Vec<f32> = (0..=12)
+            .map(|i| {
+                let x = 1.4 + i as f32 * 0.1;
+                map.sample_with_bias_filtered(Vector3::new(x, 0.0, 0.0), 0.1, taps, 4.0)
+            })
+            .collect();
+
+        for pair in samples.windows(2) {
+            assert!(
+                pair[1] <= pair[0] + 1e-6,
+                "occlusion must not increase as the probe leaves the shadow: \
+                 {samples:?}"
+            );
+        }
+        assert!(
+            samples.first().copied().unwrap_or(0.0) > samples.last().copied().unwrap_or(1.0),
+            "and the sweep must actually fall from occluded to lit: {samples:?}"
+        );
+        // At least one intermediate value, or this is a step rather than a ramp.
+        assert!(
+            samples.iter().any(|v| *v > 0.05 && *v < 0.95),
+            "the sweep must pass through a partial value: {samples:?}"
+        );
+    }
 }
 
 /// Directional light cascade split (pat-p0s82.8).
@@ -973,6 +1427,7 @@ pub fn generate_directional_cascades(
             let mut depth = DepthBuffer::new(size, size);
             rasterize_instances_into_shadow(
                 instances,
+                light.shadow_caster_mask,
                 &view_matrix,
                 &proj_matrix,
                 &mut depth,

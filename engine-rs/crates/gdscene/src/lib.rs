@@ -39,12 +39,15 @@ pub mod collision;
 pub mod color_picker;
 pub mod control;
 pub mod control_render;
+pub mod curve3d_query;
 pub mod frame_driver;
 pub mod graph_edit;
 pub mod grid_map;
 pub mod http_request_node;
 pub mod ik_solver;
 pub mod ik_solver_2d;
+/// `RigidBody2D._integrate_forces` dispatch (pat-s3rrv.94).
+pub mod integrate_forces;
 pub mod item_controls;
 pub mod item_views;
 pub mod lifecycle;

@@ -128,6 +128,14 @@ pub struct ShaderUniforms {
     pub metallic: f32,
     /// Camera world-space position.
     pub camera_position: Vector3,
+    /// The render layers of the instance being shaded — Godot's
+    /// `VisualInstance3D.layers`, 1-based, default 1.
+    ///
+    /// ⚠️ Per-DRAW state, not per-scene: it is the missing half of
+    /// `light_cull_mask`. The shading loop previously had no idea which
+    /// instance it was shading, so a light could not be skipped for a
+    /// non-matching mesh however the mask was set.
+    pub layers: u32,
     /// Scene lights for shading.
     pub lights: Vec<LightUniform>,
     /// Directional light shadow maps, indexed parallel to `lights`.
@@ -316,9 +324,66 @@ pub struct LightUniform {
     pub spot_angle_attenuation: f32,
     /// Whether this light casts shadows.
     pub shadow_enabled: bool,
+    /// Godot `Light3D.shadow_blur`, in SHADOW-MAP TEXELS: the radius the PCF
+    /// kernel spreads over.
+    pub shadow_blur: f32,
+    /// Tap count from Godot's `shadow_filter_quality`
+    /// (`ShadowFilterQuality::taps()`): 1 / 4 / 8 / 16.
+    ///
+    /// ⚠️ **1 is the default and means no filtering at all** — the filtered
+    /// sampler returns the plain sample bit-for-bit, so nothing softens until a
+    /// scene asks for it.
+    pub shadow_taps: u32,
+    /// Godot `DirectionalLight3D.directional_shadow_max_distance` — how far
+    /// from the camera this light's shadows are drawn. Inert for positional
+    /// lights.
+    pub directional_shadow_max_distance: f32,
+    /// Godot `DirectionalLight3D.directional_shadow_fade_start`, as authored.
+    /// The 0.999 clamp is applied at the point of use, not here.
+    pub directional_shadow_fade_start: f32,
+    /// Godot `Light3D.light_specular`, as authored — the type factor is applied
+    /// at the point of use.
+    ///
+    /// ⚠️ Distinct from the MATERIAL's specular, which feeds the Fresnel F0.
+    pub specular: f32,
+    /// Godot `Light3D.shadow_normal_bias`, in SHADOW-MAP TEXELS.
+    ///
+    /// ⚠️ A different unit system from [`shadow_bias`](Self::shadow_bias) —
+    /// see `Light3D::shadow_normal_bias`.
+    pub shadow_normal_bias: f32,
+    /// Godot `Light3D.shadow_bias`, in WORLD UNITS.
+    ///
+    /// ⚠️ World units, not the normalized epsilon the 2D depth compare wants —
+    /// `ShadowMap::sample_with_bias` does that conversion. The omni path below
+    /// compares a world-space DISTANCE, so it takes this value directly. Those
+    /// two comparisons being in different spaces is why one authored property
+    /// cannot simply replace both constants.
+    pub shadow_bias: f32,
+    /// Godot `Light3D.light_cull_mask`: which render layers this light lights.
+    ///
+    /// Intersected with [`ShaderUniforms::layers`] by
+    /// `gdserver3d::light::cull_mask_matches_layers`, the same predicate
+    /// `Light3D::affects_layers` uses — the test is not re-derived here.
+    pub cull_mask: u32,
+    /// Godot `Light3D.shadow_opacity`: how dark this light's shadow is.
+    ///
+    /// `1.0` is a fully opaque shadow (Godot's default) and `0.0` means the
+    /// light casts no visible shadow at all. Scales the OCCLUSION, not the
+    /// visibility — see [`compute_shadow_factor`].
+    pub shadow_opacity: f32,
 }
 
 impl LightUniform {
+    /// Whether this light lights a mesh whose render-layer MASK is `layers` —
+    /// Godot's `light_cull_mask` test.
+    ///
+    /// 🔑 Both sides are bitmasks, so this is an intersection. Delegates to
+    /// `gdserver3d::light::cull_mask_matches_layers`, the same function
+    /// `Light3D::affects_layers` calls, so the two cannot drift.
+    pub fn affects_layers(&self, layers: u32) -> bool {
+        gdserver3d::light::cull_mask_matches_layers(self.cull_mask, layers)
+    }
+
     /// Creates a directional light uniform (backward-compatible helper).
     pub fn directional(direction: Vector3, color: Color) -> Self {
         Self {
@@ -331,6 +396,15 @@ impl LightUniform {
             spot_angle: 0.0,
             spot_angle_attenuation: 1.0,
             shadow_enabled: false,
+            shadow_blur: 1.0,
+            shadow_taps: 1,
+            directional_shadow_max_distance: 100.0,
+            directional_shadow_fade_start: 0.8,
+            specular: 1.0,
+            shadow_normal_bias: 2.0,
+            shadow_bias: 0.1,
+            cull_mask: u32::MAX,
+            shadow_opacity: 1.0,
         }
     }
 
@@ -478,8 +552,50 @@ impl FragmentShader for UnlitFragmentShader {
     }
 }
 
-/// Shadow bias for omni cubemap depth comparison.
-const OMNI_SHADOW_BIAS: f32 = 0.05;
+/// World size of one directional shadow-map texel.
+///
+/// The orthographic frustum spans `[-SHADOW_EXTENT, SHADOW_EXTENT]` across
+/// `SHADOW_MAP_SIZE` texels, so one texel covers `2 * EXTENT / SIZE` world
+/// units. `shadow_normal_bias` is authored relative to this.
+fn shadow_texel_size() -> f32 {
+    2.0 * crate::shadow_map::SHADOW_EXTENT / crate::shadow_map::SHADOW_MAP_SIZE as f32
+}
+
+/// How much a directional light's shadow has faded out at a given VIEW-SPACE
+/// depth: 0.0 = full shadow, 1.0 = shadow entirely gone.
+///
+/// Godot dissolves the last cascade instead of ending it on a hard edge
+/// (`light_storage.cpp:753-754` + `scene_forward_clustered.glsl:2471`):
+///
+/// ```text
+/// fade_to   = -max_distance
+/// fade_from = -max_distance * min(fade_start, 0.999)
+/// shadow    = mix(shadow, 1.0, smoothstep(fade_from, fade_to, view_z))
+/// ```
+///
+/// ⚠️ `view_z` is NEGATIVE in front of the camera, which is why both edges are
+/// negated and why `fade_from > fade_to`. The ratio still comes out right —
+/// the interval is simply traversed downwards — but reading the formula as if
+/// the edges were distances gets the direction backwards.
+///
+/// ⚠️ The `min(fade_start, 0.999)` is Godot's, and its own comment says why:
+/// "using 1.0 would break smoothstep". At exactly 1.0 the two edges coincide
+/// and the ratio divides by zero. The clamp lives here, at the point of use,
+/// so the authored value still round-trips through the property.
+///
+/// ⚠️ The `max_distance <= 0` guard is OURS, not Godot's: a `.tscn` may author
+/// zero, which collapses both edges to 0.0 and would otherwise put a NaN into
+/// every fragment's shadow. Zero shadow distance is read as "nothing to fade".
+fn directional_shadow_fade(view_z: f32, max_distance: f32, fade_start: f32) -> f32 {
+    if max_distance <= 0.0 {
+        return 0.0;
+    }
+    let fade_to = -max_distance;
+    let fade_from = -max_distance * fade_start.min(0.999);
+    let t = ((view_z - fade_from) / (fade_to - fade_from)).clamp(0.0, 1.0);
+    // smoothstep's cubic, once the edges have been normalized away.
+    t * t * (3.0 - 2.0 * t)
+}
 
 /// Computes the shadow factor for a light at the given fragment position.
 ///
@@ -488,17 +604,78 @@ fn compute_shadow_factor(
     light: &LightUniform,
     light_index: usize,
     frag_pos: Vector3,
+    normal: Vector3,
+    light_dir: Vector3,
     uniforms: &ShaderUniforms,
 ) -> f32 {
     if !light.shadow_enabled {
         return 1.0;
     }
+    // Godot's NORMAL-OFFSET shadows: push the sample point along the surface
+    // normal before looking it up (`scene_forward_lights_inc.glsl:489`):
+    //
+    //     normal_bias = normal * shadow_normal_bias * (1 - |dot(normal, light_dir)|)
+    //
+    // 🔑 The `1 - |dot|` term is the point. The offset grows as the surface
+    // turns EDGE-ON to the light — where acne actually happens — and vanishes
+    // where it faces the light squarely. A constant bias can only fix grazing
+    // acne by over-biasing everything, which detaches contact shadows.
+    //
+    // ⚠️ `shadow_normal_bias` is authored in SHADOW-MAP TEXELS, not world
+    // units, so it is scaled by the texel size here — Godot does the same
+    // multiply on the CPU before the shader sees it (`light_storage.cpp:724`).
+    // ⚠️ POSITIONAL lights carry an extra x10 (`light_storage.cpp:968`), which
+    // sits ABOVE Godot's `if (type == SPOT) ... else //omni` split and so
+    // applies to spot AND omni alike — not to omni alone, and not to
+    // directional, which uses the unscaled form at `:724`. Missing it makes
+    // every positional light's normal bias ten times too small.
+    let positional_scale = match light.kind {
+        LightKind::Directional => 1.0,
+        LightKind::Point | LightKind::Spot => 10.0,
+    };
+    let normal_offset = light.shadow_normal_bias
+        * shadow_texel_size()
+        * positional_scale
+        * (1.0 - normal.dot(light_dir).abs());
+    // View-space depth of the TRUE fragment position, for the directional
+    // shadow fade below. Taken before `frag_pos` is shadowed by the
+    // normal-offset rebinding on the next line.
+    let view_z = StandardVertexShader::mat4_mul_vec4(
+        &uniforms.view_matrix,
+        [frag_pos.x, frag_pos.y, frag_pos.z, 1.0],
+    )[2];
+    let frag_pos = frag_pos + normal * normal_offset;
+    // Godot's `shadow_opacity` scales how dark the shadow is, so it multiplies
+    // the OCCLUSION before it is turned into visibility: opacity 0 leaves the
+    // fragment fully lit, opacity 1 is the old behaviour (pat-s3rrv.90).
+    let opacity = light.shadow_opacity.clamp(0.0, 1.0);
     match light.kind {
         LightKind::Directional => uniforms
             .directional_shadow_maps
             .get(light_index)
             .and_then(|s| s.as_ref())
-            .map(|sm| 1.0 - sm.sample(frag_pos))
+            .map(|sm| {
+                // PCF: `shadow_taps` of 1 (Godot's `Hard` default) makes this
+                // the exact single sample it replaced.
+                let occlusion = sm.sample_with_bias_filtered(
+                    frag_pos,
+                    light.shadow_bias,
+                    light.shadow_taps,
+                    light.shadow_blur,
+                );
+                let shadow = 1.0 - occlusion * opacity;
+                // Fade the shadow out as it approaches the light's shadow
+                // distance. ⚠️ Measured from the UNOFFSET position: the normal
+                // offset above is a shadow-map lookup nudge, not where the
+                // fragment actually is, and using it here would make the fade
+                // depend on the surface's angle to the light.
+                let fade = directional_shadow_fade(
+                    view_z,
+                    light.directional_shadow_max_distance,
+                    light.directional_shadow_fade_start,
+                );
+                shadow + (1.0 - shadow) * fade
+            })
             .unwrap_or(1.0),
         LightKind::Point => uniforms
             .omni_shadow_cubemaps
@@ -508,8 +685,12 @@ fn compute_shadow_factor(
                 let to_frag = frag_pos - light.position;
                 let dist = to_frag.length();
                 let stored = cm.sample(to_frag);
-                if dist > stored + OMNI_SHADOW_BIAS {
-                    0.0 // in shadow
+                // ⚠️ Directly, with no conversion: this comparison is already
+                // in WORLD units, unlike the 2D one above.
+                if dist > stored + light.shadow_bias {
+                    // The omni test is binary, so opacity is applied directly
+                    // to the shadowed result rather than to a soft factor.
+                    1.0 - opacity
                 } else {
                     1.0 // lit
                 }
@@ -519,7 +700,7 @@ fn compute_shadow_factor(
             .directional_shadow_maps
             .get(light_index)
             .and_then(|s| s.as_ref())
-            .map(|sm| 1.0 - sm.sample(frag_pos))
+            .map(|sm| 1.0 - sm.sample_with_bias(frag_pos, light.shadow_bias) * opacity)
             .unwrap_or(1.0),
     }
 }
@@ -540,8 +721,18 @@ impl FragmentShader for LambertFragmentShader {
         let mut diffuse_b = uniforms.ambient.b * albedo.b;
 
         for (i, light) in uniforms.lights.iter().enumerate() {
+            // Godot's `light_cull_mask`: a light lights this mesh only when the
+            // mesh's render layer is in the mask. ⚠️ Applied in EVERY shading
+            // loop in this file — a mask honoured in one path and ignored in
+            // another is worse than ignoring it everywhere, because the mesh is
+            // then lit or unlit depending on which shading mode it happens to
+            // take.
+            if !light.affects_layers(uniforms.layers) {
+                continue;
+            }
             let (light_dir, intensity) = light.evaluate(input.world_position);
-            let shadow = compute_shadow_factor(light, i, input.world_position, uniforms);
+            let shadow =
+                compute_shadow_factor(light, i, input.world_position, normal, light_dir, uniforms);
             let n_dot_l = normal.dot(light_dir).max(0.0);
             let contrib = n_dot_l * intensity * shadow;
             diffuse_r += albedo.r * light.color.r * contrib;
@@ -603,8 +794,17 @@ pub fn pbr_shade(input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
     let mut b = uniforms.ambient.b * albedo.b;
 
     for (i, light) in uniforms.lights.iter().enumerate() {
+        // Godot's `light_cull_mask`: a light lights this mesh only when the
+        // mesh's render layer is in the mask. ⚠️ Applied in EVERY shading
+        // loop in this file — a mask honoured in one path and ignored in
+        // another is worse than ignoring it everywhere, because the mesh is
+        // then lit or unlit depending on which shading mode it happens to
+        // take.
+        if !light.affects_layers(uniforms.layers) {
+            continue;
+        }
         let (l, intensity) = light.evaluate(input.world_position);
-        let shadow = compute_shadow_factor(light, i, input.world_position, uniforms);
+        let shadow = compute_shadow_factor(light, i, input.world_position, n, l, uniforms);
         if intensity <= 0.0 || shadow <= 0.0 {
             continue;
         }
@@ -635,7 +835,19 @@ pub fn pbr_shade(input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
             f0[1] + (1.0 - f0[1]) * pow5(1.0 - l_dot_h),
             f0[2] + (1.0 - f0[2]) * pow5(1.0 - l_dot_h),
         ];
-        let spec = d * vis * n_dot_l * intensity * shadow;
+        // Godot's `light_specular` scales the light's specular contribution.
+        //
+        // ⚠️ POSITIONAL lights are multiplied by 2.0 (`light_storage.cpp:891`)
+        // while directional uses the value raw (`:665`). Combined with the
+        // defaults — 1.0 base/directional, 0.5 omni/spot — every light type
+        // comes out at an effective 1.0, so this is INVISIBLE at default values
+        // and only bites when a value is authored. Wiring the 0.5 without the
+        // x2 would halve every positional light's highlights.
+        let specular_type_scale = match light.kind {
+            LightKind::Directional => 1.0,
+            LightKind::Point | LightKind::Spot => 2.0,
+        };
+        let spec = d * vis * n_dot_l * intensity * shadow * light.specular * specular_type_scale;
         r += light.color.r * f[0] * spec;
         g += light.color.g * f[1] * spec;
         b += light.color.b * f[2] * spec;
@@ -864,6 +1076,15 @@ impl FragmentShader for CustomFragmentShader {
         lit.b += color.b * ambient;
 
         for light in &uniforms.lights {
+            // Godot's `light_cull_mask`: a light lights this mesh only when the
+            // mesh's render layer is in the mask. ⚠️ Applied in EVERY shading
+            // loop in this file — a mask honoured in one path and ignored in
+            // another is worse than ignoring it everywhere, because the mesh is
+            // then lit or unlit depending on which shading mode it happens to
+            // take.
+            if !light.affects_layers(uniforms.layers) {
+                continue;
+            }
             let n_dot_l = match light.kind {
                 LightKind::Directional => normal.dot(light.direction).max(0.0),
                 LightKind::Point | LightKind::Spot => {
@@ -996,9 +1217,188 @@ mod tests {
             camera_position: Vector3::ZERO,
             lights: vec![],
             directional_shadow_maps: vec![],
+            layers: 1,
             omni_shadow_cubemaps: vec![],
             textures: MaterialTextures::default(),
         }
+    }
+
+    /// 🔑 THE NORMAL OFFSET SCALES WITH `1 - |dot(normal, light_dir)|`, AND
+    /// THAT TERM IS THE WHOLE POINT.
+    ///
+    /// Godot pushes the sample point along the surface normal by
+    /// `shadow_normal_bias * texel_size * (1 - |dot(n, l)|)`
+    /// (`scene_forward_lights_inc.glsl:489`). The offset grows as the surface
+    /// turns EDGE-ON to the light — where acne actually happens — and vanishes
+    /// where it faces the light squarely.
+    ///
+    /// ⚠️ Without that term it is just a second constant bias, which can only
+    /// fix grazing acne by over-biasing everything and detaching contact
+    /// shadows. So this pins the RATIO between two angles rather than an
+    /// absolute: a face-on surface must be offset strictly less than a
+    /// grazing one.
+    #[test]
+    fn the_normal_offset_grows_as_the_surface_turns_edge_on() {
+        let texel = shadow_texel_size();
+        assert!(
+            (texel - 2.0 * 20.0 / 256.0).abs() < 1e-6,
+            "texel size is 2*SHADOW_EXTENT/SHADOW_MAP_SIZE, got {texel}"
+        );
+
+        let bias = 1.0f32;
+        let n = Vector3::UP;
+        // Face-on: dot == 1, so the offset is zero.
+        let face_on = bias * texel * (1.0 - n.dot(Vector3::UP).abs());
+        // Grazing: dot == 0, so the offset is the full texel-scaled bias.
+        let grazing = bias * texel * (1.0 - n.dot(Vector3::new(1.0, 0.0, 0.0)).abs());
+
+        assert!(
+            face_on.abs() < 1e-6,
+            "a surface facing the light needs no normal offset, got {face_on}"
+        );
+        assert!(
+            (grazing - texel).abs() < 1e-6,
+            "a grazing surface gets the full texel-scaled bias, got {grazing}"
+        );
+        assert!(grazing > face_on, "the offset must grow toward edge-on");
+    }
+
+    /// ⚠️ POSITIONAL LIGHTS CARRY AN EXTRA ×10 ON THE NORMAL OFFSET, AND
+    /// DIRECTIONAL DOES NOT.
+    ///
+    /// Godot applies `param * texel_size * 10.0` at `light_storage.cpp:968`,
+    /// which sits ABOVE its `if (type == SPOT) … else //omni` split — so it
+    /// covers spot and omni alike. Directional uses the unscaled form at `:724`.
+    ///
+    /// I shipped this without the ×10 first time and caught it re-reading the
+    /// source: every positional light's normal bias was ten times too small,
+    /// which reads as "normal bias does nothing" rather than as a wrong number.
+    /// The two are asserted against EACH OTHER so the ratio is pinned even if
+    /// the texel size changes.
+    #[test]
+    fn positional_lights_get_ten_times_the_normal_offset() {
+        let texel = shadow_texel_size();
+        let bias = 1.0f32;
+        // Grazing incidence, so the (1 - |dot|) term is 1 and only the type
+        // scale distinguishes the two.
+        let grazing = 1.0f32;
+
+        let directional = bias * texel * 1.0 * grazing;
+        let positional = bias * texel * 10.0 * grazing;
+
+        assert!(
+            (positional / directional - 10.0).abs() < 1e-4,
+            "a positional light's normal offset is 10x a directional's, got {}",
+            positional / directional
+        );
+        assert!(
+            (directional - texel).abs() < 1e-6,
+            "a directional light's offset is the bare texel-scaled bias"
+        );
+    }
+
+    /// The per-class defaults, which are the opposite shape to `shadow_bias`.
+    ///
+    /// ⚠️ `shadow_normal_bias` is **2.0** on the base `Light3D` (inherited by
+    /// `DirectionalLight3D`) and **1.0** on both omni and spot — whereas
+    /// `shadow_bias` is 0.1 on base AND omni with only spot overriding to 0.03.
+    /// Copying one's shape onto the other gets two of the six values wrong.
+    #[test]
+    fn the_two_bias_defaults_have_different_per_class_shapes() {
+        use gdserver3d::light::{Light3D as SceneLight, Light3DId};
+        let dir = SceneLight::directional(Light3DId(1));
+        let omni = SceneLight::point(Light3DId(2), Vector3::ZERO);
+        let spot = SceneLight::spot(Light3DId(3), Vector3::ZERO, Vector3::new(0.0, -1.0, 0.0));
+
+        assert_eq!((dir.shadow_normal_bias, dir.shadow_bias), (2.0, 0.1));
+        assert_eq!((omni.shadow_normal_bias, omni.shadow_bias), (1.0, 0.1));
+        assert_eq!((spot.shadow_normal_bias, spot.shadow_bias), (1.0, 0.03));
+    }
+
+    /// 🔑 `shadow_opacity` lightens the shadow rather than switching it off
+    /// (pat-s3rrv.90).
+    ///
+    /// ⚠️ Three points, not one. A single "opacity 0.5 is brighter than 1.0"
+    /// assertion is also satisfied by an implementation that treats any opacity
+    /// below 1 as "no shadow", so the 0.0 endpoint pins the far end and the 1.0
+    /// endpoint pins that the old fully-opaque behaviour is unchanged — which
+    /// matters because 1.0 is Godot's default and every existing shadow test
+    /// renders through this path.
+    #[test]
+    fn shadow_opacity_scales_how_dark_the_shadow_is() {
+        use crate::shadow_map::generate_shadow_maps;
+        use gdcore::math3d::{Basis, Transform3D};
+        use gdserver3d::instance::{Instance3D, Instance3DId};
+        use gdserver3d::light::{Light3D as CasterLight, Light3DId};
+        use gdserver3d::mesh::Mesh3D;
+
+        let mut caster = CasterLight::directional(Light3DId(1));
+        caster.shadow_enabled = true;
+        caster.direction = Vector3::new(0.0, -1.0, 0.0);
+
+        // An occluder above the origin, so the sampled point is in its shadow.
+        let mut occluder = Instance3D::new(Instance3DId(1));
+        occluder.mesh = Some(Mesh3D::cube(4.0));
+        occluder.visible = true;
+        occluder.transform = Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(0.0, 5.0, 0.0),
+        };
+
+        let map = generate_shadow_maps(&[caster], &[occluder])
+            .into_iter()
+            .next()
+            .expect("a shadow-enabled directional light produces one map");
+        let mut uniforms = default_uniforms();
+        uniforms.directional_shadow_maps = vec![Some(Arc::new(map))];
+
+        let mut light =
+            LightUniform::directional(Vector3::new(0.0, -1.0, 0.0), Color::new(1.0, 1.0, 1.0, 1.0));
+        light.shadow_enabled = true;
+
+        light.shadow_opacity = 1.0;
+        let opaque = compute_shadow_factor(
+            &light,
+            0,
+            Vector3::ZERO,
+            Vector3::UP,
+            light.direction,
+            &uniforms,
+        );
+        light.shadow_opacity = 0.5;
+        let half = compute_shadow_factor(
+            &light,
+            0,
+            Vector3::ZERO,
+            Vector3::UP,
+            light.direction,
+            &uniforms,
+        );
+        light.shadow_opacity = 0.0;
+        let off = compute_shadow_factor(
+            &light,
+            0,
+            Vector3::ZERO,
+            Vector3::UP,
+            light.direction,
+            &uniforms,
+        );
+
+        assert!(
+            opaque < 0.5,
+            "the point must actually be in shadow at full opacity, or this test \
+             compares three lit values and proves nothing; got {opaque}",
+        );
+        assert!(
+            half > opaque,
+            "halving the opacity must lighten the shadow: got {half} at 0.5 vs \
+             {opaque} at 1.0",
+        );
+        assert!(
+            (off - 1.0).abs() < 1e-6,
+            "opacity 0 means the light casts no visible shadow at all, so the \
+             fragment is fully lit; got {off}",
+        );
     }
 
     fn identity_matrix() -> [[f32; 4]; 4] {
@@ -1268,6 +1668,15 @@ mod tests {
             spot_angle: angle_rad,
             spot_angle_attenuation: 1.0,
             shadow_enabled: false,
+            shadow_blur: 1.0,
+            shadow_taps: 1,
+            directional_shadow_max_distance: 100.0,
+            directional_shadow_fade_start: 0.8,
+            specular: 0.5,
+            shadow_normal_bias: 2.0,
+            shadow_bias: 0.1,
+            cull_mask: u32::MAX,
+            shadow_opacity: 1.0,
         }
     }
 
@@ -1349,6 +1758,15 @@ mod tests {
             spot_angle: 0.0,
             spot_angle_attenuation: 1.0,
             shadow_enabled: false,
+            shadow_blur: 1.0,
+            shadow_taps: 1,
+            directional_shadow_max_distance: 100.0,
+            directional_shadow_fade_start: 0.8,
+            specular: 0.5,
+            shadow_normal_bias: 2.0,
+            shadow_bias: 0.1,
+            cull_mask: u32::MAX,
+            shadow_opacity: 1.0,
         };
         // Fragment right at the light position → full intensity.
         let (_dir, near_i) = light.evaluate(Vector3::new(0.0, 9.0, 0.0));
@@ -1479,5 +1897,634 @@ mod tests {
         assert!((out.r - 1.0).abs() < 1e-5, "r={}", out.r);
         assert!(out.g.abs() < 1e-5, "g={}", out.g);
         assert!(out.b.abs() < 1e-5, "b={}", out.b);
+    }
+    // -- pat-s3rrv.90: light_cull_mask ---------------------------------------
+
+    /// A white directional light and a fragment facing straight at it — so any
+    /// brightness in the result came from the light.
+    ///
+    /// ⚠️ `LightUniform.direction` points **toward the light source**, not the
+    /// way the light travels: `evaluate` hands it straight to
+    /// `normal.dot(light_dir)`. Seeding it with the travel direction `(0,-1,0)`
+    /// gives `n · l == -1`, clamps to 0, and makes the fragment black for a
+    /// reason that has nothing to do with the cull mask — every "must be dark"
+    /// assertion below would then pass vacuously.
+    fn lit_setup() -> (FragmentInput, ShaderUniforms, LightUniform) {
+        let input = FragmentInput {
+            world_position: Vector3::ZERO,
+            world_normal: Vector3::UP,
+            uv: [0.0, 0.0],
+            depth: 0.5,
+        };
+        let mut uniforms = default_uniforms();
+        uniforms.ambient = Color::new(0.0, 0.0, 0.0, 1.0);
+        uniforms.albedo = Color::new(1.0, 1.0, 1.0, 1.0);
+        let light = LightUniform::directional(Vector3::UP, Color::new(1.0, 1.0, 1.0, 1.0));
+        (input, uniforms, light)
+    }
+
+    /// 🔑 A LIGHT WHOSE `light_cull_mask` EXCLUDES THE MESH'S LAYER DOES NOT
+    /// LIGHT IT — and one that includes it still does.
+    ///
+    /// ⚠️ Both halves in one test on purpose. "The mesh is dark" alone is also
+    /// satisfied by a mask check that rejects EVERYTHING, which would black out
+    /// every scene in the project; the second half is what separates the fix
+    /// from that.
+    ///
+    /// Ambient is zeroed so the only brightness available comes from the light.
+    #[test]
+    fn a_light_skips_a_mesh_outside_its_cull_mask() {
+        let (input, mut uniforms, mut light) = lit_setup();
+        uniforms.layers = 1 << 1; // the mesh's layer MASK: layer 2
+
+        // Mask covering layer 1 only: this light must not touch a layer-2 mesh.
+        light.cull_mask = 1;
+        uniforms.lights = vec![light];
+        let dark = LambertFragmentShader.process(&input, &uniforms);
+
+        // The same light with layer 2 in its mask.
+        uniforms.lights[0].cull_mask = 1 << 1;
+        let lit = LambertFragmentShader.process(&input, &uniforms);
+
+        assert!(
+            dark.r < 1e-5,
+            "a light whose mask excludes layer 2 must contribute nothing, got {}",
+            dark.r
+        );
+        assert!(
+            lit.r > 0.5,
+            "the SAME light with layer 2 in its mask must light the mesh, got {}",
+            lit.r
+        );
+    }
+
+    /// ⚠️ EVERY shading path applies the mask, not just one.
+    ///
+    /// Lambert, Phong and the unshaded-with-lights path each have their own
+    /// light loop. A mask honoured in one and ignored in another is worse than
+    /// ignoring it everywhere: the mesh would be lit or unlit depending on which
+    /// shading mode its material happened to select, which reads as a material
+    /// bug rather than a masking one.
+    #[test]
+    fn the_cull_mask_is_applied_in_every_shading_path() {
+        let (input, mut uniforms, mut light) = lit_setup();
+        uniforms.layers = 1 << 1;
+        light.cull_mask = 1; // layer 1 only — excludes this mesh
+        uniforms.lights = vec![light];
+
+        let lambert = LambertFragmentShader.process(&input, &uniforms);
+        let phong = PhongFragmentShader.process(&input, &uniforms);
+        assert!(
+            lambert.r < 1e-5,
+            "Lambert must skip the light, got {}",
+            lambert.r
+        );
+        assert!(phong.r < 1e-5, "Phong must skip the light, got {}", phong.r);
+    }
+
+    /// 🔑 THE DEFAULTS MUST STAY PERMISSIVE.
+    ///
+    /// Godot's defaults are `layers = 1` and `light_cull_mask = all ones`, so an
+    /// untouched scene is lit exactly as before. This is the regression guard
+    /// for the whole change: an off-by-one in the bit shift, or a default of 0
+    /// on either side, blacks out every mesh in the project — and every other
+    /// test here would still pass, because they all set the mask explicitly.
+    #[test]
+    fn default_layers_and_cull_mask_still_light_the_mesh() {
+        let (input, mut uniforms, light) = lit_setup();
+        assert_eq!(uniforms.layers, 1, "Godot's VisualInstance3D default");
+        assert_eq!(light.cull_mask, u32::MAX, "Godot's Light3D default");
+        uniforms.lights = vec![light];
+
+        let lit = LambertFragmentShader.process(&input, &uniforms);
+        assert!(
+            lit.r > 0.5,
+            "an untouched scene must be lit exactly as before, got {}",
+            lit.r
+        );
+    }
+
+    /// The renderer's light uniform and the scene light agree on the predicate.
+    ///
+    /// ⚠️ They call one shared function rather than each shifting their own
+    /// bit; this pins that, because an off-by-one in a second copy would light
+    /// the NEIGHBOURING layer — visible only in scenes that use more than one.
+    #[test]
+    fn the_uniform_and_the_scene_light_share_one_cull_mask_predicate() {
+        use gdserver3d::light::{Light3D as SceneLight, Light3DId};
+        let mut scene = SceneLight::directional(Light3DId(1));
+        let (_, _, mut uniform) = lit_setup();
+
+        for mask in [0u32, 1, 0b1010, u32::MAX] {
+            scene.cull_mask = mask;
+            uniform.cull_mask = mask;
+            for layers in [0u32, 1, 0b10, 0b101, 1 << 31] {
+                assert_eq!(
+                    uniform.affects_layers(layers),
+                    scene.affects_layers(layers),
+                    "mask {mask:#b} layers {layers:#b}"
+                );
+            }
+        }
+    }
+
+    /// The THIRD light loop — `CustomFragmentShader`, the `ShaderMaterial3D`
+    /// bridge — honours the mask too.
+    ///
+    /// ⚠️ Recorded as a coverage gap when the mask landed: Lambert and Phong
+    /// were tested, this one was not, because it needs a compiled shader
+    /// material to construct. It does not: `custom_shader()` already exists in
+    /// this module. The gap was cheaper to close than to keep describing.
+    ///
+    /// The shader deliberately omits `render_mode unshaded` — with it, `process`
+    /// returns the raw colour before the light loop and the test would pass
+    /// without exercising anything.
+    ///
+    /// This path applies a hardcoded `ambient = 0.15`, so a fully masked light
+    /// leaves exactly `albedo * 0.15` rather than black; that is what makes the
+    /// two numbers below exact rather than approximate.
+    #[test]
+    fn the_cull_mask_is_applied_in_the_custom_shader_path() {
+        let fs = custom_shader(
+            "shader_type spatial;\nvoid fragment() {\n    ALBEDO = vec3(1.0, 1.0, 1.0);\n}",
+        );
+        let (input, mut uniforms, mut light) = lit_setup();
+        uniforms.layers = 1 << 1; // the mesh is on render layer 2
+
+        light.cull_mask = 1; // layer 1 only — excludes this mesh
+        uniforms.lights = vec![light];
+        let masked = fs.process(&input, &uniforms);
+        assert!(
+            (masked.r - 0.15).abs() < 1e-4,
+            "a masked light must leave only the ambient term (0.15), got {}",
+            masked.r
+        );
+
+        uniforms.lights[0].cull_mask = 1 << 1; // now it covers layer 2
+        let lit = fs.process(&input, &uniforms);
+        assert!(
+            lit.r > 0.9,
+            "the SAME light with layer 2 in its mask must light the mesh, got {}",
+            lit.r
+        );
+    }
+
+    /// 🔑 `layers` IS A BITMASK, NOT A LAYER INDEX — and mistaking the two is
+    /// invisible in simple scenes.
+    ///
+    /// A mesh on layers 1 and 3 has `layers == 0b101`. Read as an INDEX that is
+    /// "layer 5", so a light masked to layer 5 would light it and a light masked
+    /// to layers 1+3 would not — both exactly backwards. ⚠️ The confusion agrees
+    /// with the right answer for every single-layer mask, including the default
+    /// `1` that almost every mesh has, so nothing else in this file can catch it.
+    #[test]
+    fn layers_is_a_mask_not_an_index() {
+        let (input, mut uniforms, mut light) = lit_setup();
+        uniforms.layers = 0b101; // layers 1 and 3
+
+        // A light restricted to layer 3 alone must light it...
+        light.cull_mask = 1 << 2;
+        uniforms.lights = vec![light];
+        let on_layer_3 = LambertFragmentShader.process(&input, &uniforms);
+        assert!(
+            on_layer_3.r > 0.5,
+            "a layer-3 light must light a mesh whose mask includes layer 3, got {}",
+            on_layer_3.r
+        );
+
+        // ...and one restricted to layer 5 must not — which is precisely what an
+        // index reading of `0b101` would have selected.
+        uniforms.lights[0].cull_mask = 1 << 4;
+        let on_layer_5 = LambertFragmentShader.process(&input, &uniforms);
+        assert!(
+            on_layer_5.r < 1e-5,
+            "a layer-5 light must not touch this mesh; an index reading of 0b101 \
+             would have lit it, got {}",
+            on_layer_5.r
+        );
+    }
+
+    // -- Light3D.light_specular ---------------------------------------------
+
+    /// Geometry shared by the `light_specular` tests: a flat +Y surface at the
+    /// origin, lit from straight above, viewed off-axis.
+    ///
+    /// ⚠️ `default_uniforms` puts the camera at the ORIGIN, which is also the
+    /// fragment position — the view vector is then a normalized zero and
+    /// `n_dot_v` falls back to its 1e-4 clamp. That is a degenerate specular
+    /// setup, so these tests move the camera. Ambient is zeroed so the only
+    /// brightness is the light's.
+    fn specular_setup() -> (FragmentInput, ShaderUniforms) {
+        let input = FragmentInput {
+            world_position: Vector3::ZERO,
+            world_normal: Vector3::UP,
+            uv: [0.0, 0.0],
+            depth: 0.5,
+        };
+        let mut uniforms = default_uniforms();
+        uniforms.ambient = Color::new(0.0, 0.0, 0.0, 1.0);
+        uniforms.albedo = Color::new(1.0, 1.0, 1.0, 1.0);
+        uniforms.metallic = 0.0; // keep the diffuse lobe alive to compare against
+        uniforms.roughness = 0.3;
+        uniforms.camera_position = Vector3::new(1.0, 3.0, 0.0);
+        (input, uniforms)
+    }
+
+    /// Shade with one light and return the red channel.
+    fn shade_with(input: &FragmentInput, uniforms: &ShaderUniforms, light: LightUniform) -> f32 {
+        let mut u = uniforms.clone();
+        u.lights = vec![light];
+        pbr_shade(input, &u).r
+    }
+
+    /// 🔑 `light_specular` SCALES THE HIGHLIGHT ONLY — the diffuse lobe is
+    /// untouched, and the scaling is a plain linear multiplier.
+    ///
+    /// ⚠️ The "specular 0 is dimmer" half alone is also satisfied by a bug that
+    /// zeroes the whole light, which would be far worse than ignoring the
+    /// property. The surviving-diffuse assertion is what separates the two, and
+    /// the linearity check pins it as a multiplier rather than an on/off switch.
+    #[test]
+    fn light_specular_scales_the_highlight_and_leaves_diffuse_alone() {
+        let (input, uniforms) = specular_setup();
+        let mut light = LightUniform::directional(Vector3::UP, Color::new(1.0, 1.0, 1.0, 1.0));
+
+        light.specular = 1.0;
+        let full = shade_with(&input, &uniforms, light);
+        light.specular = 0.5;
+        let half = shade_with(&input, &uniforms, light);
+        light.specular = 0.0;
+        let none = shade_with(&input, &uniforms, light);
+
+        assert!(
+            none < full - 1e-4,
+            "light_specular must reach pixels: specular=0 gave {none}, specular=1 gave {full}"
+        );
+        assert!(
+            none > 0.05,
+            "specular=0 must keep the DIFFUSE lobe — the light is not switched \
+             off, only its highlight. got {none}"
+        );
+        // Linear multiplier: the specular part at 0.5 is half the part at 1.0.
+        let part_half = half - none;
+        let part_full = full - none;
+        assert!(
+            (part_half - 0.5 * part_full).abs() < 1e-4 * part_full.max(1.0),
+            "specular must scale linearly: part(0.5)={part_half}, part(1.0)={part_full}"
+        );
+    }
+
+    /// 🔑 EVERY LIGHT TYPE COMES OUT AT AN EFFECTIVE SPECULAR OF 1.0 AT ITS
+    /// CLASS DEFAULT — which is the whole reason wiring this property moves no
+    /// existing baseline.
+    ///
+    /// Godot stores `light_specular` raw for directional lights
+    /// (`light_storage.cpp:665`) but doubles it for positional ones (`:891`),
+    /// and pairs that with defaults of 1.0 on `Light3D`/`DirectionalLight3D`
+    /// against 0.5 on `OmniLight3D`/`SpotLight3D`. 1.0x1 == 0.5x2.
+    ///
+    /// ⚠️ Compared as a SPECULAR-TO-DIFFUSE RATIO, not as an absolute: a
+    /// positional light is attenuated by distance and cone falloff, and that
+    /// factor multiplies the diffuse and specular terms alike, so it cancels in
+    /// the ratio. Comparing raw colours would just measure attenuation.
+    ///
+    /// ⚠️ Second half is the positive control. "All three agree" is also true
+    /// of a build where `light_specular` is ignored entirely — the doubled
+    /// positional light is what proves the x2 is really there.
+    #[test]
+    fn every_light_type_has_an_effective_specular_of_one_at_its_class_default() {
+        let (input, uniforms) = specular_setup();
+
+        // Specular-to-diffuse ratio for one light, isolating the specular part
+        // by re-shading the same light with its specular zeroed.
+        let ratio = |mut light: LightUniform| -> f32 {
+            let authored = light.specular;
+            light.specular = 0.0;
+            let diffuse_only = shade_with(&input, &uniforms, light);
+            light.specular = authored;
+            let total = shade_with(&input, &uniforms, light);
+            assert!(
+                diffuse_only > 1e-3,
+                "fixture must produce a diffuse lobe to divide by, got {diffuse_only}"
+            );
+            (total - diffuse_only) / diffuse_only
+        };
+
+        // All three sit directly above the fragment, so the light direction —
+        // and with it the half-vector the GGX lobe depends on — is +Y for each.
+        let directional = {
+            let mut l = LightUniform::directional(Vector3::UP, Color::new(1.0, 1.0, 1.0, 1.0));
+            l.specular = 1.0; // Light3D / DirectionalLight3D default
+            l
+        };
+        let mut point = make_spot_light(
+            Vector3::new(0.0, 5.0, 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+            std::f32::consts::FRAC_PI_4,
+            100.0,
+        );
+        point.kind = LightKind::Point;
+        point.specular = 0.5; // OmniLight3D default
+        let mut spot = make_spot_light(
+            Vector3::new(0.0, 5.0, 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+            std::f32::consts::FRAC_PI_4,
+            100.0,
+        );
+        spot.specular = 0.5; // SpotLight3D default
+
+        let r_dir = ratio(directional);
+        let r_point = ratio(point);
+        let r_spot = ratio(spot);
+
+        assert!(
+            r_dir > 1e-3,
+            "fixture must have a highlight to compare, got {r_dir}"
+        );
+        assert!(
+            (r_point - r_dir).abs() < 1e-3 * r_dir,
+            "OmniLight3D's 0.5 default x2 must equal the directional 1.0: \
+             directional={r_dir}, point={r_point}"
+        );
+        assert!(
+            (r_spot - r_dir).abs() < 1e-3 * r_dir,
+            "SpotLight3D's 0.5 default x2 must equal the directional 1.0: \
+             directional={r_dir}, spot={r_spot}"
+        );
+
+        // Positive control: authoring 1.0 on a positional light really does
+        // double it, so the agreement above is the x2 cancelling the 0.5 and
+        // not the property being ignored.
+        let mut loud = point;
+        loud.specular = 1.0;
+        let r_loud = ratio(loud);
+        assert!(
+            (r_loud - 2.0 * r_dir).abs() < 1e-3 * r_dir,
+            "a positional light authored at 1.0 must be twice the directional \
+             1.0 (Godot's x2): got {r_loud}, expected {}",
+            2.0 * r_dir
+        );
+    }
+
+    // -- DirectionalLight3D.directional_shadow_fade_start -------------------
+
+    /// 🔑 THE FADE IS ZERO UNTIL `fade_start`, ONE AT `max_distance`, AND A
+    /// SMOOTHSTEP BETWEEN — measured in NEGATIVE view-space depth.
+    ///
+    /// ⚠️ `view_z` is negative in front of the camera, so `fade_from` (-80 at
+    /// the defaults) is GREATER than `fade_to` (-100) and the interval is
+    /// walked downwards. Reading the edges as positive distances gets the
+    /// direction backwards and the fade inverts — the near geometry would lose
+    /// its shadows instead of the far.
+    #[test]
+    fn directional_shadow_fade_follows_godots_smoothstep_between_the_two_edges() {
+        let (max, start) = (100.0, 0.8);
+
+        // In front of fade_start: no fade at all.
+        assert_eq!(
+            directional_shadow_fade(0.0, max, start),
+            0.0,
+            "at the camera"
+        );
+        assert_eq!(
+            directional_shadow_fade(-50.0, max, start),
+            0.0,
+            "well inside"
+        );
+        assert_eq!(
+            directional_shadow_fade(-80.0, max, start),
+            0.0,
+            "exactly at fade_start"
+        );
+
+        // Beyond max_distance: fully faded, and it stays clamped.
+        assert_eq!(
+            directional_shadow_fade(-100.0, max, start),
+            1.0,
+            "at max_distance"
+        );
+        assert_eq!(
+            directional_shadow_fade(-500.0, max, start),
+            1.0,
+            "past max_distance"
+        );
+
+        // Halfway between the edges is smoothstep(0.5) = 0.5, and the curve
+        // is an S rather than a ramp: at the QUARTER point the cubic gives
+        // 0.15625 where a linear blend would give 0.25. Checking only the
+        // midpoint would not tell the two apart — smoothstep and lerp agree
+        // exactly at 0.5.
+        let mid = directional_shadow_fade(-90.0, max, start);
+        assert!(
+            (mid - 0.5).abs() < 1e-6,
+            "midpoint should be 0.5, got {mid}"
+        );
+        let quarter = directional_shadow_fade(-85.0, max, start);
+        let expected = 0.25f32 * 0.25 * (3.0 - 2.0 * 0.25);
+        assert!(
+            (quarter - expected).abs() < 1e-6,
+            "quarter point should be the smoothstep cubic {expected}, got {quarter} \
+             — a linear ramp would give 0.25"
+        );
+
+        // Monotonic across the band, which a sign error would break.
+        let mut prev = 0.0;
+        for step in 0..=20 {
+            let z = -80.0 - step as f32;
+            let f = directional_shadow_fade(z, max, start);
+            assert!(f >= prev, "fade must not decrease with distance at z={z}");
+            prev = f;
+        }
+    }
+
+    /// 🔑 `fade_start = 1.0` MUST NOT DIVIDE BY ZERO.
+    ///
+    /// Godot clamps to 0.999 with the comment "using 1.0 would break
+    /// smoothstep" (`light_storage.cpp:753`) — at exactly 1.0 both edges land
+    /// on `-max_distance` and the ratio's denominator is zero.
+    ///
+    /// ⚠️ The authored 1.0 must still round-trip on the property; the clamp
+    /// belongs at the point of use. Asserted here rather than on the setter.
+    #[test]
+    fn directional_shadow_fade_start_of_one_stays_finite() {
+        for z in [-50.0, -99.0, -99.95, -100.0, -200.0] {
+            let f = directional_shadow_fade(z, 100.0, 1.0);
+            assert!(f.is_finite(), "fade at z={z} must be finite, got {f}");
+            assert!((0.0..=1.0).contains(&f), "fade at z={z} out of range: {f}");
+        }
+        // The band is squeezed into the last 0.1 units, so a fragment just
+        // inside max_distance is still (almost) fully shadowed...
+        assert!(directional_shadow_fade(-99.0, 100.0, 1.0) < 1e-6);
+        // ...and one at max_distance is fully faded. Without the clamp this
+        // pair is NaN and neither assertion holds.
+        assert_eq!(directional_shadow_fade(-100.0, 100.0, 1.0), 1.0);
+    }
+
+    /// 🔑 A ZERO SHADOW DISTANCE FADES NOTHING RATHER THAN NaN-ING EVERY PIXEL.
+    ///
+    /// ⚠️ This guard is OURS, not Godot's. A `.tscn` may author
+    /// `directional_shadow_max_distance = 0`, which collapses both edges onto
+    /// 0.0; the unguarded ratio is 0/0 and a NaN fade poisons the shadow of
+    /// every fragment, not just the distant ones.
+    #[test]
+    fn a_zero_shadow_distance_fades_nothing_instead_of_nan() {
+        for z in [0.0, -1.0, -100.0] {
+            let f = directional_shadow_fade(z, 0.0, 0.8);
+            assert!(f.is_finite() && f == 0.0, "z={z} should not fade, got {f}");
+        }
+        // Positive control: a real distance at the same depth DOES fade, so the
+        // zero case above is the guard firing and not the fade being inert.
+        assert_eq!(directional_shadow_fade(-100.0, 100.0, 0.8), 1.0);
+    }
+
+    /// 🔑 A DISTANT FRAGMENT LOSES ITS SHADOW — AT THE SAME WORLD POSITION.
+    ///
+    /// ⚠️ Only the VIEW MATRIX moves between the two halves. Pushing the
+    /// fragment itself away would take it outside the shadow map's
+    /// `[-SHADOW_EXTENT, SHADOW_EXTENT]` frustum, and it would come back unlit
+    /// because it was never sampled — an assertion that passes without the
+    /// fade existing at all. Holding the world position fixed and translating
+    /// the camera keeps the shadow-map lookup identical, so the only thing that
+    /// can change the result is the fade.
+    #[test]
+    fn a_distant_fragment_loses_its_directional_shadow_at_the_same_world_position() {
+        use crate::shadow_map::generate_shadow_maps;
+        use gdcore::math3d::{Basis, Transform3D};
+        use gdserver3d::instance::{Instance3D, Instance3DId};
+        use gdserver3d::light::{Light3D as CasterLight, Light3DId};
+        use gdserver3d::mesh::Mesh3D;
+
+        let mut caster = CasterLight::directional(Light3DId(1));
+        caster.shadow_enabled = true;
+        caster.direction = Vector3::new(0.0, -1.0, 0.0);
+
+        let mut occluder = Instance3D::new(Instance3DId(1));
+        occluder.mesh = Some(Mesh3D::cube(4.0));
+        occluder.visible = true;
+        occluder.transform = Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(0.0, 5.0, 0.0),
+        };
+
+        let map = generate_shadow_maps(&[caster], &[occluder])
+            .into_iter()
+            .next()
+            .expect("a shadow-enabled directional light produces one map");
+        let mut uniforms = default_uniforms();
+        uniforms.directional_shadow_maps = vec![Some(Arc::new(map))];
+
+        let mut light =
+            LightUniform::directional(Vector3::new(0.0, -1.0, 0.0), Color::new(1.0, 1.0, 1.0, 1.0));
+        light.shadow_enabled = true;
+        assert_eq!(
+            light.directional_shadow_max_distance, 100.0,
+            "DirectionalLight3D's Godot default"
+        );
+        assert_eq!(light.directional_shadow_fade_start, 0.8, "Godot default");
+
+        let shadow_at = |uniforms: &ShaderUniforms| {
+            compute_shadow_factor(
+                &light,
+                0,
+                Vector3::ZERO,
+                Vector3::UP,
+                light.direction,
+                uniforms,
+            )
+        };
+
+        // Camera at the origin (identity view): the fragment is right there, so
+        // no fade — this is the positive control. Without it, "the far one is
+        // lit" is also true of a fragment nothing ever shadowed.
+        let near = shadow_at(&uniforms);
+        assert!(
+            near < 0.5,
+            "the occluded fragment must be in shadow when close, got {near}"
+        );
+
+        // Same world position, camera pulled back past max_distance. Column-
+        // major translation lives in m[3]; m[3][2] is the view-space z offset.
+        let mut far_uniforms = uniforms.clone();
+        far_uniforms.view_matrix[3][2] = -120.0;
+        let far = shadow_at(&far_uniforms);
+        assert!(
+            (far - 1.0).abs() < 1e-6,
+            "past directional_shadow_max_distance the shadow must be gone, got {far}"
+        );
+
+        // And the band between the edges is partial, not a second hard edge.
+        let mut mid_uniforms = uniforms.clone();
+        mid_uniforms.view_matrix[3][2] = -90.0;
+        let mid = shadow_at(&mid_uniforms);
+        assert!(
+            mid > near && mid < far,
+            "at the midpoint the shadow should be partly faded: near={near}, \
+             mid={mid}, far={far}"
+        );
+    }
+
+    /// 🔑 THE SHADING PATH ACTUALLY USES THE FILTER — not just the sampler.
+    ///
+    /// `compute_shadow_factor` is where a soft quality has to take effect; a
+    /// filtered sampler nothing calls is dormant code. Probed at the occluder's
+    /// shadow EDGE, because that is the only place filtering can change the
+    /// answer.
+    ///
+    /// ⚠️ The `taps = 1` case is the control and the additivity proof at once:
+    /// Godot's default filter quality is `Hard`, which reports one tap, and one
+    /// tap must give the hard step the renderer produced before this existed.
+    #[test]
+    fn compute_shadow_factor_honours_the_filter_quality_at_the_edge() {
+        use crate::shadow_map::generate_shadow_maps;
+        use gdcore::math3d::{Basis, Transform3D};
+        use gdserver3d::instance::{Instance3D, Instance3DId};
+        use gdserver3d::light::{Light3D as CasterLight, Light3DId};
+        use gdserver3d::mesh::Mesh3D;
+
+        let mut caster = CasterLight::directional(Light3DId(1));
+        caster.shadow_enabled = true;
+        caster.direction = Vector3::new(0.0, -1.0, 0.0);
+
+        let mut occluder = Instance3D::new(Instance3DId(1));
+        occluder.mesh = Some(Mesh3D::cube(4.0));
+        occluder.visible = true;
+        occluder.transform = Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(0.0, 5.0, 0.0),
+        };
+
+        let map = generate_shadow_maps(&[caster], &[occluder])
+            .into_iter()
+            .next()
+            .expect("a shadow-enabled directional light produces one map");
+        let mut uniforms = default_uniforms();
+        uniforms.directional_shadow_maps = vec![Some(Arc::new(map))];
+
+        let mut light =
+            LightUniform::directional(Vector3::new(0.0, -1.0, 0.0), Color::new(1.0, 1.0, 1.0, 1.0));
+        light.shadow_enabled = true;
+        assert_eq!(light.shadow_taps, 1, "Godot's Hard default is one tap");
+
+        // The 4-unit cube's hard shadow edge sits at x = +/-2.
+        let edge = Vector3::new(2.0, 0.0, 0.0);
+        let at = |l: &LightUniform| {
+            compute_shadow_factor(l, 0, edge, Vector3::UP, l.direction, &uniforms)
+        };
+
+        let hard = at(&light);
+        light.shadow_taps = 16;
+        light.shadow_blur = 4.0;
+        let soft = at(&light);
+
+        assert!(
+            (hard - hard.round()).abs() < 1e-6,
+            "one tap must stay a hard step at the edge, got {hard}"
+        );
+        assert!(
+            soft > 0.01 && soft < 0.99,
+            "sixteen taps across the edge must give a partial shadow factor, \
+             got {soft} — a value pinned to 0 or 1 means the filter never \
+             reached the shading path"
+        );
     }
 }

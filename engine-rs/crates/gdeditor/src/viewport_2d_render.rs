@@ -398,8 +398,78 @@ impl Viewport2D {
     /// skipped, and items appear in scene-tree order (the back-to-front draw
     /// order).
     pub fn build_render_list(&self, tree: &SceneTree) -> Vec<Render2DItem> {
-        collect_canvas_items(tree)
+        let mut items = collect_canvas_items(tree);
+        // Editor chrome draws over the scene (pat-s3rrv.82). `self.overlays` is
+        // the LIVE overlay set — this method is the seam where it is already in
+        // scope, which is why the overlay hangs here rather than off the
+        // tree-only collectors.
+        items.extend(navigation_overlay_items(tree, &self.overlays));
+        items
     }
+}
+
+/// The navigation overlay as viewport draw items: a filled [`Render2DKind::Polygon`]
+/// per navmesh face and a [`Render2DKind::Line`] per edge.
+///
+/// Returns empty when the `NavigationRegions` overlay is off —
+/// [`navigation_overlay_2d`] does that check itself, so the toggle costs nothing
+/// rather than merely hiding geometry that was still built.
+///
+/// ⚠️ `global_transform` is IDENTITY and the points go in as-authored.
+/// `navigation_overlay_2d` has already offset every point into world space using
+/// the region's own position; composing a transform on top would move the overlay
+/// twice and put it at double the region's offset.
+///
+/// ⚠️ Drawn at [`CONTROL_Z_BASE`] so the overlay sits above the scene it
+/// describes. Faces are pushed before edges so the outline reads on top of its
+/// own fill rather than being half-covered by it.
+pub fn navigation_overlay_items(
+    tree: &SceneTree,
+    overlays: &crate::viewport_2d::OverlaySettings,
+) -> Vec<Render2DItem> {
+    let overlay = crate::navigation_overlay::navigation_overlay_2d(tree, overlays);
+    let mut out = Vec::with_capacity(overlay.faces.len() + overlay.edges.len());
+    // Editor chrome: not a scene node, so `node_id` is 0 ("not pickable"), the
+    // item tint stays neutral because each face carries its own colour, and the
+    // default light/visibility layers keep it visible to a default cull mask.
+    let mut push = |kind: Render2DKind, z: i64| {
+        out.push(Render2DItem {
+            node_id: 0,
+            global_transform: Transform2D::IDENTITY,
+            modulate: Color::new(1.0, 1.0, 1.0, 1.0),
+            z_index: z,
+            canvas_layer: 0,
+            canvas_follow: CanvasFollow::DefaultCanvas,
+            clip_rect: None,
+            light_mask: 1,
+            visibility_layer: 1,
+            canvas_material: None,
+            shader_material: None,
+            texture_filter: TextureFilter::Nearest,
+            texture_repeat: TextureRepeat::Disabled,
+            kind,
+        });
+    };
+    for face in &overlay.faces {
+        push(
+            Render2DKind::Polygon {
+                points: face.points.clone(),
+                color: face.color,
+            },
+            CONTROL_Z_BASE,
+        );
+    }
+    for edge in &overlay.edges {
+        push(
+            Render2DKind::Line {
+                points: vec![edge.from, edge.to],
+                width: 1.0,
+                color: edge.color,
+            },
+            CONTROL_Z_BASE + 1,
+        );
+    }
+    out
 }
 
 /// Walks `tree` in scene order and returns a [`Render2DItem`] for every
@@ -949,14 +1019,27 @@ fn push_draw_order(tree: &SceneTree, id: NodeId, out: &mut Vec<NodeId>) {
     } else {
         canvas_order::draw_ordered_children(tree, id)
     };
-    // ⚠️ Simplification worth knowing: `show_behind_parent` is partitioned over
-    // the whole group, so a flattened GRANDCHILD carrying the flag lands before
-    // this node rather than before its own parent. For the overwhelmingly common
-    // case (no `show_behind_parent` inside a y-sorted subtree) the result is
-    // identical, and it keeps the flag's existing meaning for direct children.
-    let (behind, front): (Vec<NodeId>, Vec<NodeId>) = children
-        .into_iter()
-        .partition(|&child| read_bool(tree, child, "show_behind_parent"));
+    // `show_behind_parent` applies ONLY outside a y-sorted group.
+    //
+    // Godot has two distinct branches in `_cull_canvas_item`
+    // (upstream/godot/servers/rendering/renderer_canvas_cull.cpp): the y-sort
+    // branch flattens the subtree, sorts it with `ItemYSort`, and draws it in
+    // that order **without ever reading the flag**; the `behind` reads live in
+    // the OTHER branch (`:479`, `:486`), after the y-sort branch has closed.
+    // So inside a y-sorted group, position is the only thing that orders items.
+    //
+    // This previously partitioned the FLATTENED group, which put a grandchild
+    // carrying the flag before this node — ahead of its own parent, and ahead of
+    // items Godot would have drawn first purely by Y. Gathering `behind`
+    // children next to their parent instead would be equally wrong: it invents
+    // an adjacency Godot does not have, and the by-Y sort would scramble it.
+    let (behind, front): (Vec<NodeId>, Vec<NodeId>) = if flattened {
+        (Vec::new(), children)
+    } else {
+        children
+            .into_iter()
+            .partition(|&child| read_bool(tree, child, "show_behind_parent"))
+    };
     for child in behind {
         push_group_member(tree, child, flattened, out);
     }
@@ -3403,6 +3486,123 @@ mod tests {
             }
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    /// 🔑 THE EDITOR RENDER LIST CARRIES THE NAVMESH — AND ONLY WHEN ASKED.
+    ///
+    /// This is the seam the bead is about: `navigation_overlay_2d` existed with
+    /// tests, and nothing called it, so the geometry was computed and never
+    /// drawn. `Viewport2D::build_render_list` is where the live overlay set is
+    /// already in scope.
+    ///
+    /// ⚠️ The toggle-off half is asserted against the SAME scene, so a pass
+    /// cannot come from the region failing to bake — the on/off pair differ by
+    /// exactly one flag.
+    #[test]
+    fn the_editor_render_list_carries_navmesh_faces_and_edges_when_enabled() {
+        use crate::viewport_2d::CanvasOverlay;
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut region = Node::new("Region", "NavigationRegion2D");
+        region.set_property(
+            "__navmesh_vertices__",
+            Variant::PackedVector2Array(vec![
+                Vector2::new(0.0, 0.0),
+                Vector2::new(10.0, 0.0),
+                Vector2::new(10.0, 10.0),
+                Vector2::new(0.0, 10.0),
+            ]),
+        );
+        region.set_property(
+            "__navmesh_polygons__",
+            Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2, 3])]),
+        );
+        tree.add_child(root, region).expect("region attaches");
+
+        let mut vp = Viewport2D::new(800, 600);
+        let baseline = vp.build_render_list(&tree).len();
+
+        vp.overlays.enable(CanvasOverlay::NavigationRegions);
+        let items = vp.build_render_list(&tree);
+
+        let polys = items
+            .iter()
+            .filter(|i| matches!(i.kind, Render2DKind::Polygon { .. }))
+            .count();
+        let lines = items
+            .iter()
+            .filter(|i| matches!(i.kind, Render2DKind::Line { .. }))
+            .count();
+        assert_eq!(polys, 1, "the baked quad must become one filled face");
+        assert_eq!(lines, 4, "and a closed quad is four edge segments");
+        assert!(
+            items.len() > baseline,
+            "enabling the overlay must ADD items: {baseline} -> {}",
+            items.len()
+        );
+
+        // ⚠️ Same scene, toggle off: back to the baseline exactly. A region that
+        // simply failed to bake would also produce no overlay items, which is
+        // why this compares against the enabled run rather than against zero.
+        vp.overlays.disable(CanvasOverlay::NavigationRegions);
+        assert_eq!(
+            vp.build_render_list(&tree).len(),
+            baseline,
+            "turning the overlay off must cost nothing, not merely hide it"
+        );
+    }
+
+    /// 🔑 THE OVERLAY IS NOT OFFSET TWICE.
+    ///
+    /// ⚠️ `navigation_overlay_2d` has already placed every point in world space
+    /// using the region's own position, so the emitted item must carry an
+    /// IDENTITY transform. Composing the region's transform again would draw the
+    /// overlay at double the offset — a bug that is invisible at the origin,
+    /// which is why this region sits at (100, 50).
+    #[test]
+    fn the_overlay_is_placed_in_world_space_exactly_once() {
+        use crate::viewport_2d::CanvasOverlay;
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut region = Node::new("Region", "NavigationRegion2D");
+        region.set_property("position", Variant::Vector2(Vector2::new(100.0, 50.0)));
+        region.set_property(
+            "__navmesh_vertices__",
+            Variant::PackedVector2Array(vec![
+                Vector2::new(0.0, 0.0),
+                Vector2::new(10.0, 0.0),
+                Vector2::new(10.0, 10.0),
+            ]),
+        );
+        region.set_property(
+            "__navmesh_polygons__",
+            Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2])]),
+        );
+        tree.add_child(root, region).expect("region attaches");
+
+        let mut vp = Viewport2D::new(800, 600);
+        vp.overlays.enable(CanvasOverlay::NavigationRegions);
+        let items = vp.build_render_list(&tree);
+        let face = items
+            .iter()
+            .find(|i| matches!(i.kind, Render2DKind::Polygon { .. }))
+            .expect("the region contributes a face");
+
+        assert_eq!(
+            face.global_transform,
+            Transform2D::IDENTITY,
+            "the points are already world-space; a transform here offsets twice"
+        );
+        let Render2DKind::Polygon { points, .. } = &face.kind else {
+            unreachable!("filtered on Polygon above");
+        };
+        assert_eq!(
+            points[0],
+            Vector2::new(100.0, 50.0),
+            "the first vertex is the region's own origin, offset once"
+        );
     }
 }
 

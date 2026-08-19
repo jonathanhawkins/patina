@@ -63,7 +63,7 @@ pub const LAYER_ORIG_OFFSET: &str = "_parallax_orig_offset";
 /// resolved THIS frame, not the camera's raw position — so a smoothed or
 /// drag-held camera parallaxes against the view it actually renders. That is
 /// why this phase runs after it.
-pub fn process_parallax(tree: &mut SceneTree) {
+pub fn process_parallax(tree: &mut SceneTree, delta_secs: f32) {
     let viewport = tree.root_window().visible_size();
     let Some(cam) = crate::behavioral_2d::current_camera2d(tree) else {
         return;
@@ -117,6 +117,8 @@ pub fn process_parallax(tree: &mut SceneTree) {
         }
     }
 
+    process_parallax_2d(tree, cam, viewport, delta_secs);
+
     for (layer_id, offset, orig) in writes {
         // Written as `position`, the same property the editor and the render
         // list already read, so no new transform channel is introduced.
@@ -127,6 +129,100 @@ pub fn process_parallax(tree: &mut SceneTree) {
             node.set_property("position", Variant::Vector2(offset));
         }
     }
+}
+
+/// Drives every `Parallax2D` in the tree — Godot 4.3's replacement for the
+/// `ParallaxBackground`/`ParallaxLayer` pair.
+///
+/// ⚠️ **A `Parallax2D` is a `Node2D`, not a `CanvasLayer`**, so unlike a
+/// ParallaxLayer the camera transform DOES apply to it. It scrolls by being
+/// placed in the WORLD, which is why `gdserver2d`'s formula for it is inverted
+/// relative to the layer one and why `scroll_scale`'s endpoints are the other
+/// way round (`1` = moves with the world, `0` = pinned to the screen).
+///
+/// It also takes a DIFFERENT camera quantity: Godot's `adj_screen_pos`, the
+/// view's world-space top-left (`camera_screen_center - screen_size * 0.5`,
+/// `camera_2d.cpp:63`) — the third `_camera_moved` argument, which
+/// ParallaxBackground ignores.
+///
+/// The class has been registered in ClassDB with all ten of its properties and
+/// no behaviour whatsoever: a `.tscn` containing one loaded, kept every
+/// property, and never moved. This is the phase that drives it.
+fn process_parallax_2d(tree: &mut SceneTree, cam: NodeId, viewport: Vector2, delta_secs: f32) {
+    let center = match tree
+        .get_node(cam)
+        .map(|n| n.get_property(crate::behavioral_2d::CAMERA2D_SCROLL_CENTER))
+    {
+        Some(Variant::Vector2(v)) => v,
+        _ => crate::node2d::get_screen_center_position(tree, cam, viewport),
+    };
+    let adj_screen_pos = Vector2::new(center.x - viewport.x * 0.5, center.y - viewport.y * 0.5);
+
+    let mut writes: Vec<(NodeId, Vector2, Vector2, Vector2)> = Vec::new();
+    for id in tree.all_nodes_in_tree_order() {
+        let Some(node) = tree.get_node(id) else {
+            continue;
+        };
+        if node.class_name() != "Parallax2D" {
+            continue;
+        }
+        let mut parallax = parallax_2d_from_node(node);
+        // Advanced BEFORE the camera is applied and before the position is
+        // computed, matching Godot's NOTIFICATION_INTERNAL_PROCESS, which runs
+        // the autoscroll step and then calls `_update_scroll`.
+        parallax.advance_autoscroll(delta_secs);
+        parallax.follow_camera(adj_screen_pos);
+        // The node's OWN scale stretches the repeat period; this is not a zoom.
+        writes.push((
+            id,
+            parallax.position(viewport, crate::node2d::get_scale(tree, id)),
+            parallax.scroll_offset,
+            parallax.screen_offset,
+        ));
+    }
+
+    for (id, position, scroll_offset, screen_offset) in writes {
+        if let Some(node) = tree.get_node_mut(id) {
+            node.set_property("position", Variant::Vector2(position));
+            // ⚠️ Both are read back on the next frame, so they must be written:
+            // `scroll_offset` is the autoscroll ACCUMULATOR (dropping it would
+            // leave an autoscrolling node advancing one frame's worth for ever
+            // and never actually moving), and `screen_offset` is what
+            // `ignore_camera_scroll` freezes. Godot sets both through their
+            // property setters for the same reason.
+            node.set_property("scroll_offset", Variant::Vector2(scroll_offset));
+            node.set_property("screen_offset", Variant::Vector2(screen_offset));
+        }
+    }
+}
+
+/// Reads a `Parallax2D`'s authored properties, falling back to Godot's defaults.
+///
+/// ⚠️ The limit defaults are `±1e7`, NOT zero. Defaulting a missing limit to
+/// zero would clamp every Parallax2D to a degenerate range and freeze it.
+fn parallax_2d_from_node(node: &crate::node::Node) -> gdserver2d::parallax::Parallax2D {
+    let vec2 = |name: &str, default: Vector2| match node.get_property(name) {
+        Variant::Vector2(v) => v,
+        _ => default,
+    };
+    let flag = |name: &str, default: bool| match node.get_property(name) {
+        Variant::Bool(b) => b,
+        _ => default,
+    };
+    let mut parallax = gdserver2d::parallax::Parallax2D::new();
+    parallax.scroll_scale = vec2("scroll_scale", parallax.scroll_scale);
+    parallax.scroll_offset = vec2("scroll_offset", parallax.scroll_offset);
+    parallax.repeat_size = vec2("repeat_size", parallax.repeat_size);
+    parallax.autoscroll = vec2("autoscroll", parallax.autoscroll);
+    parallax.limit_begin = vec2("limit_begin", parallax.limit_begin);
+    parallax.limit_end = vec2("limit_end", parallax.limit_end);
+    parallax.follow_viewport = flag("follow_viewport", parallax.follow_viewport);
+    parallax.ignore_camera_scroll = flag("ignore_camera_scroll", parallax.ignore_camera_scroll);
+    parallax.screen_offset = vec2("screen_offset", parallax.screen_offset);
+    if let Variant::Int(times) = node.get_property("repeat_times") {
+        parallax.repeat_times = times as i32;
+    }
+    parallax
 }
 
 /// Where a world-space node at the origin renders — Godot's canvas transform

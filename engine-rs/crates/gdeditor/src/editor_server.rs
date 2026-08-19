@@ -19919,9 +19919,14 @@ fn api_get_monitors(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
         0
     };
     let active_maps = if nav_regions > 0 { 1 } else { 0 };
+    // Godot reports how much baked navmesh geometry the map holds. Computed
+    // through the overlay's own parser so the monitor and the drawn overlay can
+    // never disagree about a region's polygon count (pat-s3rrv.82).
+    let (nav_polygons, nav_edges) =
+        crate::navigation_overlay::navigation_geometry_counts(&s.scene_tree);
 
     let json = format!(
-        r#"{{"monitors":{{"time/fps":{fps:.1},"time/process":{proc_ms:.2},"time/physics_process":{physics_ms:.2},"time/navigation_process":0,"memory/static":{static_mem},"memory/static_max":{static_mem},"memory/msg_buf_max":262144,"object/objects":{objects},"object/resources":{resources},"object/nodes":{nodes},"object/orphan_nodes":0,"raster/total_objects_drawn":{drawable},"raster/total_primitives_drawn":{primitives},"raster/total_draw_calls":{draw_calls},"video/video_mem_used":{video_mem},"video/texture_mem_used":{texture_mem},"video/buffer_mem_used":{buffer_mem},"physics_2d/active_objects":{active_2d},"physics_2d/collision_pairs":0,"physics_2d/islands":0,"physics_3d/active_objects":{active_3d},"physics_3d/collision_pairs":0,"physics_3d/islands":0,"navigation/active_maps":{active_maps},"navigation/regions":{nav_regions},"navigation/agents":{nav_agents},"navigation/links":{nav_links},"navigation/polygons":0,"navigation/edges":0,"audio/driver_output_latency":0}}}}"#
+        r#"{{"monitors":{{"time/fps":{fps:.1},"time/process":{proc_ms:.2},"time/physics_process":{physics_ms:.2},"time/navigation_process":0,"memory/static":{static_mem},"memory/static_max":{static_mem},"memory/msg_buf_max":262144,"object/objects":{objects},"object/resources":{resources},"object/nodes":{nodes},"object/orphan_nodes":0,"raster/total_objects_drawn":{drawable},"raster/total_primitives_drawn":{primitives},"raster/total_draw_calls":{draw_calls},"video/video_mem_used":{video_mem},"video/texture_mem_used":{texture_mem},"video/buffer_mem_used":{buffer_mem},"physics_2d/active_objects":{active_2d},"physics_2d/collision_pairs":0,"physics_2d/islands":0,"physics_3d/active_objects":{active_3d},"physics_3d/collision_pairs":0,"physics_3d/islands":0,"navigation/active_maps":{active_maps},"navigation/regions":{nav_regions},"navigation/agents":{nav_agents},"navigation/links":{nav_links},"navigation/polygons":{nav_polygons},"navigation/edges":{nav_edges},"audio/driver_output_latency":0}}}}"#
     );
     send_json(stream, &json);
 }

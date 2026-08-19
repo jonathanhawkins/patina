@@ -49,6 +49,7 @@ fn the_settings_reach_the_transport_config() {
         RequestSettings {
             timeout: 2.5,
             max_redirects: 3,
+            ..Default::default()
         },
         "http://example.test/x",
     );

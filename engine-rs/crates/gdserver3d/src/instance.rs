@@ -138,6 +138,16 @@ pub struct GeometryInstanceSettings {
     pub lod_bias: f32,
     /// Grows the instance's culling bounds by this many world units.
     pub extra_cull_margin: f32,
+    /// Render layers this instance is drawn on — Godot's
+    /// `VisualInstance3D.layers`, a 1-based bitmask whose default is layer 1.
+    ///
+    /// ⚠️ Carried HERE rather than on [`Instance3D`] because
+    /// `set_geometry_instance_settings` is an existing end-to-end channel from
+    /// the scene to the renderer; a new field on `Instance3D` would need a new
+    /// trait method and a new sync site to go with it.
+    ///
+    /// Read by the shading loop to honour each light's `light_cull_mask`.
+    pub layers: u32,
     /// Overrides the mesh-derived bounds used for culling.
     pub custom_aabb: Option<Aabb>,
 }
@@ -155,6 +165,10 @@ impl Default for GeometryInstanceSettings {
             material_overlay: None,
             lod_bias: 1.0,
             extra_cull_margin: 0.0,
+            // Godot's default is layer 1 only, NOT all layers: a mesh left
+            // alone sits on one layer and every light's default all-ones mask
+            // covers it.
+            layers: 1,
             custom_aabb: None,
         }
     }

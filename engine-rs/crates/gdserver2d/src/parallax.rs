@@ -387,10 +387,25 @@ impl Parallax2D {
     /// Advances `scroll_offset` by [`autoscroll`](Self::autoscroll), wrapping it
     /// into one repeat period — Godot's `NOTIFICATION_INTERNAL_PROCESS`.
     ///
-    /// ⚠️ The wrap keeps the accumulator bounded; without it a long-running
-    /// autoscroll loses precision as the value grows, and the drift is invisible
-    /// for the first several minutes.
+    /// ⚠️ **AUTOSCROLL DOES NOTHING WITHOUT A `repeat_size`.** Godot enables the
+    /// whole notification only when BOTH are set
+    /// (`_update_process`: `(repeat_size.x || repeat_size.y) && (autoscroll.x ||
+    /// autoscroll.y)`), which is easy to miss because the two properties are
+    /// independent everywhere else. Running the step regardless would be worse
+    /// than a no-op in the other direction too: the wrap would silently fold an
+    /// AUTHORED `scroll_offset` into one period even when nothing is scrolling,
+    /// so a background offset of 300 with a 256 period would jump to 44 on the
+    /// first frame.
+    ///
+    /// The wrap keeps the accumulator bounded; without it a long-running
+    /// autoscroll loses f32 precision as the value grows, and the drift is
+    /// invisible for the first several minutes.
     pub fn advance_autoscroll(&mut self, delta: f32) {
+        let repeats = self.repeat_size.x != 0.0 || self.repeat_size.y != 0.0;
+        let scrolls = self.autoscroll.x != 0.0 || self.autoscroll.y != 0.0;
+        if !repeats || !scrolls {
+            return;
+        }
         let mut offset = Vector2::new(
             self.scroll_offset.x + self.autoscroll.x * delta,
             self.scroll_offset.y + self.autoscroll.y * delta,
@@ -674,8 +689,26 @@ mod tests {
         assert!((ofs.y - 22.5).abs() < 1e-3, "45 * 0.5, got {}", ofs.y);
     }
 
-    /// `scroll_ignore_camera_zoom` pins the layer scale to 1 so a zoomed camera
-    /// does not stretch the layer's static offset or its mirroring period.
+    /// `scroll_ignore_camera_zoom` pins the layer scale to 1, so a zoomed camera
+    /// does not stretch the layer's static offset or its mirroring period — AND
+    /// it divides the scroll position by the zoom.
+    ///
+    /// ⚠️ **THIS TEST USED TO ASSERT 120, AND 120 WAS THE BUG.** It was written
+    /// against an implementation that read the ignore-zoom branch as "pass the
+    /// offset through with scale 1" and kept only the `1.0`. Godot's branch is
+    /// `(scroll_ofs + screen_offset * (scale - 1)) / scale`
+    /// (`parallax_background.cpp:104-108`), so the base is DIVIDED by the zoom
+    /// as well: `100 / 2 + 20 * 1 = 70`.
+    ///
+    /// The two readings agree exactly at `zoom == 1`, which is why the defect
+    /// survived — and this fixture, the only one in the module that zooms, had
+    /// the wrong number baked into it, so it locked the defect in rather than
+    /// catching it. The 120 is gone because the CODE was wrong, not this
+    /// arithmetic.
+    ///
+    /// `layer_offset` uses a ZERO screen offset (Godot's
+    /// `ANCHOR_MODE_FIXED_TOP_LEFT`), so the `screen_offset * (scale - 1)` term
+    /// drops out here; `parallax_ignore_camera_zoom.rs` covers the non-zero case.
     #[test]
     fn background_ignore_camera_zoom_pins_scale() {
         let mut layer = ParallaxLayer::new(Vector2::ONE);
@@ -684,14 +717,22 @@ mod tests {
         let mut bg = ParallaxBackground::new();
         bg.scroll_offset = Vector2::new(100.0, 0.0);
 
-        // Zoom 2 scales the static motion_offset: 100 + 20*2 = 140.
+        // Following the zoom scales the static motion_offset: 100 + 20*2 = 140.
         let zoomed = bg.layer_offset(&layer, 2.0);
         assert!((zoomed.x - 140.0).abs() < 1e-3, "got {}", zoomed.x);
 
-        // Ignoring zoom pins scale to 1: 100 + 20*1 = 120.
+        // Ignoring it divides the base and pins scale to 1: 100/2 + 20*1 = 70.
         bg.scroll_ignore_camera_zoom = true;
         let pinned = bg.layer_offset(&layer, 2.0);
-        assert!((pinned.x - 120.0).abs() < 1e-3, "got {}", pinned.x);
+        assert!((pinned.x - 70.0).abs() < 1e-3, "got {}", pinned.x);
+
+        // The part the old fixture was actually reaching for, isolated: the
+        // static offset is NOT stretched by the zoom. With motion_offset zeroed
+        // the ignore branch is the bare division, 100/2 = 50, so the 20 above is
+        // unmistakably contributing at scale 1 rather than at scale 2.
+        layer.motion_offset = Vector2::ZERO;
+        let bare = bg.layer_offset(&layer, 2.0);
+        assert!((bare.x - 50.0).abs() < 1e-3, "got {}", bare.x);
     }
 
     /// Zoom scales the mirroring period too, so a zoomed mirrored layer still
@@ -712,6 +753,261 @@ mod tests {
             "at zoom 2 the layer must repeat every 200 units ({} vs {})",
             a.x,
             b.x,
+        );
+    }
+    // -- pat-s3rrv.86 item (2): the standalone Parallax2D node ----------------
+
+    fn p2d() -> Parallax2D {
+        Parallax2D::new()
+    }
+
+    const VPS: Vector2 = Vector2 {
+        x: 1152.0,
+        y: 648.0,
+    };
+
+    fn at(node: &Parallax2D, screen_offset: Vector2) -> Vector2 {
+        let mut n = *node;
+        n.follow_camera(screen_offset);
+        n.position(VPS, Vector2::ONE)
+    }
+
+    /// 🔑 `scroll_scale` RUNS THE OPPOSITE WAY FROM `ParallaxLayer::motion_scale`.
+    ///
+    /// `1` leaves the node at a FIXED WORLD POSITION — it moves with the world,
+    /// at the full camera rate — and `0` pins it to the screen. On a
+    /// ParallaxLayer those endpoints are reversed, because that node lives on a
+    /// screen-fixed CanvasLayer. Getting this backwards inverts every background
+    /// in a project, so both endpoints are pinned rather than a midpoint.
+    #[test]
+    fn parallax2d_scroll_scale_endpoints_are_world_and_screen() {
+        let mut full = p2d();
+        full.scroll_scale = Vector2::ONE;
+        let a = at(&full, Vector2::new(500.0, 300.0));
+        let b = at(&full, Vector2::new(1000.0, 600.0));
+        assert!(
+            a == Vector2::ZERO && b == Vector2::ZERO,
+            "scroll_scale 1 must hold a fixed world position, got {a:?} and {b:?}"
+        );
+
+        let mut pinned = p2d();
+        pinned.scroll_scale = Vector2::ZERO;
+        let screen = Vector2::new(500.0, 300.0);
+        assert_eq!(
+            at(&pinned, screen),
+            screen,
+            "scroll_scale 0 must sit exactly at the view's top-left, i.e. pinned"
+        );
+    }
+
+    /// The half-rate case, which is what the node is actually for.
+    #[test]
+    fn parallax2d_half_scroll_scale_tracks_half_the_view() {
+        let mut node = p2d();
+        node.scroll_scale = Vector2::new(0.5, 0.5);
+        assert_eq!(
+            at(&node, Vector2::new(500.0, 300.0)),
+            Vector2::new(250.0, 150.0)
+        );
+        assert_eq!(
+            at(&node, Vector2::new(1000.0, 600.0)),
+            Vector2::new(500.0, 300.0)
+        );
+    }
+
+    /// `scroll_offset` is a constant displacement, and `follow_viewport` removes
+    /// the view term entirely.
+    #[test]
+    fn parallax2d_scroll_offset_and_follow_viewport() {
+        let mut offset = p2d();
+        offset.scroll_offset = Vector2::new(50.0, 20.0);
+        assert_eq!(
+            at(&offset, Vector2::new(500.0, 300.0)),
+            Vector2::new(50.0, 20.0),
+            "at scroll_scale 1 the node rests at scroll_offset"
+        );
+
+        let mut detached = p2d();
+        detached.scroll_scale = Vector2::new(0.5, 0.5);
+        detached.follow_viewport = false;
+        assert_eq!(
+            at(&detached, Vector2::new(500.0, 300.0)),
+            Vector2::new(-250.0, -150.0),
+            "follow_viewport = false subtracts the view offset"
+        );
+    }
+
+    /// ⚠️ THE LIMIT GUARD IS `begin <= end - viewport`, NOT `begin <= end`.
+    ///
+    /// A level narrower than the viewport is left UNCLAMPED rather than pinned,
+    /// so it scrolls freely instead of freezing. With limits `0..1000` against a
+    /// 1152px viewport the correct answer is the unlimited one (2500); the
+    /// `begin <= end` reading gives 5000.
+    #[test]
+    fn parallax2d_limits_narrower_than_the_viewport_are_ignored() {
+        let mut node = p2d();
+        node.scroll_scale = Vector2::new(0.5, 0.5);
+        node.limit_begin = Vector2::new(0.0, -1.0e7);
+        node.limit_end = Vector2::new(1000.0, 1.0e7);
+
+        let mut unlimited = p2d();
+        unlimited.scroll_scale = Vector2::new(0.5, 0.5);
+
+        let screen = Vector2::new(5000.0, 0.0);
+        assert_eq!(
+            at(&node, screen).x,
+            at(&unlimited, screen).x,
+            "limits closer together than the viewport must not clamp"
+        );
+        assert!((at(&node, screen).x - 2500.0).abs() < 1e-3);
+    }
+
+    /// Past its limits the node is pinned to the SCREEN, not to the world.
+    ///
+    /// Stated as the screen-relative offset holding constant, because that is
+    /// the visible effect: the background stops moving relative to the player
+    /// while its world position keeps tracking the camera.
+    #[test]
+    fn parallax2d_past_its_limits_the_node_holds_still_on_screen() {
+        let mut node = p2d();
+        node.scroll_scale = Vector2::new(0.5, 0.5);
+        node.limit_begin = Vector2::new(0.0, -1.0e7);
+        node.limit_end = Vector2::new(2000.0, 1.0e7);
+
+        let near = Vector2::new(5000.0, 0.0);
+        let far = Vector2::new(9000.0, 0.0);
+        assert!((at(&node, near).x - near.x + 424.0).abs() < 1e-3);
+        assert!((at(&node, far).x - far.x + 424.0).abs() < 1e-3);
+    }
+
+    /// ⚠️ THE REPEAT WRAP NEEDS `fposmod`, NOT RUST'S `%`.
+    ///
+    /// Rust's remainder takes the sign of the dividend, so it agrees with Godot
+    /// for a positive argument and is one full period out for a negative one —
+    /// i.e. it is correct exactly while the camera stays right of the origin,
+    /// and every obvious fixture does. Here the screen-relative offset must be
+    /// -6; a plain `%` gives +250.
+    #[test]
+    fn parallax2d_repeat_wraps_with_a_positive_modulo() {
+        let mut node = p2d();
+        node.scroll_scale = Vector2::new(0.5, 1.0);
+        node.repeat_size = Vector2::new(256.0, 0.0);
+
+        let screen = Vector2::new(-500.0, 0.0);
+        assert!(
+            (at(&node, screen).x - screen.x + 6.0).abs() < 1e-3,
+            "expected a screen-relative -6, got {}",
+            at(&node, screen).x - screen.x
+        );
+    }
+
+    /// One repeat period of camera travel returns the identical screen-relative
+    /// position — the seamless-tiling property.
+    ///
+    /// At `scroll_scale` 0.5 a 256px period takes 512px of view travel, so the
+    /// fixture cannot be satisfied by ignoring `scroll_scale`.
+    #[test]
+    fn parallax2d_repeat_is_seamless_over_one_period() {
+        let mut node = p2d();
+        node.scroll_scale = Vector2::new(0.5, 1.0);
+        node.repeat_size = Vector2::new(256.0, 0.0);
+
+        let a = Vector2::new(500.0, 0.0);
+        let b = Vector2::new(1012.0, 0.0);
+        assert!(
+            ((at(&node, a).x - a.x) - (at(&node, b).x - b.x)).abs() < 1e-3,
+            "512px of view travel must repeat: {} vs {}",
+            at(&node, a).x - a.x,
+            at(&node, b).x - b.x
+        );
+    }
+
+    /// The repeat period is stretched by the NODE's scale, not by any zoom.
+    #[test]
+    fn parallax2d_node_scale_stretches_the_repeat_period() {
+        let mut node = p2d();
+        node.scroll_scale = Vector2::new(0.5, 1.0);
+        node.repeat_size = Vector2::new(256.0, 0.0);
+        node.follow_camera(Vector2::new(1524.0, 0.0));
+
+        // Period 256 * scale 2 = 512, which takes 1024px of view travel.
+        assert!((node.position(VPS, Vector2::new(2.0, 1.0)).x - 1274.0).abs() < 1e-3);
+    }
+
+    /// A node scaled to zero on an axis must not produce a NaN position.
+    ///
+    /// Godot tests the UNSCALED `repeat_size` and then divides by
+    /// `repeat_size * scale`, so this input hands `set_position` a NaN there. A
+    /// NaN propagates into the transform and cannot be recovered from, while a
+    /// zero-scaled node is a legitimate authored state, so this port falls back
+    /// to the un-repeated branch instead.
+    #[test]
+    fn parallax2d_zero_node_scale_does_not_produce_nan() {
+        let mut node = p2d();
+        node.scroll_scale = Vector2::new(0.5, 1.0);
+        node.repeat_size = Vector2::new(256.0, 0.0);
+        node.follow_camera(Vector2::new(500.0, 0.0));
+
+        let p = node.position(VPS, Vector2::new(0.0, 1.0));
+        assert!(p.x.is_finite(), "position must stay finite, got {}", p.x);
+        assert!((p.x - 250.0).abs() < 1e-3);
+    }
+
+    /// `ignore_camera_scroll` freezes the recorded view.
+    #[test]
+    fn parallax2d_ignore_camera_scroll_freezes_the_view() {
+        let mut node = p2d();
+        node.scroll_scale = Vector2::new(0.5, 0.5);
+        node.ignore_camera_scroll = true;
+        node.follow_camera(Vector2::new(5000.0, 5000.0));
+        assert_eq!(node.screen_offset, Vector2::ZERO);
+    }
+
+    /// Autoscroll advances `scroll_offset` and wraps it into one period.
+    ///
+    /// ⚠️ The wrap is what keeps the accumulator bounded; without it a
+    /// long-running autoscroll drifts as f32 precision degrades, which no short
+    /// test would ever reach.
+    #[test]
+    fn parallax2d_autoscroll_advances_and_wraps() {
+        let mut node = p2d();
+        node.autoscroll = Vector2::new(60.0, 0.0);
+        node.repeat_size = Vector2::new(256.0, 0.0);
+
+        node.advance_autoscroll(0.5);
+        assert!((node.scroll_offset.x - 30.0).abs() < 1e-3);
+
+        for _ in 0..100 {
+            node.advance_autoscroll(0.5);
+        }
+        assert!(
+            node.scroll_offset.x >= 0.0 && node.scroll_offset.x < 256.0,
+            "autoscroll must stay inside one period, got {}",
+            node.scroll_offset.x
+        );
+
+        // ⚠️ Godot gates the whole autoscroll notification on BOTH a repeat
+        // size and an autoscroll being set, so an autoscroll with no repeat
+        // period does not move at all — it is not merely unwrapped.
+        let mut no_period = p2d();
+        no_period.autoscroll = Vector2::new(60.0, 0.0);
+        no_period.advance_autoscroll(10.0);
+        assert_eq!(
+            no_period.scroll_offset,
+            Vector2::ZERO,
+            "autoscroll without a repeat_size must not advance at all"
+        );
+
+        // And the inverse: a repeat size with no autoscroll must NOT fold an
+        // authored scroll_offset into one period.
+        let mut authored = p2d();
+        authored.repeat_size = Vector2::new(256.0, 0.0);
+        authored.scroll_offset = Vector2::new(300.0, 0.0);
+        authored.advance_autoscroll(1.0);
+        assert!(
+            (authored.scroll_offset.x - 300.0).abs() < 1e-3,
+            "an authored scroll_offset must survive when nothing autoscrolls, got {}",
+            authored.scroll_offset.x
         );
     }
 }

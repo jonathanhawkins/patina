@@ -1286,6 +1286,27 @@ impl Vector3 {
         )
     }
 
+    /// Catmull-Rom interpolation between `self` and `b`, with `pre_a` and
+    /// `post_b` as the surrounding control points (Godot
+    /// `Vector3.cubic_interpolate`, `core/math/vector3.cpp`).
+    ///
+    /// ⚠️ ARGUMENT ORDER IS A TRAP, exactly as on [`Vector4::cubic_interpolate`]:
+    /// the method takes `(b, pre_a, post_b, w)` while the scalar it delegates to
+    /// takes `(from, to, pre, post, w)`, so `b` is the SECOND scalar argument
+    /// and `pre_a` the third. A transposition still yields a smooth curve
+    /// through plausible values, which is why the tests pin the endpoints:
+    /// `w == 0` must be exactly `self` and `w == 1` exactly `b`.
+    ///
+    /// Added for `Curve3D`'s cubic baked sampling (pat-s3rrv.91); Godot has had
+    /// this on Vector3 all along and only the Vector4 form existed here.
+    pub fn cubic_interpolate(self, b: Self, pre_a: Self, post_b: Self, weight: f32) -> Self {
+        Self::new(
+            cubic_interpolate_f(self.x, b.x, pre_a.x, post_b.x, weight),
+            cubic_interpolate_f(self.y, b.y, pre_a.y, post_b.y, weight),
+            cubic_interpolate_f(self.z, b.z, pre_a.z, post_b.z, weight),
+        )
+    }
+
     /// Returns the distance to another vector.
     pub fn distance_to(self, other: Self) -> f32 {
         (self - other).length()

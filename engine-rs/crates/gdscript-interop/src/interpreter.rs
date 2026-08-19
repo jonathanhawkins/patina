@@ -1925,6 +1925,32 @@ impl Interpreter {
                         rng_set_property(*oid, member, &final_val);
                         return Ok(());
                     }
+                    // `state.linear_velocity = v` inside `_integrate_forces`.
+                    // Same reason as the RNG arm above: the scene path would
+                    // resolve the handle as a node and drop the write, which is
+                    // the whole point of the callback (pat-s3rrv.94).
+                    if gdobject::physics_direct_body_state::is_direct_body_state_2d_handle(*oid) {
+                        let cur =
+                            direct_body_state_2d_get_property(*oid, member).unwrap_or(Variant::Nil);
+                        let final_val = if matches!(op, AssignOp::Assign) {
+                            rhs
+                        } else {
+                            self.apply_assign_op(op, &cur, &rhs)?
+                        };
+                        direct_body_state_2d_set_property(*oid, member, &final_val);
+                        return Ok(());
+                    }
+                    if gdobject::physics_direct_body_state::is_direct_body_state_3d_handle(*oid) {
+                        let cur =
+                            direct_body_state_3d_get_property(*oid, member).unwrap_or(Variant::Nil);
+                        let final_val = if matches!(op, AssignOp::Assign) {
+                            rhs
+                        } else {
+                            self.apply_assign_op(op, &cur, &rhs)?
+                        };
+                        direct_body_state_3d_set_property(*oid, member, &final_val);
+                        return Ok(());
+                    }
                     let final_val = if matches!(op, AssignOp::Assign) {
                         rhs
                     } else {
@@ -3767,6 +3793,20 @@ impl Interpreter {
                     // would answer Nil (pat-0q2kx.164).
                     if is_rng_handle(*oid) {
                         if let Some(v) = rng_get_property(*oid, member) {
+                            return Ok(v);
+                        }
+                    }
+                    // `state.linear_velocity` inside `_integrate_forces`. Also
+                    // before the scene lookup: the state handle names no node,
+                    // so the scene route would answer Nil and the script would
+                    // read a zero velocity for a moving body (pat-s3rrv.94).
+                    if gdobject::physics_direct_body_state::is_direct_body_state_2d_handle(*oid) {
+                        if let Some(v) = direct_body_state_2d_get_property(*oid, member) {
+                            return Ok(v);
+                        }
+                    }
+                    if gdobject::physics_direct_body_state::is_direct_body_state_3d_handle(*oid) {
+                        if let Some(v) = direct_body_state_3d_get_property(*oid, member) {
                             return Ok(v);
                         }
                     }
@@ -9388,6 +9428,12 @@ impl Interpreter {
             if gdplatform::packet_peer_stream::is_packet_peer_stream_handle(*oid) {
                 return call_packet_peer_stream_instance(*oid, method, args);
             }
+            if gdobject::physics_direct_body_state::is_direct_body_state_2d_handle(*oid) {
+                return call_direct_body_state_2d_instance(*oid, method, args);
+            }
+            if gdobject::physics_direct_body_state::is_direct_body_state_3d_handle(*oid) {
+                return call_direct_body_state_3d_instance(*oid, method, args);
+            }
             if gdplatform::webrtc_peer::is_webrtc_connection_handle(*oid) {
                 return self.call_webrtc_connection_instance(*oid, method, args);
             }
@@ -11735,7 +11781,27 @@ impl Interpreter {
                             Ok(Variant::Bool(false))
                         }
                     }
-                    "get_collider" => {
+                    // ⚠️ GUARDED on the receiver actually being a raycast-style
+                    // node. This arm reads RayCast's singular `_hit_collider`,
+                    // and an ObjectId that is not a raycast has no such
+                    // property — so it answered `Nil` and SHADOWED the real
+                    // `get_collider()` that `SceneAccess::call_node_method`
+                    // would have provided one layer down. A
+                    // `KinematicCollision2D` handle hit exactly this: its
+                    // `get_normal()` worked (no arm here claims that name) while
+                    // `get_collider()` silently returned Nil (pat-s3rrv.95).
+                    //
+                    // A raycast publishes `_hit_colliding` every frame — `false`
+                    // when it misses — so the property's PRESENCE is what
+                    // separates the two cases. Absent, the call falls through to
+                    // the scene-access dispatch, which previously produced the
+                    // same `Nil` for these receivers, so no existing behaviour
+                    // changes.
+                    "get_collider"
+                        if self.scene_access.as_ref().is_some_and(|a| {
+                            !matches!(a.get_node_property(id, "_hit_colliding"), Variant::Nil)
+                        }) =>
+                    {
                         if let Some(ref access) = self.scene_access {
                             Ok(access.get_node_property(id, "_hit_collider"))
                         } else {
@@ -19700,6 +19766,387 @@ fn rng_u64_arg(value: &Variant) -> u64 {
         Variant::Float(f) => *f as u64,
         _ => 0,
     }
+}
+
+// ---------------------------------------------------------------------------
+// PhysicsDirectBodyState2D (pat-s3rrv.94)
+// ---------------------------------------------------------------------------
+
+/// Vector2 argument, defaulting to zero — the default several `apply_*`
+/// overloads declare for their `position`.
+fn dbs_vec2(args: &[Variant], i: usize) -> gdcore::math::Vector2 {
+    match args.get(i) {
+        Some(Variant::Vector2(v)) => *v,
+        _ => gdcore::math::Vector2::new(0.0, 0.0),
+    }
+}
+
+/// Scalar argument as f32.
+fn dbs_f32(args: &[Variant], i: usize) -> f32 {
+    match args.get(i) {
+        Some(Variant::Float(f)) => *f as f32,
+        Some(Variant::Int(n)) => *n as f32,
+        _ => 0.0,
+    }
+}
+
+/// Contact index argument.
+fn dbs_idx(args: &[Variant], i: usize) -> i64 {
+    match args.get(i) {
+        Some(Variant::Int(n)) => *n,
+        Some(Variant::Float(f)) => *f as i64,
+        _ => 0,
+    }
+}
+
+/// Reads a `PhysicsDirectBodyState2D` property.
+///
+/// ⚠️ Must be consulted BEFORE the scene lookup: the state handle names no node,
+/// so resolving it against the scene answers Nil and the script silently sees
+/// zeroes instead of the body's real velocity. Same hazard the RNG handle
+/// documents below.
+fn direct_body_state_2d_get_property(id: gdcore::id::ObjectId, name: &str) -> Option<Variant> {
+    use gdobject::physics_direct_body_state::with_direct_body_state_2d;
+    with_direct_body_state_2d(id, |s| match name {
+        "step" => Some(Variant::Float(s.step as f64)),
+        "inverse_mass" => Some(Variant::Float(s.inverse_mass as f64)),
+        "inverse_inertia" => Some(Variant::Float(s.inverse_inertia as f64)),
+        "total_gravity" => Some(Variant::Vector2(s.total_gravity)),
+        "total_linear_damp" => Some(Variant::Float(s.total_linear_damp as f64)),
+        "total_angular_damp" => Some(Variant::Float(s.total_angular_damp as f64)),
+        "center_of_mass" => Some(Variant::Vector2(s.center_of_mass)),
+        "center_of_mass_local" => Some(Variant::Vector2(s.center_of_mass_local)),
+        "collision_layer" => Some(Variant::Int(s.collision_layer)),
+        "collision_mask" => Some(Variant::Int(s.collision_mask)),
+        "linear_velocity" => Some(Variant::Vector2(s.linear_velocity)),
+        "angular_velocity" => Some(Variant::Float(s.angular_velocity as f64)),
+        "transform" => Some(Variant::Transform2D(s.transform)),
+        "sleeping" => Some(Variant::Bool(s.sleeping)),
+        _ => None,
+    })
+    .flatten()
+}
+
+/// Writes one of the four assignable `PhysicsDirectBodyState2D` properties.
+///
+/// ⚠️ Only `linear_velocity`, `angular_velocity`, `transform` and `sleeping` are
+/// writable — the doc XML gives the rest no setter. A write to a read-only name
+/// is dropped rather than stored, because storing it would report a value back
+/// on the next read that the body never adopted.
+fn direct_body_state_2d_set_property(
+    id: gdcore::id::ObjectId,
+    name: &str,
+    value: &Variant,
+) -> bool {
+    use gdobject::physics_direct_body_state::with_direct_body_state_2d;
+    with_direct_body_state_2d(id, |s| match name {
+        "linear_velocity" => {
+            if let Variant::Vector2(v) = value {
+                s.linear_velocity = *v;
+            }
+            true
+        }
+        "angular_velocity" => {
+            s.angular_velocity = match value {
+                Variant::Float(f) => *f as f32,
+                Variant::Int(n) => *n as f32,
+                _ => s.angular_velocity,
+            };
+            true
+        }
+        "transform" => {
+            if let Variant::Transform2D(t) = value {
+                s.transform = *t;
+            }
+            true
+        }
+        "sleeping" => {
+            if let Variant::Bool(b) = value {
+                s.sleeping = *b;
+            }
+            true
+        }
+        _ => false,
+    })
+    .unwrap_or(false)
+}
+
+/// Routes a method call on a `PhysicsDirectBodyState2D` handle.
+fn call_direct_body_state_2d_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdobject::physics_direct_body_state::with_direct_body_state_2d;
+    let zero = Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0));
+    let result = with_direct_body_state_2d(id, |s| match method {
+        "get_contact_count" => Variant::Int(s.contact_count()),
+        "get_contact_local_position" => s
+            .contact(dbs_idx(args, 0))
+            .map(|c| Variant::Vector2(c.local_position))
+            .unwrap_or_else(|| zero.clone()),
+        "get_contact_local_normal" => s
+            .contact(dbs_idx(args, 0))
+            .map(|c| Variant::Vector2(c.local_normal))
+            .unwrap_or_else(|| zero.clone()),
+        "get_contact_local_shape" => {
+            Variant::Int(s.contact(dbs_idx(args, 0)).map_or(0, |c| c.local_shape))
+        }
+        "get_contact_impulse" => s
+            .contact(dbs_idx(args, 0))
+            .map(|c| Variant::Vector2(c.impulse))
+            .unwrap_or_else(|| zero.clone()),
+        "get_contact_collider" => {
+            Variant::Int(s.contact(dbs_idx(args, 0)).map_or(0, |c| c.collider as i64))
+        }
+        "get_contact_collider_id" => {
+            Variant::Int(s.contact(dbs_idx(args, 0)).map_or(0, |c| c.collider_id))
+        }
+        "get_contact_collider_position" => s
+            .contact(dbs_idx(args, 0))
+            .map(|c| Variant::Vector2(c.collider_position))
+            .unwrap_or_else(|| zero.clone()),
+        "get_contact_collider_shape" => {
+            Variant::Int(s.contact(dbs_idx(args, 0)).map_or(0, |c| c.collider_shape))
+        }
+        "get_contact_collider_velocity_at_position" => s
+            .contact(dbs_idx(args, 0))
+            .map(|c| Variant::Vector2(c.collider_velocity))
+            .unwrap_or_else(|| zero.clone()),
+        "apply_central_impulse" => {
+            s.apply_central_impulse(dbs_vec2(args, 0));
+            Variant::Nil
+        }
+        "apply_impulse" => {
+            s.apply_impulse(dbs_vec2(args, 0), dbs_vec2(args, 1));
+            Variant::Nil
+        }
+        "apply_torque_impulse" => {
+            s.apply_torque_impulse(dbs_f32(args, 0));
+            Variant::Nil
+        }
+        "apply_central_force" => {
+            s.apply_central_force(dbs_vec2(args, 0));
+            Variant::Nil
+        }
+        "apply_force" => {
+            s.apply_force(dbs_vec2(args, 0), dbs_vec2(args, 1));
+            Variant::Nil
+        }
+        "apply_torque" => {
+            s.apply_torque(dbs_f32(args, 0));
+            Variant::Nil
+        }
+        "add_constant_central_force" => {
+            s.add_constant_central_force(dbs_vec2(args, 0));
+            Variant::Nil
+        }
+        "add_constant_force" => {
+            s.add_constant_force(dbs_vec2(args, 0), dbs_vec2(args, 1));
+            Variant::Nil
+        }
+        "add_constant_torque" => {
+            s.add_constant_torque(dbs_f32(args, 0));
+            Variant::Nil
+        }
+        "get_constant_force" => Variant::Vector2(s.constant_force),
+        "set_constant_force" => {
+            s.constant_force = dbs_vec2(args, 0);
+            Variant::Nil
+        }
+        "get_constant_torque" => Variant::Float(s.constant_torque as f64),
+        "set_constant_torque" => {
+            s.constant_torque = dbs_f32(args, 0);
+            Variant::Nil
+        }
+        // `v + w x r` for the 2D case, where the angular term is a scalar and
+        // the perpendicular of `r` supplies the direction.
+        "get_velocity_at_local_position" => {
+            let r = dbs_vec2(args, 0) - s.center_of_mass_local;
+            Variant::Vector2(
+                s.linear_velocity
+                    + gdcore::math::Vector2::new(
+                        -s.angular_velocity * r.y,
+                        s.angular_velocity * r.x,
+                    ),
+            )
+        }
+        // Godot re-runs the built-in integrator on demand. Patina integrates in
+        // the solver after this callback returns, so the request is already
+        // satisfied by the time the script could observe it.
+        "integrate_forces" => Variant::Nil,
+        _ => Variant::Nil,
+    });
+    Ok(result.unwrap_or(Variant::Nil))
+}
+
+/// Vector3 argument, defaulting to zero.
+fn dbs_vec3(args: &[Variant], i: usize) -> gdcore::math::Vector3 {
+    match args.get(i) {
+        Some(Variant::Vector3(v)) => *v,
+        _ => gdcore::math::Vector3::new(0.0, 0.0, 0.0),
+    }
+}
+
+/// Reads a `PhysicsDirectBodyState3D` property.
+fn direct_body_state_3d_get_property(id: gdcore::id::ObjectId, name: &str) -> Option<Variant> {
+    use gdobject::physics_direct_body_state::with_direct_body_state_3d;
+    with_direct_body_state_3d(id, |s| match name {
+        "step" => Some(Variant::Float(s.step as f64)),
+        "inverse_mass" => Some(Variant::Float(s.inverse_mass as f64)),
+        "inverse_inertia" => Some(Variant::Vector3(s.inverse_inertia)),
+        "inverse_inertia_tensor" => Some(Variant::Basis(s.inverse_inertia_tensor)),
+        "principal_inertia_axes" => Some(Variant::Basis(s.principal_inertia_axes)),
+        "total_gravity" => Some(Variant::Vector3(s.total_gravity)),
+        "total_linear_damp" => Some(Variant::Float(s.total_linear_damp as f64)),
+        "total_angular_damp" => Some(Variant::Float(s.total_angular_damp as f64)),
+        "center_of_mass" => Some(Variant::Vector3(s.center_of_mass)),
+        "center_of_mass_local" => Some(Variant::Vector3(s.center_of_mass_local)),
+        "collision_layer" => Some(Variant::Int(s.collision_layer)),
+        "collision_mask" => Some(Variant::Int(s.collision_mask)),
+        "linear_velocity" => Some(Variant::Vector3(s.linear_velocity)),
+        "angular_velocity" => Some(Variant::Vector3(s.angular_velocity)),
+        "transform" => Some(Variant::Transform3D(s.transform)),
+        "sleeping" => Some(Variant::Bool(s.sleeping)),
+        _ => None,
+    })
+    .flatten()
+}
+
+/// Writes one of the four assignable `PhysicsDirectBodyState3D` properties.
+fn direct_body_state_3d_set_property(
+    id: gdcore::id::ObjectId,
+    name: &str,
+    value: &Variant,
+) -> bool {
+    use gdobject::physics_direct_body_state::with_direct_body_state_3d;
+    with_direct_body_state_3d(id, |s| match name {
+        "linear_velocity" => {
+            if let Variant::Vector3(v) = value {
+                s.linear_velocity = *v;
+            }
+            true
+        }
+        "angular_velocity" => {
+            if let Variant::Vector3(v) = value {
+                s.angular_velocity = *v;
+            }
+            true
+        }
+        "transform" => {
+            if let Variant::Transform3D(t) = value {
+                s.transform = *t;
+            }
+            true
+        }
+        "sleeping" => {
+            if let Variant::Bool(b) = value {
+                s.sleeping = *b;
+            }
+            true
+        }
+        _ => false,
+    })
+    .unwrap_or(false)
+}
+
+/// Routes a method call on a `PhysicsDirectBodyState3D` handle.
+fn call_direct_body_state_3d_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdobject::physics_direct_body_state::with_direct_body_state_3d;
+    let zero = Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0));
+    let result = with_direct_body_state_3d(id, |s| match method {
+        "get_contact_count" => Variant::Int(s.contact_count()),
+        "get_contact_local_position" => s
+            .contact(dbs_idx(args, 0))
+            .map(|c| Variant::Vector3(c.local_position))
+            .unwrap_or_else(|| zero.clone()),
+        "get_contact_local_normal" => s
+            .contact(dbs_idx(args, 0))
+            .map(|c| Variant::Vector3(c.local_normal))
+            .unwrap_or_else(|| zero.clone()),
+        "get_contact_local_shape" => {
+            Variant::Int(s.contact(dbs_idx(args, 0)).map_or(0, |c| c.local_shape))
+        }
+        "get_contact_impulse" => s
+            .contact(dbs_idx(args, 0))
+            .map(|c| Variant::Vector3(c.impulse))
+            .unwrap_or_else(|| zero.clone()),
+        "get_contact_collider" => {
+            Variant::Int(s.contact(dbs_idx(args, 0)).map_or(0, |c| c.collider as i64))
+        }
+        "get_contact_collider_id" => {
+            Variant::Int(s.contact(dbs_idx(args, 0)).map_or(0, |c| c.collider_id))
+        }
+        "get_contact_collider_position" => s
+            .contact(dbs_idx(args, 0))
+            .map(|c| Variant::Vector3(c.collider_position))
+            .unwrap_or_else(|| zero.clone()),
+        "get_contact_collider_shape" => {
+            Variant::Int(s.contact(dbs_idx(args, 0)).map_or(0, |c| c.collider_shape))
+        }
+        "get_contact_collider_velocity_at_position" => s
+            .contact(dbs_idx(args, 0))
+            .map(|c| Variant::Vector3(c.collider_velocity))
+            .unwrap_or_else(|| zero.clone()),
+        "apply_central_impulse" => {
+            s.apply_central_impulse(dbs_vec3(args, 0));
+            Variant::Nil
+        }
+        "apply_impulse" => {
+            s.apply_impulse(dbs_vec3(args, 0), dbs_vec3(args, 1));
+            Variant::Nil
+        }
+        "apply_torque_impulse" => {
+            s.apply_torque_impulse(dbs_vec3(args, 0));
+            Variant::Nil
+        }
+        "apply_central_force" => {
+            s.apply_central_force(dbs_vec3(args, 0));
+            Variant::Nil
+        }
+        "apply_force" => {
+            s.apply_force(dbs_vec3(args, 0), dbs_vec3(args, 1));
+            Variant::Nil
+        }
+        "apply_torque" => {
+            s.apply_torque(dbs_vec3(args, 0));
+            Variant::Nil
+        }
+        "add_constant_central_force" => {
+            s.add_constant_central_force(dbs_vec3(args, 0));
+            Variant::Nil
+        }
+        "add_constant_force" => {
+            s.add_constant_force(dbs_vec3(args, 0), dbs_vec3(args, 1));
+            Variant::Nil
+        }
+        "add_constant_torque" => {
+            s.add_constant_torque(dbs_vec3(args, 0));
+            Variant::Nil
+        }
+        "get_constant_force" => Variant::Vector3(s.constant_force),
+        "set_constant_force" => {
+            s.constant_force = dbs_vec3(args, 0);
+            Variant::Nil
+        }
+        "get_constant_torque" => Variant::Vector3(s.constant_torque),
+        "set_constant_torque" => {
+            s.constant_torque = dbs_vec3(args, 0);
+            Variant::Nil
+        }
+        // `v + w x r`, with a genuine 3D cross product for the angular term.
+        "get_velocity_at_local_position" => {
+            let r = dbs_vec3(args, 0) - s.center_of_mass_local;
+            Variant::Vector3(s.linear_velocity + s.angular_velocity.cross(r))
+        }
+        "integrate_forces" => Variant::Nil,
+        _ => Variant::Nil,
+    });
+    Ok(result.unwrap_or(Variant::Nil))
 }
 
 /// Reads `seed`/`state`, which Godot exposes as properties rather than getters.

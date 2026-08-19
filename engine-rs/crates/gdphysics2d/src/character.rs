@@ -6,8 +6,14 @@
 use gdcore::math::{Transform2D, Vector2};
 
 use crate::body::PhysicsBody2D;
+// ⚠️ `BodyId` is imported UNCONDITIONALLY: `Collision2D::collider` (below) is a
+// non-test public field, so a `#[cfg(test)]` on this import compiles under
+// `--lib` (which builds with `cfg(test)`) and fails every normal build — taking
+// every crate below gdphysics2d with it. `BodyType` stays test-only because
+// nothing outside the tests module names it.
+use crate::body::BodyId;
 #[cfg(test)]
-use crate::body::{BodyId, BodyType};
+use crate::body::BodyType;
 use crate::collision;
 use crate::shape::Shape2D;
 
@@ -451,6 +457,7 @@ impl CharacterBody2D {
             // Record the contact for get_slide_collision().
             let remainder = motion - surface_normal * motion.dot(surface_normal);
             self.slide_collisions.push(KinematicCollision2D {
+                collider: Some(bodies[body_idx].id),
                 normal: surface_normal,
                 depth: result.depth,
                 position: self.position,
@@ -675,7 +682,7 @@ impl CharacterBody2D {
                 self.position = target;
                 None
             }
-            Some((result, _body_idx)) => {
+            Some((result, body_idx)) => {
                 let surface_normal = -result.normal;
                 // Push out of the collision.
                 self.position = target + surface_normal * result.depth;
@@ -686,6 +693,7 @@ impl CharacterBody2D {
                 };
                 self.classify_surface(surface_normal, up, self.floor_max_angle.cos());
                 Some(KinematicCollision2D {
+                    collider: bodies.get(body_idx).map(|b| b.id),
                     normal: surface_normal,
                     depth: result.depth,
                     position: self.position,
@@ -699,6 +707,16 @@ impl CharacterBody2D {
 /// Collision information returned by [`CharacterBody2D::move_and_collide`].
 #[derive(Debug, Clone)]
 pub struct KinematicCollision2D {
+    /// The body that was hit, for Godot's `get_collider()` (pat-s3rrv.95).
+    ///
+    /// ⚠️ A `BodyId`, not a node: this crate is the solver and knows nothing
+    /// about the scene tree. `PhysicsServer` already keeps `body_to_node`, so
+    /// the script-facing `get_collider()` resolves the node there. Recording the
+    /// id is what makes that resolution possible at all — the collision data was
+    /// previously computed and discarded with no record of what was struck.
+    ///
+    /// `None` only for a collision built without a known body (test fixtures).
+    pub collider: Option<BodyId>,
     /// The surface normal at the collision point (pointing away from the body).
     pub normal: Vector2,
     /// Penetration depth.

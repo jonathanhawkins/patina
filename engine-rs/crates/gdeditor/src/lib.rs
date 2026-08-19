@@ -98,6 +98,8 @@ pub mod monitors_panel;
 pub mod multi_caret;
 pub mod multi_document;
 pub mod multi_node_edit;
+/// Navigation debug overlay draw items for the 2D viewport (pat-s3rrv.82).
+pub mod navigation_overlay;
 pub mod new_scene;
 pub mod numeric_expression;
 pub mod open_recent;
@@ -139,6 +141,7 @@ pub mod signal_goto_method;
 pub mod signal_receiver_stub;
 pub mod signals_tree;
 pub mod snap_config;
+pub mod sprite3d_render;
 pub mod subresource_inline;
 pub mod texture_cache;
 pub mod theme_editor;

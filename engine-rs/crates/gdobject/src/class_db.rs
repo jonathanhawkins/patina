@@ -708,11 +708,31 @@ pub fn class_has_method(class_name: &str, method_name: &str) -> bool {
 pub fn get_property_list(class_name: &str) -> Vec<PropertyInfo> {
     let db = global_db().lock().expect("ClassDB lock poisoned");
     let chain = db.inheritance_chain(class_name);
-    let mut props = Vec::new();
+    let mut props: Vec<PropertyInfo> = Vec::new();
     // Walk from base to derived so base properties come first
     for ancestor in chain.iter().rev() {
         if let Some(info) = db.get_by_name(ancestor) {
-            props.extend(info.properties.iter().cloned());
+            for prop in info.properties.iter() {
+                // A derived class re-declaring a base property is an OVERRIDE,
+                // not a second member. Godot declares such a member once and
+                // spells the override in the doc XML as
+                // `<member name="clip_contents" … overrides="Control"
+                // default="true"/>` (RichTextLabel.xml:726) — its
+                // `class_get_property_list` never returns a name twice.
+                //
+                // Keep the BASE position, so the "base properties come first"
+                // order above still holds, and take the DERIVED value — the
+                // same last-wins order `property_get_revert` documents.
+                //
+                // Without this, every Control subclass that re-declares
+                // `clip_contents` to flip its default (RichTextLabel,
+                // ScrollContainer, ItemList, GraphEdit, Tree) reported the
+                // property twice (pat-s3rrv.74).
+                match props.iter_mut().find(|p| p.name == prop.name) {
+                    Some(existing) => *existing = prop.clone(),
+                    None => props.push(prop.clone()),
+                }
+            }
         }
     }
     props
@@ -2402,6 +2422,247 @@ pub fn register_3d_classes() {
             )),
     );
 
+    // The 3D twin of AnimatableBody2D (pat-s3rrv.93); same parent-chain and
+    // same `sync_to_physics` default of true.
+    register_class(
+        ClassRegistration::new("AnimatableBody3D")
+            .parent("StaticBody3D")
+            .property(
+                PropertyInfo::new("sync_to_physics", Variant::Bool(true))
+                    .with_accessors("is_sync_to_physics_enabled", "set_sync_to_physics"),
+            ),
+    );
+
+    // `PhysicsDirectBodyState3D` — the 3D twin (pat-s3rrv.94). 16 properties,
+    // 28 methods, from `doc/classes/PhysicsDirectBodyState3D.xml`.
+    //
+    // ⚠️ Registered here rather than beside its 2D sibling so it picks up this
+    // function's `Vector3` / `Basis` / `Transform3D` imports, and so it sits
+    // with `RigidBody3D`, the class that delivers it.
+    if !class_exists("PhysicsDirectBodyState3D") {
+        register_class(
+            ClassRegistration::new("PhysicsDirectBodyState3D")
+                .parent("Object")
+                .abstract_class()
+                .property(
+                    PropertyInfo::new("angular_velocity", Variant::Vector3(Vector3::ZERO))
+                        .with_accessors("get_angular_velocity", "set_angular_velocity"),
+                )
+                .property(
+                    PropertyInfo::new("center_of_mass", Variant::Vector3(Vector3::ZERO))
+                        .with_accessors("get_center_of_mass", ""),
+                )
+                .property(
+                    PropertyInfo::new("center_of_mass_local", Variant::Vector3(Vector3::ZERO))
+                        .with_accessors("get_center_of_mass_local", ""),
+                )
+                .property(
+                    PropertyInfo::new("collision_layer", Variant::Int(1))
+                        .with_accessors("get_collision_layer", "set_collision_layer"),
+                )
+                .property(
+                    PropertyInfo::new("collision_mask", Variant::Int(1))
+                        .with_accessors("get_collision_mask", "set_collision_mask"),
+                )
+                .property(
+                    PropertyInfo::new("inverse_inertia", Variant::Vector3(Vector3::ZERO))
+                        .with_accessors("get_inverse_inertia", ""),
+                )
+                .property(
+                    PropertyInfo::new("inverse_inertia_tensor", Variant::Basis(Basis::IDENTITY))
+                        .with_accessors("get_inverse_inertia_tensor", ""),
+                )
+                .property(
+                    PropertyInfo::new("inverse_mass", Variant::Float(0.0))
+                        .with_accessors("get_inverse_mass", ""),
+                )
+                .property(
+                    PropertyInfo::new("linear_velocity", Variant::Vector3(Vector3::ZERO))
+                        .with_accessors("get_linear_velocity", "set_linear_velocity"),
+                )
+                .property(
+                    PropertyInfo::new("principal_inertia_axes", Variant::Basis(Basis::IDENTITY))
+                        .with_accessors("get_principal_inertia_axes", ""),
+                )
+                .property(
+                    PropertyInfo::new("sleeping", Variant::Bool(false))
+                        .with_accessors("is_sleeping", "set_sleep_state"),
+                )
+                .property(
+                    PropertyInfo::new("step", Variant::Float(0.0)).with_accessors("get_step", ""),
+                )
+                .property(
+                    PropertyInfo::new("total_angular_damp", Variant::Float(0.0))
+                        .with_accessors("get_total_angular_damp", ""),
+                )
+                .property(
+                    PropertyInfo::new("total_gravity", Variant::Vector3(Vector3::ZERO))
+                        .with_accessors("get_total_gravity", ""),
+                )
+                .property(
+                    PropertyInfo::new("total_linear_damp", Variant::Float(0.0))
+                        .with_accessors("get_total_linear_damp", ""),
+                )
+                .property(
+                    PropertyInfo::new("transform", Variant::Transform3D(Transform3D::IDENTITY))
+                        .with_accessors("get_transform", "set_transform"),
+                )
+                .method(
+                    MethodInfo::new("add_constant_central_force", 1).with_arguments(vec![
+                        PropertyInfo::new("force", Variant::Vector3(Vector3::ZERO)),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("add_constant_force", 2).with_arguments(vec![
+                        PropertyInfo::new("force", Variant::Vector3(Vector3::ZERO)),
+                        PropertyInfo::new("position", Variant::Vector3(Vector3::ZERO)),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("add_constant_torque", 1).with_arguments(vec![
+                        PropertyInfo::new("torque", Variant::Vector3(Vector3::ZERO)),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("apply_central_force", 1).with_arguments(vec![
+                        PropertyInfo::new("force", Variant::Vector3(Vector3::ZERO)),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("apply_central_impulse", 1).with_arguments(vec![
+                        PropertyInfo::new("impulse", Variant::Vector3(Vector3::ZERO)),
+                    ]),
+                )
+                .method(MethodInfo::new("apply_force", 2).with_arguments(vec![
+                    PropertyInfo::new("force", Variant::Vector3(Vector3::ZERO)),
+                    PropertyInfo::new("position", Variant::Vector3(Vector3::ZERO)),
+                ]))
+                .method(MethodInfo::new("apply_impulse", 2).with_arguments(vec![
+                    PropertyInfo::new("impulse", Variant::Vector3(Vector3::ZERO)),
+                    PropertyInfo::new("position", Variant::Vector3(Vector3::ZERO)),
+                ]))
+                .method(
+                    MethodInfo::new("apply_torque", 1).with_arguments(vec![PropertyInfo::new(
+                        "torque",
+                        Variant::Vector3(Vector3::ZERO),
+                    )]),
+                )
+                .method(
+                    MethodInfo::new("apply_torque_impulse", 1).with_arguments(vec![
+                        PropertyInfo::new("impulse", Variant::Vector3(Vector3::ZERO)),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("get_constant_force", 0)
+                        .const_method()
+                        .returns(Variant::Vector3(Vector3::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_constant_torque", 0)
+                        .const_method()
+                        .returns(Variant::Vector3(Vector3::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_collider", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Rid(gdcore::id::Rid::INVALID)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_collider_id", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_collider_object", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns_of(
+                            Variant::ObjectId(gdcore::id::ObjectId::from_raw(0)),
+                            "Object",
+                        ),
+                )
+                .method(
+                    MethodInfo::new("get_contact_collider_position", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Vector3(Vector3::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_collider_shape", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_collider_velocity_at_position", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Vector3(Vector3::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_count", 0)
+                        .const_method()
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_impulse", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Vector3(Vector3::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_local_normal", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Vector3(Vector3::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_local_position", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Vector3(Vector3::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_local_shape", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_local_velocity_at_position", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Vector3(Vector3::ZERO)),
+                )
+                .method(MethodInfo::new("get_space_state", 0).returns_of(
+                    Variant::ObjectId(gdcore::id::ObjectId::from_raw(0)),
+                    "PhysicsDirectSpaceState3D",
+                ))
+                .method(
+                    MethodInfo::new("get_velocity_at_local_position", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new(
+                            "local_position",
+                            Variant::Vector3(Vector3::ZERO),
+                        )])
+                        .returns(Variant::Vector3(Vector3::ZERO)),
+                )
+                .method(MethodInfo::new("integrate_forces", 0))
+                .method(
+                    MethodInfo::new("set_constant_force", 1).with_arguments(vec![
+                        PropertyInfo::new("force", Variant::Vector3(Vector3::ZERO)),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("set_constant_torque", 1).with_arguments(vec![
+                        PropertyInfo::new("torque", Variant::Vector3(Vector3::ZERO)),
+                    ]),
+                ),
+        );
+    }
+
     register_class(
         ClassRegistration::new("RigidBody3D")
             .signal(SignalInfo::new("body_entered").arg("body"))
@@ -2456,7 +2717,15 @@ pub fn register_3d_classes() {
             ))
             .property(PropertyInfo::new("contact_monitor", Variant::Bool(false)))
             .property(PropertyInfo::new("continuous_cd", Variant::Bool(false)))
-            .property(PropertyInfo::new("custom_integrator", Variant::Bool(false)))
+            // Accessors match RigidBody2D's entry and Godot's
+            // `set_use_custom_integrator` / `is_using_custom_integrator`. The 3D
+            // registration carried the property but no accessors, so
+            // `ClassDB.class_get_property_getter` answered nothing for it while
+            // the 2D one answered correctly (pat-s3rrv.94).
+            .property(
+                PropertyInfo::new("custom_integrator", Variant::Bool(false))
+                    .with_accessors("is_using_custom_integrator", "set_use_custom_integrator"),
+            )
             .property(PropertyInfo::new("freeze_mode", Variant::Int(0)))
             .property(PropertyInfo::new(
                 "inertia",
@@ -7196,6 +7465,276 @@ pub fn register_3d_classes() {
                 .property(
                     PropertyInfo::new("position", Variant::Vector3(Vector3::ZERO))
                         .with_accessors("get_position", "set_position"),
+                ),
+        );
+    }
+    // `PhysicsTestMotionParameters2D` / `...3D` and their Result siblings
+    // (pat-s3rrv.96). Godot's real `body_test_motion` threads these RefCounted
+    // objects; `interpreter.rs:7821` documents that Patina's staged form returns
+    // a Dictionary instead "because neither resource exists in Patina yet".
+    //
+    // ⚠️ `margin` defaults are NOT the same on the two: 0.08 in 2D (pixels) and
+    // 0.001 in 3D (metres). Copying the sibling registration would declare a
+    // 2D-scale margin on a 3D body — 80x too large — and the two entries look
+    // interchangeable.
+    //
+    // ⚠️ Two setters do not follow from their property names:
+    // `collide_separation_ray` -> `set_collide_separation_ray_enabled` and
+    // `recovery_as_collision` -> `set_recovery_as_collision_enabled`.
+    if !class_exists("PhysicsTestMotionParameters2D") {
+        register_class(
+            ClassRegistration::new("PhysicsTestMotionParameters2D")
+                .parent("RefCounted")
+                .property(
+                    PropertyInfo::new("collide_separation_ray", Variant::Bool(false))
+                        .with_accessors(
+                            "is_collide_separation_ray_enabled",
+                            "set_collide_separation_ray_enabled",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new("exclude_bodies", Variant::Array(Vec::new()))
+                        .with_accessors("get_exclude_bodies", "set_exclude_bodies"),
+                )
+                .property(
+                    PropertyInfo::new("exclude_objects", Variant::Array(Vec::new()))
+                        .with_accessors("get_exclude_objects", "set_exclude_objects"),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "from",
+                        Variant::Transform2D(gdcore::math::Transform2D::IDENTITY),
+                    )
+                    .with_accessors("get_from", "set_from"),
+                )
+                .property(
+                    PropertyInfo::new("margin", Variant::Float(0.08))
+                        .with_accessors("get_margin", "set_margin"),
+                )
+                .property(
+                    PropertyInfo::new("motion", Variant::Vector2(gdcore::math::Vector2::ZERO))
+                        .with_accessors("get_motion", "set_motion"),
+                )
+                .property(
+                    PropertyInfo::new("recovery_as_collision", Variant::Bool(false))
+                        .with_accessors(
+                            "is_recovery_as_collision_enabled",
+                            "set_recovery_as_collision_enabled",
+                        ),
+                ),
+        );
+    }
+    if !class_exists("PhysicsTestMotionParameters3D") {
+        register_class(
+            ClassRegistration::new("PhysicsTestMotionParameters3D")
+                .parent("RefCounted")
+                .property(
+                    PropertyInfo::new("collide_separation_ray", Variant::Bool(false))
+                        .with_accessors(
+                            "is_collide_separation_ray_enabled",
+                            "set_collide_separation_ray_enabled",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new("exclude_bodies", Variant::Array(Vec::new()))
+                        .with_accessors("get_exclude_bodies", "set_exclude_bodies"),
+                )
+                .property(
+                    PropertyInfo::new("exclude_objects", Variant::Array(Vec::new()))
+                        .with_accessors("get_exclude_objects", "set_exclude_objects"),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "from",
+                        Variant::Transform3D(gdcore::math3d::Transform3D::IDENTITY),
+                    )
+                    .with_accessors("get_from", "set_from"),
+                )
+                .property(
+                    PropertyInfo::new("margin", Variant::Float(0.001))
+                        .with_accessors("get_margin", "set_margin"),
+                )
+                .property(
+                    PropertyInfo::new("max_collisions", Variant::Int(1))
+                        .with_accessors("get_max_collisions", "set_max_collisions"),
+                )
+                .property(
+                    PropertyInfo::new("motion", Variant::Vector3(gdcore::math::Vector3::ZERO))
+                        .with_accessors("get_motion", "set_motion"),
+                )
+                .property(
+                    PropertyInfo::new("recovery_as_collision", Variant::Bool(false))
+                        .with_accessors(
+                            "is_recovery_as_collision_enabled",
+                            "set_recovery_as_collision_enabled",
+                        ),
+                ),
+        );
+    }
+    // ⚠️ The Result classes differ in SHAPE, not just in vector type: every 3D
+    // getter takes a `collision_index` and 3D adds `get_collision_count`,
+    // because a 3D test can report up to `max_collisions` hits while 2D reports
+    // exactly one. A 3D registration copied from 2D would declare nullary
+    // getters that no real caller can use.
+    if !class_exists("PhysicsTestMotionResult2D") {
+        register_class(
+            ClassRegistration::new("PhysicsTestMotionResult2D")
+                .parent("RefCounted")
+                .method(
+                    MethodInfo::new("get_collider", 0)
+                        .const_method()
+                        .returns_of(
+                            Variant::ObjectId(gdcore::id::ObjectId::from_raw(0)),
+                            "Object",
+                        ),
+                )
+                .method(
+                    MethodInfo::new("get_collider_id", 0)
+                        .const_method()
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_collider_rid", 0)
+                        .const_method()
+                        .returns(Variant::Rid(gdcore::id::Rid::INVALID)),
+                )
+                .method(
+                    MethodInfo::new("get_collider_shape", 0)
+                        .const_method()
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_collider_velocity", 0)
+                        .const_method()
+                        .returns(Variant::Vector2(gdcore::math::Vector2::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_collision_depth", 0)
+                        .const_method()
+                        .returns(Variant::Float(0.0)),
+                )
+                .method(
+                    MethodInfo::new("get_collision_local_shape", 0)
+                        .const_method()
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_collision_normal", 0)
+                        .const_method()
+                        .returns(Variant::Vector2(gdcore::math::Vector2::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_collision_point", 0)
+                        .const_method()
+                        .returns(Variant::Vector2(gdcore::math::Vector2::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_collision_safe_fraction", 0)
+                        .const_method()
+                        .returns(Variant::Float(0.0)),
+                )
+                .method(
+                    MethodInfo::new("get_collision_unsafe_fraction", 0)
+                        .const_method()
+                        .returns(Variant::Float(0.0)),
+                )
+                .method(
+                    MethodInfo::new("get_remainder", 0)
+                        .const_method()
+                        .returns(Variant::Vector2(gdcore::math::Vector2::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_travel", 0)
+                        .const_method()
+                        .returns(Variant::Vector2(gdcore::math::Vector2::ZERO)),
+                ),
+        );
+    }
+    if !class_exists("PhysicsTestMotionResult3D") {
+        register_class(
+            ClassRegistration::new("PhysicsTestMotionResult3D")
+                .parent("RefCounted")
+                .method(
+                    MethodInfo::new("get_collider", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("collision_index", Variant::Int(0))])
+                        .returns_of(
+                            Variant::ObjectId(gdcore::id::ObjectId::from_raw(0)),
+                            "Object",
+                        ),
+                )
+                .method(
+                    MethodInfo::new("get_collider_id", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("collision_index", Variant::Int(0))])
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_collider_rid", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("collision_index", Variant::Int(0))])
+                        .returns(Variant::Rid(gdcore::id::Rid::INVALID)),
+                )
+                .method(
+                    MethodInfo::new("get_collider_shape", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("collision_index", Variant::Int(0))])
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_collider_velocity", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("collision_index", Variant::Int(0))])
+                        .returns(Variant::Vector3(gdcore::math::Vector3::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_collision_count", 0)
+                        .const_method()
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_collision_depth", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("collision_index", Variant::Int(0))])
+                        .returns(Variant::Float(0.0)),
+                )
+                .method(
+                    MethodInfo::new("get_collision_local_shape", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("collision_index", Variant::Int(0))])
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_collision_normal", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("collision_index", Variant::Int(0))])
+                        .returns(Variant::Vector3(gdcore::math::Vector3::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_collision_point", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("collision_index", Variant::Int(0))])
+                        .returns(Variant::Vector3(gdcore::math::Vector3::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_collision_safe_fraction", 0)
+                        .const_method()
+                        .returns(Variant::Float(0.0)),
+                )
+                .method(
+                    MethodInfo::new("get_collision_unsafe_fraction", 0)
+                        .const_method()
+                        .returns(Variant::Float(0.0)),
+                )
+                .method(
+                    MethodInfo::new("get_remainder", 0)
+                        .const_method()
+                        .returns(Variant::Vector3(gdcore::math::Vector3::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_travel", 0)
+                        .const_method()
+                        .returns(Variant::Vector3(gdcore::math::Vector3::ZERO)),
                 ),
         );
     }
@@ -15413,6 +15952,84 @@ pub fn register_2d_classes() {
         );
     }
 
+    // AnimatableBody2D — a StaticBody2D meant to be MOVED, by an
+    // AnimationPlayer or a script (pat-s3rrv.93).
+    //
+    // ⚠️ Its parent is StaticBody2D, not PhysicsBody2D, so it inherits
+    // `constant_linear_velocity` / `constant_angular_velocity` through the
+    // chain. Registering it flat under PhysicsBody2D would silently drop both
+    // conveyor properties.
+    //
+    // `sync_to_physics` defaults to **true** (`doc/classes/AnimatableBody2D.xml`):
+    // the body's movement is synchronised to the physics frame so riders are
+    // carried. The default matters — an unset property must animate platforms,
+    // not behave as a plain static body.
+    if !class_exists("AnimatableBody2D") {
+        register_class(
+            ClassRegistration::new("AnimatableBody2D")
+                .parent("StaticBody2D")
+                .property(
+                    PropertyInfo::new("sync_to_physics", Variant::Bool(true))
+                        .with_accessors("is_sync_to_physics_enabled", "set_sync_to_physics"),
+                ),
+        );
+    }
+
+    // KinematicCollision2D / 3D — the object `get_slide_collision(i)` and
+    // `move_and_collide()` hand back (pat-s3rrv.95).
+    //
+    // The 2D collision data was already computed every physics tick and then
+    // discarded: `CharacterBody2D` fills a `Vec<KinematicCollision2D>` during
+    // its slide loop, and nothing ever turned it into something a script could
+    // read. Registering the class is the first half of making
+    // `get_slide_collision(0).get_collider()` reachable.
+    //
+    // ⚠️ **THE TWO CLASSES ARE NOT SYMMETRIC — do not copy one onto the other.**
+    // A KinematicCollision3D holds SEVERAL contacts, so nine of its getters take
+    // a `collision_index` and it adds `get_collision_count()`; every 2D getter
+    // is 0-arg. `get_angle` differs too: 1 argument in 2D, 2 in 3D. Arities are
+    // taken from `doc/classes/KinematicCollision{2D,3D}.xml` one method at a
+    // time rather than mirrored.
+    if !class_exists("KinematicCollision2D") {
+        register_class(
+            ClassRegistration::new("KinematicCollision2D")
+                .parent("RefCounted")
+                .method(MethodInfo::new("get_collider", 0).const_method())
+                .method(MethodInfo::new("get_collider_id", 0).const_method())
+                .method(MethodInfo::new("get_collider_rid", 0).const_method())
+                .method(MethodInfo::new("get_collider_shape", 0).const_method())
+                .method(MethodInfo::new("get_collider_shape_index", 0).const_method())
+                .method(MethodInfo::new("get_collider_velocity", 0).const_method())
+                .method(MethodInfo::new("get_depth", 0).const_method())
+                .method(MethodInfo::new("get_local_shape", 0).const_method())
+                .method(MethodInfo::new("get_normal", 0).const_method())
+                .method(MethodInfo::new("get_position", 0).const_method())
+                .method(MethodInfo::new("get_remainder", 0).const_method())
+                .method(MethodInfo::new("get_travel", 0).const_method())
+                .method(MethodInfo::new("get_angle", 1).const_method()),
+        );
+    }
+    if !class_exists("KinematicCollision3D") {
+        register_class(
+            ClassRegistration::new("KinematicCollision3D")
+                .parent("RefCounted")
+                .method(MethodInfo::new("get_collider", 1).const_method())
+                .method(MethodInfo::new("get_collider_id", 1).const_method())
+                .method(MethodInfo::new("get_collider_rid", 1).const_method())
+                .method(MethodInfo::new("get_collider_shape", 1).const_method())
+                .method(MethodInfo::new("get_collider_shape_index", 1).const_method())
+                .method(MethodInfo::new("get_collider_velocity", 1).const_method())
+                .method(MethodInfo::new("get_local_shape", 1).const_method())
+                .method(MethodInfo::new("get_normal", 1).const_method())
+                .method(MethodInfo::new("get_position", 1).const_method())
+                .method(MethodInfo::new("get_collision_count", 0).const_method())
+                .method(MethodInfo::new("get_depth", 0).const_method())
+                .method(MethodInfo::new("get_remainder", 0).const_method())
+                .method(MethodInfo::new("get_travel", 0).const_method())
+                .method(MethodInfo::new("get_angle", 2).const_method()),
+        );
+    }
+
     // -- Joint2D family (pat-0q2kx.114) --
     //
     // `gdphysics2d::joint` solves all three joint kinds and `world.add_joint`
@@ -15514,6 +16131,233 @@ pub fn register_2d_classes() {
                 .property(
                     PropertyInfo::new("damping", Variant::Float(1.0))
                         .with_accessors("get_damping", "set_damping"),
+                ),
+        );
+    }
+    // `PhysicsDirectBodyState2D` — the body view handed to
+    // `RigidBody2D._integrate_forces` (pat-s3rrv.94). Surface transcribed from
+    // `doc/classes/PhysicsDirectBodyState2D.xml`: 14 properties, 28 methods.
+    //
+    // ⚠️ `abstract_class()` because Godot marks it `is_instantiable=false` — a
+    // script receives one, it never constructs one. Registering it as
+    // instantiable would let `ClassDB.instantiate("PhysicsDirectBodyState2D")`
+    // hand back an object with no body behind it.
+    //
+    // ⚠️ Only four members carry a setter (`angular_velocity`,
+    // `linear_velocity`, `transform`, `sleeping`, plus the two collision masks);
+    // the rest are reported with an empty setter because the XML declares none.
+    // `sleeping`'s setter is `set_sleep_state`, NOT `set_sleeping` — the one
+    // name here that does not follow from the property.
+    if !class_exists("PhysicsDirectBodyState2D") {
+        register_class(
+            ClassRegistration::new("PhysicsDirectBodyState2D")
+                .parent("Object")
+                .abstract_class()
+                .property(
+                    PropertyInfo::new("angular_velocity", Variant::Float(0.0))
+                        .with_accessors("get_angular_velocity", "set_angular_velocity"),
+                )
+                .property(
+                    PropertyInfo::new("center_of_mass", Variant::Vector2(Vector2::ZERO))
+                        .with_accessors("get_center_of_mass", ""),
+                )
+                .property(
+                    PropertyInfo::new("center_of_mass_local", Variant::Vector2(Vector2::ZERO))
+                        .with_accessors("get_center_of_mass_local", ""),
+                )
+                .property(
+                    PropertyInfo::new("collision_layer", Variant::Int(1))
+                        .with_accessors("get_collision_layer", "set_collision_layer"),
+                )
+                .property(
+                    PropertyInfo::new("collision_mask", Variant::Int(1))
+                        .with_accessors("get_collision_mask", "set_collision_mask"),
+                )
+                .property(
+                    PropertyInfo::new("inverse_inertia", Variant::Float(0.0))
+                        .with_accessors("get_inverse_inertia", ""),
+                )
+                .property(
+                    PropertyInfo::new("inverse_mass", Variant::Float(0.0))
+                        .with_accessors("get_inverse_mass", ""),
+                )
+                .property(
+                    PropertyInfo::new("linear_velocity", Variant::Vector2(Vector2::ZERO))
+                        .with_accessors("get_linear_velocity", "set_linear_velocity"),
+                )
+                .property(
+                    PropertyInfo::new("sleeping", Variant::Bool(false))
+                        .with_accessors("is_sleeping", "set_sleep_state"),
+                )
+                .property(
+                    PropertyInfo::new("step", Variant::Float(0.0)).with_accessors("get_step", ""),
+                )
+                .property(
+                    PropertyInfo::new("total_angular_damp", Variant::Float(0.0))
+                        .with_accessors("get_total_angular_damp", ""),
+                )
+                .property(
+                    PropertyInfo::new("total_gravity", Variant::Vector2(Vector2::ZERO))
+                        .with_accessors("get_total_gravity", ""),
+                )
+                .property(
+                    PropertyInfo::new("total_linear_damp", Variant::Float(0.0))
+                        .with_accessors("get_total_linear_damp", ""),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "transform",
+                        Variant::Transform2D(gdcore::math::Transform2D::IDENTITY),
+                    )
+                    .with_accessors("get_transform", "set_transform"),
+                )
+                .method(
+                    MethodInfo::new("add_constant_central_force", 1).with_arguments(vec![
+                        PropertyInfo::new("force", Variant::Vector2(Vector2::ZERO)),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("add_constant_force", 2).with_arguments(vec![
+                        PropertyInfo::new("force", Variant::Vector2(Vector2::ZERO)),
+                        PropertyInfo::new("position", Variant::Vector2(Vector2::ZERO)),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("add_constant_torque", 1)
+                        .with_arguments(vec![PropertyInfo::new("torque", Variant::Float(0.0))]),
+                )
+                .method(
+                    MethodInfo::new("apply_central_force", 1).with_arguments(vec![
+                        PropertyInfo::new("force", Variant::Vector2(Vector2::ZERO)),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("apply_central_impulse", 1).with_arguments(vec![
+                        PropertyInfo::new("impulse", Variant::Vector2(Vector2::ZERO)),
+                    ]),
+                )
+                .method(MethodInfo::new("apply_force", 2).with_arguments(vec![
+                    PropertyInfo::new("force", Variant::Vector2(Vector2::ZERO)),
+                    PropertyInfo::new("position", Variant::Vector2(Vector2::ZERO)),
+                ]))
+                .method(MethodInfo::new("apply_impulse", 2).with_arguments(vec![
+                    PropertyInfo::new("impulse", Variant::Vector2(Vector2::ZERO)),
+                    PropertyInfo::new("position", Variant::Vector2(Vector2::ZERO)),
+                ]))
+                .method(
+                    MethodInfo::new("apply_torque", 1)
+                        .with_arguments(vec![PropertyInfo::new("torque", Variant::Float(0.0))]),
+                )
+                .method(
+                    MethodInfo::new("apply_torque_impulse", 1)
+                        .with_arguments(vec![PropertyInfo::new("impulse", Variant::Float(0.0))]),
+                )
+                .method(
+                    MethodInfo::new("get_constant_force", 0)
+                        .const_method()
+                        .returns(Variant::Vector2(Vector2::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_constant_torque", 0)
+                        .const_method()
+                        .returns(Variant::Float(0.0)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_collider", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Rid(gdcore::id::Rid::INVALID)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_collider_id", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_collider_object", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns_of(
+                            Variant::ObjectId(gdcore::id::ObjectId::from_raw(0)),
+                            "Object",
+                        ),
+                )
+                .method(
+                    MethodInfo::new("get_contact_collider_position", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Vector2(Vector2::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_collider_shape", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_collider_velocity_at_position", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Vector2(Vector2::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_count", 0)
+                        .const_method()
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_impulse", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Vector2(Vector2::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_local_normal", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Vector2(Vector2::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_local_position", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Vector2(Vector2::ZERO)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_local_shape", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_contact_local_velocity_at_position", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new("contact_idx", Variant::Int(0))])
+                        .returns(Variant::Vector2(Vector2::ZERO)),
+                )
+                .method(MethodInfo::new("get_space_state", 0).returns_of(
+                    Variant::ObjectId(gdcore::id::ObjectId::from_raw(0)),
+                    "PhysicsDirectSpaceState2D",
+                ))
+                .method(
+                    MethodInfo::new("get_velocity_at_local_position", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new(
+                            "local_position",
+                            Variant::Vector2(Vector2::ZERO),
+                        )])
+                        .returns(Variant::Vector2(Vector2::ZERO)),
+                )
+                .method(MethodInfo::new("integrate_forces", 0))
+                .method(
+                    MethodInfo::new("set_constant_force", 1).with_arguments(vec![
+                        PropertyInfo::new("force", Variant::Vector2(Vector2::ZERO)),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("set_constant_torque", 1)
+                        .with_arguments(vec![PropertyInfo::new("torque", Variant::Float(0.0))]),
                 ),
         );
     }

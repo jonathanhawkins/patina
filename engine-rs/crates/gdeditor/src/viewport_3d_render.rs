@@ -47,6 +47,13 @@ pub enum Render3DKind {
         shape: CollisionShapeKind,
         half_extents: Vector3,
     },
+    /// Geometry generated from the scene rather than loaded from a resource
+    /// path — a CSG boolean tree folded into one mesh (pat-s3rrv.89).
+    ///
+    /// ⚠️ Carries the mesh by value because there IS no path to load it from:
+    /// it is computed from the node's own subtree, and the render pass runs
+    /// after the `SceneTree` is out of scope.
+    Geometry { mesh: Mesh3D },
 }
 
 /// The collision shape a `CollisionShape3D` carries, chosen from its `shape:`
@@ -114,7 +121,9 @@ impl Viewport3D {
         self.collect_scene_content(tree)
             .into_iter()
             .filter(|r| r.visible)
-            .map(|mut r| {
+            // flat_map, not map: a GridMap expands into one item per used cell,
+            // and a CSG descendant collapses to none (pat-s3rrv.89).
+            .flat_map(|mut r| {
                 // Fold the mesh sub-resource's authored properties into the marker
                 // before the item leaves the tree behind (pat-0q2kx.43).
                 r.mesh_path = r
@@ -135,10 +144,81 @@ impl Viewport3D {
                 // while the tree is still in scope (pat-nzgdu.76).
                 let geometry =
                     gdscene::render_server_3d::geometry_instance_settings_for_node(tree, nid);
-                render_item_for(r, material, geometry)
+                // CSG: a root folds its whole boolean subtree into one mesh, and
+                // its descendants draw NOTHING — they are already part of that
+                // mesh. Without the skip a subtracted sphere would still appear
+                // as its own marker cube next to the hole it cut (pat-s3rrv.89).
+                let csg_mesh = if gdscene::render_server_3d::is_csg_root(tree, nid) {
+                    match gdscene::render_server_3d::evaluate_csg_tree(tree, nid) {
+                        Some(mesh) => Some(mesh),
+                        // An empty combiner has no geometry; drawing its default
+                        // marker cube would be worse than drawing nothing.
+                        None => return Vec::new(),
+                    }
+                } else if gdscene::render_server_3d::is_csg_class_name(&r.class_name) {
+                    return Vec::new();
+                } else {
+                    None
+                };
+                let is_gridmap = r.class_name == "GridMap";
+                // Sprite3D, AnimatedSprite3D and Label3D draw as a TEXTURED
+                // QUAD, not as a mesh resource
+                // (`SpriteBase3D::_draw`). It descends from Node3D, so it was
+                // already in this list — with no mesh path and no shape, which
+                // is exactly the fall-through that made it a grey marker cube
+                // (pat-s3rrv.92). Built here, while `tree` is still in scope,
+                // for the same reason `material` is.
+                let (generated_mesh, material) = match crate::sprite3d_render::billboard_geometry(
+                    tree,
+                    nid,
+                    &mut material_textures,
+                ) {
+                    Some((mesh, sprite_material)) => (Some(mesh), Some(sprite_material)),
+                    None => (csg_mesh, material),
+                };
+                let base = render_item_for(r, material, geometry, generated_mesh);
+                if is_gridmap {
+                    return gridmap_items(tree, nid, &base);
+                }
+                vec![base]
             })
             .collect()
     }
+}
+
+/// Expands a `GridMap` into one render item per used cell (pat-s3rrv.89).
+///
+/// ⚠️ `GridMap::from_node` captures the mesh library's PATH; the items themselves
+/// live in a separate `.tres` and nothing had ever loaded them, so every cell
+/// resolved to no mesh and the node drew a single marker cube for the whole map.
+/// Loading it here is what makes the cells appear at all.
+///
+/// ⚠️ Uses `mesh_instances_oriented`, not `mesh_instances`: the latter drops each
+/// cell's rotation, and a tiled map drawn unrotated reads as badly authored art
+/// rather than as missing data.
+fn gridmap_items(tree: &SceneTree, nid: gdscene::NodeId, base: &Render3DItem) -> Vec<Render3DItem> {
+    let Some(mut grid) = gdscene::grid_map::GridMap::from_node(tree, nid) else {
+        return Vec::new();
+    };
+    if let Some(path) = grid.mesh_library_resource.clone() {
+        let on_disk = path.strip_prefix("res://").unwrap_or(&path);
+        if let Ok(source) = std::fs::read_to_string(on_disk) {
+            if let Ok(Some(library)) = gdscene::grid_map::MeshLibrary::from_tres(&source) {
+                grid.mesh_library = library;
+            }
+        }
+    }
+    grid.mesh_instances_oriented()
+        .into_iter()
+        .map(|(origin, basis, path)| Render3DItem {
+            // The cell's placement is relative to the GridMap node, so it
+            // composes with the node's own global transform rather than
+            // replacing it.
+            global_transform: base.global_transform * Transform3D { basis, origin },
+            kind: Render3DKind::Mesh { path },
+            ..base.clone()
+        })
+        .collect()
 }
 
 /// Maps a collected spatial node to its draw item.
@@ -146,8 +226,14 @@ fn render_item_for(
     r: Node3DRenderable,
     material: Option<Material3D>,
     geometry: GeometryInstanceSettings,
+    generated_mesh: Option<Mesh3D>,
 ) -> Render3DItem {
-    let kind = if let Some(shape) = r.shape_path.as_deref() {
+    // Generated geometry wins over every path-based kind: a CSG root has no mesh
+    // resource to load, and a Sprite3D's quad is built from its texture, so
+    // falling through would draw either as a marker cube.
+    let kind = if let Some(mesh) = generated_mesh {
+        Render3DKind::Geometry { mesh }
+    } else if let Some(shape) = r.shape_path.as_deref() {
         let (shape, half_extents) = collision_shape_for(shape);
         Render3DKind::Collision {
             shape,
@@ -541,12 +627,64 @@ pub struct SceneLight3D {
     /// sets this false: the light draws its sky sun disc but adds no surface
     /// lighting (the complement of [`sky`](Self::sky)).
     pub affects_scene: bool,
+    /// The rest of Godot's Light3D property set, read by the SHARED reader
+    /// `gdscene::render_server_3d::sync_light_properties` (pat-s3rrv.90).
+    ///
+    /// ⚠️ Stored as scalars rather than by embedding `gdserver3d::light::Light3D`
+    /// because this struct is `Copy` and `Light3D` is not — embedding it would
+    /// quietly drop the `Copy` derive and change every use site.
+    ///
+    /// ⚠️ **This list used to say only the temperature reached pixels. That is
+    /// no longer true** — the rasterizer now consumes `cull_mask`,
+    /// `shadow_opacity`, `shadow_bias`, `shadow_normal_bias`, `specular`,
+    /// `negative`, the `distance_fade_*` set and the directional shadow fade,
+    /// on both the software and GPU paths.
+    ///
+    /// Still carried but NOT consumed by any shading code:
+    /// `indirect_energy` and `volumetric_fog_energy` (no GI or fog path
+    /// exists), `shadow_caster_mask`, and the `shadow_split_*`/`blend_splits`
+    /// cascade controls.
+    ///
+    /// The temperature remains the odd one out: it reaches pixels only because
+    /// the shared reader folds it into [`color`](Self::color), which the
+    /// rasterizer reads knowing nothing about temperature.
+    pub temperature: f32,
+    pub cull_mask: u32,
+    pub indirect_energy: f32,
+    pub volumetric_fog_energy: f32,
+    pub distance_fade_enabled: bool,
+    pub distance_fade_begin: f32,
+    pub distance_fade_shadow: f32,
+    pub distance_fade_length: f32,
+    pub shadow_opacity: f32,
+    pub shadow_caster_mask: u32,
+    pub shadow_split_1: f32,
+    pub shadow_split_2: f32,
+    pub shadow_split_3: f32,
+    pub blend_splits: bool,
     /// Godot `Light3D.editor_only`: the light shades the **editor viewport**
     /// but contributes nothing to a running game (pat-0q2kx.110).
     ///
     /// Kept as a flag rather than filtered at collection time because the same
     /// snapshot feeds both paths — the editor keeps these lights and only
     /// [`strip_editor_only_items`] (the Play path) drops them.
+    /// `shadow_bias` / `shadow_normal_bias` — the offsets that keep a surface
+    /// from shadowing itself. Consumed by `compute_shadow_factor` on the
+    /// software path and by the WGSL on the GPU one (pat-s3rrv.90).
+    pub shadow_bias: f32,
+    pub shadow_normal_bias: f32,
+    /// `light_specular` — how much this light contributes to highlights.
+    /// ⚠️ The positional x2 is applied in the shader, not here, so this stays
+    /// the authored value.
+    pub specular: f32,
+    /// `light_negative` — the light SUBTRACTS instead of adding. Godot does it
+    /// as a sign flip on the energy, so it must not become a colour change.
+    pub negative: bool,
+    /// `directional_shadow_max_distance` / `directional_shadow_fade_start` —
+    /// where a directional light's shadow dissolves out. Inert for positional
+    /// lights, which are bounded by their own `range`.
+    pub directional_shadow_max_distance: f32,
+    pub directional_shadow_fade_start: f32,
     pub editor_only: bool,
 }
 
@@ -578,12 +716,23 @@ pub enum SceneLightKind {
 /// Directional lights stay capped at 4 (Godot's sky sun-disc limit); omni and spot
 /// share a further budget so a pathological scene cannot unbound the light loop.
 fn scene_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
-    const MAX_POSITIONAL_LIGHTS: usize = 8;
     let mut lights = scene_directional_lights(tree);
+
+    // 🔑 The positional budget is whatever the frame's light array has LEFT, not
+    // a second independent number.
+    //
+    // It used to be a hardcoded 8 beside the directional cap of 4, so a scene
+    // could hand over at most 12 lights while the GPU path uploads
+    // `array<LightData, 16>` — four slots permanently unused. Worse, the two
+    // numbers were free to drift: the renderer truncates past its array SILENTLY,
+    // so raising either side alone would have started dropping lights with no
+    // diagnostic. Deriving it from the shared `MAX_SCENE_LIGHTS` makes the
+    // collector and both renderers agree by construction.
+    let max_positional = gdserver3d::light::MAX_SCENE_LIGHTS.saturating_sub(lights.len());
 
     let mut positional = 0usize;
     for nid in tree.all_nodes_in_tree_order() {
-        if positional >= MAX_POSITIONAL_LIGHTS {
+        if positional >= max_positional {
             break;
         }
         let Some(node) = tree.get_node(nid) else {
@@ -623,6 +772,13 @@ fn scene_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
             ),
         };
 
+        let synced = synced_light(
+            tree,
+            nid,
+            kind,
+            gdscene::node3d::get_light_color(tree, nid),
+            gdscene::node3d::get_light_energy(tree, nid) as f32,
+        );
         lights.push(SceneLight3D {
             kind,
             position: transform.origin,
@@ -632,12 +788,34 @@ fn scene_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
             spot_angle_attenuation: gdscene::node3d::get_spot_angle_attenuation(tree, nid) as f32,
             shadow_enabled: bool_prop_3d_render(tree, nid, "shadow_enabled"),
             direction,
-            color: gdscene::node3d::get_light_color(tree, nid),
-            energy: gdscene::node3d::get_light_energy(tree, nid) as f32,
+            // From the shared reader, so the temperature tint it folded in
+            // survives (pat-s3rrv.90).
+            color: synced.color,
+            energy: synced.energy,
             angular_distance: 0.0,
             // Only directional lights draw a sky sun disc.
             sky: false,
             affects_scene: true,
+            temperature: synced.temperature,
+            cull_mask: synced.cull_mask,
+            shadow_bias: synced.shadow_bias,
+            shadow_normal_bias: synced.shadow_normal_bias,
+            specular: synced.specular,
+            negative: synced.negative,
+            directional_shadow_max_distance: synced.directional_shadow_max_distance,
+            directional_shadow_fade_start: synced.directional_shadow_fade_start,
+            indirect_energy: synced.indirect_energy,
+            volumetric_fog_energy: synced.volumetric_fog_energy,
+            distance_fade_enabled: synced.distance_fade_enabled,
+            distance_fade_begin: synced.distance_fade_begin,
+            distance_fade_shadow: synced.distance_fade_shadow,
+            distance_fade_length: synced.distance_fade_length,
+            shadow_opacity: synced.shadow_opacity,
+            shadow_caster_mask: synced.shadow_caster_mask,
+            shadow_split_1: synced.shadow_split_1,
+            shadow_split_2: synced.shadow_split_2,
+            shadow_split_3: synced.shadow_split_3,
+            blend_splits: synced.blend_splits,
             editor_only: bool_prop_3d_render(tree, nid, "editor_only"),
         });
         positional += 1;
@@ -662,6 +840,51 @@ fn bool_prop_3d_render(tree: &SceneTree, nid: gdscene::NodeId, key: &str) -> boo
     )
 }
 
+/// Runs the shared property reader over `nid`, seeded with the authored colour
+/// and energy (pat-s3rrv.90).
+///
+/// ⚠️ The colour goes in FIRST and comes back out again, because
+/// `sync_light_properties` folds `light_temperature` into whatever colour the
+/// light already carries. Reading `light_color` afterwards would overwrite the
+/// tint with the untinted authored value and make temperature a no-op — which is
+/// the bug this bead is about, reintroduced one layer down.
+fn synced_light(
+    tree: &SceneTree,
+    nid: gdscene::NodeId,
+    kind: SceneLightKind,
+    base_color: Color,
+    energy: f32,
+) -> Light3D {
+    // ⚠️ SEED WITH THE LIGHT'S OWN CLASS. `sync_light_properties` only
+    // overwrites what the node actually authored, so every unauthored property
+    // keeps the SEED's default — and three of them differ per class:
+    //
+    //     shadow_bias         directional 0.1   omni 0.1   spot 0.03
+    //     shadow_normal_bias  directional 2.0   omni 1.0   spot 1.0
+    //     light_specular      directional 1.0   omni 0.5   spot 0.5
+    //
+    // Seeding everything as directional (as this did) gave an unauthored omni
+    // light a normal bias of 2.0 and a specular of 1.0 instead of 1.0 and 0.5.
+    // That was inert while `setup_editor_lighting_3d` dropped those fields;
+    // the moment they are carried through it becomes a wrong picture for every
+    // omni and spot light in every scene.
+    let mut light = match kind {
+        SceneLightKind::Directional => Light3D::directional(Light3DId(0)),
+        SceneLightKind::Omni => Light3D::point(Light3DId(0), Vector3::ZERO),
+        // Position and direction are placeholders — the caller supplies the
+        // real ones; only this seed's DEFAULTS are load-bearing here.
+        SceneLightKind::Spot => {
+            Light3D::spot(Light3DId(0), Vector3::ZERO, Vector3::new(0.0, -1.0, 0.0))
+        }
+    };
+    light.color = base_color;
+    light.energy = energy;
+    if let Some(node) = tree.get_node(nid) {
+        gdscene::render_server_3d::sync_light_properties(node, &mut light);
+    }
+    light
+}
+
 fn scene_directional_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
     let mut lights = Vec::new();
     for nid in tree.all_nodes_in_tree_order() {
@@ -678,6 +901,13 @@ fn scene_directional_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
             continue;
         }
         let sky_mode = gdscene::node3d::get_light_sky_mode(tree, nid);
+        let synced = synced_light(
+            tree,
+            nid,
+            SceneLightKind::Directional,
+            gdscene::node3d::get_light_color(tree, nid),
+            gdscene::node3d::get_light_energy(tree, nid) as f32,
+        );
         lights.push(SceneLight3D {
             kind: SceneLightKind::Directional,
             // A directional light is infinitely far away, so only its direction
@@ -689,13 +919,33 @@ fn scene_directional_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
             spot_angle_attenuation: 1.0,
             shadow_enabled: bool_prop_3d_render(tree, nid, "shadow_enabled"),
             direction: Vector3::new(dir.x / len, dir.y / len, dir.z / len),
-            color: gdscene::node3d::get_light_color(tree, nid),
-            energy: gdscene::node3d::get_light_energy(tree, nid) as f32,
+            color: synced.color,
+            energy: synced.energy,
             angular_distance: gdscene::node3d::get_light_angular_distance(tree, nid) as f32,
             // Godot sky_mode: LIGHT_ONLY (1) draws no sky sun disc; SKY_ONLY (2)
             // draws the disc but does not shade the scene; LIGHT_AND_SKY (0) both.
             sky: sky_mode != 1,
             affects_scene: sky_mode != 2,
+            temperature: synced.temperature,
+            cull_mask: synced.cull_mask,
+            shadow_bias: synced.shadow_bias,
+            shadow_normal_bias: synced.shadow_normal_bias,
+            specular: synced.specular,
+            negative: synced.negative,
+            directional_shadow_max_distance: synced.directional_shadow_max_distance,
+            directional_shadow_fade_start: synced.directional_shadow_fade_start,
+            indirect_energy: synced.indirect_energy,
+            volumetric_fog_energy: synced.volumetric_fog_energy,
+            distance_fade_enabled: synced.distance_fade_enabled,
+            distance_fade_begin: synced.distance_fade_begin,
+            distance_fade_shadow: synced.distance_fade_shadow,
+            distance_fade_length: synced.distance_fade_length,
+            shadow_opacity: synced.shadow_opacity,
+            shadow_caster_mask: synced.shadow_caster_mask,
+            shadow_split_1: synced.shadow_split_1,
+            shadow_split_2: synced.shadow_split_2,
+            shadow_split_3: synced.shadow_split_3,
+            blend_splits: synced.blend_splits,
             editor_only: bool_prop_3d_render(tree, nid, "editor_only"),
         });
         if lights.len() >= 4 {
@@ -1867,6 +2117,7 @@ fn populate_editor_scene_3d(
                 item.albedo.unwrap_or(MESH_COLOR_3D),
             ),
             Render3DKind::Collision { .. } => unreachable!("handled above"),
+            Render3DKind::Geometry { mesh } => (mesh.clone(), item.albedo.unwrap_or(MESH_COLOR_3D)),
             Render3DKind::Primitive { shape } => {
                 if matches!(shape, PrimitiveShape::Camera | PrimitiveShape::Light) {
                     node_gizmos.push((item.global_transform, *shape));
@@ -1972,6 +2223,36 @@ fn setup_editor_lighting_3d(
         light.color = sl.color;
         light.energy = sl.energy.max(0.0);
         light.angular_distance = sl.angular_distance;
+        // Everything the editor path used to drop on the floor (pat-s3rrv.90).
+        // `light.color` above already carries the `light_temperature` tint,
+        // folded in by the shared reader — that is the one property here the
+        // rasterizer actually consumes, because it reads `color` and knows
+        // nothing about temperature.
+        light.temperature = sl.temperature;
+        light.cull_mask = sl.cull_mask;
+        light.indirect_energy = sl.indirect_energy;
+        light.volumetric_fog_energy = sl.volumetric_fog_energy;
+        light.distance_fade_enabled = sl.distance_fade_enabled;
+        light.distance_fade_begin = sl.distance_fade_begin;
+        light.distance_fade_shadow = sl.distance_fade_shadow;
+        light.distance_fade_length = sl.distance_fade_length;
+        light.shadow_opacity = sl.shadow_opacity;
+        light.shadow_caster_mask = sl.shadow_caster_mask;
+        // ⚠️ These six were read by the shared reader and then DROPPED here, so
+        // they reached `RenderServer3DAdapter` (which has no non-test callers)
+        // but never the shipped editor or Play view. Carrying a property into
+        // `SceneLight3D` is only half the wiring; this copy is the other half,
+        // and a field missing from it fails silently at its default.
+        light.shadow_bias = sl.shadow_bias;
+        light.shadow_normal_bias = sl.shadow_normal_bias;
+        light.specular = sl.specular;
+        light.negative = sl.negative;
+        light.directional_shadow_max_distance = sl.directional_shadow_max_distance;
+        light.directional_shadow_fade_start = sl.directional_shadow_fade_start;
+        light.shadow_split_1 = sl.shadow_split_1;
+        light.shadow_split_2 = sl.shadow_split_2;
+        light.shadow_split_3 = sl.shadow_split_3;
+        light.blend_splits = sl.blend_splits;
         // Godot's sky_mode: LIGHT_ONLY lights shade the scene but draw no sky
         // sun disc (sky_suns_from_lights filters on this); SKY_ONLY lights draw
         // the disc but do not shade the scene (affects_scene gates that).
@@ -2673,6 +2954,67 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(scene_directional_lights(&tree).len(), 4);
+    }
+
+    /// 🔑 THE POSITIONAL BUDGET IS THE FRAME'S REMAINING LIGHT SLOTS, NOT A
+    /// SECOND INDEPENDENT NUMBER.
+    ///
+    /// It used to be a hardcoded 8 beside the directional cap of 4, so a scene
+    /// could hand over at most 12 lights while the GPU uploads
+    /// `array<LightData, 16>` — four slots permanently unused, and the two
+    /// numbers free to drift apart with no diagnostic (the renderer truncates
+    /// past its array silently).
+    ///
+    /// ⚠️ Asserted as EXACTLY `MAX_SCENE_LIGHTS`, not "more than 12": the point
+    /// is that the frame is now filled, and a plain inequality would also pass
+    /// for a budget that overshot the array and started dropping lights.
+    #[test]
+    fn positional_lights_fill_the_remaining_light_budget() {
+        gdobject::class_db::register_3d_classes();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        // Far more of each than the budget allows, so the caps are what decide.
+        for i in 0..6 {
+            tree.add_child(root, Node::new(&format!("Sun{i}"), "DirectionalLight3D"))
+                .unwrap();
+        }
+        for i in 0..20 {
+            tree.add_child(root, Node::new(&format!("Lamp{i}"), "OmniLight3D"))
+                .unwrap();
+        }
+
+        let lights = scene_lights(&tree);
+        assert_eq!(
+            lights.len(),
+            gdserver3d::light::MAX_SCENE_LIGHTS,
+            "the collector must fill the frame's light array, not stop at 12"
+        );
+        let directional = lights
+            .iter()
+            .filter(|l| matches!(l.kind, SceneLightKind::Directional))
+            .count();
+        assert_eq!(directional, 4, "the directional cap is unchanged");
+    }
+
+    /// With no directional lights at all, every slot goes to positional ones.
+    ///
+    /// This is what "derived budget" buys over a fixed 8, and it fails under the
+    /// old hardcoded cap — which is why it is a separate test rather than a
+    /// second assertion above.
+    #[test]
+    fn a_scene_without_suns_gives_every_slot_to_positional_lights() {
+        gdobject::class_db::register_3d_classes();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        for i in 0..20 {
+            tree.add_child(root, Node::new(&format!("Lamp{i}"), "OmniLight3D"))
+                .unwrap();
+        }
+        assert_eq!(
+            scene_lights(&tree).len(),
+            gdserver3d::light::MAX_SCENE_LIGHTS,
+            "with no suns the whole budget is positional; the old fixed 8 gave 8"
+        );
     }
 
     /// A mesh's resolved `albedo_color` flows into its render item, so the

@@ -19,6 +19,10 @@ gdserver3d = { path = "../gdserver3d" }
 gdrender3d = { path = "../gdrender3d" }
 gdrender2d = { path = "../gdrender2d" }
 gdplatform = { path = "../gdplatform" }
+# Already used by gdresource and gdrender2d at this exact version and already
+# resolved in Cargo.lock (0.8.9) — HTTPRequest.accept_gzip needs a decoder and
+# this adds no new package to the graph.
+miniz_oxide = "0.8"
 thiserror.workspace = true
 tracing.workspace = true
 serde_json.workspace = true

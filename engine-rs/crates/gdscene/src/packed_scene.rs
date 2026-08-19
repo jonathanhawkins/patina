@@ -777,15 +777,125 @@ impl PackedScene {
                         .and_then(|p| p.get("closed")),
                     Some(Variant::Bool(true))
                 );
+                // Carry the AUTHORED control points onto the node, so the
+                // runtime `Curve3D` can rebuild the bezier the scene described
+                // rather than only the polyline baked from it. `sample`,
+                // `samplef` and `tessellate` all evaluate handles, which the
+                // baked polyline has already thrown away (pat-s3rrv.91 item 5).
+                //
+                // ⚠️ Written from `raw`, BEFORE the `closed` push below. Godot's
+                // `_data["points"]` does NOT contain the duplicated first point
+                // — `closed` is a separate flag and `sample`/`tessellate` add
+                // the wrap segment themselves. Writing the post-push array
+                // alongside `curve_closed = true` would make them wrap a second
+                // time, appending a closing segment the author never drew.
+                tmpl.properties.insert(
+                    "curve_control_points".into(),
+                    Variant::PackedVector3Array(raw.to_vec()),
+                );
+                tmpl.properties
+                    .insert("curve_closed".into(), Variant::Bool(closed));
+
                 if closed && control.len() > 2 {
                     control.push(control[0]);
                 }
-                let baked = crate::bezier_bake::bake_curve_3d(&control, 16);
+
+                // `bake_interval` is "the distance in meters between two
+                // adjacent cached points" (`doc/classes/Curve3D.xml:204`), and
+                // every baker below has to agree on it: the polyline, the tilts
+                // and the up vectors are read INDEX-FOR-INDEX by the runtime, so
+                // the subdivision is computed ONCE here and handed to all three.
+                // `bake_curve_3d_tilts` takes no geometry and could not derive
+                // it even if it wanted to.
+                //
+                // ⚠️ Resolved AFTER the `closed` push so the wrap segment is
+                // subdivided too — a curve that loops back across the whole path
+                // has its longest span in exactly that pair.
+                //
+                // ⚠️ An `Int` arm as well as a `Float` one: Godot writes whole
+                // numbers unquoted, so a hand-edited `bake_interval = 1` arrives
+                // as `Variant::Int`.
+                //
+                // ⚠️ A non-positive interval falls back to the class default
+                // rather than through to the baker. `even_length_schedule_3d`
+                // reads `<= 0.0` as "no subdivision" — correct for a caller that
+                // asked for it directly, but a scene file carrying `0.0` has an
+                // out-of-range value, not a request for a 2-point path, and
+                // silently baking one would drop the curve to its chords.
+                let bake_interval = match sub_resource_props
+                    .get(&curve_id)
+                    .and_then(|p| p.get("bake_interval"))
+                {
+                    Some(Variant::Float(f)) if *f > 0.0 => *f as f32,
+                    Some(Variant::Int(i)) if *i > 0 => *i as f32,
+                    _ => crate::bezier_bake::CURVE3D_BAKE_INTERVAL,
+                };
+                let schedule = crate::bezier_bake::even_length_schedule_3d(
+                    &control,
+                    crate::bezier_bake::MAX_BAKE_STAGES,
+                    bake_interval,
+                );
+
+                let baked = crate::bezier_bake::bake_curve_3d(&control, &schedule);
                 if baked.is_empty() {
                     continue;
                 }
                 tmpl.properties
                     .insert("curve_points".into(), Variant::PackedVector3Array(baked));
+
+                // Per-point tilt, which `_set_data` requires and Godot always
+                // writes (`curve.cpp:2278-2299`). An earlier pass deliberately
+                // skipped it — "inventing a tilt would be worse than [none]" —
+                // which was right while nothing consumed a tilt; PathFollow3D
+                // now twists about the tangent by it, so the value has to
+                // travel with the polyline.
+                //
+                // ⚠️ Baked to the SAME cadence as the points and carried as a
+                // parallel array, so `curve_points[i]` and `curve_tilts[i]`
+                // describe one place on the curve. A tilt array that disagreed
+                // in length with the polyline would rotate the follower by an
+                // angle belonging to somewhere else on the path — plausible
+                // motion, wrong everywhere.
+                if let Some(Variant::PackedFloat32Array(raw_tilts)) = data.get("tilts") {
+                    let mut tilts = raw_tilts.clone();
+                    // Mirrors the `closed` handling above: the appended copy of
+                    // the first control point needs its tilt appended too, or
+                    // the two arrays end at different lengths.
+                    if closed && tilts.len() > 2 && control.len() == tilts.len() + 1 {
+                        tilts.push(tilts[0]);
+                    }
+                    if tilts.len() == control.len() {
+                        let baked_tilts =
+                            crate::bezier_bake::bake_curve_3d_tilts(&tilts, &schedule);
+                        tmpl.properties.insert(
+                            "curve_tilts".into(),
+                            Variant::PackedFloat32Array(baked_tilts),
+                        );
+                    }
+                }
+
+                // Per-sample UP VECTORS by parallel transport, which is what
+                // gives a PathFollow3D its roll on a curve that climbs or banks
+                // (`curve.cpp:1785-1822`).
+                //
+                // ⚠️ `up_vector_enabled` DEFAULTS TO TRUE
+                // (`doc/classes/Curve3D.xml`), so an absent property must bake
+                // them. Godot represents the disabled case by clearing the
+                // cache, so the property is simply absent here too and every
+                // consumer falls back to world up.
+                let up_vectors_enabled = !matches!(
+                    sub_resource_props
+                        .get(&curve_id)
+                        .and_then(|p| p.get("up_vector_enabled")),
+                    Some(Variant::Bool(false))
+                );
+                if up_vectors_enabled {
+                    let ups = crate::bezier_bake::bake_curve_3d_up_vectors(&control, &schedule);
+                    if !ups.is_empty() {
+                        tmpl.properties
+                            .insert("curve_up_vectors".into(), Variant::PackedVector3Array(ups));
+                    }
+                }
                 continue;
             }
             if class != Some("Curve2D") {
@@ -813,11 +923,33 @@ impl PackedScene {
                     position: t[2],
                 })
                 .collect();
-            // Godot's `bake_interval` is a distance (default 5px); this baker
-            // takes samples per segment, so a fixed step count stands in. 16 is
-            // dense enough that the arc-length table tracks a typical editor
-            // curve to well under a pixel.
-            let baked = crate::bezier_bake::bake_curve(&control, 16);
+            // `bake_interval` is "the distance in pixels between two adjacent
+            // cached points" (`doc/classes/Curve2D.xml:174`), the 2D twin of the
+            // Curve3D handling above.
+            //
+            // ⚠️ The default is 5.0 PIXELS, twenty-five times the 3D default of
+            // 0.2 metres. The two constants are separate for that reason —
+            // sharing one would resample every 2D path at a metre-scale density.
+            //
+            // ⚠️ A uniform step count CANNOT honour this, which is what the old
+            // literal 16 here was: a zero-handle segment is a smoothstep that
+            // crosses its own chord at 1.5x speed, so the midpoint gap
+            // overshoots whatever count is chosen (pat-s3rrv.83's measurement:
+            // 0.05859232 = 15/256 for a requested 0.05).
+            let bake_interval = match sub_resource_props
+                .get(&curve_id)
+                .and_then(|p| p.get("bake_interval"))
+            {
+                Some(Variant::Float(f)) if *f > 0.0 => *f as f32,
+                Some(Variant::Int(i)) if *i > 0 => *i as f32,
+                _ => crate::bezier_bake::CURVE2D_BAKE_INTERVAL,
+            };
+            let schedule = crate::bezier_bake::even_length_schedule_2d(
+                &control,
+                crate::bezier_bake::MAX_BAKE_STAGES,
+                bake_interval,
+            );
+            let baked = crate::bezier_bake::bake_curve(&control, &schedule);
             if baked.is_empty() {
                 continue;
             }

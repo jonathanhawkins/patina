@@ -509,7 +509,7 @@ pub fn validate_shader_source(source: &str) -> ShaderValidation {
     };
 
     // Godot requires a `shader_type` declaration; without one the parser errors.
-    if gdresource::shader_tokenizer::extract_shader_type(&tokens).is_none() {
+    let Some(shader_type) = gdresource::shader_tokenizer::extract_shader_type(&tokens) else {
         return ShaderValidation {
             ok: false,
             errors: vec![ShaderDiagnostic {
@@ -519,11 +519,45 @@ pub fn validate_shader_source(source: &str) -> ShaderValidation {
             }],
             warnings: Vec::new(),
         };
-    }
+    };
 
     // Semantic pass: a call to a function that is neither built-in nor
     // defined in this shader is an error, not a warning (pat-nzgdu.141).
-    let errors = undefined_function_errors(source);
+    let mut errors = undefined_function_errors(source);
+
+    // pat-s3rrv.36 clause 2: a source the GDShader front end cannot parse
+    // becomes a line-numbered error the editor can point at, instead of being
+    // dropped silently. Godot reports these at compile time.
+    //
+    // ⚠️ Gated TWO ways, and both matter:
+    //
+    // 1. `canvas_item` only. `parse_fragment_body_checked` drives the 2D
+    //    matcher, which is the wrong matcher for a spatial `fragment()` — a
+    //    valid spatial shader would leave it empty, fall through to the AST, and
+    //    get a fabricated syntax error. It also keeps the live spatial gates
+    //    (`semantic_pass_accepts_builtins_constructors_and_user_functions` and
+    //    its sibling) provably untouched.
+    //
+    // 2. Only when the matcher produced NOTHING — which is
+    //    `parse_fragment_body_checked`'s own contract, not an extra condition
+    //    imposed here. `shader_ast::parse_shader` still errors on top-level
+    //    constructs it does not model (struct declarations were a real bug,
+    //    shader_ast.rs:391-400), so gating on it alone would reject valid
+    //    shaders. A shader that actually renders can never be reported broken.
+    //
+    // ⚠️ `ShaderError` is 1-based and so is this `ShaderDiagnostic`, so the line
+    // copies straight across. Do NOT mirror the 3D path, whose own
+    // `ShaderDiagnostic` is 0-based and subtracts one.
+    if shader_type == "canvas_item" {
+        if let Err(e) = gdserver2d::shader::parse_fragment_body_checked(source) {
+            errors.push(ShaderDiagnostic {
+                line: e.line,
+                col: e.col,
+                message: e.message.clone(),
+            });
+        }
+    }
+
     ShaderValidation {
         ok: errors.is_empty(),
         errors,
@@ -1259,6 +1293,98 @@ mod tests {
     /// Built-ins, type constructors and shader-defined functions must NOT be
     /// flagged — a false positive here would break every real shader.
     #[test]
+    /// 🔑 A canvas_item source the front end cannot parse names its line.
+    ///
+    /// ⚠️ **The fixture must not contain a `COLOR` assignment.** All five of the
+    /// 2D line-matcher's shapes are `COLOR`-prefixed (`COLOR =`, `COLOR.rgb =`,
+    /// `COLOR.a =`, `COLOR.rgb *=`, `COLOR *=`), and the matcher is lossy enough
+    /// to accept a malformed right-hand side — my first attempt used `COLOR = ;`
+    /// and the matcher swallowed it, returned a non-empty instruction list, and
+    /// `parse_fragment_body_checked` short-circuited to `Ok` before ever
+    /// consulting the front end. The test failed with "got []" and the wiring was
+    /// never at fault. A body of locals with no `COLOR` write is what the real
+    /// fixture (fixtures/shaders/outline.gdshader) looks like anyway, and it is
+    /// the only shape that actually reaches the AST.
+    ///
+    /// ⚠️ The assertion is a RANGE rather than an exact line on purpose: a parser
+    /// may attribute a failure to the token that broke or to the statement that
+    /// contains it, and pinning the exact one would make this test about the
+    /// parser's internal choice rather than about the diagnostic reaching the
+    /// editor. What matters is that a real line is named — `line: 0` was a live
+    /// bug here (out of range for a 1-based field, so nothing could highlight it).
+    #[test]
+    fn shader_diagnostic_reports_the_offending_line() {
+        let src = "shader_type canvas_item;\n\
+                   \n\
+                   void fragment() {\n\
+                       vec4 col = texture(TEXTURE, UV);\n\
+                       float w = max(col.a, ;\n\
+                   }\n";
+        let v = validate_shader_source(src);
+
+        assert!(
+            !v.ok,
+            "a broken shader must not validate, got {:?}",
+            v.errors
+        );
+        let diag = v
+            .errors
+            .first()
+            .expect("a broken shader must produce a diagnostic");
+        assert_ne!(
+            diag.line, 0,
+            "line 0 is out of range for a 1-based field — nothing can highlight it",
+        );
+        assert!(
+            diag.line >= 3,
+            "the diagnostic must point into the fragment body, not default to \
+             the top of the file; got line {}",
+            diag.line,
+        );
+    }
+
+    /// 🔑 The control: a shader that RENDERS is never reported broken.
+    ///
+    /// ⚠️ This is the assertion that makes the gating safe rather than merely
+    /// present. `shader_ast::parse_shader` still errors on top-level constructs
+    /// it does not model, so a diagnostic gated on it alone would reject valid
+    /// shaders. The checked parser only consults the AST when the matcher
+    /// produced nothing, so anything that draws is immune.
+    #[test]
+    fn shader_diagnostic_never_fires_on_a_shader_that_renders() {
+        let src = "shader_type canvas_item;\n\
+                   void fragment() {\n\
+                       COLOR = vec4(1.0, 0.0, 0.0, 1.0);\n\
+                   }\n";
+        let v = validate_shader_source(src);
+        assert!(
+            v.ok,
+            "a canvas_item shader that produces instructions must validate, got {:?}",
+            v.errors,
+        );
+    }
+
+    /// 🔑 Spatial sources are left alone.
+    ///
+    /// ⚠️ `parse_fragment_body_checked` drives the 2D matcher. A valid SPATIAL
+    /// fragment() leaves that matcher empty, which would fall through to the AST
+    /// and report a fabricated syntax error for a perfectly good shader. Scoping
+    /// the check to canvas_item is what keeps the spatial gates above honest.
+    #[test]
+    fn shader_diagnostic_skips_spatial_sources() {
+        let src = "shader_type spatial;\n\
+                   void fragment() {\n\
+                       ROUGHNESS = 0.25;\n\
+                       METALLIC = 1.0;\n\
+                   }\n";
+        let v = validate_shader_source(src);
+        assert!(
+            v.ok,
+            "a spatial shader must not be judged by the 2D matcher, got {:?}",
+            v.errors,
+        );
+    }
+
     fn semantic_pass_accepts_builtins_constructors_and_user_functions() {
         let src = "shader_type spatial;\n\
                    float helper(float x) { return x * 2.0; }\n\

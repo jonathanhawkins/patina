@@ -485,12 +485,7 @@ impl RenderServer3DAdapter {
                 continue;
             }
             // Only roots evaluate; descendants are folded in by their root.
-            let parent_is_csg = node
-                .parent()
-                .and_then(|p| tree.get_node(p))
-                .map(|p| is_csg_class(p.class_name()))
-                .unwrap_or(false);
-            if parent_is_csg {
+            if !is_csg_root(tree, nid) {
                 continue;
             }
 
@@ -552,6 +547,23 @@ impl RenderServer3DAdapter {
                             new_id
                         };
 
+                    // -- blend shapes (pat-s3rrv.23) --
+                    // Godot deforms a mesh by its blend-shape weights before
+                    // skinning. Until now nothing called `apply_morph` from any
+                    // render stage, so changing a weight moved no pixel — the
+                    // import and the maths both existed and never met.
+                    //
+                    // ⚠️ Its OWN branch, ahead of skinning: the skinning branch
+                    // is gated on `is_skinned()`, so folding morph in there
+                    // would skip every unskinned morphed mesh.
+                    let morphed = {
+                        let base = self.instance_map.node_to_base_mesh.get(&nid);
+                        base.and_then(|base| morphed_mesh(tree, nid, base))
+                    };
+                    if let Some(mesh) = &morphed {
+                        self.renderer.set_mesh(inst_id, mesh.clone());
+                    }
+
                     // -- skeletal skinning (pat-0q2kx.3) --
                     // Godot: a MeshInstance3D bound to a Skeleton3D is deformed
                     // by that skeleton's live bone poses before rasterization
@@ -559,11 +571,22 @@ impl RenderServer3DAdapter {
                     // from the undeformed base every frame so the pose the
                     // skeleton phase just computed is what gets drawn.
                     if let Some(skeleton) = Self::resolve_skeleton(tree, nid) {
-                        let base = self.instance_map.node_to_base_mesh.get(&nid);
-                        if let Some(base) = base.filter(|m| m.is_skinned()) {
-                            let poses = skeleton3d::bone_pose_array(tree, skeleton);
-                            let skin = Self::resolve_skin(tree, skeleton);
-                            let skinned = gdserver3d::skin::skin_mesh(base, &skin, &poses);
+                        let skinned = {
+                            // ⚠️ Skin the MORPHED mesh when there is one. Reading
+                            // the undeformed base here would silently discard the
+                            // morph for any mesh that is both morphed and
+                            // skinned — the `set_mesh` below overwrites the one
+                            // above.
+                            let base = morphed
+                                .as_ref()
+                                .or_else(|| self.instance_map.node_to_base_mesh.get(&nid));
+                            base.filter(|m| m.is_skinned()).map(|base| {
+                                let poses = skeleton3d::bone_pose_array(tree, skeleton);
+                                let skin = Self::resolve_skin(tree, skeleton);
+                                gdserver3d::skin::skin_mesh(base, &skin, &poses)
+                            })
+                        };
+                        if let Some(skinned) = skinned {
                             self.skinned_vertices.insert(nid, skinned.vertices.clone());
                             self.renderer.set_mesh(inst_id, skinned);
                         }
@@ -1792,7 +1815,104 @@ fn csg_transform_mesh(mesh: &mut Mesh3D, root_inv: Transform3D, child_global: Tr
 /// descendant is folded in with its own `operation` (union / intersection /
 /// subtraction) via the `gdserver3d::csg` solver. Invisible nodes are skipped.
 /// Returns `None` when the subtree produces no geometry at all.
-fn evaluate_csg_tree(tree: &SceneTree, root: NodeId) -> Option<Mesh3D> {
+/// Applies a `MeshInstance3D`'s blend-shape weights to `base` (pat-s3rrv.23).
+///
+/// A module-level free function, like the other mesh helpers here — the
+/// `Self::`-qualified resolvers it sits beside (`resolve_skeleton`,
+/// `resolve_skin`) are associated fns, and calling this one the same way is
+/// what broke the first build.
+///
+/// `None` when the mesh carries no blend shapes or every weight is zero — in
+/// both cases the result is the base mesh, and returning it would clone a whole
+/// mesh per node per frame for nothing.
+///
+/// ⚠️ The mode defaults to **Relative**, which is Godot's actual default:
+/// `ArrayMesh.blend_shape_mode` is `default="1"` and `BLEND_SHAPE_MODE_RELATIVE`
+/// is 1 (`doc/classes/ArrayMesh.xml:209`). `BlendShapeMode`'s own doc records
+/// that this was previously — and wrongly — believed to be Normalized.
+fn morphed_mesh(tree: &SceneTree, nid: NodeId, base: &Mesh3D) -> Option<Mesh3D> {
+    use gdrender3d::morph::{apply_morph_with_mode, BlendShapeMode, MorphTarget};
+    use gdvariant::Variant;
+
+    if base.blend_shapes.is_empty() {
+        return None;
+    }
+    let node = tree.get_node(nid)?;
+
+    // Godot addresses shapes by NAME (`blend_shapes/<name>` on the instance),
+    // not by index, so the weight array is built from the shape names rather
+    // than from whatever order the properties happen to be in.
+    let weights: Vec<f32> = base
+        .blend_shapes
+        .iter()
+        .map(
+            |shape| match node.get_property(&format!("blend_shapes/{}", shape.name)) {
+                Variant::Float(w) => w as f32,
+                Variant::Int(w) => w as f32,
+                _ => 0.0,
+            },
+        )
+        .collect();
+    if weights.iter().all(|w| *w == 0.0) {
+        return None;
+    }
+
+    let targets: Vec<MorphTarget> = base
+        .blend_shapes
+        .iter()
+        .map(|shape| MorphTarget {
+            name: shape.name.clone(),
+            deltas: shape.vertex_deltas.clone(),
+        })
+        .collect();
+    let mode = match node.get_property("blend_shape_mode") {
+        Variant::Int(0) => BlendShapeMode::Normalized,
+        _ => BlendShapeMode::Relative,
+    };
+
+    let mut out = base.clone();
+    out.vertices = apply_morph_with_mode(&base.vertices, &targets, &weights, mode);
+    Some(out)
+}
+
+/// Whether `class` is one of the CSG node classes.
+///
+/// ⚠️ Public so a caller can SKIP CSG descendants. They contribute geometry to
+/// their root and must draw nothing themselves; without that skip a subtracted
+/// sphere still appears as its own marker beside the hole it cut.
+pub fn is_csg_class_name(class: &str) -> bool {
+    is_csg_class(class)
+}
+
+/// Whether `nid` is the ROOT of a CSG tree — the only node that evaluates.
+///
+/// ⚠️ Public together with [`evaluate_csg_tree`] so the editor's render path
+/// shares this rule instead of re-deriving it (pat-s3rrv.89). A caller that got
+/// it wrong would draw every shape of a boolean tree as its own solid AND the
+/// carved result on top — a subtracted sphere would appear as a sphere.
+///
+/// Godot folds descendants into their root (`modules/csg/csg_shape.cpp`), so a
+/// CSG node parented to another CSG node contributes geometry but draws nothing
+/// of its own.
+pub fn is_csg_root(tree: &SceneTree, nid: NodeId) -> bool {
+    let Some(node) = tree.get_node(nid) else {
+        return false;
+    };
+    if !is_csg_class(node.class_name()) {
+        return false;
+    }
+    !node
+        .parent()
+        .and_then(|p| tree.get_node(p))
+        .map(|p| is_csg_class(p.class_name()))
+        .unwrap_or(false)
+}
+
+/// Folds a CSG subtree into one mesh (union / intersection / subtraction).
+///
+/// ⚠️ Call only for a node [`is_csg_root`] accepts; on a descendant this would
+/// re-evaluate that descendant's own subtree as if it were independent.
+pub fn evaluate_csg_tree(tree: &SceneTree, root: NodeId) -> Option<Mesh3D> {
     use gdserver3d::csg::CSGCombiner3D;
 
     let root_inv = node3d::get_global_transform(tree, root).inverse();
@@ -1863,6 +1983,19 @@ fn geometry_instance_settings(
         material_overlay,
         ..GeometryInstanceSettings::default()
     };
+
+    // `VisualInstance3D.layers` — the mesh side of `light_cull_mask`. Godot's
+    // default is layer 1 (`doc/classes/VisualInstance3D.xml`), which is what
+    // `GeometryInstanceSettings::default()` already carries.
+    //
+    // ⚠️ Rides the geometry-settings channel rather than a new trait method:
+    // `set_geometry_instance_settings` is already synced end to end, so this
+    // reaches the renderer through a path that is known to work. Read as an INT
+    // because `.tscn` stores the bitmask that way; a zero is kept as authored
+    // (a mesh on no layer is lit by nothing), so only a non-Int is ignored.
+    if let Variant::Int(layers) = node.get_property("layers") {
+        g.layers = layers as u32;
+    }
 
     // ⚠️ Two spellings in the wild: a `.tscn` stores `cast_shadow` as Godot's
     // enum ordinal, but Patina's own `node3d::set_cast_shadow` writes a Bool.
@@ -1935,11 +2068,42 @@ pub fn geometry_instance_settings_for_node(
     geometry_instance_settings(node, overlay)
 }
 
-fn sync_light_properties(node: &crate::node::Node, light: &mut Light3D) {
+/// Reads the full `Light3D` property set off a scene node (pat-s3rrv.90).
+///
+/// ⚠️ Public so the EDITOR's render path can share it. It used to be private
+/// with a single caller inside `RenderServer3DAdapter`, while
+/// `gdeditor::viewport_3d_render::scene_lights` hand-read about ten properties
+/// of its own — so the same scene light shaded differently depending on which
+/// renderer walked it, and everything below was silently dropped in the editor
+/// and Play viewport.
+///
+/// ⚠️ `light_temperature` is folded into `light.color` here rather than left as
+/// a field, which is what makes it reach the shading at all: the rasterizer
+/// reads `color` and has no notion of temperature.
+pub fn sync_light_properties(node: &crate::node::Node, light: &mut Light3D) {
     use gdvariant::Variant;
 
-    if let Variant::Float(t) = node.get_property("light_temperature") {
-        light.temperature = t as f32;
+    /// Reads a numeric light property as `f32`, accepting either numeric kind.
+    ///
+    /// Matching only the float kind silently DROPS the value when a script
+    /// writes it, because GDScript types a bare `3000` or `1` as an **Int** —
+    /// `light.light_temperature = 3000` and `light.shadow_opacity = 1` are the
+    /// natural spellings and both were ignored, leaving the property at its
+    /// default with no error. `.tscn` files happen to write `3000.0`, which is
+    /// why every scene-loaded test missed it (pat-s3rrv.90).
+    ///
+    /// Same shape as the readers already used for `pixel_size` and `font_scale`
+    /// in this file.
+    let num = |key: &str| -> Option<f32> {
+        match node.get_property(key) {
+            Variant::Float(f) => Some(f as f32),
+            Variant::Int(i) => Some(i as f32),
+            _ => None,
+        }
+    };
+
+    if let Some(t) = num("light_temperature") {
+        light.temperature = t;
         let tint = gdserver3d::light::kelvin_to_rgb(light.temperature);
         light.color = Color::new(
             light.color.r * tint.r,
@@ -1951,42 +2115,67 @@ fn sync_light_properties(node: &crate::node::Node, light: &mut Light3D) {
     if let Variant::Int(mask) = node.get_property("light_cull_mask") {
         light.cull_mask = mask as u32;
     }
-    if let Variant::Float(e) = node.get_property("light_indirect_energy") {
-        light.indirect_energy = e as f32;
+    if let Some(e) = num("light_indirect_energy") {
+        light.indirect_energy = e;
     }
-    if let Variant::Float(e) = node.get_property("light_volumetric_fog_energy") {
-        light.volumetric_fog_energy = e as f32;
+    if let Some(e) = num("light_volumetric_fog_energy") {
+        light.volumetric_fog_energy = e;
     }
     if let Variant::Bool(b) = node.get_property("distance_fade_enabled") {
         light.distance_fade_enabled = b;
     }
-    if let Variant::Float(v) = node.get_property("distance_fade_begin") {
-        light.distance_fade_begin = v as f32;
+    if let Some(v) = num("distance_fade_begin") {
+        light.distance_fade_begin = v;
     }
-    if let Variant::Float(v) = node.get_property("distance_fade_shadow") {
-        light.distance_fade_shadow = v as f32;
+    if let Some(v) = num("distance_fade_shadow") {
+        light.distance_fade_shadow = v;
     }
-    if let Variant::Float(v) = node.get_property("distance_fade_length") {
-        light.distance_fade_length = v as f32;
+    if let Some(v) = num("distance_fade_length") {
+        light.distance_fade_length = v;
     }
-    if let Variant::Float(v) = node.get_property("shadow_opacity") {
-        light.shadow_opacity = v as f32;
+    if let Some(v) = num("shadow_opacity") {
+        light.shadow_opacity = v;
+    }
+    // ⚠️ In WORLD UNITS, and the per-class defaults already seeded by the
+    // `Light3D` constructors differ (0.1 base / 0.03 spot), so an ABSENT
+    // property must leave the constructor's value alone rather than fall back
+    // to a shared constant here.
+    if let Some(v) = num("shadow_bias") {
+        light.shadow_bias = v;
+    }
+    // ⚠️ In SHADOW-MAP TEXELS, not world units — Godot pre-multiplies by the
+    // texel size before the shader sees it. Different unit system from
+    // `shadow_bias` directly above, despite the neighbouring names.
+    if let Some(v) = num("shadow_normal_bias") {
+        light.shadow_normal_bias = v;
+    }
+    if let Some(v) = num("light_specular") {
+        light.specular = v;
+    }
+    if let Some(v) = num("directional_shadow_max_distance") {
+        light.directional_shadow_max_distance = v;
+    }
+    if let Some(v) = num("directional_shadow_fade_start") {
+        light.directional_shadow_fade_start = v;
     }
     if let Variant::Int(mask) = node.get_property("shadow_caster_mask") {
         light.shadow_caster_mask = mask as u32;
+    }
+    if let Variant::Bool(b) = node.get_property("light_negative") {
+        light.negative = b;
     }
     if let Variant::Bool(b) = node.get_property("editor_only") {
         light.editor_only = b;
     }
     // DirectionalLight3D PSSM splits.
-    if let Variant::Float(v) = node.get_property("directional_shadow_split_1") {
-        light.shadow_split_1 = v as f32;
+    if let Some(v) = num("directional_shadow_split_1") {
+        light.shadow_split_1 = v;
     }
-    if let Variant::Float(v) = node.get_property("directional_shadow_split_2") {
-        light.shadow_split_2 = v as f32;
+    if let Some(v) = num("directional_shadow_split_2") {
+        light.shadow_split_2 = v;
     }
-    if let Variant::Float(v) = node.get_property("directional_shadow_split_3") {
-        light.shadow_split_3 = v as f32;
+    if let Some(v) = num("directional_shadow_split_3") {
+        light.shadow_split_3 = v;
     }
     if let Variant::Bool(b) = node.get_property("directional_shadow_blend_splits") {
         light.blend_splits = b;
@@ -2338,6 +2527,87 @@ mod tests {
     use crate::scene_tree::SceneTree;
     use gdcore::math::{Color, Rect2, Vector2, Vector3};
     use gdvariant::Variant;
+
+    /// Builds a MeshInstance3D carrying one named blend shape that pushes every
+    /// vertex +1 on X, and a node whose weight for it is `weight`.
+    fn morph_fixture(weight: Option<f32>) -> (SceneTree, crate::node::NodeId, Mesh3D) {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let nid = tree
+            .add_child(root, Node::new("Morphed", "MeshInstance3D"))
+            .expect("node added");
+        if let Some(w) = weight {
+            if let Some(node) = tree.get_node_mut(nid) {
+                node.set_property("blend_shapes/wide", Variant::Float(w as f64));
+            }
+        }
+        let mut base = Mesh3D::cube(1.0);
+        let deltas = vec![Vector3::new(1.0, 0.0, 0.0); base.vertices.len()];
+        base.blend_shapes = vec![gdserver3d::mesh::BlendShape3D {
+            name: "wide".to_string(),
+            vertex_deltas: deltas,
+        }];
+        (tree, nid, base)
+    }
+
+    /// 🔑 A blend-shape weight actually moves vertices.
+    ///
+    /// ⚠️ The whole point of this bead's layer 3: the glTF importer produced
+    /// blend shapes and `apply_morph` could consume them, but no render stage
+    /// ever called it, so a weight moved nothing. This asserts the node sync
+    /// pass's helper, which is what feeds `set_mesh`.
+    #[test]
+    fn blend_shape_weight_deforms_the_mesh() {
+        let (tree, nid, base) = morph_fixture(Some(1.0));
+        let morphed = morphed_mesh(&tree, nid, &base)
+            .expect("a non-zero weight must produce a deformed mesh");
+
+        assert_eq!(morphed.vertices.len(), base.vertices.len());
+        for (before, after) in base.vertices.iter().zip(morphed.vertices.iter()) {
+            assert!(
+                (after.x - (before.x + 1.0)).abs() < 1e-5,
+                "weight 1.0 on a +1 X delta must move each vertex a full unit: \
+                 {before:?} -> {after:?}",
+            );
+        }
+    }
+
+    /// 🔑 Weights are addressed by NAME, not by index.
+    ///
+    /// ⚠️ Godot exposes `blend_shapes/<name>` on the instance. A lookup keyed by
+    /// position would happily read a DIFFERENT shape's weight whenever the
+    /// property order and the shape order disagree — which is invisible for a
+    /// mesh with a single shape, i.e. exactly the fixture above.
+    #[test]
+    fn blend_shape_weight_is_looked_up_by_name() {
+        let (mut tree, nid, base) = morph_fixture(None);
+        if let Some(node) = tree.get_node_mut(nid) {
+            // A weight under the WRONG name must not reach the "wide" shape.
+            node.set_property("blend_shapes/narrow", Variant::Float(1.0));
+        }
+        assert!(
+            morphed_mesh(&tree, nid, &base).is_none(),
+            "a weight authored under another shape's name must not deform this \
+             one; positional lookup would have applied it",
+        );
+    }
+
+    /// An absent or zero weight leaves the mesh alone (and clones nothing).
+    #[test]
+    fn a_zero_blend_shape_weight_does_not_deform() {
+        let (tree, nid, base) = morph_fixture(Some(0.0));
+        assert!(
+            morphed_mesh(&tree, nid, &base).is_none(),
+            "zero weight is the base mesh; returning it would clone a whole \
+             mesh per node per frame for nothing",
+        );
+
+        let (tree, nid, base) = morph_fixture(None);
+        assert!(
+            morphed_mesh(&tree, nid, &base).is_none(),
+            "an unauthored weight behaves as zero",
+        );
+    }
 
     #[test]
     fn empty_scene_renders_black() {
@@ -3515,6 +3785,128 @@ material_override = SubResource("ShaderMaterial_1")
         assert!(
             px.g > px.r && px.g > px.b,
             "centre pixel should be green-dominant from the sprite modulate, got {px:?}"
+        );
+    }
+
+    /// 🔑 `light_specular` AUTHORED ON A NODE REACHES THE `Light3D` — in both
+    /// GDScript spellings — and the class defaults survive when it is unset.
+    ///
+    /// ⚠️ The unset half is the point of the whole property: `Light3D` and
+    /// `DirectionalLight3D` default to **1.0** while `OmniLight3D`/
+    /// `SpotLight3D` default to **0.5**, and Godot doubles the positional ones
+    /// on the way to the shader — so every light type comes out at an effective
+    /// 1.0 and wiring this moves no existing render. A single shared default
+    /// here would silently halve or double every positional highlight.
+    ///
+    /// ⚠️ `0.25` on purpose: 1.0 and 0.5 are the defaults, so a fixture using
+    /// either is green whether or not the read happens at all.
+    #[test]
+    fn light_specular_is_read_from_the_node_and_defaults_per_class() {
+        use gdserver3d::light::{Light3D, Light3DId};
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let nid = tree
+            .add_child(root, Node::new("Sun", "DirectionalLight3D"))
+            .expect("node added");
+
+        // Unset: the per-class defaults stand.
+        let mut directional = Light3D::directional(Light3DId(1));
+        let mut omni = Light3D::point(Light3DId(2), Vector3::ZERO);
+        let mut spot = Light3D::spot(Light3DId(3), Vector3::ZERO, Vector3::new(0.0, -1.0, 0.0));
+        let node = tree.get_node(nid).expect("node exists");
+        sync_light_properties(node, &mut directional);
+        sync_light_properties(node, &mut omni);
+        sync_light_properties(node, &mut spot);
+        assert_eq!(
+            directional.specular, 1.0,
+            "Light3D/DirectionalLight3D default"
+        );
+        assert_eq!(omni.specular, 0.5, "OmniLight3D default");
+        assert_eq!(spot.specular, 0.5, "SpotLight3D default");
+
+        // Authored as a float, the `.tscn` spelling.
+        tree.get_node_mut(nid)
+            .expect("node exists")
+            .set_property("light_specular", Variant::Float(0.25));
+        let mut light = Light3D::directional(Light3DId(1));
+        sync_light_properties(tree.get_node(nid).expect("node exists"), &mut light);
+        assert_eq!(light.specular, 0.25, "float spelling must be read");
+
+        // Authored as an int, the spelling GDScript gives `light.light_specular
+        // = 1`. Matching only the float kind drops this silently.
+        tree.get_node_mut(nid)
+            .expect("node exists")
+            .set_property("light_specular", Variant::Int(1));
+        let mut light = Light3D::point(Light3DId(2), Vector3::ZERO);
+        sync_light_properties(tree.get_node(nid).expect("node exists"), &mut light);
+        assert_eq!(
+            light.specular, 1.0,
+            "int spelling must be read — and it must OVERRIDE the 0.5 omni \
+             default, which is what makes this assertion non-vacuous"
+        );
+    }
+
+    /// 🔑 `directional_shadow_max_distance` AND `directional_shadow_fade_start`
+    /// ARE READ FROM THE NODE, WITH GODOT'S DEFAULTS WHEN UNSET.
+    ///
+    /// ⚠️ Both are declared on `DirectionalLight3D` ALONE — neither
+    /// `OmniLight3D` nor `SpotLight3D` nor the `Light3D` base exposes them —
+    /// but they are stored as base `Light3D` params, so every constructor
+    /// carries the same defaults here. They are simply inert for positional
+    /// lights, whose shadows are bounded by their own `range`.
+    ///
+    /// ⚠️ `fade_start = 1.0` must SURVIVE the read. Godot clamps it to 0.999,
+    /// but only at the point of use in the shader — clamping on the way in
+    /// would make the property fail to round-trip through the inspector.
+    #[test]
+    fn directional_shadow_fade_is_read_from_the_node_with_godot_defaults() {
+        use gdserver3d::light::{Light3D, Light3DId};
+
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let nid = tree
+            .add_child(root, Node::new("Sun", "DirectionalLight3D"))
+            .expect("node added");
+
+        // Unset: Godot's DirectionalLight3D defaults, on every light type.
+        for mut light in [
+            Light3D::directional(Light3DId(1)),
+            Light3D::point(Light3DId(2), Vector3::ZERO),
+            Light3D::spot(Light3DId(3), Vector3::ZERO, Vector3::new(0.0, -1.0, 0.0)),
+        ] {
+            sync_light_properties(tree.get_node(nid).expect("node exists"), &mut light);
+            assert_eq!(light.directional_shadow_max_distance, 100.0);
+            assert_eq!(light.directional_shadow_fade_start, 0.8);
+        }
+
+        // Authored as floats, the `.tscn` spelling. 40.0/0.25 on purpose —
+        // neither is a default, so the assertion fails if the read is missing.
+        {
+            let node = tree.get_node_mut(nid).expect("node exists");
+            node.set_property("directional_shadow_max_distance", Variant::Float(40.0));
+            node.set_property("directional_shadow_fade_start", Variant::Float(0.25));
+        }
+        let mut light = Light3D::directional(Light3DId(1));
+        sync_light_properties(tree.get_node(nid).expect("node exists"), &mut light);
+        assert_eq!(light.directional_shadow_max_distance, 40.0);
+        assert_eq!(light.directional_shadow_fade_start, 0.25);
+
+        // Authored as ints, the spelling GDScript gives `light.
+        // directional_shadow_max_distance = 50`. Matching only the float kind
+        // drops this silently and leaves the default in place.
+        {
+            let node = tree.get_node_mut(nid).expect("node exists");
+            node.set_property("directional_shadow_max_distance", Variant::Int(50));
+            node.set_property("directional_shadow_fade_start", Variant::Int(1));
+        }
+        let mut light = Light3D::directional(Light3DId(1));
+        sync_light_properties(tree.get_node(nid).expect("node exists"), &mut light);
+        assert_eq!(light.directional_shadow_max_distance, 50.0);
+        assert_eq!(
+            light.directional_shadow_fade_start, 1.0,
+            "an authored 1.0 must round-trip — the 0.999 clamp is the shader's, \
+             not the loader's"
         );
     }
 }

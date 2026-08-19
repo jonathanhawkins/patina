@@ -335,6 +335,7 @@ mod tests {
             camera_position: Vector3::ZERO,
             lights: vec![],
             directional_shadow_maps: vec![],
+            layers: 1,
             omni_shadow_cubemaps: vec![],
             textures: MaterialTextures::default(),
         }

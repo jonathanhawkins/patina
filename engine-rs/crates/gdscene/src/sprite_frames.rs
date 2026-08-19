@@ -6,9 +6,16 @@
 //!
 //! * [`sprite_source_rect`] — the texture sub-rectangle a `Sprite2D` should draw
 //!   given its region / sheet-frame settings.
-//! * [`SpriteFrames`] + [`AnimatedSpritePlayback`] — an `AnimatedSprite2D`
-//!   animation set and a playback state machine that advances at the animation
-//!   FPS and signals `animation_finished`.
+//! * [`SpriteFrames`] + [`AnimatedSpritePlayback`] — an animation set and a
+//!   playback state machine that advances at the animation FPS and signals
+//!   `animation_finished`.
+//!
+//! ⚠️ The playback half is **dimension-agnostic**: [`AnimatedSpritePlayback`]
+//! holds an animation name, a frame index and a clock, and [`SpriteFrames`] is
+//! just the frame table. Neither inspects a node or a class name, so both serve
+//! `AnimatedSprite3D` exactly as they serve `AnimatedSprite2D`. What is 2D-only
+//! is the DRIVER that walks the tree looking for nodes to advance
+//! (`main_loop.rs`) — adding 3D there needs no new playback code (pat-s3rrv.92).
 
 use std::collections::HashMap;
 
@@ -90,7 +97,7 @@ pub struct SpriteAnimation {
     ///
     /// Replaces the bare frame *count* this carried before pat-0q2kx.100: the
     /// count alone could drive playback state but never say which texture to
-    /// draw, which is why `AnimatedSprite2D` rendered as an invisible marker.
+    /// draw, which is why an animated sprite rendered as an invisible marker.
     pub frames: Vec<SpriteFrameEntry>,
     /// Playback rate in frames per second.
     pub speed: f32,
@@ -209,7 +216,13 @@ impl SpriteFrames {
     }
 }
 
-/// Playback state for an `AnimatedSprite2D`.
+/// Playback state for an animated sprite, 2D or 3D.
+///
+/// ⚠️ Nothing here is dimension-specific — it is an animation name, a frame
+/// index and a clock. The previous doc said `AnimatedSprite2D`, which read as a
+/// limitation of this type and sent at least two passes looking for 3D playback
+/// code to write; the only thing missing for 3D is a driver that walks the tree
+/// and calls [`advance`](Self::advance) (pat-s3rrv.92).
 #[derive(Debug, Clone)]
 pub struct AnimatedSpritePlayback {
     /// The currently-selected animation name.

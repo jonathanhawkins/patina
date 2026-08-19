@@ -63,6 +63,21 @@ struct ModelUniforms {
     metallic: f32,
     shading_mode: u32,   // 0=unlit, 1=lambert, 2=phong
     num_lights: u32,
+    // `VisualInstance3D.layers` — the render-layer BITMASK of the instance being
+    // drawn. Intersected with each light's `cull_mask` below.
+    //
+    // ⚠️ This is why `light_cull_mask` needed a WGSL change at all, unlike
+    // `shadow_opacity` and the distance fade: it is the only property in the set
+    // that is PER DRAW rather than per light, so it cannot be folded into the
+    // light uniform.
+    layers: u32,
+    // Explicit padding back to a multiple of 16: the struct's alignment comes
+    // from its mat4x4, and Rust's [[f32; 4]; 4] has an align of only 4, so the
+    // two languages agree only if the tail is spelled out. See the note on
+    // LightData.
+    _model_pad0: u32,
+    _model_pad1: u32,
+    _model_pad2: u32,
 };
 @group(1) @binding(0)
 var<uniform> model: ModelUniforms;
@@ -82,9 +97,52 @@ struct LightData {
     position: vec3<f32>,
     // -1 = no shadow map bound; 0 = sample `shadow_depth` (primary directional).
     shadow_map_index: i32,
+    // Godot `Light3D.shadow_opacity`: how dark this light's shadow is
+    // (pat-s3rrv.90). Mirrors the software `LightUniform` field of the same name.
+    shadow_opacity: f32,
+    // `light_cull_mask`: which render layers this light touches. Takes the
+    // FIRST of the three slots reserved when shadow_opacity was added, so the
+    // struct size and every existing offset are unchanged.
+    cull_mask: u32,
+    // ⚠️ EXPLICIT PADDING, not decoration. WGSL gives `mat4x4<f32>` an align of
+    // 16, so the matrix below has to start on a 16-byte boundary; Rust's
+    // `[[f32; 4]; 4]` has an align of only 4 and would place it at offset 68.
+    // Three bare `f32`s (align 4 each) put both languages at offset 80 and keep
+    // the struct a multiple of 16, which is also what the uniform ARRAY stride
+    // requires. A `vec3<f32>` would NOT work here: its align is 16, so WGSL
+    // would push it to offset 80 and disagree with Rust by twelve bytes.
+    //
+    // These three slots are where `distance_fade_begin` / `_length` /
+    // `_shadow` go next, so the layout change is paid once for the whole bead.
+    // `Light3D.shadow_bias`, in WORLD UNITS. Takes the second of the three slots
+    // reserved when shadow_opacity landed, so the struct size and every existing
+    // offset are unchanged.
+    shadow_bias: f32,
+    // `Light3D.shadow_normal_bias`, in SHADOW-MAP TEXELS. Takes the LAST slot
+    // reserved when shadow_opacity landed — the struct is now full, and the next
+    // property needs a new 16-byte row.
+    shadow_normal_bias: f32,
     // Light-space clip matrix: proj * view (column-major), matching software
     // `ShadowMap::{view_matrix, proj_matrix}` composition.
     shadow_view_proj: mat4x4<f32>,
+    // `Light3D.light_specular`, as authored. ⚠️ A NEW 16-byte row: the three
+    // slots reserved when shadow_opacity landed were all spent by
+    // cull_mask/shadow_bias/shadow_normal_bias, so this is the first property
+    // to grow the struct since the shadow matrix (144 -> 160 bytes).
+    //
+    // ⚠️ Placed AFTER the mat4x4 on purpose — inserting it before would move the
+    // matrix off its 16-byte boundary and silently reinterpret every existing
+    // field on the GPU side. Three explicit f32 pads (align 4 each) keep Rust
+    // and WGSL agreeing at 160 and keep the uniform ARRAY STRIDE a multiple of
+    // 16. A `vec3<f32>` would NOT work: its align is 16, so WGSL would round
+    // the struct to 176 while Rust stayed at 160.
+    specular: f32,
+    // `DirectionalLight3D.directional_shadow_max_distance` / `_fade_start`.
+    // These take TWO of the three pads reserved with `specular`, so the struct
+    // is still 160 bytes and every offset below the matrix is untouched.
+    directional_shadow_max_distance: f32,
+    directional_shadow_fade_start: f32,
+    _specular_pad2: f32,
 };
 
 struct LightArray {
@@ -193,24 +251,59 @@ fn get_light_dir(light: LightData, frag_pos: vec3<f32>) -> vec3<f32> {
 
 // pat-32edz: directional shadow factor. Mirrors software `ShadowMap::sample` +
 // `compute_shadow_factor` (returns 1.0 fully lit, 0.0 fully shadowed).
-// Bias matches `shadow_map::SHADOW_BIAS`.
-const SHADOW_BIAS: f32 = 0.005;
+// 🔑 The depth range the shadow frustum projects with — `shadow_map::SHADOW_FAR
+// - SHADOW_NEAR`. A `shadow_bias` is authored in WORLD units while this
+// comparison is in NORMALIZED post-divide depth, so the bias must be divided by
+// this before it means anything here: Godot's directional default of 0.1 world
+// units is ~0.001 normalized. Feeding the raw value in would be a hundred times
+// too large and detach every shadow from its caster.
+//
+// ⚠️ A WGSL literal cannot be derived from the Rust constants; a test asserts
+// they agree.
+const SHADOW_DEPTH_RANGE: f32 = 99.9;
+// World size of one shadow-map texel: `2 * shadow_map::SHADOW_EXTENT /
+// SHADOW_MAP_SIZE`. `shadow_normal_bias` is authored relative to this, so the
+// offset below scales by it.
+//
+// ⚠️ Another literal WGSL cannot derive; a test asserts it matches the Rust
+// constants, exactly like SHADOW_DEPTH_RANGE above.
+const SHADOW_TEXEL_SIZE: f32 = 0.15625;
+
+// Godot's NORMAL-OFFSET shadows (`scene_forward_lights_inc.glsl:489`): push the
+// sample point along the surface normal before the lookup, by
+// `shadow_normal_bias * texel_size * (1 - |dot(n, l)|)`.
+//
+// 🔑 The `1 - |dot|` term is the point — the offset grows as the surface turns
+// EDGE-ON to the light, where acne happens, and vanishes where it faces the
+// light squarely. Without it this is just a second constant bias.
+//
+// ⚠️ POSITIONAL lights carry an extra x10 (`light_storage.cpp:968`, which sits
+// above Godot's spot/omni split so it covers BOTH); directional uses the
+// unscaled form at `:724`.
+fn shadow_normal_offset(light: LightData, world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let light_dir = get_light_dir(light, world_pos);
+    var type_scale = 10.0;
+    if (light.kind == 0u) {
+        type_scale = 1.0;
+    }
+    let scale = light.shadow_normal_bias * SHADOW_TEXEL_SIZE * type_scale
+        * (1.0 - abs(dot(normal, light_dir)));
+    return normal * scale;
+}
 // Sentinel for unwritten shadow texels (CPU uses f32::MAX).
 const SHADOW_EMPTY: f32 = 1.0e30;
 
-// pat-g4i60: omni shadow bias — matches the software `OMNI_SHADOW_BIAS`
-// (shader.rs); cubemap depths are linear distance from the light.
-const OMNI_SHADOW_BIAS: f32 = 0.05;
-
 // Mirrors `ShadowCubemap::sample` + `direction_to_face_uv` (gdserver3d
 // light.rs): dominant-axis face select, (sc/ma, tc/ma) → [0,1] UV, truncating
-// texel conversion, then the linear-distance compare with OMNI_SHADOW_BIAS.
+// texel conversion, then the linear-distance compare with the light's own
+// `shadow_bias` (world units, so no conversion — see `LightData.shadow_bias`).
 // Returns 1.0 fully lit, 0.0 fully shadowed.
-fn omni_shadow_factor(light: LightData, world_pos: vec3<f32>) -> f32 {
+fn omni_shadow_factor(light: LightData, world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     if (light.shadow_enabled == 0u || light.kind != 1u || light.shadow_map_index < 0) {
         return 1.0;
     }
-    let to_frag = world_pos - light.position;
+    let biased = world_pos + shadow_normal_offset(light, world_pos, normal);
+    let to_frag = biased - light.position;
     let dist = length(to_frag);
 
     let ax = abs(to_frag.x);
@@ -254,18 +347,26 @@ fn omni_shadow_factor(light: LightData, world_pos: vec3<f32>) -> f32 {
     if (stored >= SHADOW_EMPTY) {
         return 1.0; // No occluder recorded in this texel.
     }
-    if (dist > stored + OMNI_SHADOW_BIAS) {
-        return 0.0;
+    // ⚠️ Directly, with NO division: cubemap depths are a linear distance from
+    // the light, so this comparison is already in the world units the property
+    // is authored in — unlike the normalized 2D compare above.
+    if (dist > stored + light.shadow_bias) {
+        // `shadow_opacity` scales the OCCLUSION, not the visibility, exactly as
+        // the software `compute_shadow_factor` does: `1 - occlusion * opacity`.
+        // Occlusion is binary here, so a full occluder returns `1 - opacity` —
+        // opacity 0 leaves the fragment fully lit and 1 is the old `0.0`.
+        return 1.0 - clamp(light.shadow_opacity, 0.0, 1.0);
     }
     return 1.0;
 }
 
-fn directional_shadow_factor(light: LightData, world_pos: vec3<f32>) -> f32 {
+fn directional_shadow_factor(light: LightData, world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     // kind 0 = directional, 2 = spot (both use the 2D depth map).
     if (light.shadow_enabled == 0u || (light.kind != 0u && light.kind != 2u) || light.shadow_map_index < 0) {
         return 1.0;
     }
-    let clip = light.shadow_view_proj * vec4<f32>(world_pos, 1.0);
+    let biased = world_pos + shadow_normal_offset(light, world_pos, normal);
+    let clip = light.shadow_view_proj * vec4<f32>(biased, 1.0);
     let w = clip.w;
     if (w <= 0.0) {
         return 1.0;
@@ -293,10 +394,44 @@ fn directional_shadow_factor(light: LightData, world_pos: vec3<f32>) -> f32 {
         return 1.0; // No occluder at this texel.
     }
     // Farther than stored depth + bias → in shadow.
-    if (depth > stored_depth + SHADOW_BIAS) {
-        return 0.0;
+    if (depth > stored_depth + light.shadow_bias / SHADOW_DEPTH_RANGE) {
+        // Same rule as `omni_shadow_factor`: scale the occlusion, not the
+        // visibility, so this matches the software renderer term for term.
+        return 1.0 - clamp(light.shadow_opacity, 0.0, 1.0);
     }
     return 1.0;
+}
+
+// Fades a DIRECTIONAL light's shadow out as it approaches the light's shadow
+// distance, so the last cascade dissolves instead of ending on a visible edge.
+//
+// Godot: fade_to = -max_distance, fade_from = -max_distance * min(fade_start,
+// 0.999), shadow = mix(shadow, 1.0, smoothstep(fade_from, fade_to, view_z))
+// (`light_storage.cpp:753-754`, `scene_forward_clustered.glsl:2471`).
+//
+// ⚠️ `view_z` is NEGATIVE in front of the camera, so fade_from (-80 at the
+// defaults) is GREATER than fade_to (-100) and the interval runs downwards.
+// Reading the edges as positive distances inverts the fade — the near geometry
+// would lose its shadows instead of the far.
+//
+// ⚠️ DIRECTIONAL ONLY. `directional_shadow_factor` also serves SPOT lights
+// (kind 2), so the kind test here is not redundant: without it every spot
+// light would lose its shadow past 100 units too.
+//
+// ⚠️ The `max_distance <= 0` guard is ours, not Godot's — a `.tscn` may author
+// zero, which collapses both edges onto 0.0 and makes the ratio 0/0. A NaN
+// here poisons every fragment, not just the distant ones.
+fn directional_shadow_fade(light: LightData, world_position: vec3<f32>, shadow: f32) -> f32 {
+    if (light.kind != 0u || light.directional_shadow_max_distance <= 0.0) {
+        return shadow;
+    }
+    let view_z = (camera.view_matrix * vec4<f32>(world_position, 1.0)).z;
+    let fade_to = -light.directional_shadow_max_distance;
+    let fade_from = -light.directional_shadow_max_distance
+        * min(light.directional_shadow_fade_start, 0.999);
+    let t = clamp((view_z - fade_from) / (fade_to - fade_from), 0.0, 1.0);
+    let fade = t * t * (3.0 - 2.0 * t);
+    return shadow + (1.0 - shadow) * fade;
 }
 
 @fragment
@@ -326,6 +461,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let num_lights = min(model.num_lights, 16u);
     for (var i = 0u; i < num_lights; i = i + 1u) {
         let light = light_array.lights[i];
+        // Godot's `light_cull_mask`: both sides are BITMASKS, so the test is an
+        // intersection. ⚠️ NOT an index shift — `layers` of 0b101 means "on
+        // layers 1 and 3", and reading it as the number 5 agrees for every
+        // single-layer mask (including the default 1) while mislighting
+        // everything from layer 3 up.
+        if ((light.cull_mask & model.layers) == 0u) {
+            continue;
+        }
         let light_dir = get_light_dir(light, in.world_position);
         let eval = evaluate_light(light, in.world_position);
         let intensity = eval.y;
@@ -333,8 +476,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let n_dot_l = max(dot(normal, light_dir), 0.0);
         // Each factor is 1.0 for light kinds it doesn't handle, so the
         // product applies whichever map (2D or cubemap) this light carries.
-        let shadow = directional_shadow_factor(light, in.world_position)
-            * omni_shadow_factor(light, in.world_position);
+        let raw_shadow = directional_shadow_factor(light, in.world_position, normal)
+            * omni_shadow_factor(light, in.world_position, normal);
+        let shadow = directional_shadow_fade(light, in.world_position, raw_shadow);
         let contrib = n_dot_l * intensity * shadow;
 
         // Lambert diffuse (mode == 1).
@@ -377,7 +521,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // visibility fireflies only on the GPU.
             let vis = min(0.5 / max(mix(vis_a, vis_b, alpha), 1e-6), 1.0e4);
             let f = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - l_dot_h, 5.0);
-            color += light.color * f * (d * vis * n_dot_l * intensity * shadow);
+            // `light_specular` scales the light's specular contribution.
+            // ⚠️ Godot applies it RAW for directional lights
+            // (light_storage.cpp:665) and DOUBLED for positional ones (:891),
+            // paired with defaults of 1.0 on Light3D/DirectionalLight3D against
+            // 0.5 on OmniLight3D/SpotLight3D — so both come out at an effective
+            // 1.0 and this is invisible at default values. Mirrors the software
+            // `pbr_shade`; dropping the x2 here alone would make the GPU path
+            // half as glossy as the CPU one for every omni and spot light.
+            let specular_type_scale = select(2.0, 1.0, light.kind == 0u);
+            color += light.color
+                * f
+                * (d * vis * n_dot_l * intensity * shadow * light.specular * specular_type_scale);
         }
     }
 
@@ -641,6 +796,13 @@ pub struct ModelUniformData {
     pub shading_mode: u32,
     /// Number of active lights.
     pub num_lights: u32,
+    /// `VisualInstance3D.layers` — the instance's render-layer BITMASK, tested
+    /// against each light's `cull_mask` in the shader.
+    pub layers: u32,
+    /// ⚠️ Explicit padding: the struct's align comes from its `mat4x4`, and
+    /// `[[f32; 4]; 4]` has a Rust align of 4, so the size must be spelled back
+    /// out to a multiple of 16 or the two declarations disagree.
+    pub _model_pad: [u32; 3],
 }
 
 /// Single light data for the GPU.
@@ -667,8 +829,56 @@ pub struct GpuLightData {
     pub position: [f32; 3],
     /// Shadow map slot: `-1` = none, `0` = primary directional map texture.
     pub shadow_map_index: i32,
+    /// Godot `Light3D.shadow_opacity`: how dark this light's shadow is.
+    ///
+    /// `1.0` is fully opaque (Godot's default); `0.0` means the light casts no
+    /// visible shadow. Scales the OCCLUSION, matching the software
+    /// `LightUniform::shadow_opacity`.
+    pub shadow_opacity: f32,
+    /// ⚠️ Explicit padding so `shadow_view_proj` starts at offset 80 in BOTH
+    /// languages — see the comment on the WGSL `LightData` struct. Without it
+    /// Rust would place the matrix at 68 (its align is 4) while WGSL placed it
+    /// at 80 (mat4x4 align 16), and every light after the first would be read
+    /// from the wrong bytes — a silent corruption, not a compile error.
+    /// `light_cull_mask`: which render layers this light touches.
+    ///
+    /// Occupies the FIRST of the three slots reserved when `shadow_opacity` was
+    /// added, so the layout change was paid once — size and every existing
+    /// offset are unchanged.
+    pub cull_mask: u32,
+    /// `Light3D.shadow_bias`, in WORLD UNITS — the shader divides by the shadow
+    /// frustum's depth range for the 2D compare and uses it raw for the omni one.
+    pub shadow_bias: f32,
+    /// `Light3D.shadow_normal_bias`, in SHADOW-MAP TEXELS — the last reserved
+    /// slot. The struct is now full; the next field needs a new 16-byte row.
+    pub shadow_normal_bias: f32,
     /// Light-space clip matrix (`proj * view`), column-major.
     pub shadow_view_proj: [[f32; 4]; 4],
+    /// `Light3D.light_specular`, as authored — the x2 for positional lights is
+    /// applied in the shader, matching the software `LightUniform`.
+    ///
+    /// ⚠️ First field in a NEW 16-byte row (144 -> 160 bytes). It sits AFTER
+    /// the matrix so every existing offset is unchanged; putting it before
+    /// would push `shadow_view_proj` off its 16-byte boundary and reinterpret
+    /// every field the GPU already reads.
+    pub specular: f32,
+    /// ⚠️ EXPLICIT PADDING to 160 bytes, and it must be three separate `f32`s.
+    /// A `[f32; 3]` in Rust sits at offset 148, but its WGSL counterpart
+    /// `vec3<f32>` has an align of 16 and would land at 160, making the WGSL
+    /// struct 176 while Rust stayed at 160 — the two languages would disagree
+    /// about every light after the first. Same trap as the pad before
+    /// `shadow_view_proj`.
+    /// `DirectionalLight3D.directional_shadow_max_distance` — takes the first
+    /// pad reserved beside `specular`, so the struct stays 160 bytes.
+    pub directional_shadow_max_distance: f32,
+    /// `DirectionalLight3D.directional_shadow_fade_start`, as authored. The
+    /// 0.999 clamp is applied in the shader, matching the software path and
+    /// Godot itself — the authored value must round-trip.
+    pub directional_shadow_fade_start: f32,
+    /// The last of the three pads. ⚠️ Still must be a bare `f32`: see the note
+    /// on `specular` above for why a `vec3`/array pad breaks the two layouts
+    /// apart.
+    pub _specular_pad2: f32,
 }
 
 /// Light array uniform (bind group 2). Fixed-size array of 16 lights.
@@ -676,7 +886,7 @@ pub struct GpuLightData {
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LightArrayData {
     /// Up to 16 lights.
-    pub lights: [GpuLightData; 16],
+    pub lights: [GpuLightData; gdserver3d::light::MAX_SCENE_LIGHTS],
 }
 
 /// Sky-pass uniform (group 0 of the sky pipeline). Mirrors `SkyUniforms` in
@@ -1288,12 +1498,35 @@ fn empty_gpu_light() -> GpuLightData {
         spot_angle_attenuation: 1.0,
         position: [0.0, 0.0, 0.0],
         shadow_map_index: -1,
+        // An empty slot casts nothing, but the default matches Godot's so a
+        // slot that is later filled in place does not start out shadowless.
+        shadow_opacity: 1.0,
+        // An empty slot lights nothing, but an all-ones mask is Godot's
+        // default, so a slot later filled in place does not start out culled.
+        cull_mask: u32::MAX,
+        shadow_bias: 0.1,
+        shadow_normal_bias: 2.0,
         shadow_view_proj: identity_mat4(),
+        // An empty slot contributes nothing either way, but 1.0 is the base
+        // `Light3D` default, so a slot later filled in place is never dimmer
+        // than the light that lands in it.
+        specular: 1.0,
+        // An empty slot casts no shadow, so these are inert; Godot's defaults
+        // keep it consistent with the light that later fills the slot.
+        directional_shadow_max_distance: 100.0,
+        directional_shadow_fade_start: 0.8,
+        _specular_pad2: 0.0,
     }
 }
 
 /// Converts a scene [`Light3D`] into a [`GpuLightData`] (no shadow matrix yet).
-fn light_to_gpu(light: &Light3D) -> GpuLightData {
+///
+/// `camera` is the view position, needed for Godot's light-LOD distance fade.
+/// ⚠️ That fade is measured camera-to-**LIGHT**, not camera-to-fragment
+/// (`light_storage.cpp:857-864`), so it is a per-light constant and belongs
+/// here rather than in the shader — which is also why it needs no WGSL change
+/// and no new uniform field at all.
+fn light_to_gpu(light: &Light3D, camera: Vector3) -> GpuLightData {
     let kind = match light.light_type {
         LightType::Directional => 0u32,
         LightType::Point => 1u32,
@@ -1325,7 +1558,20 @@ fn light_to_gpu(light: &Light3D) -> GpuLightData {
         // SKY_ONLY light (`affects_scene == false`) contributes no surface
         // lighting; its sky sun disc is drawn separately from `self.lights`.
         color: {
-            let shade_energy = if light.affects_scene { light.energy } else { 0.0 };
+            let shade_energy = if light.affects_scene {
+                light.energy
+            } else {
+                0.0
+            };
+            // Godot's light LOD and `light_negative`, both folded into the
+            // energy exactly as the software renderer does — the SAME
+            // `distance_fade_factors`, not a second transcription of the curve.
+            // `sign = negative ? -1 : 1` (`light_storage.cpp:840`) makes the
+            // light SUBTRACT; it must not become a colour change, or the
+            // authored colour stops surviving round-trips.
+            let (energy_fade, _) = crate::renderer::distance_fade_factors(light, camera);
+            let sign = if light.negative { -1.0 } else { 1.0 };
+            let shade_energy = shade_energy * energy_fade * sign;
             [
                 srgb_to_linear_channel(light.color.r) * shade_energy,
                 srgb_to_linear_channel(light.color.g) * shade_energy,
@@ -1335,7 +1581,24 @@ fn light_to_gpu(light: &Light3D) -> GpuLightData {
         spot_angle_attenuation: light.spot_angle_attenuation,
         position: [light.position.x, light.position.y, light.position.z],
         shadow_map_index: -1,
+        // Clamped here rather than only in the shader so a `.tscn` carrying an
+        // out-of-range value cannot make the uniform disagree with the software
+        // renderer, which clamps in `compute_shadow_factor`.
+        //
+        // ⚠️ The shadow gets its OWN fade, from `distance_fade_shadow`, which is
+        // usually NEARER than `distance_fade_begin` — Godot fades a distant
+        // light's shadow out before the light itself, so the cheap thing goes
+        // first and the transition is not visible as a pop.
+        shadow_opacity: light.shadow_opacity.clamp(0.0, 1.0)
+            * crate::renderer::distance_fade_factors(light, camera).1,
+        cull_mask: light.cull_mask,
+        shadow_bias: light.shadow_bias,
+        shadow_normal_bias: light.shadow_normal_bias,
         shadow_view_proj: identity_mat4(),
+        specular: light.specular,
+        directional_shadow_max_distance: light.directional_shadow_max_distance,
+        directional_shadow_fade_start: light.directional_shadow_fade_start,
+        _specular_pad2: 0.0,
     }
 }
 
@@ -1346,12 +1609,17 @@ fn pack_lights_from_maps(
     lights: &[Light3D],
     maps: &[crate::shadow_map::ShadowMap],
     omni: &[(u64, gdserver3d::light::ShadowCubemap)],
+    camera: Vector3,
 ) -> LightArrayData {
     let mut light_data = LightArrayData {
-        lights: [empty_gpu_light(); 16],
+        lights: [empty_gpu_light(); gdserver3d::light::MAX_SCENE_LIGHTS],
     };
-    for (i, light) in lights.iter().enumerate().take(16) {
-        let mut gpu = light_to_gpu(light);
+    for (i, light) in lights
+        .iter()
+        .enumerate()
+        .take(gdserver3d::light::MAX_SCENE_LIGHTS)
+    {
+        let mut gpu = light_to_gpu(light, camera);
         if light.shadow_enabled
             && matches!(
                 light.light_type,
@@ -1385,11 +1653,12 @@ fn pack_lights_from_maps(
 fn pack_lights_with_shadows<'a>(
     lights: &[Light3D],
     instances: impl Iterator<Item = &'a Instance3D>,
+    camera: Vector3,
 ) -> (LightArrayData, Vec<crate::shadow_map::ShadowMap>) {
     let instance_list: Vec<Instance3D> = instances.cloned().collect();
     let maps = crate::shadow_map::generate_shadow_maps(lights, &instance_list);
     let omni = pack_omni_cubemaps(lights, &instance_list);
-    let light_data = pack_lights_from_maps(lights, &maps, &omni);
+    let light_data = pack_lights_from_maps(lights, &maps, &omni, camera);
     (light_data, maps)
 }
 
@@ -2163,6 +2432,9 @@ struct GpuDrawCall {
     roughness: f32,
     metallic: f32,
     shading_mode: u32,
+    /// `VisualInstance3D.layers` — the instance's render-layer bitmask, carried
+    /// per draw so the shader can test it against each light's `cull_mask`.
+    layers: u32,
     /// Face-cull mode for this draw (pat-s3rrv.30), carried the same way as the
     /// other flattened material fields above.
     cull_mode: crate::render_modes::CullMode,
@@ -2371,7 +2643,7 @@ impl GpuRenderer3D {
     /// uniform packing runs. Call with `&mut self` before the render pass
     /// takes its immutable device/target borrows; read the atlas view from
     /// `shadow_atlas_cache` afterwards.
-    fn ensure_shadow_atlas(&mut self) -> LightArrayData {
+    fn ensure_shadow_atlas(&mut self, camera: Vector3) -> LightArrayData {
         let key = shadow_state_key(&self.lights, self.instances.values());
         if self.shadow_atlas_cache.as_ref().map(|c| c.key) != Some(key) {
             // Miss: the deep clone + rasterization only happen when the scene
@@ -2395,7 +2667,7 @@ impl GpuRenderer3D {
             self.shadow_atlas_rebuilds += 1;
         }
         let cache = self.shadow_atlas_cache.as_ref().expect("just ensured");
-        pack_lights_from_maps(&self.lights, &cache.maps, &cache.omni)
+        pack_lights_from_maps(&self.lights, &cache.maps, &cache.omni, camera)
     }
 
     /// Phase 1 of a cached render (pat-ism62 #2b): expands every visible instance
@@ -2444,6 +2716,7 @@ impl GpuRenderer3D {
                     roughness: entry.roughness,
                     metallic: entry.metallic,
                     shading_mode: entry.shading_mode,
+                    layers: inst.geometry.layers,
                     cull_mode: entry.cull_mode,
                     transparency: entry.transparency,
                     alpha_scissor_threshold: entry.alpha_scissor_threshold,
@@ -2556,7 +2829,7 @@ impl GpuRenderer3D {
         // Shadow atlas + light uniforms (pat-32edz / pat-2be0q) — needs
         // `&mut self`, so it runs before the immutable borrows below; a
         // static scene reuses the cached maps + texture untouched.
-        let light_data = self.ensure_shadow_atlas();
+        let light_data = self.ensure_shadow_atlas(viewport.camera_transform.origin);
 
         let device = &self.ctx.device;
         let queue = &self.ctx.queue;
@@ -2796,7 +3069,14 @@ impl GpuRenderer3D {
                         roughness: entry.roughness,
                         metallic: entry.metallic,
                         shading_mode: entry.shading_mode,
-                        num_lights: self.lights.len().min(16) as u32,
+                        num_lights: self.lights.len().min(gdserver3d::light::MAX_SCENE_LIGHTS)
+                            as u32,
+                        // ⚠️ From the INSTANCE, not `entry`: this loop's `entry`
+                        // is a `GpuDrawEntry` (the per-surface expansion), which
+                        // carries material fields only. `GpuDrawCall` is the one
+                        // that flattens `layers`.
+                        layers: inst.geometry.layers,
+                        _model_pad: [0; 3],
                     };
                     let model_buf = create_buffer_init(
                         device,
@@ -3075,7 +3355,7 @@ impl GpuRenderer3D {
         let draw_calls = self.build_draw_calls();
         // Shadow atlas + light uniforms (pat-32edz / pat-2be0q): cached across
         // frames, regenerated only when the shadow-relevant state changes.
-        let light_data = self.ensure_shadow_atlas();
+        let light_data = self.ensure_shadow_atlas(viewport.camera_transform.origin);
 
         let device = &self.ctx.device;
         let queue = &self.ctx.queue;
@@ -3213,7 +3493,7 @@ impl GpuRenderer3D {
             &atlas.omni_view,
             "light-bind-group",
         );
-        let num_lights = self.lights.len().min(16) as u32;
+        let num_lights = self.lights.len().min(gdserver3d::light::MAX_SCENE_LIGHTS) as u32;
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("3d-render-encoder"),
@@ -3309,6 +3589,8 @@ impl GpuRenderer3D {
                     metallic: call.metallic,
                     shading_mode: call.shading_mode,
                     num_lights,
+                    layers: call.layers,
+                    _model_pad: [0; 3],
                 };
                 let model_buf = create_buffer_init(
                     device,
@@ -3675,7 +3957,7 @@ mod tests {
             "WGSL must use a shadow depth array (multi-light atlas)"
         );
         assert!(
-            SHADER_3D_WGSL.contains("SHADOW_BIAS"),
+            SHADER_3D_WGSL.contains("light.shadow_bias"),
             "WGSL must apply shadow bias matching software path"
         );
         assert!(
@@ -3690,9 +3972,17 @@ mod tests {
 
     #[test]
     fn gpu_light_data_layout_includes_shadow_matrix() {
-        // 64 (base) + 64 (mat4) = 128 bytes per light.
-        assert_eq!(std::mem::size_of::<GpuLightData>(), 128);
-        assert_eq!(std::mem::size_of::<LightArrayData>(), 128 * 16);
+        // 64 (base) + 16 (shadow_opacity, cull_mask, shadow_bias,
+        // shadow_normal_bias) + 64 (mat4) + 16 (specular + 3 pads) = 160 bytes
+        // per light.
+        //
+        // ⚠️ Was 128 until the shadow row landed (pat-s3rrv.90). This module is
+        // behind `--features gpu`, so a default-feature test run never compiles
+        // it and a stale size here stays invisible; anyone growing
+        // `GpuLightData` must update THIS assertion, `light_data_size` and
+        // `light_array_size` below, and the byte-level layout tests.
+        assert_eq!(std::mem::size_of::<GpuLightData>(), 160);
+        assert_eq!(std::mem::size_of::<LightArrayData>(), 160 * 16);
     }
 
     #[test]
@@ -3712,7 +4002,8 @@ mod tests {
         inst.visible = true;
         inst.transform = Transform3D::IDENTITY;
 
-        let (data, maps) = pack_lights_with_shadows(&[light], std::iter::once(&inst));
+        let (data, maps) =
+            pack_lights_with_shadows(&[light], std::iter::once(&inst), Vector3::ZERO);
         assert_eq!(maps.len(), 1, "one directional shadow map");
         assert_eq!(
             data.lights[0].shadow_map_index, 0,
@@ -3745,7 +4036,8 @@ mod tests {
         inst.visible = true;
         inst.transform = Transform3D::IDENTITY;
 
-        let (data, maps) = pack_lights_with_shadows(&[l0, l1], std::iter::once(&inst));
+        let (data, maps) =
+            pack_lights_with_shadows(&[l0, l1], std::iter::once(&inst), Vector3::ZERO);
         assert_eq!(maps.len(), 2, "two shadow maps for two lights");
         assert_eq!(data.lights[0].shadow_map_index, 0);
         assert_eq!(data.lights[1].shadow_map_index, 1);
@@ -3863,6 +4155,7 @@ mod tests {
             color: Color::new(1.0, 0.9, 0.8, 1.0),
             energy: 2.5,
             size: 0.5f32.to_radians(),
+            volumetric_fog_energy: 1.0,
         }];
         let data = sky_uniform_for_env(&env, &vp, 64, 64, &suns).expect("sky pass");
         assert_eq!(data.sun_params[2], 1.0);
@@ -3900,6 +4193,7 @@ mod tests {
             color: Color::new(1.0, 1.0, 1.0, 1.0),
             energy: 1.0,
             size: 0.5f32.to_radians(),
+            volumetric_fog_energy: 1.0,
         }];
         let data = sky_uniform_for_env(&env, &vp, 64, 64, &suns).expect("physical sky pass");
         assert_eq!(data.sun_params[2], 2001.0, "mode flag 2000 + sun count");
@@ -3931,20 +4225,23 @@ mod tests {
 
     #[test]
     fn model_uniform_size() {
-        // mat4x4 (64) + 2*vec4 (32) + 2*f32 (8) + 2*u32 (8) = 112 bytes.
-        assert_eq!(std::mem::size_of::<ModelUniformData>(), 112);
+        // mat4x4 (64) + 2*vec4 (32) + 2*f32 (8) + 2*u32 (8) + layers u32 (4)
+        // + 3*u32 pad (12) = 128 bytes. Was 112 before `layers` (pat-s3rrv.90);
+        // the pad keeps the struct a multiple of 16 for the uniform stride.
+        assert_eq!(std::mem::size_of::<ModelUniformData>(), 128);
     }
 
     #[test]
     fn light_data_size() {
-        // Base 64 + shadow_view_proj mat4 (64) = 128 (pat-32edz).
-        assert_eq!(std::mem::size_of::<GpuLightData>(), 128);
+        // Base 64 + shadow row 16 + shadow_view_proj mat4 (64) + specular
+        // row 16 = 160 (pat-32edz, grown twice by pat-s3rrv.90).
+        assert_eq!(std::mem::size_of::<GpuLightData>(), 160);
     }
 
     #[test]
     fn light_array_size() {
-        // 16 * 128 = 2048 bytes.
-        assert_eq!(std::mem::size_of::<LightArrayData>(), 2048);
+        // 16 * 160 = 2560 bytes.
+        assert_eq!(std::mem::size_of::<LightArrayData>(), 2560);
     }
 
     #[test]
@@ -4032,7 +4329,7 @@ mod tests {
         // the unnegated direction made every sun-facing surface ambient-black.
         let mut light = Light3D::directional(Light3DId(1));
         light.direction = Vector3::new(0.0, -1.0, 0.0);
-        let gpu = light_to_gpu(&light);
+        let gpu = light_to_gpu(&light, Vector3::ZERO);
         assert_eq!(gpu.kind, 0);
         assert_eq!(gpu.direction, [0.0, 1.0, 0.0]);
         assert_eq!(gpu.color, [1.0, 1.0, 1.0]);
@@ -4042,7 +4339,7 @@ mod tests {
     fn light_to_gpu_directional_normalizes() {
         let mut light = Light3D::directional(Light3DId(1));
         light.direction = Vector3::new(-3.0, -4.0, 0.0);
-        let gpu = light_to_gpu(&light);
+        let gpu = light_to_gpu(&light, Vector3::ZERO);
         assert!((gpu.direction[0] - 0.6).abs() < 1e-6);
         assert!((gpu.direction[1] - 0.8).abs() < 1e-6);
         assert!((gpu.direction[2] - 0.0).abs() < 1e-6);
@@ -4055,12 +4352,773 @@ mod tests {
         let mut light = Light3D::directional(Light3DId(1));
         light.energy = 5.0;
         light.affects_scene = false;
-        let gpu = light_to_gpu(&light);
+        let gpu = light_to_gpu(&light, Vector3::ZERO);
         assert_eq!(gpu.color, [0.0, 0.0, 0.0], "SKY_ONLY adds no surface light");
 
         // The default (LIGHT_AND_SKY) still shades.
         light.affects_scene = true;
-        let gpu = light_to_gpu(&light);
+        let gpu = light_to_gpu(&light, Vector3::ZERO);
         assert!(gpu.color[0] > 0.0, "LIGHT_AND_SKY must still shade the scene");
+    }
+
+    /// 🔑 THE RUST AND WGSL `LightData` STRUCTS MUST AGREE BYTE FOR BYTE.
+    ///
+    /// ⚠️ A mismatch here is NOT a compile error — it is a silent misread of
+    /// every light after the first, which shows up as garbled shadows rather
+    /// than as a failure. `shadow_opacity` sits at offset 64 and the matrix has
+    /// to start at 80, because WGSL gives `mat4x4<f32>` an align of 16 while
+    /// Rust's `[[f32; 4]; 4]` has an align of 4 and would have placed it at 68.
+    /// The three explicit `f32` pads are what close that gap; a `vec3<f32>`
+    /// would not, since its own align of 16 pushes it to 80 in WGSL only.
+    ///
+    /// Checked through the actual bytes rather than `offset_of!`, so the
+    /// assertion holds on any toolchain.
+    #[test]
+    fn shadow_opacity_gpu_layout_matches_the_wgsl_struct() {
+        let mut light = Light3D::directional(Light3DId(1));
+        light.shadow_opacity = 0.25;
+        let mut gpu = light_to_gpu(&light, Vector3::ZERO);
+        gpu.shadow_view_proj[0][0] = 7.5;
+        let bytes = bytemuck::bytes_of(&gpu);
+
+        assert_eq!(
+            std::mem::size_of::<GpuLightData>(),
+            160,
+            "the uniform ARRAY stride must stay a multiple of 16"
+        );
+        assert_eq!(std::mem::size_of::<GpuLightData>() % 16, 0);
+        assert_eq!(
+            &bytes[64..68],
+            &0.25f32.to_le_bytes(),
+            "shadow_opacity must sit at offset 64, right after shadow_map_index"
+        );
+        assert_eq!(
+            &bytes[80..84],
+            &7.5f32.to_le_bytes(),
+            "shadow_view_proj must start at offset 80, the 16-byte boundary WGSL puts it on"
+        );
+    }
+
+    /// The value has to be in the shader, in the struct AND in both shadow
+    /// functions — the software renderer applies it in the directional/spot and
+    /// the omni branch alike.
+    ///
+    /// ⚠️ Asserting the struct field alone would pass against a uniform that is
+    /// uploaded and never read, which is the failure mode this whole bead is
+    /// about.
+    #[test]
+    fn shadow_opacity_gpu_reaches_both_shader_branches() {
+        assert!(
+            SHADER_3D_WGSL.contains("shadow_opacity: f32"),
+            "the WGSL LightData struct must carry the field"
+        );
+        assert_eq!(
+            SHADER_3D_WGSL.matches("light.shadow_opacity").count(),
+            2,
+            "both omni_shadow_factor and directional_shadow_factor must use it"
+        );
+        // The old unconditional `return 0.0;` inside a shadow test is what this
+        // replaces; a stray one left behind would mean one branch still ignores
+        // the property.
+        assert!(
+            SHADER_3D_WGSL.contains("1.0 - clamp(light.shadow_opacity, 0.0, 1.0)"),
+            "the shader must scale the OCCLUSION, matching `1 - occlusion * opacity`"
+        );
+    }
+
+    /// `light_to_gpu` carries the value and clamps it, so an out-of-range
+    /// `.tscn` value cannot make the GPU disagree with the software renderer
+    /// (which clamps inside `compute_shadow_factor`).
+    #[test]
+    fn shadow_opacity_gpu_is_carried_and_clamped() {
+        let mut light = Light3D::directional(Light3DId(1));
+        assert_eq!(
+            light_to_gpu(&light, Vector3::ZERO).shadow_opacity,
+            1.0,
+            "Godot's default is a fully opaque shadow"
+        );
+
+        light.shadow_opacity = 0.5;
+        assert_eq!(light_to_gpu(&light, Vector3::ZERO).shadow_opacity, 0.5);
+
+        light.shadow_opacity = 4.0;
+        assert_eq!(
+            light_to_gpu(&light, Vector3::ZERO).shadow_opacity,
+            1.0,
+            "clamped high"
+        );
+        light.shadow_opacity = -2.0;
+        assert_eq!(
+            light_to_gpu(&light, Vector3::ZERO).shadow_opacity,
+            0.0,
+            "clamped low"
+        );
+    }
+    /// A positional light fixture matching the software renderer's own fade
+    /// test, so the two paths are compared on identical numbers.
+    ///
+    /// `distance_fade_shadow` (5) is deliberately NEARER than
+    /// `distance_fade_begin` (10): Godot fades a distant light's SHADOW out
+    /// before the light itself.
+    fn faded_point_light() -> Light3D {
+        let mut light = Light3D::point(Light3DId(1), Vector3::ZERO);
+        light.energy = 1.0;
+        light.distance_fade_enabled = true;
+        light.distance_fade_begin = 10.0;
+        light.distance_fade_shadow = 5.0;
+        light.distance_fade_length = 10.0;
+        light
+    }
+
+    /// 🔑 THE GPU PATH USES THE SOFTWARE PATH'S OWN FADE FUNCTION.
+    ///
+    /// This bead exists because the engine has two render paths and one was
+    /// lossy. A second transcription of the fade curve would recreate that on a
+    /// smaller scale — and the divergence would only appear at a distance, which
+    /// is the hardest place to notice it. So the assertion is not "the GPU fades
+    /// too" but "the GPU's energy is EXACTLY the shared factor times the
+    /// unfaded energy".
+    #[test]
+    fn distance_fade_gpu_uses_the_shared_factors() {
+        let light = faded_point_light();
+        for distance in [4.0f32, 15.0, 25.0] {
+            let camera = Vector3::new(distance, 0.0, 0.0);
+            let (energy_fade, _) = crate::renderer::distance_fade_factors(&light, camera);
+            let gpu = light_to_gpu(&light, camera);
+            let expected = srgb_to_linear_channel(light.color.r) * light.energy * energy_fade;
+            assert!(
+                (gpu.color[0] - expected).abs() < 1e-6,
+                "at {distance} away the GPU energy must be the shared fade factor \
+                 {energy_fade} applied to the light: got {}, expected {expected}",
+                gpu.color[0]
+            );
+        }
+    }
+
+    /// The fade curve itself, in absolute terms — inside the threshold nothing
+    /// changes, at half the ramp the light is at half strength, past the end it
+    /// is gone.
+    ///
+    /// ⚠️ Stated separately from the test above because that one would still
+    /// pass if BOTH paths shared the same WRONG curve. These numbers come from
+    /// Godot's `smoothstep(0, 1, 1 - (d - begin) / length)`.
+    #[test]
+    fn distance_fade_gpu_dims_a_far_light() {
+        let light = faded_point_light();
+        let at = |d: f32| light_to_gpu(&light, Vector3::new(d, 0.0, 0.0)).color[0];
+        let full = srgb_to_linear_channel(light.color.r);
+
+        assert!(
+            (at(4.0) - full).abs() < 1e-6,
+            "inside distance_fade_begin the light is at full strength"
+        );
+        assert!(
+            (at(15.0) - full * 0.5).abs() < 1e-5,
+            "halfway along the ramp smoothstep gives exactly 0.5, got {}",
+            at(15.0)
+        );
+        assert!(
+            at(25.0).abs() < 1e-6,
+            "past begin + length the light contributes nothing, got {}",
+            at(25.0)
+        );
+    }
+
+    /// 🔑 THE SHADOW FADES OUT BEFORE THE LIGHT DOES.
+    ///
+    /// At 15 units the energy is still at half strength while the shadow is
+    /// already fully gone — `distance_fade_shadow` (5) is nearer than
+    /// `distance_fade_begin` (10). Godot does this so the expensive term
+    /// disappears first and the transition is not visible as a pop.
+    ///
+    /// ⚠️ A single fade factor reused for both would put these two at the same
+    /// value and pass every other test in this file.
+    #[test]
+    fn distance_fade_gpu_fades_the_shadow_before_the_light() {
+        let mut light = faded_point_light();
+        light.shadow_opacity = 1.0;
+        let camera = Vector3::new(15.0, 0.0, 0.0);
+        let gpu = light_to_gpu(&light, camera);
+
+        assert!(
+            gpu.shadow_opacity.abs() < 1e-6,
+            "the shadow must be gone at 15 units, got {}",
+            gpu.shadow_opacity
+        );
+        let full = srgb_to_linear_channel(light.color.r);
+        assert!(
+            (gpu.color[0] - full * 0.5).abs() < 1e-5,
+            "...while the light itself is still at half strength, got {}",
+            gpu.color[0]
+        );
+    }
+
+    /// ⚠️ DIRECTIONAL LIGHTS ARE EXEMPT, and that is not an oversight.
+    ///
+    /// Godot hides all four properties on DirectionalLight3D (`light_3d.cpp:561`:
+    /// "the light LOD system only pertains to point lights") and its fade block
+    /// runs over the omni/spot sorts alone. Fading the sun by the distance to
+    /// whatever arbitrary point its node happens to sit at would be nonsense —
+    /// and a directional light's position is exactly that.
+    #[test]
+    fn distance_fade_gpu_leaves_directional_lights_alone() {
+        let mut light = Light3D::directional(Light3DId(1));
+        light.energy = 1.0;
+        light.distance_fade_enabled = true;
+        light.distance_fade_begin = 10.0;
+        light.distance_fade_length = 10.0;
+
+        let near = light_to_gpu(&light, Vector3::ZERO).color[0];
+        let far = light_to_gpu(&light, Vector3::new(1000.0, 0.0, 0.0)).color[0];
+        assert!(
+            (near - far).abs() < 1e-6 && near > 0.0,
+            "a directional light must not fade with distance: {near} vs {far}"
+        );
+    }
+
+    /// `light_negative` makes the light SUBTRACT, as a sign flip on the energy.
+    ///
+    /// ⚠️ Godot does it as `sign = negative ? -1 : 1` on the energy
+    /// (`light_storage.cpp:840`), NOT as a colour change — the authored colour
+    /// has to survive so introspection and re-tinting still see it. The uploaded
+    /// colour therefore goes negative while `light.color` itself does not.
+    #[test]
+    fn distance_fade_gpu_carries_light_negative_as_an_energy_sign() {
+        let mut light = Light3D::point(Light3DId(1), Vector3::ZERO);
+        light.energy = 1.0;
+        let positive = light_to_gpu(&light, Vector3::ZERO).color[0];
+        assert!(positive > 0.0);
+
+        light.negative = true;
+        let negative = light_to_gpu(&light, Vector3::ZERO).color[0];
+        assert!(
+            (negative + positive).abs() < 1e-6,
+            "a negative light must upload the exact negation: {negative} vs {positive}"
+        );
+        assert!(
+            light.color.r > 0.0,
+            "the AUTHORED colour must be untouched, got {}",
+            light.color.r
+        );
+    }
+
+    /// 🔑 THE GPU CULL MASK IS AN INTERSECTION OF TWO BITMASKS, AND THE STRUCTS
+    /// MUST STILL AGREE BYTE FOR BYTE.
+    ///
+    /// `cull_mask` takes the FIRST slot reserved when `shadow_opacity` landed,
+    /// so it cost no size at the time and the matrix stayed at 80.
+    /// `ModelUniformData` grows a new 16-byte row instead, because its four
+    /// trailing scalars were already full.
+    ///
+    /// ⚠️ `GpuLightData` is now **160** bytes: `light_specular` exhausted the
+    /// reserved slots and added a row AFTER the matrix. Every offset asserted
+    /// here is unchanged — that is the point of appending rather than
+    /// inserting.
+    ///
+    /// ⚠️ Checked through real bytes rather than `offset_of!`, and on BOTH
+    /// structs: a mismatch is a silent misread, not a compile error.
+    #[test]
+    fn cull_mask_gpu_layout_matches_the_wgsl_structs() {
+        let mut light = Light3D::point(Light3DId(1), Vector3::ZERO);
+        light.cull_mask = 0xABCD_1234;
+        let gpu = light_to_gpu(&light, Vector3::ZERO);
+        let bytes = bytemuck::bytes_of(&gpu);
+        assert_eq!(
+            std::mem::size_of::<GpuLightData>(),
+            160,
+            "reusing a reserved pad must NOT move any offset below; the size \
+             grew only later, when light_specular added a row after the matrix"
+        );
+        assert_eq!(
+            &bytes[68..72],
+            &0xABCD_1234u32.to_le_bytes(),
+            "cull_mask sits at offset 68, the first reserved slot"
+        );
+
+        assert_eq!(
+            std::mem::size_of::<ModelUniformData>() % 16,
+            0,
+            "the model uniform must stay a multiple of 16"
+        );
+        assert_eq!(std::mem::size_of::<ModelUniformData>(), 128);
+        let model = ModelUniformData {
+            model_matrix: identity_mat4(),
+            albedo: [0.0; 4],
+            emission: [0.0; 4],
+            roughness: 0.0,
+            metallic: 0.0,
+            shading_mode: 0,
+            num_lights: 0,
+            layers: 0x0000_BEEF,
+            _model_pad: [0; 3],
+        };
+        assert_eq!(
+            &bytemuck::bytes_of(&model)[112..116],
+            &0x0000_BEEFu32.to_le_bytes(),
+            "layers sits at offset 112, right after num_lights"
+        );
+    }
+
+    /// The shader must actually TEST the mask, not merely carry it.
+    ///
+    /// ⚠️ Asserting the struct fields alone would pass against a uniform that is
+    /// uploaded and never read — the exact failure this whole bead is about. And
+    /// the test has to be an INTERSECTION: `layers` is a bitmask on both sides,
+    /// so an index shift agrees for every single-layer mask (including the
+    /// default 1) and mislights everything from layer 3 up.
+    #[test]
+    fn cull_mask_gpu_is_tested_in_the_shader() {
+        assert!(
+            SHADER_3D_WGSL.contains("(light.cull_mask & model.layers) == 0u"),
+            "the WGSL light loop must skip a light whose mask misses this mesh"
+        );
+        assert!(
+            SHADER_3D_WGSL.contains("    cull_mask: u32,"),
+            "LightData must carry the mask"
+        );
+        assert!(
+            SHADER_3D_WGSL.contains("    layers: u32,"),
+            "ModelUniforms must carry the instance's layers"
+        );
+    }
+
+    /// `light_to_gpu` carries the mask verbatim, defaults included.
+    #[test]
+    fn cull_mask_gpu_is_carried_verbatim() {
+        let mut light = Light3D::point(Light3DId(1), Vector3::ZERO);
+        assert_eq!(
+            light_to_gpu(&light, Vector3::ZERO).cull_mask,
+            u32::MAX,
+            "Godot's default lights every layer"
+        );
+        light.cull_mask = 0b101;
+        assert_eq!(light_to_gpu(&light, Vector3::ZERO).cull_mask, 0b101);
+    }
+
+    /// 🔑 THE WGSL ARRAY LENGTH IS A LITERAL AND CANNOT BE DERIVED FROM THE
+    /// CONSTANT — so it is asserted instead.
+    ///
+    /// `LightArrayData` is now sized by `gdserver3d::light::MAX_SCENE_LIGHTS`,
+    /// but the shader source says `array<LightData, 16>` in text. If someone
+    /// raises the constant without editing the WGSL, the uniform buffer grows
+    /// while the shader keeps reading 16 entries — every light past the
+    /// sixteenth uploaded and silently ignored, with no error anywhere.
+    #[test]
+    fn max_scene_lights_matches_the_wgsl_array_length() {
+        let n = gdserver3d::light::MAX_SCENE_LIGHTS;
+        assert!(
+            SHADER_3D_WGSL.contains(&format!("array<LightData, {n}>")),
+            "the WGSL light array must be declared with {n} entries to match \
+             MAX_SCENE_LIGHTS; raising the constant needs the shader edited too"
+        );
+        assert_eq!(
+            LightArrayData {
+                lights: [empty_gpu_light(); gdserver3d::light::MAX_SCENE_LIGHTS],
+            }
+            .lights
+            .len(),
+            n
+        );
+    }
+
+    /// 🔑 THE WGSL DEPTH RANGE IS A LITERAL AND MUST MATCH THE RUST CONSTANTS.
+    ///
+    /// The 2D shadow compare divides the authored world-space `shadow_bias` by
+    /// `SHADOW_DEPTH_RANGE` to reach the normalized depth it compares in. That
+    /// range is `shadow_map::SHADOW_FAR - SHADOW_NEAR`, but WGSL cannot derive
+    /// it — so if either constant moves and the shader does not, every GPU
+    /// shadow silently gets the wrong bias while the software path stays right.
+    #[test]
+    fn shadow_bias_gpu_depth_range_matches_the_rust_constants() {
+        let range = crate::shadow_map::SHADOW_FAR - crate::shadow_map::SHADOW_NEAR;
+        assert!(
+            SHADER_3D_WGSL.contains(&format!("SHADOW_DEPTH_RANGE: f32 = {range};")),
+            "the WGSL depth range must equal SHADOW_FAR - SHADOW_NEAR ({range})"
+        );
+    }
+
+    /// Both shader branches use the authored bias, each in its own space.
+    ///
+    /// ⚠️ The 2D branch DIVIDES by the depth range and the omni branch does NOT —
+    /// cubemap depths are a linear distance from the light, so they are already
+    /// in the world units the property is authored in. Asserting only that the
+    /// field is referenced would pass against a shader that divided in both.
+    #[test]
+    fn shadow_bias_gpu_is_applied_in_both_spaces() {
+        assert!(
+            SHADER_3D_WGSL.contains("stored_depth + light.shadow_bias / SHADOW_DEPTH_RANGE"),
+            "the 2D compare must convert the world bias to normalized depth"
+        );
+        assert!(
+            SHADER_3D_WGSL.contains("stored + light.shadow_bias"),
+            "the omni compare must use the world bias directly"
+        );
+        // The constants it replaces are gone, so neither branch can silently
+        // fall back to a hardcoded value.
+        assert!(!SHADER_3D_WGSL.contains("OMNI_SHADOW_BIAS"));
+    }
+
+    /// The uniform carries the value, and reusing a reserved pad kept the layout
+    /// byte-identical.
+    #[test]
+    fn shadow_bias_gpu_layout_is_unchanged() {
+        let mut light = Light3D::spot(Light3DId(1), Vector3::ZERO, Vector3::new(0.0, -1.0, 0.0));
+        assert!(
+            (light.shadow_bias - 0.03).abs() < 1e-6,
+            "a SpotLight3D's Godot default is 0.03, not the base 0.1"
+        );
+        light.shadow_bias = 0.25;
+        let gpu = light_to_gpu(&light, Vector3::ZERO);
+        let bytes = bytemuck::bytes_of(&gpu);
+
+        assert_eq!(
+            std::mem::size_of::<GpuLightData>(),
+            160,
+            "offsets below the matrix unchanged; 160 since light_specular's row"
+        );
+        assert_eq!(
+            &bytes[72..76],
+            &0.25f32.to_le_bytes(),
+            "shadow_bias sits at offset 72, the second reserved slot"
+        );
+        assert_eq!(
+            &bytes[80..84],
+            &gpu.shadow_view_proj[0][0].to_le_bytes(),
+            "the matrix still starts at offset 80"
+        );
+    }
+
+    /// 🔑 THE THIRD WGSL LITERAL THAT MUST TRACK A RUST CONSTANT.
+    ///
+    /// `SHADOW_TEXEL_SIZE` is `2 * SHADOW_EXTENT / SHADOW_MAP_SIZE`, and WGSL
+    /// cannot derive it. Moving either constant without editing the shader
+    /// leaves every GPU normal offset scaled wrong while the software path stays
+    /// right — the same silent divergence class as `SHADOW_DEPTH_RANGE` and the
+    /// light-array length, both already guarded here.
+    #[test]
+    fn shadow_texel_size_gpu_matches_the_rust_constants() {
+        let texel =
+            2.0 * crate::shadow_map::SHADOW_EXTENT / crate::shadow_map::SHADOW_MAP_SIZE as f32;
+        assert!(
+            SHADER_3D_WGSL.contains(&format!("SHADOW_TEXEL_SIZE: f32 = {texel};")),
+            "the WGSL texel size must equal 2*SHADOW_EXTENT/SHADOW_MAP_SIZE ({texel})"
+        );
+    }
+
+    /// The normal offset is applied in BOTH shadow branches, with the positional
+    /// ×10 and the grazing-angle term.
+    ///
+    /// ⚠️ Asserting the field is merely referenced would pass against a shader
+    /// that dropped the `1 - |dot|` factor — which is what makes it a NORMAL
+    /// bias rather than a second constant one — or that applied the ×10 to
+    /// directional lights too.
+    #[test]
+    fn shadow_normal_bias_gpu_is_applied_in_both_branches() {
+        assert_eq!(
+            SHADER_3D_WGSL
+                .matches("shadow_normal_offset(light, world_pos, normal)")
+                .count(),
+            2,
+            "both the omni and the 2D shadow branch must offset the sample point"
+        );
+        assert!(
+            SHADER_3D_WGSL.contains("(1.0 - abs(dot(normal, light_dir)))"),
+            "the grazing-angle term is what distinguishes a normal bias from a \
+             constant one"
+        );
+        // The x10 is keyed on light kind: directional (0) is unscaled.
+        assert!(
+            SHADER_3D_WGSL.contains("var type_scale = 10.0;")
+                && SHADER_3D_WGSL.contains("if (light.kind == 0u) {"),
+            "positional lights take the x10; directional does not"
+        );
+    }
+
+    /// The last reserved slot is used, and the layout is still unchanged.
+    #[test]
+    fn shadow_normal_bias_gpu_fills_the_last_reserved_slot() {
+        let mut light = Light3D::point(Light3DId(1), Vector3::ZERO);
+        assert!(
+            (light.shadow_normal_bias - 1.0).abs() < 1e-6,
+            "an OmniLight3D's Godot default is 1.0, not the base 2.0"
+        );
+        light.shadow_normal_bias = 0.75;
+        let gpu = light_to_gpu(&light, Vector3::ZERO);
+        let bytes = bytemuck::bytes_of(&gpu);
+
+        assert_eq!(
+            std::mem::size_of::<GpuLightData>(),
+            160,
+            "offsets below the matrix unchanged; 160 since light_specular's row"
+        );
+        assert_eq!(
+            &bytes[76..80],
+            &0.75f32.to_le_bytes(),
+            "shadow_normal_bias sits at offset 76, the last reserved slot"
+        );
+        assert_eq!(
+            &bytes[80..84],
+            &gpu.shadow_view_proj[0][0].to_le_bytes(),
+            "the matrix still starts at offset 80"
+        );
+    }
+
+    /// 🔑 `light_specular` REACHES THE GPU, IN A NEW ROW THAT MOVES NOTHING.
+    ///
+    /// The three slots reserved when `shadow_opacity` landed were spent by
+    /// `cull_mask`/`shadow_bias`/`shadow_normal_bias`, so this property is the
+    /// first to grow `GpuLightData` since the shadow matrix: 144 → **160**.
+    ///
+    /// ⚠️ The row goes AFTER `shadow_view_proj`. Inserting it before would push
+    /// the matrix off the 16-byte boundary WGSL requires and silently
+    /// reinterpret every field the shader already reads — a wrong picture, not
+    /// a compile error. Both facts are asserted through real bytes.
+    #[test]
+    fn light_specular_gpu_layout_adds_a_row_without_moving_the_matrix() {
+        let mut light = Light3D::spot(Light3DId(1), Vector3::ZERO, Vector3::new(0.0, -1.0, 0.0));
+        assert!(
+            (light.specular - 0.5).abs() < 1e-6,
+            "a SpotLight3D's Godot default is 0.5, not the base 1.0"
+        );
+        light.specular = 0.25;
+        let mut gpu = light_to_gpu(&light, Vector3::ZERO);
+        gpu.shadow_view_proj[0][0] = 7.5;
+        let bytes = bytemuck::bytes_of(&gpu);
+
+        assert_eq!(
+            std::mem::size_of::<GpuLightData>(),
+            160,
+            "specular's row grows the struct from 144 to 160"
+        );
+        assert_eq!(
+            std::mem::size_of::<GpuLightData>() % 16,
+            0,
+            "the uniform ARRAY stride must stay a multiple of 16"
+        );
+        assert_eq!(
+            &bytes[80..84],
+            &7.5f32.to_le_bytes(),
+            "the matrix must STILL start at offset 80 — appending after it is \
+             the whole reason this layout change is safe"
+        );
+        assert_eq!(
+            &bytes[144..148],
+            &0.25f32.to_le_bytes(),
+            "specular sits at offset 144, immediately after the matrix"
+        );
+        // ⚠️ Was `bytes[148..160] == [0u8; 12]` when specular's row was all
+        // pad. Two of those three slots are now
+        // `directional_shadow_max_distance` / `_fade_start`, so only the last
+        // four bytes are still pad. Left as a byte assertion rather than
+        // deleted: a stale non-zero tail is exactly what a future field
+        // forgetting its initializer would look like.
+        assert_eq!(
+            &bytes[156..160],
+            &[0u8; 4],
+            "the one remaining pad slot must be an explicit zero"
+        );
+    }
+
+    /// 🔑 THE x2 FOR POSITIONAL LIGHTS IS A WGSL LITERAL THAT NO RUST CONSTANT
+    /// CAN REACH — the fourth of its kind in this shader.
+    ///
+    /// Godot stores `light_specular` raw for directional lights
+    /// (`light_storage.cpp:665`) and doubles it for positional ones (`:891`),
+    /// against defaults of 1.0 (`Light3D`/`DirectionalLight3D`) and 0.5
+    /// (`OmniLight3D`/`SpotLight3D`). The two cancel, so every light type sits
+    /// at an effective 1.0 and the property is invisible until authored.
+    ///
+    /// ⚠️ Dropping the x2 on this side alone would leave the GPU path exactly
+    /// HALF as glossy as the software one for every omni and spot light, at
+    /// default values, with no test failing anywhere else. Same silent-
+    /// divergence class as `SHADOW_DEPTH_RANGE` and `SHADOW_TEXEL_SIZE`.
+    #[test]
+    fn light_specular_wgsl_doubles_positional_lights_only() {
+        assert!(
+            SHADER_3D_WGSL.contains("specular: f32,"),
+            "LightData must carry the authored specular"
+        );
+        assert!(
+            SHADER_3D_WGSL.contains("select(2.0, 1.0, light.kind == 0u)"),
+            "positional lights (kind 1/2) must be doubled and directional \
+             (kind 0) left raw — select(false_val, true_val, cond)"
+        );
+        assert!(
+            SHADER_3D_WGSL.contains("light.specular * specular_type_scale"),
+            "the scale must actually multiply the specular accumulation, not \
+             just be computed"
+        );
+    }
+
+    /// 🔑 THE CPU AND GPU PATHS AGREE ON THE EFFECTIVE SPECULAR AT EVERY CLASS
+    /// DEFAULT.
+    ///
+    /// The software renderer applies the same authored value and the same
+    /// per-kind scale in `pbr_shade`. Uploading the value while the shader
+    /// applied a different scale — or the reverse — is the failure this pins:
+    /// both halves are individually plausible and only disagree in the picture.
+    #[test]
+    fn light_specular_uploads_the_authored_value_for_every_light_kind() {
+        let directional = Light3D::directional(Light3DId(1));
+        let omni = Light3D::point(Light3DId(2), Vector3::ZERO);
+        let spot = Light3D::spot(Light3DId(3), Vector3::ZERO, Vector3::new(0.0, -1.0, 0.0));
+
+        // Godot's per-class defaults, and the kind tags the shader switches on.
+        for (light, want_specular, want_kind) in [
+            (&directional, 1.0f32, 0u32),
+            (&omni, 0.5, 1),
+            (&spot, 0.5, 2),
+        ] {
+            let gpu = light_to_gpu(light, Vector3::ZERO);
+            assert_eq!(gpu.kind, want_kind, "kind tag drives the x2 in WGSL");
+            assert!(
+                (gpu.specular - want_specular).abs() < 1e-6,
+                "kind {want_kind} must upload {want_specular}, got {}",
+                gpu.specular
+            );
+            // The scale the shader will apply, mirrored here.
+            let scale = if want_kind == 0 { 1.0 } else { 2.0 };
+            assert!(
+                (gpu.specular * scale - 1.0).abs() < 1e-6,
+                "every light type must come out at an effective 1.0 at its \
+                 class default — that is what makes this change additive"
+            );
+        }
+
+        // Positive control: an authored value is not flattened to the default.
+        let mut loud = omni;
+        loud.specular = 0.25;
+        assert!(
+            (light_to_gpu(&loud, Vector3::ZERO).specular - 0.25).abs() < 1e-6,
+            "an authored specular must survive the upload"
+        );
+    }
+    /// 🔑 THE DIRECTIONAL SHADOW FADE REACHES THE GPU IN THE SLOTS SPECULAR
+    /// RESERVED — the struct does NOT grow again.
+    ///
+    /// `specular` added a 16-byte row with three spare `f32`s; two of them are
+    /// now `directional_shadow_max_distance` and `_fade_start`, so
+    /// `GpuLightData` is still 160 bytes and every offset is where it was.
+    ///
+    /// ⚠️ Asserted through real bytes, because this is exactly the change that
+    /// looks free and is not: reordering the row, or padding it differently,
+    /// would leave the Rust and WGSL structs disagreeing with no compile error
+    /// on either side.
+    #[test]
+    fn directional_shadow_fade_gpu_fills_two_of_speculars_reserved_slots() {
+        let mut light = Light3D::directional(Light3DId(1));
+        assert_eq!(
+            light.directional_shadow_max_distance, 100.0,
+            "DirectionalLight3D's Godot default"
+        );
+        assert_eq!(light.directional_shadow_fade_start, 0.8, "Godot default");
+
+        light.directional_shadow_max_distance = 40.0;
+        light.directional_shadow_fade_start = 0.25;
+        let gpu = light_to_gpu(&light, Vector3::ZERO);
+        let bytes = bytemuck::bytes_of(&gpu);
+
+        assert_eq!(
+            std::mem::size_of::<GpuLightData>(),
+            160,
+            "reusing specular's reserved pads must NOT grow the struct"
+        );
+        assert_eq!(
+            &bytes[148..152],
+            &40.0f32.to_le_bytes(),
+            "directional_shadow_max_distance sits at offset 148"
+        );
+        assert_eq!(
+            &bytes[152..156],
+            &0.25f32.to_le_bytes(),
+            "directional_shadow_fade_start sits at offset 152"
+        );
+        assert_eq!(
+            &bytes[144..148],
+            &gpu.specular.to_le_bytes(),
+            "specular must not have moved off offset 144"
+        );
+    }
+
+    /// 🔑 THE FADE IS DIRECTIONAL-ONLY, AND THE 0.999 CLAMP IS IN THE SHADER.
+    ///
+    /// ⚠️ `directional_shadow_factor` serves SPOT lights too (its guard admits
+    /// `kind == 0 || kind == 2`), so the `light.kind != 0u` test in the fade is
+    /// load-bearing, not defensive: without it every spot light would also lose
+    /// its shadow past `directional_shadow_max_distance`, which is a
+    /// DirectionalLight3D property that spot lights never author.
+    ///
+    /// ⚠️ `min(fade_start, 0.999)` is Godot's guard against both fade edges
+    /// coinciding and dividing by zero. It has to live in the shader — the
+    /// authored 1.0 must survive the upload, which the byte test above pins.
+    #[test]
+    fn directional_shadow_fade_wgsl_is_directional_only_and_clamps_fade_start() {
+        assert!(
+            SHADER_3D_WGSL.contains("directional_shadow_max_distance: f32,")
+                && SHADER_3D_WGSL.contains("directional_shadow_fade_start: f32,"),
+            "LightData must carry both fade parameters"
+        );
+        // ⚠️ The WHOLE guard line, not just `light.kind != 0u`. That fragment
+        // already appears in `directional_shadow_factor`'s own admission test
+        // (`kind != 0u && kind != 2u`), so asserting it alone passes with this
+        // fade deleted — a green test proving nothing.
+        assert!(
+            SHADER_3D_WGSL.contains(
+                "if (light.kind != 0u || light.directional_shadow_max_distance <= 0.0) {"
+            ),
+            "the fade must skip every non-directional light (spot included) and \
+             short-circuit a zero shadow distance, which would be 0/0 -> NaN"
+        );
+        assert!(
+            SHADER_3D_WGSL.contains("min(light.directional_shadow_fade_start, 0.999)"),
+            "fade_start must be clamped in the shader, or fade_from == fade_to \
+             and the ratio divides by zero"
+        );
+        assert!(
+            SHADER_3D_WGSL.contains(
+                "let shadow = directional_shadow_fade(light, in.world_position, raw_shadow);"
+            ),
+            "the fade must actually wrap the shadow term, not merely be defined"
+        );
+    }
+
+    /// 🔑 THE GPU FADE IS THE SAME CURVE AS THE SOFTWARE ONE.
+    ///
+    /// The WGSL cannot be executed here, so this pins the two halves that CAN
+    /// diverge silently: the uploaded parameters, and the arithmetic. The
+    /// expected values come from `gdrender3d::shader`'s own port, so if either
+    /// side is edited alone this fails.
+    ///
+    /// ⚠️ The smoothstep is checked at the QUARTER point. Smoothstep and a
+    /// linear ramp agree exactly at the midpoint, so a midpoint-only assertion
+    /// cannot tell a cubic from a lerp.
+    #[test]
+    fn directional_shadow_fade_gpu_parameters_match_the_software_curve() {
+        let light = Light3D::directional(Light3DId(1));
+        let gpu = light_to_gpu(&light, Vector3::ZERO);
+
+        // The shader recomputes the edges from these two numbers, so agreeing
+        // on them is what makes the WGSL arithmetic above meaningful.
+        assert_eq!(gpu.directional_shadow_max_distance, 100.0);
+        assert_eq!(gpu.directional_shadow_fade_start, 0.8);
+        assert_eq!(gpu.kind, 0, "only kind 0 is faded");
+
+        // The curve the WGSL implements, mirrored from the uploaded values.
+        let fade = |view_z: f32| {
+            let fade_to = -gpu.directional_shadow_max_distance;
+            let fade_from =
+                -gpu.directional_shadow_max_distance * gpu.directional_shadow_fade_start.min(0.999);
+            let t = ((view_z - fade_from) / (fade_to - fade_from)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        assert_eq!(fade(-50.0), 0.0, "inside fade_start, nothing fades");
+        assert_eq!(fade(-80.0), 0.0, "exactly at fade_start");
+        assert!(
+            (fade(-85.0) - 0.15625).abs() < 1e-6,
+            "quarter point is the cubic, not 0.25"
+        );
+        assert!((fade(-90.0) - 0.5).abs() < 1e-6, "midpoint");
+        assert_eq!(fade(-100.0), 1.0, "at max_distance the shadow is gone");
+        assert_eq!(fade(-500.0), 1.0, "and it stays clamped");
     }
 }

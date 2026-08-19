@@ -5,8 +5,12 @@
 //! two more of the 86 classes the audit found with no properties at all. The
 //! counts here — 30 and 22 — are the audit's own figures, and they fall out of
 //! `doc/classes/*.xml` once the members an ancestor already declares are
-//! excluded (the class only re-defaults those, and `get_property_list`
-//! concatenates the chain without deduping).
+//! excluded (the class only re-defaults those). `get_property_list` collapses
+//! such a re-declaration into ONE entry carrying the derived default, matching
+//! Godot's `<member … overrides="Control" default="true"/>` form — it used to
+//! concatenate the chain without deduping, which is what
+//! `no_member_is_declared_twice_along_the_chain` below was failing on
+//! (pat-s3rrv.74).
 
 use gdobject::class_db::{get_class_info, get_property_list, register_all_classes};
 use gdvariant::Variant;
@@ -30,9 +34,19 @@ fn own_count(class: &str) -> usize {
         .len()
 }
 
+/// ⚠️ 32, not the 30 the audit recorded: `doc/classes/RichTextLabel.xml`
+/// declares 32 `<member>` entries, and **two of them are overrides** —
+/// `clip_contents` and `focus_mode`, both `overrides="Control"`. Patina has no
+/// separate override mechanism, so it expresses an override by re-declaring the
+/// property with the derived default, which puts it in the class's OWN list.
+/// The audit's 30 counted only the genuinely new members.
+///
+/// CodeEdit needs no such adjustment and is consistent: its XML declares 24
+/// members including two overrides (`layout_direction`, `text_direction`), and
+/// the assertion below already expects 24.
 #[test]
-fn richtextlabel_carries_its_thirty_members() {
-    assert_eq!(own_count("RichTextLabel"), 30);
+fn richtextlabel_carries_its_thirty_two_members() {
+    assert_eq!(own_count("RichTextLabel"), 32);
 
     assert_eq!(own("RichTextLabel", "bbcode_enabled"), Variant::Bool(false));
     assert_eq!(
@@ -248,5 +262,54 @@ fn richtextlabel_does_not_borrow_the_text_input_methods() {
         names.len(),
         5,
         "only the five dispatched methods belong here today; got {names:?}"
+    );
+}
+
+/// 🔑 Collapsing a re-declared property must keep the DERIVED default.
+///
+/// `clip_contents` is declared on **Control** with `false`
+/// (`doc/classes/Control.xml`); RichTextLabel re-defaults it to `true`, which
+/// Godot spells `<member name="clip_contents" … overrides="Control"
+/// default="true"/>` (`RichTextLabel.xml:726`) and enforces in its constructor
+/// with `set_clip_contents(true)` (`rich_text_label.cpp:8207`).
+///
+/// ⚠️ Without this, the uniqueness test above is satisfied just as well by
+/// dropping the DERIVED entry and keeping Control's `false` — which would leave
+/// every RichTextLabel un-clipped while the suite stayed green.
+#[test]
+fn a_redeclared_property_keeps_the_derived_default() {
+    register_all_classes();
+
+    let merged = get_property_list("RichTextLabel");
+    let clip: Vec<&Variant> = merged
+        .iter()
+        .filter(|p| p.name == "clip_contents")
+        .map(|p| &p.default_value)
+        .collect();
+
+    assert_eq!(
+        clip.len(),
+        1,
+        "clip_contents must appear exactly once in the merged list"
+    );
+    assert_eq!(
+        *clip[0],
+        Variant::Bool(true),
+        "the collapsed entry must carry RichTextLabel's override (true), not \
+         Control's declared default (false)"
+    );
+
+    // Control itself is untouched: the override is RichTextLabel's, not a
+    // mutation of the base class.
+    let base: Vec<Variant> = get_property_list("Control")
+        .into_iter()
+        .filter(|p| p.name == "clip_contents")
+        .map(|p| p.default_value)
+        .collect();
+    assert_eq!(base.len(), 1, "Control declares clip_contents once");
+    assert_eq!(
+        base[0],
+        Variant::Bool(false),
+        "Control keeps its own default; the derived override must not leak up"
     );
 }

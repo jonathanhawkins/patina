@@ -22,6 +22,11 @@ pub mod editor_plugin_classes;
 pub mod movie_writer;
 pub mod notification;
 pub mod object;
+/// `PhysicsDirectBodyState2D/3D` — the body view handed to
+/// `_integrate_forces`. Lives here rather than in a physics crate because both
+/// `gdscene` (producer) and `gdscript-interop` (consumer) must see it, and the
+/// interpreter depends on neither physics crate.
+pub mod physics_direct_body_state;
 pub mod ref_counted;
 /// Script-reachable `RefCounted` instances addressed by `ObjectId`
 /// (pat-0q2kx.163). `ref_counted` supplies the counting semantics; this owns

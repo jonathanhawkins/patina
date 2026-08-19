@@ -539,6 +539,52 @@ impl SoftwareRenderer3D {
 
     /// Renders a frame using the vertex/fragment shader pipeline with solid
     /// triangle rasterization.
+    /// The order instances are drawn in: every opaque one first, in its
+    /// original order, then the transparent ones farthest-first.
+    ///
+    /// ⚠️ The opaque partition is **stable**. An opaque-only scene therefore
+    /// draws in exactly the order it did before this existed, which is what
+    /// keeps this from perturbing every existing 3D render baseline — depth
+    /// testing already makes opaque order irrelevant to the image, but not to a
+    /// test that pins draw sequence.
+    ///
+    /// Depth is measured from the camera to the instance ORIGIN, which is
+    /// Godot's own approximation (`RenderListElement::sort_key` uses the
+    /// instance's transformed AABB centre). It mis-orders two transparent
+    /// surfaces that interpenetrate — no per-object sort can fix that case, and
+    /// Godot does not either.
+    fn transparency_draw_order<'a>(
+        instances: &'a [Instance3D],
+        viewport: &Viewport3D,
+    ) -> Vec<&'a Instance3D> {
+        let is_transparent = |inst: &Instance3D| {
+            inst.material
+                .as_ref()
+                // Reuses the module's own predicate rather than re-testing the
+                // enum here, so "what counts as transparent" cannot drift
+                // between the sorter and the blender.
+                .is_some_and(|m| crate::render_modes::is_transparent(m.transparency))
+        };
+        if !instances.iter().any(is_transparent) {
+            // Nothing to reorder; skip the allocation-heavy path entirely.
+            return instances.iter().collect();
+        }
+
+        let camera = viewport.camera_transform.origin;
+        let mut opaque: Vec<&Instance3D> = Vec::new();
+        let mut transparent: Vec<(f32, &Instance3D)> = Vec::new();
+        for inst in instances {
+            if is_transparent(inst) {
+                transparent.push((camera.distance_to(inst.transform.origin), inst));
+            } else {
+                opaque.push(inst);
+            }
+        }
+        crate::render_modes::sort_back_to_front(&mut transparent);
+        opaque.extend(transparent.into_iter().map(|(_, inst)| inst));
+        opaque
+    }
+
     fn render_frame_solid(&self, viewport: &Viewport3D) -> FrameData3D {
         let w = viewport.width;
         let h = viewport.height;
@@ -603,6 +649,18 @@ impl SoftwareRenderer3D {
                 // `self.lights`, and the sky-sun path reads `self.lights` directly
                 // (not these uniforms), so its disc is unaffected.
                 let shade_energy = if l.affects_scene { l.energy } else { 0.0 };
+                // Godot's light LOD: a distant light dims out, and its shadow
+                // dims out first (pat-s3rrv.90).
+                let (energy_fade, shadow_fade) =
+                    distance_fade_factors(l, viewport.camera_transform.origin);
+                // `light_negative` makes a light SUBTRACT instead of add. Godot
+                // does it as a sign flip on the energy — `sign = negative ? -1
+                // : 1`, then `energy = sign * param[ENERGY] * fade`
+                // (light_storage.cpp:840) — so it belongs here, beside the
+                // fade, and NOT as a colour change: the authored colour must
+                // survive so re-tinting and introspection still see it.
+                let sign = if l.negative { -1.0 } else { 1.0 };
+                let shade_energy = shade_energy * energy_fade * sign;
                 LightUniform {
                     kind,
                     direction,
@@ -620,6 +678,25 @@ impl SoftwareRenderer3D {
                     spot_angle: l.spot_angle,
                     spot_angle_attenuation: 1.0,
                     shadow_enabled: l.shadow_enabled,
+                    // Which render layers this light touches; tested per draw
+                    // against the instance's own `layers` in the shading loop.
+                    // World units; ShadowMap::sample_with_bias converts for
+                    // the normalized 2D compare, the omni path uses it directly.
+                    // Texel-relative, unlike shadow_bias beside it.
+                    // Authored `light_specular`; the x2 for positional lights
+                    // is applied at the point of use, not here, so this stays
+                    // the value the user typed.
+                    // Godot's shadow_blur is in texels; the tap count comes
+                    // from shadow_filter_quality, whose Hard default is 1 tap.
+                    shadow_blur: l.shadow_blur,
+                    shadow_taps: l.shadow_filter_quality.taps(),
+                    directional_shadow_max_distance: l.directional_shadow_max_distance,
+                    directional_shadow_fade_start: l.directional_shadow_fade_start,
+                    specular: l.specular,
+                    shadow_normal_bias: l.shadow_normal_bias,
+                    shadow_bias: l.shadow_bias,
+                    cull_mask: l.cull_mask,
+                    shadow_opacity: (l.shadow_opacity * shadow_fade).clamp(0.0, 1.0),
                 }
             })
             .collect();
@@ -659,7 +736,17 @@ impl SoftwareRenderer3D {
 
         let vertex_shader = StandardVertexShader;
 
-        for inst in &self.instances {
+        // ⚠️ **Transparent instances are drawn last, farthest first.**
+        // `Transparency::Alpha`'s own doc says it "needs back-to-front
+        // sorting", and `render_modes::sort_back_to_front` existed for exactly
+        // this — with zero callers, so nothing ever sorted (pat-s3rrv.30).
+        // Alpha blending is order-dependent: drawing a near transparent surface
+        // before the geometry behind it composites the near one against the
+        // background instead of against what it is actually in front of. The
+        // scene still *renders*, which is why this survived — it just composites
+        // wrongly, and only when a transparent surface happens to be declared
+        // before what is behind it.
+        for inst in Self::transparency_draw_order(&self.instances, viewport) {
             // GeometryInstance3D cast_shadow (pat-nzgdu.76): ShadowsOnly casts
             // into the shadow maps above but is absent from the colour pass.
             // Covers `visible` too.
@@ -810,6 +897,9 @@ impl SoftwareRenderer3D {
                     roughness: entry.material.roughness,
                     metallic: entry.material.metallic,
                     camera_position: viewport.camera_transform.origin,
+                    // The half of `light_cull_mask` the shading loop was
+                    // missing: WHICH instance it is shading.
+                    layers: inst.geometry.layers,
                     lights: light_uniforms.clone(),
                     directional_shadow_maps: directional_shadow_maps.clone(),
                     omni_shadow_cubemaps: omni_shadow_cubemaps.clone(),
@@ -1319,6 +1409,15 @@ pub struct SkySun {
     /// Angular diameter in radians (`LIGHTn_SIZE`, from the light's
     /// `angular_distance` degrees). 0 draws no hard disc, only the halo.
     pub size: f32,
+    /// Godot `Light3D.light_volumetric_fog_energy` — this light's contribution
+    /// to volumetric fog, INDEPENDENT of its contribution to surfaces.
+    ///
+    /// ⚠️ Carried separately from [`energy`](Self::energy) rather than folded
+    /// into it: `energy` also sizes the sun disc in the sky, so pre-multiplying
+    /// would dim the visible sun whenever an author only meant to take the light
+    /// out of the fog. Godot's default is 1.0, and 0.0 means "this light does
+    /// not light the fog at all" while still lighting the scene.
+    pub volumetric_fog_energy: f32,
 }
 
 /// Computes the environment's ambient light color in **linear** space, applied
@@ -1383,6 +1482,7 @@ pub fn sky_suns_from_lights(lights: &[Light3D]) -> Vec<SkySun> {
             color: l.color,
             energy: l.energy,
             size: l.angular_distance.to_radians(),
+            volumetric_fog_energy: l.volumetric_fog_energy,
         })
         .collect()
 }
@@ -1854,7 +1954,12 @@ fn fog_process(
     // Sun scatter: directional lights bleed into the fog toward the viewer.
     if env.fog_sun_scatter > 0.001 {
         for sun in suns {
-            let amt = view_dir_world.dot(sun.direction).max(0.0).powf(8.0) * env.fog_sun_scatter;
+            // ⚠️ `volumetric_fog_energy` scales ONLY this scatter term. Before
+            // this it was parsed, carried onto the Light3D and read by nobody
+            // (pat-s3rrv.90) — so setting it to 0 dimmed nothing.
+            let amt = view_dir_world.dot(sun.direction).max(0.0).powf(8.0)
+                * env.fog_sun_scatter
+                * sun.volumetric_fog_energy;
             fog[0] += srgb_to_linear_channel(sun.color.r) * sun.energy * amt;
             fog[1] += srgb_to_linear_channel(sun.color.g) * sun.energy * amt;
             fog[2] += srgb_to_linear_channel(sun.color.b) * sun.energy * amt;
@@ -2125,11 +2230,173 @@ impl RenderingServer3D for SoftwareRenderer3D {
     }
 }
 
+/// Godot's `Math::smoothstep(0.0, 1.0, x)`.
+fn smoothstep01(x: f32) -> f32 {
+    let t = x.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Godot's light LOD fade: `(energy_fade, shadow_opacity_fade)`.
+///
+/// ⚠️ `pub(crate)` so the wgpu path calls THIS function rather than growing its
+/// own copy. This bead exists because the engine has two render paths and one of
+/// them was lossy; a second transcription of the fade curve would recreate that
+/// on a smaller scale, and the divergence would only show at a distance.
+///
+/// From `light_storage.cpp:857-864` — the light dims once the CAMERA is further
+/// than `distance_fade_begin` from it, over `distance_fade_length`, and its
+/// shadow starts dimming at the separate (usually nearer) `distance_fade_shadow`
+/// so the shadow disappears before the light does. `smoothstep` is Godot's own
+/// choice, "to make opacity changes more gradual and less noticeable".
+///
+/// ⚠️ **Positional lights only.** `DirectionalLight3D` hides all four properties
+/// (`light_3d.cpp:561`: "Not relevant for DirectionalLight3D, as the light LOD
+/// system only pertains to point lights"), and the upstream fade block runs over
+/// the omni/spot sort lists alone. Applying it to a directional light would fade
+/// the sun by the distance to whatever arbitrary point its node sits at.
+///
+/// ⚠️ The distance is camera-to-LIGHT, not camera-to-fragment, so this belongs
+/// here — once per light per frame — rather than in the fragment shader.
+pub(crate) fn distance_fade_factors(light: &Light3D, camera: Vector3) -> (f32, f32) {
+    if !light.distance_fade_enabled || matches!(light.light_type, LightType::Directional) {
+        return (1.0, 1.0);
+    }
+    let to_light = light.position - camera;
+    let distance = to_light.length();
+    let length = light.distance_fade_length;
+    if length <= 0.0 {
+        // Godot divides by this; a zero length would yield inf and then NaN
+        // energy, which blanks or blows out the whole frame rather than fading
+        // anything. A hard cut at the threshold is the sane reading.
+        return (
+            if distance > light.distance_fade_begin {
+                0.0
+            } else {
+                1.0
+            },
+            if distance > light.distance_fade_shadow {
+                0.0
+            } else {
+                1.0
+            },
+        );
+    }
+    let fade_from = |start: f32| {
+        if distance <= start {
+            1.0
+        } else {
+            smoothstep01(1.0 - (distance - start) / length)
+        }
+    };
+    (
+        fade_from(light.distance_fade_begin),
+        fade_from(light.distance_fade_shadow),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gdcore::math3d::Basis;
     use gdserver3d::material::ShadingMode;
+
+    /// Builds a point light at the origin with Godot's LOD fade configured.
+    ///
+    /// `distance_fade_shadow` (5) is nearer than `distance_fade_begin` (10),
+    /// which is the interesting arrangement: Godot fades the shadow out BEFORE
+    /// the light, so there is a band where the light is still at full strength
+    /// and its shadow is already dimming.
+    fn faded_point_light() -> Light3D {
+        let mut light = Light3D::point(Light3DId(1), Vector3::ZERO);
+        light.distance_fade_enabled = true;
+        light.distance_fade_begin = 10.0;
+        light.distance_fade_shadow = 5.0;
+        light.distance_fade_length = 10.0;
+        light
+    }
+
+    /// 🔑 A light dims as the camera moves away, and is gone past begin+length.
+    #[test]
+    fn light_distance_fade_dims_a_far_light() {
+        let light = faded_point_light();
+
+        let (near, _) = distance_fade_factors(&light, Vector3::new(4.0, 0.0, 0.0));
+        assert_eq!(
+            near, 1.0,
+            "inside distance_fade_begin the light is at full strength"
+        );
+
+        let (mid, _) = distance_fade_factors(&light, Vector3::new(15.0, 0.0, 0.0));
+        assert!(
+            mid > 0.0 && mid < 1.0,
+            "halfway through the fade the light is partly dimmed, got {mid}",
+        );
+
+        let (far, _) = distance_fade_factors(&light, Vector3::new(25.0, 0.0, 0.0));
+        assert_eq!(
+            far, 0.0,
+            "past begin + length the light contributes nothing; Godot skips \
+             drawing it entirely at that point",
+        );
+    }
+
+    /// 🔑 The shadow fades out BEFORE the light does.
+    ///
+    /// ⚠️ This is what separates the two thresholds. An implementation that
+    /// drove both from `distance_fade_begin` would pass every assertion in
+    /// [`light_distance_fade_dims_a_far_light`] and still be wrong — the whole point
+    /// of the separate `distance_fade_shadow` is this band.
+    #[test]
+    fn light_distance_fade_dims_the_shadow_first() {
+        let light = faded_point_light();
+
+        // 7 is past distance_fade_shadow (5) but short of distance_fade_begin (10).
+        let (energy, shadow) = distance_fade_factors(&light, Vector3::new(7.0, 0.0, 0.0));
+        assert_eq!(
+            energy, 1.0,
+            "the light itself has not started fading yet at this distance",
+        );
+        assert!(
+            shadow < 1.0 && shadow > 0.0,
+            "…but its shadow already has; got {shadow}",
+        );
+    }
+
+    /// 🔑 A directional light never distance-fades.
+    ///
+    /// ⚠️ Godot hides all four properties on DirectionalLight3D
+    /// (`light_3d.cpp:561`, "the light LOD system only pertains to point
+    /// lights"). Fading one would dim the sun by the distance to whatever
+    /// arbitrary point its node happens to sit at — which is both wrong and
+    /// very confusing to debug from the viewport.
+    #[test]
+    fn light_distance_fade_skips_directional_lights() {
+        let mut light = Light3D::directional(Light3DId(1));
+        light.distance_fade_enabled = true;
+        light.distance_fade_begin = 10.0;
+        light.distance_fade_shadow = 5.0;
+        light.distance_fade_length = 10.0;
+
+        let (energy, shadow) = distance_fade_factors(&light, Vector3::new(1000.0, 0.0, 0.0));
+        assert_eq!((energy, shadow), (1.0, 1.0));
+    }
+
+    /// A zero fade length is a hard cut, not a division by zero.
+    ///
+    /// ⚠️ Godot divides by this value; at zero that is `inf`, and an `inf`
+    /// smoothstep gives a NaN energy which blanks or blows out the entire frame
+    /// rather than fading one light.
+    #[test]
+    fn light_distance_fade_zero_length_is_a_hard_cut() {
+        let mut light = faded_point_light();
+        light.distance_fade_length = 0.0;
+
+        let (near, _) = distance_fade_factors(&light, Vector3::new(4.0, 0.0, 0.0));
+        let (far, _) = distance_fade_factors(&light, Vector3::new(40.0, 0.0, 0.0));
+        assert_eq!(near, 1.0);
+        assert_eq!(far, 0.0);
+        assert!(near.is_finite() && far.is_finite());
+    }
 
     fn cube_at(renderer: &mut SoftwareRenderer3D, z: f32) -> Instance3DId {
         let id = renderer.create_instance();
@@ -2141,6 +2408,139 @@ mod tests {
         };
         renderer.set_transform(id, transform);
         id
+    }
+
+    /// A translucent cube at depth `z`, with a distinguishing albedo.
+    fn alpha_cube_at(renderer: &mut SoftwareRenderer3D, z: f32, albedo: Color) -> Instance3DId {
+        let id = renderer.create_instance();
+        renderer.set_mesh(id, Mesh3D::cube(1.0));
+        let mut mat = Material3D {
+            transparency: crate::render_modes::Transparency::Alpha,
+            ..Default::default()
+        };
+        mat.albedo = albedo;
+        renderer.set_material(id, mat);
+        renderer.set_transform(
+            id,
+            Transform3D {
+                basis: Basis::IDENTITY,
+                origin: Vector3::new(0.0, 0.0, z),
+            },
+        );
+        id
+    }
+
+    /// 🔑 Transparent instances are drawn farthest-first, whatever order they
+    /// were created in.
+    ///
+    /// ⚠️ The fixture creates the NEAR cube first, which is the order that
+    /// composites wrongly without sorting. Creating the far one first would
+    /// already be correct and the test would pass against no sorting at all.
+    #[test]
+    fn transparent_instances_are_drawn_back_to_front() {
+        let mut renderer = SoftwareRenderer3D::new();
+        // Camera looks down -Z from the origin, so -2 is NEARER than -8.
+        alpha_cube_at(&mut renderer, -2.0, Color::new(1.0, 0.0, 0.0, 0.5));
+        alpha_cube_at(&mut renderer, -8.0, Color::new(0.0, 1.0, 0.0, 0.5));
+
+        let vp = Viewport3D::new(32, 32);
+        let order = SoftwareRenderer3D::transparency_draw_order(&renderer.instances, &vp);
+
+        let zs: Vec<f32> = order.iter().map(|i| i.transform.origin.z).collect();
+        assert_eq!(
+            zs,
+            vec![-8.0, -2.0],
+            "the farther transparent cube must be drawn first; {zs:?} in \
+             creation order means nothing sorted",
+        );
+    }
+
+    /// 🔑 Opaque instances keep their original order.
+    ///
+    /// ⚠️ This is the property that keeps the sort from perturbing every
+    /// existing 3D baseline. Depth testing makes opaque draw order irrelevant to
+    /// the image, but not to a test that pins a sequence — so the partition is
+    /// stable and an all-opaque scene must come back untouched.
+    #[test]
+    fn opaque_instances_keep_their_original_order() {
+        let mut renderer = SoftwareRenderer3D::new();
+        cube_at(&mut renderer, -2.0);
+        cube_at(&mut renderer, -8.0);
+        cube_at(&mut renderer, -5.0);
+
+        let vp = Viewport3D::new(32, 32);
+        let order = SoftwareRenderer3D::transparency_draw_order(&renderer.instances, &vp);
+        let zs: Vec<f32> = order.iter().map(|i| i.transform.origin.z).collect();
+        assert_eq!(
+            zs,
+            vec![-2.0, -8.0, -5.0],
+            "an opaque-only scene must be handed back in creation order",
+        );
+    }
+
+    /// 🔑 Opaque geometry is drawn before ANY transparent geometry, even when
+    /// the transparent surface is farther away.
+    ///
+    /// ⚠️ Sorting purely by depth would put the far transparent cube ahead of a
+    /// nearer opaque one, and it would then blend against the background rather
+    /// than against the opaque surface. Godot partitions first and sorts within
+    /// the transparent pass — the order here is opaque(-2), then alpha(-8).
+    #[test]
+    fn opaque_precedes_transparent_regardless_of_depth() {
+        let mut renderer = SoftwareRenderer3D::new();
+        alpha_cube_at(&mut renderer, -8.0, Color::new(0.0, 1.0, 0.0, 0.5));
+        cube_at(&mut renderer, -2.0);
+
+        let vp = Viewport3D::new(32, 32);
+        let order = SoftwareRenderer3D::transparency_draw_order(&renderer.instances, &vp);
+        let zs: Vec<f32> = order.iter().map(|i| i.transform.origin.z).collect();
+        assert_eq!(
+            zs,
+            vec![-2.0, -8.0],
+            "the opaque cube draws first even though it is nearer; a pure \
+             depth sort would invert this and blend the far alpha surface \
+             against the background",
+        );
+    }
+
+    /// 🔑 The composite no longer depends on declaration order.
+    ///
+    /// This is the user-visible consequence: the same two translucent surfaces
+    /// must produce the same image whichever order the scene happens to list
+    /// them in. It is the assertion that would fail before the sort existed.
+    #[test]
+    fn transparent_composite_is_independent_of_declaration_order() {
+        let (near, far) = (
+            Color::new(1.0, 0.0, 0.0, 0.5),
+            Color::new(0.0, 1.0, 0.0, 0.5),
+        );
+
+        let mut near_first = SoftwareRenderer3D::new();
+        alpha_cube_at(&mut near_first, -2.0, near);
+        alpha_cube_at(&mut near_first, -8.0, far);
+
+        let mut far_first = SoftwareRenderer3D::new();
+        alpha_cube_at(&mut far_first, -8.0, far);
+        alpha_cube_at(&mut far_first, -2.0, near);
+
+        let vp = Viewport3D::new(32, 32);
+        let a = near_first.render_frame(&vp);
+        let b = far_first.render_frame(&vp);
+
+        // The positive control: the scene must actually draw something, or two
+        // blank frames would compare equal and prove nothing.
+        let lit = a.pixels.iter().filter(|c| **c != Color::BLACK).count();
+        assert!(
+            lit > 20,
+            "the fixture must actually render translucent geometry; only {lit} \
+             non-black pixels means the frames below are compared empty",
+        );
+        assert_eq!(
+            a.pixels, b.pixels,
+            "two translucent surfaces must composite identically however the \
+             scene lists them; a difference means draw order still leaks into \
+             the image",
+        );
     }
 
     #[test]
@@ -2488,6 +2888,87 @@ mod tests {
         assert!(nonblack > 100, "phong lit cube should fill pixels");
     }
 
+    /// 🔑 `light_negative` makes a light SUBTRACT rather than add.
+    ///
+    /// Godot flips the sign of the energy (`sign = negative ? -1 : 1`, then
+    /// `energy = sign * param[ENERGY] * fade` — light_storage.cpp:840), so the
+    /// identical scene lit by a negative light must come out DARKER than the
+    /// positive one. Asserted on rendered pixels rather than on the flag,
+    /// because the flag reaching `Light3D` proves nothing about the shading.
+    #[test]
+    fn a_negative_light_subtracts_instead_of_adding() {
+        fn lit_frame(negative: bool) -> Vec<Color> {
+            let mut renderer = SoftwareRenderer3D::new();
+            let id = renderer.create_instance();
+            renderer.set_mesh(id, Mesh3D::cube(1.0));
+            // Same material as `solid_phong_shading`, which is the test that
+            // establishes this setup renders lit pixels at all. A bare
+            // `Material3D::default()` with Phong came out fully black, which
+            // made the comparison below vacuous rather than wrong.
+            renderer.set_material(
+                id,
+                Material3D {
+                    shading_mode: ShadingMode::Phong,
+                    roughness: 0.2,
+                    metallic: 0.8,
+                    ..Material3D::default()
+                },
+            );
+            renderer.set_transform(
+                id,
+                Transform3D {
+                    basis: Basis::IDENTITY,
+                    origin: Vector3::new(0.0, 0.0, -5.0),
+                },
+            );
+            renderer.add_light(Light3DId(1));
+            renderer.lights[0].negative = negative;
+            renderer.render_frame(&Viewport3D::new(64, 64)).pixels
+        }
+
+        let positive = lit_frame(false);
+        let negative = lit_frame(true);
+
+        // ⚠️ PRECONDITION. Both frames came back entirely black on the first
+        // attempt, and `assert_ne!` then failed for a reason that had nothing to
+        // do with `negative`. Unless the positive frame is genuinely lit, every
+        // assertion below is vacuous.
+        let lit = positive.iter().filter(|c| **c != Color::BLACK).count();
+        assert!(
+            lit > 100,
+            "fixture check: the positive light must actually light the cube, \
+             got {lit} non-black pixels"
+        );
+
+        assert_ne!(
+            positive, negative,
+            "a negative light must change the frame; identical frames mean the \
+             flag never reached the shading energy"
+        );
+
+        let luminance =
+            |px: &[Color]| -> f64 { px.iter().map(|c| f64::from(c.r + c.g + c.b)).sum() };
+        assert!(
+            luminance(&negative) < luminance(&positive),
+            "a negative light must SUBTRACT: total luminance {} must be below \
+             the positive light's {}",
+            luminance(&negative),
+            luminance(&positive)
+        );
+    }
+
+    /// Control: the default light is positive, so the flag must not be a
+    /// no-op-in-name-only that darkens every frame.
+    #[test]
+    fn a_default_light_is_not_negative() {
+        let mut renderer = SoftwareRenderer3D::new();
+        renderer.add_light(Light3DId(1));
+        assert!(
+            !renderer.lights[0].negative,
+            "Godot's light_negative defaults to false"
+        );
+    }
+
     #[test]
     fn render_mode_default_is_solid() {
         let renderer = SoftwareRenderer3D::new();
@@ -2814,6 +3295,7 @@ mod tests {
             color: Color::WHITE,
             energy: 1.0,
             size: 0.0,
+            volumetric_fog_energy: 1.0,
         };
         let with_night = sample_physical_sky(&mat, &up, 1.0, &[sun]);
         let without_night = sample_physical_sky(&bare, &up, 1.0, &[sun]);
@@ -2835,6 +3317,7 @@ mod tests {
             color: Color::WHITE,
             energy: 1.0,
             size: 0.0,
+            volumetric_fog_energy: 1.0,
         };
 
         // Looking straight at the sun: c2 = 0 → full sun color.
@@ -3130,6 +3613,7 @@ mod tests {
             color: Color::WHITE,
             energy: 1.0,
             size: 0.0,
+            volumetric_fog_energy: 1.0,
         };
         let toward = Vector3::new(0.0, 0.0, -1.0); // straight at the sun
         let away = Vector3::new(0.0, 0.0, 1.0);
@@ -3148,6 +3632,88 @@ mod tests {
         assert!(
             (c_aerial.b - 0.9).abs() < 1e-4,
             "aerial=1 → fog color becomes the sky color"
+        );
+    }
+
+    /// 🔑 `light_volumetric_fog_energy` scales the light's contribution to fog.
+    ///
+    /// ⚠️ The discriminating assertion is that **0.0 makes the fog identical to
+    /// having no sun at all** — not merely "dimmer". Godot's property means "this
+    /// light does not light the fog", and a partial attenuation would pass a
+    /// looser `<` check while still leaking the light in.
+    #[test]
+    fn volumetric_fog_energy_scales_only_the_fog_scatter() {
+        let mut env = Environment3D::default();
+        env.fog_enabled = true;
+        env.fog_sun_scatter = 1.0;
+        let toward = Vector3::new(0.0, 0.0, -1.0);
+        let sun = |vfe: f32| SkySun {
+            direction: Vector3::new(0.0, 0.0, -1.0),
+            color: Color::WHITE,
+            energy: 1.0,
+            size: 0.0,
+            volumetric_fog_energy: vfe,
+        };
+
+        let (full, _) = fog_process(&env, 1.0, 0.0, &toward, &[sun(1.0)], None);
+        let (half, _) = fog_process(&env, 1.0, 0.0, &toward, &[sun(0.5)], None);
+        let (none, _) = fog_process(&env, 1.0, 0.0, &toward, &[sun(0.0)], None);
+        let (no_sun, _) = fog_process(&env, 1.0, 0.0, &toward, &[], None);
+
+        // Positive control: the fixture must actually scatter, or every
+        // comparison below is between identical unlit values.
+        assert!(
+            full.r > no_sun.r + 0.3,
+            "the fixture must produce real sun scatter at energy 1.0; got {} vs \
+             {} with no sun",
+            full.r,
+            no_sun.r,
+        );
+        assert!(
+            half.r < full.r && half.r > no_sun.r,
+            "0.5 must land between: {} not inside ({}, {})",
+            half.r,
+            no_sun.r,
+            full.r,
+        );
+        assert!(
+            (none.r - no_sun.r).abs() < 1e-6,
+            "volumetric_fog_energy = 0 must remove the light from the fog \
+             ENTIRELY — {} should equal the no-sun fog {}",
+            none.r,
+            no_sun.r,
+        );
+    }
+
+    /// 🔑 The fog energy is carried separately, NOT folded into `energy`.
+    ///
+    /// ⚠️ This pins a design decision that is tempting to "simplify" away.
+    /// `SkySun::energy` also sizes and brightens the visible sun disc, so
+    /// pre-multiplying the fog energy into it would dim the sun in the sky
+    /// whenever an author only meant to take the light out of the fog — a
+    /// change that no fog test would catch.
+    #[test]
+    fn volumetric_fog_energy_is_not_folded_into_sun_energy() {
+        let mut light = Light3D::directional(Light3DId(1));
+        light.sky = true;
+        light.energy = 2.0;
+        light.volumetric_fog_energy = 0.0;
+
+        let suns = sky_suns_from_lights(&[light]);
+        assert_eq!(
+            suns.len(),
+            1,
+            "a sky-visible directional light becomes a sun"
+        );
+        assert_eq!(
+            suns[0].energy, 2.0,
+            "the sun's own energy must survive untouched; 0.0 here means the \
+             fog energy was multiplied into it and the visible sun disc would \
+             go dark with it",
+        );
+        assert_eq!(
+            suns[0].volumetric_fog_energy, 0.0,
+            "…and the fog energy is carried through in its own field",
         );
     }
 

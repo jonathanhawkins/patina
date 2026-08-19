@@ -64,6 +64,19 @@ func _input(event):
 ";
 
 fn listener() -> (MainLoop, NodeId) {
+    // ⚠️ ClassDB starts EMPTY in every nextest process, and `is` needs it for
+    // the INHERITANCE half of the test only: `value_is_type` answers
+    // `event is InputEventMagnifyGesture` from the exact class name with no
+    // registry at all, but `event is InputEventGesture` resolves through
+    // `class_db::is_parent_class`, which walks an empty registry and returns
+    // false. That asymmetry is why the delivery assertions passed while the
+    // parent-chain one failed, and it reads exactly like a broken registration
+    // in `class_db.rs` — the chain there is correct
+    // (MagnifyGesture -> Gesture -> WithModifiers -> FromWindow).
+    // The sibling `input_event_objects_reach_script_input` registers for the
+    // same reason (pat-s3rrv.14).
+    gdobject::class_db::register_all_classes();
+
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let node = tree.add_child(root, Node::new("Listener", "Node")).unwrap();

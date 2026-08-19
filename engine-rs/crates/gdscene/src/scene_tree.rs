@@ -3987,7 +3987,7 @@ impl SceneTree {
         }
     }
 
-    /// Advances every `AnimatedSprite2D`'s frame by `delta` seconds.
+    /// Advances every `AnimatedSprite2D`/`AnimatedSprite3D` frame by `delta` seconds.
     ///
     /// Godot's `AnimatedSprite2D::_process_animation` walks the node's
     /// `SpriteFrames` at the animation's FPS, wrapping when it loops and
@@ -4007,7 +4007,16 @@ impl SceneTree {
             let Some(node) = self.nodes.get(&node_id) else {
                 continue;
             };
-            if node.class_name() != "AnimatedSprite2D" {
+            // ⚠️ AnimatedSprite3D drives from the SAME state, so it shares
+            // this loop rather than getting a parallel one. Godot gives it the
+            // identical `animation` / `autoplay` / `frame` / `frame_progress` /
+            // `speed_scale` / `sprite_frames` members
+            // (`doc/classes/AnimatedSprite3D.xml`) and an `_process_animation`
+            // mirroring the 2D one. The `texture` published below then reaches
+            // the 3D viewport by exactly the route it already reaches the
+            // canvas — which is the same argument the comment there makes
+            // against a second parallel path (pat-s3rrv.92).
+            if !matches!(node.class_name(), "AnimatedSprite2D" | "AnimatedSprite3D") {
                 continue;
             }
             // `playing` defaults to FALSE, matching Godot: a sprite only
@@ -5202,7 +5211,18 @@ impl SceneTree {
                 // drops the callback rather than emitting into a dead object.
                 continue;
             }
+            // Read once per node, before any handler runs: a handler is
+            // script code that could set `download_file` mid-drain, and Godot
+            // reads the property at completion time.
+            let delivery = self
+                .nodes
+                .get(&node_id)
+                .map(crate::http_request_node::delivery_settings)
+                .unwrap_or_default();
             for payload in done {
+                // `body_size_limit` / `download_file` are node properties the
+                // transport knows nothing about, so they are applied here.
+                let payload = crate::http_request_node::deliver(payload, &delivery);
                 self.emit_signal(
                     node_id,
                     "request_completed",

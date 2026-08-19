@@ -1055,6 +1055,126 @@ fn is_playback_handle(raw: u64) -> bool {
     raw & 0xFF00_0000_0000_0000 == PLAYBACK_HANDLE_TAG
 }
 
+// -- KinematicCollision2D handles (pat-s3rrv.95) ----------------------------
+//
+// Godot hands `get_slide_collision(i)` and `move_and_collide()` back an OBJECT
+// whose getters the script then calls:
+//
+//     for i in get_slide_collision_count():
+//         var c = get_slide_collision(i)
+//         if c.get_collider().is_in_group("hazard"): die()
+//
+// The contacts were already computed every physics tick and discarded;
+// `physics_server` now publishes them onto the character node as
+// `_slide_collisions`. These handles are what makes one addressable.
+//
+// ⚠️ The handle stores (character node, index) and RE-READS the record on every
+// getter, exactly as the playback handle re-resolves itself. Copying the values
+// in at mint time would freeze a contact that the next physics tick has already
+// replaced, so a script holding one across frames would read stale geometry.
+
+/// Tag byte marking an `ObjectId` as a slide-collision handle. Distinct from
+/// every other family's tag — 0x71 was free in the workspace-wide sweep.
+const KINEMATIC_COLLISION_TAG: u64 = 0x71_00_0000_0000_0000;
+
+thread_local! {
+    /// Live collision handles: raw id -> (character node raw id, contact index).
+    static COLLISION_HANDLES: std::cell::RefCell<HashMap<u64, (u64, usize)>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_COLLISION_HANDLE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Returns `true` when `raw` was issued by [`kinematic_collision_handle_for`].
+fn is_kinematic_collision_handle(raw: u64) -> bool {
+    raw & 0xFF00_0000_0000_0000 == KINEMATIC_COLLISION_TAG
+}
+
+/// A handle addressing contact `index` on character `node`, deduped so reading
+/// the same contact twice yields the same object — as it does in Godot.
+fn kinematic_collision_handle_for(node: u64, index: usize) -> u64 {
+    COLLISION_HANDLES.with(|handles| {
+        let mut handles = handles.borrow_mut();
+        if let Some((raw, _)) = handles.iter().find(|(_, v)| **v == (node, index)) {
+            return *raw;
+        }
+        let seq = NEXT_COLLISION_HANDLE.with(|n| {
+            let v = n.get();
+            n.set(v + 1);
+            v
+        });
+        let raw = KINEMATIC_COLLISION_TAG | seq;
+        handles.insert(raw, (node, index));
+        raw
+    })
+}
+
+/// The published record behind a handle, re-read from the node every call.
+fn collision_record(tree: &SceneTree, raw: u64) -> Option<gdvariant::Dictionary> {
+    let (node, index) = COLLISION_HANDLES.with(|h| h.borrow().get(&raw).copied())?;
+    let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+    match tree
+        .get_node(nid)
+        .map(|n| n.get_property("_slide_collisions"))
+    {
+        Some(Variant::Array(items)) => match items.get(index) {
+            Some(Variant::Dictionary(d)) => Some(d.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// How many contacts the last physics tick published on `nid`.
+fn slide_collision_count(tree: &SceneTree, nid: NodeId) -> usize {
+    match tree
+        .get_node(nid)
+        .map(|n| n.get_property("_slide_collisions"))
+    {
+        Some(Variant::Array(items)) => items.len(),
+        _ => 0,
+    }
+}
+
+/// `KinematicCollision2D`'s getter surface, answered for handle receivers only.
+///
+/// ⚠️ Must run BEFORE the generic method table. `get_collider`, `get_normal`
+/// and `get_position` all already exist there reading RayCast2D's `_hit_*`
+/// keys, and a handle reaching those arms would read a raycast's empty results
+/// and report nothing — the same shadowing ShapeCast2D had to be lifted above.
+/// Declines every non-handle receiver, so the table stays reachable.
+fn kinematic_collision_call(
+    tree: &SceneTree,
+    node: u64,
+    method: &str,
+    _args: &[Variant],
+) -> Option<Variant> {
+    if !is_kinematic_collision_handle(node) {
+        return None;
+    }
+    let rec = collision_record(tree, node)?;
+    let field = |k: &str| rec.get(k).cloned().unwrap_or(Variant::Nil);
+    let value = match method {
+        "get_normal" => field("normal"),
+        "get_position" => field("position"),
+        "get_remainder" => field("remainder"),
+        "get_depth" => field("depth"),
+        // The collider is published as a node ObjectId, so the value handed
+        // back is an ordinary node reference — `is_in_group()` and every other
+        // node method then work on it through the normal dispatch below.
+        "get_collider" => field("collider"),
+        "get_collider_id" => match field("collider") {
+            Variant::ObjectId(id) => Variant::Int(id.raw() as i64),
+            _ => Variant::Nil,
+        },
+        // `get_travel` is Godot's motion-applied-before-contact. The slide loop
+        // does not record it yet, so it is deliberately NOT answered here: a
+        // getter returning a plausible zero would read as "no travel" rather
+        // than "not implemented".
+        _ => return None,
+    };
+    Some(value)
+}
+
 // -- Physics 2D space-query handles (pat-s3rrv.26) --------------------------
 //
 // Godot's query surface is a chain of *objects*:
@@ -1277,7 +1397,6 @@ fn playback_param_name(path: &str) -> Option<&str> {
     }
 }
 
-/// Whether `node_id` is an `HTTPRequest` (pat-s3rrv.78).
 /// The HTTPRequest settings as authored on the NODE (pat-s3rrv.78).
 ///
 /// ⚠️ Read from the node properties, not from a copy on `HttpRequestNode`.
@@ -1299,9 +1418,45 @@ fn http_settings(tree: &SceneTree, node_id: NodeId) -> crate::http_request_node:
             Some(Variant::Int(i)) => i,
             _ => crate::http_request_node::DEFAULT_MAX_REDIRECTS,
         },
+        // ⚠️ Absent means `true`, the Godot default — not `false`.
+        accept_gzip: match node.map(|n| n.get_property("accept_gzip")) {
+            Some(Variant::Bool(b)) => b,
+            _ => crate::http_request_node::DEFAULT_ACCEPT_GZIP,
+        },
     }
 }
 
+/// Whether `node_id` is an `HTTPRequest` (pat-s3rrv.78).
+/// The HTTPRequest DELIVERY settings as authored on the node (pat-s3rrv.78).
+///
+/// Delegates rather than re-reading the properties, so the getters here and the
+/// emit path in `SceneTree::process_http_requests` cannot drift apart.
+fn http_delivery(tree: &SceneTree, node_id: NodeId) -> crate::http_request_node::DeliverySettings {
+    tree.get_node(node_id)
+        .map(crate::http_request_node::delivery_settings)
+        .unwrap_or_default()
+}
+
+/// Godot's `custom_headers` argument: a `PackedStringArray` of `"Name: Value"`.
+///
+/// ⚠️ An untyped `Array` of strings is accepted too — GDScript array literals
+/// produce one, so `r.request(url, ["X: 1"])` is what a project actually writes
+/// and a PackedStringArray-only reader would silently drop every header.
+fn custom_headers_arg(args: &[Variant]) -> Vec<String> {
+    match args.get(1) {
+        Some(Variant::PackedStringArray(h)) => h.clone(),
+        Some(Variant::Array(a)) => a
+            .iter()
+            .filter_map(|v| match v {
+                Variant::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether `node_id` is an `HTTPRequest` (pat-s3rrv.78).
 fn is_http_request(tree: &SceneTree, node_id: NodeId) -> bool {
     tree.get_node(node_id)
         .map(|n| n.class_name() == "HTTPRequest")
@@ -1706,6 +1861,16 @@ impl SceneAccess for SceneTreeAccessor {
         // it publishes indexed arrays. Left to the table, a ShapeCast2D would
         // read a raycast's empty results and report `false` forever. The handler
         // declines every non-ShapeCast2D node, so the table stays reachable.
+        // A slide-collision handle answers its own getters, and must do so
+        // BEFORE the table below for the same reason ShapeCast2D does: that
+        // table's `get_collider` / `get_normal` / `get_position` arms read
+        // RayCast2D's `_hit_*` keys, which a collision handle never writes.
+        // Left to the table it would read a raycast's empty results and report
+        // nothing (pat-s3rrv.95). Declines every non-handle receiver.
+        if let Some(value) = kinematic_collision_call(self.tree(), node, method, args) {
+            return Some(value);
+        }
+
         if method == "force_shapecast_update" {
             // Inlined rather than factored into a helper method: this block is
             // inside `impl SceneAccess`, which may only contain that trait's own
@@ -1889,6 +2054,39 @@ impl SceneAccess for SceneTreeAccessor {
             // `get_world_2d()` is answered for any node: Patina has one
             // `PhysicsWorld2D` per tree, so the handle is a singleton rather
             // than something keyed on the caller.
+            // -- CharacterBody2D slide contacts (pat-s3rrv.95) ------------
+            //
+            // `physics_server` publishes each tick's contacts as
+            // `_slide_collisions`; these turn them into the objects Godot's
+            // idiom indexes. Names are specific enough not to shadow anything,
+            // so they sit in the table rather than needing to precede it.
+            "get_slide_collision_count" => {
+                Some(Variant::Int(slide_collision_count(self.tree(), nid) as i64))
+            }
+            // Godot returns null for an out-of-range index rather than raising,
+            // so a `for i in count` loop that races a tick degrades quietly.
+            "get_slide_collision" => {
+                let idx = match args.first() {
+                    Some(Variant::Int(i)) if *i >= 0 => *i as usize,
+                    _ => return Some(Variant::Nil),
+                };
+                if idx >= slide_collision_count(self.tree(), nid) {
+                    return Some(Variant::Nil);
+                }
+                Some(Variant::ObjectId(ObjectId::from_raw(
+                    kinematic_collision_handle_for(node, idx),
+                )))
+            }
+            "get_last_slide_collision" => {
+                match slide_collision_count(self.tree(), nid).checked_sub(1) {
+                    Some(last) => Some(Variant::ObjectId(ObjectId::from_raw(
+                        kinematic_collision_handle_for(node, last),
+                    ))),
+                    // No contacts this tick — Godot returns null, not an object
+                    // describing a collision that did not happen.
+                    None => Some(Variant::Nil),
+                }
+            }
             "get_world_2d" => Some(Variant::ObjectId(ObjectId::from_raw(WORLD_2D_HANDLE))),
             // Queries on the space-state handle. Guarded on the receiver being
             // that handle so these names cannot shadow a same-named script or
@@ -2918,10 +3116,11 @@ impl SceneAccess for SceneTreeAccessor {
                 // ⚠️ Resolved BEFORE the mutable borrow below; reading the
                 // tree inside the `http_request_for` call is E0502.
                 let settings = http_settings(self.tree(), nid);
+                let headers = custom_headers_arg(args);
                 let code = self
                     .tree_mut()
                     .http_request_for(nid)
-                    .request(&url, method, body, settings);
+                    .request_with_headers(&url, method, body, &headers, settings);
                 Some(Variant::Int(code as i64))
             }
             // `request_raw` differs only in taking the body as bytes, which the
@@ -2943,10 +3142,11 @@ impl SceneAccess for SceneTreeAccessor {
                 // ⚠️ Resolved BEFORE the mutable borrow below; reading the
                 // tree inside the `http_request_for` call is E0502.
                 let settings = http_settings(self.tree(), nid);
+                let headers = custom_headers_arg(args);
                 let code = self
                     .tree_mut()
                     .http_request_for(nid)
-                    .request(&url, method, body, settings);
+                    .request_with_headers(&url, method, body, &headers, settings);
                 Some(Variant::Int(code as i64))
             }
             // ⚠️ `cancel_request` returns VOID and emits nothing. The
@@ -2994,6 +3194,54 @@ impl SceneAccess for SceneTreeAccessor {
             }
             "get_max_redirects" if is_http_request(self.tree(), nid) => {
                 Some(Variant::Int(http_settings(self.tree(), nid).max_redirects))
+            }
+            // `body_size_limit` and `download_file` shape what the completion
+            // DELIVERS rather than what the request sends, so they are read at
+            // emit time by `SceneTree::process_http_requests`. These arms only
+            // have to store them where that reader looks — the node itself.
+            "set_body_size_limit" if is_http_request(self.tree(), nid) => {
+                let Some(Variant::Int(bytes)) = args.first() else {
+                    return Some(Variant::Nil);
+                };
+                // ⚠️ Stored verbatim, negatives included: negative is NO LIMIT
+                // (`http_request.cpp:408`), and the default is -1.
+                let bytes = *bytes;
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("body_size_limit", Variant::Int(bytes));
+                }
+                Some(Variant::Nil)
+            }
+            "get_body_size_limit" if is_http_request(self.tree(), nid) => Some(Variant::Int(
+                http_delivery(self.tree(), nid).body_size_limit,
+            )),
+            "set_download_file" if is_http_request(self.tree(), nid) => {
+                let Some(Variant::String(path)) = args.first() else {
+                    return Some(Variant::Nil);
+                };
+                let path = path.clone();
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("download_file", Variant::String(path));
+                }
+                Some(Variant::Nil)
+            }
+            "get_download_file" if is_http_request(self.tree(), nid) => Some(Variant::String(
+                http_delivery(self.tree(), nid).download_file,
+            )),
+            "set_accept_gzip" if is_http_request(self.tree(), nid) => {
+                let Some(Variant::Bool(enable)) = args.first() else {
+                    return Some(Variant::Nil);
+                };
+                let enable = *enable;
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("accept_gzip", Variant::Bool(enable));
+                }
+                Some(Variant::Nil)
+            }
+            // ⚠️ The getter is `is_accepting_gzip`, not `get_accept_gzip`
+            // (`HTTPRequest.xml:236` names it as the property's getter). A
+            // script calling the name the setter implies would miss.
+            "is_accepting_gzip" if is_http_request(self.tree(), nid) => {
+                Some(Variant::Bool(http_delivery(self.tree(), nid).accept_gzip))
             }
             // -- RichTextLabel text API (pat-s3rrv.74) -----------------------
             //

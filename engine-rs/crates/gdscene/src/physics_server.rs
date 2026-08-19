@@ -34,6 +34,11 @@ fn body_type_for_class(class_name: &str) -> Option<BodyType> {
         "RigidBody2D" => Some(BodyType::Rigid),
         "StaticBody2D" => Some(BodyType::Static),
         "CharacterBody2D" => Some(BodyType::Kinematic),
+        // ⚠️ Kinematic, NOT Static, even though Godot parents it to
+        // StaticBody2D. A moving platform has to be driven by the scene tree
+        // every tick, and the Static arm below only picks up teleports past an
+        // epsilon — an animated platform would judder or stall (pat-s3rrv.93).
+        "AnimatableBody2D" => Some(BodyType::Kinematic),
         _ => None,
     }
 }
@@ -646,6 +651,15 @@ pub struct PhysicsServer {
     node_to_body: HashMap<NodeId, BodyId>,
     /// Maps physics body IDs back to scene node IDs.
     body_to_node: HashMap<BodyId, NodeId>,
+    /// Per-tick world-space motion of each `AnimatableBody2D` whose
+    /// `sync_to_physics` is on (pat-s3rrv.93).
+    ///
+    /// ⚠️ A DISPLACEMENT, not a velocity: `sync_to_physics` reads the scene and
+    /// has no `dt`, while `step_physics` has `dt` but no memory of where the
+    /// node used to be. The delta is recorded by the first and divided by the
+    /// second, which is also the only ordering that yields the velocity for the
+    /// step that is about to run.
+    animatable_motion: HashMap<BodyId, Vector2>,
     /// Maps scene node IDs to area IDs.
     node_to_area: HashMap<NodeId, AreaId>,
     /// Maps joint scene nodes to the world joints built from them, so a
@@ -711,6 +725,7 @@ impl PhysicsServer {
             next_server_rid: 1,
             node_to_body: HashMap::new(),
             body_to_node: HashMap::new(),
+            animatable_motion: HashMap::new(),
             node_to_area: HashMap::new(),
             node_to_joint: HashMap::new(),
             area_to_node: HashMap::new(),
@@ -1720,6 +1735,20 @@ impl PhysicsServer {
             // works in world space (pat-0q2kx.31).
             let scene_pos = crate::node2d::get_global_position(tree, node_id);
             let scene_rot = crate::node2d::get_global_rotation(tree, node_id);
+            // An AnimatableBody2D turns its own motion into rider-carrying
+            // velocity, but only while `sync_to_physics` is on (pat-s3rrv.93).
+            //
+            // ⚠️ Absent means ON. The property defaults to true in Godot, so
+            // only an explicit `false` reverts the platform to plain-static
+            // behaviour; treating "unset" as off would leave every authored
+            // platform inert.
+            let animatable = tree.get_node(node_id).is_some_and(|n| {
+                n.class_name() == "AnimatableBody2D"
+                    && !matches!(n.get_property("sync_to_physics"), Variant::Bool(false))
+            });
+            let is_animatable_class = tree
+                .get_node(node_id)
+                .is_some_and(|n| n.class_name() == "AnimatableBody2D");
             let node_lin = tree
                 .get_node(node_id)
                 .map(|n| n.get_property("linear_velocity"));
@@ -1797,6 +1826,24 @@ impl PhysicsServer {
                 }
                 match body.body_type {
                     BodyType::Kinematic => {
+                        // ⚠️ Read the displacement BEFORE the assignment below
+                        // overwrites the body's old position — that difference
+                        // is the whole signal, and one line later it is gone.
+                        //
+                        // Recorded for every AnimatableBody2D, including a
+                        // stationary one (delta zero) and one with
+                        // `sync_to_physics` off (forced to zero), so a platform
+                        // that stops carrying actually stops: an entry that
+                        // simply vanished would leave last tick's velocity on
+                        // the body forever.
+                        if is_animatable_class {
+                            let delta = if animatable {
+                                scene_pos - body.position
+                            } else {
+                                Vector2::ZERO
+                            };
+                            self.animatable_motion.insert(body_id, delta);
+                        }
                         body.position = scene_pos;
                         body.rotation = scene_rot;
                     }
@@ -1945,6 +1992,27 @@ impl PhysicsServer {
     /// Otherwise the plain [`step`](gdphysics2d::world::PhysicsWorld2D::step) is
     /// used, leaving default gravity behaviour untouched.
     pub fn step_physics(&mut self, dt: f32) {
+        // Phase 0a: an AnimatableBody2D's per-tick displacement becomes the
+        // body's velocity for the step about to run (pat-s3rrv.93). This is the
+        // value `CharacterBody2D`'s floor carry reads off whatever it is
+        // standing on (`gdphysics2d/src/character.rs` takes
+        // `floor_platform_vel` from the floor body's `linear_velocity`), so
+        // setting it here is what makes a rider travel with the platform.
+        //
+        // ⚠️ **`linear_velocity`, NOT `constant_linear_velocity`.** The latter
+        // is the CONVEYOR field: it drags contacts by friction while the
+        // surface itself stays put, and the carry path never reads it. Writing
+        // the platform's motion there instead would leave a rider standing
+        // still while the platform slid out from under it.
+        if dt > 0.0 {
+            let motions: Vec<(BodyId, Vector2)> = self.animatable_motion.drain().collect();
+            for (body_id, delta) in motions {
+                if let Some(body) = self.world.get_body_mut(body_id) {
+                    body.linear_velocity = delta / dt;
+                }
+            }
+        }
+
         // Phase 0: compute per-body area gravity/damp overrides (only when an
         // area actually declares one, so default behaviour is unaffected).
         if self.area_store.has_space_overrides() {
@@ -2179,6 +2247,84 @@ impl PhysicsServer {
     /// Godot's `body_entered(body: Node)` / `body_exited(body: Node)` contract.
     /// Static bodies (which lack a `contact_monitor` property) naturally never
     /// emit, while a monitoring rigid body still reports contact with them.
+    /// Publishes each monitoring body's CURRENT contacts as `_body_contacts`,
+    /// so `_integrate_forces(state)` can report them (pat-s3rrv.94).
+    ///
+    /// `PhysicsDirectBodyState2D`'s contact getters were registered in ClassDB
+    /// and backed by a real `BodyContact2D` type, but `build_state` filled the
+    /// list with `Vec::new()` — so `get_contact_count()` answered 0 however many
+    /// bodies were touching.
+    ///
+    /// ⚠️ A separate pass from [`process_body_contact_signals`](Self::process_body_contact_signals),
+    /// which deliberately skips `Persisting` contacts because it reports
+    /// enter/exit EDGES. A body resting on a floor is persisting on every tick
+    /// after the first, so reusing that pass would report contacts for exactly
+    /// one frame and none thereafter.
+    ///
+    /// Same bridge as `publish_overlapping_bodies`: the script phase holds no
+    /// handle on the physics server, so the physics phase leaves the answer on
+    /// the node.
+    pub fn publish_body_contacts(&self, tree: &mut SceneTree) {
+        // Every monitoring body is reset first, so a body that stopped touching
+        // reports zero rather than keeping last tick's list forever.
+        let monitoring: Vec<NodeId> = self
+            .node_to_body
+            .keys()
+            .copied()
+            .filter(|&n| bool_prop(tree, n, "contact_monitor", false))
+            .collect();
+
+        let mut per_node: HashMap<NodeId, Vec<Variant>> = HashMap::new();
+        for event in &self.last_collision_events {
+            // Either side may be the monitoring body, so both directions are
+            // evaluated — mirroring the signal pass.
+            for (self_body, other_body, self_is_a) in [
+                (event.body_a, event.body_b, true),
+                (event.body_b, event.body_a, false),
+            ] {
+                let (Some(&self_node), Some(&other_node)) = (
+                    self.body_to_node.get(&self_body),
+                    self.body_to_node.get(&other_body),
+                ) else {
+                    continue;
+                };
+                if !bool_prop(tree, self_node, "contact_monitor", false) {
+                    continue;
+                }
+                // Godot gates on BOTH flags, and caps the list at the reported
+                // maximum rather than growing without bound.
+                let cap = u32_prop(tree, self_node, "max_contacts_reported", 0) as usize;
+                let entry = per_node.entry(self_node).or_default();
+                if cap == 0 || entry.len() >= cap {
+                    continue;
+                }
+                // ⚠️ `CollisionEvent.normal` runs A -> B. Godot's
+                // `get_contact_local_normal` points AWAY from the surface this
+                // body is resting against — up, for a body on a floor — so the
+                // sign flips when this body is A. Publishing the raw event
+                // normal would report every floor contact as pointing down and
+                // silently invert the standard floor test.
+                let normal = if self_is_a {
+                    event.normal * -1.0
+                } else {
+                    event.normal
+                };
+                let mut rec = gdvariant::Dictionary::new();
+                rec.insert("normal", Variant::Vector2(normal));
+                rec.insert("position", Variant::Vector2(event.contact_point));
+                rec.insert("collider", Variant::ObjectId(other_node.object_id()));
+                entry.push(Variant::Dictionary(rec));
+            }
+        }
+
+        for node in monitoring {
+            let recs = per_node.remove(&node).unwrap_or_default();
+            if let Some(n) = tree.get_node_mut(node) {
+                n.set_property("_body_contacts", Variant::Array(recs));
+            }
+        }
+    }
+
     pub fn process_body_contact_signals(&self, tree: &mut SceneTree) {
         for event in &self.last_collision_events {
             let signal_name = match event.state {
@@ -2346,7 +2492,41 @@ impl PhysicsServer {
             // was seeded from `body.position`), so it has to be de-parented
             // before landing in the local `position` property (pat-0q2kx.31).
             crate::node2d::set_global_position(tree, node_id, new_position);
+
+            // Slide contacts, published for `get_slide_collision(i)`
+            // (pat-s3rrv.95). The slide loop computed these every tick and then
+            // dropped them, so `get_slide_collision_count()` had nothing to read
+            // and the standard CharacterBody damage idiom was unwritable.
+            //
+            // Same bridge as `publish_overlapping_bodies`: the script phase
+            // holds no handle on the physics server, so the physics phase leaves
+            // the answer on the node.
+            //
+            // ⚠️ The collider is resolved to a NODE id HERE, not carried out as
+            // a `BodyId`. This is the only layer that owns `body_to_node`, and
+            // `get_collider()` has to hand a script something it can call
+            // `is_in_group()` on — a raw body id would be a dead end.
+            let slide_records: Vec<Variant> = (0..character.get_slide_collision_count())
+                .filter_map(|i| character.get_slide_collision(i))
+                .map(|c| {
+                    let mut rec = gdvariant::Dictionary::new();
+                    rec.insert("normal", Variant::Vector2(c.normal));
+                    rec.insert("depth", Variant::Float(c.depth as f64));
+                    rec.insert("position", Variant::Vector2(c.position));
+                    rec.insert("remainder", Variant::Vector2(c.remainder));
+                    rec.insert(
+                        "collider",
+                        c.collider
+                            .and_then(|bid| self.body_to_node.get(&bid).copied())
+                            .map(|nid| Variant::ObjectId(nid.object_id()))
+                            .unwrap_or(Variant::Nil),
+                    );
+                    Variant::Dictionary(rec)
+                })
+                .collect();
+
             if let Some(node) = tree.get_node_mut(node_id) {
+                node.set_property("_slide_collisions", Variant::Array(slide_records));
                 node.set_property("velocity", Variant::Vector2(result_velocity));
                 node.set_property("platform_velocity", Variant::Vector2(result_platform_vel));
                 node.set_property("is_on_floor", Variant::Bool(on_floor));
