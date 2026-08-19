@@ -473,6 +473,15 @@ fn effect_from_sub_resource(
                 f("release_ms", 250.0),
             );
             c.gain_db = f("gain", 0.0);
+            // pat-s3rrv.53: the `sidechain` bus name was parsed and DROPPED, so
+            // a layout configuring ducking produced a compressor keyed off its
+            // own input — audibly "the compressor does nothing much" rather than
+            // an error. `.tres` string values arrive quoted.
+            c.set_sidechain_bus(
+                fields
+                    .get("sidechain")
+                    .map(|v| v.trim().trim_matches('"').to_string()),
+            );
             Some(Box::new(c))
         }
         "AudioEffectLimiter" => Some(Box::new(AudioEffectLimiter::new(

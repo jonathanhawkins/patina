@@ -2890,7 +2890,16 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
                 <!-- A blend-tree WIRE, not a transition: it carries no crossfade
                      and no condition. Both lists are served by /api/animation/tree. -->
                 <button id="anim-tree-wire" title="Wire blend-tree output (connection)">&#8674;</button>
+                <!-- pat-s3rrv.1: the graph and the scene, in both directions.
+                     Load first — an empty canvas applied over a scene that
+                     already has a machine replaces it with nothing. -->
+                <button id="anim-tree-load" title="Load the selected AnimationTree's graph">&#8681;</button>
+                <button id="anim-tree-apply" title="Apply this graph to the selected AnimationTree">&#8679;</button>
               </div>
+              <!-- Load/Apply act on the SCENE, so they need somewhere to say
+                   what happened; a failure that only reached the console would
+                   look exactly like an AnimationTree with no states. -->
+              <div id="anim-tree-status" style="padding:0 0 4px 0;color:var(--text-dim);font-size:11px"></div>
               <div id="anim-tree-body">
                 <div class="anim-tree-node active">AnimationNodeStateMachine (root)</div>
                 <div id="anim-tree-states"></div>
@@ -7387,6 +7396,19 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     // Zoom with mouse wheel
     container.addEventListener('wheel', function(e) {
       e.preventDefault();
+      // pat-s3rrv.76: while Play is running the wheel belongs to the GAME, not
+      // to the editor camera. Handled as a BRANCH in this listener rather than a
+      // second `wheel` listener on the same element: two listeners would both
+      // fire on every notch, so a scroll in Play would also zoom the editor
+      // viewport behind it.
+      //
+      // The deltas are forwarded raw — the server maps sign to
+      // MOUSE_BUTTON_WHEEL_UP/DOWN, so the DOM's "positive deltaY is scrolling
+      // down" convention is decided in exactly one place.
+      if (typeof runtimeRunning !== 'undefined' && runtimeRunning) {
+        api('POST', '/api/runtime/input/mouse_wheel', { delta_y: e.deltaY || 0, delta_x: e.deltaX || 0 });
+        return;
+      }
       if (editorMode === '3d') {
         // Godot: the wheel scales free-look flight speed while the right mouse
         // button is held (freelook active), instead of dollying the camera.
@@ -11198,6 +11220,14 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   var gameInputMousemoveHandler = null;
   var gameInputMousedownHandler = null;
   var gameInputMouseupHandler = null;
+  // pat-s3rrv.77 — one per DOM phase, kept individually so the teardown below
+  // can removeEventListener each with its exact function reference. A factory
+  // used inline would produce a NEW closure per call and none of them could
+  // ever be removed, leaking a listener on every play/stop cycle.
+  var gameInputTouchStartHandler = null;
+  var gameInputTouchMoveHandler = null;
+  var gameInputTouchEndHandler = null;
+  var gameInputTouchCancelHandler = null;
   var GAME_KEYS = new Set(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' ','Tab']);
   // pat-0q2kx.88 — browser gamepad poll state.
   var gamepadPollTimer = null;
@@ -11279,6 +11309,47 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       vp.addEventListener('mousemove', gameInputMousemoveHandler);
       vp.addEventListener('mousedown', gameInputMousedownHandler);
       vp.addEventListener('mouseup', gameInputMouseupHandler);
+      // pat-s3rrv.77: the touch pipeline. Without these a phone or tablet
+      // cannot play a Patina game at all — the engine's ScreenTouch/ScreenDrag
+      // model existed with no producer.
+      var makeTouchHandler = function(phase) {
+        return function(e) {
+          if (!runtimeRunning) return;
+          // ⚠️ Only meaningful because the listener is registered with
+          // { passive: false }. Left passive, the page scrolls under the game
+          // and the browser also synthesizes delayed mouse events, so every tap
+          // would arrive twice.
+          e.preventDefault();
+          var rect = vp.getBoundingClientRect();
+          // ⚠️ changedTouches — the fingers THIS event is about. `touches` is
+          // every finger still down, which on a touchend would report the
+          // lifted finger as present.
+          var list = [];
+          for (var i = 0; i < e.changedTouches.length; i++) {
+            var t = e.changedTouches[i];
+            list.push({
+              identifier: t.identifier,
+              x: t.clientX - rect.left,
+              y: t.clientY - rect.top,
+              // `force` is 0 for a plain finger and only meaningful for a
+              // stylus; Godot reports it as `pressure` either way.
+              force: t.force || 0,
+              tiltX: 0,
+              tiltY: 0
+            });
+          }
+          if (list.length === 0) return;
+          api('POST', '/api/runtime/input/touch', { phase: phase, touches: list });
+        };
+      };
+      gameInputTouchStartHandler = makeTouchHandler('start');
+      gameInputTouchMoveHandler = makeTouchHandler('move');
+      gameInputTouchEndHandler = makeTouchHandler('end');
+      gameInputTouchCancelHandler = makeTouchHandler('cancel');
+      vp.addEventListener('touchstart', gameInputTouchStartHandler, { passive: false });
+      vp.addEventListener('touchmove', gameInputTouchMoveHandler, { passive: false });
+      vp.addEventListener('touchend', gameInputTouchEndHandler, { passive: false });
+      vp.addEventListener('touchcancel', gameInputTouchCancelHandler, { passive: false });
       // pat-0q2kx.90: the browser can drop the lock on its own (Esc, tab
       // switch). Tell the server the ACTUAL state rather than assuming our
       // request stuck, so the engine's mouse mode cannot drift out of sync with
@@ -11443,6 +11514,10 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       if (gameInputMousemoveHandler) { vp.removeEventListener('mousemove', gameInputMousemoveHandler); gameInputMousemoveHandler = null; }
       if (gameInputMousedownHandler) { vp.removeEventListener('mousedown', gameInputMousedownHandler); gameInputMousedownHandler = null; }
       if (gameInputMouseupHandler) { vp.removeEventListener('mouseup', gameInputMouseupHandler); gameInputMouseupHandler = null; }
+      if (gameInputTouchStartHandler) { vp.removeEventListener('touchstart', gameInputTouchStartHandler); gameInputTouchStartHandler = null; }
+      if (gameInputTouchMoveHandler) { vp.removeEventListener('touchmove', gameInputTouchMoveHandler); gameInputTouchMoveHandler = null; }
+      if (gameInputTouchEndHandler) { vp.removeEventListener('touchend', gameInputTouchEndHandler); gameInputTouchEndHandler = null; }
+      if (gameInputTouchCancelHandler) { vp.removeEventListener('touchcancel', gameInputTouchCancelHandler); gameInputTouchCancelHandler = null; }
     }
     stopGamepadPolling();
     showGameInputIndicator(false);
@@ -13610,6 +13685,45 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       await refreshAnimTree();
     }
 
+    function animTreeStatus(msg) {
+      var el = document.getElementById('anim-tree-status');
+      if (el) el.textContent = msg;
+    }
+
+    // pat-s3rrv.1: read the machine the selected AnimationTree already holds
+    // into the editor graph. Until this existed, opening a scene with an
+    // AnimationTree showed a blank canvas.
+    async function loadAnimTreeFromScene() {
+      var resp = await fetch('/api/animation/tree/load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      });
+      // ⚠️ Report the failure. A silent catch here would show the same blank
+      // canvas as before and look like an AnimationTree with no states.
+      if (!resp.ok) {
+        animTreeStatus('Load failed: ' + (await resp.text()));
+        return;
+      }
+      await refreshAnimTree();
+      animTreeStatus('Loaded the selected AnimationTree into the graph');
+    }
+
+    // The write half. Deliberately not automatic on edit: it replaces the
+    // scene's whole machine, so it is a thing the user asks for.
+    async function applyAnimTreeToScene() {
+      var resp = await fetch('/api/animation/tree/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      });
+      if (!resp.ok) {
+        animTreeStatus('Apply failed: ' + (await resp.text()));
+        return;
+      }
+      animTreeStatus('Applied the graph to the selected AnimationTree');
+    }
+
     var treeAddBtn = document.getElementById('anim-tree-add-state');
     if (treeAddBtn) treeAddBtn.addEventListener('click', addAnimTreeState);
     var treeConnectBtn = document.getElementById('anim-tree-connect');
@@ -13618,6 +13732,10 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     if (treeWireBtn) treeWireBtn.addEventListener('click', wireAnimTreeNodes);
     var bsAddBtn = document.getElementById('anim-tree-bs-add');
     if (bsAddBtn) bsAddBtn.addEventListener('click', addAnimTreeBlendPoint);
+    var treeLoadBtn = document.getElementById('anim-tree-load');
+    if (treeLoadBtn) treeLoadBtn.addEventListener('click', loadAnimTreeFromScene);
+    var treeApplyBtn = document.getElementById('anim-tree-apply');
+    if (treeApplyBtn) treeApplyBtn.addEventListener('click', applyAnimTreeToScene);
 
     // --- Theme resource editor (pat-nzgdu.102) ------------------------------
     // Opens a .tres Theme, lists its item overrides, and edits an item's color

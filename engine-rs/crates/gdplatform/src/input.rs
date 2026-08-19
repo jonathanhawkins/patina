@@ -385,6 +385,14 @@ pub enum MouseButton {
     Middle,
     WheelUp,
     WheelDown,
+    /// Horizontal wheel tilt left (`MOUSE_BUTTON_WHEEL_LEFT`, 6).
+    WheelLeft,
+    /// Horizontal wheel tilt right (`MOUSE_BUTTON_WHEEL_RIGHT`, 7).
+    WheelRight,
+    /// The "back" thumb button (`MOUSE_BUTTON_XBUTTON1`, 8).
+    XButton1,
+    /// The "forward" thumb button (`MOUSE_BUTTON_XBUTTON2`, 9).
+    XButton2,
 }
 
 impl MouseButton {
@@ -401,6 +409,10 @@ impl MouseButton {
             MouseButton::Middle => 3,
             MouseButton::WheelUp => 4,
             MouseButton::WheelDown => 5,
+            MouseButton::WheelLeft => 6,
+            MouseButton::WheelRight => 7,
+            MouseButton::XButton1 => 8,
+            MouseButton::XButton2 => 9,
         }
     }
 
@@ -1999,6 +2011,17 @@ impl InputState {
         self.emulate_touch_from_mouse
     }
 
+    /// The finger currently driving the emulated mouse, if any
+    /// (`mouse_from_touch_index`, pat-s3rrv.77).
+    ///
+    /// Exposed because the emulated mouse EVENT is synthesized outside this
+    /// type — `MainLoop` owns both the state and the scene tree, and only an
+    /// event can reach the GUI stage. The decision has to be read BEFORE
+    /// `process_event` runs, since processing a release clears this.
+    pub fn mouse_from_touch_index(&self) -> Option<u32> {
+        self.mouse_from_touch_index
+    }
+
     /// Whether finger `index` is currently down.
     pub fn is_touch_pressed(&self, index: u32) -> bool {
         self.touch_positions.contains_key(&index)
@@ -2711,6 +2734,10 @@ impl InputMap {
             3 => Some(MouseButton::Middle),
             4 => Some(MouseButton::WheelUp),
             5 => Some(MouseButton::WheelDown),
+            6 => Some(MouseButton::WheelLeft),
+            7 => Some(MouseButton::WheelRight),
+            8 => Some(MouseButton::XButton1),
+            9 => Some(MouseButton::XButton2),
             _ => None,
         }
     }
@@ -2771,6 +2798,10 @@ pub fn mouse_button_from_godot(index: i64) -> Option<MouseButton> {
         3 => MouseButton::Middle,
         4 => MouseButton::WheelUp,
         5 => MouseButton::WheelDown,
+        6 => MouseButton::WheelLeft,
+        7 => MouseButton::WheelRight,
+        8 => MouseButton::XButton1,
+        9 => MouseButton::XButton2,
         _ => return None,
     })
 }
@@ -2948,6 +2979,10 @@ impl InputMap {
                             "Middle" | "middle" => Some(MouseButton::Middle),
                             "WheelUp" | "wheel_up" => Some(MouseButton::WheelUp),
                             "WheelDown" | "wheel_down" => Some(MouseButton::WheelDown),
+                            "WheelLeft" | "wheel_left" => Some(MouseButton::WheelLeft),
+                            "WheelRight" | "wheel_right" => Some(MouseButton::WheelRight),
+                            "XButton1" | "xbutton1" => Some(MouseButton::XButton1),
+                            "XButton2" | "xbutton2" => Some(MouseButton::XButton2),
                             _ => None,
                         };
                         if let Some(b) = btn {

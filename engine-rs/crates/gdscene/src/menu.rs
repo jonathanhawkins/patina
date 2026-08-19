@@ -55,6 +55,62 @@ impl MenuBarModel {
         self.open.is_some()
     }
 
+    /// Height of the title strip.
+    pub const TITLE_HEIGHT: f32 = 24.0;
+
+    /// Horizontal padding either side of a title's text.
+    pub const TITLE_PADDING: f32 = 10.0;
+
+    /// Nominal advance per character in a title.
+    ///
+    /// ⚠️ Patina has no font metrics at this layer — the popup draw passes text
+    /// through without measuring it — so the strip uses a synthetic advance.
+    /// The number itself barely matters; what matters is that
+    /// [`title_at`](Self::title_at) and the draw pass derive their layout from
+    /// this SAME rule. If the width used to map a click differs from the width
+    /// used to place the titles, every click past the first title opens the
+    /// wrong menu, and it looks correct until you try the last one — the same
+    /// trap [`PopupMenu::ROW_HEIGHT`](crate::popup::PopupMenu::ROW_HEIGHT)
+    /// exists to avoid vertically.
+    pub const TITLE_CHAR_WIDTH: f32 = 8.0;
+
+    /// Width of one title's clickable cell.
+    pub fn title_width(title: &str) -> f32 {
+        title.chars().count() as f32 * Self::TITLE_CHAR_WIDTH + Self::TITLE_PADDING * 2.0
+    }
+
+    /// Left edge of title `index` within the strip.
+    pub fn title_x(&self, index: usize) -> f32 {
+        self.titles
+            .iter()
+            .take(index)
+            .map(|t| Self::title_width(t))
+            .sum()
+    }
+
+    /// Total width of the strip.
+    pub fn strip_width(&self) -> f32 {
+        self.title_x(self.titles.len())
+    }
+
+    /// The title under `x` (an offset within the bar), or `None` past the end.
+    ///
+    /// Answers regardless of whether a menu is open — opening is the caller's
+    /// decision, and hover-to-switch needs the same mapping a press uses.
+    pub fn title_at(&self, x: f32) -> Option<usize> {
+        if x < 0.0 {
+            return None;
+        }
+        let mut edge = 0.0;
+        for (i, t) in self.titles.iter().enumerate() {
+            edge += Self::title_width(t);
+            if x < edge {
+                return Some(i);
+            }
+        }
+        None
+    }
+
     /// A click on title `index`. Returns the newly open index, or `None` when
     /// the click closed the menu.
     ///

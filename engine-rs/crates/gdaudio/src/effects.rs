@@ -32,6 +32,25 @@ pub trait AudioEffect: Send {
         None
     }
 
+    /// The bus this effect keys its sidechain from, if any (pat-s3rrv.53).
+    ///
+    /// Godot's `AudioEffectCompressor.sidechain` names another bus whose signal
+    /// drives this compressor's envelope — how ducking is built. The name was
+    /// parsed out of a bus layout and then **dropped**: nothing carried it, and
+    /// `mixer.rs` had no reference to sidechain at all, so a layout that
+    /// configured ducking produced a compressor keyed off its own input.
+    ///
+    /// Defaulted for the same reason `magnitude_for_frequency_range` is: the
+    /// alternative is an `as_any` downcast hook that would touch every effect
+    /// in this file.
+    fn sidechain_bus(&self) -> Option<&str> {
+        None
+    }
+
+    /// Hands this effect the sidechain key for the frame, one sample per frame
+    /// (pat-s3rrv.53). No-op for effects that do not key.
+    fn set_sidechain_key(&mut self, _key: Option<Vec<f32>>) {}
+
     /// The Godot class this effect was built from, e.g.
     /// `"AudioEffectLowPassFilter"` (pat-s3rrv.54).
     ///
@@ -534,6 +553,23 @@ impl EffectChain {
     /// back the instance regardless of `set_bus_effect_enabled`, and a
     /// visualizer reading a bypassed analyzer should get its (silent) data, not
     /// a null.
+    /// Hands the effect at `index` its sidechain key for the frame
+    /// (pat-s3rrv.53).
+    ///
+    /// ⚠️ Deliberately does the work in here and returns NOTHING, rather than
+    /// exposing an `effect_at_mut` twin of [`effect_at`](Self::effect_at). The
+    /// box holds an **unsized** `dyn AudioEffect`, and handing a `&mut` to it
+    /// back out through `Option::map` fights the borrow checker in a way the
+    /// shared version does not — the immutable accessor's symmetry is
+    /// misleading here. Nothing else needs mutable access to a single slot, so
+    /// the narrow method is both simpler and the only one that is obviously
+    /// sound.
+    pub fn set_sidechain_key_at(&mut self, index: usize, key: Option<Vec<f32>>) {
+        if let Some(slot) = self.slots.get_mut(index) {
+            slot.effect.set_sidechain_key(key);
+        }
+    }
+
     pub fn effect_at(&self, index: usize) -> Option<&dyn AudioEffect> {
         self.slots.get(index).map(|s| s.effect.as_ref())
     }
@@ -941,6 +977,10 @@ pub struct AudioEffectCompressor {
     pub gain_db: f32,
     /// Optional external sidechain key (mono, one sample per frame).
     sidechain: Option<Vec<f32>>,
+    /// The bus named by `AudioEffectCompressor.sidechain` in a bus layout
+    /// (pat-s3rrv.53). Held so the mixer can resolve it each frame; the DSP
+    /// above only ever sees the resulting key buffer.
+    sidechain_bus: Option<String>,
     /// Envelope follower state (linear).
     env: f32,
 }
@@ -955,8 +995,18 @@ impl AudioEffectCompressor {
             release_ms,
             gain_db: 0.0,
             sidechain: None,
+            sidechain_bus: None,
             env: 0.0,
         }
+    }
+
+    /// Names the bus this compressor keys from (`AudioEffectCompressor.sidechain`).
+    ///
+    /// An empty name clears it: Godot writes `sidechain = ""` for "no sidechain",
+    /// and treating that as a bus called "" would send the mixer looking for a
+    /// bus that cannot exist on every frame.
+    pub fn set_sidechain_bus(&mut self, bus: Option<String>) {
+        self.sidechain_bus = bus.filter(|b| !b.is_empty());
     }
 
     /// Provide (or clear) an external sidechain key. One sample per frame.
@@ -968,6 +1018,14 @@ impl AudioEffectCompressor {
 impl AudioEffect for AudioEffectCompressor {
     fn name(&self) -> &str {
         "Compressor"
+    }
+
+    fn sidechain_bus(&self) -> Option<&str> {
+        self.sidechain_bus.as_deref()
+    }
+
+    fn set_sidechain_key(&mut self, key: Option<Vec<f32>>) {
+        self.sidechain = key;
     }
 
     fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {

@@ -56,6 +56,23 @@ pub enum DopplerTracking {
     PhysicsStep,
 }
 
+impl DopplerTracking {
+    /// Maps Godot's `AudioStreamPlayer3D.DopplerTracking` enum value
+    /// (`doc/classes/AudioStreamPlayer3D.xml`: DISABLED 0, IDLE_STEP 1,
+    /// PHYSICS_STEP 2) onto this enum.
+    ///
+    /// ⚠️ Unknown values fall back to `Disabled`, matching the field's own
+    /// default. Guessing `IdleStep` instead would silently start pitching every
+    /// source in a scene that authored a value this build does not know.
+    pub fn from_godot_int(v: i64) -> Self {
+        match v {
+            1 => Self::IdleStep,
+            2 => Self::PhysicsStep,
+            _ => Self::Disabled,
+        }
+    }
+}
+
 /// A 3D positional audio source with spatial attenuation and stereo panning.
 ///
 /// Maps to Godot's `AudioStreamPlayer3D`. Calculates volume gain and
@@ -788,6 +805,42 @@ mod tests {
     }
 
     // -- Doppler --
+
+    /// 🔑 pat-s3rrv.55: the mapping whose ABSENCE made the whole Doppler path
+    /// dead code.
+    ///
+    /// `Spatial3D::doppler_tracking` defaults to `Disabled`, and the scene
+    /// bridge never read the property — so `doppler_for` returned on its first
+    /// branch every frame and the pitch was never touched. The maths below, the
+    /// previous-position bookkeeping and the `set_pitch_scale` call were all
+    /// correct and all unreachable.
+    #[test]
+    fn doppler_tracking_maps_godots_enum_values() {
+        assert_eq!(
+            DopplerTracking::from_godot_int(0),
+            DopplerTracking::Disabled
+        );
+        assert_eq!(
+            DopplerTracking::from_godot_int(1),
+            DopplerTracking::IdleStep,
+            "1 is DOPPLER_TRACKING_IDLE_STEP in doc/classes/AudioStreamPlayer3D.xml"
+        );
+        assert_eq!(
+            DopplerTracking::from_godot_int(2),
+            DopplerTracking::PhysicsStep
+        );
+
+        // ⚠️ An unknown value must fall back to Disabled, not to a tracking
+        // mode: guessing IdleStep would silently start pitching every source in
+        // a scene that authored a value this build does not know.
+        for unknown in [-1, 3, 99] {
+            assert_eq!(
+                DopplerTracking::from_godot_int(unknown),
+                DopplerTracking::Disabled,
+                "unknown value {unknown} must not enable tracking"
+            );
+        }
+    }
 
     #[test]
     fn doppler_stationary_is_unity() {

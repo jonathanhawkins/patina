@@ -483,6 +483,13 @@ pub struct MainLoop {
     /// Engine-owned input state. Receives events via [`push_event`](Self::push_event)
     /// and produces the script-facing [`InputSnapshot`] each frame.
     input_state: InputState,
+    /// The map the host installed at boot, kept so
+    /// `InputMap.load_from_project_settings()` can restore it (pat-s3rrv.14).
+    ///
+    /// `None` when no host ever called [`MainLoop::set_input_map`] — a reload
+    /// then does nothing, which is the honest answer: there are no project
+    /// declarations to return to.
+    project_input_map: Option<InputMap>,
     /// Engine-owned cursor state (pat-0q2kx.90). `gdplatform::cursor` had the
     /// full shape/custom-cursor model with green unit tests but **no owner** —
     /// nothing in the engine or the editor ever constructed one, so a script's
@@ -622,6 +629,7 @@ impl MainLoop {
             physics_interpolation_enabled: false,
             paused: false,
             input_state: InputState::new(),
+            project_input_map: None,
             cursor: gdplatform::cursor::CursorManager::new(),
             pending_input: Vec::new(),
             particles: HashMap::new(),
@@ -2313,8 +2321,76 @@ impl MainLoop {
     /// Per-frame state (just_pressed / just_released) is flushed automatically
     /// at the end of each step.
     pub fn push_event(&mut self, event: InputEvent) {
+        // ⚠️ Decided BEFORE `process_event`, which mutates the very state the
+        // decision reads: processing a touch release clears
+        // `mouse_from_touch_index`, so asking afterwards can never tell that
+        // this finger was the one driving the mouse.
+        let emulated = self.emulated_mouse_event(&event);
+
         self.pending_input.push(event.clone());
         self.input_state.process_event(event);
+
+        if let Some(synth) = emulated {
+            // ⚠️ Queued for dispatch ONLY — deliberately not fed back through
+            // `process_event`. `InputState::emulate_mouse_from_touch_event` has
+            // already applied the state change, and re-processing would both
+            // double-count the press and re-enter `emulate_touch_from_mouse`,
+            // which is how a touch/mouse emulation pair loops.
+            self.pending_input.push(synth);
+        }
+    }
+
+    /// The mouse event Godot's `emulate_mouse_from_touch` would produce for
+    /// `event`, or `None` (pat-s3rrv.77).
+    ///
+    /// # Why this exists at all
+    ///
+    /// `InputState` already emulates — but only into ITSELF. The GUI stage
+    /// consumes events, so without a synthesized event a touch could set
+    /// `Input.is_mouse_button_pressed()` while every Button in the scene stayed
+    /// inert. Godot emits a real `InputEventMouseButton` here, and scripts'
+    /// `_gui_input` receive exactly that.
+    ///
+    /// ⚠️ Only the FIRST finger down translates, and only that same finger
+    /// releases the emulated button — Godot's `mouse_from_touch_index` rule. A
+    /// second finger must not move the cursor or the pointer jumps between
+    /// fingers mid-gesture.
+    fn emulated_mouse_event(&self, event: &InputEvent) -> Option<InputEvent> {
+        if !self.input_state.is_emulating_mouse_from_touch() {
+            return None;
+        }
+        let driving = self.input_state.mouse_from_touch_index();
+        match event {
+            InputEvent::ScreenTouch {
+                index,
+                position,
+                pressed,
+                ..
+            } => {
+                let translates = if *pressed {
+                    // The first finger down claims the mouse; later ones do not.
+                    driving.is_none()
+                } else {
+                    driving == Some(*index)
+                };
+                translates.then(|| InputEvent::MouseButton {
+                    button: gdplatform::input::MouseButton::Left,
+                    pressed: *pressed,
+                    position: *position,
+                })
+            }
+            InputEvent::ScreenDrag {
+                index, position, ..
+            } => (driving == Some(*index)).then(|| InputEvent::MouseMotion {
+                position: *position,
+                // ⚠️ `relative` is the delta since the finger's last known
+                // position, not since the last mouse move: the emulated cursor
+                // teleports to wherever the finger went down, and reporting that
+                // jump as motion would fling anything reading `relative`.
+                relative: *position - self.input_state.touch_position(*index).unwrap_or(*position),
+            }),
+            _ => None,
+        }
     }
 
     /// Godot's physics object picking — the final input stage, after
@@ -2427,7 +2503,12 @@ impl MainLoop {
             );
         }
 
-        let payload = crate::scene_tree::input_event_to_variant(event);
+        // `false`: physics picking passes the event on to a collider's
+        // `_input_event`, and it does not own the click-window bookkeeping that
+        // `SceneTree::push_input` does. Passing `false` preserves exactly the
+        // behaviour this call site had before `double_click` was computed at all
+        // (pat-s3rrv.76) rather than guessing a value here.
+        let payload = crate::scene_tree::input_event_to_variant(event, false);
         for nid in hits {
             if self.tree.is_input_handled() {
                 return;
@@ -2613,7 +2694,8 @@ impl MainLoop {
         // arguments to a five-parameter handler is not a partial delivery: the
         // interpreter rejects the arity outright and the raise is swallowed, so
         // a handler with Godot's documented signature never ran.
-        let payload = crate::scene_tree::input_event_to_variant(event);
+        // See the 2D picking site above: `false` preserves the prior behaviour.
+        let payload = crate::scene_tree::input_event_to_variant(event, false);
         let args = [
             Variant::ObjectId(camera.object_id()),
             payload.clone(),
@@ -2630,6 +2712,11 @@ impl MainLoop {
     /// Must be called before pushing events if scripts rely on action names
     /// (e.g. `Input.is_action_pressed("ui_left")`).
     pub fn set_input_map(&mut self, map: InputMap) {
+        // Snapshot what the host installed. `load_from_project_settings()` is a
+        // reset, so it needs the pre-runtime baseline to return to; taking it
+        // here means any host that installs a map gets the behaviour, without a
+        // second "and also register the defaults" call to forget.
+        self.project_input_map = Some(map.clone());
         self.input_state.set_input_map(map);
     }
 
@@ -2750,6 +2837,14 @@ impl MainLoop {
                     self.input_state
                         .input_map_mut()
                         .action_erase_events(&action);
+                }
+                InputCommand::InputMapLoadFromProjectSettings => {
+                    // Replace, do not merge: the whole point of the call is to
+                    // discard runtime rebinds. Cloned because the baseline has
+                    // to survive a second reload.
+                    if let Some(baseline) = self.project_input_map.clone() {
+                        self.input_state.set_input_map(baseline);
+                    }
                 }
             }
         }
@@ -2909,6 +3004,26 @@ impl MainLoop {
                 actions_just_released: platform_snap.just_released_actions(),
                 gamepad_buttons_pressed,
                 gamepad_axis_values,
+                // Carry the analog pair across the bridge (pat-s3rrv.14).
+                // `InputState` computes both correctly and had ZERO readers:
+                // the script-facing snapshot never carried them, so the
+                // `SceneAccess` digital default answered every query.
+                //
+                // Only held actions are stored. Both gdplatform accessors gate
+                // on `actions_pressed` before consulting their maps, so an
+                // absent entry and an unpressed action mean the same thing, and
+                // the override's digital fallback reproduces it exactly.
+                action_strengths: platform_snap
+                    .pressed_actions()
+                    .into_iter()
+                    .map(|a| {
+                        let pair = (
+                            platform_snap.get_action_strength(&a),
+                            platform_snap.get_action_raw_strength(&a),
+                        );
+                        (a, pair)
+                    })
+                    .collect(),
             };
             // A gamepad-only frame used to produce NO snapshot at all, so a pad
             // could never be seen from a script however well the transport
@@ -3058,6 +3173,16 @@ impl MainLoop {
             // `AnimationMixer::_physics_process` (pat-0q2kx.1). Before the script
             // phase, so a `_physics_process` handler reads this tick's pose.
             self.tree.process_animations_in_mode(
+                physics_dt,
+                crate::animation::AnimationCallbackMode::Physics,
+            );
+            // pat-s3rrv.23: AnimationTree honours `callback_mode_process` too —
+            // it extends AnimationMixer, where the property lives. Trees used to
+            // advance unconditionally in the idle phase below, so a tree set to
+            // PHYSICS sampled once per rendered frame instead of once per tick.
+            // After the players, matching the idle phase's ordering, so a tree's
+            // blended pose still wins where both write the same property.
+            self.tree.process_animation_trees_in_mode(
                 physics_dt,
                 crate::animation::AnimationCallbackMode::Physics,
             );

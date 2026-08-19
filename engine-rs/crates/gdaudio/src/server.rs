@@ -4,6 +4,7 @@
 //! manages active [`AudioStreamPlayback`] instances, and produces mixed output
 //! buffers each frame.
 
+use crate::biquad::{Biquad, FilterMode};
 use crate::bus::AudioBus;
 use crate::decode::AudioBuffer;
 use crate::mixer::AudioMixer;
@@ -17,6 +18,19 @@ pub struct PlaybackId(pub u64);
 struct ActiveStream {
     playback: AudioStreamPlayback,
     buffer: AudioBuffer,
+    /// One high-shelf per OUTPUT channel (pat-s3rrv.55). A biquad carries two
+    /// samples of delay state, and the channels are independent signals, so a
+    /// single shared filter would smear one channel's history into the other.
+    /// Empty whenever the voice has no shelf.
+    highshelf: Vec<Biquad>,
+    /// What [`highshelf`](Self::highshelf) was built for: `(db, cutoff, rate,
+    /// channels)`.
+    ///
+    /// ⚠️ Load-bearing. `Biquad::new` returns a filter with ZEROED delay state,
+    /// so rebuilding every block would restart the filter 40-ish times a second
+    /// and click audibly. Rebuilding only when the parameters actually change
+    /// keeps a steady shelf continuous across blocks.
+    highshelf_key: (f32, f32, u32, usize),
 }
 
 /// The audio server manages playback, mixing, and output buffer generation.
@@ -56,6 +70,20 @@ const PEAK_DECAY: f32 = 0.85;
 
 /// Floor reported for silence, matching Godot's `-200 dB` sentinel.
 const PEAK_FLOOR_DB: f32 = -200.0;
+
+/// Collapses an interleaved buffer to one sample per frame (pat-s3rrv.53).
+///
+/// A sidechain key is mono — the compressor's envelope follows the loudness of
+/// the keying bus, not one of its channels. Averaging rather than taking
+/// channel 0 keeps a hard-panned source (a voice fully in the right channel,
+/// say) able to duck the music, which is the usual reason a ducking bus exists.
+fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
+    let ch = channels.max(1);
+    interleaved
+        .chunks(ch)
+        .map(|frame| frame.iter().sum::<f32>() / frame.len().max(1) as f32)
+        .collect()
+}
 
 impl AudioServer {
     /// Creates a new audio server with default settings (44100 Hz, stereo).
@@ -208,7 +236,15 @@ impl AudioServer {
         let mut playback = AudioStreamPlayback::new(buffer.duration_secs());
         playback.play();
 
-        self.streams.push((id, ActiveStream { playback, buffer }));
+        self.streams.push((
+            id,
+            ActiveStream {
+                playback,
+                buffer,
+                highshelf: Vec::new(),
+                highshelf_key: (0.0, 0.0, 0, 0),
+            },
+        ));
         id
     }
 
@@ -221,7 +257,15 @@ impl AudioServer {
         playback.set_bus(bus);
         playback.play();
 
-        self.streams.push((id, ActiveStream { playback, buffer }));
+        self.streams.push((
+            id,
+            ActiveStream {
+                playback,
+                buffer,
+                highshelf: Vec::new(),
+                highshelf_key: (0.0, 0.0, 0, 0),
+            },
+        ));
         id
     }
 
@@ -406,6 +450,40 @@ impl AudioServer {
             // Equal-power stereo pan gains (default 1.0/1.0 = center) supplied by
             // positional players (AudioStreamPlayer2D/3D) via `set_pan`.
             let (pan_left, pan_right) = stream.playback.pan();
+
+            // Per-voice high-shelf (pat-s3rrv.55). Godot muffles a distant or
+            // off-axis 3D source as well as quietening it — `_update_panning`
+            // feeds `set_playback_highshelf_params`. Before this the value was
+            // computed by `compute_spatial` and dropped, so the emission cone
+            // had no audible effect at all.
+            //
+            // `0 dB` bypasses completely rather than running a unity-gain
+            // biquad, so every non-spatial voice mixes bit-identically to
+            // before.
+            let (hs_db, hs_cutoff) = stream.playback.highshelf();
+            let filtering = hs_db != 0.0 && hs_cutoff > 0.0 && out_ch > 0;
+            if filtering {
+                let key = (hs_db, hs_cutoff, rate, out_ch);
+                if stream.highshelf_key != key || stream.highshelf.len() != out_ch {
+                    // ⚠️ `q` is `sqrt(0.5)`, DERIVED rather than picked: Godot's
+                    // high-shelf uses `beta = sqrt(gain) / sqrt(Q)` with a
+                    // default resonance of 0.5 (`audio_filter_sw.cpp:163-176`,
+                    // `audio_filter_sw.h:78`), while this biquad's shelf term is
+                    // `2*sqrt(a)*alpha` with `alpha = sin(w)/(2q)`. The two
+                    // agree exactly when `q == sqrt(Q_godot)`.
+                    let q = 0.5f32.sqrt();
+                    stream.highshelf = (0..out_ch)
+                        .map(|_| {
+                            Biquad::new(FilterMode::HighShelf, hs_cutoff, rate as f32, q, hs_db)
+                        })
+                        .collect();
+                    stream.highshelf_key = key;
+                }
+            } else if !stream.highshelf.is_empty() {
+                stream.highshelf.clear();
+                stream.highshelf_key = (0.0, 0.0, 0, 0);
+            }
+
             let buf = &mut bus_bufs[bus_idx];
 
             // Direction and loop region for the read cursor (pat-0q2kx.58): a
@@ -465,6 +543,15 @@ impl AudioServer {
                     let s0 = stream.buffer.samples[i0 * src_channels + src_ch];
                     let s1 = stream.buffer.samples[i1 * src_channels + src_ch];
                     let sample = s0 + (s1 - s0) * frac;
+                    // The shelf runs on the SOURCE signal, before gain and pan
+                    // — Godot filters the voice, not the panned result, so a
+                    // hard-panned source is muffled by the same amount as a
+                    // centred one.
+                    let sample = if filtering {
+                        stream.highshelf[ch].process(sample)
+                    } else {
+                        sample
+                    };
                     // Left/right pan applies to channels 0/1; extra channels pass through.
                     let pan_gain = match ch {
                         0 => pan_left,
@@ -496,6 +583,37 @@ impl AudioServer {
                 .unwrap_or(1.0);
             for s in bus_bufs[i].iter_mut() {
                 *s *= vol;
+            }
+
+            // pat-s3rrv.53: sidechain keys. An effect naming another bus (a
+            // compressor's `sidechain`) is handed that bus's signal for this
+            // frame, which is how ducking is built. The name used to be dropped
+            // at load, so a ducking layout produced a compressor keyed off its
+            // OWN input — audibly "the compressor barely does anything" rather
+            // than an error.
+            //
+            // ⚠️ Buses are walked from the highest index DOWN, so a key bus with
+            // a higher index than the compressor's contributes its POST-effect
+            // signal and a lower one its pre-effect signal. Godot has the same
+            // ordering dependence; what must not happen is a bus keying off
+            // itself, which is just its own input and is skipped below.
+            let sidechain_keys: Vec<(usize, Vec<f32>)> = match self.mixer.get_bus(i) {
+                Some(bus) => (0..bus.effects().len())
+                    .filter_map(|e| {
+                        let name = bus.effects().effect_at(e)?.sidechain_bus()?;
+                        let src = self.mixer.get_bus_by_name(name)?;
+                        if src == i || src >= bus_bufs.len() {
+                            return None;
+                        }
+                        Some((e, downmix_to_mono(&bus_bufs[src], out_ch)))
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            for (slot, key) in sidechain_keys {
+                if let Some(bus) = self.mixer.get_bus_mut(i) {
+                    bus.effects_mut().set_sidechain_key_at(slot, Some(key));
+                }
             }
 
             // Effect chain (skipped when the bus bypasses its inserts).

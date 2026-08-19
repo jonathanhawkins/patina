@@ -36,24 +36,13 @@ pub enum NodeKind {
 /// A stable node id.
 pub type NodeId = u64;
 
-/// One blend-space point: a position and the animation played there
-/// (pat-s3rrv.1).
-///
-/// ⚠️ `y` is meaningless for a [`NodeKind::BlendSpace1D`] and is ignored when
-/// the graph is applied. Godot's two blend spaces are separate classes whose
-/// points genuinely differ in arity, but carrying one struct with an unused
-/// component beats two near-identical ones — the node's own kind already says
-/// how many components to read, and the editor reads it to decide how many
-/// fields to show.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BlendPoint {
-    /// Position along the first axis (`blend_position` for 1D).
-    pub x: f32,
-    /// Position along the second axis. Ignored for a 1D blend space.
-    pub y: f32,
-    /// The animation clip name played at this point.
-    pub animation: String,
-}
+/// Grid width used when laying out a machine loaded from a scene
+/// (pat-s3rrv.1) — see [`AnimTreeGraph::from_state_machine`].
+const LOAD_COLUMNS: usize = 4;
+/// Horizontal spacing of that grid, in editor pixels.
+const LOAD_COLUMN_WIDTH: f64 = 220.0;
+/// Vertical spacing of that grid, in editor pixels.
+const LOAD_ROW_HEIGHT: f64 = 140.0;
 
 /// A node in the AnimationTree graph.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,14 +64,6 @@ pub struct Node {
     pub x: f64,
     /// Graph-canvas Y position in editor pixels.
     pub y: f64,
-    /// Blend-space points, for a [`NodeKind::BlendSpace1D`] or
-    /// [`NodeKind::BlendSpace2D`] node; empty for every other kind
-    /// (pat-s3rrv.1).
-    ///
-    /// ⚠️ A blend space with no points samples to NOTHING — `sample_blend_space_1d`
-    /// returns an empty track list on an empty point set — so an authored blend
-    /// space that was never given points is silently inert rather than broken.
-    pub blend_points: Vec<BlendPoint>,
 }
 
 /// A directed link (blend-tree connection or state transition).
@@ -131,7 +112,6 @@ impl AnimTreeGraph {
             // at the drop point rather than a computed layout.
             x: 0.0,
             y: 0.0,
-            blend_points: Vec::new(),
         });
         id
     }
@@ -204,44 +184,168 @@ impl AnimTreeGraph {
         self.get_node(id)?.params.get(key).map(String::as_str)
     }
 
-    /// Adds a blend-space point to `node_id`, returning false if the node does
-    /// not exist or is not a blend space (pat-s3rrv.1).
+    /// Builds an editor graph from a runtime state machine (pat-s3rrv.1).
     ///
-    /// ⚠️ Rejecting a point on a non-blend-space node matters: the runtime
-    /// simply has nowhere to put one, so accepting it would store editor state
-    /// that can never be applied — authored, saved, and silently ignored.
-    pub fn add_blend_point(&mut self, node_id: NodeId, x: f32, y: f32, animation: &str) -> bool {
-        let Some(node) = self.nodes.iter_mut().find(|n| n.id == node_id) else {
-            return false;
-        };
-        if !matches!(node.kind, NodeKind::BlendSpace1D | NodeKind::BlendSpace2D) {
-            return false;
+    /// The inverse of [`to_state_machine`](Self::to_state_machine), and the
+    /// reason it matters: without it the editor opens a scene that already has
+    /// an `AnimationTree` and shows an EMPTY graph. Applying that empty graph —
+    /// now that `POST /api/animation/tree/apply` exists — would silently
+    /// replace the real machine with nothing.
+    ///
+    /// ⚠️ States are laid out in NAME order, with the machine's `current` state
+    /// first. The runtime keeps them in a `HashMap`, so iterating it directly
+    /// would lay the graph out differently on every open; and because
+    /// `to_state_machine` reads the starting state off the FIRST node, map
+    /// order would also hand back a machine that starts somewhere else. Sorting
+    /// makes the round trip an identity instead of a shuffle.
+    ///
+    /// ⚠️ Not everything survives a re-apply. A nested `StateMachine`, a
+    /// `Blend2` and the other composite nodes are labelled with their real
+    /// [`NodeKind`] so the editor shows what is actually in the scene, but the
+    /// editor has no surface for their children — converting such a graph back
+    /// flattens them to a leaf. Showing them as plain animations would hide
+    /// that; showing them truthfully at least lets a user see what they are
+    /// about to lose.
+    pub fn from_state_machine(machine: &StateMachine) -> Self {
+        let mut graph = Self::new();
+
+        let mut names: Vec<&String> = machine.states.keys().collect();
+        names.sort();
+        // Stable, so the current state leads and the rest stay in name order.
+        names.sort_by_key(|n| *n != &machine.current);
+
+        for (i, name) in names.into_iter().enumerate() {
+            let node = machine.states.get(name).expect("key came from the map");
+            let id = graph.add_node(name.clone(), Self::graph_kind(node));
+            // ⚠️ Every node would otherwise sit at the origin, drawing the whole
+            // machine as one stack the user cannot pull apart. The runtime
+            // `StateMachine` carries no coordinates — Godot keeps them on the
+            // resource as `states/<name>/position`, which our type does not
+            // model yet — so the load lays out a grid. Moving a node persists
+            // in the graph as usual; only the FIRST open is auto-arranged.
+            graph.move_node(
+                id,
+                (i % LOAD_COLUMNS) as f64 * LOAD_COLUMN_WIDTH,
+                (i / LOAD_COLUMNS) as f64 * LOAD_ROW_HEIGHT,
+            );
+            Self::store_leaf_clip(&mut graph, id, name, node);
+            Self::store_blend_points(&mut graph, id, node);
         }
-        // A 1D space has no second axis; storing a stray `y` would round-trip
-        // through the editor and mislead whoever read it back.
-        let y = if node.kind == NodeKind::BlendSpace1D {
-            0.0
-        } else {
-            y
-        };
-        node.blend_points.push(BlendPoint {
-            x,
-            y,
-            animation: animation.to_string(),
-        });
-        true
+
+        for t in &machine.transitions {
+            let (Some(from), Some(to)) =
+                (graph.node_id_by_name(&t.from), graph.node_id_by_name(&t.to))
+            else {
+                // An edge naming a state the machine does not hold describes
+                // nothing the editor could draw; dropping it beats inventing
+                // the missing state.
+                continue;
+            };
+            graph.add_transition_with_xfade(from, to, t.crossfade);
+        }
+        graph
     }
 
-    /// Removes the blend-space point at `index`. Returns whether it existed.
-    pub fn remove_blend_point(&mut self, node_id: NodeId, index: usize) -> bool {
-        let Some(node) = self.nodes.iter_mut().find(|n| n.id == node_id) else {
-            return false;
-        };
-        if index >= node.blend_points.len() {
-            return false;
+    /// The editor kind that names a runtime node.
+    fn graph_kind(node: &AnimationNode) -> NodeKind {
+        match node {
+            AnimationNode::BlendSpace1D(_) => NodeKind::BlendSpace1D,
+            AnimationNode::BlendSpace2D(_) => NodeKind::BlendSpace2D,
+            AnimationNode::StateMachine(_) => NodeKind::StateMachine,
+            AnimationNode::Blend2 { .. } => NodeKind::Blend2,
+            // Every other runtime node plays or composes clips and has no
+            // editor kind of its own; `Animation` is the closest honest label.
+            _ => NodeKind::Animation,
         }
-        node.blend_points.remove(index);
-        true
+    }
+
+    /// Records a leaf's clip name when it differs from the state name.
+    ///
+    /// A state key and the clip it plays are independent in Godot — a `walk`
+    /// state may play `walk_cycle`. [`runtime_node`](Self::runtime_node) reads
+    /// this key back, so loading and re-applying a machine keeps the clip
+    /// instead of renaming it after its state.
+    fn store_leaf_clip(graph: &mut Self, id: NodeId, state: &str, node: &AnimationNode) {
+        if let AnimationNode::Animation { name, .. } = node {
+            if name != state {
+                graph.set_param(id, "animation", name.clone());
+            }
+        }
+    }
+
+    /// Writes a blend space's points back into `params` under the same
+    /// `blend_point_N/*` names the param route and the point editor use, so a
+    /// loaded graph is indistinguishable from an authored one — and so
+    /// [`blend_points`](Self::blend_points) reads them straight back.
+    fn store_blend_points(graph: &mut Self, id: NodeId, node: &AnimationNode) {
+        match node {
+            AnimationNode::BlendSpace1D(space) => {
+                for (i, (pos, animation)) in space.points().iter().enumerate() {
+                    graph.set_param(id, format!("blend_point_{i}/pos"), pos.to_string());
+                    graph.set_param(id, format!("blend_point_{i}/node"), animation.clone());
+                }
+            }
+            AnimationNode::BlendSpace2D(space) => {
+                for (i, (pos, animation)) in space.points().iter().enumerate() {
+                    graph.set_param(
+                        id,
+                        format!("blend_point_{i}/pos"),
+                        format!("{},{}", pos.x, pos.y),
+                    );
+                    graph.set_param(id, format!("blend_point_{i}/node"), animation.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A blend space's authored points, in index order.
+    ///
+    /// ⚠️ They live in [`Node::params`] under Godot's own indexed
+    /// resource-property names — `blend_point_N/pos` and `blend_point_N/node` —
+    /// because that is what `POST /api/animation/tree/node/param` writes and
+    /// what the point editor in `editor_ui.rs` edits. Reading anywhere else
+    /// yields a blend space with no points for every graph a user actually
+    /// authored (pat-s3rrv.1).
+    ///
+    /// `pos` is a scalar in 1D and an `"x,y"` pair in 2D; the `y` is simply 0.0
+    /// for the 1D case, so one reader serves both. A point missing its `node`
+    /// is skipped rather than defaulted: a blend point with no animation
+    /// samples nothing, and inventing a clip name would be worse than omitting
+    /// the point.
+    fn blend_points(node: &Node) -> Vec<(gdcore::math::Vector2, &str)> {
+        let mut out: Vec<(usize, gdcore::math::Vector2, &str)> = Vec::new();
+        for (key, value) in &node.params {
+            let Some(rest) = key.strip_prefix("blend_point_") else {
+                continue;
+            };
+            let Some((index, field)) = rest.split_once('/') else {
+                continue;
+            };
+            if field != "pos" {
+                continue;
+            }
+            let Ok(index) = index.parse::<usize>() else {
+                continue;
+            };
+            let mut parts = value.split(',').map(|p| p.trim().parse::<f32>());
+            let x = match parts.next() {
+                Some(Ok(v)) => v,
+                _ => continue,
+            };
+            let y = match parts.next() {
+                Some(Ok(v)) => v,
+                _ => 0.0,
+            };
+            let Some(animation) = node.params.get(&format!("blend_point_{index}/node")) else {
+                continue;
+            };
+            out.push((index, gdcore::math::Vector2::new(x, y), animation.as_str()));
+        }
+        // Index order, not map order: the points describe a 1D ramp whose
+        // ordering is meaningful.
+        out.sort_by_key(|(i, _, _)| *i);
+        out.into_iter().map(|(_, p, a)| (p, a)).collect()
     }
 
     /// Builds the runtime [`StateMachine`](gdscene::animation_tree::StateMachine)
@@ -298,15 +402,15 @@ impl AnimTreeGraph {
         match node.kind {
             NodeKind::BlendSpace1D => {
                 let mut bs = BlendSpace1D::new();
-                for p in &node.blend_points {
-                    bs.add_point(p.x, &p.animation);
+                for (pos, animation) in Self::blend_points(node) {
+                    bs.add_point(pos.x, animation);
                 }
                 AnimationNode::BlendSpace1D(bs)
             }
             NodeKind::BlendSpace2D => {
                 let mut bs = BlendSpace2D::new();
-                for p in &node.blend_points {
-                    bs.add_point(gdcore::math::Vector2::new(p.x, p.y), &p.animation);
+                for (pos, animation) in Self::blend_points(node) {
+                    bs.add_point(pos, animation);
                 }
                 AnimationNode::BlendSpace2D(bs)
             }
@@ -315,8 +419,17 @@ impl AnimTreeGraph {
             // nested machine: the editor has no nesting surface yet, and
             // inventing an empty nested machine here would produce a state that
             // silently plays nothing.
+            // The clip is the `animation` param when one is set, and the node
+            // name otherwise (pat-s3rrv.1). A state key and the clip it plays
+            // are independent in Godot — a `walk` state may play `walk_cycle` —
+            // and before this the name was the ONLY way to say which clip, so
+            // loading such a machine and applying it renamed the clip.
             _ => AnimationNode::Animation {
-                name: node.name.clone(),
+                name: node
+                    .params
+                    .get("animation")
+                    .cloned()
+                    .unwrap_or_else(|| node.name.clone()),
                 position: 0.0,
                 opts: AnimationLeafOptions::default(),
             },
@@ -477,13 +590,20 @@ mod tests {
     fn blend_points_reach_the_runtime_blend_space() {
         let mut g = AnimTreeGraph::new();
         let bs = g.add_node("Move", NodeKind::BlendSpace2D);
-        g.add_blend_point(bs, -1.0, 0.0, "left");
-        g.add_blend_point(bs, 1.0, 0.0, "right");
+        // ⚠️ Authored through `params` with Godot's own indexed key names —
+        // exactly what POST /api/animation/tree/node/param writes. Any other
+        // representation would convert to a blend space with no points.
+        g.set_param(bs, "blend_point_0/pos", "-1,0");
+        g.set_param(bs, "blend_point_0/node", "left");
+        g.set_param(bs, "blend_point_1/pos", "1,0");
+        g.set_param(bs, "blend_point_1/node", "right");
 
         let sm = g.to_state_machine();
         match sm.states.get("Move").expect("the blend space is a state") {
             AnimationNode::BlendSpace2D(space) => {
                 assert_eq!(space.points().len(), 2, "both authored points carry over");
+                assert_eq!(space.points()[0].1, "left");
+                assert_eq!(space.points()[1].0.x, 1.0);
             }
             other => panic!("expected a BlendSpace2D, got {other:?}"),
         }
@@ -494,7 +614,9 @@ mod tests {
     fn a_1d_blend_space_carries_scalar_points() {
         let mut g = AnimTreeGraph::new();
         let bs = g.add_node("Speed", NodeKind::BlendSpace1D);
-        g.add_blend_point(bs, 2.0, 0.0, "run");
+        // A 1D point's `pos` is a bare scalar, not an "x,y" pair.
+        g.set_param(bs, "blend_point_0/pos", "2.0");
+        g.set_param(bs, "blend_point_0/node", "run");
 
         let sm = g.to_state_machine();
         match sm.states.get("Speed").expect("state") {
@@ -507,79 +629,313 @@ mod tests {
         }
     }
 
-    /// pat-s3rrv.1: blend-space points reach the graph model.
-    ///
-    /// The previous pass deferred blend spaces believing the runtime had no
-    /// evaluator. It does — `sample_blend_space_1d` / `_2d` in
-    /// `gdscene::animation_tree` implement Godot's Interpolated/Discrete/Carry
-    /// modes. The missing piece was here: the model had blend-space node KINDS
-    /// and nowhere to put a point.
+    /// ⚠️ A point whose `node` is missing is SKIPPED, not defaulted: a blend
+    /// point with no animation samples nothing, and inventing a clip name would
+    /// hide the authoring mistake behind a silent wrong result.
     #[test]
-    fn blend_points_are_authored_on_blend_space_nodes() {
-        let mut g = AnimTreeGraph::new();
-        let bs = g.add_node("Move", NodeKind::BlendSpace2D);
-
-        assert!(g.add_blend_point(bs, -1.0, 0.5, "strafe_left"));
-        assert!(g.add_blend_point(bs, 1.0, 0.5, "strafe_right"));
-
-        let node = g.get_node(bs).expect("node");
-        assert_eq!(node.blend_points.len(), 2);
-        assert_eq!(node.blend_points[0].animation, "strafe_left");
-        assert_eq!(node.blend_points[1].x, 1.0);
-        assert_eq!(node.blend_points[1].y, 0.5, "a 2D space keeps both axes");
-    }
-
-    /// ⚠️ A 1D space has no second axis, so a stray `y` is dropped rather than
-    /// stored — storing it would round-trip through the editor and mislead
-    /// whoever read it back into thinking the node was 2D.
-    #[test]
-    fn a_1d_blend_point_drops_its_second_axis() {
+    fn a_point_without_an_animation_is_skipped() {
         let mut g = AnimTreeGraph::new();
         let bs = g.add_node("Speed", NodeKind::BlendSpace1D);
+        g.set_param(bs, "blend_point_0/pos", "0.0");
+        g.set_param(bs, "blend_point_0/node", "idle");
+        g.set_param(bs, "blend_point_1/pos", "1.0"); // no `node`
 
-        assert!(g.add_blend_point(bs, 2.5, 99.0, "run"));
-
-        let node = g.get_node(bs).expect("node");
-        assert_eq!(node.blend_points[0].x, 2.5);
-        assert_eq!(node.blend_points[0].y, 0.0);
+        let sm = g.to_state_machine();
+        match sm.states.get("Speed").expect("state") {
+            AnimationNode::BlendSpace1D(space) => assert_eq!(space.points().len(), 1),
+            other => panic!("expected a BlendSpace1D, got {other:?}"),
+        }
     }
 
-    /// A point on a node that is not a blend space is REJECTED.
-    ///
-    /// The runtime has nowhere to put one, so accepting it would store editor
-    /// state that can never be applied — authored, saved, silently ignored.
+    /// Points come back in INDEX order, not map order — a 1D ramp's ordering is
+    /// meaningful, and `params` is a BTreeMap keyed by string, where
+    /// `blend_point_10` sorts before `blend_point_2`.
     #[test]
-    fn a_non_blend_space_node_rejects_points() {
+    fn points_are_ordered_by_index_not_by_key() {
         let mut g = AnimTreeGraph::new();
-        let sm = g.add_node("Idle", NodeKind::StateMachine);
+        let bs = g.add_node("Speed", NodeKind::BlendSpace1D);
+        for (i, (pos, clip)) in [("0.0", "a"), ("1.0", "b"), ("2.0", "c")]
+            .iter()
+            .enumerate()
+        {
+            g.set_param(bs, format!("blend_point_{i}/pos"), *pos);
+            g.set_param(bs, format!("blend_point_{i}/node"), *clip);
+        }
+        g.set_param(bs, "blend_point_10/pos", "10.0");
+        g.set_param(bs, "blend_point_10/node", "last");
 
-        assert!(!g.add_blend_point(sm, 0.0, 0.0, "idle"));
-        assert!(
-            !g.add_blend_point(9999, 0.0, 0.0, "idle"),
-            "unknown node too"
-        );
-        assert!(g.get_node(sm).expect("node").blend_points.is_empty());
-    }
-
-    #[test]
-    fn a_blend_point_can_be_removed() {
-        let mut g = AnimTreeGraph::new();
-        let bs = g.add_node("Move", NodeKind::BlendSpace1D);
-        g.add_blend_point(bs, 0.0, 0.0, "idle");
-        g.add_blend_point(bs, 1.0, 0.0, "run");
-
-        assert!(g.remove_blend_point(bs, 0));
-        assert!(
-            !g.remove_blend_point(bs, 5),
-            "out of range is not a removal"
-        );
-
-        let node = g.get_node(bs).expect("node");
-        assert_eq!(node.blend_points.len(), 1);
-        assert_eq!(node.blend_points[0].animation, "run");
+        let sm = g.to_state_machine();
+        match sm.states.get("Speed").expect("state") {
+            AnimationNode::BlendSpace1D(space) => {
+                let names: Vec<&str> = space.points().iter().map(|p| p.1.as_str()).collect();
+                assert_eq!(names, vec!["a", "b", "c", "last"]);
+            }
+            other => panic!("expected a BlendSpace1D, got {other:?}"),
+        }
     }
 
     use super::*;
+
+    /// Builds a machine the way a scene would hold one, so the tests below
+    /// exercise the load direction rather than a graph they just authored.
+    fn leaf(name: &str) -> AnimationNode {
+        AnimationNode::Animation {
+            name: name.to_string(),
+            position: 0.0,
+            opts: AnimationLeafOptions::default(),
+        }
+    }
+
+    /// pat-s3rrv.1: a scene's existing machine becomes the editor's graph.
+    ///
+    /// Nothing built an `AnimTreeGraph` from an `AnimationNode` tree, so opening
+    /// a project with an existing `AnimationTree` showed an empty canvas — and
+    /// once `POST /api/animation/tree/apply` landed, saving that empty canvas
+    /// replaced the real machine with nothing.
+    #[test]
+    fn a_runtime_machine_becomes_an_editor_graph() {
+        let mut sm = StateMachine::new();
+        sm.states.insert("idle".into(), leaf("idle"));
+        sm.states.insert("run".into(), leaf("run"));
+        sm.current = "idle".into();
+        sm.transitions.push(StateTransition {
+            from: "idle".into(),
+            to: "run".into(),
+            crossfade: 0.25,
+            ..StateTransition::default()
+        });
+
+        let g = AnimTreeGraph::from_state_machine(&sm);
+
+        assert_eq!(g.node_count(), 2, "every state is a node the user can see");
+        let idle = g.node_id_by_name("idle").expect("idle loaded");
+        let run = g.node_id_by_name("run").expect("run loaded");
+        assert!(g.has_transition(idle, run), "the edge loaded too");
+        assert_eq!(
+            g.transition_xfade(idle, run),
+            Some(0.25),
+            "the crossfade is authored data, not a runtime detail"
+        );
+    }
+
+    /// The round trip is an identity, which is what makes the apply route safe:
+    /// opening a scene and saving it back without touching anything must leave
+    /// the machine exactly as it was.
+    #[test]
+    fn loading_then_applying_leaves_the_machine_unchanged() {
+        let mut before = StateMachine::new();
+        for name in ["walk", "idle", "run"] {
+            before.states.insert(name.into(), leaf(name));
+        }
+        before.current = "idle".into();
+        before.transitions.push(StateTransition {
+            from: "idle".into(),
+            to: "run".into(),
+            crossfade: 0.5,
+            ..StateTransition::default()
+        });
+
+        let after = AnimTreeGraph::from_state_machine(&before).to_state_machine();
+
+        assert_eq!(after.states.len(), 3, "no state was dropped");
+        assert!(["walk", "idle", "run"]
+            .iter()
+            .all(|n| after.states.contains_key(*n)));
+        // ⚠️ `to_state_machine` takes the FIRST node as the starting state, so
+        // this only holds because the load sorts `current` to the front. With
+        // `HashMap` order the machine would come back starting somewhere else.
+        assert_eq!(
+            after.current, "idle",
+            "the starting state survives the round trip"
+        );
+        assert_eq!(after.transitions.len(), 1);
+        assert_eq!(after.transitions[0].crossfade, 0.5);
+    }
+
+    /// Two identical machines must load to identically ordered graphs.
+    ///
+    /// Each `HashMap` carries its own random hash seed, so iterating
+    /// `states` directly gives a different node order per map — the graph would
+    /// be laid out differently every time a scene was opened.
+    #[test]
+    fn the_loaded_layout_does_not_depend_on_map_order() {
+        let build = || {
+            let mut sm = StateMachine::new();
+            for name in ["delta", "alpha", "charlie", "bravo", "echo"] {
+                sm.states.insert(name.into(), leaf(name));
+            }
+            sm.current = "charlie".into();
+            sm
+        };
+
+        let names = |g: &AnimTreeGraph| -> Vec<String> {
+            g.nodes().iter().map(|n| n.name.clone()).collect()
+        };
+        let first = names(&AnimTreeGraph::from_state_machine(&build()));
+
+        assert_eq!(
+            first,
+            vec!["charlie", "alpha", "bravo", "delta", "echo"],
+            "the current state leads, the rest are in name order"
+        );
+        assert_eq!(
+            first,
+            names(&AnimTreeGraph::from_state_machine(&build())),
+            "a second load of the same machine lays out the same way"
+        );
+    }
+
+    /// A blend space comes back with its points in `params`, under the same
+    /// keys the param route writes — so the point editor can edit a loaded
+    /// blend space, not just one authored in this session.
+    #[test]
+    fn a_blend_space_state_reloads_its_points() {
+        let mut space = BlendSpace2D::new();
+        space.add_point(gdcore::math::Vector2::new(-1.0, 0.0), "left");
+        space.add_point(gdcore::math::Vector2::new(1.0, 0.5), "right");
+        let mut sm = StateMachine::new();
+        sm.states
+            .insert("Move".into(), AnimationNode::BlendSpace2D(space));
+
+        let g = AnimTreeGraph::from_state_machine(&sm);
+        let id = g.node_id_by_name("Move").expect("the blend space loaded");
+
+        assert_eq!(g.get_node(id).map(|n| n.kind), Some(NodeKind::BlendSpace2D));
+        assert_eq!(g.param(id, "blend_point_0/pos"), Some("-1,0"));
+        assert_eq!(g.param(id, "blend_point_0/node"), Some("left"));
+        assert_eq!(g.param(id, "blend_point_1/pos"), Some("1,0.5"));
+        assert_eq!(g.param(id, "blend_point_1/node"), Some("right"));
+
+        // And they survive going back — the points must round-trip through the
+        // param representation, not just be readable in it.
+        match AnimTreeGraph::from_state_machine(&sm)
+            .to_state_machine()
+            .states
+            .remove("Move")
+        {
+            Some(AnimationNode::BlendSpace2D(back)) => {
+                assert_eq!(back.points().len(), 2);
+                assert_eq!(back.points()[1].1, "right");
+                assert_eq!(back.points()[1].0.y, 0.5);
+            }
+            other => panic!("expected a BlendSpace2D, got {other:?}"),
+        }
+    }
+
+    /// A 1D blend space's scalar positions survive the same way.
+    #[test]
+    fn a_1d_blend_space_state_reloads_its_points() {
+        let mut space = BlendSpace1D::new();
+        space.add_point(-1.0, "slow");
+        space.add_point(0.5, "fast");
+        let mut sm = StateMachine::new();
+        sm.states
+            .insert("Speed".into(), AnimationNode::BlendSpace1D(space));
+
+        let g = AnimTreeGraph::from_state_machine(&sm);
+        let id = g.node_id_by_name("Speed").expect("the blend space loaded");
+
+        assert_eq!(g.get_node(id).map(|n| n.kind), Some(NodeKind::BlendSpace1D));
+        assert_eq!(
+            g.param(id, "blend_point_1/pos"),
+            Some("0.5"),
+            "a 1D position is a scalar, not an `x,y` pair"
+        );
+        assert_eq!(g.param(id, "blend_point_1/node"), Some("fast"));
+    }
+
+    /// A state and the clip it plays are independent in Godot. Before
+    /// pat-s3rrv.1 the node name was the only way to name a clip, so loading a
+    /// machine whose clip differed from its state and applying it back RENAMED
+    /// the clip.
+    #[test]
+    fn a_clip_that_differs_from_its_state_is_not_renamed() {
+        let mut sm = StateMachine::new();
+        sm.states.insert("walk".into(), leaf("walk_cycle"));
+
+        let g = AnimTreeGraph::from_state_machine(&sm);
+        let id = g.node_id_by_name("walk").expect("the state loaded");
+        assert_eq!(
+            g.param(id, "animation"),
+            Some("walk_cycle"),
+            "the clip is preserved where the param route can edit it"
+        );
+
+        match g.to_state_machine().states.remove("walk") {
+            Some(AnimationNode::Animation { name, .. }) => assert_eq!(name, "walk_cycle"),
+            other => panic!("expected an Animation leaf, got {other:?}"),
+        }
+    }
+
+    /// A state whose clip matches its name carries no redundant param — an
+    /// authored graph and a loaded one must look the same, or the editor shows
+    /// a key the user never typed.
+    #[test]
+    fn a_clip_matching_its_state_adds_no_param() {
+        let mut sm = StateMachine::new();
+        sm.states.insert("idle".into(), leaf("idle"));
+
+        let g = AnimTreeGraph::from_state_machine(&sm);
+        let id = g.node_id_by_name("idle").expect("the state loaded");
+        assert_eq!(g.param(id, "animation"), None);
+    }
+
+    /// A transition naming a state the machine does not hold is dropped rather
+    /// than conjuring the missing state — a node the scene has no state for
+    /// would be applied back as a real one.
+    #[test]
+    fn an_edge_to_a_missing_state_is_dropped() {
+        let mut sm = StateMachine::new();
+        sm.states.insert("idle".into(), leaf("idle"));
+        sm.transitions.push(StateTransition {
+            from: "idle".into(),
+            to: "ghost".into(),
+            ..StateTransition::default()
+        });
+
+        let g = AnimTreeGraph::from_state_machine(&sm);
+
+        assert_eq!(g.node_count(), 1, "no node is invented for `ghost`");
+        assert!(g.transitions().is_empty(), "and the dangling edge is gone");
+    }
+
+    /// A loaded machine is laid out on a grid rather than stacked at the
+    /// origin. `add_node` places every node at (0,0), so without this the whole
+    /// machine draws as one pile the user cannot separate.
+    #[test]
+    fn a_loaded_machine_is_laid_out_not_stacked() {
+        let mut sm = StateMachine::new();
+        for name in ["a", "b", "c", "d", "e"] {
+            sm.states.insert(name.into(), leaf(name));
+        }
+        sm.current = "a".into();
+
+        let g = AnimTreeGraph::from_state_machine(&sm);
+        let at = |name: &str| {
+            let n = g
+                .get_node(g.node_id_by_name(name).expect("loaded"))
+                .unwrap();
+            (n.x, n.y)
+        };
+
+        assert_eq!(at("a"), (0.0, 0.0), "the current state anchors the grid");
+        assert_eq!(at("b"), (220.0, 0.0));
+        assert_eq!(at("e"), (0.0, 140.0), "the fifth node wraps to a new row");
+        let mut seen: Vec<(u64, u64)> =
+            g.nodes().iter().map(|n| (n.x as u64, n.y as u64)).collect();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 5, "no two nodes share a position");
+    }
+
+    /// An empty machine loads to an empty graph without panicking: a scene may
+    /// hold an `AnimationTree` whose root machine has no states yet.
+    #[test]
+    fn an_empty_machine_loads_to_an_empty_graph() {
+        let g = AnimTreeGraph::from_state_machine(&StateMachine::new());
+        assert_eq!(g.node_count(), 0);
+        assert!(g.transitions().is_empty());
+    }
 
     /// Acceptance (pat-la1lc): the AnimationTree graph lets nodes be added,
     /// connected, and parameterized, and transitions between states are created

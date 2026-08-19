@@ -365,6 +365,12 @@ impl AudioServerBridge {
             if let Some(playback) = self.server.stream_mut(playback_id) {
                 playback.set_linear_gain(result.volume_linear);
                 playback.set_pan(result.pan_left, result.pan_right);
+                // pat-s3rrv.55: `compute_spatial` has always produced this and
+                // nothing consumed it, so the emission cone and the distance
+                // filter were computed and thrown away — a source outside its
+                // cone sounded identical to one on-axis. The mixer now has a
+                // per-voice shelf to put it in.
+                playback.set_highshelf(result.highshelf_db, result.highshelf_cutoff_hz);
                 if let Some(pitch) = doppler {
                     playback.set_pitch_scale(pitch);
                 }
@@ -527,6 +533,17 @@ impl AudioServerBridge {
         }
         if let Some(v) = number_property(node, "attenuation_filter_db") {
             source.attenuation_filter_db = v;
+        }
+        // 🔑 `doppler_tracking` was the LAST unread property, and its absence
+        // made the whole Doppler path dead: `Spatial3D::doppler_tracking`
+        // defaults to `Disabled`, so `doppler_for` returned on its very first
+        // branch every frame and the pitch was never touched. The maths, the
+        // previous-position bookkeeping and the `set_pitch_scale` call were all
+        // correct and all unreachable — a source authored with
+        // `doppler_tracking = 1` behaved exactly like one with it off
+        // (pat-s3rrv.55).
+        if let Variant::Int(mode) = node.get_property("doppler_tracking") {
+            source.doppler_tracking = DopplerTracking::from_godot_int(mode);
         }
         // The cone is measured against the node's FORWARD, which Godot takes as
         // the -Z basis column of the global transform — so a rotated speaker

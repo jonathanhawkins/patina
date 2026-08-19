@@ -2257,10 +2257,33 @@ pub fn rasterize_render_list_with_quality(
                             } else {
                                 Rect2::new(*offset, Vector2::new(dw, dh))
                             };
-                            let flip = Transform2D::scaled(Vector2::new(
-                                if *flip_h { -1.0 } else { 1.0 },
-                                if *flip_v { -1.0 } else { 1.0 },
-                            ));
+                            // ⚠️ Mirror about the RECT'S OWN CENTRE, not the
+                            // node origin (pat-s3rrv.22).
+                            //
+                            // Godot flips a Sprite2D by negating
+                            // `dst_rect.size` (`sprite_2d.cpp:124-129`), and
+                            // `canvas_item_add_texture_rect_region` normalises
+                            // that back to a positive rect plus a
+                            // `CANVAS_RECT_FLIP_H` flag
+                            // (`renderer_canvas_cull.cpp:1572-1579`). So the
+                            // QUAD stays exactly where it was and only the
+                            // texture SAMPLING mirrors.
+                            //
+                            // Scaling by -1 about the origin instead moves an
+                            // uncentred sprite to the far side of its node: a
+                            // 4px cell placed at x∈[16,20) lands at x∈[12,16),
+                            // and every pixel it was meant to cover reads the
+                            // clear colour. For `centered = true` the rect is
+                            // symmetric about the origin, so the two agree —
+                            // which is why this survived every flip test that
+                            // used the default.
+                            let centre = rect.position + rect.size / 2.0;
+                            let flip = Transform2D::translated(centre)
+                                * Transform2D::scaled(Vector2::new(
+                                    if *flip_h { -1.0 } else { 1.0 },
+                                    if *flip_v { -1.0 } else { 1.0 },
+                                ))
+                                * Transform2D::translated(-centre);
                             // pat-s3rrv.28: an authored canvas_item shader
                             // rewrites COLOR per fragment; without one this is
                             // the plain blit, now carrying the item's resolved

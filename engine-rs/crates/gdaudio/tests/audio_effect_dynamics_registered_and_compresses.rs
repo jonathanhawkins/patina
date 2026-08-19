@@ -257,3 +257,87 @@ bus/0/effect/0/enabled = true
          near full scale, got {slow:.4}",
     );
 }
+
+/// pat-s3rrv.53 — the `sidechain` bus name survives the layout load.
+///
+/// The compressor's DSP has accepted an external key all along
+/// (`set_sidechain`), and the bus layout has always been able to *name* a
+/// source — but `effect_from_sub_resource` parsed the field and **dropped it**,
+/// and `mixer.rs` contained no reference to sidechain at all. A layout
+/// configuring ducking therefore built a compressor keyed off its own input:
+/// not an error, just a compressor that quietly does something other than what
+/// was authored.
+#[test]
+fn the_sidechain_bus_name_survives_the_layout_load() {
+    let mut mixer = gdaudio::mixer::AudioMixer::new();
+    let loaded = mixer.load_bus_layout_tres(LAYOUT);
+    assert!(
+        loaded >= 2,
+        "layout declares Master and Duck; loaded {loaded}"
+    );
+
+    let master = mixer.get_bus(0).expect("Master bus");
+    let comp = master
+        .effects()
+        .effect_at(0)
+        .expect("Master's first effect is the compressor");
+    assert_eq!(
+        comp.sidechain_bus(),
+        Some("Duck"),
+        "the compressor must remember the bus it keys from. `None` means the \
+         name was parsed and thrown away, which is the bug — the quotes around \
+         the .tres value are part of it",
+    );
+
+    // The named bus must actually resolve, or routing has nothing to feed.
+    assert_eq!(
+        mixer.get_bus_by_name("Duck"),
+        Some(1),
+        "the sidechain source must be a real bus",
+    );
+}
+
+/// An empty `sidechain` means "none", not a bus called `""` (pat-s3rrv.53).
+///
+/// Godot writes `sidechain = ""` for an unconfigured compressor. Treating that
+/// as a bus name sends the mixer looking up a bus that cannot exist, on every
+/// frame, forever.
+#[test]
+fn an_empty_sidechain_is_no_sidechain() {
+    const NO_KEY: &str = r#"[sub_resource type="AudioEffectCompressor" id="Comp_1"]
+threshold = -24.0
+sidechain = ""
+
+[resource]
+bus/0/name = "Master"
+bus/0/effect/0/effect = SubResource("Comp_1")
+bus/0/effect/0/enabled = true
+"#;
+    let mut mixer = gdaudio::mixer::AudioMixer::new();
+    mixer.load_bus_layout_tres(NO_KEY);
+    let comp = mixer
+        .get_bus(0)
+        .and_then(|b| b.effects().effect_at(0))
+        .expect("compressor loaded");
+    assert_eq!(
+        comp.sidechain_bus(),
+        None,
+        r#"`sidechain = ""` must read as no sidechain, not as a bus named """#,
+    );
+}
+
+/// An effect that does not key reports no sidechain bus (pat-s3rrv.53).
+///
+/// The trait method is defaulted so no other effect had to change; this pins
+/// that the default is `None` rather than something that would send the mixer
+/// hunting for a bus on every frame for every effect in the project.
+#[test]
+fn a_non_keying_effect_reports_no_sidechain() {
+    let mut mixer = gdaudio::mixer::AudioMixer::new();
+    mixer.load_bus_layout_tres(LAYOUT);
+    let limiter = mixer
+        .get_bus(0)
+        .and_then(|b| b.effects().effect_at(1))
+        .expect("hard limiter loaded");
+    assert_eq!(limiter.sidechain_bus(), None);
+}

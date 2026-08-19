@@ -1675,6 +1675,91 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Literal(Variant::String(v)))
             }
+            // `^"Sprite:modulate:r"` — a NodePath LITERAL (pat-s3rrv.60).
+            //
+            // The tokenizer emits `^` as `Token::Caret`, the bitwise-XOR
+            // operator, and has no NodePath-literal token at all — so an
+            // exported `^"..."` path did not merely evaluate wrongly, it failed
+            // to parse.
+            //
+            // ⚠️ Disambiguated HERE rather than in the lexer on purpose. `^` is
+            // a BINARY operator, so it can never legally begin an expression:
+            // in primary position it is unambiguously a NodePath literal, and
+            // `a ^ b` never reaches this arm because the caret is consumed by
+            // the binary-operator loop. Doing it in the tokenizer would have
+            // meant a new `Token` variant, a new `Display` arm, and lexer
+            // surgery around the string scanner, for no extra disambiguation.
+            Token::Caret => {
+                self.advance();
+                match self.peek().clone() {
+                    Token::StringLit(path) => {
+                        self.advance();
+                        Ok(Expr::Literal(Variant::NodePath(
+                            gdcore::node_path::NodePath::new(&path),
+                        )))
+                    }
+                    _ => {
+                        let ts = self.tokens.get(self.pos);
+                        let (token, line, col) = match ts {
+                            Some(ts) => (ts.token.to_string(), ts.line, ts.col),
+                            None => ("EOF".to_string(), 0, 0),
+                        };
+                        Err(ParseError::UnexpectedToken {
+                            token,
+                            expected: "string after ^ (NodePath literal)".to_string(),
+                            line,
+                            col,
+                            source_line: if line > 0 {
+                                self.source_lines.get(line - 1).cloned()
+                            } else {
+                                None
+                            },
+                        })
+                    }
+                }
+            }
+            // `&"some_name"` — a StringName LITERAL (pat-s3rrv.60), the exact
+            // counterpart of the `^"..."` arm above.
+            //
+            // Same gap and same reasoning: the tokenizer emits `&` only as
+            // `Token::Amp` (bitwise AND), so `&"foo"` failed to parse. `&` and
+            // `&&` are both BINARY, so neither can begin an expression and
+            // primary position is unambiguous.
+            //
+            // ⚠️ Godot treats `&"x"` and `"x"` as interchangeable in most
+            // places, which is exactly why this is worth having rather than
+            // rewriting scripts to drop the sigil: code copied from a Godot
+            // project keeps the sigil, and silently failing to parse it is a
+            // far worse outcome than the tiny cost of honouring it.
+            Token::Amp => {
+                self.advance();
+                match self.peek().clone() {
+                    Token::StringLit(name) => {
+                        self.advance();
+                        Ok(Expr::Literal(Variant::StringName(
+                            gdcore::string_name::StringName::new(&name),
+                        )))
+                    }
+                    _ => {
+                        let ts = self.tokens.get(self.pos);
+                        let (token, line, col) = match ts {
+                            Some(ts) => (ts.token.to_string(), ts.line, ts.col),
+                            None => ("EOF".to_string(), 0, 0),
+                        };
+                        Err(ParseError::UnexpectedToken {
+                            token,
+                            expected: "string after & (StringName literal)".to_string(),
+                            line,
+                            col,
+                            source_line: if line > 0 {
+                                self.source_lines.get(line - 1).cloned()
+                            } else {
+                                None
+                            },
+                        })
+                    }
+                }
+            }
             Token::BoolLit(v) => {
                 self.advance();
                 Ok(Expr::Literal(Variant::Bool(v)))
@@ -1840,6 +1925,64 @@ mod tests {
         let tokens = tokenize(src).unwrap();
         let mut parser = Parser::new(tokens, src);
         parser.parse_expr().unwrap()
+    }
+
+    /// `^"Sprite:modulate:r"` parses as a NodePath LITERAL (pat-s3rrv.60).
+    ///
+    /// The three counts are the acceptance criterion's own: one name, two
+    /// subnames, and "modulate:r" concatenated.
+    #[test]
+    fn a_caret_string_parses_as_a_nodepath_literal() {
+        let expr = parse_expr_str("^\"Sprite:modulate:r\"");
+        let path = match expr {
+            Expr::Literal(Variant::NodePath(p)) => p,
+            other => panic!("expected a NodePath literal, got {other:?}"),
+        };
+        assert_eq!(path.get_name_count(), 1, "one node name: Sprite");
+        assert_eq!(
+            path.get_subname_count(),
+            2,
+            "two subnames: modulate and r — the colon after the node name \
+             separates the property chain, it does not add a name"
+        );
+        assert_eq!(path.get_concatenated_subnames(), "modulate:r");
+    }
+
+    /// ⚠️ The disambiguation must not break bitwise XOR, which uses the SAME
+    /// token. `^` is binary, so it is only ever a NodePath literal in primary
+    /// position; this pins that `a ^ b` still parses as an operator rather than
+    /// being swallowed by the new arm.
+    #[test]
+    fn a_caret_between_operands_is_still_bitwise_xor() {
+        let expr = parse_expr_str("5 ^ 3");
+        assert!(
+            matches!(expr, Expr::BinaryOp { .. }),
+            "`5 ^ 3` must stay a binary XOR expression, got {expr:?}"
+        );
+    }
+
+    /// `&"some_name"` parses as a StringName literal (pat-s3rrv.60).
+    #[test]
+    fn an_amp_string_parses_as_a_stringname_literal() {
+        let expr = parse_expr_str("&\"some_name\"");
+        match expr {
+            Expr::Literal(Variant::StringName(name)) => {
+                assert_eq!(name.as_str(), "some_name");
+            }
+            other => panic!("expected a StringName literal, got {other:?}"),
+        }
+    }
+
+    /// ⚠️ The counterpart guard to the XOR one: `&` is also a binary operator,
+    /// so this pins that `6 & 3` still parses as bitwise AND rather than being
+    /// swallowed by the literal arm.
+    #[test]
+    fn an_amp_between_operands_is_still_bitwise_and() {
+        let expr = parse_expr_str("6 & 3");
+        assert!(
+            matches!(expr, Expr::BinaryOp { .. }),
+            "`6 & 3` must stay a binary AND expression, got {expr:?}"
+        );
     }
 
     #[test]

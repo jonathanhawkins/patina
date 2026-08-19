@@ -16,7 +16,12 @@
 //! snaps to `step` and clamps to `[min, max - page]`, and its own doc comment
 //! names "Slider drag" as the intended caller. It had none.
 
+use std::sync::{Arc, Mutex};
+
+use gdcore::id::ObjectId;
 use gdcore::math::{Color, Vector2};
+use gdobject::signal::Connection;
+use gdplatform::input::{InputEvent, MouseButton};
 use gdscene::control::{self, AnchorPreset};
 use gdscene::control_render::render_control_tree;
 use gdscene::node::{Node, NodeId};
@@ -39,6 +44,20 @@ fn control_node(class: &str, w: f32, h: f32, props: &[(&str, Variant)]) -> (Scen
     control::apply_anchor_preset(&mut tree, id, AnchorPreset::TopLeft);
     control::set_offset_right(&mut tree, id, w);
     control::set_offset_bottom(&mut tree, id, h);
+    // ⚠️ Anchors and offsets are the INPUTS; `size` is derived from them and is
+    // absent until something resolves the layout. `control::get_size` (which
+    // both the drag helper and `render_control_tree` read) returns
+    // `Vector2::ZERO` for a missing `size` property rather than erroring, so a
+    // fixture that stops at the offsets hands every helper a zero-sized
+    // control: `track_length` collapses to EPSILON and any drag clamps to max,
+    // making an HSlider report 100.0 for every target.
+    //
+    // Resolving it here is what the render pass itself does
+    // (`control_render.rs:472`), so the drag path is measured against exactly
+    // the rect production would compute. With the TopLeft preset every anchor
+    // is 0.0, so the parent size cancels out and the rect is (w, h).
+    control::resolve_control_layout(&mut tree, id, Vector2::new(800.0, 600.0));
+    debug_assert_eq!(control::get_size(&tree, id), Vector2::new(w, h));
     (tree, id)
 }
 
@@ -334,5 +353,107 @@ fn a_radial_bar_emits_a_quarter_arc_at_one_quarter() {
     assert!(
         last.x > center.x && (last.y - center.y).abs() < 0.001,
         "a quarter turn clockwise ends at three o'clock, got {last:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The signal path
+// ---------------------------------------------------------------------------
+
+/// Records every `value_changed(float)` payload, in order.
+#[derive(Clone, Default)]
+struct ValueLog(Arc<Mutex<Vec<f64>>>);
+
+impl ValueLog {
+    fn values(&self) -> Vec<f64> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// Connects a recorder to `value_changed`. `tag` need only be unique per
+/// connection: the connection carries the callback, so the target id is never
+/// dispatched against.
+fn watch_value_changed(tree: &mut SceneTree, node: NodeId, tag: u64) -> ValueLog {
+    let log = ValueLog::default();
+    let sink = log.clone();
+    tree.connect_signal(
+        node,
+        "value_changed",
+        Connection::with_callback(ObjectId::from_raw(tag), "on_value_changed", move |args| {
+            if let Some(Variant::Float(v)) = args.first() {
+                sink.0.lock().unwrap().push(*v);
+            }
+            Variant::Nil
+        }),
+    );
+    log
+}
+
+/// **The acceptance case, end to end.** `range_control_family_renders_and_drags`
+/// calls `drag_slider_to_local` directly, which pins the arithmetic but bypasses
+/// the entire input path — so it cannot show that a *connected callback* ever
+/// hears about the drag. Godot's contract is that the drag emits
+/// `value_changed`, and a slider that moves silently is as broken as one that
+/// does not move: nothing downstream would ever update.
+///
+/// This drives a real `InputEvent` through `SceneTree::push_input` and asserts
+/// the connected Callable receives exactly one `75.0`.
+#[test]
+fn a_dragged_slider_emits_value_changed_to_a_connected_callable() {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    let slider = tree.add_child(root, Node::new("Bar", "HSlider")).unwrap();
+
+    // ⚠️ Deliberately NOT at the origin. `drag_range_control` converts the
+    // viewport-space event into control-local space via `get_global_position`
+    // before doing any arithmetic; a slider placed at (0, 0) makes the two
+    // spaces identical, so the test would pass whether or not that conversion
+    // happens at all.
+    if let Some(n) = tree.get_node_mut(slider) {
+        n.set_property("position", Variant::Vector2(Vector2::new(20.0, 30.0)));
+        n.set_property("size", Variant::Vector2(Vector2::new(100.0, 16.0)));
+    }
+
+    let seen = watch_value_changed(&mut tree, slider, 69);
+    assert_eq!(
+        control::get_range_value(&tree, slider),
+        0.0,
+        "starts at min"
+    );
+
+    // The same local 72.5 the acceptance test derives from `slider.cpp:75`,
+    // shifted into viewport space by the control's own origin.
+    let press = Vector2::new(20.0 + 72.5, 30.0 + 8.0);
+    tree.push_input(&InputEvent::MouseButton {
+        button: MouseButton::Left,
+        pressed: true,
+        position: press,
+    });
+
+    assert_eq!(
+        control::get_range_value(&tree, slider),
+        75.0,
+        "a left press at 75% of the track must move the slider through the \
+         real input path, not just through the helper"
+    );
+    assert_eq!(
+        seen.values(),
+        vec![75.0],
+        "the connected Callable must receive exactly one value_changed, \
+         carrying the SNAPPED stored value"
+    );
+
+    // ⚠️ Pressing the same point again is not a change, and Godot's
+    // `Range::set_value` emits only on a real change. A second payload here
+    // would mean every motion sample of a single drag floods the callback.
+    tree.push_input(&InputEvent::MouseButton {
+        button: MouseButton::Left,
+        pressed: true,
+        position: press,
+    });
+    assert_eq!(
+        seen.values(),
+        vec![75.0],
+        "re-pressing the same point must emit nothing further"
     );
 }

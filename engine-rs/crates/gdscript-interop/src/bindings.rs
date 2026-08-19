@@ -1532,6 +1532,17 @@ pub trait SceneAccess {
     /// Unbinds every event from `action` (`InputMap.action_erase_events`).
     fn input_map_action_erase_events(&mut self, _action: &str) {}
 
+    /// Reloads the InputMap from the project's declared actions
+    /// (`InputMap.load_from_project_settings`).
+    ///
+    /// ⚠️ This is a RESET, not a top-up. Godot rebuilds the map from
+    /// ProjectSettings, so every runtime `add_action` / `action_add_event` /
+    /// deadzone change made since boot is DISCARDED. A rebinding screen that
+    /// offers "restore defaults" is exactly this call, and an implementation
+    /// that merely re-adds the project actions on top would leave the custom
+    /// bindings in place — the one behaviour the caller asked to undo.
+    fn input_map_load_from_project_settings(&mut self) {}
+
     /// How many events are bound to `action`. Backs `InputMap.action_get_events`,
     /// which cannot return real `InputEvent` objects until Patina has that class
     /// family; the count is what a script can meaningfully act on today.

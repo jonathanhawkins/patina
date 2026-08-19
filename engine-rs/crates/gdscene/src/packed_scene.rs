@@ -449,6 +449,39 @@ impl PackedScene {
             }
         }
 
+        // Flatten a `MultiplayerSynchronizer`'s `SceneReplicationConfig`
+        // sub-resource onto the node under `__replication__*` (pat-s3rrv.17),
+        // mirroring the `__material__*` pass below.
+        //
+        // ⚠️ This is what a REAL Godot-exported scene looks like. The editor
+        // writes `replication_config = SubResource("...")` with
+        // `properties/N/path` entries inside it; Patina only ever read a
+        // hand-authored `_sync_properties` array, so every synchronizer exported
+        // from the actual editor replicated NOTHING — and did so silently, since
+        // an empty property list is also how "not configured yet" is spelled.
+        //
+        // Copied verbatim, like the material pass: by render/tick time the
+        // `PackedScene` is gone and only the `SceneTree` remains, so anything
+        // the tick needs has to travel on the node.
+        for tmpl in &mut templates {
+            let Some(cfg_id) = tmpl
+                .properties
+                .get("replication_config")
+                .and_then(|v| match v {
+                    Variant::String(s) => s.strip_prefix("SubResource:").map(String::from),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+            if let Some(cfg_props) = sub_resource_props.get(&cfg_id) {
+                for (key, value) in cfg_props {
+                    tmpl.properties
+                        .insert(format!("__replication__{key}"), value.clone());
+                }
+            }
+        }
+
         // Resolve a mesh's material albedo to an `albedo_color` property so the
         // 3D viewport can shade the mesh in its real colour (like Godot), from a
         // node-level `surface_material_override/0` or the mesh's own `material`.

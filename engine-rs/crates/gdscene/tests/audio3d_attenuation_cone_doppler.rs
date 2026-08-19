@@ -59,6 +59,41 @@ fn dc_buffer() -> gdaudio::AudioBuffer {
     }
 }
 
+/// A 12 kHz tone: the period-4 pattern `+1 +1 -1 -1` at 48 kHz.
+///
+/// 🔑 The emission cone is a HIGH-SHELF cut, not a volume cut, so it is
+/// invisible on the DC buffer above — a shelf leaves 0 Hz at unity gain by
+/// definition. That is why the cone assertion could never move while it used
+/// `dc_buffer`, independently of whether the filter was applied at all.
+///
+/// ⚠️ Not a Nyquist (`+1 -1`) pattern, which would be the strongest signal for
+/// a shelf: the mixer runs at 44.1 kHz and this buffer is 48 kHz, so everything
+/// is resampled at a ratio of 1.088 and a Nyquist tone would alias into
+/// garbage. 12 kHz survives resampling and still sits deep in the shelf's
+/// stopband.
+fn hf_buffer() -> gdaudio::AudioBuffer {
+    gdaudio::AudioBuffer {
+        sample_rate: SR,
+        channels: 1,
+        samples: (0..SR as usize)
+            .map(|i| if (i / 2) % 2 == 0 { 1.0 } else { -1.0 })
+            .collect(),
+    }
+}
+
+/// RMS of the combined stereo magnitude.
+///
+/// Used instead of the peak wherever the signal is a TONE rather than DC: the
+/// resampler ripples the peak of a 12 kHz tone frame to frame, while its energy
+/// is steady.
+fn combined_rms(mix: &[f32]) -> f32 {
+    let frames: Vec<f32> = mix
+        .chunks_exact(2)
+        .map(|f| f[0] * f[0] + f[1] * f[1])
+        .collect();
+    (frames.iter().sum::<f32>() / frames.len().max(1) as f32).sqrt()
+}
+
 /// Recovers the source's GAIN from the interleaved stereo mix.
 ///
 /// ⚠️ A per-channel peak is not the gain. Panning is equal-power
@@ -80,7 +115,11 @@ fn combined_peak(mix: &[f32]) -> f32 {
 
 /// Builds a tree with a current `Camera3D` at the origin (the listener) and an
 /// autoplaying `AudioStreamPlayer3D` at `pos`.
-fn scene_3d(pos: Vector3, extra: &[(&str, Variant)]) -> (MainLoop, NodeId) {
+fn scene_3d_with(
+    pos: Vector3,
+    extra: &[(&str, Variant)],
+    buffer: gdaudio::AudioBuffer,
+) -> (MainLoop, NodeId) {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
@@ -97,8 +136,12 @@ fn scene_3d(pos: Vector3, extra: &[(&str, Variant)]) -> (MainLoop, NodeId) {
     let sfx_id = tree.add_child(root, sfx).unwrap();
 
     let mut ml = MainLoop::new(tree);
-    ml.audio_bridge_mut().set_stream_buffer(sfx_id, dc_buffer());
+    ml.audio_bridge_mut().set_stream_buffer(sfx_id, buffer);
     (ml, sfx_id)
+}
+
+fn scene_3d(pos: Vector3, extra: &[(&str, Variant)]) -> (MainLoop, NodeId) {
+    scene_3d_with(pos, extra, dc_buffer())
 }
 
 fn run(ml: &mut MainLoop, frames: usize) -> Vec<f32> {
@@ -158,22 +201,43 @@ fn audio3d_attenuation_cone_doppler() {
             Variant::Float(-24.0),
         ),
     ];
+    // ⚠️ The source at +Z, NOT -Z. A Node3D's forward is its -Z basis column,
+    // so a source parked at (0, 0, -10) points AWAY from a listener at the
+    // origin — 180° off-axis. The original fixture put both runs outside the
+    // cone, which is one of the two reasons they returned identical values.
     let mut on_axis_props = cone.to_vec();
-    on_axis_props.push(("unit_size", Variant::Float(100.0)));
-    let (mut on_axis_ml, _) = scene_3d(Vector3::new(0.0, 0.0, -10.0), &on_axis_props);
-    let on_axis = combined_peak(&run(&mut on_axis_ml, 3));
+    on_axis_props.push(("unit_size", Variant::Float(4.0)));
+    let (mut on_axis_ml, _) =
+        scene_3d_with(Vector3::new(0.0, 0.0, 10.0), &on_axis_props, hf_buffer());
+    let on_axis = combined_rms(&run(&mut on_axis_ml, 3));
 
-    // Same radius, rotated well outside a 30-degree cone.
+    // Same radius, rotated 90° — well outside a 30-degree cone.
     let mut off_axis_props = cone.to_vec();
-    off_axis_props.push(("unit_size", Variant::Float(100.0)));
-    let (mut off_axis_ml, _) = scene_3d(Vector3::new(10.0, 0.0, 0.0), &off_axis_props);
-    let off_axis = combined_peak(&run(&mut off_axis_ml, 3));
+    off_axis_props.push(("unit_size", Variant::Float(4.0)));
+    let (mut off_axis_ml, _) =
+        scene_3d_with(Vector3::new(10.0, 0.0, 0.0), &off_axis_props, hf_buffer());
+    let off_axis = combined_rms(&run(&mut off_axis_ml, 3));
 
+    // `unit_size` is 4, not 100: at d = 10 that is a gain of 0.4, comfortably
+    // under `max_db`. The original 100 made the raw gain +20 dB, so BOTH runs
+    // were pinned at the 3 dB ceiling (1.412538) — the other reason they
+    // matched, and it would have masked any real difference.
+    //
+    // `max_distance` is off by default, so the distance filter contributes 0 dB
+    // and the cone is the ONLY shelf term: on-axis is an exact bypass, off-axis
+    // is the full -24 dB. At 12 kHz that is |H| = 0.068, so the threshold below
+    // has 7x of margin and still cannot be satisfied by "no filtering".
     assert!(
-        off_axis < on_axis,
+        off_axis < on_axis * 0.5,
         "a listener outside the 30-degree emission cone must be attenuated \
-         relative to on-axis: on {on_axis:.6} vs off {off_axis:.6}. Equal \
-         values mean the cone is not consulted at all.",
+         relative to on-axis: on {on_axis:.6} vs off {off_axis:.6} (expected \
+         about {:.6}). Equal values mean the cone is not consulted at all.",
+        on_axis * 0.068,
+    );
+    assert!(
+        on_axis > 1e-4,
+        "the on-axis run must actually be audible, else the comparison above is \
+         vacuous; got {on_axis:.6}",
     );
 
     // -- 3. Doppler raises the pitch of an approaching source ----------------
@@ -194,11 +258,18 @@ fn audio3d_attenuation_cone_doppler() {
     ml.step(1.0 / 60.0);
     let baseline = ml.audio_bridge_mut().playback_pitch_scale(sfx);
 
-    // Move it hard toward the listener and step again: ~60 units per 1/60 s is
-    // 3600 units/s, an appreciable fraction of the 343 m/s speed of sound, so
-    // the shift is far larger than any rounding.
+    // ⚠️ 3 units per 1/60 s, NOT 60. At 60 the source travels -100 -> -40 -> 20
+    // -> 80: it passes THROUGH the listener, so the final step is a RECESSION
+    // and the pitch read afterwards is below baseline — the assertion below
+    // would fail on a perfectly correct Doppler implementation. 3 units keeps
+    // it approaching the whole way (-97, -94, -91).
+    //
+    // 3 units per frame is 180 units/s, about half the 343 m/s speed of sound,
+    // giving 343/(343-180) = 2.10x. That exercises the real formula rather than
+    // its supersonic clamp, which would return a flat 4.0 and pass even if the
+    // ratio were wrong.
     for frame in 1..4 {
-        let z = -100.0 + 60.0 * frame as f32;
+        let z = -100.0 + 3.0 * frame as f32;
         if let Some(node) = ml.tree_mut().get_node_mut(sfx) {
             node.set_property("position", Variant::Vector3(Vector3::new(0.0, 0.0, z)));
         }
@@ -231,7 +302,8 @@ fn doppler_disabled_leaves_pitch_alone() {
     let before = ml.audio_bridge_mut().playback_pitch_scale(sfx);
 
     for frame in 1..4 {
-        let z = -100.0 + 60.0 * frame as f32;
+        // The same approach as the test above, so this really is its control.
+        let z = -100.0 + 3.0 * frame as f32;
         if let Some(node) = ml.tree_mut().get_node_mut(sfx) {
             node.set_property("position", Variant::Vector3(Vector3::new(0.0, 0.0, z)));
         }

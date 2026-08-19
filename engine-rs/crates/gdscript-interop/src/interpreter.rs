@@ -2976,6 +2976,46 @@ impl Interpreter {
                         // a call on a TYPE NAME rather than on a value, so they
                         // never reached `call_method_on` and were undefined.
                         if let Expr::Ident(type_name) = object.as_ref() {
+                            // `Callable.create(object, "method")` — Godot's
+                            // STATIC spelling of `Callable(object, "method")`
+                            // (pat-s3rrv.60).
+                            //
+                            // Built here rather than in `variant_math`, whose
+                            // static table only covers Color and Vector2 and
+                            // which cannot see `CallableRef`. Kept
+                            // byte-for-byte in step with the `"Callable"` arm
+                            // of `try_builtin`: `Nil` means self (target 0),
+                            // and a StringName is accepted alongside String
+                            // because `Callable.create(self, &"bump")` is the
+                            // spelling a Godot project actually writes.
+                            if type_name == "Callable" && member == "create" {
+                                let target_id = match evaluated_args.first() {
+                                    Some(Variant::ObjectId(oid)) => oid.raw(),
+                                    Some(Variant::Nil) | None => 0,
+                                    _ => {
+                                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                            "Callable.create() first argument must be an object \
+                                             or null"
+                                                .into(),
+                                        )));
+                                    }
+                                };
+                                let method_name = match evaluated_args.get(1) {
+                                    Some(Variant::String(s)) => s.clone(),
+                                    Some(Variant::StringName(s)) => s.as_str().to_string(),
+                                    _ => {
+                                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                            "Callable.create() second argument must be a method \
+                                             name"
+                                                .into(),
+                                        )));
+                                    }
+                                };
+                                return Ok(Variant::Callable(Box::new(CallableRef::Method {
+                                    target_id,
+                                    method: method_name,
+                                })));
+                            }
                             if let Some(result) = crate::variant_math::vector_static_call(
                                 type_name,
                                 member,
@@ -3851,6 +3891,50 @@ impl Interpreter {
             "get_physical_keycode_with_modifiers" => Ok(Variant::Int(
                 ie_int(res, "physical_keycode") | ie_modifiers_mask(res),
             )),
+            // `xformed_by(xform, local_ofs := Vector2())` — pat-s3rrv.14.
+            //
+            // Godot returns a COPY (`core/input/input_event.cpp`), which is why
+            // this one is implementable at all: Patina's events are value
+            // Resources, so a method that mutated the receiver could not be seen
+            // by the caller. Copying is exactly what value semantics do well.
+            //
+            // ⚠️ Only THREE fields move, and which transform each uses is the
+            // whole correctness question:
+            //   * `position`  -> `xform.xform(position + local_ofs)`  (affine,
+            //     translation included)
+            //   * `relative`, `velocity` -> `xform.basis_xform(..)`   (DIRECTIONS;
+            //     applying the translation to a delta would corrupt it)
+            // `global_position`, `screen_relative` and `screen_velocity` are
+            // copied UNCHANGED — they are screen-space and deliberately outside
+            // the transformed local space. Transforming them "for consistency"
+            // is the obvious mistake and is wrong.
+            "xformed_by" => {
+                let xform = match args.first() {
+                    Some(Variant::Transform2D(t)) => *t,
+                    // Godot's signature requires a Transform2D; anything else
+                    // leaves the event untouched rather than erroring, matching
+                    // how `is_match` treats a bad argument.
+                    _ => return Ok(Variant::Resource(Box::new(res.clone()))),
+                };
+                let local_ofs = match args.get(1) {
+                    Some(Variant::Vector2(v)) => *v,
+                    _ => gdcore::math::Vector2::ZERO,
+                };
+                let mut out = res.clone();
+                if let Some(Variant::Vector2(p)) = out.properties.get("position").cloned() {
+                    out.properties.insert(
+                        "position".to_string(),
+                        Variant::Vector2(xform.xform(p + local_ofs)),
+                    );
+                }
+                for key in ["relative", "velocity"] {
+                    if let Some(Variant::Vector2(d)) = out.properties.get(key).cloned() {
+                        out.properties
+                            .insert(key.to_string(), Variant::Vector2(xform.basis_xform(d)));
+                    }
+                }
+                Ok(Variant::Resource(Box::new(out)))
+            }
             "is_match" => {
                 let other = match args.first() {
                     Some(Variant::Resource(r)) => r,
@@ -5906,6 +5990,40 @@ impl Interpreter {
             // Rect2/Transform2D/Transform3D/Quaternion/Basis/AABB/Plane: every
             // one of these had a `Variant` arm and a tested `gdcore` type, but
             // no way for a script to build one (pat-0q2kx.50).
+            // `NodePath("Sprite:modulate")` and `StringName("foo")` — the CALL
+            // forms (pat-s3rrv.60), counterparts of the `^"..."` / `&"..."`
+            // literals. Both types had a `Variant` arm, a `gdcore` type and a
+            // method surface, and no way for a script to construct one by name.
+            //
+            // ⚠️ Each accepts its OWN type as well as a String, because Godot's
+            // constructors are copy-constructors too. `NodePath(some_path)` is
+            // idiomatic when normalising an argument of unknown origin, and
+            // rejecting it would make the constructor unusable for exactly that.
+            "NodePath" => {
+                use gdcore::node_path::NodePath as NP;
+                match args.first() {
+                    None => Ok(Some(Variant::NodePath(NP::empty()))),
+                    Some(Variant::NodePath(p)) => Ok(Some(Variant::NodePath(p.clone()))),
+                    Some(Variant::String(s)) => Ok(Some(Variant::NodePath(NP::new(s)))),
+                    Some(Variant::StringName(s)) => {
+                        Ok(Some(Variant::NodePath(NP::new(s.as_str()))))
+                    }
+                    Some(other) => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "NodePath() expects a String or NodePath, got {other:?}"
+                    )))),
+                }
+            }
+            "StringName" => {
+                use gdcore::string_name::StringName as SN;
+                match args.first() {
+                    None => Ok(Some(Variant::StringName(SN::new("")))),
+                    Some(Variant::StringName(s)) => Ok(Some(Variant::StringName(s.clone()))),
+                    Some(Variant::String(s)) => Ok(Some(Variant::StringName(SN::new(s)))),
+                    Some(other) => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "StringName() expects a String or StringName, got {other:?}"
+                    )))),
+                }
+            }
             "Rect2" | "Transform2D" | "Transform3D" | "Quaternion" | "Basis" | "AABB" | "Plane" => {
                 crate::variant_math::construct(name, args).map(Some)
             }
@@ -8759,9 +8877,22 @@ impl Interpreter {
                         .is_some(),
                 ))
             }
-            // Godot re-reads project.godot; Patina's map is installed by the
-            // host at boot, so the script-visible effect is already in place.
-            "load_from_project_settings" => Ok(Variant::Nil),
+            // Godot re-reads project.godot and REPLACES the map. The old
+            // comment here said Patina's map is "already in place" and returned
+            // Nil — true of a boot-time map, but it silently dropped the half
+            // that matters: the call must UNDO runtime rebinds. A script that
+            // rebinds a key and then offers "restore defaults" saw nothing
+            // happen (pat-s3rrv.14).
+            //
+            // Queued like every other `InputMap` mutator, since the engine map
+            // belongs to the frame owner; the tree's mirrors are rebuilt from
+            // engine truth in the same pass that applies the command.
+            "load_from_project_settings" => {
+                if let Some(access) = self.scene_access.as_mut() {
+                    access.input_map_load_from_project_settings();
+                }
+                Ok(Variant::Nil)
+            }
             _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                 format!("InputMap.{method}"),
             ))),
@@ -10455,6 +10586,18 @@ impl Interpreter {
             // alongside the affine builtins, so it delegates the same way.
             // Without this arm every `col.darkened(0.2)` fell through to the
             // catch-all below and errored with "cannot call method on Color".
+            // pat-s3rrv.59: Vector4/Vector4i's method tables live in
+            // `variant_math` too. Vector2 and Vector3 are handled inline above,
+            // so these two had no arm anywhere and every `v.length()` fell to
+            // the catch-all below — the tables existed and nothing could reach
+            // them, exactly as with Color.
+            | Variant::Vector4(_)
+            | Variant::Vector4i(_)
+            // Rect2i and Projection had the same gap as the Vector4 pair: a
+            // kind that round-trips through a `.tscn` and whose members read,
+            // with no method callable on it (pat-s3rrv.59).
+            | Variant::Rect2i(_)
+            | Variant::Projection(_)
             | Variant::Color(_) => match crate::variant_math::call_method(obj, method, args) {
                 Some(result) => result,
                 None => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
@@ -24154,6 +24297,7 @@ fn is_input_event_method(method: &str) -> bool {
             | "as_text_key_label"
             | "get_keycode_with_modifiers"
             | "get_physical_keycode_with_modifiers"
+            | "xformed_by"
     )
 }
 

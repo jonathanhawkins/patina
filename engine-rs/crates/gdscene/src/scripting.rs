@@ -481,6 +481,9 @@ pub enum InputCommand {
         /// Action name.
         action: String,
     },
+    /// `InputMap.load_from_project_settings()` — restore the project-declared
+    /// map, discarding every runtime change.
+    InputMapLoadFromProjectSettings,
 }
 
 /// Converts a script-described input event into the engine's typed binding
@@ -562,6 +565,19 @@ pub struct InputSnapshot {
     pub gamepad_buttons_pressed: HashSet<(i64, i64)>,
     /// Latest value per `(device, Godot JoyAxis index)` (pat-0q2kx.88).
     pub gamepad_axis_values: std::collections::HashMap<(i64, i64), f32>,
+    /// Per-action `(strength, raw_strength)` for actions held this frame
+    /// (pat-s3rrv.14).
+    ///
+    /// ⚠️ The pair is NOT redundant. They differ only for ANALOG bindings and
+    /// only once a deadzone applies: a stick at 0.6 under a 0.1 deadzone reads
+    /// **0.56** as strength and **0.6** as raw. A digital binding reports 1.0
+    /// from both — which is exactly why an implementation that aliases them
+    /// passes every keyboard-shaped test and is wrong on every gamepad.
+    ///
+    /// Absent means "not held": both accessors fall back to the digital
+    /// default, matching `gdplatform`'s own accessors, which gate on
+    /// `actions_pressed` before consulting either map.
+    pub action_strengths: std::collections::HashMap<String, (f32, f32)>,
 }
 
 impl InputSnapshot {
@@ -1261,6 +1277,42 @@ fn playback_param_name(path: &str) -> Option<&str> {
     }
 }
 
+/// Whether `node_id` is a `RichTextLabel` (pat-s3rrv.74).
+fn is_rich_text_label(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .map(|n| n.class_name() == "RichTextLabel")
+        .unwrap_or(false)
+}
+
+/// The label's current BBCode source, matching what the draw arm reads.
+///
+/// `bbcode_text` wins when set, else plain `text` — so a script appending to a
+/// label authored with plain `text` extends that text rather than silently
+/// starting a second, empty string beside it.
+fn richtext_src(tree: &SceneTree, node_id: NodeId) -> String {
+    let string_prop = |key: &str| match tree.get_node(node_id).map(|n| n.get_property(key)) {
+        Some(Variant::String(s)) => Some(s),
+        _ => None,
+    };
+    // Same precedence, expressed the same way, as `control_render::richtext_source`.
+    string_prop("bbcode_text")
+        .filter(|s| !s.is_empty())
+        .or_else(|| string_prop("text"))
+        .unwrap_or_default()
+}
+
+/// Writes the label's source back.
+///
+/// Both properties are set: `bbcode_text` is what the draw arm prefers, and
+/// leaving a stale `text` behind would resurrect the old string the moment
+/// something cleared the bbcode one.
+fn set_richtext(tree: &mut SceneTree, node_id: NodeId, value: String) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("bbcode_text", Variant::String(value.clone()));
+        node.set_property("text", Variant::String(value));
+    }
+}
+
 impl SceneAccess for SceneTreeAccessor {
     fn get_node(&self, from: u64, path: &str) -> Option<u64> {
         let from_id = NodeId::from_object_id(ObjectId::from_raw(from));
@@ -1628,6 +1680,22 @@ impl SceneAccess for SceneTreeAccessor {
         {
             return Some(value);
         }
+        // The `Range` value model (pat-s3rrv.73). Same shape and same reason as
+        // the two arms above: it answers `None` for every non-range node and for
+        // every method it does not implement, so the generic table below is
+        // reached unchanged.
+        //
+        // ⚠️ Without this a script cannot move a slider at all. `class_has_method`
+        // consults declared `MethodInfo` only, and `Range` registers its value
+        // model as PROPERTIES — so `set_value` is not merely inert, it does not
+        // resolve. Both spellings land here: `$Bar.set_value(50)` through
+        // `interpreter.rs::call_method_on`'s fallback, and a bare `set_value(50)`
+        // through `call_self_func_or_native`.
+        if let Some(value) =
+            crate::range_controls::call_range_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
         // String-ish first argument, shared by the group/child/signal calls.
         let arg_str = |i: usize| -> Option<String> {
             match args.get(i) {
@@ -1653,6 +1721,38 @@ impl SceneAccess for SceneTreeAccessor {
         };
 
         match method {
+            // -- Multiplayer authority (pat-s3rrv.17) ------------------------
+            //
+            // Answered for ANY node: in Godot authority is a `Node` property,
+            // not something only the replication nodes carry. Placed first so a
+            // node class that happens to declare a same-named method cannot
+            // shadow the engine rule.
+            "get_multiplayer_authority" => {
+                Some(Variant::Int(self.tree().get_multiplayer_authority(nid)))
+            }
+            "is_multiplayer_authority" => {
+                Some(Variant::Bool(self.tree().is_multiplayer_authority(nid)))
+            }
+            "set_multiplayer_authority" => {
+                let Some(authority) = (match args.first() {
+                    Some(Variant::Int(i)) => Some(*i),
+                    Some(Variant::Float(f)) => Some(*f as i64),
+                    _ => None,
+                }) else {
+                    // Godot requires an int id; a bad argument leaves authority
+                    // untouched rather than resetting it to the server, which
+                    // would silently hand the node back to the host.
+                    return Some(Variant::Nil);
+                };
+                // ⚠️ Godot's second argument DEFAULTS TO TRUE. Reading a missing
+                // argument as `false` would set authority on the node alone and
+                // leave every child inheriting the server — the subtle half-
+                // transfer this API exists to avoid.
+                let recursive = !matches!(args.get(1), Some(Variant::Bool(false)));
+                self.tree_mut()
+                    .set_multiplayer_authority(nid, authority, recursive);
+                Some(Variant::Nil)
+            }
             // -- Physics 2D space queries (pat-s3rrv.26) ---------------------
             //
             // `get_world_2d()` is answered for any node: Patina has one
@@ -2658,6 +2758,65 @@ impl SceneAccess for SceneTreeAccessor {
                 Some(Variant::Nil)
             }
 
+            // -- RichTextLabel text API (pat-s3rrv.74) -----------------------
+            //
+            // Godot builds rich text imperatively as well as declaratively;
+            // without these a script could only ever set the whole `bbcode_text`
+            // string, so nothing could append a line to a log or a dialogue box —
+            // the two things a RichTextLabel is usually for.
+            //
+            // All of them work on the same source string the draw arm reads, so
+            // a script append shows up in the very next frame with no separate
+            // model to fall out of sync.
+            "append_text" if is_rich_text_label(self.tree(), nid) => {
+                let extra = arg_str(0)?;
+                let joined = format!("{}{}", richtext_src(self.tree(), nid), extra);
+                set_richtext(self.tree_mut(), nid, joined);
+                Some(Variant::Nil)
+            }
+            // ⚠️ `add_text` adds RAW text: "Adds raw non-BBCode-parsed text to the
+            // tag stack" (RichTextLabel.xml). Appending it unescaped would let a
+            // stray `[` in user data — a chat line, a filename — be read as a
+            // tag and silently swallow the rest of the string. The brackets are
+            // escaped with Godot's own `[lb]`/`[rb]`, which the parser now
+            // understands, so the text round-trips through `get_parsed_text`.
+            "add_text" if is_rich_text_label(self.tree(), nid) => {
+                let raw = arg_str(0)?;
+                // ⚠️ ONE pass, not two chained `replace`s. Escaping `[` emits a
+                // `]` of its own, so a following `replace(']', "[rb]")` mangles
+                // the escape just written — `[lb]` becomes `[lb[rb]`, an unknown
+                // tag that is then stripped, and the bracket the user typed
+                // disappears entirely. No ordering of two replaces avoids it,
+                // because each one emits both characters the other rewrites.
+                let escaped: String = raw.chars().fold(String::new(), |mut acc, c| {
+                    match c {
+                        '[' => acc.push_str("[lb]"),
+                        ']' => acc.push_str("[rb]"),
+                        other => acc.push(other),
+                    }
+                    acc
+                });
+                let joined = format!("{}{}", richtext_src(self.tree(), nid), escaped);
+                set_richtext(self.tree_mut(), nid, joined);
+                Some(Variant::Nil)
+            }
+            "clear" if is_rich_text_label(self.tree(), nid) => {
+                set_richtext(self.tree_mut(), nid, String::new());
+                Some(Variant::Nil)
+            }
+            "get_parsed_text" if is_rich_text_label(self.tree(), nid) => Some(Variant::String(
+                crate::control_render::richtext_parsed_text(self.tree(), nid),
+            )),
+            "get_total_character_count" if is_rich_text_label(self.tree(), nid) => {
+                // Counts PARSED characters, so markup never inflates the total —
+                // this is the denominator a typewriter effect drives
+                // `visible_characters` against.
+                let n = crate::control_render::richtext_parsed_text(self.tree(), nid)
+                    .chars()
+                    .count();
+                Some(Variant::Int(n as i64))
+            }
+
             // -- LineEdit / TextEdit editing (pat-0q2kx.87) ------------------
             //
             // Registered in ClassDB, so without these arms `node_has_method`
@@ -3215,6 +3374,48 @@ impl SceneAccess for SceneTreeAccessor {
             .unwrap_or(false)
     }
 
+    // Analog action strength (pat-s3rrv.14). The `SceneAccess` DEFAULTS treat
+    // every action as digital (1.0 / 0.0), and the real analog values live in
+    // `gdplatform::input::InputState`, which belongs to `MainLoop` and is
+    // unreachable from a running script — so without these overrides no script
+    // could observe an analog or deadzoned value from EITHER accessor, however
+    // correct `InputState`'s own implementation was.
+    //
+    // The frame owner mirrors the pair into the snapshot; here we only read it.
+    // Falling through to the digital default when the action is absent is what
+    // keeps a keyboard-bound action reporting 1.0 while held.
+    fn get_action_strength(&self, action: &str) -> f32 {
+        if let Some(strength) = self
+            .input
+            .as_ref()
+            .and_then(|i| i.action_strengths.get(action))
+            .map(|(s, _)| *s)
+        {
+            return strength;
+        }
+        if self.is_input_action_pressed(action) {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    fn get_action_raw_strength(&self, action: &str) -> f32 {
+        if let Some(raw) = self
+            .input
+            .as_ref()
+            .and_then(|i| i.action_strengths.get(action))
+            .map(|(_, raw)| *raw)
+        {
+            return raw;
+        }
+        if self.is_input_action_pressed(action) {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
     // -- Input singleton mutators (pat-0q2kx.24) ----------------------------
     //
     // Godot's `Input` mutators change live engine state
@@ -3524,6 +3725,17 @@ impl SceneAccess for SceneTreeAccessor {
             action: action.to_string(),
         });
         tree.input_map_mirror_erase_events(action);
+    }
+
+    fn input_map_load_from_project_settings(&mut self) {
+        // No mirror call to pair with this one: a reload replaces the whole map
+        // rather than touching one action, and the tree has no copy of the
+        // project's declarations to rebuild from. It does not need one — the
+        // command applier rebuilds BOTH input-map mirrors from engine truth
+        // immediately after draining, so the restored map is visible from the
+        // next read onward, exactly as for any other queued mutator.
+        self.tree_mut()
+            .queue_input_command(InputCommand::InputMapLoadFromProjectSettings);
     }
 
     fn input_map_action_event_count(&self, action: &str) -> usize {

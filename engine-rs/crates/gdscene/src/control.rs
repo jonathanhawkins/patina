@@ -562,7 +562,15 @@ pub fn get_mouse_filter(tree: &SceneTree, node_id: NodeId) -> MouseFilter {
 fn default_mouse_filter(node: &crate::node::Node) -> MouseFilter {
     const IGNORE: &[&str] = &[
         "Label",
-        "RichTextLabel",
+        // ⚠️ NOT RichTextLabel (pat-s3rrv.74). `label.cpp:1477` calls
+        // `set_mouse_filter(MOUSE_FILTER_IGNORE)`; `rich_text_label.cpp` has no
+        // such call anywhere, so it keeps Control's STOP. Generalising Label's
+        // setting to it is a one-word change that makes `[url=…]` links
+        // unclickable — the label never wins the hit test, so `meta_clicked` can
+        // never fire and the whole meta feature is dead with no error anywhere.
+        //
+        // RichTextLabel extends Control, not Label, so removing the literal is
+        // enough: `is_class("Label")` is false for it.
         "Separator",
         "HSeparator",
         "VSeparator",
@@ -900,6 +908,10 @@ pub fn control_at_point(tree: &SceneTree, point: Vector2) -> Option<NodeId> {
 /// the ClassDB inheritance table has not been populated (e.g. bare unit tests),
 /// mirroring [`crate::control_render`]'s control detection.
 const CONTROL_HIT_CLASSES: &[&str] = &[
+    // pat-s3rrv.72: a MenuBar's title strip has to be hit-testable or the press
+    // never resolves to the bar and no menu can open — the strip would draw and
+    // ignore every click.
+    "MenuBar",
     "Control",
     "Panel",
     "PanelContainer",

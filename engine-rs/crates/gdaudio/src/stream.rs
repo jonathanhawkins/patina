@@ -65,6 +65,18 @@ pub struct AudioStreamPlayback {
     /// Ping-pong phase: `true` while travelling toward `loop_end`, `false` while
     /// travelling back toward `loop_begin`. Meaningless for the other modes.
     ping_pong_forward: bool,
+    /// High-shelf reduction in dB applied to this voice, `0.0` for none
+    /// (pat-s3rrv.55).
+    ///
+    /// Godot muffles a distant or off-axis 3D source rather than only
+    /// quietening it: `_update_panning` derives the attenuation and calls
+    /// `set_playback_highshelf_params`. Negative values cut the highs, which is
+    /// why Godot's `attenuation_filter_db` and
+    /// `emission_angle_filter_attenuation_db` default to -24 and -12.
+    highshelf_db: f32,
+    /// Cutoff for [`highshelf_db`](Self::highshelf_db) in Hz (Godot's
+    /// `attenuation_filter_cutoff_hz`, default 5000).
+    highshelf_cutoff_hz: f32,
 }
 
 impl AudioStreamPlayback {
@@ -84,6 +96,10 @@ impl AudioStreamPlayback {
             loop_begin_secs: 0.0,
             loop_end_secs: 0.0,
             ping_pong_forward: true,
+            // No filtering by default: an unspatialised voice must mix exactly
+            // as it did before the high-shelf existed (pat-s3rrv.55).
+            highshelf_db: 0.0,
+            highshelf_cutoff_hz: 5000.0,
         }
     }
 
@@ -259,6 +275,28 @@ impl AudioStreamPlayback {
     /// their distance-attenuated linear volume here.
     pub fn set_linear_gain(&mut self, gain: f32) {
         self.linear_gain = gain.max(0.0);
+    }
+
+    /// The per-voice high-shelf reduction in dB and its cutoff in Hz.
+    pub fn highshelf(&self) -> (f32, f32) {
+        (self.highshelf_db, self.highshelf_cutoff_hz)
+    }
+
+    /// Set the per-voice high-shelf. `db` of `0.0` disables the filter
+    /// entirely — the mixer then leaves the signal untouched rather than
+    /// running a unity-gain biquad over it, so an unspatialised voice is
+    /// bit-identical to before this existed (pat-s3rrv.55).
+    ///
+    /// ⚠️ A non-finite or non-positive cutoff also disables it. A shelf at 0 Hz
+    /// is not "no filtering" — it is a degenerate one, and the coefficients go
+    /// to NaN, which would silence the voice and every bus it mixes into.
+    pub fn set_highshelf(&mut self, db: f32, cutoff_hz: f32) {
+        self.highshelf_db = if db.is_finite() { db } else { 0.0 };
+        self.highshelf_cutoff_hz = if cutoff_hz.is_finite() && cutoff_hz > 0.0 {
+            cutoff_hz
+        } else {
+            0.0
+        };
     }
 
     /// Return the loop mode.

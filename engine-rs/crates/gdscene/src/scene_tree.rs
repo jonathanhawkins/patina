@@ -59,6 +59,76 @@ pub struct DeferredCall {
 /// accepted. Anything else (notably `Nil`, which is what an unset property reads
 /// back as) yields `None` so the caller can fall back to a default rather than
 /// registering an empty path that silently matches nothing.
+/// The properties a `MultiplayerSynchronizer` replicates (pat-s3rrv.17).
+///
+/// Prefers the flattened `SceneReplicationConfig` (`__replication__properties/N/*`,
+/// what the Godot editor actually exports) and falls back to the hand-authored
+/// `_sync_properties` array that hand-written test scenes use.
+///
+/// An empty result means nothing syncs. `poll_outbound` already returns early on
+/// an empty snapshot, so an unconfigured synchronizer stays inert rather than
+/// guessing at `position`.
+fn replication_properties_from_node(node: &crate::node::Node) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    // Godot numbers the entries densely from 0, so stop at the first gap rather
+    // than scanning an arbitrary range.
+    for index in 0.. {
+        let path = match node.get_property(&format!("__replication__properties/{index}/path")) {
+            Variant::Nil => break,
+            other => match variant_as_path_string(&other) {
+                Some(p) if !p.is_empty() => p,
+                _ => break,
+            },
+        };
+        let flag = |name: &str, default: bool| -> bool {
+            match node.get_property(&format!("__replication__properties/{index}/{name}")) {
+                Variant::Bool(b) => b,
+                _ => default,
+            }
+        };
+        // `replication_mode` 0 is NEVER. Absent means Godot's default, ALWAYS.
+        let mode_never = matches!(
+            node.get_property(&format!(
+                "__replication__properties/{index}/replication_mode"
+            )),
+            Variant::Int(0)
+        );
+        if mode_never || !flag("sync", true) {
+            continue;
+        }
+        // ⚠️ A config path is `<node>:<property>`, e.g. `.:position`. Split from
+        // the RIGHT: only the last colon separates the property, and a NodePath
+        // may legitimately contain others.
+        let Some((node_part, prop)) = path.rsplit_once(':') else {
+            continue;
+        };
+        // Only properties on the synchronizer's own root are supported. A path
+        // targeting a CHILD (`Sprite:modulate`) is skipped rather than applied
+        // to the root — writing `modulate` on the wrong node would be a silent
+        // corruption, which is worse than not replicating it.
+        if !node_part.is_empty() && node_part != "." {
+            continue;
+        }
+        if !prop.is_empty() {
+            out.push(prop.to_string());
+        }
+    }
+    if !out.is_empty() {
+        return out;
+    }
+    match node.get_property("_sync_properties") {
+        Variant::Array(items) => items
+            .iter()
+            .filter_map(|v| match v {
+                Variant::String(s) if !s.is_empty() => Some(s.clone()),
+                Variant::StringName(s) if !s.as_str().is_empty() => Some(s.as_str().to_string()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn variant_as_path_string(value: &Variant) -> Option<String> {
     match value {
         Variant::NodePath(p) => Some(p.to_string()),
@@ -93,6 +163,13 @@ struct ReplicationState {
     /// The outbound spawn pass diffs the live children against this set, so a
     /// node is announced exactly once no matter how many frames it lives for.
     announced: HashMap<NodeId, HashSet<NodeId>>,
+    /// Announced child -> the `net_id` it was announced under (pat-s3rrv.17).
+    ///
+    /// The spawn pass mints a `net_id` per child and previously discarded it.
+    /// Despawn needs it: the receiver keys its instantiated nodes by `net_id`,
+    /// so "this child is gone" cannot be expressed without the id it arrived
+    /// under.
+    spawn_net_ids: HashMap<NodeId, u32>,
     /// Monotonic milliseconds accumulated from the frame delta.
     ///
     /// `MultiplayerSynchronizer::poll_outbound` compares this against its
@@ -188,6 +265,33 @@ impl std::ops::BitOr for DuplicateFlags {
 /// hierarchy.
 ///
 /// A root node is created automatically and is always present.
+/// The open popup menu and where it is on screen (pat-s3rrv.72).
+///
+/// Holds the MODEL rather than pointing at the node, so activation reads the
+/// same items the hit-test measured even if the node's `items` property is
+/// rewritten while the menu is open.
+#[derive(Debug, Clone)]
+struct OpenPopup {
+    /// The control that opened it — a MenuButton or OptionButton. Receives
+    /// `item_selected` when the owner is an OptionButton.
+    owner: NodeId,
+    /// The PopupMenu node itself, when one exists as a child. `id_pressed` and
+    /// `index_pressed` are emitted here, as Godot emits them on the PopupMenu.
+    popup_node: Option<NodeId>,
+    menu: crate::popup::PopupMenu,
+    /// Top-left corner in the same space `gui_input_stage` receives positions.
+    origin: gdcore::math::Vector2,
+    width: f32,
+    /// The row under the cursor, for the draw pass to highlight.
+    hovered: Option<usize>,
+    /// Which MenuBar title this menu belongs to, when a bar opened it.
+    ///
+    /// `None` for a MenuButton/OptionButton, which have no strip. Kept so the
+    /// strip can highlight the open title and so hover-to-switch knows which
+    /// title it is already showing.
+    bar_title: Option<usize>,
+}
+
 pub struct SceneTree {
     /// Arena storage: every node in the tree lives here.
     nodes: HashMap<NodeId, Node>,
@@ -223,6 +327,12 @@ pub struct SceneTree {
     video_players: HashMap<NodeId, crate::video_stream::VideoStreamPlayer>,
     /// Control currently under the mouse, for `mouse_entered`/`mouse_exited`
     /// transitions in the GUI input stage (pat-0q2kx.18).
+    /// The popup menu currently open, if any (pat-s3rrv.72).
+    ///
+    /// Godot's `PopupMenu` is a Popup<-Window: while it is open it draws above
+    /// everything and GRABS input, so the control underneath must not see the
+    /// click that dismisses it.
+    open_popup: Option<OpenPopup>,
     hovered_control: Option<NodeId>,
     /// Control that received the most recent mouse press. A release only counts
     /// as a click when it lands on this same control, as in Godot.
@@ -233,6 +343,15 @@ pub struct SceneTree {
     /// which is what makes button drag-off/drag-back, and every draggable
     /// Control, work at all (pat-s3rrv.12).
     gui_mouse_focus: Option<NodeId>,
+    /// An in-flight scrollbar grabber drag (Godot's `ScrollBar::drag`), holding
+    /// where the grab started so the handle stays under the pointer.
+    gui_scrollbar_drag: Option<(NodeId, crate::range_controls::ScrollBarDrag)>,
+    /// The `[url=…]` run the pointer is currently inside: its label, the run's
+    /// index and the payload.
+    ///
+    /// The payload is kept because `meta_hover_ended` reports the run being
+    /// LEFT, which is no longer under the cursor by the time it is emitted.
+    hovered_meta: Option<(NodeId, usize, String)>,
     /// The Control holding keyboard focus (Godot's `Viewport::gui.key_focus`).
     /// Clicking a focusable Control grabs it (pat-0q2kx.21).
     focus_owner: Option<NodeId>,
@@ -313,6 +432,14 @@ pub struct SceneTree {
     event_trace: EventTrace,
     /// Current frame number for trace recording.
     trace_frame: u64,
+    /// Frame on which each mouse button was last pressed, keyed by Godot button
+    /// index — the state `InputEventMouseButton.double_click` is computed from
+    /// (pat-s3rrv.76).
+    ///
+    /// Godot's platform layers flag the SECOND press, so the window is measured
+    /// against the previous press of the SAME button: chording left then right
+    /// is not a double click.
+    last_mouse_press_frame: std::collections::HashMap<i64, u64>,
     /// Whether the scene tree is currently paused.
     paused: bool,
     /// Multiplayer coordinator wired into the tree (pat-u3l8c.75). Polled once
@@ -401,9 +528,12 @@ impl SceneTree {
             animation_trees: HashMap::new(),
             graph_edits: HashMap::new(),
             video_players: HashMap::new(),
+            open_popup: None,
             hovered_control: None,
             gui_press_target: None,
             gui_mouse_focus: None,
+            gui_scrollbar_drag: None,
+            hovered_meta: None,
             focus_owner: None,
             tweens: HashMap::new(),
             scripts: HashMap::new(),
@@ -425,6 +555,7 @@ impl SceneTree {
             next_timer_id: 1,
             event_trace: EventTrace::new(),
             trace_frame: 0,
+            last_mouse_press_frame: std::collections::HashMap::new(),
             paused: false,
             multiplayer: MultiplayerAPI::new(),
             replication: ReplicationState::default(),
@@ -617,19 +748,7 @@ impl SceneTree {
                     // nothing syncs — `poll_outbound` already returns early on
                     // an empty snapshot, so a synchronizer with no config is
                     // inert rather than guessing at `position`.
-                    let properties = match node.get_property("_sync_properties") {
-                        Variant::Array(items) => items
-                            .iter()
-                            .filter_map(|v| match v {
-                                Variant::String(s) if !s.is_empty() => Some(s.clone()),
-                                Variant::StringName(s) if !s.as_str().is_empty() => {
-                                    Some(s.as_str().to_string())
-                                }
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>(),
-                        _ => Vec::new(),
-                    };
+                    let properties = replication_properties_from_node(node);
                     pending.push((
                         id,
                         Pending::Synchronizer {
@@ -681,6 +800,22 @@ impl SceneTree {
     /// the remote spawner's `spawn_path` and writes synchronized properties onto
     /// the live node; this is the same, with the `.tscn` fetched through the
     /// real resource loader rather than a caller-supplied closure.
+    /// Removes the node a peer despawned (pat-s3rrv.17).
+    ///
+    /// Also drops it from `announced`, because the receiver marked it announced
+    /// at birth to stop the echo cascade — leaving it there would keep a freed
+    /// NodeId in the diff set, and NodeIds are reused.
+    fn apply_replication_despawn(&mut self, net_id: u32) {
+        let Some(node_id) = self.replication.replicator.forget(net_id) else {
+            return;
+        };
+        for seen in self.replication.announced.values_mut() {
+            seen.remove(&node_id);
+        }
+        self.replication.spawn_net_ids.remove(&node_id);
+        let _ = self.remove_node(node_id);
+    }
+
     fn apply_replication_packets(
         &mut self,
         spawns: Vec<gdplatform::network::SpawnPacket>,
@@ -766,6 +901,89 @@ impl SceneTree {
     /// Godot's `SceneReplicationInterface` watches the spawn path and replicates
     /// each new child to every peer; this is the same diff, driven from the
     /// SceneTree poll.
+    /// Announces children that have LEFT a spawner's `spawn_path` (pat-s3rrv.17).
+    ///
+    /// The inverse of the spawn diff: `announced` minus the live children is the
+    /// set that was replicated and is now gone. Without this a host that frees a
+    /// spawned node leaves every client's copy on screen permanently — the node
+    /// simply stops receiving sync frames, which looks like a frozen entity
+    /// rather than a removed one.
+    fn poll_replication_despawns(&mut self) {
+        use gdplatform::network::{encode_despawn_packet, Packet, TransferMode};
+
+        if self.replication.spawners.is_empty() {
+            return;
+        }
+
+        // Phase 1 — collect (spawner, gone child) pairs without holding a borrow
+        // into `self.replication` across the sends below.
+        let mut gone: Vec<(NodeId, NodeId)> = Vec::new();
+        for (spawner_id, announced) in &self.replication.announced {
+            let Some(spawner) = self.replication.spawners.get(spawner_id) else {
+                continue;
+            };
+            // Same rule as the spawn diff: a non-authority peer must not retract
+            // a node it never announced.
+            if !self.is_multiplayer_authority(*spawner_id) {
+                continue;
+            }
+            let path = spawner.get_spawn_path();
+            let parent = if path.is_empty() {
+                Some(*spawner_id)
+            } else {
+                self.get_node_or_null(*spawner_id, path)
+            };
+            // ⚠️ A missing parent is NOT an empty child list. If the spawn_path
+            // itself has been freed, treating it as "no children" would despawn
+            // every node under it — including on a client whose scene simply
+            // resolves the path differently. Skip instead.
+            let Some(parent) = parent else {
+                continue;
+            };
+            let Some(parent_node) = self.get_node(parent) else {
+                continue;
+            };
+            let live = parent_node.children();
+            for child in announced {
+                if !live.contains(child) {
+                    gone.push((*spawner_id, *child));
+                }
+            }
+        }
+        if gone.is_empty() {
+            return;
+        }
+
+        let peers = self.replication_targets();
+        let sender = self.multiplayer.peer_mut().map(|p| p.get_unique_id());
+        for (spawner_id, child) in gone {
+            // Forget it regardless of whether a packet goes out, so a child that
+            // was announced without a net_id (a spawner at its limit) cannot be
+            // rescanned every frame forever.
+            let net_id = self.replication.spawn_net_ids.remove(&child);
+            if let Some(seen) = self.replication.announced.get_mut(&spawner_id) {
+                seen.remove(&child);
+            }
+            let (Some(net_id), Some(sender)) = (net_id, sender) else {
+                continue;
+            };
+            let encoded = encode_despawn_packet(net_id);
+            if let Some(peer) = self.multiplayer.peer_mut() {
+                for to in &peers {
+                    let _ = peer.send_packet(
+                        *to,
+                        Packet {
+                            sender,
+                            channel: 0,
+                            data: encoded.clone(),
+                            transfer_mode: TransferMode::Reliable,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     fn poll_replication_spawns(&mut self) {
         use gdplatform::network::{encode_spawn_packet, Packet, TransferMode};
 
@@ -777,6 +995,18 @@ impl SceneTree {
         // Phase 1 — diff live children against what has already been announced.
         let mut pending: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
         for (spawner_id, spawner) in &self.replication.spawners {
+            // Only the spawner's authority replicates it (pat-s3rrv.17). Godot's
+            // rule — and here it also REPLACES a workaround: the receiver marks
+            // inbound spawns announced-at-birth purely to stop an echo cascade,
+            // which suppressed the symptom without expressing the rule.
+            //
+            // ⚠️ Deliberately NOT applied to `replication_spawn_owner`, which
+            // has an identical loop header: that one resolves where INBOUND
+            // spawns are parented, and the receiver is by definition not the
+            // authority. Gating it would drop every arriving node.
+            if !self.is_multiplayer_authority(*spawner_id) {
+                continue;
+            }
             let path = spawner.get_spawn_path();
             let parent = if path.is_empty() {
                 Some(*spawner_id)
@@ -870,6 +1100,7 @@ impl SceneTree {
                         );
                     }
                 }
+                self.replication.spawn_net_ids.insert(child, net_id);
                 self.replication
                     .announced
                     .entry(spawner_id)
@@ -1045,6 +1276,7 @@ impl SceneTree {
         let other = self.multiplayer.poll();
         let mut spawns = Vec::new();
         let mut syncs = Vec::new();
+        let mut despawns: Vec<u32> = Vec::new();
         for packet in &other {
             // Spawn first: both decoders are tagged by a leading kind byte, so
             // a frame can only match one, and trying spawn first mirrors the
@@ -1053,10 +1285,18 @@ impl SceneTree {
                 spawns.push(spawn);
             } else if let Some(sync) = gdplatform::network::decode_sync_packet(&packet.data) {
                 syncs.push(sync);
+            } else if let Some(net_id) = gdplatform::network::decode_despawn_packet(&packet.data) {
+                despawns.push(net_id);
             }
         }
         if !spawns.is_empty() || !syncs.is_empty() {
             self.apply_replication_packets(spawns, syncs);
+        }
+        // After the spawns, so a frame carrying both applies them in the order
+        // they were produced rather than deleting a node that arrives later in
+        // the same drain.
+        for net_id in despawns {
+            self.apply_replication_despawn(net_id);
         }
         // Outbound replication runs after inbound so a value that arrived this
         // frame is not immediately echoed back to its sender.
@@ -1066,6 +1306,10 @@ impl SceneTree {
             .saturating_add((delta * 1000.0).max(0.0) as u64);
         // (registration already ran above, before the inbound drain)
         self.poll_replication_spawns();
+        // After spawns so a node added and removed within one frame is announced
+        // before it is retracted, and before outbound sync so a removed node
+        // does not also emit a property frame on its way out.
+        self.poll_replication_despawns();
         self.poll_replication_outbound();
 
         let root = self.root_id;
@@ -2344,6 +2588,58 @@ impl SceneTree {
     // -- traversal helpers --------------------------------------------------
 
     /// Collects the subtree rooted at `id` in top-down (parent-first) order.
+    /// Godot `Node.get_multiplayer_authority()` (pat-s3rrv.17).
+    ///
+    /// Stored per node under `multiplayer_authority`. Absent means INHERIT: walk
+    /// up to the nearest ancestor that declares one, defaulting to the server —
+    /// what Godot seeds every node with, and why a scene that never mentions
+    /// authority still behaves server-authoritative.
+    pub fn get_multiplayer_authority(&self, node_id: NodeId) -> i64 {
+        let mut cursor = Some(node_id);
+        while let Some(id) = cursor {
+            let Some(node) = self.get_node(id) else {
+                break;
+            };
+            if let Variant::Int(v) = node.get_property("multiplayer_authority") {
+                return v;
+            }
+            cursor = node.parent();
+        }
+        i64::from(gdplatform::network::PeerId::SERVER.0)
+    }
+
+    /// Godot `Node.set_multiplayer_authority(id, recursive = true)`.
+    ///
+    /// ⚠️ Recursive is Godot's DEFAULT and is not a convenience: authority is
+    /// read per node, so setting it on a spawned root alone leaves every child
+    /// inheriting whatever the ancestor chain says — which for a node parented
+    /// under the scene root is the server, not the new owner.
+    pub fn set_multiplayer_authority(&mut self, node_id: NodeId, authority: i64, recursive: bool) {
+        let mut targets = Vec::new();
+        if recursive {
+            self.collect_subtree_top_down(node_id, &mut targets);
+        } else {
+            targets.push(node_id);
+        }
+        for id in targets {
+            if let Some(node) = self.get_node_mut(id) {
+                node.set_property("multiplayer_authority", Variant::Int(authority));
+            }
+        }
+    }
+
+    /// Whether THIS peer is the authority for `node_id`.
+    ///
+    /// With no peer set the answer is `true`: a single-player tree owns
+    /// everything, and gating replication on `false` there would silently
+    /// disable the spawner in every offline test.
+    pub fn is_multiplayer_authority(&self, node_id: NodeId) -> bool {
+        let Some(peer) = self.multiplayer.peer() else {
+            return true;
+        };
+        i64::from(peer.get_unique_id().0) == self.get_multiplayer_authority(node_id)
+    }
+
     pub fn collect_subtree_top_down(&self, id: NodeId, out: &mut Vec<NodeId>) {
         out.push(id);
         if let Some(node) = self.nodes.get(&id) {
@@ -3277,8 +3573,32 @@ impl SceneTree {
     /// parent) — and then each track's own node path relative to that. Inactive
     /// trees (`active == false`) are skipped, as in Godot.
     pub fn process_animation_trees(&mut self, delta: f64) {
+        self.process_animation_trees_in_mode(delta, AnimationCallbackMode::Idle);
+    }
+
+    /// Advances every `AnimationTree` whose owner node's `callback_mode_process`
+    /// selects `mode` (pat-s3rrv.23).
+    ///
+    /// `AnimationTree` extends `AnimationMixer`, which is where
+    /// `callback_mode_process` lives — a tree honours it exactly as an
+    /// `AnimationPlayer` does (`scene/animation/animation_mixer.cpp`). Patina
+    /// filtered players by mode but ran trees unconditionally in the idle
+    /// phase, so a tree set to `PHYSICS` advanced on the wrong clock: its pose
+    /// was written once per rendered frame instead of once per physics tick, and
+    /// anything reading a bone or property it drives saw values that drifted
+    /// with the frame rate rather than tracking the simulation.
+    ///
+    /// Kept as a separate entry point rather than a flag, mirroring
+    /// [`process_animations_in_mode`](Self::process_animations_in_mode), so both
+    /// families are driven the same way from `MainLoop`.
+    pub fn process_animation_trees_in_mode(&mut self, delta: f64, mode: AnimationCallbackMode) {
         // Snapshot the ids so nodes can be mutated while iterating.
-        let node_ids: Vec<NodeId> = self.animation_trees.keys().copied().collect();
+        let node_ids: Vec<NodeId> = self
+            .animation_trees
+            .keys()
+            .copied()
+            .filter(|id| self.animation_callback_mode(*id) == mode)
+            .collect();
         for node_id in node_ids {
             let (values, root_node) = match self.animation_trees.get_mut(&node_id) {
                 Some(anim_tree) if anim_tree.active => {
@@ -4016,7 +4336,29 @@ impl SceneTree {
     /// [`call_script_with_access`], so no opt-in flag is required for them.
     pub fn push_input(&mut self, event: &gdplatform::input::InputEvent) {
         use gdplatform::input::InputEvent as Ev;
-        let payload = input_event_to_variant(event);
+        // `double_click` is computed HERE rather than carried on the event:
+        // `InputEvent::MouseButton` has 71 construction sites across six crates,
+        // so adding a field to it is a far larger change than this flag is worth
+        // (pat-s3rrv.76). The bookkeeping is the same shape as the touch path's
+        // `would_be_double_tap`, reusing its window so the two agree.
+        let double_click = match event {
+            Ev::MouseButton {
+                button,
+                pressed: true,
+                ..
+            } => {
+                let idx = button.to_godot_index();
+                let now = self.trace_frame;
+                let is_double = match self.last_mouse_press_frame.get(&idx) {
+                    Some(&last) => now.saturating_sub(last) <= gdplatform::input::DOUBLE_TAP_FRAMES,
+                    None => false,
+                };
+                self.last_mouse_press_frame.insert(idx, now);
+                is_double
+            }
+            _ => false,
+        };
+        let payload = input_event_to_variant(event, double_click);
         // Each event starts unhandled; `set_input_as_handled()` sets the flag.
         self.input_handled = false;
 
@@ -4138,6 +4480,350 @@ impl SceneTree {
     /// - a disabled button consumes the event without emitting anything;
     /// - key events skip the hit test entirely and go to the focus owner
     ///   ([`gui_key_stage`](Self::gui_key_stage), pat-0q2kx.84).
+    /// The open popup's geometry and model, for the draw pass (pat-s3rrv.72).
+    ///
+    /// Returns the SAME model the hit-test measures, so the rows drawn and the
+    /// rows clickable cannot drift apart.
+    pub(crate) fn open_popup_draw(
+        &self,
+    ) -> Option<(
+        gdcore::math::Vector2,
+        f32,
+        &crate::popup::PopupMenu,
+        Option<usize>,
+    )> {
+        self.open_popup
+            .as_ref()
+            .map(|o| (o.origin, o.width, &o.menu, o.hovered))
+    }
+
+    /// Emits `meta_hover_started` / `meta_hover_ended` as the pointer moves in
+    /// and out of `[url=…]` runs (pat-s3rrv.74).
+    ///
+    /// ⚠️ `meta_hover_ended` carries the payload of the run being **left**, not
+    /// the one being entered (`rich_text_label.cpp:3055-3072`) — which is why
+    /// the payload is stored rather than re-derived: by the time the signal
+    /// fires, that run is no longer under the cursor.
+    ///
+    /// Identity is (label, run index) rather than the payload string, mirroring
+    /// Godot's comparison of the meta ITEM. Two adjacent `[url=same]` runs are
+    /// two links there, and merging them by payload would swallow the crossing
+    /// between them.
+    fn update_meta_hover(&mut self, hit: Option<NodeId>, position: gdcore::math::Vector2) {
+        let now: Option<(NodeId, usize, String)> = hit
+            .filter(|&id| {
+                self.get_node(id)
+                    .map(|n| n.class_name() == "RichTextLabel")
+                    .unwrap_or(false)
+            })
+            .and_then(|id| {
+                let rect = gdcore::math::Rect2::new(
+                    self.control_global_position(id),
+                    crate::control::get_size(self, id),
+                );
+                crate::control_render::richtext_meta_regions(
+                    self,
+                    id,
+                    crate::control_render::RICHTEXT_DEFAULT_FONT_SIZE,
+                    rect,
+                )
+                .into_iter()
+                .enumerate()
+                .find(|(_, (r, _))| r.contains_point(position))
+                .map(|(idx, (_, meta))| (id, idx, meta))
+            });
+
+        // Moving WITHIN one run is not a transition, so it emits nothing —
+        // otherwise every motion sample over a link would re-fire the pair.
+        let unchanged = match (&self.hovered_meta, &now) {
+            (Some((a, i, _)), Some((b, j, _))) => a == b && i == j,
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
+            return;
+        }
+
+        // Ended before started, so a pointer sliding straight from one link to
+        // the next reports leaving the first as well as entering the second.
+        if let Some((node, _, left)) = self.hovered_meta.take() {
+            if self.nodes.contains_key(&node) {
+                self.emit_signal(node, "meta_hover_ended", &[Variant::String(left)]);
+            }
+        }
+        if let Some((node, idx, meta)) = now {
+            self.emit_signal(node, "meta_hover_started", &[Variant::String(meta.clone())]);
+            self.hovered_meta = Some((node, idx, meta));
+        }
+    }
+
+    /// Screen-space top-left of a control, accumulating ancestor offsets the
+    /// same way hit-testing does (pat-s3rrv.72).
+    fn control_global_position(&self, node: NodeId) -> gdcore::math::Vector2 {
+        let mut pos = crate::control::get_position(self, node);
+        let mut cur = self.nodes.get(&node).and_then(|n| n.parent());
+        while let Some(p) = cur {
+            pos = pos + crate::control::get_position(self, p);
+            cur = self.nodes.get(&p).and_then(|n| n.parent());
+        }
+        pos
+    }
+
+    /// Opens the popup owned by `owner`, anchored under it (pat-s3rrv.72).
+    ///
+    /// A MenuButton owns a `PopupMenu` CHILD; an OptionButton carries the items
+    /// on itself. Both end up as the same model, so activation has one path.
+    fn open_popup_for(&mut self, owner: NodeId) {
+        let children: Vec<NodeId> = self
+            .nodes
+            .get(&owner)
+            .map(|n| n.children().to_vec())
+            .unwrap_or_default();
+        let popup_node = children.into_iter().find(|&c| {
+            self.get_node(c)
+                .map(|n| n.class_name() == "PopupMenu")
+                .unwrap_or(false)
+        });
+        let menu = crate::item_views::load_popup_menu(self, popup_node.unwrap_or(owner));
+        // An empty menu opens nothing: Godot shows no panel, and opening one
+        // would make the popup modal with no way to dismiss it by choosing.
+        if menu.item_count() == 0 {
+            return;
+        }
+        let pos = self.control_global_position(owner);
+        let size = crate::control::get_size(self, owner);
+        self.open_popup = Some(OpenPopup {
+            owner,
+            popup_node,
+            menu,
+            // Below the button, which is where Godot drops a MenuButton's menu.
+            origin: gdcore::math::Vector2::new(pos.x, pos.y + size.y),
+            width: size.x.max(1.0),
+            hovered: None,
+            bar_title: None,
+        });
+    }
+
+    /// A `MenuBar`'s titles and which one is currently open, for the draw pass
+    /// (pat-s3rrv.72).
+    ///
+    /// Returns the SAME titles `menu_bar_title_under` maps clicks against, so
+    /// the strip drawn and the strip clickable cannot drift apart.
+    pub(crate) fn menu_bar_strip(&self, bar: NodeId) -> (Vec<String>, Option<usize>) {
+        let open = self
+            .open_popup
+            .as_ref()
+            .filter(|o| o.owner == bar)
+            .and_then(|o| o.bar_title);
+        (self.menu_bar_titles(bar), open)
+    }
+
+    /// The `PopupMenu` children of a `MenuBar`, in tree order — one per title.
+    fn menu_bar_popups(&self, bar: NodeId) -> Vec<NodeId> {
+        self.nodes
+            .get(&bar)
+            .map(|n| n.children().to_vec())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|&c| {
+                self.get_node(c)
+                    .map(|n| n.class_name() == "PopupMenu")
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    /// The strip's titles: a child's `title` property when set, else its node
+    /// name — Godot's `MenuBar` labels each menu that way (`menu_bar.cpp`).
+    fn menu_bar_titles(&self, bar: NodeId) -> Vec<String> {
+        self.menu_bar_popups(bar)
+            .into_iter()
+            .map(|c| {
+                let node = self.get_node(c);
+                let titled = node.map(|n| n.get_property("title")).and_then(|v| match v {
+                    Variant::String(t) if !t.is_empty() => Some(t),
+                    _ => None,
+                });
+                titled.unwrap_or_else(|| node.map(|n| n.name().to_string()).unwrap_or_default())
+            })
+            .collect()
+    }
+
+    /// The title index under a global `position`, or `None` when the pointer is
+    /// off the strip.
+    fn menu_bar_title_under(&self, bar: NodeId, position: gdcore::math::Vector2) -> Option<usize> {
+        let is_bar = self
+            .get_node(bar)
+            .map(|n| n.class_name() == "MenuBar")
+            .unwrap_or(false);
+        if !is_bar {
+            return None;
+        }
+        let origin = self.control_global_position(bar);
+        let local_y = position.y - origin.y;
+        if local_y < 0.0 || local_y >= crate::menu::MenuBarModel::TITLE_HEIGHT {
+            return None;
+        }
+        crate::menu::MenuBarModel::new(self.menu_bar_titles(bar)).title_at(position.x - origin.x)
+    }
+
+    /// Opens the `index`-th menu of `bar`, anchored under its own title.
+    fn open_menu_bar_title(&mut self, bar: NodeId, index: usize) {
+        let popups = self.menu_bar_popups(bar);
+        let Some(&popup_node) = popups.get(index) else {
+            return;
+        };
+        let menu = crate::item_views::load_popup_menu(self, popup_node);
+        if menu.item_count() == 0 {
+            return;
+        }
+        let model = crate::menu::MenuBarModel::new(self.menu_bar_titles(bar));
+        let origin = self.control_global_position(bar);
+        // The panel is as wide as its widest row, floored at the title it hangs
+        // from — measured with the SAME synthetic advance the strip uses, so a
+        // menu never renders narrower than the title that opened it.
+        let width = (0..menu.item_count())
+            .filter_map(|i| menu.get_item(i))
+            .map(|it| crate::menu::MenuBarModel::title_width(&it.text))
+            .fold(0.0f32, f32::max)
+            .max(
+                model
+                    .titles()
+                    .get(index)
+                    .map(|t| crate::menu::MenuBarModel::title_width(t))
+                    .unwrap_or(0.0),
+            );
+        self.open_popup = Some(OpenPopup {
+            owner: bar,
+            popup_node: Some(popup_node),
+            menu,
+            // Under its own title, not under the bar's left edge.
+            origin: gdcore::math::Vector2::new(
+                origin.x + model.title_x(index),
+                origin.y + crate::menu::MenuBarModel::TITLE_HEIGHT,
+            ),
+            width: width.max(1.0),
+            hovered: None,
+            bar_title: Some(index),
+        });
+    }
+
+    /// Routes a mouse event to the open popup; returns whether it consumed it.
+    ///
+    /// ⚠️ Runs BEFORE `control_at_point`. A `PopupMenu` is a Popup<-Window and
+    /// is MODAL in Godot: while open it takes every mouse event, so a click
+    /// inside its rect must never reach the control underneath and a click
+    /// outside dismisses it rather than pressing whatever it landed on.
+    fn popup_input_stage(
+        &mut self,
+        event: &gdplatform::input::InputEvent,
+        position: gdcore::math::Vector2,
+    ) -> bool {
+        use gdplatform::input::InputEvent as Ev;
+        // Everything the decision needs, read while the borrow is alive so the
+        // mutating half below is free to take `&mut self`.
+        let Some((inside, idx, activatable, owner, popup_node, item_text, bar_title)) =
+            self.open_popup.as_ref().map(|open| {
+                let o = open.origin;
+                let h = open.menu.height();
+                let inside = position.x >= o.x
+                    && position.x < o.x + open.width
+                    && position.y >= o.y
+                    && position.y < o.y + h;
+                let idx = if inside {
+                    open.menu.index_at(position.y - o.y)
+                } else {
+                    None
+                };
+                // Read-only: `activate_item` toggles a checkbox as a side
+                // effect, so asking WITH it would flip state on a row that may
+                // not even be activatable.
+                let activatable = idx.is_some_and(|i| open.menu.is_activatable(i));
+                let text = idx
+                    .and_then(|i| open.menu.get_item(i))
+                    .map(|it| it.text.clone())
+                    .unwrap_or_default();
+                (
+                    inside,
+                    idx,
+                    activatable,
+                    open.owner,
+                    open.popup_node,
+                    text,
+                    open.bar_title,
+                )
+            })
+        else {
+            return false;
+        };
+
+        match event {
+            Ev::MouseMotion { .. } => {
+                // Godot's MenuBar switches menus on hover WHILE one is open —
+                // the behaviour every desktop menu bar has, and the reason
+                // `MenuBarModel` keeps "open" and "hovered" apart. Moving across
+                // a CLOSED bar must open nothing, which is why this lives here,
+                // inside the already-open branch, rather than in the hover
+                // bookkeeping of the normal stage.
+                if !inside && bar_title.is_some() {
+                    if let Some(next) = self.menu_bar_title_under(owner, position) {
+                        if Some(next) != bar_title {
+                            self.open_menu_bar_title(owner, next);
+                            return true;
+                        }
+                    }
+                }
+                if let Some(o) = self.open_popup.as_mut() {
+                    o.hovered = idx;
+                }
+                true
+            }
+            // The press is swallowed and the ACTIVATION happens on release,
+            // matching Godot: pressing and dragging off a row must not fire it.
+            Ev::MouseButton { pressed: true, .. } => true,
+            Ev::MouseButton { pressed: false, .. } => {
+                if !inside {
+                    // Godot's autohide — dismiss without activating anything.
+                    self.open_popup = None;
+                    return true;
+                }
+                let Some(idx) = idx else { return true };
+                if !activatable {
+                    // A disabled row or separator keeps the menu open and emits
+                    // nothing, rather than closing as if it had been chosen.
+                    return true;
+                }
+                let id = self
+                    .open_popup
+                    .as_mut()
+                    .and_then(|o| o.menu.activate_item(idx));
+                self.open_popup = None;
+                if let Some(id) = id {
+                    // Godot emits both on the PopupMenu itself.
+                    if let Some(pn) = popup_node {
+                        self.emit_signal(pn, "id_pressed", &[Variant::Int(id)]);
+                        self.emit_signal(pn, "index_pressed", &[Variant::Int(idx as i64)]);
+                    }
+                    let is_option = self
+                        .get_node(owner)
+                        .map(|n| n.class_name() == "OptionButton")
+                        .unwrap_or(false);
+                    if is_option {
+                        if let Some(n) = self.get_node_mut(owner) {
+                            n.set_property("selected", Variant::Int(idx as i64));
+                            // The button shows the chosen entry, which is the
+                            // visible half of `select()`.
+                            n.set_property("text", Variant::String(item_text));
+                        }
+                        self.emit_signal(owner, "item_selected", &[Variant::Int(idx as i64)]);
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn gui_input_stage(&mut self, event: &gdplatform::input::InputEvent, payload: &Variant) {
         use gdplatform::input::InputEvent as Ev;
         let position = match event {
@@ -4150,6 +4836,13 @@ impl SceneTree {
             }
             _ => return,
         };
+
+        // pat-s3rrv.72: the open popup is modal and gets first refusal, BEFORE
+        // any hit-test — that is what stops a click inside it reaching the
+        // control underneath.
+        if self.popup_input_stage(event, position) {
+            return;
+        }
 
         let hit = crate::control::control_at_point(self, position);
 
@@ -4167,6 +4860,14 @@ impl SceneTree {
                 self.call_script_with_access(now, "_mouse_entered", &[]);
             }
             self.hovered_control = hit;
+        }
+
+        // `[url=…]` hover (pat-s3rrv.74). Placed beside the mouse_entered
+        // bookkeeping and BEFORE pointer capture on purpose: hover follows the
+        // real cursor, so a link stops being hovered the moment the pointer
+        // leaves it even mid-drag.
+        if matches!(event, Ev::MouseMotion { .. }) {
+            self.update_meta_hover(hit, position);
         }
 
         // Pointer capture (pat-s3rrv.12). Godot's viewport routes every motion
@@ -4217,6 +4918,57 @@ impl SceneTree {
             }
         }
 
+        // A click on a `[url=…]` run emits `meta_clicked(payload)`
+        // (pat-s3rrv.74) — Godot's `RichTextLabel` signal, and the reason the
+        // parser carries a meta per run at all.
+        //
+        // On RELEASE, like every other click action here: pressing and dragging
+        // off a link must not follow it.
+        if matches!(event, Ev::MouseButton { pressed: false, .. }) {
+            let is_rich = self
+                .get_node(hit)
+                .map(|n| n.class_name() == "RichTextLabel")
+                .unwrap_or(false);
+            if is_rich {
+                let rect = gdcore::math::Rect2::new(
+                    self.control_global_position(hit),
+                    crate::control::get_size(self, hit),
+                );
+                let clicked = crate::control_render::richtext_meta_regions(
+                    self,
+                    hit,
+                    crate::control_render::RICHTEXT_DEFAULT_FONT_SIZE,
+                    rect,
+                )
+                .into_iter()
+                .find(|(r, _)| r.contains_point(position))
+                .map(|(_, meta)| meta);
+                if let Some(meta) = clicked {
+                    self.emit_signal(hit, "meta_clicked", &[Variant::String(meta)]);
+                    self.input_handled = true;
+                }
+            }
+        }
+
+        // A press on a MenuButton or OptionButton opens its popup
+        // (pat-s3rrv.72). Guarded on nothing being open already: the modal
+        // stage above consumes clicks while a popup is up, so reaching here
+        // means the press really is a fresh open.
+        if matches!(event, Ev::MouseButton { pressed: true, .. }) && self.open_popup.is_none() {
+            let opens_popup = self
+                .get_node(hit)
+                .map(|n| matches!(n.class_name(), "MenuButton" | "OptionButton"))
+                .unwrap_or(false);
+            if opens_popup {
+                self.open_popup_for(hit);
+            } else if let Some(title) = self.menu_bar_title_under(hit, position) {
+                // A MenuBar owns one PopupMenu per title, so which menu opens
+                // depends on WHERE along the strip the press landed —
+                // `open_popup_for` would always take the first child.
+                self.open_menu_bar_title(hit, title);
+            }
+        }
+
         // A press on a TabContainer's header strip switches tabs and emits
         // `tab_changed(idx)`, as Godot's TabBar does on click (pat-0q2kx.83).
         // The strip is only reachable when no child covers it, which is exactly
@@ -4255,10 +5007,68 @@ impl SceneTree {
                     ..
                 }
             );
+            // A standalone Slider/ScrollBar takes the notch itself, before the
+            // enclosing-container walk below: `scroll_under_cursor` only looks
+            // for a ScrollContainer, so a bare HScrollBar in a scene was
+            // wheel-deaf even though it is exactly the control a wheel belongs
+            // to. Godot gives the event to the control under the cursor, and the
+            // container case only exists because a container FORWARDS to its own
+            // internal bars (`ScrollContainer::gui_input`).
+            if let Some(delta) = crate::range_controls::wheel_delta(self, hit, down) {
+                let target = crate::control::get_range_value(self, hit) + delta;
+                if crate::control::set_range_value(self, hit, target) {
+                    // Re-read: the stored value is snapped and clamped, so it is
+                    // what the signal must carry.
+                    let now = crate::control::get_range_value(self, hit);
+                    self.emit_signal(hit, "value_changed", &[Variant::Float(now)]);
+                }
+                // Consumed either way — a notch at the end of the range is still
+                // the scrollbar's notch, and must not fall through to a
+                // container behind it and scroll something else.
+                self.input_handled = true;
+                return;
+            }
             if self.scroll_under_cursor(hit, down) {
                 self.input_handled = true;
             }
             return;
+        }
+
+        // Range controls (Slider/ScrollBar) jump to the pointer on the press and
+        // keep tracking it while captured — that second half is what makes a
+        // drag a drag. Godot's `Slider::gui_input` acts on the button-down edge
+        // and then on every motion while `grab.active`, so clicking the track
+        // moves the value immediately and the following motion continues from
+        // there (upstream/godot/scene/gui/slider.cpp).
+        //
+        // Placed AFTER the wheel block above, which returns for wheel events: a
+        // wheel notch over a scrollbar must scroll, not be read as a drag to the
+        // cursor's position. Only the left button drags, as in `slider.cpp` and
+        // `scroll_bar.cpp`.
+        let range_press = match event {
+            Ev::MouseButton {
+                pressed: true,
+                button: gdplatform::input::MouseButton::Left,
+                ..
+            } => Some(true),
+            // Captured, so this fires even when the pointer has left the rect —
+            // dragging past the end and back is a real gesture.
+            Ev::MouseMotion { .. } if self.gui_mouse_focus == Some(hit) => Some(false),
+            _ => None,
+        };
+        if let Some(is_press) = range_press {
+            if let Some(value) = self.drag_range_control(hit, position, is_press) {
+                // `value_changed` fires ONLY on a real change: `drag_range_control`
+                // returns `None` when the snapped value is unchanged, mirroring
+                // `Range::set_value` (upstream/godot/scene/gui/range.cpp). Emitting
+                // per motion sample instead would flood every connected callback
+                // during a single drag.
+                self.emit_signal(hit, "value_changed", &[Variant::Float(value)]);
+                // The GUI consumed the event, so it does not also fall through to
+                // physics picking — the same reason a button stops a click from
+                // reaching the world behind it.
+                self.input_handled = true;
+            }
         }
 
         if let Ev::MouseButton {
@@ -4324,6 +5134,10 @@ impl SceneTree {
                     || crate::control::keeps_pressed_outside(self, hit);
                 self.gui_press_target = None;
                 self.gui_mouse_focus = None;
+                // The grabber is let go on release, as `ScrollBar::gui_input`
+                // clears `drag.active`; otherwise the next stray motion would
+                // resume a drag the user already finished.
+                self.gui_scrollbar_drag = None;
                 if is_button && !disabled && same {
                     // `button_up` reports the physical release and fires even
                     // when the pointer wandered off; only the ACTION is gated on
@@ -4337,6 +5151,61 @@ impl SceneTree {
                     }
                 }
             }
+        }
+    }
+
+    /// Moves a Slider/ScrollBar to the pointer and returns its new value **only
+    /// when it changed**, so the caller emits `value_changed` exactly as often
+    /// as Godot does.
+    ///
+    /// Returns `None` for any control that is not a range control:
+    /// `drag_slider_to_local` resolves the axis from the class name and gives up
+    /// when there is none, so routing every hit control through here is safe.
+    fn drag_range_control(
+        &mut self,
+        node_id: NodeId,
+        position: gdcore::math::Vector2,
+        is_press: bool,
+    ) -> Option<f64> {
+        use crate::range_controls::ScrollBarPress;
+        // The drag math is expressed in the control's own space, the same space
+        // the render arm draws the grabber in.
+        let origin = crate::control::get_global_position(self, node_id);
+        let local = gdcore::math::Vector2::new(position.x - origin.x, position.y - origin.y);
+
+        let is_scrollbar = self
+            .get_node(node_id)
+            .map(|n| matches!(n.class_name(), "HScrollBar" | "VScrollBar"))
+            .unwrap_or(false);
+        if !is_scrollbar {
+            // A slider jumps to the cursor: `Slider::gui_input` reads the value
+            // straight off the click position.
+            return crate::range_controls::drag_slider_to_local(self, node_id, local);
+        }
+
+        // ⚠️ A scrollbar does NOT jump to the cursor — see `scrollbar_press`.
+        if is_press {
+            match crate::range_controls::scrollbar_press(self, node_id, local)? {
+                ScrollBarPress::Grab(drag) => {
+                    // Seizing the grabber changes nothing by itself; the value
+                    // moves only once the pointer does. That is what keeps the
+                    // handle under the finger that grabbed it.
+                    self.gui_scrollbar_drag = Some((node_id, drag));
+                    None
+                }
+                ScrollBarPress::Page(amount) => {
+                    self.gui_scrollbar_drag = None;
+                    crate::range_controls::scrollbar_page(self, node_id, amount)
+                }
+            }
+        } else {
+            let (owner, drag) = self.gui_scrollbar_drag?;
+            // A drag belongs to the bar it started on, so motion never leaks
+            // into a different scrollbar the pointer happens to cross.
+            if owner != node_id {
+                return None;
+            }
+            crate::range_controls::scrollbar_drag_to(self, node_id, local, drag)
         }
     }
 
@@ -4474,6 +5343,32 @@ impl SceneTree {
             return;
         }
 
+        // A focused Slider consumes the arrow along its OWN axis and moves by
+        // `step` (upstream/godot/scene/gui/slider.cpp `gui_input`).
+        //
+        // ⚠️ The axis check is not a detail. Godot returns WITHOUT
+        // `accept_event()` when the key does not match the orientation, so
+        // Left/Right on a VSlider still walks the focus ring instead of being
+        // swallowed by a control that cannot act on it. Consuming every arrow
+        // would strand keyboard users on the first slider in the ring.
+        if let Some(owner) = self.focus_owner {
+            if let Some(delta) = self.range_key_delta(owner, *key) {
+                let target = crate::control::get_range_value(self, owner) + delta;
+                if crate::control::set_range_value(self, owner, target) {
+                    // Re-read rather than reporting `target`: `set_range_value`
+                    // snaps to `step` and clamps to [min, max - page], so the
+                    // stored value is what the signal must carry.
+                    let now = crate::control::get_range_value(self, owner);
+                    self.emit_signal(owner, "value_changed", &[Variant::Float(now)]);
+                }
+                // Accepted whenever the axis matched, even when the value was
+                // already at the end of its range: the slider still owns the key,
+                // so focus must not move out from under it.
+                self.input_handled = true;
+                return;
+            }
+        }
+
         let moved = match key {
             Key::Tab if *shift => self.focus_prev(),
             Key::Tab => self.focus_next(),
@@ -4489,6 +5384,34 @@ impl SceneTree {
         // `_unhandled_input` so gameplay can still read it.
         if moved || matches!(key, Key::Tab) {
             self.input_handled = true;
+        }
+    }
+
+    /// The value delta an arrow key applies to a focused range control, or
+    /// `None` when the key is off the control's axis — or it is not a range
+    /// control at all, which is what keeps this out of every other control's way.
+    fn range_key_delta(&self, node_id: NodeId, key: gdplatform::input::Key) -> Option<f64> {
+        use crate::range_controls::SliderAxis;
+        use gdplatform::input::Key;
+        let class = self.get_node(node_id)?.class_name().to_string();
+        let axis = crate::range_controls::slider_axis(&class)?;
+        // `Slider::gui_input` returns immediately when `editable` is false. An
+        // absent property means editable, since that is the registered default.
+        if matches!(
+            self.get_node(node_id).map(|n| n.get_property("editable")),
+            Some(Variant::Bool(false))
+        ) {
+            return None;
+        }
+        let step = crate::control::get_range_step(self, node_id);
+        match (axis, key) {
+            (SliderAxis::Horizontal, Key::Right) => Some(step),
+            (SliderAxis::Horizontal, Key::Left) => Some(-step),
+            // Up INCREASES on a vertical slider: its maximum is at the top, the
+            // same inversion `ratio_at_local_point` applies to the drag.
+            (SliderAxis::Vertical, Key::Up) => Some(step),
+            (SliderAxis::Vertical, Key::Down) => Some(-step),
+            _ => None,
         }
     }
 
@@ -5410,7 +6333,10 @@ fn modifier_props(shift: bool, ctrl: bool, alt: bool) -> Vec<(&'static str, Vari
     ]
 }
 
-pub(crate) fn input_event_to_variant(event: &gdplatform::input::InputEvent) -> Variant {
+pub(crate) fn input_event_to_variant(
+    event: &gdplatform::input::InputEvent,
+    double_click: bool,
+) -> Variant {
     use gdplatform::input::InputEvent as Ev;
 
     match event {
@@ -5448,7 +6374,7 @@ pub(crate) fn input_event_to_variant(event: &gdplatform::input::InputEvent) -> V
                 ("button_index", Variant::Int(button.to_godot_index())),
                 ("pressed", Variant::Bool(*pressed)),
                 ("canceled", Variant::Bool(false)),
-                ("double_click", Variant::Bool(false)),
+                ("double_click", Variant::Bool(double_click)),
                 ("factor", Variant::Float(1.0)),
                 ("position", Variant::Vector2(*position)),
                 ("global_position", Variant::Vector2(*position)),
@@ -7194,6 +8120,68 @@ mod tests {
             let result =
                 tree.attach_animation_tree(fake, crate::animation_tree::AnimationTree::new());
             assert!(result.is_err());
+        }
+
+        /// pat-s3rrv.23: an AnimationTree honours `callback_mode_process`.
+        ///
+        /// `AnimationTree` extends `AnimationMixer`, where the property lives,
+        /// so a tree picks its phase exactly as an `AnimationPlayer` does.
+        /// Patina filtered players by mode and ran trees unconditionally in the
+        /// idle phase — a tree set to PHYSICS sampled once per rendered frame
+        /// instead of once per tick, so anything it drove drifted with the
+        /// frame rate instead of tracking the simulation.
+        ///
+        /// ⚠️ Asserted in BOTH directions. Only checking that a PHYSICS tree
+        /// advances in the physics phase would still pass if the filter were
+        /// missing entirely and every tree ran in every phase — which is the
+        /// bug. The idle-phase assertion below is what makes the filter real.
+        #[test]
+        fn animation_trees_respect_their_callback_mode() {
+            use crate::animation::AnimationCallbackMode;
+
+            // A tree left at the default (IDLE) advances in the idle phase…
+            let (mut tree, sprite, tree_node, anim_tree) = tree_with_animation_tree(1.0);
+            tree.attach_animation_tree(tree_node, anim_tree).unwrap();
+            tree.process_animation_trees_in_mode(0.5, AnimationCallbackMode::Idle);
+            let idle_x = match tree.get_node(sprite).unwrap().get_property("x") {
+                Variant::Float(x) => x,
+                other => panic!("Sprite:x not driven: {other:?}"),
+            };
+            assert!(
+                idle_x > 1.0,
+                "a default-mode tree must advance in the IDLE phase, x={idle_x}",
+            );
+
+            // …and does NOT advance in the physics phase.
+            let (mut tree, sprite, tree_node, anim_tree) = tree_with_animation_tree(1.0);
+            tree.attach_animation_tree(tree_node, anim_tree).unwrap();
+            tree.process_animation_trees_in_mode(0.5, AnimationCallbackMode::Physics);
+            assert!(
+                !matches!(
+                    tree.get_node(sprite).unwrap().get_property("x"),
+                    Variant::Float(x) if x > 1.0
+                ),
+                "an IDLE tree must not advance in the PHYSICS phase — if it \
+                 does, the mode filter is absent and every tree runs in every \
+                 phase, which is the bug this pins",
+            );
+
+            // A tree marked PHYSICS is the mirror image.
+            let (mut tree, sprite, tree_node, anim_tree) = tree_with_animation_tree(1.0);
+            tree.attach_animation_tree(tree_node, anim_tree).unwrap();
+            if let Some(n) = tree.get_node_mut(tree_node) {
+                // AnimationCallbackMode::Physics == 0 in Godot's enum
+                // (ANIMATION_CALLBACK_MODE_PROCESS_PHYSICS).
+                n.set_property("callback_mode_process", Variant::Int(0));
+            }
+            tree.process_animation_trees_in_mode(0.5, AnimationCallbackMode::Physics);
+            match tree.get_node(sprite).unwrap().get_property("x") {
+                Variant::Float(x) => assert!(
+                    x > 1.0,
+                    "a PHYSICS tree must advance in the physics phase, x={x}",
+                ),
+                other => panic!("Sprite:x not driven: {other:?}"),
+            }
         }
 
         #[test]

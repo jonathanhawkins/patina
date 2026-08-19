@@ -40,6 +40,10 @@ pub(crate) const SCROLLBAR_THICKNESS: f32 = 8.0;
 /// Control classes handled by the render pass. Used as a fallback membership
 /// test in case the ClassDB inheritance chain is unavailable for `is_class`.
 const CONTROL_CLASSES: &[&str] = &[
+    // pat-s3rrv.72: without membership here the draw walk skips the node
+    // entirely and the `"MenuBar"` arm below is unreachable — the strip would
+    // be laid out, clickable and invisible.
+    "MenuBar",
     "Control",
     "Panel",
     "PanelContainer",
@@ -67,7 +71,9 @@ const CONTROL_CLASSES: &[&str] = &[
     // these, so an authored slider was clickable and focusable while drawing
     // nothing; without them here `is_control` rejects the node whenever the
     // ClassDB Control chain is unavailable and the new arms never run.
+    "HScrollBar",
     "HSlider",
+    "VScrollBar",
     "VSlider",
     "SpinBox",
     "TextureProgressBar",
@@ -80,6 +86,9 @@ const CONTROL_CLASSES: &[&str] = &[
     "ItemList",
     "TabBar",
     "TabContainer",
+    // pat-s3rrv.75. `Tree` was already in `CONTROL_HIT_CLASSES` (control.rs:941)
+    // and missing here, so it absorbed clicks while never drawing.
+    "Tree",
     "MarginContainer",
     "ScrollContainer",
     "GridContainer",
@@ -313,6 +322,68 @@ pub fn control_draw_items_themed(
             }
         }
     }
+    // pat-s3rrv.72: the open popup paints LAST so it composites above every
+    // control, which is what a Popup<-Window does in Godot. Appended after the
+    // flattened stream rather than walked with the tree — it is not part of the
+    // scene's layout and must not be re-ordered by z against it.
+    if let Some((origin, width, menu, hovered)) = tree.open_popup_draw() {
+        let row_h = crate::popup::PopupMenu::ROW_HEIGHT;
+        let z = i32::MAX - 1;
+        out.push(ControlDrawItem::Rect {
+            rect: Rect2::new(origin, Vector2::new(width, menu.height())),
+            color: Color::new(0.16, 0.16, 0.18, 1.0),
+            filled: true,
+            z,
+        });
+        for idx in 0..menu.item_count() {
+            let Some(item) = menu.get_item(idx) else {
+                continue;
+            };
+            let top = origin.y + idx as f32 * row_h;
+            if item.separator {
+                // Godot draws a separator as a rule, not a row of text.
+                out.push(ControlDrawItem::Line {
+                    from: Vector2::new(origin.x + 4.0, top + row_h * 0.5),
+                    to: Vector2::new(origin.x + width - 4.0, top + row_h * 0.5),
+                    color: Color::new(0.45, 0.45, 0.48, 1.0),
+                    width: 1.0,
+                    z: z + 1,
+                });
+                continue;
+            }
+            if hovered == Some(idx) && !item.disabled {
+                out.push(ControlDrawItem::Rect {
+                    rect: Rect2::new(Vector2::new(origin.x, top), Vector2::new(width, row_h)),
+                    color: Color::new(0.26, 0.36, 0.56, 1.0),
+                    filled: true,
+                    z: z + 1,
+                });
+            }
+            out.push(ControlDrawItem::Text {
+                text: item.text.clone(),
+                // Left padding leaves room for the check mark drawn below.
+                position: Vector2::new(origin.x + 20.0, top + 4.0),
+                color: if item.disabled {
+                    Color::new(0.5, 0.5, 0.5, 1.0)
+                } else {
+                    Color::new(0.9, 0.9, 0.9, 1.0)
+                },
+                font_size: 14,
+                font_path: None,
+                z: z + 1,
+            });
+            if item.checkable && item.checked {
+                out.push(ControlDrawItem::Line {
+                    from: Vector2::new(origin.x + 6.0, top + row_h * 0.5),
+                    to: Vector2::new(origin.x + 14.0, top + row_h - 6.0),
+                    color: Color::new(0.9, 0.9, 0.9, 1.0),
+                    width: 2.0,
+                    z: z + 1,
+                });
+            }
+        }
+    }
+
     out
 }
 
@@ -466,6 +537,15 @@ fn render_node(
         // This assumes the container has been sorted, which is the documented
         // order for the render pass: `build_control_render_items` sorts every
         // container before drawing.
+        // `fit_content` feeds the solver, so it has to be written BEFORE the
+        // solve reads `min_size` (pat-s3rrv.74). No-op for every class but
+        // RichTextLabel, and for a RichTextLabel that has not opted in.
+        if class_of(tree, node_id) == "RichTextLabel" {
+            let fs = theme
+                .get_font_size("RichTextLabel", "font_size")
+                .unwrap_or(RICHTEXT_DEFAULT_FONT_SIZE);
+            apply_richtext_fit_content(tree, node_id, fs);
+        }
         if !parent_is_container {
             control::resolve_control_layout(tree, node_id, parent_size);
         }
@@ -846,6 +926,29 @@ pub(crate) fn text_width(text: &str, scale: u32) -> f32 {
     (n * GLYPH_W + (n - 1.0) * GLYPH_GAP) * scale as f32
 }
 
+/// A paragraph's horizontal alignment — Godot's `[center]` / `[right]` /
+/// `[left]` / `[fill]`, each of which calls `push_paragraph`
+/// (rich_text_label.cpp:5675-5688).
+///
+/// ⚠️ Deliberately NOT [`crate::control::TextAlign`], which is a different
+/// thing: that one backs a Control's `h_align`/`v_align` properties and has no
+/// `Fill`. Adding `Fill` to it would ripple through every exhaustive match on it
+/// (gdeditor's viewport renderer included) for the sake of a value only rich
+/// text can produce. Two small types beat one shared type that means two things
+/// — but they must not share a NAME, which is why this one is `ParagraphAlign`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ParagraphAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+    /// ⚠️ Godot justifies the line by stretching inter-word spacing. This
+    /// renderer has no word model — it lays out runs, not words — so `[fill]`
+    /// currently renders left-aligned rather than pretending to justify.
+    /// Recorded as a divergence instead of silently aliasing it to Left.
+    Fill,
+}
+
 /// A run of text sharing one color, produced by [`parse_bbcode`].
 #[derive(Clone, Debug, PartialEq)]
 struct TextSpan {
@@ -865,13 +968,36 @@ struct TextSpan {
     /// `relative_index` has to keep counting across the split. Only meaningful
     /// when `effect` is `Some`; the `end` is backfilled once the tag closes.
     effect_range: (usize, usize),
+    /// Which line this run sits on. Bumped by a literal `\n` and by each
+    /// paragraph tag.
+    line: usize,
+    /// The alignment of the line this run belongs to (constant within a line).
+    align: ParagraphAlign,
+    /// The `[bgcolor=…]` fill behind this run, if any.
+    bgcolor: Option<Color>,
+    /// Whether `[u]` covers this run.
+    underline: bool,
+    /// Whether `[s]` covers this run.
+    strike: bool,
+    /// The `[url=…]` payload covering this run, if any — Godot's "meta".
+    ///
+    /// Carried per-run rather than as a separate region list so the text and its
+    /// clickable extent can never disagree: the rect a click is tested against
+    /// is measured from this very span (pat-s3rrv.74).
+    meta: Option<String>,
 }
 
-/// Parses a BBCode subset into colored spans. Recognized tags:
-/// `[color=#rrggbb]`/`[color=name]` … `[/color]` set the run color; `[b]`,
-/// `[i]`, `[u]`, `[s]` (and their closers) are stripped — the built-in bitmap
-/// font has no weight/style variants, so formatting only affects the stripped
-/// text. Unknown `[...]` tags are dropped. `default` colors untagged text.
+/// Parses a BBCode subset into styled spans. Recognized tags:
+/// `[color=#rrggbb]`/`[color=name]` … `[/color]` set the run color;
+/// `[url=target]` … `[/url]` attaches a meta payload (what `meta_clicked`
+/// carries); `[u]` and `[s]` mark the run underlined / struck through.
+///
+/// ⚠️ `[b]` and `[i]` are still **stripped**, and that asymmetry is deliberate:
+/// the built-in 5x7 bitmap font has no weight or slant variants, so a bold flag
+/// would have nothing to render. Underline and strikethrough are *rules* rather
+/// than glyph shapes, so the draw arm can honour them exactly (pat-s3rrv.74).
+///
+/// Unknown `[...]` tags are dropped. `default` colors untagged text.
 fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
     let mut spans: Vec<TextSpan> = Vec::new();
     // Color stack so nested `[color]` tags restore the outer color on `[/color]`.
@@ -894,6 +1020,12 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                  color: Color,
                  effect: Option<(BuiltinEffect, usize)>,
                  start: usize,
+                 meta: Option<String>,
+                 bgcolor: Option<Color>,
+                 underline: bool,
+                 strike: bool,
+                 line: usize,
+                 align: ParagraphAlign,
                  spans: &mut Vec<TextSpan>| {
         if !cur.is_empty() {
             spans.push(TextSpan {
@@ -903,9 +1035,31 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                 char_offset: start,
                 // `end` is unknown until the tag closes; backfilled below.
                 effect_range: (effect.map(|(_, s)| s).unwrap_or(0), 0),
+                meta,
+                bgcolor,
+                underline,
+                strike,
+                line,
+                align,
             });
         }
     };
+    // `[url=a][url=b]…[/url]…[/url]` nests like the colour stack does.
+    let mut meta_stack: Vec<String> = Vec::new();
+    // Depth counters rather than booleans, so `[u]a[u]b[/u]c[/u]` keeps `c`
+    // underlined instead of the inner closer clearing the outer tag.
+    // `[bgcolor=…]` nests like the colour stack; `[fgcolor=…]` pushes onto the
+    // colour stack itself, since its effect IS the run colour.
+    let mut bg_stack: Vec<Color> = Vec::new();
+    let mut u_depth: usize = 0;
+    let mut s_depth: usize = 0;
+    // Line/paragraph state. `[center]` and friends push an alignment AND start a
+    // new line, matching `push_paragraph`.
+    let mut line: usize = 0;
+    let mut align_stack: Vec<ParagraphAlign> = vec![ParagraphAlign::Left];
+    // Whether the current line has emitted anything yet. A paragraph tag at the
+    // very start must not leave a blank line above the text.
+    let mut line_started = false;
 
     while let Some(c) = chars.next() {
         if c == '[' {
@@ -930,19 +1084,256 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
             let cur_effect = effect_stack.last().map(|(_, e, start)| (*e, *start));
             let lower = tag.to_ascii_lowercase();
             if let Some(spec) = lower.strip_prefix("color=") {
-                flush(&mut cur, cur_color, cur_effect, span_start, &mut spans);
+                flush(
+                    &mut cur,
+                    cur_color,
+                    cur_effect,
+                    span_start,
+                    meta_stack.last().cloned(),
+                    bg_stack.last().copied(),
+                    u_depth > 0,
+                    s_depth > 0,
+                    line,
+                    *align_stack.last().unwrap(),
+                    &mut spans,
+                );
                 span_start = char_index;
                 color_stack.push(parse_bbcode_color(spec).unwrap_or(cur_color));
-            } else if lower == "/color" {
-                flush(&mut cur, cur_color, cur_effect, span_start, &mut spans);
+            } else if let Some(spec) = lower.strip_prefix("bgcolor=") {
+                // `[bgcolor=…]` fills BEHIND the run (rich_text_label.cpp:6495).
+                // Unlike `[color]` it does not touch the glyph colour, so it
+                // needs its own stack rather than riding on the colour one.
+                flush(
+                    &mut cur,
+                    cur_color,
+                    cur_effect,
+                    span_start,
+                    meta_stack.last().cloned(),
+                    bg_stack.last().copied(),
+                    u_depth > 0,
+                    s_depth > 0,
+                    line,
+                    *align_stack.last().unwrap(),
+                    &mut spans,
+                );
+                span_start = char_index;
+                bg_stack.push(parse_bbcode_color(spec).unwrap_or(cur_color));
+            } else if lower == "/bgcolor" {
+                flush(
+                    &mut cur,
+                    cur_color,
+                    cur_effect,
+                    span_start,
+                    meta_stack.last().cloned(),
+                    bg_stack.last().copied(),
+                    u_depth > 0,
+                    s_depth > 0,
+                    line,
+                    *align_stack.last().unwrap(),
+                    &mut spans,
+                );
+                span_start = char_index;
+                bg_stack.pop();
+            } else if let Some(spec) = lower.strip_prefix("fgcolor=") {
+                // `[fgcolor=…]` sets the glyph colour, which is exactly what the
+                // colour stack already means — so it pushes there rather than
+                // duplicating the mechanism. Godot keeps them as separate items
+                // (ItemFGColor vs ItemColor) but the rendered effect is the same.
+                flush(
+                    &mut cur,
+                    cur_color,
+                    cur_effect,
+                    span_start,
+                    meta_stack.last().cloned(),
+                    bg_stack.last().copied(),
+                    u_depth > 0,
+                    s_depth > 0,
+                    line,
+                    *align_stack.last().unwrap(),
+                    &mut spans,
+                );
+                span_start = char_index;
+                color_stack.push(parse_bbcode_color(spec).unwrap_or(cur_color));
+            } else if lower == "/fgcolor" {
+                flush(
+                    &mut cur,
+                    cur_color,
+                    cur_effect,
+                    span_start,
+                    meta_stack.last().cloned(),
+                    bg_stack.last().copied(),
+                    u_depth > 0,
+                    s_depth > 0,
+                    line,
+                    *align_stack.last().unwrap(),
+                    &mut spans,
+                );
                 span_start = char_index;
                 if color_stack.len() > 1 {
                     color_stack.pop();
                 }
+            } else if let Some(target) = lower.strip_prefix("url=") {
+                // Godot's `[url=target]` pushes a meta onto the run; clicking it
+                // emits `meta_clicked(target)` (rich_text_label.cpp `push_meta`).
+                // The payload keeps the ORIGINAL case — `lower` is only for
+                // matching the tag name, and a url is data, not a keyword.
+                let start = tag.len() - target.len();
+                flush(
+                    &mut cur,
+                    cur_color,
+                    cur_effect,
+                    span_start,
+                    meta_stack.last().cloned(),
+                    bg_stack.last().copied(),
+                    u_depth > 0,
+                    s_depth > 0,
+                    line,
+                    *align_stack.last().unwrap(),
+                    &mut spans,
+                );
+                span_start = char_index;
+                meta_stack.push(tag[start..].to_string());
+            } else if lower == "/url" {
+                flush(
+                    &mut cur,
+                    cur_color,
+                    cur_effect,
+                    span_start,
+                    meta_stack.last().cloned(),
+                    bg_stack.last().copied(),
+                    u_depth > 0,
+                    s_depth > 0,
+                    line,
+                    *align_stack.last().unwrap(),
+                    &mut spans,
+                );
+                span_start = char_index;
+                meta_stack.pop();
+            } else if lower == "/color" {
+                flush(
+                    &mut cur,
+                    cur_color,
+                    cur_effect,
+                    span_start,
+                    meta_stack.last().cloned(),
+                    bg_stack.last().copied(),
+                    u_depth > 0,
+                    s_depth > 0,
+                    line,
+                    *align_stack.last().unwrap(),
+                    &mut spans,
+                );
+                span_start = char_index;
+                if color_stack.len() > 1 {
+                    color_stack.pop();
+                }
+            } else if matches!(
+                lower.as_str(),
+                "center"
+                    | "right"
+                    | "left"
+                    | "fill"
+                    | "/center"
+                    | "/right"
+                    | "/left"
+                    | "/fill"
+                    | "p"
+                    | "/p"
+            ) {
+                // Paragraph alignment. Each of these calls `push_paragraph` in
+                // Godot (rich_text_label.cpp:5675-5688), and a paragraph is a
+                // LINE — `a[center]mid[/center]b` is three paragraphs, not one
+                // line with a centred middle. Treating them as inline attributes
+                // would centre the whole line the moment one word was tagged.
+                flush(
+                    &mut cur,
+                    cur_color,
+                    cur_effect,
+                    span_start,
+                    meta_stack.last().cloned(),
+                    bg_stack.last().copied(),
+                    u_depth > 0,
+                    s_depth > 0,
+                    line,
+                    *align_stack.last().unwrap(),
+                    &mut spans,
+                );
+                span_start = char_index;
+                // A paragraph tag at the very start must not leave a blank line
+                // above the text, so the break only counts once the current line
+                // has something on it.
+                if line_started {
+                    line += 1;
+                    line_started = false;
+                }
+                match lower.as_str() {
+                    "center" => align_stack.push(ParagraphAlign::Center),
+                    "right" => align_stack.push(ParagraphAlign::Right),
+                    "fill" => align_stack.push(ParagraphAlign::Fill),
+                    "left" | "p" => align_stack.push(ParagraphAlign::Left),
+                    // A closer restores the enclosing paragraph's alignment.
+                    _ => {
+                        if align_stack.len() > 1 {
+                            align_stack.pop();
+                        }
+                    }
+                }
+            } else if lower == "lb" || lower == "rb" {
+                // Godot's bracket escapes (rich_text_label.cpp:5621-5626):
+                // `[lb]` is a literal `[`, `[rb]` a literal `]`.
+                //
+                // ⚠️ These emit a CHARACTER, so unlike every other tag they must
+                // NOT flush the run. Flushing would split a run mid-word and, on
+                // an effected run, restart the glyph phase at the escape.
+                cur.push(if lower == "lb" { '[' } else { ']' });
+                char_index += 1;
+            } else if matches!(lower.as_str(), "u" | "s" | "/u" | "/s") {
+                // `[u]` / `[s]`. Godot cannot render weight or slant here — the
+                // built-in 5x7 bitmap font has no variants, which is why `[b]`
+                // and `[i]` are still stripped — but underline and strikethrough
+                // are RULES, not glyph shapes, so they are drawable exactly.
+                //
+                // ⚠️ Matched as whole tags: `[s]` must not be confused with
+                // `[shake]`, and `[u]` must not swallow `[url=…]`, which is
+                // handled above. A `strip_prefix` here would do both.
+                flush(
+                    &mut cur,
+                    cur_color,
+                    cur_effect,
+                    span_start,
+                    meta_stack.last().cloned(),
+                    bg_stack.last().copied(),
+                    u_depth > 0,
+                    s_depth > 0,
+                    line,
+                    *align_stack.last().unwrap(),
+                    &mut spans,
+                );
+                span_start = char_index;
+                match lower.as_str() {
+                    "u" => u_depth += 1,
+                    "s" => s_depth += 1,
+                    // Saturating: a stray `[/u]` with nothing open is stripped,
+                    // not an underflow panic.
+                    "/u" => u_depth = u_depth.saturating_sub(1),
+                    _ => s_depth = s_depth.saturating_sub(1),
+                }
             } else if let Some(name) = lower.strip_prefix('/') {
                 // A closer: pop only if it matches the open effect.
                 if effect_stack.last().map(|(n, _, _)| n.as_str()) == Some(name) {
-                    flush(&mut cur, cur_color, cur_effect, span_start, &mut spans);
+                    flush(
+                        &mut cur,
+                        cur_color,
+                        cur_effect,
+                        span_start,
+                        meta_stack.last().cloned(),
+                        bg_stack.last().copied(),
+                        u_depth > 0,
+                        s_depth > 0,
+                        line,
+                        *align_stack.last().unwrap(),
+                        &mut spans,
+                    );
                     span_start = char_index;
                     effect_stack.pop();
                 }
@@ -951,21 +1342,76 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                 // An opener: `wave`, or `wave amp=20 freq=3`.
                 let (name, params) = parse_tag_params(&lower);
                 if let Some(effect) = BuiltinEffect::parse(name, &params) {
-                    flush(&mut cur, cur_color, cur_effect, span_start, &mut spans);
+                    flush(
+                        &mut cur,
+                        cur_color,
+                        cur_effect,
+                        span_start,
+                        meta_stack.last().cloned(),
+                        bg_stack.last().copied(),
+                        u_depth > 0,
+                        s_depth > 0,
+                        line,
+                        *align_stack.last().unwrap(),
+                        &mut spans,
+                    );
                     span_start = char_index;
                     effect_stack.push((name.to_string(), effect, char_index));
                 }
                 // b/i/u/s, unknown tags, and script-defined effect tags (which
                 // cannot be dispatched yet — see `char_fx`): strip, no change.
             }
+        } else if c == '\n' {
+            // A literal newline breaks the line. Before this the arm advanced x
+            // and never y, so a multi-line label drew every line on top of the
+            // first — `\n` reached the bitmap font as an unrenderable glyph.
+            //
+            // ⚠️ It is NOT pushed into the run: it is layout, not a character,
+            // and `get_parsed_text` keeps it only because Godot's newline items
+            // report as "\n" there.
+            //
+            // Re-read here rather than reusing the tag branch's bindings: those
+            // are declared inside `if c == '['`, which is a SIBLING scope.
+            let cur_color = *color_stack.last().unwrap();
+            let cur_effect = effect_stack.last().map(|(_, e, start)| (*e, *start));
+            flush(
+                &mut cur,
+                cur_color,
+                cur_effect,
+                span_start,
+                meta_stack.last().cloned(),
+                bg_stack.last().copied(),
+                u_depth > 0,
+                s_depth > 0,
+                line,
+                *align_stack.last().unwrap(),
+                &mut spans,
+            );
+            line += 1;
+            line_started = false;
+            char_index += 1;
+            span_start = char_index;
         } else {
             cur.push(c);
             char_index += 1;
+            line_started = true;
         }
     }
     let cur_color = *color_stack.last().unwrap();
     let cur_effect = effect_stack.last().map(|(_, e, start)| (*e, *start));
-    flush(&mut cur, cur_color, cur_effect, span_start, &mut spans);
+    flush(
+        &mut cur,
+        cur_color,
+        cur_effect,
+        span_start,
+        meta_stack.last().cloned(),
+        bg_stack.last().copied(),
+        u_depth > 0,
+        s_depth > 0,
+        line,
+        *align_stack.last().unwrap(),
+        &mut spans,
+    );
     backfill_effect_ends(&mut spans);
     spans
 }
@@ -1225,6 +1671,338 @@ pub fn separator_minimum_size(theme: &Theme, class: &str) -> Vector2 {
     }
 }
 
+/// Default `RichTextLabel` font size — what the draw arm falls back to when the
+/// theme has no entry.
+pub const RICHTEXT_DEFAULT_FONT_SIZE: i64 = 16;
+
+/// The BBCode source of a `RichTextLabel`: `bbcode_text` when set, else `text`.
+///
+/// Shared so the hit-test and the draw pass can never read different strings.
+fn richtext_source(tree: &SceneTree, node_id: NodeId) -> String {
+    string_prop(tree, node_id, "bbcode_text")
+        .filter(|s| !s.is_empty())
+        .or_else(|| string_prop(tree, node_id, "text"))
+        .unwrap_or_default()
+}
+
+/// The natural size of a `RichTextLabel`'s content: the widest line by the
+/// number of lines (pat-s3rrv.74).
+///
+/// Measured from the same `parse_bbcode` + `text_width` + `GLYPH_GAP` the layout
+/// advances by, so "how big is this" and "where does it go" cannot disagree.
+/// Alignment is irrelevant here — it moves runs within a width, it does not
+/// change the width — so this needs no rect and can be asked before one exists.
+pub fn richtext_content_size(tree: &SceneTree, node_id: NodeId, font_size: i64) -> Vector2 {
+    let raw = richtext_source(tree, node_id);
+    if raw.is_empty() {
+        return Vector2::ZERO;
+    }
+    let scale = text_scale(font_size);
+    let gap = GLYPH_GAP * scale as f32;
+    let spans = parse_bbcode(&raw, Color::WHITE);
+    let last_line = spans.iter().map(|s| s.line).max().unwrap_or(0);
+    let mut widest = 0.0f32;
+    for line in 0..=last_line {
+        let on_line: Vec<&TextSpan> = spans
+            .iter()
+            .filter(|s| s.line == line && !s.text.is_empty())
+            .collect();
+        if on_line.is_empty() {
+            continue;
+        }
+        let w: f32 = on_line
+            .iter()
+            .map(|s| text_width(&s.text, scale))
+            .sum::<f32>()
+            + gap * (on_line.len() as f32 - 1.0);
+        widest = widest.max(w);
+    }
+    let line_h = (GLYPH_H + GLYPH_GAP) * scale as f32;
+    Vector2::new(widest, (last_line + 1) as f32 * line_h)
+}
+
+/// Applies `fit_content`: when set, the label's `min_size` follows its content
+/// so the layout solver grows it (pat-s3rrv.74).
+///
+/// ⚠️ `fit_content` was registered and **unread** — the inspector showed it, the
+/// value round-tripped through `.tscn`, and nothing consulted it. Godot: "the
+/// label's minimum size will be automatically updated to fit its content"
+/// (RichTextLabel.xml:740). Default is `false`, so a label that does not opt in
+/// is untouched.
+///
+/// Runs before `resolve_control_layout`, which reads `min_size` as `inner_min`
+/// (control.rs:1342) — after it, the size would be a frame stale.
+pub fn apply_richtext_fit_content(tree: &mut SceneTree, node_id: NodeId, font_size: i64) {
+    let fits = tree
+        .get_node(node_id)
+        .map(|n| matches!(n.get_property("fit_content"), Variant::Bool(true)))
+        .unwrap_or(false);
+    if !fits {
+        return;
+    }
+    let size = richtext_content_size(tree, node_id, font_size);
+    control::set_min_size(tree, node_id, size);
+}
+
+/// The label's text with every tag removed — Godot's `get_parsed_text`
+/// (rich_text_label.cpp:7183, which concatenates the text items).
+///
+/// Derived from `parse_bbcode` rather than a second stripping pass, so what a
+/// script reads back is exactly what the draw arm lays out.
+pub fn richtext_parsed_text(tree: &SceneTree, node_id: NodeId) -> String {
+    parse_bbcode(&richtext_source(tree, node_id), Color::WHITE)
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
+}
+
+/// One laid-out run: where it goes, and what it is.
+pub(crate) struct PlacedSpan {
+    pub rect: Rect2,
+    span: TextSpan,
+}
+
+/// The full layout of a `RichTextLabel`: parse, apply the visible-character
+/// budget, break into lines, and place every run (pat-s3rrv.74).
+///
+/// ⚠️ This is the SINGLE layout pipeline. The draw arm and the `[url]` hit
+/// regions both consume it, so a link is clickable exactly where it is painted.
+/// They previously each advanced `x` themselves, which agreed only by accident
+/// and would have diverged the moment lines existed — a link on line 2 would
+/// have been clickable on line 1.
+fn richtext_placements(
+    tree: &SceneTree,
+    node_id: NodeId,
+    font_size: i64,
+    rect: Rect2,
+    default_color: Color,
+) -> Vec<PlacedSpan> {
+    let raw = richtext_source(tree, node_id);
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let scale = text_scale(font_size);
+    let mut spans = parse_bbcode(&raw, default_color);
+
+    // The visible-character budget is applied BEFORE placement so the widths a
+    // line is centred by are the widths actually drawn — trimming afterwards
+    // would centre against text that is not there.
+    let total: usize = spans.iter().map(|s| s.text.chars().count()).sum();
+    let limit = match int_prop(tree, node_id, "visible_characters") {
+        Some(n) if n >= 0 => Some(n as usize),
+        _ => float_prop(tree, node_id, "visible_ratio")
+            .filter(|r| *r >= 0.0 && *r < 1.0)
+            .map(|r| (r * total as f64).round() as usize),
+    };
+    if let Some(limit) = limit {
+        let mut emitted = 0usize;
+        let mut kept: Vec<TextSpan> = Vec::new();
+        for mut span in spans {
+            if emitted >= limit {
+                break;
+            }
+            let room = limit - emitted;
+            if span.text.chars().count() > room {
+                // Truncated, not dropped: Godot reveals glyph by glyph, and
+                // dropping the run would reveal a word at a time.
+                span.text = span.text.chars().take(room).collect();
+            }
+            emitted += span.text.chars().count();
+            kept.push(span);
+        }
+        spans = kept;
+    }
+
+    let gap = GLYPH_GAP * scale as f32;
+    let line_h = (GLYPH_H + GLYPH_GAP) * scale as f32;
+    // A space costs its own glyph plus the inter-glyph gap on EACH side, which
+    // is what makes a word-split line measure exactly the same as the
+    // unsplit run it came from: "go to" == "go" + space + "to" == 58.
+    let space_w = text_width(" ", scale) + 2.0 * gap;
+    // Godot: AUTOWRAP_OFF 0, ARBITRARY 1, WORD 2, WORD_SMART 3. The ClassDB
+    // default for RichTextLabel is 3, and class defaults are not written onto
+    // nodes, so an authored label with no property still wraps.
+    //
+    // ⚠️ `text_layout` implements WORD breaking only, so ARBITRARY (break
+    // mid-word) is treated as WORD — the same narrowing the Label path already
+    // documents rather than silently approximating.
+    let autowrap = int_prop(tree, node_id, "autowrap_mode").unwrap_or(3);
+
+    let mut out = Vec::new();
+    // ⚠️ Visual lines are counted across the WHOLE label, not per paragraph. A
+    // logical line that wraps into two pushes everything after it down — using
+    // the logical index plus the wrap index would put paragraph 2 on top of
+    // paragraph 1's second visual line.
+    let mut visual_line = 0usize;
+    let last_line = spans.iter().map(|s| s.line).max().unwrap_or(0);
+    for line in 0..=last_line {
+        let on_line: Vec<&TextSpan> = spans
+            .iter()
+            .filter(|s| s.line == line && !s.text.is_empty())
+            .collect();
+        if on_line.is_empty() {
+            continue;
+        }
+
+        // Split the line into words. A word accumulates pieces ACROSS run
+        // boundaries — `[color=red]he[/color]llo` is one word, and breaking it
+        // at the colour change would hyphenate a word nothing asked to break.
+        // Each piece remembers its run and its offset within it, so effects keep
+        // phasing off the right glyph index after a wrap.
+        let mut words: Vec<Vec<(usize, String, usize)>> = Vec::new();
+        let mut cur: Vec<(usize, String, usize)> = Vec::new();
+        for (si, span) in on_line.iter().enumerate() {
+            let mut piece = String::new();
+            let mut piece_start = 0usize;
+            for (ci, ch) in span.text.chars().enumerate() {
+                if ch == ' ' {
+                    if !piece.is_empty() {
+                        cur.push((si, std::mem::take(&mut piece), piece_start));
+                    }
+                    if !cur.is_empty() {
+                        words.push(std::mem::take(&mut cur));
+                    }
+                } else {
+                    if piece.is_empty() {
+                        piece_start = ci;
+                    }
+                    piece.push(ch);
+                }
+            }
+            if !piece.is_empty() {
+                cur.push((si, piece, piece_start));
+            }
+        }
+        if !cur.is_empty() {
+            words.push(cur);
+        }
+        if words.is_empty() {
+            continue;
+        }
+
+        // A word's width includes the gaps between its own pieces, so it equals
+        // the width of the same characters in one run.
+        let widths: Vec<f32> = words
+            .iter()
+            .map(|w| {
+                w.iter().map(|(_, t, _)| text_width(t, scale)).sum::<f32>()
+                    + gap * (w.len() as f32 - 1.0)
+            })
+            .collect();
+
+        // The line's alignment, needed by both the fast path and the wrap path.
+        let align = on_line[0].align;
+        // ⚠️ A line that FITS is placed run-by-run, exactly as before wrapping
+        // existed. The word path drops spaces (they become advance, not draw
+        // items), which is right at a wrap point and wrong everywhere else: it
+        // turned "[b]bold[/b] [i]it[/i]" into "boldit". Only an overflowing line
+        // pays that cost, and there the dropped space IS the line break.
+        let run_width: f32 = on_line
+            .iter()
+            .map(|s| text_width(&s.text, scale))
+            .sum::<f32>()
+            + gap * (on_line.len() as f32 - 1.0);
+        if autowrap == 0 || run_width <= rect.size.x {
+            let x0 = rect.position.x
+                + match align {
+                    ParagraphAlign::Left | ParagraphAlign::Fill => 0.0,
+                    ParagraphAlign::Center => ((rect.size.x - run_width) * 0.5).max(0.0),
+                    ParagraphAlign::Right => (rect.size.x - run_width).max(0.0),
+                };
+            let y = rect.position.y + visual_line as f32 * line_h;
+            visual_line += 1;
+            let mut x = x0;
+            for span in &on_line {
+                let w = text_width(&span.text, scale);
+                out.push(PlacedSpan {
+                    rect: Rect2::new(Vector2::new(x, y), Vector2::new(w, GLYPH_H * scale as f32)),
+                    span: (*span).clone(),
+                });
+                x += w + gap;
+            }
+            continue;
+        }
+
+        let ranges = if autowrap == 0 {
+            // OFF: one visual line, however wide — the previous behaviour.
+            vec![gdrender2d::text_layout::LineRange {
+                start: 0,
+                end: words.len(),
+                width: widths.iter().sum::<f32>() + space_w * (words.len() as f32 - 1.0),
+            }]
+        } else {
+            gdrender2d::text_layout::break_lines_word(&widths, space_w, rect.size.x)
+        };
+
+        for range in ranges.iter() {
+            let mut x = rect.position.x
+                + match align {
+                    // `Fill` renders left-aligned: justification needs a word
+                    // model with elastic spacing, which this does not have.
+                    ParagraphAlign::Left | ParagraphAlign::Fill => 0.0,
+                    ParagraphAlign::Center => ((rect.size.x - range.width) * 0.5).max(0.0),
+                    ParagraphAlign::Right => (rect.size.x - range.width).max(0.0),
+                };
+            let y = rect.position.y + visual_line as f32 * line_h;
+            visual_line += 1;
+            for wi in range.start..range.end {
+                if wi > range.start {
+                    x += space_w;
+                }
+                for (pi, (si, text, off)) in words[wi].iter().enumerate() {
+                    if pi > 0 {
+                        x += gap;
+                    }
+                    let w = text_width(text, scale);
+                    let mut span = on_line[*si].clone();
+                    // The fragment keeps its own glyph index so `[wave]` and
+                    // friends phase from the tag, not from the wrap point.
+                    span.char_offset = on_line[*si].char_offset + off;
+                    span.text = text.clone();
+                    out.push(PlacedSpan {
+                        rect: Rect2::new(
+                            Vector2::new(x, y),
+                            Vector2::new(w, GLYPH_H * scale as f32),
+                        ),
+                        span,
+                    });
+                    x += w;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The clickable `[url=…]` regions of a `RichTextLabel`, in global space
+/// (pat-s3rrv.74).
+///
+/// ⚠️ Reads [`richtext_placements`], the same layout the draw arm paints from,
+/// so a link is clickable exactly where it appears — on the right LINE as well
+/// as the right column. Re-deriving the geometry here is how a link ends up
+/// clickable a word to the left, or on the wrong row of a multi-line label.
+///
+/// Runs hidden by `visible_characters` are absent from the layout and therefore
+/// not clickable, which is the behaviour you want: text that has not been
+/// revealed yet is not a link.
+///
+/// ⚠️ `font_size` is a parameter rather than read from a theme because the input
+/// stage has no theme to consult — `SceneTree` does not carry one, the draw call
+/// receives it. Callers outside the draw pass pass
+/// [`RICHTEXT_DEFAULT_FONT_SIZE`], which agrees with the draw arm for any label
+/// that does not override the theme font size.
+pub fn richtext_meta_regions(
+    tree: &SceneTree,
+    node_id: NodeId,
+    font_size: i64,
+    rect: Rect2,
+) -> Vec<(Rect2, String)> {
+    richtext_placements(tree, node_id, font_size, rect, Color::WHITE)
+        .into_iter()
+        .filter_map(|p| p.span.meta.clone().map(|m| (p.rect, m)))
+        .collect()
+}
+
 fn draw_control(
     tree: &SceneTree,
     node_id: NodeId,
@@ -1412,182 +2190,112 @@ fn draw_control(
             }
         }
         "RichTextLabel" => {
-            // Accept either `bbcode_text` (bbcode_enabled) or plain `text`.
-            let raw = string_prop(tree, node_id, "bbcode_text")
-                .filter(|s| !s.is_empty())
-                .or_else(|| string_prop(tree, node_id, "text"))
-                .unwrap_or_default();
-            if !raw.is_empty() {
-                let font_color = theme
-                    .get_color("RichTextLabel", "default_color")
-                    .unwrap_or(Color::WHITE);
-                let font_size = theme
-                    .get_font_size("RichTextLabel", "font_size")
-                    .unwrap_or(16);
-                let scale = text_scale(font_size);
-                // Effects are pure functions of elapsed time, which the label
-                // carries as a property so the renderer stays a function of the
-                // tree. A frame driver advances it; a test sets it directly.
-                let elapsed = float_prop(tree, node_id, "fx_elapsed_time").unwrap_or(0.0) as f32;
-                let spans = parse_bbcode(&raw, font_color);
-                // The effect's range is its own run, so glyphs phase from the
-                // tag rather than from the start of the label's text.
-                let mut x = rect.position.x;
-                let y = rect.position.y;
-                for span in spans {
-                    if span.text.is_empty() {
-                        continue;
-                    }
-                    let w = text_width(&span.text, scale);
-                    match span.effect {
-                        // Plain text: one draw call for the whole run.
-                        None => {
-                            out.push(DrawCommand::DrawString {
-                                text: span.text,
-                                position: Vector2::new(x, y),
-                                color: span.color,
-                                font_size: font_size.max(1) as u32,
-                            });
-                            x += w + GLYPH_GAP * scale as f32;
-                        }
-                        // Effected text: each glyph moves independently, so it
-                        // needs its own draw call with its own offset/color.
-                        Some(effect) => {
-                            // The whole tag's range, not this run's — a nested
-                            // tag splits the run but must not restart the phase.
-                            let range = span.effect_range;
-                            let mut gx = x;
-                            for (i, ch) in span.text.chars().enumerate() {
-                                let mut fx = CharFXTransform::new(
-                                    span.char_offset + i,
-                                    range,
-                                    elapsed,
-                                    span.color,
-                                );
-                                effect.apply(&mut fx);
-                                let gw = text_width(&ch.to_string(), scale);
-                                if fx.visible {
-                                    out.push(DrawCommand::DrawString {
-                                        text: ch.to_string(),
-                                        position: Vector2::new(gx, y) + fx.offset,
-                                        color: fx.color,
-                                        font_size: font_size.max(1) as u32,
-                                    });
-                                }
-                                // Advance by the un-offset width: the effect
-                                // displaces the glyph, it must not re-flow the
-                                // line under it.
-                                gx += gw + GLYPH_GAP * scale as f32;
-                            }
-                            x = gx;
-                        }
-                    }
-                }
-            }
-        }
-        // A LineEdit draws its background, then the selection band, then the
-        // text (masked when `secret`), then the caret — Godot's paint order in
-        // `LineEdit::_notification(NOTIFICATION_DRAW)`. Empty text falls back to
-        // `placeholder_text` in the dimmer placeholder colour. pat-0q2kx.87.
-        "LineEdit" => {
-            if let Some(sb) = theme.get_stylebox("LineEdit", "normal") {
-                out.extend(sb.draw(rect));
-            } else {
-                let bg = stylebox_bg(theme, "LineEdit", "normal", Color::new(0.1, 0.1, 0.1, 1.0));
-                out.push(DrawCommand::DrawRect {
-                    rect,
-                    color: bg,
-                    filled: true,
-                });
-            }
-
-            let font_size = theme.get_font_size("LineEdit", "font_size").unwrap_or(16);
+            let font_color = theme
+                .get_color("RichTextLabel", "default_color")
+                .unwrap_or(Color::WHITE);
+            let font_size = theme
+                .get_font_size("RichTextLabel", "font_size")
+                .unwrap_or(RICHTEXT_DEFAULT_FONT_SIZE);
             let scale = text_scale(font_size);
-            let glyph_h = GLYPH_H * scale as f32;
-            // Vertically centre the single line, as Godot does.
-            let baseline_y = rect.position.y + (rect.size.y - glyph_h) * 0.5;
+            // Effects are pure functions of elapsed time, which the label
+            // carries as a property so the renderer stays a function of the
+            // tree. A frame driver advances it; a test sets it directly.
+            let elapsed = float_prop(tree, node_id, "fx_elapsed_time").unwrap_or(0.0) as f32;
 
-            // The displayed string is the masked one; the caret and selection
-            // are measured against it so a `secret` field's caret still lands
-            // between mask glyphs rather than between the real characters.
-            let shown = crate::line_edit::display_text(tree, node_id);
-
-            // x offset of a caret sitting *before* character `column`.
-            let caret_x = |column: usize| -> f32 {
-                if column == 0 {
-                    return rect.position.x;
-                }
-                let prefix: String = shown.chars().take(column).collect();
-                rect.position.x + text_width(&prefix, scale) + GLYPH_GAP * scale as f32
-            };
-
-            if let Some((begin, end)) = crate::line_edit::selection(tree, node_id) {
-                let x0 = caret_x(begin);
-                let x1 = caret_x(end);
-                if x1 > x0 {
-                    let selection_color = theme
-                        .get_color("LineEdit", "selection_color")
-                        .unwrap_or(Color::new(0.3, 0.45, 0.7, 1.0));
+            // ONE layout, shared with the `[url]` hit regions — see
+            // `richtext_placements`. Parsing, the visible-character budget, line
+            // breaking and alignment all live there, so the thing drawn and the
+            // thing clickable cannot disagree.
+            for placed in richtext_placements(tree, node_id, font_size, rect, font_color) {
+                let span = &placed.span;
+                let (x, y) = (placed.rect.position.x, placed.rect.position.y);
+                // `[bgcolor=…]` paints BEHIND the run, so it is emitted before
+                // the glyphs and sized from the run's own placed rect — the same
+                // rect the text and the `[u]`/`[s]` rules use, so the fill can
+                // never sit a few pixels off the words it belongs to.
+                if let Some(bg) = span.bgcolor {
                     out.push(DrawCommand::DrawRect {
-                        rect: Rect2::new(
-                            Vector2::new(x0, baseline_y),
-                            Vector2::new(x1 - x0, glyph_h),
-                        ),
-                        color: selection_color,
+                        rect: placed.rect,
+                        color: bg,
                         filled: true,
                     });
                 }
-            }
-
-            if shown.is_empty() {
-                let placeholder =
-                    string_prop(tree, node_id, "placeholder_text").unwrap_or_default();
-                if !placeholder.is_empty() {
-                    let color = theme
-                        .get_color("LineEdit", "font_placeholder_color")
-                        .unwrap_or(Color::new(0.6, 0.6, 0.6, 1.0));
-                    out.push(DrawCommand::DrawString {
-                        text: placeholder,
-                        position: Vector2::new(rect.position.x, baseline_y),
-                        color,
-                        font_size: font_size.max(1) as u32,
-                    });
+                match span.effect {
+                    // Plain text: one draw call for the whole run.
+                    None => {
+                        out.push(DrawCommand::DrawString {
+                            text: span.text.clone(),
+                            position: Vector2::new(x, y),
+                            color: span.color,
+                            font_size: font_size.max(1) as u32,
+                        });
+                    }
+                    // Effected text: each glyph moves independently, so it needs
+                    // its own draw call with its own offset/color.
+                    Some(effect) => {
+                        // The whole tag's range, not this run's — a nested tag
+                        // splits the run but must not restart the phase.
+                        let range = span.effect_range;
+                        let mut gx = x;
+                        for (i, ch) in span.text.chars().enumerate() {
+                            let mut fx = CharFXTransform::new(
+                                span.char_offset + i,
+                                range,
+                                elapsed,
+                                span.color,
+                            );
+                            effect.apply(&mut fx);
+                            let gw = text_width(&ch.to_string(), scale);
+                            if fx.visible {
+                                out.push(DrawCommand::DrawString {
+                                    text: ch.to_string(),
+                                    position: Vector2::new(gx, y) + fx.offset,
+                                    color: fx.color,
+                                    font_size: font_size.max(1) as u32,
+                                });
+                            }
+                            // Advance by the un-offset width: the effect
+                            // displaces the glyph, it must not re-flow the line
+                            // under it.
+                            gx += gw + GLYPH_GAP * scale as f32;
+                        }
+                    }
                 }
-            } else {
-                let font_color = color_prop(tree, node_id, "theme_override_colors/font_color")
-                    .or_else(|| theme.get_color("LineEdit", "font_color"))
-                    .unwrap_or(Color::WHITE);
-                out.push(DrawCommand::DrawString {
-                    text: shown.clone(),
-                    position: Vector2::new(rect.position.x, baseline_y),
-                    color: font_color,
-                    font_size: font_size.max(1) as u32,
-                });
-            }
-
-            // Godot only paints the caret while the field holds focus, so an
-            // unfocused LineEdit must not sprout one.
-            if tree.focus_owner() == Some(node_id) {
-                let caret_color = theme
-                    .get_color("LineEdit", "caret_color")
-                    .unwrap_or(Color::WHITE);
-                let x = caret_x(crate::line_edit::caret_column(tree, node_id));
-                out.push(DrawCommand::DrawRect {
-                    rect: Rect2::new(
-                        Vector2::new(x, baseline_y),
-                        Vector2::new(scale.max(1) as f32, glyph_h),
-                    ),
-                    color: caret_color,
-                    filled: true,
-                });
+                // `[u]` / `[s]`. Godot cannot vary weight or slant with this
+                // renderer — the built-in 5x7 bitmap font has no variants, which
+                // is why `[b]`/`[i]` remain stripped — but underline and
+                // strikethrough are RULES rather than glyph shapes, so they are
+                // drawable exactly rather than approximated.
+                //
+                // Spanning the run's full placed width, so an effected run
+                // (whose glyphs are displaced individually) still gets one
+                // continuous rule: the effect moves the glyphs, not the line
+                // under them.
+                if span.underline || span.strike {
+                    let glyph_h = GLYPH_H * scale as f32;
+                    let thickness = scale as f32;
+                    let w = placed.rect.size.x;
+                    if span.underline {
+                        let uy = y + glyph_h + thickness;
+                        out.push(DrawCommand::DrawLine {
+                            from: Vector2::new(x, uy),
+                            to: Vector2::new(x + w, uy),
+                            color: span.color,
+                            width: thickness,
+                        });
+                    }
+                    if span.strike {
+                        let sy = y + glyph_h * 0.5;
+                        out.push(DrawCommand::DrawLine {
+                            from: Vector2::new(x, sy),
+                            to: Vector2::new(x + w, sy),
+                            color: span.color,
+                            width: thickness,
+                        });
+                    }
+                }
             }
         }
-        // A TextEdit/CodeEdit draws its `text` line by line. When a
-        // CodeHighlighter is assigned — its `keyword_colors` carried on the node
-        // as the `syntax_highlighter/keyword_colors` dictionary, so the renderer
-        // stays a pure function of the tree, the way RichTextLabel carries its fx
-        // time — each keyword run draws in its configured colour; otherwise the
-        // whole line draws in the font colour. pat-nzgdu.198.
         "TextEdit" | "CodeEdit" => {
             let text = string_prop(tree, node_id, "text").unwrap_or_default();
             if !text.is_empty() {
@@ -1655,6 +2363,62 @@ fn draw_control(
                 });
             }
         }
+        // pat-s3rrv.70: scrollbars. Registered in ClassDB and present in the
+        // hit-test and focus lists all along, so a `.tscn` HScrollBar was
+        // clickable and tab-focusable — and drew nothing at all. The theme
+        // already shipped the `scroll` stylebox for both classes
+        // (`theme.rs:585-588`) with no consumer.
+        //
+        // ⚠️ A scrollbar's grabber is sized by `page`, unlike a slider's fixed
+        // one: its length is what tells the user how much of the content is
+        // visible. `scrollbar_grabber_rect` owns that geometry so the drawn
+        // handle and any future drag agree by construction — the same
+        // discipline the slider arm below relies on.
+        scroll_class @ ("HScrollBar" | "VScrollBar") => {
+            let axis = match crate::range_controls::slider_axis(scroll_class) {
+                Some(a) => a,
+                None => return,
+            };
+            let track = stylebox_bg(
+                theme,
+                scroll_class,
+                "scroll",
+                Color::new(0.08, 0.08, 0.08, 1.0),
+            );
+            out.push(DrawCommand::DrawRect {
+                rect,
+                color: track,
+                filled: true,
+            });
+
+            let ratio = control::get_range_ratio(tree, node_id);
+            let page = num_prop(tree, node_id, "page").unwrap_or(0.0);
+            let min = num_prop(tree, node_id, "min_value").unwrap_or(0.0);
+            // Godot's Range default max is 100; reading 0 here would make the
+            // range degenerate and collapse every grabber to its minimum.
+            let max = num_prop(tree, node_id, "max_value").unwrap_or(100.0);
+            let local = crate::range_controls::scrollbar_grabber_rect(
+                rect.size, axis, ratio, page, min, max,
+            );
+            let grabber_rect = Rect2::new(
+                Vector2::new(
+                    rect.position.x + local.position.x,
+                    rect.position.y + local.position.y,
+                ),
+                local.size,
+            );
+            let grabber = stylebox_bg(
+                theme,
+                scroll_class,
+                "grabber",
+                Color::new(0.7, 0.7, 0.7, 1.0),
+            );
+            out.push(DrawCommand::DrawRect {
+                rect: grabber_rect,
+                color: grabber,
+                filled: true,
+            });
+        }
         // pat-s3rrv.69: sliders. Geometry comes from `range_controls` — the
         // same functions the drag path uses — so the grabber cannot be drawn
         // anywhere other than where clicking it selects.
@@ -1662,6 +2426,41 @@ fn draw_control(
         // here is `class_of(tree, node_id).as_str()`, an unnamed temporary — there
         // is no `class_name` in scope, and both the theme lookups and the axis
         // choice need to know WHICH of the two matched.
+        // pat-s3rrv.72: the MenuBar title strip. `MenuBarModel` owns the x
+        // layout so the titles DRAWN sit exactly where `menu_bar_title_under`
+        // maps clicks — one rule, as `PopupMenu::ROW_HEIGHT` is for rows.
+        "MenuBar" => {
+            let (titles, open) = tree.menu_bar_strip(node_id);
+            let model = crate::menu::MenuBarModel::new(titles);
+            let h = crate::menu::MenuBarModel::TITLE_HEIGHT;
+            out.push(DrawCommand::DrawRect {
+                rect: Rect2::new(rect.position, Vector2::new(rect.size.x, h)),
+                color: Color::new(0.18, 0.18, 0.20, 1.0),
+                filled: true,
+            });
+            for (i, title) in model.titles().iter().enumerate() {
+                let x = rect.position.x + model.title_x(i);
+                let w = crate::menu::MenuBarModel::title_width(title);
+                // The open title stays highlighted while its menu is down, which
+                // is what tells the user which strip entry the panel belongs to.
+                if open == Some(i) {
+                    out.push(DrawCommand::DrawRect {
+                        rect: Rect2::new(Vector2::new(x, rect.position.y), Vector2::new(w, h)),
+                        color: Color::new(0.26, 0.36, 0.56, 1.0),
+                        filled: true,
+                    });
+                }
+                out.push(DrawCommand::DrawString {
+                    text: title.clone(),
+                    position: Vector2::new(
+                        x + crate::menu::MenuBarModel::TITLE_PADDING,
+                        rect.position.y + h - 7.0,
+                    ),
+                    color: Color::new(0.9, 0.9, 0.9, 1.0),
+                    font_size: 14,
+                });
+            }
+        }
         slider_class @ ("HSlider" | "VSlider") => {
             let axis = match crate::range_controls::slider_axis(slider_class) {
                 Some(a) => a,
@@ -2064,6 +2863,98 @@ fn draw_control(
                         } else {
                             font_color
                         },
+                        font_size: font_size.max(1) as u32,
+                    });
+                }
+            }
+        }
+        // One row per visible item, indented by depth, with a fold arrow on any
+        // row that has children (pat-s3rrv.75).
+        //
+        // ⚠️ Every rect here comes from `item_views` — the SAME row list and
+        // column spans `item_view_click` resolves a click through. Laying rows
+        // out independently is how a click comes to select a different item than
+        // the one under the cursor, and with folding in play the two derivations
+        // diverge the moment a subtree collapses.
+        "Tree" => {
+            let bg = stylebox_bg(theme, "Tree", "panel", Color::new(0.12, 0.12, 0.12, 1.0));
+            out.push(DrawCommand::DrawRect {
+                rect,
+                color: bg,
+                filled: true,
+            });
+            let selected_bg =
+                stylebox_bg(theme, "Tree", "selected", Color::new(0.26, 0.42, 0.66, 1.0));
+            let font_color = color_prop(tree, node_id, "theme_override_colors/font_color")
+                .or_else(|| theme.get_color("Tree", "font_color"))
+                .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
+            let font_size = theme.get_font_size("Tree", "font_size").unwrap_or(16);
+            let scale = text_scale(font_size);
+            let th = GLYPH_H * scale as f32;
+
+            let model = crate::item_views::load_tree(tree, node_id);
+            let spans = crate::item_views::tree_column_spans(&model, rect);
+            let selected = model.get_selected();
+            for row in crate::item_views::tree_visible_rows(tree, node_id) {
+                // Rows past the bottom edge are scrolled out of view.
+                if row.rect.position.y >= rect.position.y + rect.size.y {
+                    break;
+                }
+                if selected == Some(row.item) {
+                    out.push(DrawCommand::DrawRect {
+                        rect: row.rect,
+                        color: selected_bg,
+                        filled: true,
+                    });
+                }
+                // The fold arrow, drawn only where one is clickable — the rect
+                // is the very one the click path tests against.
+                if let Some(arrow) = row.arrow_rect() {
+                    let inset = arrow.size.x * 0.25;
+                    out.push(DrawCommand::DrawRect {
+                        rect: Rect2::new(
+                            Vector2::new(arrow.position.x + inset, arrow.position.y + inset),
+                            Vector2::new(arrow.size.x - inset * 2.0, arrow.size.y - inset * 2.0),
+                        ),
+                        color: font_color,
+                        // Godot draws a filled triangle for an expanded item and
+                        // an outline for a collapsed one; with no triangle
+                        // primitive the fill/outline distinction carries the
+                        // state so the two are still tellable apart.
+                        filled: !model.is_collapsed(row.item),
+                    });
+                }
+                for column in 0..model.column_count() {
+                    // A CHECK cell's box, at the cell's own content origin.
+                    if model.get_cell_mode(row.item, column)
+                        == crate::item_controls::TreeCellMode::Check
+                    {
+                        let box_rect = row.check_rect(column, &spans);
+                        out.push(DrawCommand::DrawRect {
+                            rect: box_rect,
+                            color: font_color,
+                            filled: model.is_checked(row.item, column),
+                        });
+                    }
+                    let text = model.get_text(row.item, column);
+                    if text.is_empty() {
+                        continue;
+                    }
+                    // Column 0 clears the indent and the arrow gutter; the rest
+                    // start at their own span. A CHECK cell shifts past its box.
+                    let mut x = row.cell_content_x(column, &spans);
+                    if model.get_cell_mode(row.item, column)
+                        == crate::item_controls::TreeCellMode::Check
+                    {
+                        x += row.check_rect(column, &spans).size.x + GLYPH_GAP * 2.0;
+                    }
+                    out.push(DrawCommand::DrawString {
+                        text: text.to_string(),
+                        position: Vector2::new(
+                            x + GLYPH_GAP * 2.0 * scale as f32,
+                            row.rect.position.y + (row.rect.size.y - th) * 0.5,
+                        ),
+                        color: font_color,
                         font_size: font_size.max(1) as u32,
                     });
                 }

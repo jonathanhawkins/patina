@@ -19,12 +19,21 @@
 //! its nearest seeded ancestor via [`parent_of`], so new/uncaptured classes still
 //! get a sensible base schema.
 //!
-//! The schema is deliberately kept in `gdeditor`, separate from the runtime
-//! `gdobject::class_db` (a runtime registry with different defaults/hints that
-//! does not model editor-synthesized properties such as
+//! The golden data is deliberately kept in `gdeditor`, separate from the
+//! runtime `gdobject::class_db` (a runtime registry with different
+//! defaults/hints that does not model editor-synthesized properties such as
 //! `position`/`rotation`/`scale`). Property orderings, hints, and defaults are
 //! transcribed from `fixtures/editor_oracle/inspector_*.json` — the exact source
 //! of truth the oracle diffs against.
+//!
+//! ⚠️ Separate does not mean *unaware*: [`editor_schema`] also merges in what
+//! ClassDB knows about classes the goldens never captured (pat-s3rrv.57). Of the
+//! ~688 registered classes only ~68 had their own golden — ~185 showed an
+//! ancestor's properties and none of their own, and ~435 resolved to nothing at
+//! all. The merge is strictly additive and a golden always wins, so the oracle
+//! numbers these fixtures exist to defend cannot move.
+
+use std::borrow::Cow;
 
 use gdvariant::Variant;
 
@@ -34,13 +43,17 @@ use gdvariant::Variant;
 #[derive(Debug, Clone)]
 pub struct EditorProp {
     /// Property name, e.g. `"position"`.
-    pub name: &'static str,
+    ///
+    /// ⚠️ `Cow` rather than `&'static str` because a row can now also come from
+    /// [`gdobject::class_db`], whose names are owned `String`s (pat-s3rrv.57).
+    /// The generated table still passes literals, which borrow.
+    pub name: Cow<'static, str>,
     /// Godot type name, e.g. `"Vector2"` / `"int"` / `"Color"`.
-    pub type_name: &'static str,
+    pub type_name: Cow<'static, str>,
     /// Godot `PropertyHint` value (0 = none).
     pub hint: i32,
     /// Godot `hint_string` (e.g. an enum's `"Inherit,Pausable,…"` list), `""` if none.
-    pub hint_string: &'static str,
+    pub hint_string: Cow<'static, str>,
     /// The value Godot's inspector *shows* when the node stores no override.
     /// Usually this is the class default, but for a few properties it is a
     /// project-settings-/context-derived display value (e.g. CollisionShape
@@ -58,18 +71,18 @@ pub struct EditorProp {
 
 impl EditorProp {
     pub(crate) fn new(
-        name: &'static str,
-        type_name: &'static str,
+        name: impl Into<Cow<'static, str>>,
+        type_name: impl Into<Cow<'static, str>>,
         hint: i32,
-        hint_string: &'static str,
+        hint_string: impl Into<Cow<'static, str>>,
         default: Variant,
         true_default: Variant,
     ) -> Self {
         Self {
-            name,
-            type_name,
+            name: name.into(),
+            type_name: type_name.into(),
             hint,
-            hint_string,
+            hint_string: hint_string.into(),
             default,
             true_default,
         }
@@ -78,21 +91,123 @@ impl EditorProp {
 
 /// Returns the flattened editor property schema for `class_name`, resolving
 /// through inheritance to the nearest **seeded** class. Returns `None` when no
-/// seeded ancestor exists (the caller then falls back to stored-only
-/// enumeration).
+/// seeded ancestor exists **and** `gdobject::class_db` does not know the class
+/// either (the caller then falls back to stored-only enumeration).
+///
+/// Resolution order, golden-first (pat-s3rrv.57):
+/// 1. this class's own captured golden, returned untouched;
+/// 2. otherwise the nearest seeded ancestor's schema as the base,
+/// 3. plus every ClassDB property for this class the base does not already
+///    carry — so a leaf class stops showing only its ancestor's properties;
+/// 4. or ClassDB alone when nothing up the chain is seeded.
 ///
 /// Examples: `editor_schema("Node2D")` returns the 27-property `Node2D` schema;
 /// `editor_schema("Sprite2D")` returns Sprite2D's own 39-property schema;
-/// an uncaptured `Path2D` would resolve up to `Node2D`.
+/// `editor_schema("AudioStreamPlayer")` returns `Node`'s golden plus its own
+/// registered `stream`/`volume_db`/…; `editor_schema("AStarGrid2D")`, whose
+/// `RefCounted` base no golden covers, returns its ClassDB properties.
 pub fn editor_schema(class_name: &str) -> Option<Vec<EditorProp>> {
-    let mut cur = class_name;
-    for _ in 0..64 {
-        if let Some(schema) = seeded_schema(cur) {
-            return Some(schema);
-        }
-        cur = parent_of(cur)?;
+    // An exact golden is the transcribed truth for this class — return it
+    // untouched. ClassDB has different defaults and no hints, so mixing
+    // anything in here would move the oracle-parity numbers the goldens exist
+    // to defend.
+    if let Some(schema) = seeded_schema(class_name) {
+        return Some(schema);
     }
-    None
+
+    // Nearest seeded ancestor, exactly as before.
+    let mut base: Option<Vec<EditorProp>> = None;
+    let mut cur = class_name.to_string();
+    for _ in 0..64 {
+        let Some(parent) = parent_of(&cur) else {
+            break;
+        };
+        cur = parent.to_string();
+        if let Some(schema) = seeded_schema(&cur) {
+            base = Some(schema);
+            break;
+        }
+    }
+
+    // …plus whatever ClassDB knows about THIS class that the ancestor schema
+    // does not already carry (pat-s3rrv.57).
+    let extra = classdb_schema(class_name).unwrap_or_default();
+    match base {
+        Some(mut base) => {
+            if !extra.is_empty() {
+                let seen: std::collections::HashSet<String> =
+                    base.iter().map(|p| p.name.to_string()).collect();
+                base.extend(extra.into_iter().filter(|p| !seen.contains(&*p.name)));
+            }
+            Some(base)
+        }
+        // No seeded ancestor at all: 435 registered classes are in this bucket,
+        // mostly Resources no captured scene contained. They previously fell
+        // through to stored-only enumeration, which shows whatever the `.tscn`
+        // happened to save and nothing else.
+        None if !extra.is_empty() => Some(extra),
+        None => None,
+    }
+}
+
+/// The schema `gdobject::class_db` implies for `class_name`, or `None` when the
+/// class is unregistered or carries no properties (pat-s3rrv.57).
+///
+/// # Why the two registries are merged rather than one replacing the other
+///
+/// They answer different questions. The goldens carry Godot's *inspector*
+/// truth — property order, hints, and the value the inspector SHOWS, which for
+/// a few properties is a context-derived display value rather than the class
+/// default. ClassDB carries the *runtime* truth, and knows an order of
+/// magnitude more classes. Neither is a superset, so the golden wins wherever
+/// both speak and ClassDB fills the rest.
+///
+/// ⚠️ `get_property_list` already walks the inheritance chain base-first, so
+/// this is the flattened list `editor_schema` promises, not just the leaf's own
+/// properties.
+fn classdb_schema(class_name: &str) -> Option<Vec<EditorProp>> {
+    if !gdobject::class_db::class_exists(class_name) {
+        return None;
+    }
+    let props = gdobject::class_db::get_property_list(class_name);
+    if props.is_empty() {
+        return None;
+    }
+    Some(
+        props
+            .into_iter()
+            .map(|p| {
+                let type_name = classdb_type_name(&p);
+                let default = p.default_value.clone();
+                EditorProp::new(
+                    p.name,
+                    type_name,
+                    p.hint,
+                    p.hint_string,
+                    default,
+                    p.default_value,
+                )
+            })
+            .collect(),
+    )
+}
+
+/// The Godot type name for a registered property.
+///
+/// `VariantType`'s `Display` is Godot's own vocabulary (`int`, `float`, `AABB`,
+/// `RID`), which is the same spelling the generated table uses, so the two
+/// sources describe a type identically.
+///
+/// ⚠️ A `Nil` default carrying a `hint_string` is an OBJECT slot, not an absent
+/// value: that is how a registered object-typed property spells "no instance
+/// yet", and the generated table calls those `"Object"`. Reporting `"Nil"`
+/// would make the inspector render an empty cell where a resource picker
+/// belongs.
+fn classdb_type_name(prop: &gdobject::class_db::PropertyInfo) -> Cow<'static, str> {
+    match &prop.default_value {
+        Variant::Nil if !prop.hint_string.is_empty() => Cow::Borrowed("Object"),
+        other => Cow::Owned(other.variant_type().to_string()),
+    }
 }
 
 /// The classes that have a seeded flattened editor schema. The table is
@@ -196,7 +311,7 @@ mod tests {
     use super::*;
 
     fn names(schema: &[EditorProp]) -> Vec<&str> {
-        schema.iter().map(|p| p.name).collect()
+        schema.iter().map(|p| p.name.as_ref()).collect()
     }
 
     #[test]
@@ -286,7 +401,25 @@ mod tests {
         // Path2D is not captured; it should resolve up to Node2D (27 props).
         assert!(parent_of("Path2D").is_none()); // not in the parent table either
                                                 // but a known intermediate resolves:
-        assert_eq!(editor_schema("BoxContainer").unwrap().len(), 72); // -> Control
+        let control: std::collections::HashSet<String> = editor_schema("Control")
+            .unwrap()
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect();
+        let boxes: std::collections::HashSet<String> = editor_schema("BoxContainer")
+            .unwrap()
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect();
+        // ⚠️ Deliberately a subset check, not `len() == 72`. `editor_schema`
+        // now merges in whatever `gdobject::class_db` knows about the class
+        // (pat-s3rrv.57), and ClassDB is a global registry another test in this
+        // binary may have populated first — an exact count would depend on test
+        // ORDER. What must always hold is that the ancestor schema survives.
+        assert!(
+            control.is_subset(&boxes),
+            "BoxContainer must still carry every Control property"
+        );
     }
 
     #[test]

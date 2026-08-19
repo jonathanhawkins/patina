@@ -582,6 +582,12 @@ pub struct EditorState {
     pub project_fullscreen: bool,
     /// V-Sync enabled.
     pub project_vsync: bool,
+    /// `input_devices/pointing/emulate_mouse_from_touch` — ON by default in
+    /// Godot, which is what lets a touch press a Button (pat-s3rrv.77).
+    pub project_emulate_mouse_from_touch: bool,
+    /// `input_devices/pointing/emulate_touch_from_mouse` — OFF by default; it
+    /// exists so a desktop mouse can drive touch code during testing.
+    pub project_emulate_touch_from_mouse: bool,
     /// Project physics FPS.
     pub project_physics_fps: u32,
     /// Project default gravity.
@@ -987,6 +993,8 @@ impl EditorState {
             project_stretch_aspect: "keep".to_string(),
             project_fullscreen: false,
             project_vsync: true,
+            project_emulate_mouse_from_touch: true,
+            project_emulate_touch_from_mouse: false,
             project_physics_fps: 60,
             project_gravity: 980.0,
             project_linear_damp: 0.1,
@@ -2559,6 +2567,11 @@ fn handle_connection(
             api_anim_tree_disconnect(state, &req.body, &mut stream)
         }
         // pat-s3rrv.1: a blend space's points live in the node's params.
+        ("POST", "/api/animation/tree/apply") => api_anim_tree_apply(state, &req.body, &mut stream),
+        // The read half: without it the editor opens a scene that already has
+        // an AnimationTree showing an EMPTY graph, and `apply` writes that
+        // emptiness back over the real machine (pat-s3rrv.1).
+        ("POST", "/api/animation/tree/load") => api_anim_tree_load(state, &req.body, &mut stream),
         ("POST", "/api/animation/tree/node/param") => {
             api_anim_tree_set_node_param(state, &req.body, &mut stream)
         }
@@ -2617,12 +2630,19 @@ fn handle_connection(
         ("POST", "/api/runtime/input/mouse_move") => {
             api_input_mouse_move(state, &req.body, &mut stream)
         }
+        ("POST", "/api/runtime/input/mouse_wheel") => {
+            api_input_mouse_wheel(state, &req.body, &mut stream)
+        }
         ("POST", "/api/runtime/input/mouse_down") => {
             api_input_mouse_down(state, &req.body, &mut stream)
         }
         ("POST", "/api/runtime/input/mouse_up") => {
             api_input_mouse_up(state, &req.body, &mut stream)
         }
+        // pat-s3rrv.77 — the touch pipeline. Without this a phone or tablet
+        // cannot play a Patina game at all: the ScreenTouch/ScreenDrag model and
+        // the emulation rules existed with no producer.
+        ("POST", "/api/runtime/input/touch") => api_input_touch(state, &req.body, &mut stream),
         ("POST", "/api/runtime/input/gamepad") => api_input_gamepad(state, &req.body, &mut stream),
         ("POST", "/api/runtime/input/midi") => api_input_midi(state, &req.body, &mut stream),
         ("POST", "/api/runtime/input/clear_frame") => api_input_clear_frame(state, &mut stream),
@@ -3626,12 +3646,12 @@ fn node_properties_json(
             let value = if ep.name == "layout_mode" && !node.has_property("layout_mode") {
                 // Virtual Control property Godot derives from the parent/anchors.
                 Variant::Int(compute_control_layout_mode(tree, node_id))
-            } else if node.has_property(ep.name)
+            } else if node.has_property(&ep.name)
                 && !(ep.type_name == "Object"
-                    && is_internal_resource_marker(&node.get_property(ep.name)))
+                    && is_internal_resource_marker(&node.get_property(&ep.name)))
             {
-                node.get_property(ep.name)
-            } else if gdscene::transform_inspector::is_transform_component(ep.name)
+                node.get_property(&ep.name)
+            } else if gdscene::transform_inspector::is_transform_component(&ep.name)
                 && node.has_property("transform")
             {
                 // Matrix-form node (`.tscn` stored `transform = Transform2D/3D(…)`
@@ -3639,7 +3659,7 @@ fn node_properties_json(
                 // component from the stored transform, matching Godot's inspector.
                 gdscene::transform_inspector::transform_component(
                     &node.get_property("transform"),
-                    ep.name,
+                    &ep.name,
                 )
                 .unwrap_or_else(|| ep.default.clone())
             } else {
@@ -3661,11 +3681,11 @@ fn node_properties_json(
                 value == ep.true_default
             };
             props.push(property_entry(
-                ep.name,
-                ep.type_name,
+                &ep.name,
+                &ep.type_name,
                 &value,
                 ep.hint,
-                ep.hint_string,
+                &ep.hint_string,
                 is_default,
             ));
             emitted.insert(ep.name.to_string());
@@ -3807,15 +3827,15 @@ fn resource_ref_entry(
     let (class, id) = meta.split_once("::")?;
     let resource_path = format!("{scene_res}::{id}");
     Some(serde_json::json!({
-        "name": ep.name,
+        "name": &*ep.name,
         "type": "Object",
-        "type_name": ep.type_name,
+        "type_name": &*ep.type_name,
         "value": {
             "type": "Object",
             "value": { "resource_class": class, "resource_path": resource_path }
         },
         "hint": ep.hint,
-        "hint_string": ep.hint_string,
+        "hint_string": &*ep.hint_string,
         // A set resource reference is an override, not the class default (Nil).
         "is_default": false,
     }))
@@ -5171,6 +5191,174 @@ fn collect_plugin_state(state: &mut EditorState) -> HashMap<String, Variant> {
     out
 }
 
+/// Collects the return value of `method` from every plugin that overrides it.
+///
+/// Ordered by addon folder so the merged result is reproducible rather than
+/// dependent on a `HashMap` walk.
+fn collect_plugin_returns(state: &mut EditorState, method: &str) -> Vec<Variant> {
+    let mut folders: Vec<String> = state.active_plugins.keys().cloned().collect();
+    folders.sort();
+    let mut plugins = std::mem::take(&mut state.active_plugins);
+    let mut out = Vec::new();
+    for folder in folders {
+        if let Some(instance) = plugins.get_mut(&folder) {
+            if instance.has_method(method) {
+                if let Ok(v) = instance.call_method(method, &[]) {
+                    if !v.is_nil() {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+    }
+    state.active_plugins = plugins;
+    out
+}
+
+/// Godot's `EditorPlugin.AfterGUIInput`, the return of `_forward_3d_gui_input`.
+///
+/// ⚠️ Three-valued, and a bool cannot express it. Both `Stop` and `Custom`
+/// suppress the editor's own Node3D selection; they differ in whether the
+/// remaining plugins still get the event. Coercing to a bool collapses that and
+/// silently loses one case (`doc/classes/EditorPlugin.xml:919-928`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterGuiInput {
+    /// `AFTER_GUI_INPUT_PASS` (0) — forward to other plugins **and** to the
+    /// editor's own Node3D handling.
+    Pass,
+    /// `AFTER_GUI_INPUT_STOP` (1) — consume entirely: no further plugin, no
+    /// editor selection.
+    Stop,
+    /// `AFTER_GUI_INPUT_CUSTOM` (2) — *"Pass the InputEvent to other editor
+    /// plugins except the main Node3D one. This can be used to prevent node
+    /// selection changes and work with sub-gizmos instead."*
+    Custom,
+}
+
+impl AfterGuiInput {
+    fn from_variant(v: &Variant) -> Self {
+        match v {
+            Variant::Int(1) => Self::Stop,
+            Variant::Int(2) => Self::Custom,
+            // ⚠️ A plugin written against the bool-shaped canvas sibling may
+            // return `true`. Godot's own enum has no `true`, and the intent of
+            // a truthy return is unambiguously "I handled it", so it maps to
+            // Stop rather than being read as PASS (which `as_int == 0` would
+            // give) and letting the editor act on a consumed event.
+            Variant::Bool(true) => Self::Stop,
+            _ => Self::Pass,
+        }
+    }
+
+    /// Whether the editor's own Node3D selection should still run.
+    fn allows_editor_selection(self) -> bool {
+        self == Self::Pass
+    }
+}
+
+/// Offers a 3D viewport event to every plugin, honouring `AfterGUIInput`.
+///
+/// ⚠️ Not expressible through [`dispatch_plugin_virtual`], whose
+/// `stop_at_first_claim` is boolean: `Custom` must **keep offering the event to
+/// the remaining plugins** while still suppressing the editor's selection, and
+/// only `Stop` ends the sweep. Collapsing the two would either let a sub-gizmo
+/// plugin block its peers or let the editor steal a selection the plugin meant
+/// to keep.
+///
+/// Returns the strongest outcome seen: `Stop` if any plugin stopped, else
+/// `Custom` if any asked for it, else `Pass`.
+pub fn dispatch_forward_3d_gui_input(state: &mut EditorState, args: &[Variant]) -> AfterGuiInput {
+    if state.active_plugins.is_empty() {
+        return AfterGuiInput::Pass;
+    }
+    let mut folders: Vec<String> = state.active_plugins.keys().cloned().collect();
+    folders.sort();
+    let mut plugins = std::mem::take(&mut state.active_plugins);
+    let mut logs: Vec<(String, String)> = Vec::new();
+    let mut outcome = AfterGuiInput::Pass;
+
+    for folder in folders {
+        let Some(instance) = plugins.get_mut(&folder) else {
+            continue;
+        };
+        if !instance.has_method("_forward_3d_gui_input") {
+            continue;
+        }
+        match instance.call_method("_forward_3d_gui_input", args) {
+            Ok(v) => match AfterGuiInput::from_variant(&v) {
+                AfterGuiInput::Stop => {
+                    outcome = AfterGuiInput::Stop;
+                }
+                AfterGuiInput::Custom => {
+                    if outcome == AfterGuiInput::Pass {
+                        outcome = AfterGuiInput::Custom;
+                    }
+                }
+                AfterGuiInput::Pass => {}
+            },
+            Err(e) => logs.push((
+                "error".into(),
+                format!("Plugin '{folder}' _forward_3d_gui_input failed: {e:?}"),
+            )),
+        }
+        for line in instance.take_output() {
+            logs.push(("info".into(), line));
+        }
+        // Only STOP ends the sweep. CUSTOM deliberately continues, which is the
+        // whole distinction between the two.
+        if outcome == AfterGuiInput::Stop {
+            break;
+        }
+    }
+
+    state.active_plugins = plugins;
+    for (level, message) in logs {
+        state.add_log(&level, message);
+    }
+    outcome
+}
+
+/// The lines a plugin reports as breakpoints **for `path`** (pat-s3rrv.66).
+///
+/// Godot's `_get_breakpoints` returns a `PackedStringArray` of `script:line`
+/// entries — `doc/classes/EditorPlugin.xml:230` gives
+/// `res://path_to_script.gd:25` as the example.
+///
+/// ⚠️ Split on the **LAST** colon. A `res://` path contains one of its own, so
+/// splitting on the first yields script `"res"` and line `"//path.gd:25"`; the
+/// parse then produces nothing and the plugin's breakpoints simply never
+/// appear, which looks like the plugin not implementing the virtual at all.
+fn plugin_breakpoint_lines(state: &mut EditorState, path: &str) -> Vec<u32> {
+    let mut lines = Vec::new();
+    for value in collect_plugin_returns(state, "_get_breakpoints") {
+        // A GDScript plugin may hand back either a PackedStringArray or a plain
+        // Array of strings; both are the same list to a script author.
+        let entries: Vec<String> = match value {
+            Variant::PackedStringArray(v) => v,
+            Variant::Array(items) => items
+                .iter()
+                .filter_map(|i| match i {
+                    Variant::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => continue,
+        };
+        for entry in entries {
+            let Some((script, line)) = entry.rsplit_once(':') else {
+                continue;
+            };
+            if script != path {
+                continue;
+            }
+            if let Ok(n) = line.trim().parse::<u32>() {
+                lines.push(n);
+            }
+        }
+    }
+    lines
+}
+
 /// Hands each plugin back its own `_set_state` entry, if one was saved.
 ///
 /// A plugin with no stored entry is NOT called: Godot only restores state it
@@ -5214,7 +5402,7 @@ fn canvas_click_event(x: f32, y: f32) -> Variant {
 /// `pressed: true` for a release would make a click-to-place tool fire twice
 /// per gesture — once on the press and once on what it believes is a second
 /// press — which looks like a double-input bug far from its cause.
-fn canvas_button_event(x: f32, y: f32, pressed: bool) -> Variant {
+pub fn canvas_button_event(x: f32, y: f32, pressed: bool) -> Variant {
     let mut d = gdvariant::Dictionary::new();
     d.insert(
         Variant::String("position".to_string()),
@@ -5225,6 +5413,43 @@ fn canvas_button_event(x: f32, y: f32, pressed: bool) -> Variant {
     d.insert(
         Variant::String("pressed".to_string()),
         Variant::Bool(pressed),
+    );
+    Variant::Dictionary(d)
+}
+
+/// The editor camera a 3D plugin receives as `_forward_3d_gui_input`'s first
+/// argument (pat-s3rrv.66).
+///
+/// Godot hands over a real `Camera3D`. Patina's editor camera is a
+/// `ViewportCamera3D` controller rather than a scene node, so it has no
+/// `ObjectId` to pass — the same situation `canvas_click_event` is in with
+/// `InputEventMouseButton`, and it takes the same shape: a Dictionary carrying
+/// the field names a plugin would read off the real object.
+///
+/// `global_position` is the resolved orbit eye point, not the focus point — a
+/// plugin unprojecting from the focus would ray-cast from the wrong end of the
+/// orbit arm.
+fn editor_camera_3d_value(camera: &crate::viewport_3d::ViewportCamera3D) -> Variant {
+    let mut d = gdvariant::Dictionary::new();
+    let eye = camera.position();
+    d.insert(
+        Variant::String("global_position".to_string()),
+        Variant::Vector3(eye),
+    );
+    d.insert(
+        Variant::String("fov".to_string()),
+        Variant::Float(camera.fov_degrees as f64),
+    );
+    // Godot's Camera3D.projection: 0 = perspective, 1 = orthogonal.
+    d.insert(
+        Variant::String("projection".to_string()),
+        // Matched exhaustively rather than with a catch-all: a third projection
+        // mode should be a compile error here, not silently reported as
+        // perspective.
+        Variant::Int(match camera.projection {
+            crate::viewport_3d::Projection::Perspective => 0,
+            crate::viewport_3d::Projection::Orthographic => 1,
+        }),
     );
     Variant::Dictionary(d)
 }
@@ -8607,7 +8832,10 @@ fn api_viewport_drag_start(state: &Arc<Mutex<EditorState>>, body: &str, stream: 
     {
         send_json(
             stream,
-            &format!(r#"{{"ok":true,"consumed_by":"{}"}}"#, folder.replace('"', "")),
+            &format!(
+                r#"{{"ok":true,"consumed_by":"{}"}}"#,
+                folder.replace('"', "")
+            ),
         );
         return;
     }
@@ -8736,11 +8964,13 @@ fn api_viewport_drag_end(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
         state.drag_state = None;
         send_json(
             stream,
-            &format!(r#"{{"ok":true,"consumed_by":"{}"}}"#, folder.replace('"', "")),
+            &format!(
+                r#"{{"ok":true,"consumed_by":"{}"}}"#,
+                folder.replace('"', "")
+            ),
         );
         return;
     }
-
 
     let drag = match state.drag_state.take() {
         Some(d) => d,
@@ -9350,6 +9580,33 @@ fn api_viewport_3d_select(state: &Arc<Mutex<EditorState>>, body: &str, stream: &
     let add = parsed.get("add").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let mut state = state.lock().unwrap();
+
+    // pat-s3rrv.66: plugins get the 3D event before the editor's own selection.
+    //
+    // ⚠️ Godot passes `_forward_3d_gui_input(camera, event)` — arity TWO, and a
+    // different shape from the canvas sibling's single argument. The camera is
+    // the viewport's, so a plugin can unproject the event itself.
+    let camera = editor_camera_3d_value(&state.editor_viewport_3d.camera);
+    let event = canvas_button_event(x, y, true);
+    let after = dispatch_forward_3d_gui_input(&mut state, &[camera, event]);
+    if !after.allows_editor_selection() {
+        // STOP and CUSTOM both suppress the selection; they differ only in
+        // whether the remaining plugins were still offered the event, which
+        // `dispatch_forward_3d_gui_input` has already handled.
+        send_json(
+            stream,
+            &format!(
+                r#"{{"ok":true,"after_gui_input":"{}"}}"#,
+                match after {
+                    AfterGuiInput::Stop => "stop",
+                    AfterGuiInput::Custom => "custom",
+                    AfterGuiInput::Pass => "pass",
+                }
+            ),
+        );
+        return;
+    }
+
     // Take a single &mut to the state so the viewport (mut) and scene tree (shared)
     // borrows are seen as disjoint fields, not two derefs of the MutexGuard.
     let st = &mut *state;
@@ -9416,6 +9673,36 @@ fn api_viewport_3d_box_select(state: &Arc<Mutex<EditorState>>, body: &str, strea
     let add = parsed.get("add").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let mut state = state.lock().unwrap();
+
+    // pat-s3rrv.66: a rubber-band select is a SELECTION event, so it gets the
+    // same `_forward_3d_gui_input` offer that click-select does.
+    //
+    // ⚠️ Forwarding one and not the other is worse than forwarding neither: a
+    // sub-gizmo plugin returning CUSTOM would suppress click-select while a
+    // rubber-band drag went on stealing the selection out from under it, and
+    // the inconsistency only shows up on the gesture the author happened not to
+    // test.
+    //
+    // The event carries the drag's END point, which is where the pointer
+    // actually is when the box closes.
+    let camera = editor_camera_3d_value(&state.editor_viewport_3d.camera);
+    let event = canvas_button_event(x2, y2, false);
+    let after = dispatch_forward_3d_gui_input(&mut state, &[camera, event]);
+    if !after.allows_editor_selection() {
+        send_json(
+            stream,
+            &format!(
+                r#"{{"ok":true,"after_gui_input":"{}"}}"#,
+                match after {
+                    AfterGuiInput::Stop => "stop",
+                    AfterGuiInput::Custom => "custom",
+                    AfterGuiInput::Pass => "pass",
+                }
+            ),
+        );
+        return;
+    }
+
     let st = &mut *state;
     let hits = st
         .editor_viewport_3d
@@ -10664,6 +10951,7 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     // pat-s3rrv.1: the AnimationTree graph routes were dispatched but absent
     // from the schema, so a client had no way to discover them.
     ("GET", "/api/animation/tree", "[]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/animation/tree/apply", "[]", "{\"node\":\"string?\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/animation/tree/state/add", "[]", "{\"name\":\"string\",\"kind\":\"string?\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/animation/tree/state/remove", "[]", "{\"name\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/animation/tree/state/move", "[]", "{\"name\":\"string\",\"x\":\"number\",\"y\":\"number\"}", "{\"type\":\"object\"}"),
@@ -13775,6 +14063,155 @@ fn anim_tree_kind_from_str(s: &str) -> crate::anim_tree_graph::NodeKind {
 /// `GET /api/animation/tree` -- the AnimationTree graph: states, transitions,
 /// blend-tree connections, and the live playback state (Godot highlights the
 /// currently playing state in its state-machine editor).
+/// `POST /api/animation/tree/apply` — build the authored graph into a runtime
+/// state machine and attach it to an `AnimationTree` node (pat-s3rrv.1).
+///
+/// # Why this route exists
+///
+/// `AnimTreeGraph` was pure editor state: 16 call sites mutated it, one GET read
+/// it back, and nothing ever turned it into something the runtime could play.
+/// Every state, transition and blend point authored in the served editor
+/// evaporated while each route returned 200. `to_state_machine()` closed half of
+/// that; this is the half that makes it reach a frame, because
+/// `SceneTree::process_animation_trees` drives whatever is attached here.
+///
+/// Body: `{"node":"AnimationTree"}` — the node to attach to. Omitted, it uses
+/// the selected node.
+///
+/// ⚠️ The target must actually be an `AnimationTree`. Attaching to anything else
+/// would store a graph that `process_animation_trees` never looks at, which is
+/// the same silent no-op this route exists to remove.
+/// Resolves the `AnimationTree` node an animation-tree route targets, by the
+/// request's `node` name or the current selection, and answers the request
+/// itself when it cannot (pat-s3rrv.1).
+///
+/// ⚠️ The class check is not a formality: attaching to — or reading from —
+/// anything else silently does nothing, since `process_animation_trees` only
+/// looks at `AnimationTree` nodes. Returning `None` means a response has
+/// already been written and the caller must return.
+fn anim_tree_target(s: &EditorState, body: &str, stream: &mut TcpStream) -> Option<NodeId> {
+    let requested = parse_json_body(body)
+        .and_then(|p| p.get("node").and_then(|v| v.as_str()).map(str::to_string));
+
+    let node_id = match requested {
+        Some(name) => {
+            let root = s.scene_tree.root_id();
+            match s.scene_tree.find_child(root, &name, true) {
+                Some(id) => id,
+                None => {
+                    send_error(stream, 404, &format!("no node named {name}"));
+                    return None;
+                }
+            }
+        }
+        None => match s.selected_node {
+            Some(id) => id,
+            None => {
+                send_error(stream, 400, "no node selected and no `node` given");
+                return None;
+            }
+        },
+    };
+
+    let class = s
+        .scene_tree
+        .get_node(node_id)
+        .map(|n| n.class_name().to_string())
+        .unwrap_or_default();
+    if class != "AnimationTree" {
+        send_error(
+            stream,
+            400,
+            &format!("target is a {class}, not an AnimationTree"),
+        );
+        return None;
+    }
+    Some(node_id)
+}
+
+/// `POST /api/animation/tree/load` — replaces the editor graph with the state
+/// machine a scene's `AnimationTree` already holds (pat-s3rrv.1).
+///
+/// # Why this exists
+///
+/// The graph could only ever be authored, never loaded. Opening a project whose
+/// scene already had an `AnimationTree` showed an empty canvas, and once
+/// `/apply` landed, saving that canvas replaced a real machine with nothing.
+/// This route is what lets the editor show what is actually in the scene.
+fn api_anim_tree_load(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    let Some(node_id) = anim_tree_target(&s, body, stream) else {
+        return;
+    };
+
+    let machine = match s
+        .scene_tree
+        .get_animation_tree(node_id)
+        .and_then(|t| t.root.as_ref())
+    {
+        Some(gdscene::animation_tree::AnimationNode::StateMachine(m)) => m.clone(),
+        // A blend tree is a real graph the editor has no surface for. Loading
+        // nothing and reporting 200 would leave the user one `apply` away from
+        // overwriting it — the exact failure this route exists to prevent.
+        Some(_) => {
+            send_error(
+                stream,
+                400,
+                "that AnimationTree's root is not a state machine",
+            );
+            return;
+        }
+        None => {
+            send_error(stream, 404, "that node has no AnimationTree to load");
+            return;
+        }
+    };
+
+    let graph = crate::anim_tree_graph::AnimTreeGraph::from_state_machine(&machine);
+    let states = graph.node_count();
+    let transitions = graph.transitions().len();
+    s.anim_tree = graph;
+    // An empty `current` means the machine never started; leaving the highlight
+    // unset is truer than pointing it at a state named "".
+    s.anim_tree_current_state = (!machine.current.is_empty()).then(|| machine.current.clone());
+    s.add_log(
+        "info",
+        format!("loaded animation graph from AnimationTree ({states} states)"),
+    );
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"states":{states},"transitions":{transitions}}}"#),
+    );
+}
+
+fn api_anim_tree_apply(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let mut s = state.lock().unwrap();
+    let Some(node_id) = anim_tree_target(&s, body, stream) else {
+        return;
+    };
+
+    let machine = s.anim_tree.to_state_machine();
+    let states = machine.states.len();
+    let transitions = machine.transitions.len();
+    let mut anim_tree = gdscene::animation_tree::AnimationTree::new();
+    anim_tree.set_root(gdscene::animation_tree::AnimationNode::StateMachine(
+        machine,
+    ));
+
+    if let Err(e) = s.scene_tree.attach_animation_tree(node_id, anim_tree) {
+        send_error(stream, 500, &format!("{e:?}"));
+        return;
+    }
+    s.add_log(
+        "info",
+        format!("applied animation graph to AnimationTree ({states} states)"),
+    );
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"states":{states},"transitions":{transitions}}}"#),
+    );
+}
+
 fn api_get_anim_tree(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let json = {
         let state = state.lock().unwrap();
@@ -14516,6 +14953,16 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
 
     let mut main_loop = MainLoop::new(cloned);
     main_loop.set_input_map(state.build_engine_input_map());
+    // pat-s3rrv.77: the pointer-emulation settings were declared and read by
+    // nobody, so `InputState` kept its hard-coded values whatever project.godot
+    // said. Applied here, at the same point as the input map, because both are
+    // project configuration the running scene must see from its first frame.
+    main_loop
+        .input_state_mut()
+        .set_emulate_mouse_from_touch(state.project_emulate_mouse_from_touch);
+    main_loop
+        .input_state_mut()
+        .set_emulate_touch_from_mouse(state.project_emulate_touch_from_mouse);
     state.run_main_loop = Some(main_loop);
     state.is_running = true;
     state.is_paused = false;
@@ -15967,6 +16414,63 @@ fn api_input_mouse_move(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
     send_json(stream, r#"{"ok":true}"#);
 }
 
+/// Feeds a browser `wheel` event into the running `MainLoop` (pat-s3rrv.76).
+///
+/// A wheel notch is not a DOM `button`, so it cannot go through the mouse_down
+/// route: the browser reports it as a `wheel` event carrying deltas. Godot turns
+/// each notch into a `MOUSE_BUTTON_WHEEL_*` press **and release** in the same
+/// frame, which is what makes `_input` see a discrete notch rather than a button
+/// that latches down forever — so both are pushed here.
+///
+/// ⚠️ deltaY is POSITIVE when scrolling DOWN in the DOM, so positive maps to
+/// `WheelDown`. Getting this backwards inverts every scroll in the engine and
+/// still "works", which is why the sign is named rather than left implicit.
+fn api_input_mouse_wheel(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.is_running {
+        send_error(stream, 400, "not running");
+        return;
+    }
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => {
+            send_error(stream, 400, "invalid json");
+            return;
+        }
+    };
+    let dy = v["delta_y"].as_f64().unwrap_or(0.0);
+    let dx = v["delta_x"].as_f64().unwrap_or(0.0);
+    let mut buttons: Vec<gdplatform::input::MouseButton> = Vec::new();
+    if dy > 0.0 {
+        buttons.push(gdplatform::input::MouseButton::WheelDown);
+    } else if dy < 0.0 {
+        buttons.push(gdplatform::input::MouseButton::WheelUp);
+    }
+    if dx > 0.0 {
+        buttons.push(gdplatform::input::MouseButton::WheelRight);
+    } else if dx < 0.0 {
+        buttons.push(gdplatform::input::MouseButton::WheelLeft);
+    }
+    if buttons.is_empty() {
+        // A zero-delta wheel event is not an error; it simply moved nothing.
+        send_json(stream, r#"{"ok":true}"#);
+        return;
+    }
+    let (x, y) = state.mouse_position;
+    if let Some(ref mut main_loop) = state.run_main_loop {
+        for button in buttons {
+            for pressed in [true, false] {
+                main_loop.push_event(gdplatform::InputEvent::MouseButton {
+                    button,
+                    pressed,
+                    position: gdcore::math::Vector2::new(x as f32, y as f32),
+                });
+            }
+        }
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
 fn api_input_mouse_down(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let mut state = state.lock().unwrap();
     if !state.is_running {
@@ -15980,10 +16484,14 @@ fn api_input_mouse_down(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
             return;
         }
     };
+    // 0..=4 are the DOM buttons: left, middle, right, back, forward. The cap
+    // used to be 2, which rejected the thumb buttons at the door — so mapping
+    // them in `push_mouse_button_event` was not enough on its own, the endpoint
+    // refused them first (pat-s3rrv.76).
     let button = match v["button"].as_u64() {
-        Some(b) if b <= 2 => b as u8,
+        Some(b) if b <= 4 => b as u8,
         _ => {
-            send_error(stream, 400, "invalid button (0-2)");
+            send_error(stream, 400, "invalid button (0-4)");
             return;
         }
     };
@@ -15999,14 +16507,22 @@ fn api_input_mouse_down(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
 /// `SceneTree::push_input` — `_input` never saw a mouse event and the GUI stage
 /// added in pat-0q2kx.18 had no events to route.
 ///
-/// Browser `MouseEvent.button` is 0=left, 1=middle, 2=right; Patina's
-/// `MouseButton` enum is named, so the mapping is explicit rather than the
-/// numeric 1/3/2 Godot uses internally.
+/// Browser `MouseEvent.button` is 0=left, 1=middle, 2=right, 3=back, 4=forward;
+/// Patina's `MouseButton` enum is named, so the mapping is explicit rather than
+/// the numeric 1/3/2 Godot uses internally.
+///
+/// ⚠️ 3 and 4 are the thumb buttons, and dropping them was silent: the `_ =>
+/// return` below discarded them before they reached the running game, so a
+/// project binding `back`/`forward` saw nothing and had no error to look at
+/// (pat-s3rrv.76). The browser's names are the reverse of Godot's numbering —
+/// DOM 3 ("back") is `XBUTTON1` (8), DOM 4 ("forward") is `XBUTTON2` (9).
 fn push_mouse_button_event(state: &mut EditorState, button: u8, pressed: bool) {
     let btn = match button {
         0 => gdplatform::input::MouseButton::Left,
         1 => gdplatform::input::MouseButton::Middle,
         2 => gdplatform::input::MouseButton::Right,
+        3 => gdplatform::input::MouseButton::XButton1,
+        4 => gdplatform::input::MouseButton::XButton2,
         _ => return,
     };
     let (x, y) = state.mouse_position;
@@ -16032,16 +16548,122 @@ fn api_input_mouse_up(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
             return;
         }
     };
+    // 0..=4 are the DOM buttons: left, middle, right, back, forward. The cap
+    // used to be 2, which rejected the thumb buttons at the door — so mapping
+    // them in `push_mouse_button_event` was not enough on its own, the endpoint
+    // refused them first (pat-s3rrv.76).
     let button = match v["button"].as_u64() {
-        Some(b) if b <= 2 => b as u8,
+        Some(b) if b <= 4 => b as u8,
         _ => {
-            send_error(stream, 400, "invalid button (0-2)");
+            send_error(stream, 400, "invalid button (0-4)");
             return;
         }
     };
     state.mouse_buttons.remove(&button);
     push_mouse_button_event(&mut state, button, false);
     send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/runtime/input/touch` — the browser touch pipeline (pat-s3rrv.77).
+///
+/// Body is one DOM touch event's changed-touches list plus its phase:
+/// `{"phase":"start"|"move"|"end"|"cancel","touches":[{"identifier",…}]}`.
+///
+/// Each entry becomes an `InputEvent::ScreenTouch` (start/end/cancel) or
+/// `InputEvent::ScreenDrag` (move), pushed through `MainLoop::push_event` so it
+/// travels the whole input pipeline — `_input`, the GUI stage, and, when
+/// `emulate_mouse_from_touch` is on, the synthetic mouse event that lets a touch
+/// press a Button.
+fn api_input_touch(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.is_running {
+        send_error(stream, 400, "not running");
+        return;
+    }
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => {
+            send_error(stream, 400, "invalid json");
+            return;
+        }
+    };
+    let phase = v["phase"].as_str().unwrap_or("").to_string();
+    if !matches!(phase.as_str(), "start" | "move" | "end" | "cancel") {
+        send_error(stream, 400, "phase must be start|move|end|cancel");
+        return;
+    }
+    let touches = match v["touches"].as_array() {
+        Some(list) if !list.is_empty() => list.clone(),
+        // An empty changed-touches list is a malformed frame, not a no-op: the
+        // browser only fires these events when something changed.
+        _ => {
+            send_error(stream, 400, "touches must be a non-empty array");
+            return;
+        }
+    };
+
+    let Some(main_loop) = state.run_main_loop.as_mut() else {
+        send_error(stream, 400, "not running");
+        return;
+    };
+
+    let mut pushed = 0usize;
+    for t in &touches {
+        let index = match t["identifier"].as_i64() {
+            // The browser hands out arbitrary identifiers, including negative
+            // ones on some engines; a finger index is unsigned.
+            Some(i) if i >= 0 => i as u32,
+            _ => continue,
+        };
+        let position = gdcore::math::Vector2::new(
+            t["x"].as_f64().unwrap_or(0.0) as f32,
+            t["y"].as_f64().unwrap_or(0.0) as f32,
+        );
+        let event = match phase.as_str() {
+            "move" => {
+                // ⚠️ Read BEFORE the push: `push_event` updates the stored
+                // position, so asking afterwards yields a zero delta every time.
+                let previous = main_loop
+                    .input_state()
+                    .touch_position(index)
+                    .unwrap_or(position);
+                let relative = position - previous;
+                gdplatform::InputEvent::ScreenDrag {
+                    index,
+                    position,
+                    relative,
+                    // Godot derives velocity from the event's own timing; with
+                    // one event per browser frame the per-frame delta IS the
+                    // velocity in the units a script compares against.
+                    velocity: relative,
+                    pressure: t["force"].as_f64().unwrap_or(0.0) as f32,
+                    tilt: gdcore::math::Vector2::new(
+                        t["tiltX"].as_f64().unwrap_or(0.0) as f32,
+                        t["tiltY"].as_f64().unwrap_or(0.0) as f32,
+                    ),
+                }
+            }
+            other => {
+                let pressed = other == "start";
+                gdplatform::InputEvent::ScreenTouch {
+                    index,
+                    position,
+                    pressed,
+                    // ⚠️ Asked BEFORE the push, which overwrites the very
+                    // last-press frame the answer is computed from.
+                    double_tap: pressed && main_loop.input_state().would_be_double_tap(index),
+                    // A `touchcancel` is a lift the user did not make — Godot
+                    // flags it so a script can abandon a gesture instead of
+                    // completing it.
+                    canceled: other == "cancel",
+                }
+            }
+        };
+        main_loop.push_event(event);
+        pushed += 1;
+    }
+
+    send_json(stream, &format!(r#"{{"ok":true,"events":{pushed}}}"#));
 }
 
 fn api_input_clear_frame(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
@@ -18425,8 +19047,15 @@ fn api_get_breakpoints(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mu
             return;
         }
     };
-    let s = state.lock().unwrap();
-    let bps = s.breakpoints.get(&path).cloned().unwrap_or_default();
+    let mut s = state.lock().unwrap();
+    let mut bps = s.breakpoints.get(&path).cloned().unwrap_or_default();
+    // pat-s3rrv.66: a plugin that edits script-based objects contributes its own
+    // breakpoints through `_get_breakpoints`. Merged rather than replacing, and
+    // deduped — a plugin reporting a line the editor already has must not double
+    // it in the response.
+    bps.extend(plugin_breakpoint_lines(&mut s, &path));
+    bps.sort_unstable();
+    bps.dedup();
     let errs = s.script_errors.get(&path).cloned().unwrap_or_default();
     let bp_json: Vec<String> = bps.iter().map(|l| l.to_string()).collect();
     let err_json: Vec<String> = errs
@@ -20697,6 +21326,13 @@ fn api_get_project_settings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStr
                 ]
             },
             {
+                "id": "input_devices", "label": "Input Devices",
+                "properties": [
+                    {"key":"emulate_mouse_from_touch","label":"Emulate Mouse From Touch","editor":"bool","value":s.project_emulate_mouse_from_touch},
+                    {"key":"emulate_touch_from_mouse","label":"Emulate Touch From Mouse","editor":"bool","value":s.project_emulate_touch_from_mouse},
+                ]
+            },
+            {
                 "id": "physics", "label": "Physics",
                 "properties": [
                     {"key":"physics_fps","label":"Physics FPS","editor":{"type":"integer","min":1,"max":240},"value":s.project_physics_fps},
@@ -20775,6 +21411,13 @@ fn api_set_project_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream:
         }
         if let Some(v) = p.get("vsync").and_then(|v| v.as_bool()) {
             s.project_vsync = v;
+        }
+        // Input devices (pat-s3rrv.77)
+        if let Some(v) = p.get("emulate_mouse_from_touch").and_then(|v| v.as_bool()) {
+            s.project_emulate_mouse_from_touch = v;
+        }
+        if let Some(v) = p.get("emulate_touch_from_mouse").and_then(|v| v.as_bool()) {
+            s.project_emulate_touch_from_mouse = v;
         }
         // Physics
         if let Some(v) = p.get("physics_fps").and_then(|v| v.as_u64()) {

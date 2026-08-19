@@ -127,6 +127,24 @@ centered = false
         "frame = 2 of a 4-frame sheet must sample the BLUE cell, got {drawn:?} — \
          a path that ignores `frame` draws the red first cell instead"
     );
+
+    // 🔑 …and the flip must not MOVE the quad (pat-s3rrv.22).
+    //
+    // Godot flips a Sprite2D by negating `dst_rect.size`, which the canvas
+    // normalises back to a positive rect plus a FLIP_H flag — the texture
+    // sampling mirrors, the geometry does not. Reflecting about the node
+    // origin instead sends this uncentred cell to x∈[12,16), where the
+    // assertion above reads the clear colour and looks like "`frame` was
+    // ignored". Sampling the far side is what tells the two apart, and it is
+    // only observable because `centered = false`: a centred rect is symmetric
+    // about the origin, so both behaviours agree and neither test fails.
+    let mirrored_side = fb.get_pixel(14, 10);
+    assert!(
+        mirrored_side.r < 0.5 && mirrored_side.g < 0.5 && mirrored_side.b < 0.5,
+        "x = 14 is outside the sprite's rect, so it must still be the clear \
+         colour; got {mirrored_side:?} — the flip reflected the quad about the \
+         node origin instead of mirroring the texture in place"
+    );
 }
 
 /// A script `_draw()` reaches pixels through the one remaining path. Its

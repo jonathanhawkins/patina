@@ -726,6 +726,14 @@ impl MultiplayerAPI {
         self.peer.as_ref().map(|p| p.is_server()).unwrap_or(false)
     }
 
+    /// Shared access to the peer (pat-s3rrv.17).
+    ///
+    /// The authority check runs inside loops that already hold `&self`, where a
+    /// `&mut` accessor cannot be used.
+    pub fn peer(&self) -> Option<&(dyn NetworkPeer + 'static)> {
+        self.peer.as_deref()
+    }
+
     /// Mutable access to the peer for advanced integration (spawner/sync).
     pub fn peer_mut(&mut self) -> Option<&mut (dyn NetworkPeer + 'static)> {
         self.peer.as_deref_mut()
@@ -1369,6 +1377,37 @@ pub fn decode_spawn_packet(data: &[u8]) -> Option<SpawnPacket> {
         net_id,
         scene_index,
     })
+}
+
+/// Leading kind byte for a despawn notification (pat-s3rrv.17).
+///
+/// `NetworkCommand::Despawn` has existed since the transport was written and
+/// nothing ever produced or consumed it, so a host that removed a spawned node
+/// left the client's copy on screen forever.
+pub const REPLICATION_KIND_DESPAWN: u8 = NetworkCommand::Despawn.to_byte();
+
+/// Encode a despawn notification for the spawn identified by `net_id`.
+///
+/// Only the id travels: the receiver already knows which node it instantiated
+/// for that id, and re-sending the scene path would invite the two peers to
+/// disagree about which node to remove.
+pub fn encode_despawn_packet(net_id: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + 4);
+    out.push(REPLICATION_KIND_DESPAWN);
+    out.extend_from_slice(&net_id.to_be_bytes());
+    out
+}
+
+/// Decode a despawn notification, or `None` if the payload is not one.
+///
+/// ⚠️ The length check is `!=`, not `<`. A spawn packet also begins with a
+/// 4-byte `net_id`, so a `<` check would let a longer packet whose kind byte
+/// happened to match decode as a despawn and silently delete a live node.
+pub fn decode_despawn_packet(data: &[u8]) -> Option<u32> {
+    if data.first().copied() != Some(REPLICATION_KIND_DESPAWN) || data.len() != 1 + 4 {
+        return None;
+    }
+    Some(u32::from_be_bytes(data[1..5].try_into().ok()?))
 }
 
 /// Encode a property-sync packet for multiplayer transport.

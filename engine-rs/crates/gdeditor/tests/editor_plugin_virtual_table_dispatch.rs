@@ -871,3 +871,373 @@ fn clear_reaches_every_plugin_not_just_the_first() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// pat-s3rrv.66: the drag routes forward too
+// ---------------------------------------------------------------------------
+
+/// A plugin that consumes every canvas event and records the `pressed` flag it
+/// last saw, so a release can be told from a press.
+fn drag_plugin_source() -> String {
+    "extends EditorPlugin\n\
+     var calls = 0\n\
+     var last_pressed = \"unset\"\n\
+     func _forward_canvas_gui_input(event):\n\
+     \x20   self.calls += 1\n\
+     \x20   self.last_pressed = event.pressed\n\
+     \x20   return true\n"
+        .to_string()
+}
+
+fn state_with_drag_plugin() -> EditorState {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    tree.add_child(root, Node::new("Sprite", "Sprite2D"))
+        .expect("add child");
+    let mut state = EditorState::new(tree);
+    let instance =
+        GDScriptNodeInstance::from_source(&drag_plugin_source(), root).expect("plugin parses");
+    state.active_plugins.insert("dragger".to_string(), instance);
+    state
+}
+
+/// ⚠️ Godot's contract is that the plugin sees the *input event*. Patina splits
+/// one gesture across `/api/viewport/click`, `drag_start` and `drag_end`, and
+/// only the click route forwarded — so a plugin could consume a click and then
+/// watch the editor drag a node out from under it on the very next gesture.
+#[test]
+fn a_plugin_can_consume_a_viewport_drag() {
+    let port = free_port();
+    let handle = gdeditor::editor_server::EditorServerHandle::start(port, state_with_drag_plugin());
+    thread::sleep(Duration::from_millis(100));
+
+    let start = http_post(port, "/api/viewport/drag_start", r#"{"x":10,"y":10}"#);
+    assert!(
+        start.contains("consumed_by"),
+        "drag_start must offer the press to plugins, got:\n{start}"
+    );
+
+    // ⚠️ The load-bearing consequence: consuming the press means the editor's
+    // drag never STARTED, so the release has nothing to commit. Checking only
+    // that drag_start reported `consumed_by` would pass even if the editor had
+    // begun dragging underneath.
+    let end = http_post(port, "/api/viewport/drag_end", r#"{"x":40,"y":40}"#);
+    assert!(
+        end.contains("consumed_by"),
+        "drag_end must forward the release, got:\n{end}"
+    );
+    drop(handle);
+}
+
+/// The declining control: a plugin that returns false leaves both drag routes
+/// on the editor's own path.
+///
+/// Without this half, a `dispatch_plugin_virtual` that reported `consumed_by`
+/// unconditionally would pass the test above.
+#[test]
+fn a_declining_plugin_leaves_the_drag_to_the_editor() {
+    let port = free_port();
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    tree.add_child(root, Node::new("Sprite", "Sprite2D"))
+        .expect("add child");
+    let mut state = EditorState::new(tree);
+    let src = "extends EditorPlugin\n\
+               func _forward_canvas_gui_input(event):\n\
+               \x20   return false\n";
+    state.active_plugins.insert(
+        "decliner".to_string(),
+        GDScriptNodeInstance::from_source(src, root).expect("plugin parses"),
+    );
+    let handle = gdeditor::editor_server::EditorServerHandle::start(port, state);
+    thread::sleep(Duration::from_millis(100));
+
+    let start = http_post(port, "/api/viewport/drag_start", r#"{"x":10,"y":10}"#);
+    assert!(
+        !start.contains("consumed_by"),
+        "a declining plugin must not consume the drag; `consumed_by` appears \
+         only in the consume branch, so its absence is the proof the editor's \
+         own path ran. Got:\n{start}"
+    );
+    drop(handle);
+}
+
+/// ⚠️ The release must arrive as `pressed: false`, not another press.
+///
+/// A plugin distinguishes press from release on exactly that field, so sending
+/// `true` for a release makes a click-to-place tool fire twice per gesture —
+/// once on the press and once on what it believes is a second press. Asserted
+/// in-process because the HTTP test cannot read the plugin back out of a moved
+/// `EditorState`.
+#[test]
+fn the_drag_release_is_forwarded_as_a_release() {
+    let mut state = state_with_drag_plugin();
+
+    // The press half, then the release half, through the same helper the routes
+    // use — the event shape is what is under test, not the HTTP plumbing.
+    let pressed = gdeditor::editor_server::canvas_button_event(1.0, 2.0, true);
+    gdeditor::editor_server::dispatch_plugin_virtual(
+        &mut state,
+        "_forward_canvas_gui_input",
+        &[pressed],
+        true,
+    );
+    assert_eq!(
+        prop(&state, "dragger", "last_pressed"),
+        Variant::Bool(true),
+        "a press must arrive with pressed = true"
+    );
+
+    let released = gdeditor::editor_server::canvas_button_event(3.0, 4.0, false);
+    gdeditor::editor_server::dispatch_plugin_virtual(
+        &mut state,
+        "_forward_canvas_gui_input",
+        &[released],
+        true,
+    );
+    assert_eq!(
+        prop(&state, "dragger", "last_pressed"),
+        Variant::Bool(false),
+        "a RELEASE must arrive with pressed = false — `true` here makes every \
+         click-to-place plugin fire twice per gesture"
+    );
+    assert_eq!(as_int(prop(&state, "dragger", "calls")), 2);
+}
+
+// ---------------------------------------------------------------------------
+// pat-s3rrv.66 (d): `_get_breakpoints` joins the editor's own
+// ---------------------------------------------------------------------------
+
+/// A plugin reporting breakpoints in Godot's `script:line` format.
+///
+/// ⚠️ `res://ui.gd:7` contains **two** colons. Splitting on the first yields
+/// script `"res"` and line `"//ui.gd:7"`, which parses as nothing — so the
+/// plugin's breakpoints silently never appear and it looks like the virtual was
+/// never implemented. The entries below are deliberately `res://`-prefixed so a
+/// left-split implementation cannot pass.
+const BREAKPOINT_PLUGIN: &str = "extends EditorPlugin\n\
+     func _get_breakpoints():\n\
+     \x20   return [\"res://ui.gd:7\", \"res://ui.gd:12\", \"res://other.gd:99\"]\n";
+
+#[test]
+fn plugin_breakpoints_merge_with_the_editors_own() {
+    let port = free_port();
+    let tree = SceneTree::new();
+    let root = tree.root_id();
+    let mut state = EditorState::new(tree);
+    state.active_plugins.insert(
+        "dbg".to_string(),
+        GDScriptNodeInstance::from_source(BREAKPOINT_PLUGIN, root).expect("plugin parses"),
+    );
+    // The editor already knows line 3, and also line 12 — which the plugin
+    // reports too, so the dedupe has something to collapse.
+    state
+        .breakpoints
+        .insert("res://ui.gd".to_string(), vec![3, 12]);
+
+    let handle = gdeditor::editor_server::EditorServerHandle::start(port, state);
+    thread::sleep(Duration::from_millis(100));
+
+    let resp = http_get(port, "/api/script/breakpoints?path=res%3A%2F%2Fui.gd");
+    let body = resp.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+    let v: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("expected JSON ({e}):\n{resp}"));
+    let got: Vec<i64> = v["breakpoints"]
+        .as_array()
+        .expect("breakpoints array")
+        .iter()
+        .filter_map(|x| x.as_i64())
+        .collect();
+
+    assert_eq!(
+        got,
+        vec![3, 7, 12],
+        "expected the editor's own (3, 12) merged with the plugin's (7, 12), \
+         sorted and deduped. Missing 7 means the `res://` path was split on its \
+         FIRST colon and the entry parsed to nothing; a second 12 means the \
+         merge does not dedupe; a 99 means the other script was not filtered \
+         out. Got {got:?} from:\n{body}"
+    );
+    drop(handle);
+}
+
+/// The control: with no plugin, the route still reports exactly the editor's
+/// own breakpoints.
+///
+/// Without this, a merge that accidentally returned a hard-coded list would
+/// pass the test above.
+#[test]
+fn breakpoints_without_a_plugin_are_unchanged() {
+    let port = free_port();
+    let tree = SceneTree::new();
+    let mut state = EditorState::new(tree);
+    state
+        .breakpoints
+        .insert("res://ui.gd".to_string(), vec![3, 12]);
+    let handle = gdeditor::editor_server::EditorServerHandle::start(port, state);
+    thread::sleep(Duration::from_millis(100));
+
+    let resp = http_get(port, "/api/script/breakpoints?path=res%3A%2F%2Fui.gd");
+    let body = resp.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+    let v: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("expected JSON ({e}):\n{resp}"));
+    let got: Vec<i64> = v["breakpoints"]
+        .as_array()
+        .expect("breakpoints array")
+        .iter()
+        .filter_map(|x| x.as_i64())
+        .collect();
+    assert_eq!(got, vec![3, 12], "got {got:?} from:\n{body}");
+    drop(handle);
+}
+
+// ---------------------------------------------------------------------------
+// pat-s3rrv.66: `_forward_3d_gui_input` and its THREE-valued return
+// ---------------------------------------------------------------------------
+
+/// A 3D plugin returning a fixed `AfterGUIInput`, recording that it was asked
+/// and how many arguments it received.
+fn gui3d_plugin(answer: i64) -> String {
+    format!(
+        "extends EditorPlugin\n\
+         var calls = 0\n\
+         var argc = 0\n\
+         func _forward_3d_gui_input(camera, event):\n\
+         \x20   self.calls += 1\n\
+         \x20   self.argc = 2\n\
+         \x20   return {answer}\n"
+    )
+}
+
+fn state_with_gui3d(plugins: &[(&str, i64)]) -> EditorState {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    tree.add_child(root, Node::new("Cube", "Node3D"))
+        .expect("add child");
+    let mut state = EditorState::new(tree);
+    for (folder, answer) in plugins {
+        state.active_plugins.insert(
+            (*folder).to_string(),
+            GDScriptNodeInstance::from_source(&gui3d_plugin(*answer), root).expect("plugin parses"),
+        );
+    }
+    state
+}
+
+/// ⚠️ The distinction a bool cannot carry.
+///
+/// `AFTER_GUI_INPUT_CUSTOM` (2) is documented as *"Pass the InputEvent to other
+/// editor plugins **except the main Node3D one**"* — so it suppresses the
+/// editor's selection **and keeps the sweep going**, while `STOP` (1) suppresses
+/// the selection **and ends the sweep**. Collapsing them to one boolean either
+/// lets a sub-gizmo plugin block its peers or lets the editor steal a selection
+/// the plugin meant to keep.
+///
+/// The folders are named so a sorted walk puts the deciding plugin first.
+#[test]
+fn custom_keeps_offering_the_event_while_stop_does_not() {
+    // CUSTOM first, then a second plugin: the second MUST still be asked.
+    let mut state = state_with_gui3d(&[("a_custom", 2), ("b_after", 0)]);
+    let camera = Variant::Nil;
+    let event = gdeditor::editor_server::canvas_button_event(1.0, 2.0, true);
+    gdeditor::editor_server::dispatch_forward_3d_gui_input(
+        &mut state,
+        &[camera.clone(), event.clone()],
+    );
+    assert_eq!(
+        as_int(prop(&state, "b_after", "calls")),
+        1,
+        "CUSTOM must keep offering the event to the remaining plugins — that is \
+         the entire difference from STOP"
+    );
+
+    // STOP first: the second plugin must NOT be asked.
+    let mut state = state_with_gui3d(&[("a_stop", 1), ("b_after", 0)]);
+    gdeditor::editor_server::dispatch_forward_3d_gui_input(&mut state, &[camera, event]);
+    assert_eq!(
+        as_int(prop(&state, "b_after", "calls")),
+        0,
+        "STOP ends the sweep; a later plugin acting on an event another already \
+         consumed is the bug this distinction prevents"
+    );
+}
+
+/// The virtual takes TWO arguments — `(camera, event)` — unlike its canvas
+/// sibling's one. A 1-arg dispatch would raise inside the plugin.
+#[test]
+fn forward_3d_gui_input_is_called_with_camera_and_event() {
+    let mut state = state_with_gui3d(&[("p", 0)]);
+    let camera = Variant::Nil;
+    let event = gdeditor::editor_server::canvas_button_event(3.0, 4.0, true);
+    gdeditor::editor_server::dispatch_forward_3d_gui_input(&mut state, &[camera, event]);
+    assert_eq!(
+        as_int(prop(&state, "p", "argc")),
+        2,
+        "`_forward_3d_gui_input(camera, event)` is arity 2, not the canvas \
+         sibling's 1 — a 1-arg call raises inside the plugin"
+    );
+    assert_eq!(as_int(prop(&state, "p", "calls")), 1);
+}
+
+/// ⚠️ Rubber-band select must honour the same suppression as click-select.
+///
+/// Forwarding one and not the other is worse than forwarding neither: a
+/// sub-gizmo plugin returning `CUSTOM` would suppress click-select while a
+/// rubber-band drag went on stealing the selection out from under it. The
+/// inconsistency only surfaces on whichever gesture the plugin author happened
+/// not to test, which is the worst possible place to find it.
+#[test]
+fn box_select_honours_the_same_suppression_as_click_select() {
+    let port = free_port();
+    // CUSTOM: suppress the editor's selection, but keep offering to peers.
+    let handle =
+        gdeditor::editor_server::EditorServerHandle::start(port, state_with_gui3d(&[("g", 2)]));
+    thread::sleep(Duration::from_millis(100));
+
+    let click = http_post(port, "/api/viewport/3d/select", r#"{"x":10,"y":10}"#);
+    assert!(
+        click.contains("\"after_gui_input\":\"custom\""),
+        "click-select must report the suppression, got:\n{click}"
+    );
+
+    let box_sel = http_post(
+        port,
+        "/api/viewport/3d/box_select",
+        r#"{"x1":0,"y1":0,"x2":50,"y2":50}"#,
+    );
+    assert!(
+        box_sel.contains("\"after_gui_input\":\"custom\""),
+        "box_select must honour it too — a plugin that blocks click-select and \
+         not rubber-band select has a hole exactly where nobody looks. Got:\n{box_sel}"
+    );
+    drop(handle);
+}
+
+/// The control: a PASS plugin leaves both selection routes on the editor's own
+/// path.
+///
+/// Without it, a route that reported `after_gui_input` unconditionally would
+/// pass the test above.
+#[test]
+fn a_passing_plugin_leaves_both_3d_selection_routes_alone() {
+    let port = free_port();
+    let handle =
+        gdeditor::editor_server::EditorServerHandle::start(port, state_with_gui3d(&[("g", 0)]));
+    thread::sleep(Duration::from_millis(100));
+
+    for route in ["/api/viewport/3d/select", "/api/viewport/3d/box_select"] {
+        let body = if route.ends_with("box_select") {
+            r#"{"x1":0,"y1":0,"x2":50,"y2":50}"#
+        } else {
+            r#"{"x":10,"y":10}"#
+        };
+        let resp = http_post(port, route, body);
+        assert!(
+            !resp.contains("after_gui_input"),
+            "PASS must not suppress `{route}`; `after_gui_input` appears only in \
+             the suppression branch, so its absence is the proof the editor's \
+             own path ran. Got:\n{resp}"
+        );
+    }
+    drop(handle);
+}

@@ -20,8 +20,10 @@
 //! forms with `*_local` as the right-multiply counterparts, and `Rect2.has_point`
 //! is inclusive at `position` and exclusive at `end`.
 
-use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector2i, Vector3, Vector3i};
-use gdcore::math3d::{Aabb, Basis, Plane, Quaternion, Transform3D};
+use gdcore::math::{
+    Color, Rect2, Rect2i, Transform2D, Vector2, Vector2i, Vector3, Vector3i, Vector4, Vector4i,
+};
+use gdcore::math3d::{Aabb, Basis, Plane, Projection, Quaternion, Transform3D};
 use gdvariant::Variant;
 
 use crate::interpreter::{RuntimeError, RuntimeErrorKind};
@@ -530,6 +532,12 @@ pub(crate) fn member_get(value: &Variant, member: &str) -> Option<Variant> {
             "h" => Some(Variant::Float(c.h() as f64)),
             "s" => Some(Variant::Float(c.s() as f64)),
             "v" => Some(Variant::Float(c.v() as f64)),
+            // The Oklab decomposition (pat-s3rrv.58). Perceptually uniform, so
+            // `ok_hsl_l` is NOT a rename of `v`: pure red has v = 1.0 and
+            // ok_hsl_l = 0.568.
+            "ok_hsl_h" => Some(Variant::Float(c.ok_hsl_h() as f64)),
+            "ok_hsl_s" => Some(Variant::Float(c.ok_hsl_s() as f64)),
+            "ok_hsl_l" => Some(Variant::Float(c.ok_hsl_l() as f64)),
             _ => None,
         },
         Variant::Transform2D(t) => match member {
@@ -641,6 +649,17 @@ fn member_set_inner(
             other.variant_type()
         ))),
     };
+    // ⚠️ Deliberately NOT `want_i32`. The 8-bit colour members clamp to
+    // 0..255, and narrowing first would wrap an out-of-range value before the
+    // clamp ever saw it: `col.r8 = 4294967296` narrows to 0 and writes BLACK,
+    // where clamping the full value writes white.
+    let want_i64 = |v: &Variant| match v {
+        Variant::Int(i) => Ok(*i),
+        other => Err(type_error(format!(
+            "{ctx} expects an int, got {}",
+            other.variant_type()
+        ))),
+    };
     match value {
         Variant::Rect2(r) => {
             let mut r = *r;
@@ -702,6 +721,34 @@ fn member_set_inner(
             // which is exactly what assigning `proj.x` means.
             p.m[index] = [col.x, col.y, col.z, col.w];
             Ok(Variant::Projection(p))
+        }
+        // Godot exposes every Color member as read-WRITE (`col.r8 = 128`,
+        // `col.h = 0.5`), so the write half mirrors `member_get`'s read half
+        // above (pat-s3rrv.58). Without this arm `member_set` answered `None`
+        // for Color and the assignment silently did nothing.
+        Variant::Color(c) => {
+            let c = *c;
+            Ok(Variant::Color(match member {
+                "r" => gdcore::math::Color::new(want_f32(new_value)?, c.g, c.b, c.a),
+                "g" => gdcore::math::Color::new(c.r, want_f32(new_value)?, c.b, c.a),
+                "b" => gdcore::math::Color::new(c.r, c.g, want_f32(new_value)?, c.a),
+                "a" => gdcore::math::Color::new(c.r, c.g, c.b, want_f32(new_value)?),
+                "r8" => c.with_r8(want_i64(new_value)?),
+                "g8" => c.with_g8(want_i64(new_value)?),
+                "b8" => c.with_b8(want_i64(new_value)?),
+                "a8" => c.with_a8(want_i64(new_value)?),
+                // ⚠️ These go through an HSV round-trip, so writing one
+                // re-derives the other two. Setting the hue of a GREY colour is
+                // a no-op — saturation 0 has no hue to move — which is Godot's
+                // behaviour, not a gap.
+                "h" => c.with_h(want_f32(new_value)?),
+                "s" => c.with_s(want_f32(new_value)?),
+                "v" => c.with_v(want_f32(new_value)?),
+                "ok_hsl_h" => c.with_ok_hsl_h(want_f32(new_value)?),
+                "ok_hsl_s" => c.with_ok_hsl_s(want_f32(new_value)?),
+                "ok_hsl_l" => c.with_ok_hsl_l(want_f32(new_value)?),
+                _ => unreachable!("member_get gated the member name"),
+            }))
         }
         Variant::Transform2D(t) => {
             let mut t = *t;
@@ -801,6 +848,10 @@ pub(crate) fn call_method(
         Variant::Aabb(a) => Some(aabb_method(*a, method, args)),
         Variant::Plane(p) => Some(plane_method(*p, method, args)),
         Variant::Color(c) => Some(color_method(*c, method, args)),
+        Variant::Rect2i(r) => Some(rect2i_method(*r, method, args)),
+        Variant::Projection(p) => Some(projection_method(*p, method, args)),
+        Variant::Vector4(v) => Some(vector4_method(*v, method, args)),
+        Variant::Vector4i(v) => Some(vector4i_method(*v, method, args)),
         _ => None,
     }
 }
@@ -1378,6 +1429,44 @@ fn arg_vec3i(args: &[Variant], idx: usize, ctx: &str) -> Result<Vector3i, Runtim
     }
 }
 
+/// An optional trailing bool argument; absent means `false`.
+///
+/// Godot's `flip_fov` flags default to `false`, and a caller that omits them is
+/// asking for the default rather than making an error.
+fn arg_flag(args: &[Variant], idx: usize) -> bool {
+    matches!(args.get(idx), Some(Variant::Bool(true)))
+}
+
+fn arg_rect2i(args: &[Variant], idx: usize, ctx: &str) -> Result<Rect2i, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::Rect2i(r)) => Ok(*r),
+        other => Err(type_error(format!(
+            "{ctx} expects a Rect2i for argument {idx}, got {}",
+            describe(other)
+        ))),
+    }
+}
+
+fn arg_vec4(args: &[Variant], idx: usize, ctx: &str) -> Result<Vector4, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::Vector4(v)) => Ok(*v),
+        other => Err(type_error(format!(
+            "{ctx} expects a Vector4 for argument {idx}, got {}",
+            describe(other)
+        ))),
+    }
+}
+
+fn arg_vec4i(args: &[Variant], idx: usize, ctx: &str) -> Result<Vector4i, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::Vector4i(v)) => Ok(*v),
+        other => Err(type_error(format!(
+            "{ctx} expects a Vector4i for argument {idx}, got {}",
+            describe(other)
+        ))),
+    }
+}
+
 fn arg_int(args: &[Variant], idx: usize, ctx: &str) -> Result<i32, RuntimeError> {
     match args.get(idx) {
         Some(Variant::Int(i)) => Ok(*i as i32),
@@ -1570,6 +1659,199 @@ fn vector2_method(v: Vector2, method: &str, args: &[Variant]) -> Result<Variant,
             Ok(Variant::Vector2(rotated * (result_len / start_len)))
         }
         _ => Err(undefined_method("Vector2", method)),
+    }
+}
+
+/// `Rect2i`'s instance methods (pat-s3rrv.59).
+///
+/// Same dispatch gap the Vector4 pair had: the kind round-trips through a
+/// `.tscn` and its `position`/`size`/`end` read, but nothing could be called on
+/// it. Bodies delegate to `gdcore::math::Rect2i`.
+///
+/// ⚠️ Godot spells the area accessor `get_area`; gdcore's method is `area`.
+/// The GDScript-facing name has to be Godot's.
+fn rect2i_method(r: Rect2i, method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    let ctx = format!("Rect2i.{method}()");
+    match method {
+        "get_area" => Ok(Variant::Int(r.area())),
+        "has_area" => Ok(Variant::Bool(r.has_area())),
+        "get_center" => Ok(Variant::Vector2i(r.get_center())),
+        "has_point" => Ok(Variant::Bool(r.has_point(arg_vec2i(args, 0, &ctx)?))),
+        "intersects" => Ok(Variant::Bool(r.intersects(arg_rect2i(args, 0, &ctx)?))),
+        "encloses" => Ok(Variant::Bool(r.encloses(arg_rect2i(args, 0, &ctx)?))),
+        "intersection" => Ok(Variant::Rect2i(r.intersection(arg_rect2i(args, 0, &ctx)?))),
+        "merge" => Ok(Variant::Rect2i(r.merge(arg_rect2i(args, 0, &ctx)?))),
+        "expand" => Ok(Variant::Rect2i(r.expand(arg_vec2i(args, 0, &ctx)?))),
+        "abs" => Ok(Variant::Rect2i(r.abs())),
+        "grow" => Ok(Variant::Rect2i(r.grow(arg_int(args, 0, &ctx)?))),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("Rect2i.{method}"),
+        ))),
+    }
+}
+
+/// `Projection`'s instance methods (pat-s3rrv.59).
+///
+/// ⚠️ Deliberately SHORT. Most of Godot's Projection surface is `create_*`
+/// STATIC constructors, which belong in `vector_static_call` rather than here,
+/// and the derived getters (`get_fov`, `get_z_near`, `get_aspect`, …) each read
+/// a specific combination of matrix entries that has to be taken from
+/// `core/math/projection.cpp` rather than guessed. Only the three gdcore
+/// already implements and tests are exposed.
+fn projection_method(
+    p: gdcore::math3d::Projection,
+    method: &str,
+    _args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    match method {
+        "determinant" => Ok(Variant::Float(p.determinant() as f64)),
+        "inverse" => Ok(Variant::Projection(p.inverse())),
+        "is_orthogonal" => Ok(Variant::Bool(p.is_orthogonal())),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("Projection.{method}"),
+        ))),
+    }
+}
+
+/// `Vector4`'s instance methods (pat-s3rrv.59).
+///
+/// The kind could be constructed and its members read, but `call_method` had no
+/// arm for it, so every `v.length()` hit the "cannot call method on Vector4"
+/// catch-all — the same dispatch-shaped gap `Color` had.
+///
+/// Bodies delegate to `gdcore::math::Vector4`, which is already tested, rather
+/// than recomputing here.
+fn vector4_method(v: Vector4, method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    let ctx = format!("Vector4.{method}()");
+    let vec = |x: f32, y: f32, z: f32, w: f32| -> Result<Variant, RuntimeError> {
+        Ok(Variant::Vector4(Vector4::new(x, y, z, w)))
+    };
+    match method {
+        "length" => Ok(Variant::Float(v.length() as f64)),
+        "length_squared" => Ok(Variant::Float(v.length_squared() as f64)),
+        "normalized" => Ok(Variant::Vector4(v.normalized())),
+        "is_normalized" => Ok(Variant::Bool(v.is_normalized())),
+        "abs" => Ok(Variant::Vector4(v.abs())),
+        "floor" => Ok(Variant::Vector4(v.floor())),
+        "ceil" => Ok(Variant::Vector4(v.ceil())),
+        "round" => Ok(Variant::Vector4(v.round())),
+        "sign" => vec(sign_f(v.x), sign_f(v.y), sign_f(v.z), sign_f(v.w)),
+        "dot" => Ok(Variant::Float(v.dot(arg_vec4(args, 0, &ctx)?) as f64)),
+        "distance_to" => Ok(Variant::Float(
+            v.distance_to(arg_vec4(args, 0, &ctx)?) as f64
+        )),
+        "distance_squared_to" => Ok(Variant::Float(
+            v.distance_squared_to(arg_vec4(args, 0, &ctx)?) as f64,
+        )),
+        "direction_to" => {
+            let o = arg_vec4(args, 0, &ctx)?;
+            Ok(Variant::Vector4(
+                Vector4::new(o.x - v.x, o.y - v.y, o.z - v.z, o.w - v.w).normalized(),
+            ))
+        }
+        "lerp" => {
+            let to = arg_vec4(args, 0, &ctx)?;
+            let weight = arg_num(args, 1, &ctx)?;
+            Ok(Variant::Vector4(v.lerp(to, weight)))
+        }
+        "min" => Ok(Variant::Vector4(v.min(arg_vec4(args, 0, &ctx)?))),
+        "max" => Ok(Variant::Vector4(v.max(arg_vec4(args, 0, &ctx)?))),
+        "is_finite" => Ok(Variant::Bool(
+            v.x.is_finite() && v.y.is_finite() && v.z.is_finite() && v.w.is_finite(),
+        )),
+        "is_zero_approx" => Ok(Variant::Bool(
+            v.x.abs() < CMP_EPSILON
+                && v.y.abs() < CMP_EPSILON
+                && v.z.abs() < CMP_EPSILON
+                && v.w.abs() < CMP_EPSILON,
+        )),
+        "is_equal_approx" => {
+            let o = arg_vec4(args, 0, &ctx)?;
+            Ok(Variant::Bool(
+                is_equal_approx_f(v.x, o.x)
+                    && is_equal_approx_f(v.y, o.y)
+                    && is_equal_approx_f(v.z, o.z)
+                    && is_equal_approx_f(v.w, o.w),
+            ))
+        }
+        // ⚠️ Godot's two axis scans are DELIBERATELY asymmetric
+        // (`vector4.cpp:37-59`): `min` compares with `<=` so a tie picks the
+        // LAST axis, `max` with `>` so a tie picks the FIRST. Writing both the
+        // same way is wrong on ties and invisible to any fixture whose
+        // components are all distinct.
+        "max_axis_index" => {
+            let mut idx = 0;
+            let mut best = v.x;
+            for (i, c) in [v.y, v.z, v.w].iter().enumerate() {
+                if *c > best {
+                    best = *c;
+                    idx = i + 1;
+                }
+            }
+            Ok(Variant::Int(idx as i64))
+        }
+        "min_axis_index" => {
+            let mut idx = 0;
+            let mut best = v.x;
+            for (i, c) in [v.y, v.z, v.w].iter().enumerate() {
+                if *c <= best {
+                    best = *c;
+                    idx = i + 1;
+                }
+            }
+            Ok(Variant::Int(idx as i64))
+        }
+        _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("Vector4.{method}"),
+        ))),
+    }
+}
+
+/// `Vector4i`'s instance methods (pat-s3rrv.59).
+///
+/// ⚠️ `length` is a FLOAT while every component and `length_squared` are Ints —
+/// Godot's integer vectors keep the exact squared magnitude and only the square
+/// root widens.
+fn vector4i_method(v: Vector4i, method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    let ctx = format!("Vector4i.{method}()");
+    match method {
+        "length" => Ok(Variant::Float(v.length() as f64)),
+        "length_squared" => Ok(Variant::Int(v.length_squared())),
+        "abs" => Ok(Variant::Vector4i(v.abs())),
+        "sign" => Ok(Variant::Vector4i(v.sign())),
+        "min" => Ok(Variant::Vector4i(v.min(arg_vec4i(args, 0, &ctx)?))),
+        "max" => Ok(Variant::Vector4i(v.max(arg_vec4i(args, 0, &ctx)?))),
+        "clamp" => {
+            let lo = arg_vec4i(args, 0, &ctx)?;
+            let hi = arg_vec4i(args, 1, &ctx)?;
+            Ok(Variant::Vector4i(v.clamp(lo, hi)))
+        }
+        // Same asymmetry as Vector4's; see the note there.
+        "max_axis_index" => {
+            let mut idx = 0;
+            let mut best = v.x;
+            for (i, c) in [v.y, v.z, v.w].iter().enumerate() {
+                if *c > best {
+                    best = *c;
+                    idx = i + 1;
+                }
+            }
+            Ok(Variant::Int(idx as i64))
+        }
+        "min_axis_index" => {
+            let mut idx = 0;
+            let mut best = v.x;
+            for (i, c) in [v.y, v.z, v.w].iter().enumerate() {
+                if *c <= best {
+                    best = *c;
+                    idx = i + 1;
+                }
+            }
+            Ok(Variant::Int(idx as i64))
+        }
+        _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("Vector4i.{method}"),
+        ))),
     }
 }
 
@@ -1940,6 +2222,120 @@ pub(crate) fn vector_static_call(
                 Ok(Variant::Color(Color::from_hsv(h, s, v, a)))
             })())
         }
+        // The Oklab variant. Same shape as `from_hsv`, and deliberately right
+        // next to it: the two differ only in colour space, and a caller
+        // reaching for one should see the other.
+        ("Color", "from_ok_hsl") => {
+            let ctx = "Color.from_ok_hsl()";
+            Some((|| {
+                let h = arg_num(args, 0, ctx)?;
+                let s = arg_num(args, 1, ctx)?;
+                let l = arg_num(args, 2, ctx)?;
+                let a = match args.get(3) {
+                    Some(_) => arg_num(args, 3, ctx)?,
+                    None => 1.0,
+                };
+                Ok(Variant::Color(Color::from_ok_hsl(h, s, l, a)))
+            })())
+        }
+        // ⚠️ Reads the raw i64 rather than going through `arg_int`, which
+        // narrows to i32. An RGBE9995 word is a FULL u32 and has its top bit
+        // set whenever the exponent is 16 or more — a perfectly ordinary
+        // value like 3221488129 (opaque white) narrows to a negative i32 and
+        // would unpack to something else entirely.
+        // Projection's static constructors (pat-s3rrv.59). Without these the
+        // only Projection a script could make was the identity, so
+        // `is_orthogonal` had nothing to answer `false` about.
+        ("Projection", "create_perspective") => {
+            let ctx = "Projection.create_perspective()";
+            Some((|| {
+                let fov = arg_num(args, 0, ctx)?;
+                let aspect = arg_num(args, 1, ctx)?;
+                let z_near = arg_num(args, 2, ctx)?;
+                let z_far = arg_num(args, 3, ctx)?;
+                // ⚠️ `flip_fov` reinterprets the angle as HORIZONTAL, and the
+                // conversion is Godot's own `get_fovy(fovx, 1/aspect)`
+                // (`projection.h:103`), not a swap of the aspect. gdcore's
+                // constructor only takes a vertical fov, so the conversion
+                // happens here.
+                let fov = if arg_flag(args, 4) {
+                    let half = (fov.to_radians() * 0.5).tan();
+                    (((1.0 / aspect) * half).atan() * 2.0).to_degrees()
+                } else {
+                    fov
+                };
+                Ok(Variant::Projection(Projection::create_perspective(
+                    fov, aspect, z_near, z_far,
+                )))
+            })())
+        }
+        ("Projection", "create_orthogonal") => {
+            let ctx = "Projection.create_orthogonal()";
+            Some((|| {
+                Ok(Variant::Projection(Projection::create_orthogonal(
+                    arg_num(args, 0, ctx)?,
+                    arg_num(args, 1, ctx)?,
+                    arg_num(args, 2, ctx)?,
+                    arg_num(args, 3, ctx)?,
+                    arg_num(args, 4, ctx)?,
+                    arg_num(args, 5, ctx)?,
+                )))
+            })())
+        }
+        ("Projection", "create_frustum") => {
+            let ctx = "Projection.create_frustum()";
+            Some((|| {
+                Ok(Variant::Projection(Projection::create_frustum(
+                    arg_num(args, 0, ctx)?,
+                    arg_num(args, 1, ctx)?,
+                    arg_num(args, 2, ctx)?,
+                    arg_num(args, 3, ctx)?,
+                    arg_num(args, 4, ctx)?,
+                    arg_num(args, 5, ctx)?,
+                )))
+            })())
+        }
+        ("Projection", "create_orthogonal_aspect") => {
+            let ctx = "Projection.create_orthogonal_aspect()";
+            Some((|| {
+                let size = arg_num(args, 0, ctx)?;
+                let aspect = arg_num(args, 1, ctx)?;
+                let z_near = arg_num(args, 2, ctx)?;
+                let z_far = arg_num(args, 3, ctx)?;
+                // 🔑 Godot's flag reads INVERTED here: `set_orthogonal` does
+                // `if (!p_flip_fov) { p_size *= p_aspect; }`
+                // (`projection.cpp:356-362`) — the widening happens when the
+                // flag is FALSE. gdcore's `create_orthogonal_aspect` already
+                // encodes that default case, so only the flipped one needs
+                // spelling out.
+                if arg_flag(args, 4) {
+                    let half_w = size * 0.5;
+                    let half_h = size / aspect * 0.5;
+                    Ok(Variant::Projection(Projection::create_orthogonal(
+                        -half_w, half_w, -half_h, half_h, z_near, z_far,
+                    )))
+                } else {
+                    Ok(Variant::Projection(Projection::create_orthogonal_aspect(
+                        size, aspect, z_near, z_far,
+                    )))
+                }
+            })())
+        }
+        ("Color", "from_rgbe9995") => {
+            let ctx = "Color.from_rgbe9995()";
+            Some((|| match args.first() {
+                Some(Variant::Int(v)) if (0..=u32::MAX as i64).contains(v) => {
+                    Ok(Variant::Color(Color::from_rgbe9995(*v as u32)))
+                }
+                Some(Variant::Int(v)) => Err(type_error(format!(
+                    "{ctx} expects a 32-bit unsigned value, got {v}"
+                ))),
+                other => Err(type_error(format!(
+                    "{ctx} expects an int, got {}",
+                    describe(other)
+                ))),
+            })())
+        }
         ("Color", "from_rgba8") => {
             let ctx = "Color.from_rgba8()";
             Some((|| {
@@ -1965,6 +2361,42 @@ pub(crate) fn vector_static_call(
                     .ok_or_else(|| type_error(format!("{ctx}: invalid html colour {text:?}"))),
                 Some(other) => Err(type_error(format!("{ctx} expects a String, got {other:?}"))),
                 None => Err(type_error(format!("{ctx} is missing argument 0"))),
+            })
+        }
+        // `Color.from_string(str, default)` — the ONE static this family was
+        // missing (pat-s3rrv.58).
+        //
+        // ⚠️ Unlike its neighbours it must NOT error on a bad string: Godot's
+        // `Color::from_string` exists precisely to be total, falling back to the
+        // caller's default. `html()` above is the strict spelling and errors;
+        // conflating the two would make `from_string` useless for the case it
+        // was added for — parsing user or project text where a bad value should
+        // degrade to a chosen colour rather than abort the script.
+        //
+        // Order is Godot's own (core/math/color.cpp): html FIRST, then the named
+        // palette, then the default. Trying the palette first would let a name
+        // that also parses as hex resolve to the wrong one.
+        ("Color", "from_string") => {
+            let ctx = "Color.from_string()";
+            Some(match (args.first(), args.get(1)) {
+                (Some(Variant::String(text)), default) => {
+                    let fallback = match default {
+                        Some(Variant::Color(c)) => *c,
+                        // Godot's signature requires the default; a missing or
+                        // non-Color one degrades to transparent black rather
+                        // than erroring, keeping the method total.
+                        _ => Color::new(0.0, 0.0, 0.0, 0.0),
+                    };
+                    Ok(Variant::Color(
+                        Color::from_html(text)
+                            .or_else(|| Color::named(text))
+                            .unwrap_or(fallback),
+                    ))
+                }
+                (Some(other), _) => {
+                    Err(type_error(format!("{ctx} expects a String, got {other:?}")))
+                }
+                (None, _) => Err(type_error(format!("{ctx} is missing argument 0"))),
             })
         }
         ("Color", "html_is_valid") => {
@@ -2142,6 +2574,224 @@ mod color_tests {
                 .expect("Color is dispatched")
                 .is_err(),
             "an unknown method must name itself"
+        );
+    }
+
+    /// pat-s3rrv.58: the member WRITE half. `member_get` answered for all
+    /// eleven Color members but `member_set` had no Color arm at all, so
+    /// `col.r8 = 128` resolved to `None` and the assignment silently did
+    /// nothing — the value read back unchanged, with no error to point at.
+    #[test]
+    fn color_members_are_writable() {
+        let set = |c: Variant, member: &str, v: Variant| {
+            unwrap_color(
+                member_set(&c, member, &v)
+                    .unwrap_or_else(|| panic!("Color.{member} is not settable at all"))
+                    .unwrap_or_else(|e| panic!("Color.{member} = … errored: {e:?}")),
+            )
+        };
+
+        assert_eq!(
+            set(col(0.0, 0.0, 0.0, 1.0), "r8", Variant::Int(128)).r8(),
+            128
+        );
+        assert_eq!(
+            set(col(0.0, 0.0, 0.0, 1.0), "a8", Variant::Int(64)).a8(),
+            64
+        );
+
+        // The plain channels stay float-typed, and accept an Int the way
+        // GDScript's `1` and `1.0` are both ordinary ways to write one.
+        assert!((set(col(0.0, 0.0, 0.0, 1.0), "g", Variant::Float(0.5)).g - 0.5).abs() < 1e-6);
+        assert!((set(col(0.0, 0.0, 0.0, 1.0), "b", Variant::Int(1)).b - 1.0).abs() < 1e-6);
+
+        // Writing hue re-derives through HSV and preserves alpha.
+        let shifted = set(col(1.0, 0.0, 0.0, 0.25), "h", Variant::Float(0.5));
+        assert!((shifted.h() - 0.5).abs() < 1e-4, "{shifted:?}");
+        assert!((shifted.a - 0.25).abs() < 1e-6, "alpha must survive");
+
+        // 🔑 An out-of-range byte CLAMPS rather than wrapping. This goes
+        // through `want_i64`, not `want_i32`: narrowing first would turn
+        // 4294967296 into 0 and write BLACK where Godot writes white.
+        assert_eq!(
+            set(col(0.0, 0.0, 0.0, 1.0), "r8", Variant::Int(4_294_967_296)).r8(),
+            255,
+            "a huge byte must clamp to 255, not wrap to 0"
+        );
+
+        // An unknown member is still not settable, and a wrong-typed value is
+        // an error rather than a silent no-op.
+        assert!(
+            member_set(&col(0.0, 0.0, 0.0, 1.0), "no_such_member", &Variant::Int(1)).is_none(),
+            "member_set must gate on member_get"
+        );
+        assert!(
+            member_set(
+                &col(0.0, 0.0, 0.0, 1.0),
+                "r8",
+                &Variant::String("128".into())
+            )
+            .expect("r8 is a real member")
+            .is_err(),
+            "a String assigned to r8 must error, not coerce"
+        );
+    }
+
+    /// pat-s3rrv.58: `Color.from_rgbe9995` reaches GDScript.
+    ///
+    /// 🔑 The test value 3221488129 is above `i32::MAX` on purpose. Every
+    /// RGBE9995 word with an exponent of 16 or more has its top bit set, so
+    /// routing this through the crate's i32 argument helper would narrow it to
+    /// a negative and unpack a different colour entirely. That is the bug this
+    /// case exists to catch, and in-range values never expose it.
+    #[test]
+    fn color_from_rgbe9995_reaches_scripts_without_narrowing() {
+        let white = vector_static_call("Color", "from_rgbe9995", &[Variant::Int(3_221_488_129)])
+            .expect("from_rgbe9995 is dispatched")
+            .expect("from_rgbe9995 succeeds");
+        assert!(
+            unwrap_color(white).is_equal_approx(Color::new(1.0, 1.0, 1.0, 1.0)),
+            "3221488129 is opaque white; a narrowed i32 would not be"
+        );
+
+        // HDR values pass through unclamped — that is the point of the format.
+        let hdr = vector_static_call("Color", "from_rgbe9995", &[Variant::Int(3_221_225_983)])
+            .expect("dispatched")
+            .expect("succeeds");
+        assert_eq!(unwrap_color(hdr).r, 511.0);
+
+        // Out of range and wrong-typed inputs are errors, not silent wraps.
+        assert!(
+            vector_static_call("Color", "from_rgbe9995", &[Variant::Int(-1)])
+                .expect("dispatched")
+                .is_err(),
+            "a negative word must error rather than wrap to a huge u32"
+        );
+        assert!(
+            vector_static_call("Color", "from_rgbe9995", &[Variant::Int(4_294_967_296)])
+                .expect("dispatched")
+                .is_err(),
+            "a value past u32::MAX must error"
+        );
+    }
+
+    /// pat-s3rrv.58: the OKHSL surface reaches GDScript — the members read and
+    /// write, and `Color.from_ok_hsl` dispatches as a static.
+    ///
+    /// Values come from gdcore's port of the vendored `ok_color.h`, whose hue
+    /// is pinned against the published OkLCh figure for sRGB red (29.23°).
+    #[test]
+    fn color_ok_hsl_members_and_constructor_reach_scripts() {
+        let red = col(1.0, 0.0, 0.0, 1.0);
+
+        match member_get(&red, "ok_hsl_h").expect("ok_hsl_h is a member") {
+            Variant::Float(h) => assert!((h - 0.081205).abs() < 2e-4, "hue {h}"),
+            other => panic!("expected Float, got {other:?}"),
+        }
+        match member_get(&red, "ok_hsl_l").expect("ok_hsl_l is a member") {
+            Variant::Float(l) => assert!((l - 0.568085).abs() < 2e-4, "lightness {l}"),
+            other => panic!("expected Float, got {other:?}"),
+        }
+
+        // 🔑 `ok_hsl_l` is not a second name for `v`. Red is perceptually much
+        // darker than white, so the two disagree by more than 0.4 — a wiring
+        // slip that pointed one at the other would pass every "is it a float"
+        // check.
+        match (
+            member_get(&red, "v").expect("v"),
+            member_get(&red, "ok_hsl_l").expect("ok_hsl_l"),
+        ) {
+            (Variant::Float(v), Variant::Float(l)) => {
+                assert!((v - l).abs() > 0.4, "v={v} ok_hsl_l={l}")
+            }
+            other => panic!("expected two Floats, got {other:?}"),
+        }
+
+        // The members are writable too.
+        let lightened = member_set(&red, "ok_hsl_l", &Variant::Float(0.8))
+            .expect("ok_hsl_l is settable")
+            .expect("assignment succeeds");
+        match member_get(&lightened, "ok_hsl_l").expect("ok_hsl_l") {
+            Variant::Float(l) => assert!((l - 0.8).abs() < 2e-3, "written lightness {l}"),
+            other => panic!("expected Float, got {other:?}"),
+        }
+
+        // And the static constructor round-trips red back.
+        let rebuilt = vector_static_call(
+            "Color",
+            "from_ok_hsl",
+            &[
+                Variant::Float(0.081205),
+                Variant::Float(1.0),
+                Variant::Float(0.568085),
+            ],
+        )
+        .expect("from_ok_hsl is dispatched")
+        .expect("from_ok_hsl succeeds");
+        let c = unwrap_color(rebuilt);
+        assert!(
+            (c.r - 1.0).abs() < 2e-3 && c.g < 2e-3 && c.b < 2e-3,
+            "Color.from_ok_hsl(red's own okhsl) must rebuild red, got {c:?}"
+        );
+    }
+
+    /// `Color.from_string` is the TOTAL parser (pat-s3rrv.58).
+    ///
+    /// ⚠️ The third case is the one that matters and the only one that
+    /// distinguishes this from `Color.html`: an unparseable string must return
+    /// the caller's default, NOT an error. `html()` is deliberately strict and
+    /// errors; `from_string` exists for user- and project-supplied text where a
+    /// bad value should degrade to a chosen colour instead of aborting the
+    /// script. An implementation that simply forwarded to `html` would satisfy
+    /// the first case here and fail this one.
+    #[test]
+    fn color_from_string_falls_back_to_its_default() {
+        let default = Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0));
+
+        // An html string parses.
+        let html = unwrap_color(
+            vector_static_call(
+                "Color",
+                "from_string",
+                &[Variant::String("#ff8800".into()), default.clone()],
+            )
+            .expect("from_string is dispatched")
+            .expect("a valid html string succeeds"),
+        );
+        let expect = Color::from_html("ff8800").expect("fixture parses");
+        assert!(
+            html.is_equal_approx(expect),
+            "from_string(\"#ff8800\") must parse as html, got {html:?}"
+        );
+
+        // A PALETTE NAME parses too — Godot tries html first, then `named`.
+        let named = unwrap_color(
+            vector_static_call(
+                "Color",
+                "from_string",
+                &[Variant::String("YELLOW".into()), default.clone()],
+            )
+            .expect("from_string is dispatched")
+            .expect("a palette name succeeds"),
+        );
+        assert!(
+            named.is_equal_approx(Color::new(1.0, 1.0, 0.0, 1.0)),
+            "from_string(\"YELLOW\") must resolve the named palette, got {named:?}"
+        );
+
+        // The point of the method: garbage yields the DEFAULT, not an error.
+        let fallback = unwrap_color(
+            vector_static_call(
+                "Color",
+                "from_string",
+                &[Variant::String("not_a_colour".into()), default],
+            )
+            .expect("from_string is dispatched")
+            .expect("an invalid string must NOT be an error"),
+        );
+        assert!(
+            fallback.is_equal_approx(Color::new(1.0, 0.0, 0.0, 1.0)),
+            "an unparseable string must return the caller's default, got {fallback:?}"
         );
     }
 }

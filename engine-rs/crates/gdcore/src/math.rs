@@ -1500,6 +1500,28 @@ impl Color {
         channel_to_8bit(self.a)
     }
 
+    /// Builds a colour from a packed RGBE9995 value (Godot
+    /// `Color.from_rgbe9995`).
+    ///
+    /// Nine mantissa bits per channel and a shared five-bit exponent, the
+    /// layout Godot uses for HDR lightmaps and radiance data
+    /// (`core/math/color.cpp:464`).
+    ///
+    /// ⚠️ Deliberately does NOT clamp. This is an HDR format: a channel of
+    /// 511.0 is a legitimate value, not an overflow to correct. Clamping here
+    /// would silently flatten every highlight the format exists to carry.
+    pub fn from_rgbe9995(rgbe: u32) -> Self {
+        let r = (rgbe & 0x1ff) as f32;
+        let g = ((rgbe >> 9) & 0x1ff) as f32;
+        let b = ((rgbe >> 18) & 0x1ff) as f32;
+        // The exponent is the top five bits, so the shift alone isolates it —
+        // upstream masks nothing here either.
+        let e = (rgbe >> 27) as f32;
+        let m = 2.0f32.powf(e - 15.0 - 9.0);
+
+        Self::new(r * m, g * m, b * m, 1.0)
+    }
+
     /// Builds a colour from 0..255 components (Godot `Color8`).
     pub fn from_rgba8(r: i64, g: i64, b: i64, a: i64) -> Self {
         Self::new(
@@ -1534,6 +1556,67 @@ impl Color {
         v
     }
 
+    // -- Member SETTERS (Godot `Color::set_r8` … `set_v`) --------------------
+    //
+    // Godot exposes all fourteen Color members as read-WRITE: `col.r8 = 128`
+    // and `col.h = 0.5` are ordinary assignments. These are the write halves,
+    // named `with_*` because `Color` is `Copy` here and the callers build a new
+    // value rather than mutating in place.
+
+    /// This colour with its red channel set from a 0..255 value.
+    ///
+    /// ⚠️ CLAMPS, and that is a real divergence from [`Color::from_rgba8`],
+    /// which does not. Godot's `set_r8` is `CLAMP(r8, 0, 255) / 255` while
+    /// `Color::from_rgba8` is a bare `p_r8 / 255` (`core/math/color.h:227` vs
+    /// `color.cpp:478`). Copying one into the other is the easy mistake: an
+    /// unclamped `col.r8 = 300` would store 1.18 and read back as 255, so the
+    /// value written and the value read would disagree.
+    pub fn with_r8(self, r8: i64) -> Self {
+        Self::new(channel_from_8bit(r8), self.g, self.b, self.a)
+    }
+
+    /// This colour with its green channel set from a 0..255 value.
+    pub fn with_g8(self, g8: i64) -> Self {
+        Self::new(self.r, channel_from_8bit(g8), self.b, self.a)
+    }
+
+    /// This colour with its blue channel set from a 0..255 value.
+    pub fn with_b8(self, b8: i64) -> Self {
+        Self::new(self.r, self.g, channel_from_8bit(b8), self.a)
+    }
+
+    /// This colour with its alpha set from a 0..255 value.
+    pub fn with_a8(self, a8: i64) -> Self {
+        Self::new(self.r, self.g, self.b, channel_from_8bit(a8))
+    }
+
+    /// This colour with its hue replaced, saturation and value preserved.
+    ///
+    /// Godot's `set_h` is `set_hsv(p_h, get_s(), get_v(), a)` — it round-trips
+    /// through HSV, so the other two components are re-derived rather than
+    /// carried. Alpha is preserved.
+    ///
+    /// ⚠️ A greyscale colour has saturation 0, so setting its hue is a no-op —
+    /// `Color(0.5, 0.5, 0.5).h = 0.3` stays grey, exactly as in Godot. That is
+    /// a property of the HSV round-trip, not a bug to "fix" by special-casing.
+    pub fn with_h(self, h: f32) -> Self {
+        let (_, s, v) = self.to_hsv();
+        Self::from_hsv(h, s, v, self.a)
+    }
+
+    /// This colour with its saturation replaced, hue and value preserved.
+    pub fn with_s(self, s: f32) -> Self {
+        let (h, _, v) = self.to_hsv();
+        Self::from_hsv(h, s, v, self.a)
+    }
+
+    /// This colour with its value (brightness) replaced, hue and saturation
+    /// preserved.
+    pub fn with_v(self, v: f32) -> Self {
+        let (h, s, _) = self.to_hsv();
+        Self::from_hsv(h, s, v, self.a)
+    }
+
     /// This colour as `(hue, saturation, value)`, each in 0..1.
     ///
     /// Matches `Color::get_h/get_s/get_v` (`core/math/color.cpp`). A greyscale
@@ -1555,6 +1638,70 @@ impl Color {
         let h = (h / 6.0).rem_euclid(1.0);
         let s = if max == 0.0 { 0.0 } else { delta / max };
         (h, s, max)
+    }
+
+    // -- OKHSL members (Godot `Color.ok_hsl_h/s/l`, `from_ok_hsl`) ----------
+    //
+    // Oklab-based HSL: perceptually uniform, so equal steps in `ok_hsl_l` look
+    // like equal steps in brightness where plain HSV's `v` does not. The maths
+    // lives in [`crate::ok_color`], a transcription of Godot's vendored
+    // `thirdparty/misc/ok_color.h` (pat-s3rrv.58).
+
+    /// Builds a colour from Oklab HSL, each component in 0..1 (Godot
+    /// `Color.from_ok_hsl`).
+    ///
+    /// Mirrors `Color::set_ok_hsl` (`core/math/color.cpp:236`), including its
+    /// final `clamp()`: the OKHSL gamut is larger than sRGB, so a saturated
+    /// request can land outside 0..1 and Godot clips rather than wrapping.
+    pub fn from_ok_hsl(h: f32, s: f32, l: f32, a: f32) -> Self {
+        let (r, g, b) = crate::ok_color::okhsl_to_srgb(h, s, l);
+        Self::new(r, g, b, a).clamp_to(Self::new(0.0, 0.0, 0.0, 0.0), Self::new(1.0, 1.0, 1.0, 1.0))
+    }
+
+    /// This colour as `(ok_hsl_h, ok_hsl_s, ok_hsl_l)`, each in 0..1.
+    ///
+    /// ⚠️ A pure grey has no hue, and the underlying transform divides by a
+    /// chroma of zero — so upstream really does return NaN here. Godot maps
+    /// each NaN to 0 before clamping (`color.cpp:504`), and so does this; a
+    /// caller that skipped the check would propagate NaN into a colour and
+    /// paint nothing.
+    pub fn to_ok_hsl(self) -> (f32, f32, f32) {
+        let (h, s, l) = crate::ok_color::srgb_to_okhsl(self.r, self.g, self.b);
+        let fix = |x: f32| if x.is_nan() { 0.0 } else { x.clamp(0.0, 1.0) };
+        (fix(h), fix(s), fix(l))
+    }
+
+    /// Oklab hue in 0..1 (Godot `Color.ok_hsl_h`).
+    pub fn ok_hsl_h(self) -> f32 {
+        self.to_ok_hsl().0
+    }
+
+    /// Oklab saturation in 0..1 (Godot `Color.ok_hsl_s`).
+    pub fn ok_hsl_s(self) -> f32 {
+        self.to_ok_hsl().1
+    }
+
+    /// Oklab lightness in 0..1 (Godot `Color.ok_hsl_l`).
+    pub fn ok_hsl_l(self) -> f32 {
+        self.to_ok_hsl().2
+    }
+
+    /// This colour with its Oklab hue replaced.
+    pub fn with_ok_hsl_h(self, h: f32) -> Self {
+        let (_, s, l) = self.to_ok_hsl();
+        Self::from_ok_hsl(h, s, l, self.a)
+    }
+
+    /// This colour with its Oklab saturation replaced.
+    pub fn with_ok_hsl_s(self, s: f32) -> Self {
+        let (h, _, l) = self.to_ok_hsl();
+        Self::from_ok_hsl(h, s, l, self.a)
+    }
+
+    /// This colour with its Oklab lightness replaced.
+    pub fn with_ok_hsl_l(self, l: f32) -> Self {
+        let (h, s, _) = self.to_ok_hsl();
+        Self::from_ok_hsl(h, s, l, self.a)
     }
 
     /// Builds a colour from hue/saturation/value, each in 0..1 (Godot
@@ -2122,6 +2269,17 @@ impl Color {
 #[inline]
 fn channel_to_8bit(c: f32) -> i64 {
     (c.clamp(0.0, 1.0) * 255.0).round() as i64
+}
+
+/// Godot's 0..255 byte as a 0..1 channel — the inverse of [`channel_to_8bit`].
+///
+/// ⚠️ Clamps the BYTE before dividing, matching `Color::set_r8`
+/// (`core/math/color.h:227`). Dividing first and clamping after would be the
+/// same for in-range input and differ for out-of-range: `300 / 255` is 1.18,
+/// which reads back as 255 and makes the written and read values disagree.
+#[inline]
+fn channel_from_8bit(v: i64) -> f32 {
+    v.clamp(0, 255) as f32 / 255.0
 }
 
 /// sRGB→linear transfer function for a single channel (Godot's exact curve).
@@ -2966,6 +3124,213 @@ mod tests {
         assert!(Color::named("FUCHSIA")
             .unwrap()
             .is_equal_approx(Color::named("MAGENTA").unwrap()));
+    }
+
+    /// pat-s3rrv.58: the member SETTERS. Godot exposes all fourteen Color
+    /// members as read-write; only the read half existed.
+    #[test]
+    fn color_member_setters_write_the_8bit_views() {
+        let c = Color::new(0.0, 0.0, 0.0, 1.0);
+
+        // Round-trip through the pair that must agree: 128 -> 0.50196 -> 128.
+        assert_eq!(c.with_r8(128).r8(), 128);
+        assert_eq!(c.with_g8(64).g8(), 64);
+        assert_eq!(c.with_b8(255).b8(), 255);
+        assert_eq!(c.with_a8(0).a8(), 0);
+
+        // Each setter touches ONE channel. A copy-paste slip in `with_g8` that
+        // wrote `r` would pass a single-channel test but fail this one.
+        let c = Color::new(0.1, 0.2, 0.3, 0.4).with_g8(200);
+        assert_eq!(c.g8(), 200);
+        assert!((c.r - 0.1).abs() < 1e-6, "red must not move, got {}", c.r);
+        assert!((c.b - 0.3).abs() < 1e-6, "blue must not move, got {}", c.b);
+        assert!((c.a - 0.4).abs() < 1e-6, "alpha must not move, got {}", c.a);
+    }
+
+    /// 🔑 `set_r8` CLAMPS while `from_rgba8` does not — the two really do
+    /// differ in Godot (`core/math/color.h:227` vs `color.cpp:478`), so this
+    /// pins the distinction rather than assuming one rule for both.
+    #[test]
+    fn color_member_setters_clamp_but_from_rgba8_does_not() {
+        assert_eq!(Color::BLACK.with_r8(300).r8(), 255, "set_r8 clamps high");
+        assert_eq!(Color::WHITE.with_r8(-5).r8(), 0, "…and low");
+
+        // The written value and the value read back must agree. Dividing
+        // before clamping would store 300/255 = 1.18 here, which still reads
+        // back as 255 — the same answer for the WRONG reason — so the check
+        // that actually separates them is on the stored channel.
+        assert!(
+            (Color::BLACK.with_r8(300).r - 1.0).abs() < 1e-6,
+            "the stored channel must be clamped to 1.0, not 1.18"
+        );
+
+        // ⚠️ The unclamped sibling, asserted so nobody "fixes" one to match
+        // the other: Godot's `from_rgba8` is a bare divide.
+        assert!(
+            Color::from_rgba8(300, 0, 0, 255).r > 1.0,
+            "from_rgba8 must stay unclamped — it is a different Godot function"
+        );
+    }
+
+    /// Writing one HSV component re-derives the colour and leaves the other
+    /// two — and alpha — alone.
+    #[test]
+    fn color_member_setters_round_trip_through_hsv() {
+        let c = Color::new(1.0, 0.0, 0.0, 0.25);
+
+        let shifted = c.with_h(0.5);
+        assert!(
+            (shifted.h() - 0.5).abs() < 1e-4,
+            "hue must move, got {}",
+            shifted.h()
+        );
+        assert!((shifted.s() - c.s()).abs() < 1e-4, "saturation must not");
+        assert!((shifted.v() - c.v()).abs() < 1e-4, "value must not");
+        assert!(
+            (shifted.a - 0.25).abs() < 1e-6,
+            "alpha must survive the HSV round-trip"
+        );
+
+        let desaturated = c.with_s(0.0);
+        assert!((desaturated.r - desaturated.g).abs() < 1e-6);
+        assert!((desaturated.g - desaturated.b).abs() < 1e-6);
+
+        let dimmed = c.with_v(0.5);
+        assert!((dimmed.v() - 0.5).abs() < 1e-4);
+    }
+
+    /// ⚠️ Setting the hue of a GREY colour is a no-op, because grey has no
+    /// hue to move. That is Godot's behaviour (`set_h` round-trips through
+    /// `set_hsv`, and saturation 0 short-circuits to `r = g = b = v`), not a
+    /// gap — asserted so it is not "fixed" into a divergence.
+    #[test]
+    fn color_setting_the_hue_of_grey_is_a_no_op() {
+        let grey = Color::new(0.5, 0.5, 0.5, 1.0);
+        let after = grey.with_h(0.3);
+        assert!(
+            (after.r - 0.5).abs() < 1e-6
+                && (after.g - 0.5).abs() < 1e-6
+                && (after.b - 0.5).abs() < 1e-6,
+            "grey has saturation 0, so it has no hue to move; got {after:?}"
+        );
+    }
+
+    /// pat-s3rrv.58: the packed HDR constructor.
+    #[test]
+    fn color_from_rgbe9995_unpacks_mantissas_and_exponent() {
+        // e = 24 makes the multiplier 2^(24-24) = 1, so each 9-bit mantissa is
+        // its own value — which is what separates the three channels. A port
+        // that shifted by the wrong amount would still pass a grey case.
+        let c = Color::from_rgbe9995((24 << 27) | (3 << 18) | (2 << 9) | 1);
+        assert_eq!((c.r, c.g, c.b, c.a), (1.0, 2.0, 3.0, 1.0));
+
+        assert_eq!(
+            Color::from_rgbe9995(0),
+            Color::new(0.0, 0.0, 0.0, 1.0),
+            "an all-zero word is opaque black, not transparent"
+        );
+
+        // e = 15 gives 2^-9, so a mantissa of 256 is exactly a half.
+        let half = Color::from_rgbe9995((15 << 27) | (256 << 18) | (256 << 9) | 256);
+        assert!(
+            half.is_equal_approx(Color::new(0.5, 0.5, 0.5, 1.0)),
+            "{half:?}"
+        );
+    }
+
+    /// 🔑 RGBE9995 is an HDR format, so values above 1.0 are the POINT of it.
+    ///
+    /// Clamping here would flatten exactly the highlights the format exists to
+    /// carry — and it would look correct in any test that only used in-range
+    /// values. Godot does not clamp (`color.cpp:475`).
+    #[test]
+    fn color_from_rgbe9995_does_not_clamp_hdr_values() {
+        let hdr = Color::from_rgbe9995((24 << 27) | 511);
+        assert_eq!(hdr.r, 511.0, "a 511 mantissa at e=24 is 511.0, not 1.0");
+        assert_eq!((hdr.g, hdr.b), (0.0, 0.0));
+    }
+
+    /// pat-s3rrv.58: the OKHSL members. Expected values come from an
+    /// independent Python transcription of the vendored `ok_color.h`, and the
+    /// hue is additionally pinned to the published OkLCh value for sRGB red
+    /// (29.23°) — an oracle outside this codebase entirely.
+    #[test]
+    fn color_ok_hsl_members_match_godot() {
+        let red = Color::new(1.0, 0.0, 0.0, 1.0);
+        assert!(
+            (red.ok_hsl_h() - 0.081205).abs() < 2e-4,
+            "sRGB red's Oklab hue is 29.23° = 0.081205, got {}",
+            red.ok_hsl_h()
+        );
+        assert!((red.ok_hsl_s() - 1.0).abs() < 2e-4, "{}", red.ok_hsl_s());
+        assert!(
+            (red.ok_hsl_l() - 0.568085).abs() < 2e-4,
+            "{}",
+            red.ok_hsl_l()
+        );
+
+        // ⚠️ NOT the same as plain HSV lightness — that is the entire point of
+        // the Oklab variant. `Color(1,0,0).v` is 1.0 while its `ok_hsl_l` is
+        // 0.568, because red is perceptually far darker than white.
+        assert!(
+            (red.v() - red.ok_hsl_l()).abs() > 0.4,
+            "ok_hsl_l must not be a rename of v"
+        );
+    }
+
+    /// `from_ok_hsl` is the inverse, and it preserves alpha.
+    #[test]
+    fn color_from_ok_hsl_round_trips() {
+        let red = Color::new(1.0, 0.0, 0.0, 0.25);
+        let (h, s, l) = red.to_ok_hsl();
+        let back = Color::from_ok_hsl(h, s, l, red.a);
+        // ⚠️ 2e-4, not `is_equal_approx`'s 1e-5. The chain runs a cube root and
+        // two Halley iterations in f32; the round-trip error is ~4e-7 in f64
+        // but has real headroom to grow in f32, and a gate that is tight enough
+        // to flake is worse than one that is merely tight enough to catch a
+        // structural error (which moves these by >= 1e-2).
+        for (got, want, ch) in [(back.r, 1.0, "r"), (back.g, 0.0, "g"), (back.b, 0.0, "b")] {
+            assert!(
+                (got - want).abs() < 2e-4,
+                "from_ok_hsl(to_ok_hsl(red)).{ch} must be {want}, got {got}"
+            );
+        }
+        assert!((back.a - 0.25).abs() < 1e-6, "alpha must survive");
+    }
+
+    /// 🔑 The clamp in `from_ok_hsl` is load-bearing, not defensive.
+    ///
+    /// The OKHSL gamut is larger than sRGB, so a fully saturated request can
+    /// land OUTSIDE 0..1: at h=0.075, s=1.0, l=0.55 the green channel comes
+    /// back as −0.0018. Godot's `set_ok_hsl` ends in `.clamp()`
+    /// (`color.cpp:242`) and so does this. A negative channel would survive
+    /// into blending and shaders, where it is not merely "dark".
+    #[test]
+    fn color_from_ok_hsl_clamps_out_of_gamut_requests() {
+        let c = Color::from_ok_hsl(0.075, 1.0, 0.55, 1.0);
+        assert_eq!(
+            c.g, 0.0,
+            "the out-of-gamut green must clamp to 0, got {}",
+            c.g
+        );
+        assert!(
+            c.r >= 0.0 && c.r <= 1.0 && c.b >= 0.0 && c.b <= 1.0,
+            "{c:?}"
+        );
+        assert!((c.r - 0.965267).abs() < 2e-4, "{}", c.r);
+        assert!((c.b - 0.109343).abs() < 2e-4, "{}", c.b);
+    }
+
+    /// A grey has no hue axis to divide by; nothing may leak a NaN into a
+    /// colour a caller would then paint with.
+    #[test]
+    fn color_ok_hsl_of_grey_is_finite() {
+        let (h, s, l) = Color::new(0.5, 0.5, 0.5, 1.0).to_ok_hsl();
+        assert!(
+            h.is_finite() && s.is_finite() && l.is_finite(),
+            "{h} {s} {l}"
+        );
+        assert!(s < 1e-3, "grey must be unsaturated, got {s}");
     }
 
     /// 🔴 `Color.TRANSPARENT` IS TRANSPARENT WHITE, and it deliberately does

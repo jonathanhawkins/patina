@@ -60,6 +60,16 @@ impl MultiplayerReplicator {
         self.spawned.len()
     }
 
+    /// Drops the mapping for `net_id`, returning the node it referred to
+    /// (pat-s3rrv.17).
+    ///
+    /// The caller removes the node from the tree; this only forgets it, so a
+    /// later SYNC frame addressed to a despawned id lands on nothing instead of
+    /// resurrecting a stale `NodeId` that the tree may have reused.
+    pub fn forget(&mut self, net_id: u32) -> Option<NodeId> {
+        self.spawned.remove(&net_id)
+    }
+
     /// Applies a decoded [`SyncPacket`] by writing each replicated property onto
     /// the node mapped to the packet's `net_id`. Returns `true` if that node was
     /// found and updated, `false` if the `net_id` is unknown or the node is gone.
