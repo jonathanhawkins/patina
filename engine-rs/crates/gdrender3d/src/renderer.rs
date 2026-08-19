@@ -2897,14 +2897,16 @@ mod tests {
     /// because the flag reaching `Light3D` proves nothing about the shading.
     #[test]
     fn a_negative_light_subtracts_instead_of_adding() {
-        fn lit_frame(negative: bool) -> Vec<Color> {
+        // `dir` is the light's authored direction. `light_uniforms` NEGATES it
+        // for directional lights, so the shading vector `l` is `-dir`.
+        fn frame(dir: Vector3, negative: bool, energy: f32) -> Vec<Color> {
             let mut renderer = SoftwareRenderer3D::new();
             let id = renderer.create_instance();
             renderer.set_mesh(id, Mesh3D::cube(1.0));
-            // Same material as `solid_phong_shading`, which is the test that
-            // establishes this setup renders lit pixels at all. A bare
-            // `Material3D::default()` with Phong came out fully black, which
-            // made the comparison below vacuous rather than wrong.
+            // Same material as `solid_phong_shading`. NOTE that test only
+            // asserts `nonblack > 100`, which ambient alone satisfies, so it
+            // does NOT establish that lighting is applied — this test has to
+            // prove that for itself, which is what the sweep below is for.
             renderer.set_material(
                 id,
                 Material3D {
@@ -2922,36 +2924,104 @@ mod tests {
                 },
             );
             renderer.add_light(Light3DId(1));
+            renderer.lights[0].direction = dir;
             renderer.lights[0].negative = negative;
+            renderer.lights[0].energy = energy;
             renderer.render_frame(&Viewport3D::new(64, 64)).pixels
         }
 
-        let positive = lit_frame(false);
-        let negative = lit_frame(true);
+        // ⚠️ Compared by COUNT, never with `assert_ne!` on the frames
+        // themselves. These are 64x64 pixel vectors, and a failing `assert_ne!`
+        // dumps all 4096 colours — which pushes the assertion's own message out
+        // of the verifier's truncated FAIL tail and makes the failure
+        // unreadable. A scalar keeps the diagnosis in the message.
+        let differing = |a: &[Color], b: &[Color]| -> usize {
+            a.iter().zip(b.iter()).filter(|(x, y)| x != y).count()
+        };
 
-        // ⚠️ PRECONDITION. Both frames came back entirely black on the first
-        // attempt, and `assert_ne!` then failed for a reason that had nothing to
-        // do with `negative`. Unless the positive frame is genuinely lit, every
-        // assertion below is vacuous.
-        let lit = positive.iter().filter(|c| **c != Color::BLACK).count();
+        // ⚠️ Is the CUBE drawn at all? A "lit pixels" count is satisfied by the
+        // background on its own, so a scene whose geometry was culled entirely
+        // would still pass that and every comparison below would report
+        // "identical" for a reason having nothing to do with lighting.
+        let empty = {
+            let mut renderer = SoftwareRenderer3D::new();
+            renderer.add_light(Light3DId(1));
+            renderer.render_frame(&Viewport3D::new(64, 64)).pixels
+        };
+
+        // 🔑 DO NOT hand-pick the light direction. The shading loop drops a
+        // light whose `n_dot_l <= 0.0`, so an aim that misses the one cube face
+        // the camera can see makes the light contribute NOTHING — and every
+        // assertion about `negative` below then passes or fails for reasons
+        // that have nothing to do with the flag. Deriving the visible face by
+        // hand (which way the camera looks, which face is nearest, how
+        // `light_uniforms` negates) got this wrong repeatedly and each wrong
+        // guess costs a full verify round.
+        //
+        // So SEARCH instead of deriving: sweep the six axis directions and keep
+        // one that demonstrably changes the frame when the energy changes. That
+        // is the property actually needed, and it is checked rather than
+        // assumed.
+        let candidates: [(&str, Vector3); 6] = [
+            ("+X", Vector3::new(1.0, 0.0, 0.0)),
+            ("-X", Vector3::new(-1.0, 0.0, 0.0)),
+            ("+Y", Vector3::new(0.0, 1.0, 0.0)),
+            ("-Y", Vector3::new(0.0, -1.0, 0.0)),
+            ("+Z", Vector3::new(0.0, 0.0, 1.0)),
+            ("-Z", Vector3::new(0.0, 0.0, -1.0)),
+        ];
+        let mut sweep = String::new();
+        let mut usable: Option<(&str, Vector3)> = None;
+        for (name, dir) in candidates {
+            let lit = frame(dir, false, 1.0);
+            let dark = frame(dir, false, 0.0);
+            let delta = differing(&lit, &dark);
+            sweep.push_str(&format!("{name}:{delta} "));
+            if delta > 0 && usable.is_none() {
+                usable = Some((name, dir));
+            }
+        }
+
+        let cube_pixels = {
+            let any = frame(Vector3::new(0.0, 0.0, -1.0), false, 1.0);
+            differing(&any, &empty)
+        };
+        let (aim_name, aim) = match usable {
+            Some(v) => v,
+            None => panic!(
+                "no light direction changes the frame at all: energy 1.0 and \
+                 energy 0.0 render identically from every axis, so the light \
+                 never reaches the surface and nothing about `negative` is \
+                 observable. Per-direction differing pixel counts: {sweep}\
+                 ({cube_pixels} pixels differ from an empty scene, so the cube \
+                 itself IS drawn — the fault is in lighting, not geometry)"
+            ),
+        };
+
+        let positive = frame(aim, false, 1.0);
+        let negative = frame(aim, true, 1.0);
+
+        // The cube must be drawn, else the frames are two identical backgrounds.
         assert!(
-            lit > 100,
-            "fixture check: the positive light must actually light the cube, \
-             got {lit} non-black pixels"
+            differing(&positive, &empty) > 0,
+            "the cube must be drawn at all: 0 pixels differ from an empty scene, \
+             so no geometry reached the frame (aim {aim_name}, sweep {sweep})"
         );
 
-        assert_ne!(
-            positive, negative,
-            "a negative light must change the frame; identical frames mean the \
-             flag never reached the shading energy"
+        assert!(
+            differing(&positive, &negative) > 0,
+            "a negative light must change the frame; 0 of {} pixels differed \
+             with the light aimed {aim_name}, meaning the flag never reached \
+             the shading energy (sweep {sweep})",
+            positive.len()
         );
 
         let luminance =
             |px: &[Color]| -> f64 { px.iter().map(|c| f64::from(c.r + c.g + c.b)).sum() };
         assert!(
             luminance(&negative) < luminance(&positive),
-            "a negative light must SUBTRACT: total luminance {} must be below \
-             the positive light's {}",
+            "a negative light must SUBTRACT: total luminance {} (aimed \
+             {aim_name}) must be below the positive light's {}",
             luminance(&negative),
             luminance(&positive)
         );

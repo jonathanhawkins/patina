@@ -145,6 +145,38 @@ pub fn is_chunked<'a>(headers: impl IntoIterator<Item = (&'a str, &'a str)>) -> 
     })
 }
 
+/// Copies queued body bytes into `out`, returning how many were written.
+///
+/// Ports the buffer side of `godot_js_fetch_read_chunk`
+/// (`library_godot_fetch.js:213-237`), where the caller supplies a fixed buffer
+/// and the stream is drained across however many calls it takes.
+///
+/// ⚠️ **A partially consumed chunk is pushed back at the FRONT.** Dropping the
+/// remainder silently truncates the body, and pushing it at the back reorders
+/// it — both produce a response that arrives intact for small payloads and
+/// corrupt for large ones, which is the worst way for this to fail.
+///
+/// 🔑 This lives here rather than beside the JS interop for the same reason as
+/// the rest of the module: it is real logic with real edge cases, and code
+/// behind `#[cfg(target_arch = "wasm32")]` is never type-checked by a native
+/// build nor run by any build here. Left in the interop layer it would have been
+/// permanently unprovable.
+pub fn drain_chunks(chunks: &mut std::collections::VecDeque<Vec<u8>>, out: &mut [u8]) -> usize {
+    let mut written = 0usize;
+    while written < out.len() {
+        let Some(mut chunk) = chunks.pop_front() else {
+            break;
+        };
+        let take = chunk.len().min(out.len() - written);
+        out[written..written + take].copy_from_slice(&chunk[..take]);
+        written += take;
+        if take < chunk.len() {
+            chunks.push_front(chunk.split_off(take));
+        }
+    }
+    written
+}
+
 /// Applies one `onread` result, mirroring `GodotFetch.onread`
 /// (`library_godot_fetch.js:35-45`).
 ///

@@ -1016,12 +1016,13 @@ impl Projection {
     /// — Godot's `Projection.create_orthogonal_aspect`, and the shape
     /// `Camera3D.size` describes.
     ///
-    /// ⚠️ `gdscene::camera3d::Projection` spells this `create_orthogonal`, while
-    /// its off-centre form is `create_orthogonal_off_center`. Godot (and this
-    /// type) use `create_orthogonal` for the OFF-CENTRE form, so consolidating
-    /// the two is a rename at the call sites:
-    /// `create_orthogonal(size, aspect, …)` → `create_orthogonal_aspect(…)`,
-    /// `create_orthogonal_off_center(…)` → `create_orthogonal(…)`.
+    /// ⚠️ `gdscene::camera3d::Projection` — a field-for-field identical type —
+    /// used to spell this `create_orthogonal` and the off-centre form
+    /// `create_orthogonal_off_center`, i.e. Godot's names on the wrong
+    /// overloads. **That is fixed (pat-s3rrv.59)**: both types now use Godot's
+    /// spelling, so a call moved between them keeps its meaning. Consolidating
+    /// the two types onto this one is now a re-export plus an import sweep,
+    /// with no call-site rewriting left to do.
     pub fn create_orthogonal_aspect(size: f32, aspect: f32, z_near: f32, z_far: f32) -> Self {
         let half_h = size * 0.5;
         let half_w = half_h * aspect;

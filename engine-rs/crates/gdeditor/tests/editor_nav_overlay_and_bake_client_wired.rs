@@ -8,12 +8,15 @@
 //!
 //! ⚠️ The gate is `viewport_2d::CanvasOverlay::NavigationRegions`, the overlay
 //! set the viewport actually stores (`Viewport2D.overlays`) and already uses to
-//! drive `OriginCross`. There is a SECOND, identically-named `CanvasOverlay` in
-//! `canvas_overlays.rs` carrying a `NavigationPolygons` variant; nothing stores
-//! an instance of its container, so an overlay gated on it can never be switched
-//! on by the running editor. The two enums have different variant sets and are
-//! not interchangeable — the `use` line is the only thing distinguishing them at
-//! a call site, which is exactly how the wrong one gets picked.
+//! drive `OriginCross`.
+//!
+//! A SECOND, identically-named `CanvasOverlay` used to live in
+//! `canvas_overlays.rs`, and this overlay was originally gated on it — nothing
+//! stored an instance of its container, so it could never be switched on by the
+//! running editor while every test passed. That module has since been deleted;
+//! all three of its variants had zero users. It is recorded here because the
+//! failure mode outlives the file: with two same-named types in one crate, the
+//! `use` line is the only thing distinguishing them at a call site.
 
 use gdcore::math::Vector2;
 use gdeditor::editor_ui::EDITOR_HTML;

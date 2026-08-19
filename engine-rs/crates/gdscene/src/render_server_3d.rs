@@ -1830,6 +1830,39 @@ fn csg_transform_mesh(mesh: &mut Mesh3D, root_inv: Transform3D, child_global: Tr
 /// `ArrayMesh.blend_shape_mode` is `default="1"` and `BLEND_SHAPE_MODE_RELATIVE`
 /// is 1 (`doc/classes/ArrayMesh.xml:209`). `BlendShapeMode`'s own doc records
 /// that this was previously — and wrongly — believed to be Normalized.
+/// The mesh a `MeshInstance3D` should actually draw: its blend shapes applied,
+/// then deformed by the bound `Skeleton3D`'s live bone poses (pat-s3rrv.23).
+///
+/// Returns `None` when the node is neither morphed nor skinned, so a caller can
+/// fall through to its ordinary mesh path untouched.
+///
+/// ⚠️ **MORPH FIRST, THEN SKIN THE MORPHED MESH — the order is the whole
+/// point.** Skinning the undeformed base instead silently discards the morph
+/// for any mesh that is both, because the skinned result is what gets drawn.
+/// The runtime adapter learned this the hard way and says so at its own call
+/// site; exposing ONE helper rather than the three private pieces is what stops
+/// a second call site from rediscovering it.
+///
+/// ⚠️ The morph is applied even when the mesh is NOT skinned. The skinning
+/// branch is gated on `is_skinned()`, so folding morph into it would skip every
+/// unskinned morphed mesh — a face with blend shapes and no skeleton is an
+/// ordinary case.
+pub fn deformed_mesh_for_node(tree: &SceneTree, nid: NodeId, base: &Mesh3D) -> Option<Mesh3D> {
+    let morphed = morphed_mesh(tree, nid, base);
+    let skinned = RenderServer3DAdapter::resolve_skeleton(tree, nid).and_then(|skeleton| {
+        let source = morphed.as_ref().unwrap_or(base);
+        if !source.is_skinned() {
+            return None;
+        }
+        let poses = skeleton3d::bone_pose_array(tree, skeleton);
+        let skin = RenderServer3DAdapter::resolve_skin(tree, skeleton);
+        Some(gdserver3d::skin::skin_mesh(source, &skin, &poses))
+    });
+    // Skinned wins because it already folded the morph in; morph alone is the
+    // answer for an unskinned mesh; neither means nothing to draw differently.
+    skinned.or(morphed)
+}
+
 fn morphed_mesh(tree: &SceneTree, nid: NodeId, base: &Mesh3D) -> Option<Mesh3D> {
     use gdrender3d::morph::{apply_morph_with_mode, BlendShapeMode, MorphTarget};
     use gdvariant::Variant;

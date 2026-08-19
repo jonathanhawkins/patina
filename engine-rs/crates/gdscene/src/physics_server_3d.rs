@@ -188,6 +188,19 @@ fn float_prop_3d(tree: &SceneTree, id: NodeId, key: &str, default: f64) -> f64 {
 
 /// Reads a `u32` bitmask property (`collision_layer` / `collision_mask`),
 /// defaulting to `default`.
+/// Reads a float property, distinguishing "absent" from a legitimate `0.0`.
+///
+/// The `__physics_material__*` keys need this: `bounce` is very often authored
+/// as `0.0`, and a `float_prop_3d(.., 0.0)` fallback could not tell that apart
+/// from "no override present", so the flat body property could never win.
+fn opt_float_prop_3d(tree: &SceneTree, id: NodeId, key: &str) -> Option<f64> {
+    match tree.get_node(id)?.get_property(key) {
+        Variant::Float(f) => Some(f),
+        Variant::Int(i) => Some(i as f64),
+        _ => None,
+    }
+}
+
 fn u32_prop_3d(tree: &SceneTree, id: NodeId, key: &str, default: u32) -> u32 {
     tree.get_node(id)
         .map(|n| match n.get_property(key) {
@@ -588,6 +601,38 @@ impl PhysicsServer3D {
                         body.angular_damp = float_prop_3d(tree, nid, "angular_damp", 0.0) as f32;
                         body.friction = float_prop_3d(tree, nid, "friction", 0.5) as f32;
                         body.bounce = float_prop_3d(tree, nid, "bounce", 0.0) as f32;
+                        // `physics_material_override`, which `PackedScene`
+                        // flattens onto the node as `__physics_material__*`
+                        // (packed_scene.rs). 3D dropped these entirely: the
+                        // loader wrote all four keys and nothing here ever read
+                        // one, so a RigidBody3D's material was silently inert
+                        // while the identical 2D path honoured it.
+                        //
+                        // `rough` / `absorbent` are Godot's combine modes, and
+                        // it signals them by NEGATING the stored value —
+                        // `computed_friction() { return rough ? -friction :
+                        // friction; }` (`physics_material.h:42-67`). The 3D
+                        // solver already reads that sign back out through the
+                        // same rules as 2D: `abs(MIN(a, b))` for friction
+                        // (`world.rs`, the `.min(..).abs()` pair) and
+                        // `CLAMP(a + b, 0, 1)` for restitution. So the sign is
+                        // the whole implementation — no branch is needed here
+                        // or in the solver.
+                        if let Some(f) =
+                            opt_float_prop_3d(tree, nid, "__physics_material__friction")
+                        {
+                            body.friction = f as f32;
+                        }
+                        if let Some(b) = opt_float_prop_3d(tree, nid, "__physics_material__bounce")
+                        {
+                            body.bounce = b as f32;
+                        }
+                        if truthy_prop_3d(tree, nid, "__physics_material__rough", false) {
+                            body.friction = -body.friction.abs();
+                        }
+                        if truthy_prop_3d(tree, nid, "__physics_material__absorbent", false) {
+                            body.bounce = -body.bounce.abs();
+                        }
                         body.continuous_cd = truthy_prop_3d(tree, nid, "continuous_cd", false);
                         body.can_sleep = truthy_prop_3d(tree, nid, "can_sleep", true);
 
@@ -1256,6 +1301,24 @@ impl PhysicsServer3D {
                 );
                 area.gravity_point_unit_distance =
                     float_prop_3d(tree, nid, "gravity_point_unit_distance", 0.0) as f32;
+                // The two damp channels carry their OWN override modes
+                // (pat-s3rrv.102). Godot resolves gravity, linear damp and
+                // angular damp independently, so reading only
+                // `gravity_space_override` above left an authored
+                // `linear_damp_space_override = 0` (DISABLED) applying damping
+                // anyway — the mode was never consulted at any layer.
+                area.linear_damp_space_override = space_override_from_int_3d(u32_prop_3d(
+                    tree,
+                    nid,
+                    "linear_damp_space_override",
+                    0,
+                ));
+                area.angular_damp_space_override = space_override_from_int_3d(u32_prop_3d(
+                    tree,
+                    nid,
+                    "angular_damp_space_override",
+                    0,
+                ));
                 area.linear_damp = float_prop_3d(tree, nid, "linear_damp", 0.1) as f32;
                 area.angular_damp = float_prop_3d(tree, nid, "angular_damp", 0.1) as f32;
             }
@@ -1426,6 +1489,16 @@ impl PhysicsServer3D {
                 signal,
                 &[Variant::ObjectId(body_node.object_id())],
             );
+            emit_shape_indexed(
+                tree,
+                area_node,
+                match event.state {
+                    OverlapState3D::Entered => "body_shape_entered",
+                    OverlapState3D::Exited => "body_shape_exited",
+                },
+                event.body_id.0,
+                Variant::ObjectId(body_node.object_id()),
+            );
         }
     }
 
@@ -1449,6 +1522,16 @@ impl PhysicsServer3D {
                 signal,
                 &[Variant::ObjectId(other_node.object_id())],
             );
+            emit_shape_indexed(
+                tree,
+                area_node,
+                match event.state {
+                    OverlapState3D::Entered => "area_shape_entered",
+                    OverlapState3D::Exited => "area_shape_exited",
+                },
+                event.other_area_id.0,
+                Variant::ObjectId(other_node.object_id()),
+            );
         }
     }
 
@@ -1468,6 +1551,37 @@ impl PhysicsServer3D {
                 .collect();
             if let Some(node) = tree.get_node_mut(area_node) {
                 node.set_property("_overlapping_bodies", Variant::Array(bodies));
+            }
+        }
+    }
+
+    /// Publishes each `Area3D`'s current area-vs-area overlap set onto its node
+    /// as `_overlapping_areas`, backing the script-facing
+    /// `get_overlapping_areas()` / `has_overlapping_areas()` / `overlaps_area()`
+    /// (pat-s3rrv.102).
+    ///
+    /// ⚠️ The area twin of [`publish_overlapping_bodies`](Self::publish_overlapping_bodies)
+    /// and the 3D twin of `PhysicsServer::publish_overlapping_areas`. Only the
+    /// 2D server published this property, yet `scripting.rs` answers all three
+    /// script methods from it for areas of BOTH dimensions — so every `Area3D`
+    /// reported an empty overlap set forever, while `area_entered` fired
+    /// correctly. The signals and the query disagreed, which reads as a script
+    /// bug rather than a missing publisher.
+    ///
+    /// Godot gates area-vs-area detection on the TARGET being `monitorable`,
+    /// and that gate lives inside `detect_area_overlaps`, so it is already
+    /// applied to the set read here.
+    pub fn publish_overlapping_areas(&self, tree: &mut SceneTree) {
+        for (&area_node, &area_id) in &self.node_to_area {
+            let areas: Vec<Variant> = self
+                .world
+                .overlapping_areas(area_id)
+                .into_iter()
+                .filter_map(|aid| self.area_to_node.get(&aid).copied())
+                .map(|nid| Variant::ObjectId(nid.object_id()))
+                .collect();
+            if let Some(node) = tree.get_node_mut(area_node) {
+                node.set_property("_overlapping_areas", Variant::Array(areas));
             }
         }
     }
@@ -1519,6 +1633,7 @@ impl PhysicsServer3D {
             self.process_overlap_signals(tree);
             self.process_area_overlap_signals(tree);
             self.publish_overlapping_bodies(tree);
+            self.publish_overlapping_areas(tree);
         }
     }
 }
@@ -1872,4 +1987,43 @@ mod tests {
         server.sync_to_physics(&tree);
         assert_eq!(server.body_count(), 1);
     }
+}
+
+/// Emits one of Godot's four shape-indexed Area3D signals (pat-s3rrv.102).
+///
+/// Godot pairs every `body_entered` / `area_entered` with a `*_shape_entered`
+/// carrying the collider's RID, the node, and the two shape indices:
+/// `body_shape_entered(body_rid, body, body_shape_index, local_shape_index)`
+/// (`doc/classes/Area3D.xml`). A script connecting only the shape-indexed form —
+/// which is the one you need to tell WHICH collider of a multi-collider body
+/// touched you — previously received nothing at all.
+///
+/// ⚠️ BOTH INDICES ARE 0, and that is CORRECT rather than a placeholder here:
+/// 3D bodies and areas are single-shape in Patina today (`gdphysics3d`'s
+/// `PhysicsBody3D`/`Area3D` carry no `extra_shapes`, unlike their 2D twins), so
+/// shape 0 is the only shape there is. When 3D gains multi-shape support these
+/// two arguments become real indices and this helper is where they arrive —
+/// the signal's ARITY and argument order are already Godot's, so scripts
+/// written against it keep working.
+///
+/// ⚠️ The RID argument is an `Int`, matching how the rest of the codebase models
+/// RIDs from script (`rid_arg` in the interpreter reads them as integers);
+/// Patina's Variant has no RID type.
+fn emit_shape_indexed(
+    tree: &mut SceneTree,
+    area_node: NodeId,
+    signal: &str,
+    collider_rid: u64,
+    collider_object: Variant,
+) {
+    tree.emit_signal(
+        area_node,
+        signal,
+        &[
+            Variant::Int(collider_rid as i64),
+            collider_object,
+            Variant::Int(0),
+            Variant::Int(0),
+        ],
+    );
 }

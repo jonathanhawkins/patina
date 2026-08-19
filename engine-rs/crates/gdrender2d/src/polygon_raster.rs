@@ -28,12 +28,34 @@ pub enum LineJoint {
     Round,
 }
 
-/// Scanline even-odd fill of a polygon with a solid `color`.
+/// Scanline even-odd fill of a polygon, **alpha-blended** over what is already
+/// in the framebuffer.
 ///
-/// Points are in pixel space; the polygon is implicitly closed. Pixels are
-/// sampled at their center (`y + 0.5`) so a rectangle on integer bounds fills
-/// exactly its interior.
-pub fn fill_polygon(fb: &mut FrameBuffer, points: &[Vector2], color: Color) {
+/// Identical coverage to [`fill_polygon`] — same edge walk, same pixel centres —
+/// but each pixel goes through `FrameBuffer::blend_pixel` instead of
+/// `set_pixel`.
+///
+/// ⚠️ Use this for any translucent overlay. [`fill_polygon`] **overwrites**, so
+/// filling with alow-alpha colour there paints it as fully opaque and erases the
+/// scene underneath rather than tinting it. Godot's navigation debug face colour
+/// is `Color(0.5, 1.0, 1.0, 0.4)`, which is exactly that case.
+///
+/// Mirrors the `fill_rect_blended` / `fill_circle_blended` pairs in
+/// [`crate::draw`].
+pub fn fill_polygon_blended(fb: &mut FrameBuffer, points: &[Vector2], color: Color) {
+    fill_polygon_with(fb, points, |fb, x, y| fb.blend_pixel(x, y, color));
+}
+
+/// Shared scanline walk behind [`fill_polygon`] and [`fill_polygon_blended`].
+///
+/// ⚠️ One walk on purpose: a blended fill that covered different pixels from the
+/// opaque one would put the overlay half a pixel off from anything drawn with
+/// the other, and the difference would only show on diagonal edges.
+fn fill_polygon_with(
+    fb: &mut FrameBuffer,
+    points: &[Vector2],
+    mut plot: impl FnMut(&mut FrameBuffer, u32, u32),
+) {
     let n = points.len();
     if n < 3 {
         return;
@@ -44,10 +66,9 @@ pub fn fill_polygon(fb: &mut FrameBuffer, points: &[Vector2], color: Color) {
         min_y = min_y.min(p.y);
         max_y = max_y.max(p.y);
     }
-    let y_start = min_y.floor().max(0.0) as i32;
-    let y_end = max_y.ceil().min((fb.height as f32) - 1.0) as i32;
-
-    for y in y_start..=y_end {
+    let y0 = min_y.floor().max(0.0) as i32;
+    let y1 = max_y.ceil().min((fb.height as f32) - 1.0) as i32;
+    for y in y0..=y1 {
         let yc = y as f32 + 0.5;
         let mut xs: Vec<f32> = Vec::new();
         for i in 0..n {
@@ -64,11 +85,20 @@ pub fn fill_polygon(fb: &mut FrameBuffer, points: &[Vector2], color: Color) {
             let xl = xs[i].ceil().max(0.0) as i32;
             let xr = xs[i + 1].floor().min((fb.width as f32) - 1.0) as i32;
             for x in xl..=xr {
-                fb.set_pixel(x as u32, y as u32, color);
+                plot(fb, x as u32, y as u32);
             }
             i += 2;
         }
     }
+}
+
+/// Scanline even-odd fill of a polygon with a solid `color`.
+///
+/// Points are in pixel space; the polygon is implicitly closed. Pixels are
+/// sampled at their center (`y + 0.5`) so a rectangle on integer bounds fills
+/// exactly its interior.
+pub fn fill_polygon(fb: &mut FrameBuffer, points: &[Vector2], color: Color) {
+    fill_polygon_with(fb, points, |fb, x, y| fb.set_pixel(x, y, color));
 }
 
 /// Scanline fill of a polygon sampling `texture` through per-vertex UVs.
@@ -636,5 +666,84 @@ mod tests {
         // region now filled.
         assert!(approx(fb_deformed.get_pixel(5, 5), clear()));
         assert!(approx(fb_deformed.get_pixel(17, 5), red()));
+    }
+
+    /// 🔑 THE BLENDED FILL TINTS WHAT IS UNDERNEATH; THE OPAQUE ONE REPLACES IT.
+    ///
+    /// ⚠️ This is the whole reason the blended variant exists. `fill_polygon`
+    /// goes through `set_pixel`, so filling with a low-alpha debug colour there
+    /// writes it as fully opaque and ERASES the scene under the overlay instead
+    /// of tinting it. Godot's navigation face colour is `Color(0.5, 1.0, 1.0,
+    /// 0.4)` — exactly that case.
+    #[test]
+    fn the_blended_fill_tints_rather_than_replaces() {
+        let quad = [
+            Vector2::new(1.0, 1.0),
+            Vector2::new(9.0, 1.0),
+            Vector2::new(9.0, 9.0),
+            Vector2::new(1.0, 9.0),
+        ];
+        let bg = Color::new(0.0, 0.0, 0.0, 1.0);
+        let translucent = Color::new(0.5, 1.0, 1.0, 0.4);
+
+        let mut opaque_fb = FrameBuffer::new(12, 12, bg);
+        fill_polygon(&mut opaque_fb, &quad, translucent);
+        let mut blended_fb = FrameBuffer::new(12, 12, bg);
+        fill_polygon_blended(&mut blended_fb, &quad, translucent);
+
+        let idx = (5 * 12 + 5) as usize;
+        let hard = opaque_fb.pixels[idx];
+        let soft = blended_fb.pixels[idx];
+
+        // The opaque path ignores alpha entirely — the colour lands as authored.
+        assert!(
+            (hard.g - 1.0).abs() < 1e-6,
+            "fill_polygon must write the colour as-is, got {hard:?}"
+        );
+        // The blended path mixes 40% of it over black.
+        assert!(
+            (soft.g - 0.4).abs() < 1e-3,
+            "fill_polygon_blended must mix 0.4 of green over black, got {soft:?}"
+        );
+        assert!(
+            soft.g < hard.g,
+            "a translucent fill must be dimmer than the opaque one, or nothing \
+             was blended"
+        );
+    }
+
+    /// 🔑 BOTH FILLS COVER EXACTLY THE SAME PIXELS.
+    ///
+    /// ⚠️ They share one scanline walk precisely so an overlay drawn blended
+    /// lines up with anything drawn opaque. A second copy of the edge walk would
+    /// drift on diagonals, where the two disagree by a pixel and nowhere else —
+    /// which is why this uses a TRIANGLE rather than a rectangle.
+    #[test]
+    fn the_two_fills_cover_identical_pixels() {
+        let tri = [
+            Vector2::new(1.0, 1.0),
+            Vector2::new(10.0, 3.0),
+            Vector2::new(4.0, 11.0),
+        ];
+        let bg = Color::new(0.0, 0.0, 0.0, 1.0);
+        let solid = Color::new(1.0, 1.0, 1.0, 1.0);
+
+        let mut a = FrameBuffer::new(14, 14, bg);
+        fill_polygon(&mut a, &tri, solid);
+        let mut b = FrameBuffer::new(14, 14, bg);
+        // Alpha 1.0 blends to the same value, so any difference is COVERAGE.
+        fill_polygon_blended(&mut b, &tri, solid);
+
+        let covered =
+            |fb: &FrameBuffer| -> Vec<bool> { fb.pixels.iter().map(|p| p.r > 0.5).collect() };
+        assert!(
+            covered(&a).iter().any(|c| *c),
+            "the triangle must cover something, or this compares two empty frames"
+        );
+        assert_eq!(
+            covered(&a),
+            covered(&b),
+            "the blended fill must cover exactly the pixels the opaque one does"
+        );
     }
 }

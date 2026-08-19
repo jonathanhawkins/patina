@@ -20,6 +20,12 @@ pub mod display_backend;
 pub mod error;
 pub mod file_access;
 pub mod gdextension_host;
+// ⚠️ `geometry2d` was ORPHANED — the file existed with eight public functions
+// and was never declared here, so it never compiled (pat-s3rrv.125). Two other
+// modules recorded the consequence in comments: `geometry3d.rs` noted the file
+// was "not declared in lib.rs", and `gdscene::nav_polygon` kept a PRIVATE COPY
+// of `is_point_in_polygon` because the real one was unreachable.
+pub mod geometry2d;
 pub mod geometry3d;
 pub mod id;
 pub mod math;

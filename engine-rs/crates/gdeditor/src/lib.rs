@@ -32,7 +32,6 @@ pub mod batch_rename;
 pub mod bezier_curve;
 pub mod bottom_panel_bar;
 pub mod bracket_match;
-pub mod canvas_overlays;
 pub mod code_folding;
 pub mod command_palette;
 pub mod comment_toggle;

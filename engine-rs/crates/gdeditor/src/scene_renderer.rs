@@ -41,7 +41,8 @@ const COLOR_SPRITE2D: Color = Color::new(0.3, 0.5, 1.0, 1.0); // blue
 const COLOR_CAMERA2D: Color = Color::new(0.2, 0.9, 0.3, 1.0); // green
 const COLOR_COLLISION: Color = Color::new(0.0, 0.85, 0.3, 0.7); // green outline
 const COLOR_AREA2D: Color = Color::new(0.3, 0.5, 1.0, 0.15); // blue tint
-const COLOR_NAVMESH: Color = Color::new(0.1, 1.0, 0.7, 0.8); // navmesh cyan (Godot navigation_server_2d.cpp:231)
+const COLOR_NAVMESH_FACE: Color = Color::new(0.5, 1.0, 1.0, 0.4); // Godot geometry_face_color
+const COLOR_NAVMESH_EDGE: Color = Color::new(0.5, 1.0, 1.0, 1.0); // Godot geometry_edge_color
 const COLOR_CHARBODY: Color = Color::new(0.3, 0.5, 1.0, 1.0); // blue outline
 const COLOR_RIGIDBODY: Color = Color::new(1.0, 0.85, 0.0, 1.0); // yellow outline
 const COLOR_STATICBODY: Color = Color::new(0.5, 0.5, 0.5, 1.0); // gray outline
@@ -878,10 +879,14 @@ fn draw_collision_shape(fb: &mut FrameBuffer, pos: Vector2, zoom: f32) {
 /// node-LOCAL space, so each point is `pos + v * zoom`. Using the pre-offset
 /// points from `navigation_overlay_2d` here would apply the position twice.
 ///
-/// ⚠️ Outlines rather than filled faces: Godot shades the faces too, but
-/// `gdrender2d::draw` has fill primitives only for rects and circles, and every
-/// other debug overlay in this file (collision shapes included) is drawn as an
-/// outline. Filling needs a polygon rasterizer, which is its own piece of work.
+/// Faces are filled and edges stroked, matching Godot, whose defaults are
+/// `geometry_face_color = Color(0.5, 1, 1, 0.4)` and
+/// `geometry_edge_color = Color(0.5, 1, 1, 1)`
+/// (`servers/navigation_2d/navigation_server_2d.cpp:232`).
+///
+/// ⚠️ The fill must be BLENDED. `polygon_raster::fill_polygon` writes through
+/// `set_pixel`, so a 0.4-alpha face there lands fully opaque and erases the
+/// scene under the overlay instead of tinting it.
 ///
 /// Edges close the loop — a polygon of N points draws N segments, not N - 1 —
 /// so a region never renders as an open fan.
@@ -892,14 +897,17 @@ fn draw_navigation_region(
     zoom: f32,
 ) {
     for points in crate::navigation_overlay::navigation_polygons_local(node) {
-        for i in 0..points.len() {
-            let a = points[i];
-            let b = points[(i + 1) % points.len()];
+        let screen: Vec<Vector2> = points
+            .iter()
+            .map(|v| Vector2::new(pos.x + v.x * zoom, pos.y + v.y * zoom))
+            .collect();
+        gdrender2d::polygon_raster::fill_polygon_blended(fb, &screen, COLOR_NAVMESH_FACE);
+        for i in 0..screen.len() {
             draw::draw_line_blended(
                 fb,
-                Vector2::new(pos.x + a.x * zoom, pos.y + a.y * zoom),
-                Vector2::new(pos.x + b.x * zoom, pos.y + b.y * zoom),
-                COLOR_NAVMESH,
+                screen[i],
+                screen[(i + 1) % screen.len()],
+                COLOR_NAVMESH_EDGE,
                 1.0,
             );
         }
@@ -3052,5 +3060,163 @@ mod tests {
         let fb = render_scene(&tree, None, 256, 256);
         assert_eq!(fb.width, 256);
         eprintln!("Part 2 OK");
+    }
+
+    /// A `NavigationRegion2D` at the scene origin, optionally carrying a baked
+    /// quad navmesh.
+    fn nav_region_tree(baked: bool) -> SceneTree {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut region = Node::new("Region", "NavigationRegion2D");
+        region.set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
+        if baked {
+            region.set_property(
+                "__navmesh_vertices__",
+                Variant::PackedVector2Array(vec![
+                    Vector2::new(-40.0, -30.0),
+                    Vector2::new(40.0, -30.0),
+                    Vector2::new(40.0, 30.0),
+                    Vector2::new(-40.0, 30.0),
+                ]),
+            );
+            region.set_property(
+                "__navmesh_polygons__",
+                Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2, 3])]),
+            );
+        }
+        tree.add_child(root, region).unwrap();
+        tree
+    }
+
+    /// Pixels of the navmesh EDGE colour, Godot's opaque `Color(0.5, 1, 1)`.
+    ///
+    /// ⚠️ Keyed on the edge, not the face: the face is blended at alpha 0.4 and
+    /// lands near (0.25, 0.45, 0.46), which no tight predicate can share with
+    /// the opaque edge. The fill is asserted separately, by interior coverage.
+    /// Verified against every `Color` constant in this file — nothing else has
+    /// both green and blue above 0.9.
+    fn navmesh_edge_pixels(fb: &FrameBuffer) -> usize {
+        fb.pixels
+            .iter()
+            .filter(|p| p.g > 0.9 && p.b > 0.9 && p.r > 0.3 && p.r < 0.7)
+            .count()
+    }
+
+    /// 🔑 A BAKED `NavigationRegion2D` DRAWS ITS NAVMESH IN THE EDITOR VIEWPORT.
+    ///
+    /// ⚠️ The editor viewport is IMMEDIATE-MODE — `render_scene_inner` draws
+    /// straight into the framebuffer, it does not build a `Render2DItem` list.
+    /// An overlay written as render items (which is the right shape for the
+    /// runtime canvas) never appears here, so this test asserts PIXELS.
+    ///
+    /// The unbaked half is the control: it is the same scene minus the baked
+    /// properties, so a pass cannot come from some other cyan chrome.
+    #[test]
+    fn a_baked_navigation_region_draws_its_navmesh_in_the_editor_viewport() {
+        let baked = render_scene(&nav_region_tree(true), None, 320, 240);
+        let unbaked = render_scene(&nav_region_tree(false), None, 320, 240);
+
+        let drawn = navmesh_edge_pixels(&baked);
+        let control = navmesh_edge_pixels(&unbaked);
+        assert!(
+            drawn > control,
+            "a baked region must add navmesh pixels: baked={drawn}, unbaked={control}"
+        );
+        assert!(
+            drawn >= 100,
+            "an 80x60 quad outline should cover a few hundred pixels, got {drawn} \
+             — a handful means only a corner or a single edge landed"
+        );
+
+        // ⚠️ The FACE fill, asserted through the interior rather than the edge
+        // predicate. A centre pixel that is still the background means only the
+        // outline drew — which is what shipped before the blended fill existed.
+        let centre = (baked.height / 2 * baked.width + baked.width / 2) as usize;
+        assert_ne!(
+            baked.pixels[centre], BG_COLOR,
+            "the navmesh interior must be tinted by the filled face"
+        );
+        // ...and TINTED, not painted over: an opaque fill would erase whatever
+        // the scene draws underneath, which is the bug `fill_polygon_blended`
+        // exists to avoid.
+        assert_ne!(
+            baked.pixels[centre], COLOR_NAVMESH_FACE,
+            "the face must be blended over the background, not written opaque"
+        );
+    }
+
+    /// 🔑 AN UNBAKED REGION DRAWS NO NAVMESH.
+    ///
+    /// "Not baked yet" must look like nothing, not like an empty box at the
+    /// origin — an author needs to be able to tell the two apart, which is the
+    /// same reason the overlay draws a DISABLED region greyed rather than
+    /// skipping it.
+    #[test]
+    fn an_unbaked_navigation_region_draws_no_navmesh() {
+        let fb = render_scene(&nav_region_tree(false), None, 320, 240);
+        assert_eq!(
+            navmesh_edge_pixels(&fb),
+            0,
+            "nothing in the default chrome is navmesh-cyan, so an unbaked \
+             region must contribute no such pixels"
+        );
+    }
+
+    /// 🔑 THE NAVMESH IS PLACED ONCE, NOT TWICE.
+    ///
+    /// ⚠️ `navigation_polygons_local` returns NODE-LOCAL points and the caller
+    /// has already mapped the region's GLOBAL position into screen space. A draw
+    /// routine that used the pre-offset points from `navigation_overlay_2d`
+    /// would apply the position twice — invisible at the origin, which is why
+    /// this region sits at (120, 90).
+    ///
+    /// Asserted as a bounding box rather than exact pixels: the mesh must land
+    /// around the region's own screen position, and double-offsetting puts it
+    /// twice as far from centre.
+    #[test]
+    fn the_navmesh_follows_the_regions_position_exactly_once() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut region = Node::new("Region", "NavigationRegion2D");
+        region.set_property("position", Variant::Vector2(Vector2::new(120.0, 90.0)));
+        region.set_property(
+            "__navmesh_vertices__",
+            Variant::PackedVector2Array(vec![
+                Vector2::new(-10.0, -10.0),
+                Vector2::new(10.0, -10.0),
+                Vector2::new(10.0, 10.0),
+                Vector2::new(-10.0, 10.0),
+            ]),
+        );
+        region.set_property(
+            "__navmesh_polygons__",
+            Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2, 3])]),
+        );
+        tree.add_child(root, region).unwrap();
+
+        let fb = render_scene(&tree, None, 320, 240);
+        let xs: Vec<usize> = (0..fb.pixels.len())
+            .filter(|&i| {
+                let p = fb.pixels[i];
+                p.g > 0.9 && p.b > 0.9 && p.r > 0.3 && p.r < 0.7
+            })
+            .map(|i| i % fb.width as usize)
+            .collect();
+        assert!(!xs.is_empty(), "the navmesh must be drawn at all");
+
+        // The scene is centred on its own bounds, so a single region lands near
+        // the middle of the frame whatever its authored position. Double
+        // offsetting breaks that — the mesh walks off toward one edge.
+        let (min_x, max_x) = (
+            *xs.iter().min().unwrap() as f32,
+            *xs.iter().max().unwrap() as f32,
+        );
+        let mid = (min_x + max_x) / 2.0;
+        let centre = fb.width as f32 / 2.0;
+        assert!(
+            (mid - centre).abs() < 40.0,
+            "the navmesh should sit near the centred region (x~{centre}), got \
+             x~{mid} spanning {min_x}..{max_x} — a doubled offset walks it away"
+        );
     }
 }

@@ -97,6 +97,57 @@ const JOINT_VELOCITY_ITERATIONS: usize = 8;
 const JOINT_LIMIT_BIAS: f32 = 0.2;
 
 /// Orders a body pair so one entry covers it regardless of which side asks.
+/// Resolves one damping channel over the areas a body overlaps, following
+/// Godot's space-override chain (pat-s3rrv.102).
+///
+/// `channel` picks the mode and value being resolved, so the linear and angular
+/// halves share one implementation — Godot combines them identically and only
+/// the field differs.
+///
+/// `areas` must be sorted by ASCENDING priority; this walks it in reverse so the
+/// highest-priority area is consulted first, which is what lets a `Replace`
+/// there stop everything below it.
+///
+/// Returns `None` when no overlapping area declares a mode for this channel —
+/// the signal the caller uses to leave the body's own damping alone. That is
+/// why `contributed` is tracked separately from the accumulator: a `Replace`
+/// with a value of `0.0` is a real override meaning "no damping here", and
+/// `Some(0.0)` must not collapse into `None`.
+///
+/// ⚠️ Mirrors `gdphysics2d::area2d::AreaStore::compute_body_damp`, minus its
+/// `default_damp` baseline: the 3D caller applies area damping as an extra
+/// decay on top of `integrate`, so folding a baseline in here would damp a body
+/// twice.
+fn resolve_damp(
+    areas: &[&Area3D],
+    channel: impl Fn(&Area3D) -> (SpaceOverride, f32),
+) -> Option<f32> {
+    let mut damp = 0.0_f32;
+    let mut contributed = false;
+    let mut stopped = false;
+    for area in areas.iter().rev() {
+        let (mode, value) = channel(area);
+        match mode {
+            SpaceOverride::Disabled => continue,
+            SpaceOverride::Combine => damp += value,
+            SpaceOverride::CombineReplace => {
+                damp += value;
+                stopped = true;
+            }
+            SpaceOverride::Replace => {
+                damp = value;
+                stopped = true;
+            }
+            SpaceOverride::ReplaceCombine => damp = value,
+        }
+        contributed = true;
+        if stopped {
+            break;
+        }
+    }
+    contributed.then_some(damp)
+}
+
 fn exception_key(a: BodyId3D, b: BodyId3D) -> (BodyId3D, BodyId3D) {
     if a <= b {
         (a, b)
@@ -484,6 +535,14 @@ impl PhysicsWorld3D {
         self.area_store.get_area(id)
     }
 
+    /// Every area currently overlapping `id`. Delegates to
+    /// [`AreaStore3D::overlapping_areas`], the same way every other area
+    /// accessor on this world does — the store is private, so the scene bridge
+    /// has no other route to the overlap set.
+    pub fn overlapping_areas(&self, id: AreaId3D) -> Vec<AreaId3D> {
+        self.area_store.overlapping_areas(id)
+    }
+
     /// Returns a mutable reference to an area by ID.
     pub fn get_area_mut(&mut self, id: AreaId3D) -> Option<&mut Area3D> {
         self.area_store.get_area_mut(id)
@@ -708,7 +767,13 @@ impl PhysicsWorld3D {
 
                     // Only resolve if bodies are approaching at the contact.
                     if vel_along_normal > 0.0 {
-                        let restitution = self.bodies[&id_a].bounce.min(self.bodies[&id_b].bounce);
+                        // Godot: `CLAMP(A.bounce + B.bounce, 0, 1)`
+                        // (`godot_body_pair_3d.cpp:254`) — the SAME formula the
+                        // 2D pair uses, and not a minimum. A minimum makes the
+                        // dullest surface win, so a bouncy ball on a bouncy
+                        // floor barely rebounds (pat-s3rrv.99).
+                        let restitution =
+                            (self.bodies[&id_a].bounce + self.bodies[&id_b].bounce).clamp(0.0, 1.0);
 
                         // Effective mass along the normal including the angular
                         // contribution of each body: 1/m_a + 1/m_b +
@@ -749,8 +814,16 @@ impl PhysicsWorld3D {
                         let tangent_len = tangent.length();
                         if tangent_len > 1e-8 {
                             let tangent_dir = tangent * (1.0 / tangent_len);
-                            let friction_coeff =
-                                (self.bodies[&id_a].friction * self.bodies[&id_b].friction).sqrt();
+                            // Godot: `abs(MIN(A.friction, B.friction))`
+                            // (`godot_body_pair_3d.cpp:258`), not a geometric
+                            // mean. The two agree only when the coefficients
+                            // are equal, which is what a same-material fixture
+                            // uses — so the mean looks right until two
+                            // different materials meet.
+                            let friction_coeff = self.bodies[&id_a]
+                                .friction
+                                .min(self.bodies[&id_b].friction)
+                                .abs();
                             // Effective mass along the tangent direction.
                             let raxt = ra.cross(tangent_dir);
                             let rbxt = rb.cross(tangent_dir);
@@ -1088,13 +1161,20 @@ impl PhysicsWorld3D {
     }
 
     /// Computes the effective space parameters for a body this step by folding
-    /// in every overlapping [`Area3D`] whose gravity space override is active.
+    /// in every [`Area3D`] it overlaps.
     ///
     /// Returns the effective *space* gravity (before the body's own
-    /// `gravity_scale`) plus optional linear/angular damping overrides. Areas
-    /// are applied highest-`priority` first; `Replace` modes discard the
-    /// accumulated gravity, `Combine` modes add to it — a simplification of
-    /// Godot's five-way override enum that covers the common single-zone case.
+    /// `gravity_scale`) plus optional linear/angular damping overrides.
+    ///
+    /// ⚠️ Godot treats gravity, linear damp and angular damp as THREE
+    /// independent channels, each with its own five-way `SpaceOverride` mode
+    /// resolved by `priority`. This used to fold damping in unconditionally for
+    /// any area whose *gravity* override happened to be active, which is two
+    /// bugs at once: an area could damp without asking to, and a damp-only area
+    /// was filtered out before its mode was read (pat-s3rrv.102). The damp
+    /// channels now go through [`resolve_damp`]; gravity keeps its own arm
+    /// below, where `Replace` discards the accumulated value and `Combine` adds
+    /// to it.
     fn effective_space_params(&self, id: BodyId3D) -> (Vector3, Option<f32>, Option<f32>) {
         let body = match self.bodies.get(&id) {
             Some(b) => b,
@@ -1107,10 +1187,16 @@ impl PhysicsWorld3D {
             return (self.gravity, None, None);
         }
 
+        // ⚠️ NOT filtered on `gravity_space_override` (pat-s3rrv.102). Godot
+        // resolves gravity, linear damp and angular damp as three INDEPENDENT
+        // channels, so an area that overrides only damping has
+        // `gravity_space_override == Disabled` and was previously dropped here
+        // — before its damp mode was ever consulted. Each channel applies its
+        // own `Disabled` check below instead; the gravity arm already no-ops on
+        // `Disabled`, so widening this filter leaves gravity unchanged.
         let mut overlapping: Vec<&Area3D> = self
             .area_store
             .areas()
-            .filter(|a| a.gravity_space_override != SpaceOverride::Disabled)
             .filter(|a| (a.collision_mask & body.collision_layer) != 0)
             .filter(|a| {
                 collision::test_collision(a.position, &a.shape, body.position, &body.shape)
@@ -1128,18 +1214,21 @@ impl PhysicsWorld3D {
         });
 
         let mut gravity = self.gravity;
-        let mut lin_damp: Option<f32> = None;
-        let mut ang_damp: Option<f32> = None;
-        for area in overlapping {
+        for area in &overlapping {
             let g = area.gravity_vector(body.position);
             match area.gravity_space_override {
                 SpaceOverride::Replace | SpaceOverride::ReplaceCombine => gravity = g,
                 SpaceOverride::Combine | SpaceOverride::CombineReplace => gravity = gravity + g,
                 SpaceOverride::Disabled => {}
             }
-            lin_damp = Some(lin_damp.map_or(area.linear_damp, |d| d.max(area.linear_damp)));
-            ang_damp = Some(ang_damp.map_or(area.angular_damp, |d| d.max(area.angular_damp)));
         }
+
+        let lin_damp = resolve_damp(&overlapping, |a| {
+            (a.linear_damp_space_override, a.linear_damp)
+        });
+        let ang_damp = resolve_damp(&overlapping, |a| {
+            (a.angular_damp_space_override, a.angular_damp)
+        });
         (gravity, lin_damp, ang_damp)
     }
 
@@ -1323,6 +1412,135 @@ mod tests {
         let removed = world.remove_body(id);
         assert!(removed.is_some());
         assert_eq!(world.body_count(), 0);
+    }
+
+    // -- Area3D damp space overrides (pat-s3rrv.102) -------------------------
+
+    fn damp_area(mode: SpaceOverride, damp: f32, priority: f32) -> Area3D {
+        let mut a = Area3D::new(AreaId3D(0), Vector3::ZERO, Shape3D::Sphere { radius: 5.0 });
+        a.linear_damp_space_override = mode;
+        a.linear_damp = damp;
+        a.priority = priority;
+        a
+    }
+
+    /// 🔑 `Disabled` MEANS NO DAMPING, NOT "DAMP WITH `linear_damp`".
+    ///
+    /// This is the whole defect: the resolver used to `max()` every overlapping
+    /// area's `linear_damp` together and never look at the mode, so an area
+    /// authored `linear_damp_space_override = 0` damped anyway — and
+    /// `linear_damp` defaults to 0.1, so EVERY area silently damped.
+    #[test]
+    fn area_damp_disabled_contributes_nothing() {
+        let area = damp_area(SpaceOverride::Disabled, 5.0, 0.0);
+        let areas = [&area];
+        assert_eq!(
+            resolve_damp(&areas, |a| (a.linear_damp_space_override, a.linear_damp)),
+            None,
+            "a Disabled channel must not damp at all"
+        );
+    }
+
+    /// 🔑 `Combine` ADDS, AND STACKS ACROSS AREAS.
+    #[test]
+    fn area_damp_combine_adds_together() {
+        let low = damp_area(SpaceOverride::Combine, 2.0, 0.0);
+        let high = damp_area(SpaceOverride::Combine, 3.0, 1.0);
+        // Ascending priority, as `effective_space_params` sorts them.
+        let areas = [&low, &high];
+        assert_eq!(
+            resolve_damp(&areas, |a| (a.linear_damp_space_override, a.linear_damp)),
+            Some(5.0),
+            "two Combine areas must sum"
+        );
+    }
+
+    /// 🔑 `Replace` ON THE HIGHEST-PRIORITY AREA STOPS THE CHAIN.
+    ///
+    /// ⚠️ The priority ORDER is what this really tests. `resolve_damp` walks the
+    /// ascending-priority slice in reverse, so the 5.0 area is consulted first
+    /// and its `Replace` discards the lower one. Sorting the wrong way round
+    /// would yield 2.0 here and still look like a working override.
+    #[test]
+    fn area_damp_replace_takes_highest_priority_and_stops() {
+        let low = damp_area(SpaceOverride::Combine, 2.0, 0.0);
+        let high = damp_area(SpaceOverride::Replace, 7.0, 1.0);
+        let areas = [&low, &high];
+        assert_eq!(
+            resolve_damp(&areas, |a| (a.linear_damp_space_override, a.linear_damp)),
+            Some(7.0),
+            "Replace must win outright, not sum to 9.0"
+        );
+    }
+
+    /// 🔑 `ReplaceCombine` REPLACES BUT KEEPS WALKING.
+    ///
+    /// The distinction from `Replace` is only observable with a lower area
+    /// present: 7.0 replaces the accumulator, then the 2.0 `Combine` below adds
+    /// to it. A resolver that treated the two Replace modes alike returns 7.0.
+    #[test]
+    fn area_damp_replace_combine_keeps_walking() {
+        let low = damp_area(SpaceOverride::Combine, 2.0, 0.0);
+        let high = damp_area(SpaceOverride::ReplaceCombine, 7.0, 1.0);
+        let areas = [&low, &high];
+        assert_eq!(
+            resolve_damp(&areas, |a| (a.linear_damp_space_override, a.linear_damp)),
+            Some(9.0),
+            "ReplaceCombine must replace then keep combining"
+        );
+    }
+
+    /// 🔑 A `Replace` OF ZERO IS AN OVERRIDE, NOT AN ABSENCE.
+    ///
+    /// ⚠️ `Some(0.0)` and `None` mean different things to the caller — "this
+    /// zone explicitly cancels damping" versus "no zone had an opinion". A
+    /// resolver that returned `None` for a zero accumulator would collapse them,
+    /// which is why `contributed` is tracked separately from the value.
+    #[test]
+    fn area_damp_zero_replace_is_some_not_none() {
+        let area = damp_area(SpaceOverride::Replace, 0.0, 0.0);
+        let areas = [&area];
+        assert_eq!(
+            resolve_damp(&areas, |a| (a.linear_damp_space_override, a.linear_damp)),
+            Some(0.0),
+            "an explicit zero override must not read as 'no override'"
+        );
+    }
+
+    /// 🔑 THE ACCEPTANCE, AT THE WORLD LEVEL: DISABLED leaves a body's speed
+    /// alone while COMBINE slows it.
+    ///
+    /// ⚠️ Gravity is zeroed so the ONLY thing that can change the speed is
+    /// damping. With gravity on, a falling body speeds up regardless and the
+    /// comparison would measure the wrong thing.
+    #[test]
+    fn area_damp_slows_a_body_only_when_the_mode_is_active() {
+        fn speed_after(mode: SpaceOverride) -> f32 {
+            let mut world = PhysicsWorld3D::new();
+            world.set_gravity(Vector3::ZERO);
+            let mut area = damp_area(mode, 5.0, 0.0);
+            area.gravity_space_override = SpaceOverride::Disabled;
+            world.add_area(area);
+
+            let mut body = sphere_body(Vector3::ZERO);
+            body.linear_velocity = Vector3::new(10.0, 0.0, 0.0);
+            let id = world.add_body(body);
+
+            world.step(1.0 / 60.0);
+            world.get_body(id).unwrap().linear_velocity.length()
+        }
+
+        let disabled = speed_after(SpaceOverride::Disabled);
+        assert!(
+            (disabled - 10.0).abs() < 1e-4,
+            "a DISABLED damp override must leave the speed untouched, got {disabled}"
+        );
+
+        let combined = speed_after(SpaceOverride::Combine);
+        assert!(
+            combined < disabled - 0.1,
+            "a COMBINE damp override must slow the body: {combined} vs {disabled}"
+        );
     }
 
     // -- Joint constraint solving (pat-u3l8c.57) ----------------------------
@@ -1741,10 +1959,17 @@ mod tests {
         body.linear_velocity = Vector3::new(10.0, 0.0, 0.0);
         body.can_sleep = false;
         let id = world.add_body(body);
-        // Active override (combine, no gravity change) applies the area's damp.
+        // ⚠️ UPDATED by pat-s3rrv.102. This used to set only
+        // `gravity_space_override` and still expect damping, which is the exact
+        // conflation that bead fixed: Godot resolves gravity and linear damp as
+        // INDEPENDENT channels, and `linear_damp_space_override` defaults to
+        // DISABLED. The test's intent — "an active area damp override slows a
+        // body" — is unchanged; only its premise is corrected, because the
+        // damp channel now has to be switched on to damp.
         let mut area = Area3D::new(AreaId3D(0), Vector3::ZERO, Shape3D::Sphere { radius: 20.0 });
         area.gravity_space_override = SpaceOverride::Combine;
         area.gravity = 0.0;
+        area.linear_damp_space_override = SpaceOverride::Combine;
         area.linear_damp = 5.0;
         world.add_area(area);
 

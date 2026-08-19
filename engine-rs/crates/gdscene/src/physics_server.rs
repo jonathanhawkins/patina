@@ -258,15 +258,49 @@ pub(crate) fn shape_from_shape_props(tree: &SceneTree, node_id: NodeId) -> Optio
             }
         }
         Variant::String(s) => Some(s.clone()),
+        // A shape built at RUNTIME — `$Col.shape = CircleShape2D.new()`, which
+        // is Godot's standard runtime shape authoring — arrives as a live
+        // resource rather than a string: it has no `res://` path and no
+        // `__shape__*` companions, because nothing ever wrote it to a `.tscn`.
+        // Its class name and its dimensions both live INSIDE the resource
+        // (pat-s3rrv.98).
+        //
+        // ⚠️ This used to fall into `_ => None`, and the failure was silent in
+        // the worst way: the body still registered, it just took stock geometry,
+        // so a script asking for `radius = 40` got collision at the default with
+        // nothing reporting an error.
+        Variant::Resource(r) => Some(r.class_name.clone()),
         _ => None,
     };
 
-    // Dimension readers that prefer the sub-resource's copied value.
+    // The script-assigned resource's own properties, when there is one. The
+    // dimension readers below consult it BETWEEN the two node-property lookups.
+    let shape_res: Option<&gdvariant::ResourceRef> = match &shape_prop {
+        Variant::Resource(r) => Some(r.as_ref()),
+        _ => None,
+    };
+    let res_prop = move |key: &str| -> Option<Variant> {
+        shape_res.and_then(|r| r.properties.get(key).cloned())
+    };
+
+    // Dimension readers, in priority order:
+    //   1. `__shape__<key>` — the .tscn sub-resource's value, copied onto the
+    //      node at instancing;
+    //   2. the assigned resource's own property — a script-built shape;
+    //   3. the bare node key — a hand-built node with dimensions inline.
+    // The .tscn value stays first so this cannot change how an authored scene
+    // resolves; the new arm only fires where there was previously no answer.
     let has = |key: &str| !matches!(node.get_property(key), Variant::Nil);
     let num = |key: &str, default: f64| -> f32 {
         let ns = format!("__shape__{key}");
         if has(&ns) {
             float_prop(tree, node_id, &ns, default) as f32
+        } else if let Some(v) = res_prop(key) {
+            match v {
+                Variant::Float(f) => f as f32,
+                Variant::Int(i) => i as f32,
+                _ => default as f32,
+            }
         } else {
             float_prop(tree, node_id, key, default) as f32
         }
@@ -275,6 +309,8 @@ pub(crate) fn shape_from_shape_props(tree: &SceneTree, node_id: NodeId) -> Optio
         let ns = format!("__shape__{key}");
         if has(&ns) {
             vec2_prop(tree, node_id, &ns, default)
+        } else if let Some(Variant::Vector2(v)) = res_prop(key) {
+            v
         } else {
             vec2_prop(tree, node_id, key, default)
         }
@@ -282,11 +318,15 @@ pub(crate) fn shape_from_shape_props(tree: &SceneTree, node_id: NodeId) -> Optio
     let v2s = |key: &str| -> Vec<Vector2> {
         let ns = format!("__shape__{key}");
         let namespaced = vec2array_prop(tree, node_id, &ns);
-        if namespaced.is_empty() {
-            vec2array_prop(tree, node_id, key)
-        } else {
-            namespaced
+        if !namespaced.is_empty() {
+            return namespaced;
         }
+        if let Some(Variant::PackedVector2Array(v)) = res_prop(key) {
+            if !v.is_empty() {
+                return v;
+            }
+        }
+        vec2array_prop(tree, node_id, key)
     };
 
     match resolved_class.as_deref() {
@@ -303,7 +343,18 @@ pub(crate) fn shape_from_shape_props(tree: &SceneTree, node_id: NodeId) -> Optio
             }
             "CapsuleShape2D" => {
                 let radius = num("radius", 10.0);
-                let height = num("height", 20.0);
+                // ⚠️ 30.0, not 20.0 (pat-s3rrv.98). `doc/classes/CapsuleShape2D.xml`
+                // gives `height` a default of **30.0**, and Godot omits
+                // default-valued properties when it writes a `.tscn` — so a
+                // capsule authored in Godot and left at its default arrives here
+                // with NO `height` key at all, and the old 20.0 silently gave it
+                // a shape two thirds the authored size.
+                //
+                // This also closes a disagreement inside our own engine: ClassDB
+                // registers 30.0 (from the same XML), so a script-built
+                // `CapsuleShape2D.new()` was 30 while a `.tscn`-authored one was
+                // 20 — the exact mismatch this bead set out to prevent.
+                let height = num("height", 30.0);
                 Some(Shape2D::Capsule { radius, height })
             }
             "SegmentShape2D" => {
@@ -468,6 +519,10 @@ fn extra_collision_shapes(
             // turning the blocking face with the collider is a real gap, but it
             // belongs to both shapes at once, not to this one.
             one_way_direction: Vector2::new(0.0, -1.0),
+            // `CollisionShape2D.one_way_collision_margin` for THIS collider —
+            // per-shape in Godot, so it is read here rather than taken from the
+            // body (`collision_shape_2d.cpp:49`).
+            one_way_margin: float_prop(tree, child_id, "one_way_collision_margin", 1.0) as f32,
         });
     }
     out
@@ -1176,6 +1231,32 @@ impl PhysicsServer {
                 if let Some(b) = opt_float_prop(tree, node_id, "__physics_material__bounce") {
                     body.bounce = b as f32;
                 }
+                // `rough` / `absorbent` are Godot's COMBINE-MODE flags, and it
+                // signals them by storing the value NEGATED:
+                // `computed_friction() { return rough ? -friction : friction; }`
+                // and the same for `absorbent`/`bounce`
+                // (`physics_material.h:42-67`). The pair solver then reads the
+                // sign back out through its combine rules —
+                // `friction = abs(MIN(a, b))` and `bounce = CLAMP(a + b, 0, 1)`
+                // (`godot_body_pair_2d.cpp:242-248`), both already implemented
+                // in `solver::combine_friction` / `combine_bounce`.
+                //
+                // 🔑 So the modes need NO branch here or in the solver: the sign
+                // IS the mode. `abs(MIN(..))` makes a rough surface's friction
+                // WIN the pair instead of the usual "slipperiest side wins",
+                // and a negative bounce SUBTRACTS under the clamped sum, which
+                // is how an absorbent surface deadens a bouncy one.
+                //
+                // ⚠️ NOT multiplication. Godot 4.6 has no multiplicative branch
+                // in either combine function — the bead's own prose says 0.5 and
+                // 0.5 combine to 0.25 under `rough`, and the vendored source
+                // says otherwise. Verified against the checked-in tree.
+                if bool_prop(tree, node_id, "__physics_material__rough", false) {
+                    body.friction = -body.friction.abs();
+                }
+                if bool_prop(tree, node_id, "__physics_material__absorbent", false) {
+                    body.bounce = -body.bounce.abs();
+                }
                 // The rest of Godot's RigidBody2D surface. `PhysicsBody2D`
                 // already models and honors these — `integrate` skips a frozen
                 // or sleeping body outright and zeroes angular motion under
@@ -1196,12 +1277,30 @@ impl PhysicsServer {
                 body.gravity_scale = float_prop(tree, node_id, "gravity_scale", 1.0) as f32;
                 body.linear_damp = float_prop(tree, node_id, "linear_damp", 0.0) as f32;
                 body.angular_damp = float_prop(tree, node_id, "angular_damp", 0.0) as f32;
+                // StaticBody2D's conveyor surface (pat-s3rrv.101). Godot
+                // defaults both to zero (`doc/classes/StaticBody2D.xml`), and a
+                // zero surface velocity is exactly "no conveyor", so the plain
+                // defaults are safe for every other body class.
+                //
+                // ⚠️ These are read for ALL body types, not just Static: Godot
+                // puts them on `StaticBody2D`, which `AnimatableBody2D`
+                // inherits, and this bridge maps the latter to
+                // `BodyType::Kinematic`. Gating on `BodyType::Static` would
+                // silently drop an authored conveyor on an animated platform.
+                body.constant_linear_velocity =
+                    vec2_prop(tree, node_id, "constant_linear_velocity", Vector2::ZERO);
+                body.constant_angular_velocity =
+                    float_prop(tree, node_id, "constant_angular_velocity", 0.0) as f32;
                 // One-way collision lives on the shape node in Godot but is solved
                 // per body here, so lift it (pat-0q2kx.28). The default direction
                 // (0,-1) already means "blocks from above", which is what an
                 // unrotated one-way platform does.
-                if let Some((one_way, _margin)) = one_way_collision_for(tree, node_id) {
+                if let Some((one_way, margin)) = one_way_collision_for(tree, node_id) {
                     body.one_way_collision = one_way;
+                    // The margin was previously read and discarded here, which
+                    // left `one_way_collision_margin` inert for the PRIMARY
+                    // shape (extras get theirs in `extra_collision_shapes`).
+                    body.one_way_margin = margin;
                 }
 
                 let body_id = self.world.add_body(body);
@@ -1801,6 +1900,18 @@ impl PhysicsServer {
 
             let extra_shapes = extra_collision_shapes(tree, node_id, node_scale);
 
+            // Re-read each tick so a script can change a belt's speed or stop
+            // it (pat-s3rrv.101). `opt_*` rather than a defaulted read: a class
+            // that has no such property (RigidBody2D, CharacterBody2D) yields
+            // `None` and its body is left alone, instead of being rewritten to
+            // zero sixty times a second.
+            //
+            // ⚠️ Read here, with the other `tree` lookups, because the body is
+            // borrowed mutably below and `tree` cannot be consulted inside that
+            // borrow.
+            let conveyor_linear = opt_vec2_prop(tree, node_id, "constant_linear_velocity");
+            let conveyor_angular = opt_float_prop(tree, node_id, "constant_angular_velocity");
+
             let mut is_rigid = false;
             if let Some(body) = self.world.get_body_mut(body_id) {
                 // Ahead of the per-type match: a collider's shape and offset are
@@ -1823,6 +1934,15 @@ impl PhysicsServer {
                 // moment a hitbox moved or was toggled.
                 if body.extra_shapes != extra_shapes {
                     body.extra_shapes = extra_shapes;
+                }
+                // Surface velocity is a property of the belt, not of its motion,
+                // so like the collider geometry above it applies ahead of the
+                // per-type match rather than inside one arm.
+                if let Some(v) = conveyor_linear {
+                    body.constant_linear_velocity = v;
+                }
+                if let Some(a) = conveyor_angular {
+                    body.constant_angular_velocity = a as f32;
                 }
                 match body.body_type {
                     BodyType::Kinematic => {
@@ -2361,6 +2481,96 @@ impl PhysicsServer {
         }
     }
 
+    /// Every body a character should collide against, excluding itself.
+    ///
+    /// ⚠️ Tile bodies are chained in explicitly. They are generated from painted
+    /// cells and have no scene node, so they never appear in `node_to_body` —
+    /// walking that map alone once let a character pass straight through painted
+    /// ground while the static bodies sat in the world (pat-0q2kx.117).
+    /// Extracted so the per-tick slide and the script-driven
+    /// [`script_move_and_collide`](Self::script_move_and_collide) sweep cannot
+    /// drift apart on which bodies are solid.
+    fn obstacle_bodies(&self, exclude: NodeId) -> Vec<&PhysicsBody2D> {
+        self.node_to_body
+            .iter()
+            .filter_map(|(&other_node, &other_body_id)| {
+                if other_node == exclude {
+                    return None;
+                }
+                self.world.get_body(other_body_id)
+            })
+            .chain(
+                self.tilemap_bodies
+                    .values()
+                    .flatten()
+                    .filter_map(|&tile_body| self.world.get_body(tile_body)),
+            )
+            .collect()
+    }
+
+    /// Godot's `PhysicsBody2D.move_and_collide(motion)`: sweep `motion`, stop at
+    /// the first blocking contact, and report it (pat-s3rrv.97).
+    ///
+    /// Returns `true` when something was hit, having published the contact as
+    /// `_move_and_collide` for the script surface to hand back as a
+    /// `KinematicCollision2D`.
+    ///
+    /// ⚠️ Writes the result onto the NODE, not onto the physics body. This runs
+    /// during the script phase, and `sync_to_physics` pushes node transforms
+    /// into the world at the top of the next tick — so writing the body here
+    /// would be overwritten by the node a moment later, and the two would
+    /// disagree for the rest of this frame.
+    ///
+    /// ⚠️ Unlike `move_and_slide`, this does NOT slide along the surface: Godot
+    /// stops dead at the first contact, which is the whole reason the method
+    /// exists alongside the sliding one.
+    pub fn script_move_and_collide(
+        &self,
+        tree: &mut SceneTree,
+        node_id: NodeId,
+        motion: Vector2,
+    ) -> bool {
+        let Some(&body_id) = self.node_to_body.get(&node_id) else {
+            return false;
+        };
+        let Some(body) = self.world.get_body(body_id) else {
+            return false;
+        };
+        let mut character = PhysicsCharacterBody2D::new(body.position, body.shape.clone());
+        character.collision_layer = body.collision_layer;
+        character.collision_mask = body.collision_mask;
+        let obstacles = self.obstacle_bodies(node_id);
+        let hit = character.move_and_collide(motion, &obstacles);
+        let end = character.position;
+        drop(obstacles);
+
+        crate::node2d::set_global_position(tree, node_id, end);
+        let record = match &hit {
+            Some(c) => {
+                let mut rec = gdvariant::Dictionary::new();
+                rec.insert("normal", Variant::Vector2(c.normal));
+                rec.insert("depth", Variant::Float(c.depth as f64));
+                rec.insert("position", Variant::Vector2(c.position));
+                rec.insert("remainder", Variant::Vector2(c.remainder));
+                rec.insert(
+                    "collider",
+                    c.collider
+                        .and_then(|bid| self.body_to_node.get(&bid).copied())
+                        .map(|nid| Variant::ObjectId(nid.object_id()))
+                        .unwrap_or(Variant::Nil),
+                );
+                Variant::Dictionary(rec)
+            }
+            // Cleared rather than left stale, so a later call that hits nothing
+            // cannot hand back the previous call's contact.
+            None => Variant::Nil,
+        };
+        if let Some(node) = tree.get_node_mut(node_id) {
+            node.set_property("_move_and_collide", record);
+        }
+        hit.is_some()
+    }
+
     /// Runs `move_and_slide` for every `CharacterBody2D` node that has a
     /// non-zero velocity, then syncs the resulting position back to the
     /// scene node.
@@ -2426,6 +2636,10 @@ impl PhysicsServer {
 
             // Build a CharacterBody2D seeded from the node's persisted state and
             // configuration properties.
+            // Captured BEFORE the move: `get_real_velocity()` is the motion
+            // actually achieved, which is only knowable by differencing the
+            // start and end positions (pat-s3rrv.97).
+            let start_position = body.position;
             let mut character = PhysicsCharacterBody2D::new(body.position, body.shape.clone());
             character.collision_layer = body.collision_layer;
             character.collision_mask = body.collision_mask;
@@ -2455,22 +2669,7 @@ impl PhysicsServer {
             // they never appear in `node_to_body`. Walking that map alone let a
             // character pass straight through painted ground even though the
             // static bodies were sitting in the world (pat-0q2kx.117).
-            let obstacle_refs: Vec<&PhysicsBody2D> = self
-                .node_to_body
-                .iter()
-                .filter_map(|(&other_node, &other_body_id)| {
-                    if other_node == node_id {
-                        return None;
-                    }
-                    self.world.get_body(other_body_id)
-                })
-                .chain(
-                    self.tilemap_bodies
-                        .values()
-                        .flatten()
-                        .filter_map(|&tile_body| self.world.get_body(tile_body)),
-                )
-                .collect();
+            let obstacle_refs: Vec<&PhysicsBody2D> = self.obstacle_bodies(node_id);
 
             // move_and_slide_delta applies dt internally and returns px/s velocity.
             let result_velocity = character.move_and_slide_delta(velocity, dt, &obstacle_refs);
@@ -2525,7 +2724,24 @@ impl PhysicsServer {
                 })
                 .collect();
 
+            // Godot's `get_real_velocity()` reports the motion the last move
+            // ACHIEVED, not the one that was asked for — they differ whenever a
+            // wall cancelled part of the requested motion, which is precisely
+            // when a script wants to know (pat-s3rrv.97).
+            //
+            // ⚠️ Derived from the position DELTA, not from the post-slide
+            // velocity. The two look interchangeable and are not: the slide
+            // solver reports the velocity it would carry into the next tick,
+            // which stays non-zero along a wall the body did not actually move
+            // along this tick.
+            let real_velocity = if dt > 0.0 {
+                (new_position - start_position) / dt
+            } else {
+                Vector2::ZERO
+            };
+
             if let Some(node) = tree.get_node_mut(node_id) {
+                node.set_property("_real_velocity", Variant::Vector2(real_velocity));
                 node.set_property("_slide_collisions", Variant::Array(slide_records));
                 node.set_property("velocity", Variant::Vector2(result_velocity));
                 node.set_property("platform_velocity", Variant::Vector2(result_platform_vel));
@@ -2643,6 +2859,72 @@ mod tests {
                 radius: 6.0,
                 height: 30.0
             })
+        );
+    }
+
+    /// 🔑 A CAPSULE WITH NO AUTHORED `height` IS 30, NOT 20 (pat-s3rrv.98).
+    ///
+    /// Godot omits default-valued properties when writing a `.tscn`, so a
+    /// capsule left at its default arrives here with no `height` key at all —
+    /// which makes the DEFAULT the value that ships, not a fallback that rarely
+    /// fires. `doc/classes/CapsuleShape2D.xml` says 30.0; the parser said 20.0,
+    /// silently shrinking every such shape by a third.
+    ///
+    /// ⚠️ `radius` is asserted in the same breath as a positive control: it was
+    /// already correct at 10.0, so a test that only checked `height` could pass
+    /// against a parser that had stopped reading defaults altogether.
+    #[test]
+    fn shape_from_node_capsule_defaults_match_godot() {
+        let (tree, id) = shape_node("CapsuleShape2D", &[]);
+        assert_eq!(
+            shape_from_node(&tree, id),
+            Some(Shape2D::Capsule {
+                radius: 10.0,
+                height: 30.0
+            }),
+            "an unauthored CapsuleShape2D must match doc/classes/CapsuleShape2D.xml"
+        );
+    }
+
+    /// 🔑 THE PARSER AND ClassDB MUST NOT DRIFT APART.
+    ///
+    /// These are two independent transcriptions of the same Godot XML — the
+    /// `.tscn` path reads defaults here, and the script path
+    /// (`CapsuleShape2D.new()`) reads them from ClassDB. They disagreed for as
+    /// long as both existed: ClassDB had Godot's 30.0 while the parser had 20.0,
+    /// so a script-built capsule and a scene-authored one were different shapes.
+    ///
+    /// ⚠️ Comparing them to EACH OTHER rather than both to a literal is the
+    /// point: this fails when either side is edited alone, which is how the
+    /// original mismatch survived.
+    #[test]
+    fn capsule_defaults_agree_between_the_parser_and_classdb() {
+        gdobject::class_db::register_2d_classes();
+        let props = gdobject::class_db::get_property_list("CapsuleShape2D");
+        let classdb = |name: &str| {
+            props
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("CapsuleShape2D.{name} is registered"))
+                .default_value
+                .clone()
+        };
+
+        let (tree, id) = shape_node("CapsuleShape2D", &[]);
+        let Some(Shape2D::Capsule { radius, height }) = shape_from_node(&tree, id) else {
+            panic!("the parser must build a capsule");
+        };
+
+        assert_eq!(
+            Variant::Float(radius as f64),
+            classdb("radius"),
+            "parser radius default disagrees with ClassDB"
+        );
+        assert_eq!(
+            Variant::Float(height as f64),
+            classdb("height"),
+            "parser height default disagrees with ClassDB — a script-built \
+             capsule and a .tscn-authored one would be different shapes"
         );
     }
 
@@ -2921,6 +3203,110 @@ mod tests {
         let body = server.world().get_body(body_id).unwrap();
         assert_eq!(body.collision_layer, 3);
         assert_eq!(body.collision_mask, 5);
+    }
+
+    /// 🔑 pat-s3rrv.101 — THE CONVEYOR PROPERTIES REACH THE BODY.
+    ///
+    /// The solver has folded `constant_linear_velocity` into the tangential
+    /// contact velocity for a long time, with its own green unit test. This
+    /// bridge never read the property off the node, so an authored belt was
+    /// inert while every Rust-level test passed — the gap was exactly this one
+    /// hop.
+    #[test]
+    fn conveyor_velocities_read_from_node_properties() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mut belt = Node::new("Belt", "StaticBody2D");
+        belt.set_property("position", Variant::Vector2(Vector2::ZERO));
+        belt.set_property(
+            "constant_linear_velocity",
+            Variant::Vector2(Vector2::new(100.0, 0.0)),
+        );
+        belt.set_property("constant_angular_velocity", Variant::Float(2.5));
+        let id = tree.add_child(root, belt).unwrap();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("radius", Variant::Float(8.0));
+        tree.add_child(id, s).unwrap();
+
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+
+        let body_id = server.body_for_node(id).unwrap();
+        let body = server.world().get_body(body_id).unwrap();
+        assert_eq!(body.constant_linear_velocity, Vector2::new(100.0, 0.0));
+        assert!((body.constant_angular_velocity - 2.5).abs() < 1e-6);
+    }
+
+    /// 🔑 AND THEY DEFAULT TO ZERO ON AN ORDINARY STATIC BODY.
+    ///
+    /// ⚠️ The paired negative case. Godot documents both defaults as zero
+    /// (`doc/classes/StaticBody2D.xml`), and zero means "not a conveyor" — so
+    /// this is what guarantees the new read cannot make an ordinary floor start
+    /// dragging things. Without it the test above would pass just as well if
+    /// the bridge wrote some non-zero value onto every body.
+    #[test]
+    fn conveyor_velocities_default_to_zero_when_absent() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mut floor = Node::new("Floor", "StaticBody2D");
+        floor.set_property("position", Variant::Vector2(Vector2::ZERO));
+        let id = tree.add_child(root, floor).unwrap();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("radius", Variant::Float(8.0));
+        tree.add_child(id, s).unwrap();
+
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+
+        let body_id = server.body_for_node(id).unwrap();
+        let body = server.world().get_body(body_id).unwrap();
+        assert_eq!(body.constant_linear_velocity, Vector2::ZERO);
+        assert_eq!(body.constant_angular_velocity, 0.0);
+    }
+
+    /// 🔑 A SCRIPT CAN CHANGE A BELT'S SPEED AT RUNTIME.
+    ///
+    /// ⚠️ Registration-time reads alone would freeze a belt at whatever the
+    /// `.tscn` authored, so `belt.constant_linear_velocity = Vector2(-100, 0)`
+    /// in `_process` would do nothing. `sync_to_physics` re-reads it every tick
+    /// for the same reason it re-reads the collider each tick.
+    #[test]
+    fn conveyor_velocity_is_re_read_each_tick() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+
+        let mut belt = Node::new("Belt", "StaticBody2D");
+        belt.set_property("position", Variant::Vector2(Vector2::ZERO));
+        belt.set_property(
+            "constant_linear_velocity",
+            Variant::Vector2(Vector2::new(100.0, 0.0)),
+        );
+        let id = tree.add_child(root, belt).unwrap();
+        let mut s = Node::new("Shape", "CollisionShape2D");
+        s.set_property("radius", Variant::Float(8.0));
+        tree.add_child(id, s).unwrap();
+
+        let mut server = PhysicsServer::new();
+        server.register_bodies(&tree);
+
+        // What a script does: reverse the belt.
+        if let Some(node) = tree.get_node_mut(id) {
+            node.set_property(
+                "constant_linear_velocity",
+                Variant::Vector2(Vector2::new(-100.0, 0.0)),
+            );
+        }
+        server.sync_to_physics(&mut tree);
+
+        let body_id = server.body_for_node(id).unwrap();
+        let body = server.world().get_body(body_id).unwrap();
+        assert_eq!(
+            body.constant_linear_velocity,
+            Vector2::new(-100.0, 0.0),
+            "the belt must follow the node property, not stay at its registered value"
+        );
     }
 
     #[test]

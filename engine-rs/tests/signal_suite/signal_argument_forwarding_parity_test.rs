@@ -8,6 +8,19 @@
 //! - Both typed (Method) and untyped (Lambda) callable variants
 //!
 //! Oracle: Godot 4.6.1-stable behavioral contract + fixtures/golden/traces/signal_arguments_oracle.json
+//!
+//! ⚠️ The `CallableRef::Lambda` values below carry empty `captures` and an
+//! opaque `param_defaults` (pat-s3rrv.67 added both fields). These tests only
+//! exercise `resolve_args`, which touches neither — the lambdas are never
+//! invoked, so the body, the captures and the defaults are all placeholders,
+//! exactly as `body: Arc::new(())` already was. `param_defaults` is deliberately
+//! `Arc::new(())` rather than a typed empty vec: the invoke path downcasts it
+//! and treats a failed downcast as "no defaults", so a placeholder is safe
+//! there too.
+//!
+//! ⚠️ These five constructions are the ONLY ones outside `crates/`, and adding a
+//! field to that variant breaks them without touching anything in `crates/` —
+//! `engine-rs/tests/` is a second consumer tree that a crate-local grep misses.
 
 use std::sync::{Arc, Mutex};
 
@@ -475,6 +488,8 @@ fn lambda_callable_resolve_args_passthrough() {
     let lambda = CallableRef::Lambda {
         params: vec!["x".into(), "y".into()],
         body: std::sync::Arc::new(()),
+        captures: std::sync::Arc::new(std::collections::HashMap::new()),
+        param_defaults: std::sync::Arc::new(()),
     };
 
     let args = vec![Variant::Int(10), Variant::String("hello".into())];
@@ -494,6 +509,8 @@ fn lambda_bound_resolve_args() {
     let lambda = CallableRef::Lambda {
         params: vec!["a".into()],
         body: std::sync::Arc::new(()),
+        captures: std::sync::Arc::new(std::collections::HashMap::new()),
+        param_defaults: std::sync::Arc::new(()),
     };
     let bound = CallableRef::Bound {
         inner: Box::new(lambda),
@@ -517,6 +534,8 @@ fn lambda_unbound_resolve_args() {
     let lambda = CallableRef::Lambda {
         params: vec!["a".into(), "b".into(), "c".into()],
         body: std::sync::Arc::new(()),
+        captures: std::sync::Arc::new(std::collections::HashMap::new()),
+        param_defaults: std::sync::Arc::new(()),
     };
     let unbound = CallableRef::Unbound {
         inner: Box::new(lambda),
@@ -609,6 +628,8 @@ fn method_and_lambda_forward_identically() {
     let lambda = CallableRef::Lambda {
         params: vec!["a".into(), "b".into()],
         body: std::sync::Arc::new(()),
+        captures: std::sync::Arc::new(std::collections::HashMap::new()),
+        param_defaults: std::sync::Arc::new(()),
     };
 
     let args = vec![
@@ -645,6 +666,8 @@ fn method_bind_vs_lambda_bind_identical() {
         inner: Box::new(CallableRef::Lambda {
             params: vec![],
             body: std::sync::Arc::new(()),
+            captures: std::sync::Arc::new(std::collections::HashMap::new()),
+            param_defaults: std::sync::Arc::new(()),
         }),
         bound_args,
     };

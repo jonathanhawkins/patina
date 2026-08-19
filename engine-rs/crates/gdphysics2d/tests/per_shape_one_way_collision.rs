@@ -54,6 +54,9 @@ fn split_platform() -> PhysicsBody2D {
         transform: Transform2D::translated(Vector2::new(25.0, 0.0)),
         one_way_collision: true,
         one_way_direction: Vector2::new(0.0, -1.0),
+        // Godot's default margin would let a deep contact through; this fixture
+        // is about the per-shape FLAG, so keep the shape blocking at any depth.
+        one_way_margin: f32::INFINITY,
     }];
     b
 }

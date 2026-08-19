@@ -140,6 +140,14 @@ pub enum Transparency {
     /// Alpha-tested: sub-threshold fragments are discarded, the rest opaque
     /// (`TRANSPARENCY_ALPHA_SCISSOR`).
     AlphaScissor,
+    /// Stochastic alpha test (`TRANSPARENCY_ALPHA_HASH` = 3).
+    ///
+    /// ⚠️ A TEST, not blending: like [`AlphaScissor`](Self::AlphaScissor) it
+    /// keeps or discards whole fragments and writes depth, so it belongs in the
+    /// opaque pass and must NOT be sorted back-to-front. The threshold is a hash
+    /// of the world position rather than a constant, which is what makes it look
+    /// like blending from a distance while staying order-independent.
+    AlphaHash,
 }
 
 impl Transparency {
@@ -148,10 +156,25 @@ impl Transparency {
     /// Unknown values fall back to `Disabled` rather than panicking: a scene
     /// authored in a newer Godot may carry a mode Patina has no rendering for,
     /// and drawing it opaque is a better failure than refusing to load.
+    ///
+    /// ⚠️ **3 and 4 were previously part of that fallback and should not have
+    /// been** (pat-s3rrv.30). Both are documented Godot 4.6 modes and both are
+    /// TRANSPARENT, so coercing them to `Disabled` rendered a hashed-alpha or
+    /// depth-pre-pass material as a solid quad — the loudest possible wrong
+    /// answer, and silent. The catch-all is right for genuinely unknown values;
+    /// it was wrong for these two.
+    ///
+    /// ⚠️ `TRANSPARENCY_ALPHA_DEPTH_PRE_PASS` (4) maps to [`Alpha`](Self::Alpha).
+    /// Godot draws it as ordinary alpha blending preceded by a depth-only pass,
+    /// which reduces overdraw and stabilises sorting; Patina has no pre-pass, so
+    /// this is blending WITHOUT that refinement. That is a close approximation
+    /// of the same image, where `Disabled` was a different one.
     pub fn from_godot_int(value: i64) -> Self {
         match value {
             1 => Self::Alpha,
             2 => Self::AlphaScissor,
+            3 => Self::AlphaHash,
+            4 => Self::Alpha,
             _ => Self::Disabled,
         }
     }
@@ -579,6 +602,58 @@ impl StandardMaterial3D {
 mod tests {
     use super::*;
 
+    /// 🔑 Every documented Godot transparency mode maps to something that is
+    /// actually transparent.
+    ///
+    /// ⚠️ Modes 3 and 4 previously fell into the unknown-value catch-all and
+    /// came back `Disabled`, so a hashed-alpha or depth-pre-pass material
+    /// rendered as a SOLID quad. The assertion that matters is that neither is
+    /// `Disabled` — mapping them to *some* transparent mode is the fix; which
+    /// one is the refinement.
+    #[test]
+    fn every_documented_transparency_mode_maps_to_a_transparent_result() {
+        assert_eq!(Transparency::from_godot_int(0), Transparency::Disabled);
+        assert_eq!(Transparency::from_godot_int(1), Transparency::Alpha);
+        assert_eq!(Transparency::from_godot_int(2), Transparency::AlphaScissor);
+        assert_eq!(
+            Transparency::from_godot_int(3),
+            Transparency::AlphaHash,
+            "TRANSPARENCY_ALPHA_HASH must not collapse to Disabled — that draws \
+             a stochastically-cut-out material as a solid quad",
+        );
+        assert_eq!(
+            Transparency::from_godot_int(4),
+            Transparency::Alpha,
+            "TRANSPARENCY_ALPHA_DEPTH_PRE_PASS is alpha blending with a depth \
+             pre-pass; Patina has no pre-pass, so plain Alpha is the close \
+             approximation and Disabled was a different image entirely",
+        );
+        for mode in [3, 4] {
+            assert_ne!(
+                Transparency::from_godot_int(mode),
+                Transparency::Disabled,
+                "mode {mode} is a TRANSPARENT mode in Godot 4.6",
+            );
+        }
+    }
+
+    /// A genuinely unknown value still falls back to `Disabled`.
+    ///
+    /// ⚠️ The catch-all is correct for values Patina has never heard of — a
+    /// scene from a newer Godot should load and draw, not refuse. Fixing 3 and 4
+    /// must not turn that fallback into a panic or into a blanket "assume
+    /// transparent".
+    #[test]
+    fn unknown_transparency_values_still_fall_back_to_disabled() {
+        for mode in [5, 6, 99, -1] {
+            assert_eq!(
+                Transparency::from_godot_int(mode),
+                Transparency::Disabled,
+                "mode {mode} is not a Godot 4.6 transparency mode",
+            );
+        }
+    }
+
     // ── TextureImage sampling ──
 
     fn checker_2x2() -> TextureImage {
@@ -643,8 +718,15 @@ mod tests {
         // u=1.1 wraps to 0.1 → texel 0 (black); u=1.9 wraps to 0.9 → texel 1.
         assert_eq!(t.sample_nearest(1.1, 0.0), Color::BLACK);
         assert_eq!(t.sample_nearest(1.9, 0.0), Color::WHITE);
-        // Negative UVs wrap too.
-        assert_eq!(t.sample_nearest(-0.9, 0.0), Color::WHITE);
+        // Negative UVs wrap too. ⚠️ Both directions are asserted because the
+        // arithmetic is easy to get backwards: sampling uses texel CENTRES
+        // (`u * w - 0.5`), so -0.1 lands one texel BEFORE index 0 and wraps to
+        // the LAST texel, while -0.9 lands two before and wraps back to the
+        // first. This case previously expected white for -0.9, which
+        // contradicted both the implementation and the comment's own "wraps to
+        // 0.1" reasoning — 0.1 of a 2-texel row is texel 0, and that is black.
+        assert_eq!(t.sample_nearest(-0.1, 0.0), Color::WHITE);
+        assert_eq!(t.sample_nearest(-0.9, 0.0), Color::BLACK);
     }
 
     #[test]

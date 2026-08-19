@@ -113,6 +113,19 @@ pub struct Area3D {
     /// falloff is inverse-square either side of it. `0.0` means constant
     /// strength regardless of distance (`Area3D.gravity_point_unit_distance`).
     pub gravity_point_unit_distance: f32,
+    /// How [`linear_damp`](Self::linear_damp) combines with the space and with
+    /// other overlapping areas (`Area3D.linear_damp_space_override`).
+    ///
+    /// ⚠️ Independent of [`gravity_space_override`](Self::gravity_space_override).
+    /// Godot resolves all three channels separately, so an area may replace
+    /// gravity while leaving damping alone, or damp without touching gravity.
+    /// Defaults to `Disabled`, which is Godot's default and means "this area
+    /// does not damp" — NOT "damp with `linear_damp`".
+    pub linear_damp_space_override: SpaceOverride,
+    /// The rotational twin of
+    /// [`linear_damp_space_override`](Self::linear_damp_space_override)
+    /// (`Area3D.angular_damp_space_override`).
+    pub angular_damp_space_override: SpaceOverride,
     /// Linear damp override.
     pub linear_damp: f32,
     /// Angular damp override.
@@ -137,6 +150,8 @@ impl Area3D {
             gravity_point: false,
             gravity_point_center: Vector3::new(0.0, -1.0, 0.0),
             gravity_point_unit_distance: 0.0,
+            linear_damp_space_override: SpaceOverride::default(),
+            angular_damp_space_override: SpaceOverride::default(),
             linear_damp: 0.1,
             angular_damp: 0.1,
         }
@@ -328,6 +343,27 @@ impl AreaStore3D {
     ///
     /// Returns enter/exit events by comparing against the previous frame.
     /// Maps to Godot's `area_entered` / `area_exited` signals.
+    /// Every area currently overlapping `area`, as the *observer* of the pair.
+    ///
+    /// The 3D twin of `gdphysics2d::area2d::AreaStore::overlapping_areas`, and
+    /// it reads the same state for the same reason: `previous_area_overlaps`
+    /// holds DIRECTED pairs `(observer, observed)` that
+    /// [`detect_area_overlaps`](Self::detect_area_overlaps) has already gated on
+    /// `monitoring` / `monitorable` / layer masks. So an area that opted out of
+    /// being seen never appears in another area's answer, and the gate does not
+    /// have to be repeated here.
+    pub fn overlapping_areas(&self, area: AreaId3D) -> Vec<AreaId3D> {
+        let mut ids: Vec<AreaId3D> = self
+            .previous_area_overlaps
+            .iter()
+            .filter(|(a, _)| *a == area)
+            .map(|(_, b)| *b)
+            .collect();
+        // The backing set is unordered; sort so a script sees a stable order.
+        ids.sort_by_key(|a| a.0);
+        ids
+    }
+
     pub fn detect_area_overlaps(&mut self) -> Vec<AreaOverlapEvent3D> {
         let mut current_overlaps = HashSet::new();
         let mut events = Vec::new();
@@ -687,6 +723,60 @@ mod tests {
         let bodies = vec![make_body(1, Vector3::new(1.0, 0.0, 0.0))];
         let result = area.get_overlapping_bodies(bodies.iter());
         assert!(result.is_empty());
+    }
+
+    // -- Area-vs-area overlap set (pat-s3rrv.102) ----------------------------
+
+    /// `overlapping_areas` reports the DIRECTED partner, and drops it again
+    /// once the pair separates.
+    ///
+    /// ⚠️ Both halves matter. A set that only ever grew would satisfy the first
+    /// assertion, and that is exactly the failure a script notices — an area it
+    /// left years ago still listed as overlapping.
+    #[test]
+    fn overlapping_areas_tracks_the_current_pair() {
+        let mut store = AreaStore3D::new();
+        let a = store.add_area(make_area(Vector3::ZERO, 5.0));
+        let b = store.add_area(make_area(Vector3::new(1.0, 0.0, 0.0), 5.0));
+
+        store.detect_area_overlaps();
+        assert_eq!(store.overlapping_areas(a), vec![b], "a must see b");
+        assert_eq!(store.overlapping_areas(b), vec![a], "and b must see a");
+
+        // Move b far away and re-detect.
+        if let Some(area) = store.get_area_mut(b) {
+            area.position = Vector3::new(100.0, 0.0, 0.0);
+        }
+        store.detect_area_overlaps();
+        assert!(
+            store.overlapping_areas(a).is_empty(),
+            "the overlap set must track, not latch"
+        );
+    }
+
+    /// An area that is not `monitorable` is invisible to the query, because the
+    /// gate lives in `detect_area_overlaps` and the accessor trusts it.
+    #[test]
+    fn overlapping_areas_respects_monitorable() {
+        let mut store = AreaStore3D::new();
+        let a = store.add_area(make_area(Vector3::ZERO, 5.0));
+        let b = store.add_area(make_area(Vector3::new(1.0, 0.0, 0.0), 5.0));
+        if let Some(area) = store.get_area_mut(b) {
+            area.monitorable = false;
+        }
+
+        store.detect_area_overlaps();
+        assert!(
+            store.overlapping_areas(a).is_empty(),
+            "a non-monitorable area must not be reported"
+        );
+        // ⚠️ Positive control: `b` still MONITORS, so it sees `a`. Without this
+        // the test would also pass if the pair simply never overlapped.
+        assert_eq!(
+            store.overlapping_areas(b),
+            vec![a],
+            "monitorable governs being SEEN, not seeing"
+        );
     }
 
     // -- Removed area clears state -------------------------------------------

@@ -9,6 +9,57 @@ use std::collections::{BinaryHeap, HashMap};
 use gdcore::math::{Vector2, Vector3};
 
 use crate::node::NodeId;
+
+/// A baked `NavigationRegion2D`'s polygons, in **node-local** space.
+///
+/// The canonical reader for the `__navmesh_vertices__` / `__navmesh_polygons__`
+/// pair the bake route writes. It lives here, in `gdscene`, because every
+/// consumer depends on this crate: the editor overlay, the editor viewport's
+/// immediate-mode chrome, the performance monitors, and `patina-runner`, which
+/// depends on `gdscene` and not on `gdeditor`.
+///
+/// Two behaviours a re-implementation would drift from:
+/// - a resource carrying vertices but **no** `polygons` entry is one polygon
+///   over all of them, which is what a hand-authored single-face mesh looks
+///   like;
+/// - out-of-range indices are dropped rather than panicking, so a malformed
+///   `.tscn` costs that polygon and not the frame.
+///
+/// Polygons of fewer than three points are dropped, so every one returned is
+/// drawable and countable.
+///
+/// ⚠️ **Local space, deliberately.** Callers know where the node is — the
+/// overlay adds the region's position, the editor viewport has already mapped
+/// the global position into screen space. Handing out pre-offset points is how
+/// a caller ends up applying the position twice.
+pub fn navmesh_polygons_local(node: &crate::node::Node) -> Vec<Vec<Vector2>> {
+    let gdvariant::Variant::PackedVector2Array(verts) = node.get_property("__navmesh_vertices__")
+    else {
+        return Vec::new();
+    };
+    let vert_count = verts.len();
+    let indexed: Vec<Vec<usize>> = match node.get_property("__navmesh_polygons__") {
+        gdvariant::Variant::Array(entries) => entries
+            .iter()
+            .filter_map(|entry| match entry {
+                gdvariant::Variant::PackedInt32Array(ids) => Some(
+                    ids.iter()
+                        .filter_map(|&i| usize::try_from(i).ok())
+                        .filter(|&i| i < vert_count)
+                        .collect::<Vec<usize>>(),
+                ),
+                _ => None,
+            })
+            .collect(),
+        _ if vert_count >= 3 => vec![(0..vert_count).collect()],
+        _ => Vec::new(),
+    };
+    indexed
+        .into_iter()
+        .map(|ids| ids.iter().map(|&i| verts[i]).collect::<Vec<Vector2>>())
+        .filter(|points| points.len() >= 3)
+        .collect()
+}
 use crate::scene_tree::SceneTree;
 
 // ---------------------------------------------------------------------------
@@ -3747,5 +3798,68 @@ mod tests {
             "a closing neighbor must constrain more than a fleeing one \
              (closing {closing_dev} vs fleeing {fleeing_dev})"
         );
+    }
+
+    /// 🔑 THE CANONICAL NAVMESH READER'S TWO NON-OBVIOUS BEHAVIOURS.
+    ///
+    /// These are what a re-implementation drifts on, and this parser had been
+    /// copied into `gdscene::main_loop` and `gdeditor::navigation_overlay`
+    /// independently, so pinning them here is the point of having one home.
+    #[test]
+    fn navmesh_polygons_local_handles_the_two_edge_cases() {
+        use crate::node::Node;
+        use gdvariant::Variant;
+
+        // 1. Vertices with NO `polygons` entry are one polygon over all of them
+        //    — what a hand-authored single-face mesh looks like.
+        let mut implicit = Node::new("R", "NavigationRegion2D");
+        implicit.set_property(
+            "__navmesh_vertices__",
+            Variant::PackedVector2Array(vec![
+                Vector2::new(0.0, 0.0),
+                Vector2::new(4.0, 0.0),
+                Vector2::new(4.0, 4.0),
+            ]),
+        );
+        let polys = navmesh_polygons_local(&implicit);
+        assert_eq!(polys.len(), 1, "no polygons entry means one implicit face");
+        assert_eq!(polys[0].len(), 3);
+
+        // 2. Out-of-range indices are DROPPED, not panicked on — a malformed
+        //    .tscn should cost that polygon, not the frame. Index 9 does not
+        //    exist, which leaves two points, which is not a polygon.
+        let mut malformed = Node::new("R", "NavigationRegion2D");
+        malformed.set_property(
+            "__navmesh_vertices__",
+            Variant::PackedVector2Array(vec![
+                Vector2::new(0.0, 0.0),
+                Vector2::new(4.0, 0.0),
+                Vector2::new(4.0, 4.0),
+            ]),
+        );
+        malformed.set_property(
+            "__navmesh_polygons__",
+            Variant::Array(vec![
+                Variant::PackedInt32Array(vec![0, 1, 9]),
+                Variant::PackedInt32Array(vec![0, 1, 2]),
+            ]),
+        );
+        let polys = navmesh_polygons_local(&malformed);
+        assert_eq!(
+            polys.len(),
+            1,
+            "the polygon naming a missing vertex is dropped; the valid one stays"
+        );
+        assert_eq!(
+            polys[0],
+            vec![
+                Vector2::new(0.0, 0.0),
+                Vector2::new(4.0, 0.0),
+                Vector2::new(4.0, 4.0)
+            ]
+        );
+
+        // An unbaked region yields nothing at all, rather than an empty face.
+        assert!(navmesh_polygons_local(&Node::new("R", "NavigationRegion2D")).is_empty());
     }
 }

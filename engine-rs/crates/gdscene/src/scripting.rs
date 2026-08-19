@@ -1084,6 +1084,15 @@ thread_local! {
     static NEXT_COLLISION_HANDLE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
 }
 
+/// Index marking a handle as addressing the single `move_and_collide` result
+/// rather than an entry in the slide list (pat-s3rrv.97).
+///
+/// ⚠️ A sentinel rather than a second handle family: both kinds are a
+/// `KinematicCollision2D` with identical getters, so splitting them would mean
+/// two tags and two dispatch paths answering the same method names — and tag
+/// bytes are a workspace-wide namespace where a collision misroutes silently.
+const MOVE_AND_COLLIDE_INDEX: usize = usize::MAX;
+
 /// Returns `true` when `raw` was issued by [`kinematic_collision_handle_for`].
 fn is_kinematic_collision_handle(raw: u64) -> bool {
     raw & 0xFF00_0000_0000_0000 == KINEMATIC_COLLISION_TAG
@@ -1112,6 +1121,15 @@ fn kinematic_collision_handle_for(node: u64, index: usize) -> u64 {
 fn collision_record(tree: &SceneTree, raw: u64) -> Option<gdvariant::Dictionary> {
     let (node, index) = COLLISION_HANDLES.with(|h| h.borrow().get(&raw).copied())?;
     let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+    if index == MOVE_AND_COLLIDE_INDEX {
+        return match tree
+            .get_node(nid)
+            .map(|n| n.get_property("_move_and_collide"))
+        {
+            Some(Variant::Dictionary(d)) => Some(d),
+            _ => None,
+        };
+    }
     match tree
         .get_node(nid)
         .map(|n| n.get_property("_slide_collisions"))
@@ -1320,6 +1338,43 @@ fn shape_for(raw: u64) -> Option<gdphysics2d::shape::Shape2D> {
     SHAPES.with(|m| m.borrow().get(&raw).copied())
 }
 
+/// Reads one script-visible property off a shape resource.
+///
+/// ⚠️ Every arm here MUST agree with the matching setter in
+/// `set_node_property`, because a script round-trips through both:
+/// `r.size = Vector2(20, 10)` followed by `r.size` has to give back what was
+/// written. The `size` pair is where that is easy to get wrong — Godot's
+/// `RectangleShape2D.size` is the FULL size while the solver stores half
+/// extents, so the setter halves and this doubles. Returning the stored field
+/// unchanged would read back half of every assignment.
+fn shape_property(shape: &gdphysics2d::shape::Shape2D, prop: &str) -> Option<Variant> {
+    use gdphysics2d::shape::Shape2D as S;
+    let pack = |points: &[gdcore::math::Vector2; gdphysics2d::shape::MAX_POLY_VERTS], count: u8| {
+        Variant::PackedVector2Array(points[..count as usize].to_vec())
+    };
+    Some(match (shape, prop) {
+        (S::Circle { radius }, "radius") => Variant::Float(*radius as f64),
+        (S::Rectangle { half_extents }, "size") => Variant::Vector2(gdcore::math::Vector2::new(
+            half_extents.x * 2.0,
+            half_extents.y * 2.0,
+        )),
+        (S::Segment { a, .. }, "a") => Variant::Vector2(*a),
+        (S::Segment { b, .. }, "b") => Variant::Vector2(*b),
+        (S::Capsule { radius, .. }, "radius") => Variant::Float(*radius as f64),
+        (S::Capsule { height, .. }, "height") => Variant::Float(*height as f64),
+        // Derived, never stored — which is why the docs give it no default.
+        (S::Capsule { radius, height }, "mid_height") => {
+            Variant::Float((height - radius * 2.0) as f64)
+        }
+        (S::ConvexPolygon { points, count }, "points") => pack(points, *count),
+        (S::ConcavePolygon { points, count }, "segments") => pack(points, *count),
+        (S::WorldBoundary { normal, .. }, "normal") => Variant::Vector2(*normal),
+        (S::WorldBoundary { distance, .. }, "distance") => Variant::Float(*distance as f64),
+        (S::SeparationRay { length }, "length") => Variant::Float(*length as f64),
+        _ => return None,
+    })
+}
+
 fn shape_mut<F: FnOnce(&mut gdphysics2d::shape::Shape2D)>(raw: u64, f: F) -> bool {
     SHAPES.with(|m| match m.borrow_mut().get_mut(&raw) {
         Some(s) => {
@@ -1328,6 +1383,20 @@ fn shape_mut<F: FnOnce(&mut gdphysics2d::shape::Shape2D)>(raw: u64, f: F) -> boo
         }
         None => false,
     })
+}
+
+/// The per-tick contact list `PhysicsServer::publish_body_contacts` leaves on a
+/// monitoring body (pat-s3rrv.100).
+///
+/// ⚠️ EMPTY unless the body opted in with `contact_monitor = true` AND
+/// `max_contacts_reported > 0` — the publisher applies Godot's own gate, so a
+/// body visibly resting on the floor still reports nothing until it asks to
+/// monitor. That is parity, not a missing read.
+fn body_contacts(tree: &SceneTree, nid: NodeId) -> Vec<Variant> {
+    match tree.get_node(nid).map(|n| n.get_property("_body_contacts")) {
+        Some(Variant::Array(items)) => items,
+        _ => Vec::new(),
+    }
 }
 
 fn shape_params(raw: u64) -> Option<ShapeParams2D> {
@@ -1561,6 +1630,45 @@ impl SceneAccess for SceneTreeAccessor {
             if node == WORLD_2D_HANDLE && prop == "direct_space_state" {
                 return Variant::ObjectId(ObjectId::from_raw(SPACE_STATE_2D_HANDLE));
             }
+            // Shape resources answer their own properties (pat-s3rrv.98).
+            //
+            // ⚠️ Until this existed every one of these read back `Nil`, so a
+            // shape was write-only from script: `c.radius = 20` stuck, but
+            // `c.radius` gave nothing back. The damage is not just the read —
+            // it is that `c.radius += 5` desugars to a read, and the
+            // interpreter's "is this a property?" gate treats a `Nil` read as
+            // "no such property", so the compound assignment died mid-frame
+            // exactly the way an unset `CharacterBody2D.velocity` used to.
+            if let Some(shape) = shape_for(node) {
+                if let Some(v) = shape_property(&shape, prop) {
+                    return v;
+                }
+                return Variant::Nil;
+            }
+            // `PhysicsShapeQueryParameters2D` reads back what was assigned, so
+            // a script can hand the same params object around and inspect it.
+            if let Some(params) = shape_params(node) {
+                return match prop {
+                    "shape" => {
+                        if params.shape == 0 {
+                            Variant::Nil
+                        } else {
+                            Variant::ObjectId(ObjectId::from_raw(params.shape))
+                        }
+                    }
+                    "transform" => Variant::Transform2D(params.transform),
+                    "motion" => Variant::Vector2(params.motion),
+                    "collision_mask" => Variant::Int(params.collision_mask as i64),
+                    "exclude" => Variant::Array(
+                        params
+                            .exclude
+                            .iter()
+                            .map(|raw| Variant::ObjectId(ObjectId::from_raw(*raw)))
+                            .collect(),
+                    ),
+                    _ => Variant::Nil,
+                };
+            }
             return Variant::Nil;
         }
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
@@ -1656,11 +1764,145 @@ impl SceneAccess for SceneTreeAccessor {
                 // `Shape2D::Rectangle` stores half-extents, so this halves it.
                 // Getting that backwards doubles every rectangle query and the
                 // overlap still "works", just against the wrong box.
+                // ⚠️ `radius` must PRESERVE the shape kind, not rebuild a
+                // circle. `CapsuleShape2D` also has a radius, so the old
+                // unconditional `*s = Circle { .. }` silently turned a capsule
+                // into a circle the moment a script set its radius — a shape
+                // that still collides, just as the wrong one (pat-s3rrv.98,
+                // introduced the moment capsules became constructible).
                 "radius" => {
                     if let Some(r) = variant_number(&value) {
                         let r = r as f32;
+                        // Godot rejects a negative radius outright rather than
+                        // storing it (`ERR_FAIL_COND_MSG`), leaving the shape
+                        // untouched.
+                        if r < 0.0 {
+                            return;
+                        }
+                        shape_mut(node, |s| match *s {
+                            gdphysics2d::shape::Shape2D::Capsule { height, .. } => {
+                                // ⚠️ A capsule must satisfy `height >= 2 * radius`
+                                // or it is no longer a capsule. Godot repairs the
+                                // pair rather than refusing, and the two setters
+                                // repair it in OPPOSITE directions: setting the
+                                // radius GROWS the height, while setting the
+                                // height SHRINKS the radius. Clamping both the
+                                // same way would silently disagree with Godot on
+                                // whichever half was written second.
+                                *s = gdphysics2d::shape::Shape2D::Capsule {
+                                    radius: r,
+                                    height: height.max(r * 2.0),
+                                }
+                            }
+                            _ => *s = gdphysics2d::shape::Shape2D::Circle { radius: r },
+                        });
+                    }
+                }
+                // `CapsuleShape2D.height` is the TOTAL height in Godot; the
+                // solver stores the same, so no mid-height conversion here.
+                "height" => {
+                    if let Some(h) = variant_number(&value) {
+                        let h = h as f32;
+                        if h < 0.0 {
+                            return;
+                        }
                         shape_mut(node, |s| {
-                            *s = gdphysics2d::shape::Shape2D::Circle { radius: r }
+                            if let gdphysics2d::shape::Shape2D::Capsule { radius, .. } = *s {
+                                // The opposite repair from `radius` above: a
+                                // height too small for the current radius shrinks
+                                // the radius to `height / 2`.
+                                *s = gdphysics2d::shape::Shape2D::Capsule {
+                                    radius: radius.min(h * 0.5),
+                                    height: h,
+                                }
+                            }
+                        });
+                    }
+                }
+                // `mid_height` is the straight middle section only, excluding
+                // the two semicircular caps — a wrapper over `height`, which is
+                // why the docs give it no default. It needs no invariant repair:
+                // `height = mid_height + 2 * radius` already satisfies
+                // `height >= 2 * radius` for any non-negative mid-height.
+                "mid_height" => {
+                    if let Some(m) = variant_number(&value) {
+                        let m = m as f32;
+                        if m < 0.0 {
+                            return;
+                        }
+                        shape_mut(node, |s| {
+                            if let gdphysics2d::shape::Shape2D::Capsule { radius, .. } = *s {
+                                *s = gdphysics2d::shape::Shape2D::Capsule {
+                                    radius,
+                                    height: m + radius * 2.0,
+                                }
+                            }
+                        });
+                    }
+                }
+                // `SegmentShape2D.a` / `.b`, each preserving the other end.
+                "a" | "b" => {
+                    if let Variant::Vector2(v) = &value {
+                        let (v, is_a) = (*v, prop == "a");
+                        shape_mut(node, |s| {
+                            if let gdphysics2d::shape::Shape2D::Segment { a, b } = *s {
+                                *s = if is_a {
+                                    gdphysics2d::shape::Shape2D::Segment { a: v, b }
+                                } else {
+                                    gdphysics2d::shape::Shape2D::Segment { a, b: v }
+                                }
+                            }
+                        });
+                    }
+                }
+                // ⚠️ `points` builds a CONVEX hull and `segments` a segment
+                // soup — Godot's two polygon shapes take different array
+                // meanings under different property names, so they are not one
+                // arm with a shared body.
+                "points" => {
+                    if let Variant::PackedVector2Array(pts) = &value {
+                        let pts = pts.clone();
+                        shape_mut(node, |s| {
+                            *s = gdphysics2d::shape::Shape2D::convex_polygon(&pts)
+                        });
+                    }
+                }
+                "segments" => {
+                    if let Variant::PackedVector2Array(pts) = &value {
+                        let pts = pts.clone();
+                        shape_mut(node, |s| {
+                            *s = gdphysics2d::shape::Shape2D::concave_polygon(&pts)
+                        });
+                    }
+                }
+                "normal" => {
+                    if let Variant::Vector2(v) = &value {
+                        let v = *v;
+                        shape_mut(node, |s| {
+                            if let gdphysics2d::shape::Shape2D::WorldBoundary { distance, .. } = *s
+                            {
+                                *s = gdphysics2d::shape::Shape2D::world_boundary(v, distance)
+                            }
+                        });
+                    }
+                }
+                "distance" => {
+                    if let Some(d) = variant_number(&value) {
+                        let d = d as f32;
+                        shape_mut(node, |s| {
+                            if let gdphysics2d::shape::Shape2D::WorldBoundary { normal, .. } = *s {
+                                *s = gdphysics2d::shape::Shape2D::world_boundary(normal, d)
+                            }
+                        });
+                    }
+                }
+                "length" => {
+                    if let Some(l) = variant_number(&value) {
+                        let l = l as f32;
+                        shape_mut(node, |s| {
+                            if matches!(*s, gdphysics2d::shape::Shape2D::SeparationRay { .. }) {
+                                *s = gdphysics2d::shape::Shape2D::SeparationRay { length: l }
+                            }
                         });
                     }
                 }
@@ -1957,6 +2199,36 @@ impl SceneAccess for SceneTreeAccessor {
                 _ => gdcore::math::Vector2::ZERO,
             }
         };
+        // The velocity getters are shared by CharacterBody2D and
+        // CharacterBody3D, so they must answer in the BODY'S OWN dimension
+        // (pat-s3rrv.103).
+        //
+        // ⚠️ `vec2_prop` above matches `Variant::Vector2` and falls through to
+        // ZERO for anything else — so on a CharacterBody3D, whose solver
+        // publishes `Vector3`, it did not merely return the wrong TYPE, it
+        // returned a zero VALUE. A 3D script polling `get_platform_velocity()`
+        // read (0, 0) off a body riding a moving platform, which reads as "the
+        // platform is not moving" rather than as a type error.
+        let vel_prop = |tree: &SceneTree, key: &str| -> Variant {
+            match tree.get_node(nid).map(|n| n.get_property(key)) {
+                Some(v @ (Variant::Vector2(_) | Variant::Vector3(_))) => v,
+                // Nothing published yet — before the first physics tick, or on
+                // a body that never moved. Godot still answers a zero vector
+                // rather than null, so a script may chain `.length()` on it;
+                // it has to be the zero of the RIGHT dimension, or the very
+                // first read of a 3D body is a Vector2 again.
+                _ => {
+                    if tree
+                        .get_node(nid)
+                        .is_some_and(|n| n.class_name() == "CharacterBody3D")
+                    {
+                        Variant::Vector3(gdcore::math::Vector3::ZERO)
+                    } else {
+                        Variant::Vector2(gdcore::math::Vector2::ZERO)
+                    }
+                }
+            }
+        };
 
         match method {
             // -- Multiplayer authority (pat-s3rrv.17) ------------------------
@@ -2075,6 +2347,34 @@ impl SceneAccess for SceneTreeAccessor {
                 }
                 Some(Variant::ObjectId(ObjectId::from_raw(
                     kinematic_collision_handle_for(node, idx),
+                )))
+            }
+            // Godot's `move_and_collide(motion)`: sweep and STOP at the first
+            // contact, returning a `KinematicCollision2D` or null
+            // (pat-s3rrv.97). The sweep itself lives on the physics server,
+            // which owns the world; this arm only bridges to it.
+            "move_and_collide" => {
+                let motion = match args.first() {
+                    Some(Variant::Vector2(v)) => *v,
+                    _ => return Some(Variant::Nil),
+                };
+                let addr = self.tree().script_physics_addr();
+                if addr == 0 {
+                    return Some(Variant::Nil);
+                }
+                // SAFETY: identical contract to `force_shapecast_update` above —
+                // the address is of a live `PhysicsServer` that outlives this
+                // call and is a sibling of the tree, never inside it, so this
+                // shared borrow cannot alias the `&mut` tree borrow below.
+                let physics = unsafe { &*(addr as *const crate::physics_server::PhysicsServer) };
+                if !physics.script_move_and_collide(self.tree_mut(), nid, motion) {
+                    // Godot returns null when nothing was hit, and scripts test
+                    // exactly that; handing back an object with zeroed fields
+                    // would make `if collision:` true after a clean move.
+                    return Some(Variant::Nil);
+                }
+                Some(Variant::ObjectId(ObjectId::from_raw(
+                    kinematic_collision_handle_for(node, MOVE_AND_COLLIDE_INDEX),
                 )))
             }
             "get_last_slide_collision" => {
@@ -2559,27 +2859,115 @@ impl SceneAccess for SceneTreeAccessor {
                     self.physics2d_node_test_move(node, (motion.x, motion.y)),
                 ))
             }
+            // `PhysicsBody2D.add_collision_exception_with(body)` /
+            // `remove_collision_exception_with(body)` (pat-s3rrv.100) — how a
+            // bullet stops hitting its shooter and a rider its vehicle.
+            //
+            // ⚠️ Both return **void** in Godot, so both answer `Nil` here even
+            // when nothing was applied. The bool the accessor returns is
+            // deliberately discarded rather than surfaced: inventing a return
+            // value Godot does not have would make `if a.add_collision_exception_with(b):`
+            // a script that works in Patina and breaks in Godot.
+            //
+            // `method` is the match's own binding, so comparing it inside a
+            // shared arm is sound — the two names differ only in direction.
+            "add_collision_exception_with" | "remove_collision_exception_with" => {
+                if let Some(other) = args.iter().find_map(|a| match a {
+                    Variant::ObjectId(id) => Some(id.raw()),
+                    _ => None,
+                }) {
+                    if method == "add_collision_exception_with" {
+                        self.physics2d_node_add_collision_exception(node, other);
+                    } else {
+                        self.physics2d_node_remove_collision_exception(node, other);
+                    }
+                }
+                Some(Variant::Nil)
+            }
+            // `RigidBody2D.get_contact_count()` — the number of CONTACTS, not
+            // of bodies (pat-s3rrv.100).
+            //
+            // ⚠️ Godot is explicit that the two differ: "collisions between
+            // parallel edges will result in two contacts (one at each end)"
+            // (RigidBody2D.xml). So this is the raw list length, while
+            // `get_colliding_bodies` below deduplicates — returning the same
+            // number from both would be wrong for the flat-on-flat resting case
+            // that is the single most common thing a body does.
+            "get_contact_count" => Some(Variant::Int(body_contacts(self.tree(), nid).len() as i64)),
+            // `RigidBody2D.get_colliding_bodies()` — Godot returns `Node2D[]`,
+            // one entry per BODY however many points it touches at.
+            "get_colliding_bodies" => {
+                let mut seen: Vec<u64> = Vec::new();
+                let mut out: Vec<Variant> = Vec::new();
+                for rec in body_contacts(self.tree(), nid) {
+                    let Variant::Dictionary(d) = rec else {
+                        continue;
+                    };
+                    if let Some(Variant::ObjectId(id)) = d.get("collider") {
+                        // Insertion order is preserved rather than sorted: it
+                        // mirrors contact order, and a script indexing [0] gets
+                        // a stable answer across runs.
+                        if !seen.contains(&id.raw()) {
+                            seen.push(id.raw());
+                            out.push(Variant::ObjectId(*id));
+                        }
+                    }
+                }
+                Some(Variant::Array(out))
+            }
+            // Godot answers an Array of the excepted bodies — empty, never
+            // null, so a script can `for b in ...` it without a guard.
+            "get_collision_exceptions" => Some(Variant::Array(
+                self.physics2d_node_get_collision_exceptions(node)
+                    .into_iter()
+                    .map(|raw| Variant::ObjectId(ObjectId::from_raw(raw)))
+                    .collect(),
+            )),
             // Collision state persisted by `process_character_movement`.
             "is_on_floor" | "is_on_wall" | "is_on_ceiling" => {
                 Some(Variant::Bool(bool_prop(self.tree(), method)))
             }
             // `*_only` variants ignore the "was on X last frame" distinction
             // Patina does not model separately; report the same state.
-            "is_on_floor_only" => Some(Variant::Bool(bool_prop(self.tree(), "is_on_floor"))),
-            "is_on_wall_only" => Some(Variant::Bool(bool_prop(self.tree(), "is_on_wall"))),
-            "is_on_ceiling_only" => Some(Variant::Bool(bool_prop(self.tree(), "is_on_ceiling"))),
-            // Godot's `get_real_velocity()` is the motion actually achieved last
-            // move, which differs from `velocity` when sliding cancelled part of
-            // it. Patina publishes the post-slide velocity, which is that value
-            // for every case except the first tick after a collision; reporting it
-            // beats returning null and killing `get_real_velocity().length()`.
-            "get_real_velocity" => Some(Variant::Vector2(vec2_prop(self.tree(), "velocity"))),
+            // ⚠️ The `_only` variants are NOT aliases for the plain ones —
+            // that is the bug they had (pat-s3rrv.97). Godot defines each as
+            // "this surface AND NEITHER of the other two"
+            // (`character_body_2d.cpp:456-466`):
+            //
+            //     is_on_floor_only() { return on_floor && !on_wall && !on_ceiling; }
+            //
+            // Returning the plain flag made a body that ran into a wall while
+            // standing on the ground report `is_on_floor_only() == true`, which
+            // is exactly the case the method exists to rule out — so the
+            // "am I cleanly on the ground?" test every platformer writes was
+            // always true once grounded.
+            "is_on_floor_only" | "is_on_wall_only" | "is_on_ceiling_only" => {
+                let floor = bool_prop(self.tree(), "is_on_floor");
+                let wall = bool_prop(self.tree(), "is_on_wall");
+                let ceiling = bool_prop(self.tree(), "is_on_ceiling");
+                let only = match method {
+                    "is_on_floor_only" => floor && !wall && !ceiling,
+                    "is_on_wall_only" => wall && !floor && !ceiling,
+                    _ => ceiling && !floor && !wall,
+                };
+                Some(Variant::Bool(only))
+            }
+            // Godot's `get_real_velocity()` is the motion the last move ACHIEVED.
+            //
+            // ⚠️ NOT the node's `velocity`, which is what this used to return.
+            // The two agree only while nothing obstructs the body: run into a
+            // wall and `velocity` still carries the slide velocity for the next
+            // tick while the body went nowhere along x. Reporting `velocity`
+            // therefore answered "still moving" for exactly the case the method
+            // exists to detect (pat-s3rrv.97).
+            //
+            // `process_character_movement` publishes the position delta over the
+            // tick as `_real_velocity`; ZERO before the first move, which is
+            // also what Godot reports for a body that has not moved yet.
+            "get_real_velocity" => Some(vel_prop(self.tree(), "_real_velocity")),
             // Written by `process_character_movement` from the platform the body
             // is standing on; ZERO until then.
-            "get_platform_velocity" => Some(Variant::Vector2(vec2_prop(
-                self.tree(),
-                "platform_velocity",
-            ))),
+            "get_platform_velocity" => Some(vel_prop(self.tree(), "platform_velocity")),
 
             // -- RayCast2D script API (pat-0q2kx.32) --------------------------
             //
@@ -3452,6 +3840,73 @@ impl SceneAccess for SceneTreeAccessor {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         self.physics()
             .is_some_and(|p| p.node_test_move(nid, Vector2::new(motion.0, motion.1)))
+    }
+
+    /// `PhysicsBody2D.add_collision_exception_with(body)` (pat-s3rrv.100).
+    ///
+    /// ⚠️ Both nodes must already be REGISTERED bodies. A script calling this
+    /// in `_ready` — before the first `sync_to_physics` has run — resolves no
+    /// `BodyId` and the exception is silently dropped, which is why this
+    /// answers a bool the node-method arm can surface rather than returning
+    /// unit and pretending it worked.
+    fn physics2d_node_add_collision_exception(&mut self, node: u64, other: u64) -> bool {
+        let a_nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let b_nid = NodeId::from_object_id(ObjectId::from_raw(other));
+        let Some(phys) = self.physics_mut() else {
+            return false;
+        };
+        let (Some(a), Some(b)) = (phys.body_for_node(a_nid), phys.body_for_node(b_nid)) else {
+            return false;
+        };
+        match phys.world_mut().get_body_mut(a) {
+            Some(body) => {
+                body.add_collision_exception(b);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn physics2d_node_remove_collision_exception(&mut self, node: u64, other: u64) -> bool {
+        let a_nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let b_nid = NodeId::from_object_id(ObjectId::from_raw(other));
+        let Some(phys) = self.physics_mut() else {
+            return false;
+        };
+        let (Some(a), Some(b)) = (phys.body_for_node(a_nid), phys.body_for_node(b_nid)) else {
+            return false;
+        };
+        match phys.world_mut().get_body_mut(a) {
+            Some(body) => {
+                body.remove_collision_exception(b);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The excepted bodies as node object ids, in the order they were added.
+    ///
+    /// A `BodyId` with no node behind it is dropped rather than reported as a
+    /// zero id: Godot hands back an Array of real nodes, and a script doing
+    /// `for b in get_collision_exceptions(): b.queue_free()` must not be given
+    /// something it cannot call methods on.
+    fn physics2d_node_get_collision_exceptions(&self, node: u64) -> Vec<u64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(phys) = self.physics() else {
+            return Vec::new();
+        };
+        let Some(id) = phys.body_for_node(nid) else {
+            return Vec::new();
+        };
+        let Some(body) = phys.world().get_body(id) else {
+            return Vec::new();
+        };
+        body.collision_exceptions
+            .iter()
+            .filter_map(|bid| phys.node_for_body(*bid))
+            .map(|n| n.object_id().raw())
+            .collect()
     }
 
     /// `RayCast2D.force_raycast_update()` (pat-0q2kx.32) — runs the very same
@@ -4852,6 +5307,52 @@ impl SceneAccess for SceneTreeAccessor {
                 new_shape_handle(gdphysics2d::shape::Shape2D::Rectangle {
                     half_extents: gdcore::math::Vector2::new(10.0, 10.0),
                 }),
+            ))),
+            // The remaining six Shape2D subclasses (pat-s3rrv.98). All were
+            // already in ClassDB and already representable by
+            // `gdphysics2d::shape::Shape2D`; only `.new()` was missing, so
+            // `var s = CapsuleShape2D.new()` failed on a class the editor's own
+            // resource picker offers.
+            //
+            // Defaults are Godot's, from each class's doc XML rather than
+            // copied from the circle above:
+            ("CapsuleShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                // ⚠️ height is the TOTAL height (30.0), not Godot's derived
+                // `mid_height` (= height - 2 * radius). Storing mid_height here
+                // would give a capsule 20px shorter than the authored one.
+                new_shape_handle(gdphysics2d::shape::Shape2D::Capsule {
+                    radius: 10.0,
+                    height: 30.0,
+                }),
+            ))),
+            ("SegmentShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                new_shape_handle(gdphysics2d::shape::Shape2D::Segment {
+                    a: gdcore::math::Vector2::new(0.0, 0.0),
+                    b: gdcore::math::Vector2::new(0.0, 10.0),
+                }),
+            ))),
+            // ⚠️ Both polygon kinds default to NO points, which is Godot's
+            // default and is a legal shape — geometry arrives later through the
+            // `points` / `segments` setter. Seeding a placeholder quad instead
+            // would make an unconfigured shape silently collide.
+            ("ConvexPolygonShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                new_shape_handle(gdphysics2d::shape::Shape2D::convex_polygon(&[])),
+            ))),
+            ("ConcavePolygonShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                new_shape_handle(gdphysics2d::shape::Shape2D::concave_polygon(&[])),
+            ))),
+            ("WorldBoundaryShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                // ⚠️ The default normal is (0, -1) — pointing UP in Godot's
+                // y-down 2D space, so the solid half-plane is everything below
+                // the line. Flipping the sign leaves a "floor" that bodies fall
+                // through while the shape still exists.
+                new_shape_handle(gdphysics2d::shape::Shape2D::world_boundary(
+                    gdcore::math::Vector2::new(0.0, -1.0),
+                    0.0,
+                )),
+            ))),
+            ("SeparationRayShape2D", "new") => Some(Variant::ObjectId(ObjectId::from_raw(
+                new_shape_handle(gdphysics2d::shape::Shape2D::SeparationRay { length: 20.0 }),
             ))),
             ("PhysicsShapeQueryParameters2D", "new") => Some(Variant::ObjectId(
                 ObjectId::from_raw(new_shape_params_handle()),

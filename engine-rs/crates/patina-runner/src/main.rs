@@ -461,6 +461,14 @@ fn run_booted_project(booted: project_boot::BootedProject, project_dir: &Path, a
             output[name] = Value::Bool(true);
         }
     }
+    // `--debug-navigation` also emits the navmesh itself, so a harness can
+    // assert the geometry reached the running scene and not merely the flag
+    // (pat-s3rrv.82). Same discipline as the flags above: emitted ONLY when the
+    // flag is on, so no existing run's output changes.
+    if args.debug.navigation {
+        output["navigation_draw"] =
+            patina_runner::navigation_debug::navmesh_draw_items(main_loop.tree());
+    }
     if args.trace_frames {
         output["frame_trace"] = Value::Array(frame_trace);
     }
@@ -616,6 +624,14 @@ fn main() {
         if enabled {
             output[name] = Value::Bool(true);
         }
+    }
+    // `--debug-navigation` also emits the navmesh itself, so a harness can
+    // assert the geometry reached the running scene and not merely the flag
+    // (pat-s3rrv.82). Same discipline as the flags above: emitted ONLY when the
+    // flag is on, so no existing run's output changes.
+    if args.debug.navigation {
+        output["navigation_draw"] =
+            patina_runner::navigation_debug::navmesh_draw_items(main_loop.tree());
     }
     if args.trace_frames {
         output["frame_trace"] = Value::Array(frame_trace);

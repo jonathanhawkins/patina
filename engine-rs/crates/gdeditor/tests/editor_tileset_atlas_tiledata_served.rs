@@ -25,8 +25,9 @@ use gdeditor::editor_ui::EDITOR_HTML;
 use gdscene::node::{Node, NodeId};
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::tilemap::{
-    decode_tile_map_data, encode_tile_map_data, tile_navigation_polygons, tile_physics_one_way_key,
-    TileData, TILE_NAV_POLYGON, TILE_NAV_SOURCES, TILE_PHYSICS_SOURCES, TILE_SET_SOURCE_IDS,
+    decode_tile_map_data, encode_tile_map_data, tile_navigation_polygons, tile_occluder_polygons,
+    tile_physics_one_way_key, TileData, TILE_NAV_POLYGON, TILE_NAV_SOURCES, TILE_OCCLUDER_POLYGON,
+    TILE_OCCLUDER_SOURCES, TILE_PHYSICS_SOURCES, TILE_SET_SOURCE_IDS,
 };
 use gdscene::{MainLoop, SceneTree};
 use gdvariant::Variant;
@@ -78,6 +79,22 @@ fn editor_html_wires_the_tileset_editor() {
     assert!(
         EDITOR_HTML.contains("id=\"tileset-navigation\" type=\"checkbox\""),
         "the panel must offer toggling a tile's navigation, in both directions"
+    );
+    // ⚠️ Occlusion is a CHECKBOX for the same reason navigation is, and the
+    // reason is not symmetry: `tile_occluder_polygons` keys off the source
+    // list, so a one-way "Occl" button would leave every tile ever marked
+    // shadow-casting marked forever, through every later save. The route
+    // landed in an earlier pass with no control at all, so the saver and
+    // loader could round-trip occlusion that no editor action could author
+    // (pat-s3rrv.65).
+    assert!(
+        EDITOR_HTML.contains("id=\"tileset-occlusion\" type=\"checkbox\""),
+        "the panel must offer toggling a tile's occlusion, in both directions"
+    );
+    assert!(
+        EDITOR_HTML.contains("occlusion: !!occl.checked"),
+        "the occlusion checkbox must POST its state, not merely exist — a \
+         control wired to nothing is the same defect as no control"
     );
 }
 
@@ -507,5 +524,138 @@ fn editor_tileset_tile_navigation_served() {
     assert_eq!(
         regions[0][1],
         Vector2::new(8.0, GROUND_ROW as f32 * TILE as f32)
+    );
+}
+
+// ---------------------------------------------------------------------------
+
+/// The occlusion half of the TileData surface, end to end.
+///
+/// The saver and the loader have handled tile occlusion since stage 1 — but the
+/// route did not, so a scene could *carry* occlusion that no editor action could
+/// author. `grep -c occluder editor_server.rs` was 0 while the same grep over
+/// `scene_saver.rs` was 10 (pat-s3rrv.65).
+#[test]
+fn editor_tileset_tile_occlusion_served() {
+    let port = free_port();
+    let (tree, layer_id) = painted_scene();
+    let raw = layer_id.raw();
+    let handle = EditorServerHandle::start(port, EditorState::new(tree));
+    thread::sleep(Duration::from_millis(100));
+
+    let resp = http_post(
+        port,
+        "/api/tileset/source",
+        &format!(
+            r#"{{"node_id":{raw},"source_id":{SOURCE},"texture":"res://atlas.png","region_size":[16,16],"tile_size":[16,16]}}"#
+        ),
+    );
+    assert!(resp.contains("200 OK"), "atlas source POST failed:\n{resp}");
+
+    // ⚠️ Top-left relative, like the navigation polygon and UNLIKE the collision
+    // points on this same route, which are tile-centred. `tilemap.rs` documents
+    // the occluder as the navigation twin deliberately; sending centred points
+    // casts the shadow half a tile off.
+    let resp = http_post(
+        port,
+        "/api/tileset/tile/data",
+        &format!(
+            r#"{{"node_id":{raw},"source_id":{SOURCE},"atlas":[0,0],"occlusion":true,"occluder_polygon":[[0,0],[8,0],[8,16],[0,16]]}}"#
+        ),
+    );
+    assert!(
+        resp.contains("200 OK"),
+        "POST /api/tileset/tile/data with occlusion should return 200, got:\n{resp}"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("tileset_occlusion_scene.tscn");
+    let save = http_post(
+        port,
+        "/api/scene/save",
+        &format!(r#"{{"path":"{}"}}"#, path.to_string_lossy()),
+    );
+    assert!(save.contains("200 OK"), "scene save failed:\n{save}");
+    let saved = std::fs::read_to_string(&path).expect("the saved scene must exist");
+
+    for needle in [
+        // Godot reads a tile's occluder only when the layer exists on the
+        // TileSet — the occlusion twin of `navigation_layer_0/layers`.
+        "occlusion_layer_0/light_mask = 1",
+        // ⚠️ THREE components, not two: Godot's occlusion layer holds a LIST of
+        // polygons per layer (`polygon_0/polygon`) where navigation carries
+        // exactly one. Writing the navigation shape here parses and drops the
+        // occluder.
+        "0:0/0/occlusion_layer_0/polygon_0/polygon = SubResource(",
+        // A SubResource reference to a real resource type, not an inline array.
+        "[sub_resource type=\"OccluderPolygon2D\"",
+    ] {
+        assert!(
+            saved.contains(needle),
+            "the saved scene must carry `{needle}`; without it the authored \
+             occlusion layer is dropped on save.\n{saved}"
+        );
+    }
+    assert!(
+        !saved.contains("__tile_occluder_"),
+        "the flat occluder companions must not reach the .tscn.\n{saved}"
+    );
+
+    drop(handle);
+
+    // -- reload, and check the runtime honours it ---------------------------
+    let scene = PackedScene::from_tscn(&saved).expect("the saved scene must parse");
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    add_packed_scene_to_tree(&mut tree, root, &scene).expect("the saved scene must instance");
+    let layer = tree
+        .find_child(root, "Layer", true)
+        .expect("the reloaded scene must still hold the Layer");
+    let node = tree.get_node(layer).expect("layer node");
+
+    // 🔑 The step that makes it real: `tile_occluder_polygons` returns NOTHING
+    // while the source list is empty, so a perfectly authored polygon casts no
+    // shadow at all — saved, reloaded and inert.
+    assert!(
+        matches!(
+            node.get_property(TILE_OCCLUDER_SOURCES),
+            Variant::PackedInt32Array(ref v) if v.contains(&SOURCE)
+        ),
+        "enabling occlusion must register the source in {TILE_OCCLUDER_SOURCES}"
+    );
+
+    // Back in TOP-LEFT coordinates, not the centred form the file holds.
+    let local = match node.get_property(TILE_OCCLUDER_POLYGON) {
+        Variant::PackedVector2Array(v) => v,
+        other => panic!("the reloaded layer must carry an occluder polygon, got {other:?}"),
+    };
+    assert_eq!(
+        local,
+        vec![
+            Vector2::new(0.0, 0.0),
+            Vector2::new(8.0, 0.0),
+            Vector2::new(8.0, 16.0),
+            Vector2::new(0.0, 16.0),
+        ],
+        "the polygon must come back in the top-left form it was authored in; a \
+         half-tile shift means the centred/top-left rebasing was applied once \
+         too often or not at all",
+    );
+
+    // And the runtime emits one occluder per painted, occlusion-enabled cell.
+    // ⚠️ `tile_map_data` is a PackedByteArray, not an int array — copied from
+    // the navigation test's own read rather than assumed.
+    let cells = match node.get_property("tile_map_data") {
+        Variant::PackedByteArray(bytes) => decode_tile_map_data(&bytes),
+        other => panic!("the painted cells must survive the save, got {other:?}"),
+    };
+    let sources = match node.get_property(TILE_OCCLUDER_SOURCES) {
+        Variant::PackedInt32Array(v) => v,
+        _ => Vec::new(),
+    };
+    let polys = tile_occluder_polygons(&cells, Vector2i::new(TILE, TILE), &sources, &local);
+    assert!(
+        !polys.is_empty(),
+        "every painted occlusion-enabled cell must produce an occluder polygon",
     );
 }

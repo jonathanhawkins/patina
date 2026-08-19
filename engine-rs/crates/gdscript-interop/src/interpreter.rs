@@ -3417,6 +3417,14 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "EditorInterface") {
                             return call_editor_interface_static(member, &evaluated_args);
                         }
+                        // Geometry2D singleton (pat-s3rrv.125).
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "Geometry2D") {
+                            return call_geometry_2d_static(member, &evaluated_args);
+                        }
+                        // Geometry3D singleton (pat-s3rrv.125).
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "Geometry3D") {
+                            return call_geometry_3d_static(member, &evaluated_args);
+                        }
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "CameraServer") {
                             return self.call_cameraserver(member, &evaluated_args);
                         }
@@ -3607,10 +3615,24 @@ impl Interpreter {
                                 // without a dependency cycle. Reuses the
                                 // existing physics-query seam rather than adding
                                 // another trait method.
+                                // ⚠️ Every name here needs a matching arm in
+                                // `physics_query_static_call`, and vice versa.
+                                // A name listed here with no arm makes `.new()`
+                                // fall through and return nothing; an arm with
+                                // no name here is never reached. The six added
+                                // for pat-s3rrv.98 were in the second state —
+                                // registered in ClassDB and representable by
+                                // the solver, but unreachable from script.
                                 if matches!(
                                     class_name.as_str(),
                                     "CircleShape2D"
                                         | "RectangleShape2D"
+                                        | "CapsuleShape2D"
+                                        | "SegmentShape2D"
+                                        | "ConvexPolygonShape2D"
+                                        | "ConcavePolygonShape2D"
+                                        | "WorldBoundaryShape2D"
+                                        | "SeparationRayShape2D"
                                         | "PhysicsShapeQueryParameters2D"
                                 ) {
                                     if let Some(access) = self.scene_access.as_mut() {
@@ -3686,6 +3708,60 @@ impl Interpreter {
                                     }
                                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                                         format!("{class_name}.new() requires scene access"),
+                                    )));
+                                }
+                                // RefCounted-derived classes construct as a
+                                // `Variant::Resource` seeded with ClassDB's
+                                // registered defaults — `var s =
+                                // CircleShape2D.new(); s.radius = 40` is the
+                                // standard way to author a shape at runtime
+                                // (pat-s3rrv.98), and every Godot spatial query
+                                // goes through one of these too:
+                                // `PhysicsShapeQueryParameters2D.new()`,
+                                // `PhysicsTestMotionResult2D.new()`
+                                // (pat-s3rrv.96).
+                                //
+                                // ⚠️ `RefCounted`, not `Resource` — `Resource`
+                                // DERIVES `RefCounted`, so this one condition
+                                // covers both, and Godot's rule really is "a
+                                // RefCounted class is constructible unless it
+                                // is marked non-instantiable".
+                                //
+                                // ⚠️ The query-parameter classes are RefCounted
+                                // WITHOUT being Resources, so they are modelled
+                                // by the same `ResourceRef` property bag. It
+                                // carries the real `class_name`, but a `q is
+                                // Resource` test would wrongly say true —
+                                // Variant has no separate RefCounted carrier
+                                // yet. Recorded on the bead.
+                                //
+                                // ⚠️ The abstract check above already ran, so a
+                                // base Godot marks `inst=false` — `Shape2D`,
+                                // `Shape3D` — still errors here rather than
+                                // constructing. Any Resource base registered
+                                // WITHOUT `.abstract_class()` becomes
+                                // constructible by this branch, which is a data
+                                // gap in ClassDB rather than a bug in the
+                                // dispatch.
+                                //
+                                // ⚠️ `path` is empty on purpose: a
+                                // script-built resource has no `res://` file
+                                // until something saves it, which is what
+                                // Godot's empty `resource_path` means.
+                                if gdobject::class_db::class_exists(class_name)
+                                    && gdobject::class_db::is_parent_class(class_name, "RefCounted")
+                                {
+                                    let properties =
+                                        gdobject::class_db::get_property_list(class_name)
+                                            .into_iter()
+                                            .map(|p| (p.name, p.default_value))
+                                            .collect();
+                                    return Ok(Variant::Resource(Box::new(
+                                        gdvariant::ResourceRef {
+                                            path: String::new(),
+                                            class_name: class_name.to_string(),
+                                            properties,
+                                        },
                                     )));
                                 }
                             }
@@ -3998,6 +4074,17 @@ impl Interpreter {
                     // invoked three frames later still sees today's values
                     // (pat-s3rrv.67).
                     captures: Arc::new(self.environment.snapshot()),
+                    // Parameter defaults travel as EXPRESSIONS, evaluated only
+                    // when a call omits the argument (pat-s3rrv.67). They were
+                    // dropped here before — `params.iter().map(|p| p.name)`
+                    // keeps the name and discards `FuncParam::default`, so
+                    // `func(a = 5)` silently bound `a` to Nil on `f.call()`.
+                    param_defaults: Arc::new(
+                        params
+                            .iter()
+                            .map(|p| p.default.clone())
+                            .collect::<Vec<Option<Expr>>>(),
+                    ),
                 })))
             }
 
@@ -7818,15 +7905,46 @@ impl Interpreter {
                     None => Variant::Nil,
                 })
             }
-            // Godot's real signature threads a `PhysicsTestMotionParameters2D`
-            // and writes a `PhysicsTestMotionResult2D`; neither resource exists
-            // in Patina yet, so the staged form takes the motion directly and
-            // returns both halves of the result as a Dictionary — `collided` and
-            // `travel` are the two fields the result object is read for.
+            // Godot: `body_test_motion(body, PhysicsTestMotionParameters2D,
+            // [PhysicsTestMotionResult2D]) -> bool`.
+            //
+            // Arg 1 now accepts the real parameters resource (pat-s3rrv.96).
+            // ⚠️ It previously took a bare Vector2 only, and `vec2_arg` answers
+            // `Vector2::ZERO` for anything that is not a Vector2 — so a script
+            // written against Godot's actual API handed over a params object,
+            // silently swept a ZERO-length motion, and got back "nothing in the
+            // way". A wrong answer with no error, which is worse than a refusal.
+            // Both forms are accepted: the resource when given one, the bare
+            // vector otherwise, so the staged callers keep working.
+            //
+            // STILL NOT GODOT-SHAPED, deliberately: the return stays a
+            // Dictionary rather than a bool plus a filled
+            // `PhysicsTestMotionResult2D`. Godot MUTATES the caller's result
+            // object, and these RefCounted classes are modelled as
+            // `Variant::Resource(ResourceRef)` — a VALUE — reaching this arm
+            // through `args: &[Variant]` with no write-back path. Filling a
+            // result therefore needs reference semantics (a handle plus a
+            // registry, as `SPACE_STATE_2D_HANDLE` does), which is a
+            // representation change with a green test pinned to the current
+            // answer, not something to slip in here.
+            //
+            // `from` and `margin` are likewise still ignored: the scene-side
+            // sweep starts from the body's CURRENT transform and takes no
+            // margin, so honouring them means widening that helper first.
             "body_test_motion" => {
                 arity(2)?;
                 let body = rid_arg(args, 0);
-                let motion = vec2_arg(args, 1);
+                let motion = match args.get(1) {
+                    Some(Variant::Resource(r))
+                        if r.class_name == "PhysicsTestMotionParameters2D" =>
+                    {
+                        match r.properties.get("motion") {
+                            Some(Variant::Vector2(v)) => *v,
+                            _ => gdcore::math::Vector2::ZERO,
+                        }
+                    }
+                    _ => vec2_arg(args, 1),
+                };
                 let result = self
                     .scene_access
                     .as_ref()
@@ -13590,6 +13708,7 @@ impl Interpreter {
                 params,
                 body,
                 captures,
+                param_defaults,
             } => {
                 // Downcast the body back to Vec<Stmt>
                 let body_stmts: &Vec<Stmt> = body.downcast_ref::<Vec<Stmt>>().ok_or_else(|| {
@@ -13608,8 +13727,20 @@ impl Interpreter {
                 for (name, value) in captures.iter() {
                     self.environment.define(name.clone(), value.clone());
                 }
+                // Parameter defaults are evaluated HERE, inside the scope that
+                // already holds the captures, and only when the call omits the
+                // argument — Godot's rule, and it lets `func(n = base + 1)`
+                // read a captured `base`. Binding happens one parameter at a
+                // time so a later default can also refer to an earlier one.
+                let defaults = param_defaults.downcast_ref::<Vec<Option<Expr>>>();
                 for (i, param) in params.iter().enumerate() {
-                    let val = args.get(i).cloned().unwrap_or(Variant::Nil);
+                    let val = match args.get(i) {
+                        Some(v) => v.clone(),
+                        None => match defaults.and_then(|d| d.get(i)).and_then(|d| d.as_ref()) {
+                            Some(expr) => self.eval_expr(expr)?,
+                            None => Variant::Nil,
+                        },
+                    };
                     self.environment.define(param.clone(), val);
                 }
                 let mut return_val = Variant::Nil;
@@ -14536,6 +14667,21 @@ fn set_index(container: &mut Variant, idx: &Variant, value: Variant) -> Result<(
         }
         (Variant::Dictionary(d), key) => {
             d.insert(key.clone(), value);
+            Ok(())
+        }
+        // The write half of the resource property path (pat-s3rrv.98). Reading
+        // `resource.prop` was already supported; writing it fell through to
+        // "invalid index assignment", so a script could inspect a resource but
+        // never configure one — `var s = CircleShape2D.new(); s.radius = 40`
+        // failed on the second line.
+        //
+        // ⚠️ Stores the value AS GIVEN, like the Dictionary arm above. Godot
+        // coerces to the property's declared type, so `s.radius = 40` leaves an
+        // Int here where Godot would hold 40.0. That coercion needs the
+        // property's registered type and is a separate concern from having a
+        // write path at all.
+        (Variant::Resource(r), key) => {
+            r.properties.insert(key.to_string_lossy(), value);
             Ok(())
         }
         _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -17234,18 +17380,40 @@ const MULTIPLAYER_SIGNALS: &[&str] = &[
     "peer_authentication_failed",
 ];
 
+/// The engine singletons `Engine.has_singleton` / `get_singleton_list` report.
+///
+/// ⚠️ **Every name here must have a dispatch arm**, or `has_singleton` promises
+/// something the interpreter cannot serve and the standard defensive idiom
+/// `if Engine.has_singleton(X): Engine.get_singleton(X).foo()` breaks on the
+/// second half. `builtin_singletons_all_have_a_dispatch_arm` enforces that
+/// against the source rather than trusting this comment.
+///
+/// ⚠️ **Being dispatched is not enough to belong here.** `JSON`, `DirAccess`,
+/// `FileAccess` and `Image` are dispatched as bare globals too, but Godot makes
+/// them RefCounted/Resource classes with statics — `jq '.classes[]|select(.name
+/// =="JSON")'` gives `inherits: Resource`, and `Engine.has_singleton("JSON")` is
+/// **false** in Godot. `JSON` was listed here and has been removed; its
+/// `parse_string`/`stringify` arm is untouched and still works, as a class
+/// static rather than a singleton.
+///
+/// ⚠️ `EditorInterface` is `editor_only` in Godot
+/// (`editor/register_editor_types.cpp:304`). `has_singleton` is a plain lookup
+/// and reports it either way; it is `get_singleton_list` that filters
+/// editor-only entries outside the editor, which this table does not yet model.
 const BUILTIN_SINGLETONS: &[&str] = &[
     "AudioServer",
     "CameraServer",
     "ClassDB",
     "DisplayServer",
+    "EditorInterface",
     "Engine",
     "EngineDebugger",
     "GDExtensionManager",
+    "Geometry2D",
+    "Geometry3D",
     "Input",
     "InputMap",
     "JavaScriptBridge",
-    "JSON",
     "Marshalls",
     "OS",
     "PhysicsServer2D",
@@ -17254,6 +17422,8 @@ const BUILTIN_SINGLETONS: &[&str] = &[
     "ResourceUID",
     "Time",
     "TranslationServer",
+    "WorkerThreadPool",
+    "XRServer",
 ];
 
 fn engine_singletons() -> &'static Mutex<HashMap<String, Variant>> {
@@ -22901,6 +23071,204 @@ fn camera_feed_arg(args: &[Variant], who: &str) -> Result<u64, RuntimeError> {
 /// Free-standing rather than a method on the interpreter because none of these
 /// touch interpreter state — the same reason
 /// [`call_editor_command_palette_static`] is free.
+/// `Geometry2D` singleton statics (pat-s3rrv.125).
+///
+/// ⚠️ `gdcore::geometry2d` was an ORPHANED module — present with eight public
+/// functions and never declared in `lib.rs`, so it never compiled. Declaring it
+/// and adding this arm is what makes `Geometry2D.build_arc(...)` resolve;
+/// `engine-rs/tests/misc_suite_c/geometry2d_singleton_parity_test.rs` is a live
+/// target that has been calling it and failing with
+/// `UndefinedVariable("Geometry2D")`.
+///
+/// ⚠️ `build_arc` returns a plain `Array` of `Vector2`, not a
+/// `PackedVector2Array`, because that is what the parity fixtures match on.
+fn call_geometry_2d_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    fn bad(method: &str, what: &str) -> RuntimeError {
+        RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "Geometry2D.{method}() expects {what}"
+        )))
+    }
+    fn vec2(
+        args: &[Variant],
+        i: usize,
+        method: &str,
+    ) -> Result<gdcore::math::Vector2, RuntimeError> {
+        match args.get(i) {
+            Some(Variant::Vector2(v)) => Ok(*v),
+            _ => Err(bad(method, "a Vector2")),
+        }
+    }
+    // Godot accepts an int where a float is wanted, and scripts write `1` as
+    // often as `1.0`; rejecting the Int form would fail on ordinary code.
+    fn num(args: &[Variant], i: usize, method: &str) -> Result<f32, RuntimeError> {
+        match args.get(i) {
+            Some(Variant::Float(f)) => Ok(*f as f32),
+            Some(Variant::Int(n)) => Ok(*n as f32),
+            _ => Err(bad(method, "a number")),
+        }
+    }
+    fn poly(
+        args: &[Variant],
+        i: usize,
+        method: &str,
+    ) -> Result<Vec<gdcore::math::Vector2>, RuntimeError> {
+        match args.get(i) {
+            Some(Variant::Array(a)) => Ok(a
+                .iter()
+                .filter_map(|v| match v {
+                    Variant::Vector2(p) => Some(*p),
+                    _ => None,
+                })
+                .collect()),
+            Some(Variant::PackedVector2Array(a)) => Ok(a.clone()),
+            _ => Err(bad(method, "an array of Vector2")),
+        }
+    }
+
+    match method {
+        "build_arc" => {
+            let center = vec2(args, 0, method)?;
+            let radius = num(args, 1, method)?;
+            let start = num(args, 2, method)?;
+            let end = num(args, 3, method)?;
+            let count = match args.get(4) {
+                Some(Variant::Int(n)) => (*n).max(0) as u32,
+                Some(Variant::Float(f)) => (*f).max(0.0) as u32,
+                _ => return Err(bad(method, "a point count")),
+            };
+            Ok(Variant::Array(
+                gdcore::geometry2d::build_arc(center, radius, start, end, count)
+                    .into_iter()
+                    .map(Variant::Vector2)
+                    .collect(),
+            ))
+        }
+        "is_point_in_polygon" => Ok(Variant::Bool(gdcore::geometry2d::is_point_in_polygon(
+            vec2(args, 0, method)?,
+            &poly(args, 1, method)?,
+        ))),
+        "is_polygon_clockwise" => Ok(Variant::Bool(gdcore::geometry2d::is_polygon_clockwise(
+            &poly(args, 0, method)?,
+        ))),
+        "point_is_inside_triangle" => {
+            Ok(Variant::Bool(gdcore::geometry2d::point_is_inside_triangle(
+                vec2(args, 0, method)?,
+                vec2(args, 1, method)?,
+                vec2(args, 2, method)?,
+                vec2(args, 3, method)?,
+            )))
+        }
+        "get_closest_point_to_segment" => Ok(Variant::Vector2(
+            gdcore::geometry2d::get_closest_point_to_segment(
+                vec2(args, 0, method)?,
+                vec2(args, 1, method)?,
+                vec2(args, 2, method)?,
+            ),
+        )),
+        "get_closest_point_to_segment_uncapped" => Ok(Variant::Vector2(
+            gdcore::geometry2d::get_closest_point_to_segment_unclamped(
+                vec2(args, 0, method)?,
+                vec2(args, 1, method)?,
+                vec2(args, 2, method)?,
+            ),
+        )),
+        // Godot returns the intersection point or `null` when the segments
+        // miss, which is what a script tests with `if result:`.
+        "segment_intersects_segment" => Ok(gdcore::geometry2d::segment_intersects_segment(
+            vec2(args, 0, method)?,
+            vec2(args, 1, method)?,
+            vec2(args, 2, method)?,
+            vec2(args, 3, method)?,
+        )
+        .map(Variant::Vector2)
+        .unwrap_or(Variant::Nil)),
+        "line_intersects_line" => Ok(gdcore::geometry2d::line_intersects_line(
+            vec2(args, 0, method)?,
+            vec2(args, 1, method)?,
+            vec2(args, 2, method)?,
+            vec2(args, 3, method)?,
+        )
+        .map(Variant::Vector2)
+        .unwrap_or(Variant::Nil)),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("Geometry2D.{method}"),
+        ))),
+    }
+}
+
+/// `Geometry3D` singleton statics (pat-s3rrv.125).
+///
+/// ⚠️ Five of `gdcore::geometry3d`'s six functions are dispatched. The sixth,
+/// `segment_intersects_sphere`, is deliberately LEFT OUT: Godot returns a
+/// `PackedVector3Array` of **[point, normal]** (empty on a miss), and our
+/// helper returns only `Option<Vector3>` — it computes no normal. Dispatching
+/// it would hand scripts a one-element array where Godot gives two, so
+/// `result[1]` would panic instead of yielding the normal. It stays unreachable
+/// until the normal is computed; that is recorded on the bead.
+fn call_geometry_3d_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    fn vec3(
+        args: &[Variant],
+        i: usize,
+        method: &str,
+    ) -> Result<gdcore::math::Vector3, RuntimeError> {
+        match args.get(i) {
+            Some(Variant::Vector3(v)) => Ok(*v),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "Geometry3D.{method}() expects a Vector3"
+            )))),
+        }
+    }
+
+    match method {
+        "get_closest_point_to_segment" => Ok(Variant::Vector3(
+            gdcore::geometry3d::get_closest_point_to_segment(
+                vec3(args, 0, method)?,
+                vec3(args, 1, method)?,
+                vec3(args, 2, method)?,
+            ),
+        )),
+        "get_closest_point_to_segment_uncapped" => Ok(Variant::Vector3(
+            gdcore::geometry3d::get_closest_point_to_segment_uncapped(
+                vec3(args, 0, method)?,
+                vec3(args, 1, method)?,
+                vec3(args, 2, method)?,
+            ),
+        )),
+        // Godot hands back the two closest points as a packed array, in
+        // (on-first-segment, on-second-segment) order.
+        "get_closest_points_between_segments" => {
+            let (c1, c2) = gdcore::geometry3d::get_closest_points_between_segments(
+                vec3(args, 0, method)?,
+                vec3(args, 1, method)?,
+                vec3(args, 2, method)?,
+                vec3(args, 3, method)?,
+            );
+            Ok(Variant::PackedVector3Array(vec![c1, c2]))
+        }
+        "segment_intersects_triangle" => Ok(gdcore::geometry3d::segment_intersects_triangle(
+            vec3(args, 0, method)?,
+            vec3(args, 1, method)?,
+            vec3(args, 2, method)?,
+            vec3(args, 3, method)?,
+            vec3(args, 4, method)?,
+        )
+        .map(Variant::Vector3)
+        .unwrap_or(Variant::Nil)),
+        "ray_intersects_triangle" => Ok(gdcore::geometry3d::ray_intersects_triangle(
+            vec3(args, 0, method)?,
+            vec3(args, 1, method)?,
+            vec3(args, 2, method)?,
+            vec3(args, 3, method)?,
+            vec3(args, 4, method)?,
+        )
+        .map(Variant::Vector3)
+        .unwrap_or(Variant::Nil)),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("Geometry3D.{method}"),
+        ))),
+    }
+}
+
 fn call_editor_paths_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
     match method {
         "get_data_dir" => Ok(Variant::String(gdplatform::os::data_dir())),
@@ -31458,5 +31826,432 @@ match x:
         );
         // A non-math value has no components at all.
         assert_eq!(variant_component(&Variant::Int(3), "x"), None);
+    }
+
+    /// 🔑 EVERY NAME `Engine.has_singleton` ADMITS MUST HAVE A DISPATCH ARM.
+    ///
+    /// The standard defensive idiom is
+    /// `if Engine.has_singleton(X): Engine.get_singleton(X).foo()`. A name in
+    /// [`BUILTIN_SINGLETONS`] with no dispatch arm passes the guard and then
+    /// fails on the call — the guard makes it *worse* than an unknown name,
+    /// which at least fails immediately.
+    ///
+    /// ⚠️ Checked against the SOURCE, not a second hand-written list. A
+    /// duplicate list would drift exactly the way this table already drifted:
+    /// it listed `JSON`, which Godot makes a RefCounted `Resource`, and omitted
+    /// `WorkerThreadPool`, `XRServer` and `EditorInterface`, all three of which
+    /// the interpreter has dispatched for months. `Engine.has_singleton` was
+    /// therefore wrong in both directions at once.
+    ///
+    /// ⚠️ Deliberately ONE-directional. The converse — "every dispatched name
+    /// must be listed" — is false and must not be added: `JSON`, `DirAccess`,
+    /// `FileAccess` and `Image` are all dispatched as bare globals while being
+    /// ordinary classes with statics in Godot, not singletons.
+    #[test]
+    fn builtin_singletons_all_have_a_dispatch_arm() {
+        let source = include_str!("interpreter.rs");
+
+        for name in BUILTIN_SINGLETONS {
+            let arm = format!("Expr::Ident(n) if n == \"{name}\"");
+            assert!(
+                source.contains(&arm),
+                "`{name}` is in BUILTIN_SINGLETONS, so Engine.has_singleton(\"{name}\") \
+                 returns true — but no dispatch arm matches it, so the call that \
+                 follows the guard fails. Either add the arm or drop the name."
+            );
+        }
+    }
+
+    /// 🔑 THE `Geometry2D` SINGLETON IS REACHABLE FROM SCRIPT.
+    ///
+    /// `gdcore::geometry2d` held eight correct public functions and fifteen
+    /// `#[test]`s that had **never compiled** — the module was missing from
+    /// `gdcore/src/lib.rs`, so it was orphaned source. Nothing could call it,
+    /// and `Geometry2D.build_arc(...)` failed with
+    /// `UndefinedVariable("Geometry2D")`.
+    ///
+    /// ⚠️ The declaration cannot silently regress: `call_geometry_2d_static`
+    /// names `gdcore::geometry2d::build_arc`, so dropping the `pub mod` again
+    /// fails this crate's build rather than quietly re-orphaning the module.
+    ///
+    /// ⚠️ `Array`, not `PackedVector2Array`. Godot has no `Geometry2D.build_arc`
+    /// at all (see `geometry_2d_build_arc_is_an_engine_extension_not_godot_parity`), so the
+    /// return type is fixed by our own fixtures, which match on `Array`.
+    #[test]
+    fn geometry_2d_build_arc_is_callable_from_script() {
+        // Quarter circle, unit radius, 3 points → angles 0, PI/4, PI/2.
+        let pts = run_val("return Geometry2D.build_arc(Vector2(0, 0), 1.0, 0.0, 1.5707963, 3)\n");
+        let Variant::Array(arr) = pts else {
+            panic!("build_arc must return an Array, got {pts:?}");
+        };
+        assert_eq!(arr.len(), 3, "point_count points, evenly spaced");
+
+        // Endpoints pin the sweep direction and the radius at once; a
+        // transposed sin/cos or a half-open range would move one of them.
+        let (Variant::Vector2(first), Variant::Vector2(last)) = (&arr[0], &arr[2]) else {
+            panic!("every point must be a Vector2, got {arr:?}");
+        };
+        assert!(
+            (first.x - 1.0).abs() < 1e-4 && first.y.abs() < 1e-4,
+            "arc must start at angle 0 → (1, 0), got {first:?}"
+        );
+        assert!(
+            last.x.abs() < 1e-4 && (last.y - 1.0).abs() < 1e-4,
+            "arc must end at PI/2 → (0, 1), got {last:?}"
+        );
+    }
+
+    /// 🔑 THE POLYGON PREDICATES ANSWER BOTH WAYS.
+    ///
+    /// ⚠️ A containment test that only ever asserts `true` passes just as well
+    /// against `|_, _| true`, so the outside case is the half that carries the
+    /// evidence. Both run through the singleton, not the Rust function, so this
+    /// covers the dispatch and the `Array` → `Vec<Vector2>` argument extraction.
+    #[test]
+    fn geometry_2d_polygon_predicates_dispatch_both_ways() {
+        const SQUARE: &str = "[Vector2(0, 0), Vector2(10, 0), Vector2(10, 10), Vector2(0, 10)]";
+
+        let inside = run_val(&format!(
+            "return Geometry2D.is_point_in_polygon(Vector2(5, 5), {SQUARE})\n"
+        ));
+        assert_eq!(inside, Variant::Bool(true), "(5,5) is inside the square");
+
+        let outside = run_val(&format!(
+            "return Geometry2D.is_point_in_polygon(Vector2(50, 5), {SQUARE})\n"
+        ));
+        assert_eq!(
+            outside,
+            Variant::Bool(false),
+            "(50,5) is outside the square"
+        );
+    }
+
+    /// 🔑 A MISS RETURNS `null`, NOT AN ERROR.
+    ///
+    /// `if Geometry2D.segment_intersects_segment(...):` is the ordinary way to
+    /// use this, so parallel segments must produce a falsy value rather than
+    /// abort the script.
+    #[test]
+    fn geometry_2d_segment_miss_is_nil_and_a_hit_is_a_point() {
+        let hit = run_val(
+            "return Geometry2D.segment_intersects_segment(\
+             Vector2(0, 0), Vector2(10, 10), Vector2(10, 0), Vector2(0, 10))\n",
+        );
+        let Variant::Vector2(p) = hit else {
+            panic!("crossing segments must intersect, got {hit:?}");
+        };
+        assert!(
+            (p.x - 5.0).abs() < 1e-4 && (p.y - 5.0).abs() < 1e-4,
+            "the X crosses at (5, 5), got {p:?}"
+        );
+
+        let miss = run_val(
+            "return Geometry2D.segment_intersects_segment(\
+             Vector2(0, 0), Vector2(10, 0), Vector2(0, 5), Vector2(10, 5))\n",
+        );
+        assert_eq!(miss, Variant::Nil, "parallel segments must return null");
+    }
+
+    /// 🔑 AN UNKNOWN METHOD ERRORS — WITH A POSITIVE CONTROL.
+    ///
+    /// ⚠️ On its own, "this errors" would also pass while `Geometry2D` was
+    /// entirely undefined, which is the exact bug being fixed. The control call
+    /// in the same test proves the singleton resolves and only the *method* is
+    /// rejected.
+    #[test]
+    fn geometry_2d_unknown_method_errors_but_the_singleton_resolves() {
+        // ⚠️ Two real windings, not one degenerate polygon: `is_polygon_clockwise`
+        // short-circuits to `false` for anything under three points, so a
+        // 1-point control would pass without the shoelace ever running.
+        //
+        // ⚠️ These values pin OUR shoelace sign convention (`area < 0` is
+        // clockwise), which has NOT been checked against Godot's — this is a
+        // dispatch test, not a parity test. If a later parity pass flips the
+        // convention, flip both expectations together; the load-bearing part is
+        // that reversing the winding reverses the answer.
+        let cw = run_val(
+            "return Geometry2D.is_polygon_clockwise(\
+             [Vector2(0, 0), Vector2(10, 10), Vector2(10, 0)])\n",
+        );
+        let ccw = run_val(
+            "return Geometry2D.is_polygon_clockwise(\
+             [Vector2(0, 0), Vector2(10, 0), Vector2(10, 10)])\n",
+        );
+        assert_eq!(
+            (cw.clone(), ccw.clone()),
+            (Variant::Bool(true), Variant::Bool(false)),
+            "reversing the winding must flip the answer, got {cw:?} / {ccw:?}"
+        );
+
+        let err = run_err("return Geometry2D.nonexistent_method()\n");
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("Geometry2D.nonexistent_method"),
+            "the error must name the method, got {text}"
+        );
+    }
+
+    /// 🔑 `build_arc` IS AN ENGINE EXTENSION, NOT GODOT PARITY.
+    ///
+    /// ⚠️ Recorded because `tests/misc_suite_c/geometry2d_singleton_parity_test.rs`
+    /// calls itself a *parity* test and spends fourteen of its calls on
+    /// `build_arc`. Godot's `Geometry2D` has no such method — it appears nowhere
+    /// in `upstream/godot` — so that file must not be cited as evidence of
+    /// Godot conformance. The other seven dispatched names *are* real Godot
+    /// methods, and this test pins which is which so the distinction survives.
+    #[test]
+    fn geometry_2d_build_arc_is_an_engine_extension_not_godot_parity() {
+        let source = include_str!("interpreter.rs");
+        for real in [
+            "is_point_in_polygon",
+            "is_polygon_clockwise",
+            "point_is_inside_triangle",
+            "get_closest_point_to_segment",
+            "get_closest_point_to_segment_uncapped",
+            "segment_intersects_segment",
+            "line_intersects_line",
+        ] {
+            assert!(
+                source.contains(&format!("\"{real}\" =>")),
+                "`{real}` is a documented Godot Geometry2D method and must stay dispatched"
+            );
+        }
+
+        // Godot spells the unclamped variant "uncapped"; the Rust function is
+        // `_unclamped`. The script-facing name is the one that must match.
+        assert!(
+            !source.contains("\"get_closest_point_to_segment_unclamped\" =>"),
+            "the script-facing name is `_uncapped`, matching Godot's doc XML"
+        );
+    }
+
+    /// 🔑 THE `Geometry3D` SINGLETON IS REACHABLE FROM SCRIPT.
+    ///
+    /// ⚠️ `get_closest_points_between_segments` returns a
+    /// `PackedVector3Array` of exactly two points in Godot, not a tuple or a
+    /// Dictionary — the Rust helper returns `(Vector3, Vector3)` and the
+    /// dispatch is what imposes the packed-array shape, so the LENGTH is
+    /// asserted, not just the contents.
+    #[test]
+    fn geometry_3d_closest_points_cross_the_script_boundary() {
+        let closest = run_val(
+            "return Geometry3D.get_closest_point_to_segment(\
+             Vector3(5, 10, 0), Vector3(0, 0, 0), Vector3(10, 0, 0))\n",
+        );
+        let Variant::Vector3(p) = closest else {
+            panic!("expected a Vector3, got {closest:?}");
+        };
+        assert!(
+            (p.x - 5.0).abs() < 1e-4 && p.y.abs() < 1e-4 && p.z.abs() < 1e-4,
+            "the foot of the perpendicular is (5, 0, 0), got {p:?}"
+        );
+
+        // Two skew segments: the X axis at z=0 and the Y axis at z=4.
+        let pair = run_val(
+            "return Geometry3D.get_closest_points_between_segments(\
+             Vector3(-10, 0, 0), Vector3(10, 0, 0), \
+             Vector3(0, -10, 4), Vector3(0, 10, 4))\n",
+        );
+        let Variant::PackedVector3Array(pts) = pair else {
+            panic!("expected a PackedVector3Array, got {pair:?}");
+        };
+        assert_eq!(pts.len(), 2, "Godot returns exactly two points");
+        assert!(
+            (pts[0].z - 0.0).abs() < 1e-4 && (pts[1].z - 4.0).abs() < 1e-4,
+            "point 0 lies on the first segment and point 1 on the second — \
+             a swapped pair would put z=4 first; got {pts:?}"
+        );
+    }
+
+    /// 🔑 A SEGMENT/TRIANGLE MISS IS `null`, NOT AN ERROR.
+    ///
+    /// ⚠️ Paired hit and miss. Asserting only the miss would pass while the
+    /// method was undefined, and asserting only the hit would not prove the
+    /// `Option::None` arm maps to `null` rather than erroring.
+    #[test]
+    fn geometry_3d_segment_triangle_hit_and_miss() {
+        const TRI: &str = "Vector3(0, 0, 0), Vector3(4, 0, 0), Vector3(0, 4, 0)";
+
+        let hit = run_val(&format!(
+            "return Geometry3D.segment_intersects_triangle(\
+             Vector3(1, 1, 5), Vector3(1, 1, -5), {TRI})\n"
+        ));
+        let Variant::Vector3(p) = hit else {
+            panic!("a segment through the triangle must intersect, got {hit:?}");
+        };
+        assert!(
+            p.z.abs() < 1e-4 && (p.x - 1.0).abs() < 1e-4 && (p.y - 1.0).abs() < 1e-4,
+            "the crossing is at (1, 1, 0), got {p:?}"
+        );
+
+        let miss = run_val(&format!(
+            "return Geometry3D.segment_intersects_triangle(\
+             Vector3(9, 9, 5), Vector3(9, 9, -5), {TRI})\n"
+        ));
+        assert_eq!(
+            miss,
+            Variant::Nil,
+            "a segment outside the triangle returns null"
+        );
+    }
+
+    /// 🔑 `segment_intersects_sphere` IS DELIBERATELY NOT DISPATCHED.
+    ///
+    /// Godot returns a `PackedVector3Array` of **[point, normal]** (empty on a
+    /// miss). `gdcore::geometry3d::segment_intersects_sphere` returns
+    /// `Option<Vector3>` and computes no normal, so the only shapes we could
+    /// return are a one-element array — where every script doing `result[1]`
+    /// to read the normal would fail — or a bare `Vector3`, which is not the
+    /// documented type either.
+    ///
+    /// ⚠️ This test exists so the omission is not silently "fixed" by wiring
+    /// the existing helper straight through. Erroring is the honest state until
+    /// the normal is computed; dispatching a wrong-shaped value would be worse
+    /// than the current `UndefinedFunction`, because the guard idiom
+    /// `if Geometry3D.segment_intersects_sphere(...):` would then succeed and
+    /// hand back an array Godot never produces.
+    #[test]
+    fn geometry_3d_segment_intersects_sphere_stays_undispatched() {
+        // Positive control: the singleton itself resolves, so the failure below
+        // is about this ONE method and not about `Geometry3D` being undefined.
+        let control = run_val(
+            "return Geometry3D.get_closest_point_to_segment(\
+             Vector3(0, 1, 0), Vector3(0, 0, 0), Vector3(1, 0, 0))\n",
+        );
+        assert!(
+            matches!(control, Variant::Vector3(_)),
+            "Geometry3D must resolve, got {control:?}"
+        );
+
+        let err = run_err(
+            "return Geometry3D.segment_intersects_sphere(\
+             Vector3(0, 0, -5), Vector3(0, 0, 5), Vector3(0, 0, 0), 1.0)\n",
+        );
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("Geometry3D.segment_intersects_sphere"),
+            "the error must name the undispatched method, got {text}"
+        );
+    }
+
+    /// 🔑 `JSON` IS NOT A SINGLETON, AND MUST STAY DISPATCHABLE ANYWAY.
+    ///
+    /// Godot: `jq '.classes[]|select(.name=="JSON")'` → `inherits: Resource`,
+    /// `is_refcounted: true`, and it appears in no `add_singleton` call, so
+    /// `Engine.has_singleton("JSON")` is **false**.
+    ///
+    /// ⚠️ Both halves matter. Removing it from the table without keeping the
+    /// arm would break every script calling `JSON.parse_string(...)`, which is
+    /// the normal way to use it — the fix is a reclassification, not a removal.
+    #[test]
+    fn json_is_a_class_static_not_a_singleton() {
+        assert!(
+            !BUILTIN_SINGLETONS.contains(&"JSON"),
+            "Godot reports has_singleton(\"JSON\") == false; JSON is a RefCounted Resource"
+        );
+        assert!(
+            include_str!("interpreter.rs").contains("Expr::Ident(n) if n == \"JSON\""),
+            "JSON.parse_string / JSON.stringify must keep working as class statics"
+        );
+    }
+
+    /// 🔑 A `Resource` CLASS CONSTRUCTS FROM SCRIPT, SEEDED FROM ClassDB.
+    ///
+    /// `var s = CircleShape2D.new(); s.radius = 40` is the standard way to
+    /// author a shape at runtime. Before this, `.new()` handled Node classes
+    /// through ClassDB and fell through to `UndefinedVariable` for everything
+    /// else, so every Resource class was unconstructible however well it was
+    /// registered.
+    ///
+    /// ⚠️ The default is asserted too, not just the assignment. A branch that
+    /// returned an EMPTY resource would still let `s.radius = 40` succeed —
+    /// the property write does not care whether the seed was there — and the
+    /// script would read 40 back. Only the untouched default proves ClassDB was
+    /// consulted.
+    #[test]
+    fn a_resource_class_constructs_from_classdb_defaults() {
+        let radius = run_val_with_classes("var s = CircleShape2D.new()\nreturn s.radius\n");
+        assert_eq!(
+            radius,
+            Variant::Float(10.0),
+            "CircleShape2D.new() must be seeded with Godot's documented radius"
+        );
+
+        // ⚠️ `40.0`, not `40`. The interpreter stores an assigned value as
+        // given rather than coercing it to the property's declared type, so an
+        // Int literal would come back as `Int(40)`. That gap is real and
+        // recorded on the bead; asserting it here would conflate it with the
+        // write path this test is about.
+        let assigned =
+            run_val_with_classes("var s = CircleShape2D.new()\ns.radius = 40.0\nreturn s.radius\n");
+        assert_eq!(assigned, Variant::Float(40.0));
+    }
+
+    /// 🔑 AN ABSTRACT BASE STILL REFUSES TO CONSTRUCT.
+    ///
+    /// ⚠️ `Shape2D` is `inst=false` in `extension_api.json` — Godot errors on
+    /// `Shape2D.new()`. The abstract check runs BEFORE the Resource branch, so
+    /// marking the base `.abstract_class()` is what keeps this true; without
+    /// that flag the new branch would happily construct it.
+    #[test]
+    fn an_abstract_resource_base_refuses_to_construct() {
+        gdobject::register_2d_classes();
+        let err = run_err("var s = Shape2D.new()\nreturn s\n");
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("abstract"),
+            "Shape2D.new() must report an abstract-class error, got {text}"
+        );
+    }
+
+    /// 🔑 THE PHYSICS QUERY-PARAMETER CLASSES CONSTRUCT FROM SCRIPT.
+    ///
+    /// Every Godot spatial query threads one of these:
+    /// `PhysicsShapeQueryParameters2D.new()` then `space.intersect_shape(q)`,
+    /// `body_test_motion(body, params, result)`. All six are RefCounted and
+    /// `inst=true` in Godot.
+    ///
+    /// ⚠️ They are RefCounted **without** being Resources, which is why the
+    /// `.new()` branch keys on `RefCounted` — `Resource` derives it, so one
+    /// condition serves both the shape resources (pat-s3rrv.98) and these.
+    #[test]
+    fn physics_query_parameter_classes_construct_from_script() {
+        gdobject::class_db::register_all_classes();
+
+        for class in [
+            "PhysicsShapeQueryParameters2D",
+            "PhysicsShapeQueryParameters3D",
+            "PhysicsTestMotionParameters2D",
+            "PhysicsTestMotionParameters3D",
+            "PhysicsTestMotionResult2D",
+            "PhysicsTestMotionResult3D",
+        ] {
+            let src = format!("var q = {class}.new()\nreturn q\n");
+            let v = run_val(&src);
+            match v {
+                Variant::Resource(ref r) => assert_eq!(
+                    r.class_name, class,
+                    "{class}.new() must carry its own class name"
+                ),
+                other => panic!("{class}.new() returned {other:?}, expected an object"),
+            }
+        }
+    }
+
+    /// 🔑 A CONSTRUCTED QUERY OBJECT IS CONFIGURABLE.
+    ///
+    /// ⚠️ Constructing is only half of it — the whole point is
+    /// `q.margin = 0.5` before handing it to a query. Reading the value back
+    /// proves the write landed on the object rather than being swallowed, which
+    /// is exactly the half that was missing when the shape resources first
+    /// became constructible.
+    #[test]
+    fn a_constructed_query_object_accepts_property_writes() {
+        gdobject::class_db::register_all_classes();
+
+        let v = run_val(
+            "var q = PhysicsShapeQueryParameters2D.new()\nq.margin = 0.5\nreturn q.margin\n",
+        );
+        assert_eq!(v, Variant::Float(0.5));
     }
 }

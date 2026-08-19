@@ -490,6 +490,22 @@ impl PhysicsWorld2D {
                     continue;
                 }
 
+                // Per-body collision exceptions (pat-s3rrv.100) — Godot's
+                // `add_collision_exception_with`, consulted by the broadphase
+                // when it forms a pair (`godot_body_2d.h`). Placed beside the
+                // jointed-pair skip because it answers the same question: this
+                // pair must not generate contacts, while both bodies keep
+                // colliding with everything else.
+                //
+                // ⚠️ Asked of BOTH sides via `excludes`. The exception is stored
+                // on whichever body the script called the method on, but the
+                // effect is mutual, and this loop visits each unordered pair
+                // once in id order — so testing only `a` would make the feature
+                // depend on which body happened to get the lower id.
+                if PhysicsBody2D::excludes(&self.bodies[&id_a], &self.bodies[&id_b]) {
+                    continue;
+                }
+
                 // Read shapes, positions, layers, and velocities.
                 //
                 // One-way collision is NOT hoisted here: it rides on each
@@ -553,6 +569,30 @@ impl PhysicsWorld2D {
                                     && (-approach_dir).dot(owner_b.one_way_direction) >= 0.0
                                 {
                                     continue; // Body A is not approaching from the correct side of this shape of B
+                                }
+                                // `one_way_collision_margin`: a one-way shape
+                                // blocks only while the contact is no deeper
+                                // than its margin. Past that the mover has
+                                // effectively passed through, and Godot drops
+                                // the contact rather than popping it back out
+                                // (`godot_space_2d.cpp:424`, against the
+                                // `valid_depth` set at `:949`).
+                                //
+                                // ⚠️ This is what makes a FAST body clip
+                                // through a thin one-way platform: it crosses
+                                // more than the margin in one step, so no
+                                // frame ever sees a shallow-enough contact.
+                                // Raising the margin is Godot's remedy and the
+                                // reason the property is authored per shape.
+                                if owner_a.one_way_collision
+                                    && result.depth > owner_a.one_way_margin
+                                {
+                                    continue;
+                                }
+                                if owner_b.one_way_collision
+                                    && result.depth > owner_b.one_way_margin
+                                {
+                                    continue;
                                 }
 
                                 let pair = if id_a.0 < id_b.0 {

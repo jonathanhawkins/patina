@@ -2422,6 +2422,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
               <button id="tileset-clear-collision" title="Remove this tile's collision polygon">Clear</button>
               <label style="font-size:10px;"><input id="tileset-one-way" type="checkbox"> one-way</label>
               <label style="font-size:10px;" title="Make this source's painted cells walkable (TileSet navigation layer 0)"><input id="tileset-navigation" type="checkbox"> nav</label>
+              <label style="font-size:10px;" title="Make this source's painted cells cast shadows (TileSet occlusion layer 0)"><input id="tileset-occlusion" type="checkbox"> occl</label>
             </div>
             <div style="display:flex;gap:3px;margin-bottom:3px;">
               <input id="tileset-cd-key" placeholder="custom data layer" style="width:88px;font-size:10px;">
@@ -7014,6 +7015,15 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var nav = document.getElementById('tileset-navigation');
     if (nav) nav.addEventListener('change', function() {
       postTileData({ navigation: !!nav.checked });
+    });
+    // Occlusion mirrors navigation exactly, including posting on CHANGE both
+    // ways rather than on a one-shot button: unchecking has to remove the
+    // source from the occlusion layer, or a tile marked once casts shadows
+    // forever. The route landed without a control (pat-s3rrv.65), so the
+    // saver and loader could round-trip occlusion no editor action produced.
+    var occl = document.getElementById('tileset-occlusion');
+    if (occl) occl.addEventListener('change', function() {
+      postTileData({ occlusion: !!occl.checked });
     });
     var cd = document.getElementById('tileset-cd-set');
     if (cd) cd.addEventListener('click', function() {

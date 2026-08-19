@@ -689,7 +689,15 @@ pub fn separate_bodies(a: &mut PhysicsBody2D, b: &mut PhysicsBody2D, result: &Co
         return; // Bodies are already separating
     }
 
-    let restitution = a.bounce.max(b.bounce);
+    // Godot combines restitution as `CLAMP(A.bounce + B.bounce, 0, 1)`
+    // (`godot_body_pair_2d.cpp:243`), NOT as a maximum.
+    //
+    // ⚠️ The difference is visible whenever BOTH bodies are bouncy: two
+    // surfaces at 0.5 add to a fully elastic 1.0 under Godot and stay at 0.5
+    // under a maximum, so a ball that should keep its speed loses half of it
+    // every hit. The two agree only when one side is 0, which is exactly the
+    // fixture most bounce tests use (pat-s3rrv.99).
+    let restitution = (a.bounce + b.bounce).clamp(0.0, 1.0);
     let impulse_magnitude = -(1.0 + restitution) * vel_along_normal / total_inv;
     let impulse = result.normal * impulse_magnitude;
 
@@ -718,7 +726,11 @@ pub fn separate_bodies(a: &mut PhysicsBody2D, b: &mut PhysicsBody2D, result: &Co
     // surface drags whatever rests on it. Using the rigid-body velocities alone
     // — as this did — meant `constant_linear_velocity` was stored on the body
     // and consulted by nothing, so a conveyor was inert.
-    let friction = (a.friction + b.friction) * 0.5;
+    // Godot: `abs(MIN(A.friction, B.friction))` (`godot_body_pair_2d.cpp:247`),
+    // NOT the mean. The minimum means one slippery surface is enough to make a
+    // contact slippery — ice under rubber slides — where a mean would average
+    // the two and grip.
+    let friction = a.friction.min(b.friction).abs();
     if friction > 0.0 {
         let surface_a = a.linear_velocity + a.constant_linear_velocity;
         let surface_b = b.linear_velocity + b.constant_linear_velocity;
@@ -1282,7 +1294,10 @@ mod tests {
 
     #[test]
     fn max_restitution_used() {
-        // When one body has bounce=0.8 and other has bounce=0.2, max(0.8,0.2)=0.8 is used
+        // ⚠️ This test previously pinned `max(0.8, 0.2) = 0.8` — the old
+        // non-Godot combine — and its expectation moved with the fix rather
+        // than the fix being bent to the test. Godot: `CLAMP(0.8 + 0.2, 0, 1)`
+        // = 1.0, a fully elastic bounce off the static body (pat-s3rrv.99).
         let mut a = PhysicsBody2D::new(
             BodyId(1),
             BodyType::Rigid,
@@ -1310,8 +1325,98 @@ mod tests {
         };
         separate_bodies(&mut a, &mut b, &result);
 
-        // With restitution=0.8 against static, velocity should reverse * 0.8
-        assert!(approx_eq(a.linear_velocity.x, -8.0));
+        // restitution = clamp(0.8 + 0.2) = 1.0 against a static body, so the
+        // velocity reverses in full.
+        assert!(
+            approx_eq(a.linear_velocity.x, -10.0),
+            "0.8 + 0.2 clamps to 1.0, so a 10 u/s impact reverses to -10; got {}",
+            a.linear_velocity.x
+        );
+    }
+
+    /// 🔑 Bounce combines as Godot's `CLAMP(a + b, 0, 1)`, not as a maximum.
+    ///
+    /// ⚠️ The fixture uses TWO bouncy bodies on purpose. The old maximum and
+    /// Godot's sum agree whenever one side is 0 — which is what a floor
+    /// normally is, and why this went unnoticed. They diverge as soon as both
+    /// surfaces bounce.
+    #[test]
+    fn bounce_combines_as_a_clamped_sum_not_a_maximum() {
+        let mut a = PhysicsBody2D::new(
+            BodyId(1),
+            BodyType::Rigid,
+            Vector2::ZERO,
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        a.bounce = 0.3;
+        a.linear_velocity = Vector2::new(10.0, 0.0);
+
+        let mut b = PhysicsBody2D::new(
+            BodyId(2),
+            BodyType::Static,
+            Vector2::new(1.5, 0.0),
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        b.bounce = 0.4;
+
+        let result = CollisionResult {
+            colliding: true,
+            normal: Vector2::new(1.0, 0.0),
+            depth: 0.5,
+            point: Vector2::new(0.75, 0.0),
+        };
+        separate_bodies(&mut a, &mut b, &result);
+
+        // 0.3 + 0.4 = 0.7. A maximum would give 0.4 and a mean 0.35, so this
+        // number distinguishes all three.
+        assert!(
+            approx_eq(a.linear_velocity.x, -7.0),
+            "restitution must be clamp(0.3 + 0.4) = 0.7, giving -7.0; got {} \
+             (-4.0 means a maximum, -3.5 a mean)",
+            a.linear_velocity.x
+        );
+    }
+
+    /// 🔑 The sum CLAMPS at 1 rather than growing past fully elastic.
+    #[test]
+    fn combined_bounce_never_exceeds_one() {
+        let mut a = PhysicsBody2D::new(
+            BodyId(1),
+            BodyType::Rigid,
+            Vector2::ZERO,
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        a.bounce = 0.9;
+        a.linear_velocity = Vector2::new(10.0, 0.0);
+
+        let mut b = PhysicsBody2D::new(
+            BodyId(2),
+            BodyType::Static,
+            Vector2::new(1.5, 0.0),
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        b.bounce = 0.9;
+
+        let result = CollisionResult {
+            colliding: true,
+            normal: Vector2::new(1.0, 0.0),
+            depth: 0.5,
+            point: Vector2::new(0.75, 0.0),
+        };
+        separate_bodies(&mut a, &mut b, &result);
+
+        // 0.9 + 0.9 = 1.8, clamped to 1.0. Without the clamp the body would
+        // leave FASTER than it arrived — energy from nowhere, every bounce.
+        assert!(
+            approx_eq(a.linear_velocity.x, -10.0),
+            "1.8 must clamp to 1.0 for a -10.0 rebound; got {} — a magnitude \
+             above 10 means the clamp is missing and the sim gains energy",
+            a.linear_velocity.x
+        );
     }
 
     #[test]

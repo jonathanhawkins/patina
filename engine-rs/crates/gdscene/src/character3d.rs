@@ -182,6 +182,22 @@ pub fn process_character_movement(tree: &mut SceneTree, physics: &PhysicsServer3
         let floor_normal = character.get_floor_normal();
         let platform_velocity = character.get_platform_velocity();
 
+        // Godot's `get_real_velocity()` — the motion the last move ACTUALLY
+        // achieved (pat-s3rrv.103). The 2D solver has published this since
+        // pat-s3rrv.97; the 3D one never did, so `get_real_velocity()` on a
+        // CharacterBody3D read a property that was not there.
+        //
+        // ⚠️ Derived from the position DELTA, not from `new_velocity` just
+        // above. The two look interchangeable and are not: `new_velocity` is
+        // the post-slide velocity the body carries into the NEXT tick, which
+        // stays non-zero along a wall the body did not actually move along this
+        // tick — exactly the case this method exists to detect.
+        let real_velocity = if dt > 0.0 {
+            (end - start) / dt
+        } else {
+            Vector3::ZERO
+        };
+
         // De-parent through the parent chain before storing — `position` is a
         // LOCAL property, and writing a world coordinate into it re-applies the
         // parent offset every tick (pat-0q2kx.31).
@@ -193,6 +209,7 @@ pub fn process_character_movement(tree: &mut SceneTree, physics: &PhysicsServer3
             node.set_property("is_on_ceiling", Variant::Bool(on_ceiling));
             node.set_property("floor_normal", Variant::Vector3(floor_normal));
             node.set_property("platform_velocity", Variant::Vector3(platform_velocity));
+            node.set_property("_real_velocity", Variant::Vector3(real_velocity));
         }
     }
 }

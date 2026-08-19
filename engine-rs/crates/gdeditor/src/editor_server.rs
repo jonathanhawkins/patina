@@ -11014,7 +11014,7 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("GET", "/api/tileset/source", "[\"node_id\"]", "null", "{\"type\":\"object\"}"),
     ("POST", "/api/tileset/source", "[]", "{\"node_id\":\"number\",\"source_id\":\"number\",\"texture\":\"string\",\"region_size\":\"array\",\"margins\":\"array\",\"separation\":\"array\",\"tile_size\":\"array\"}", "{\"type\":\"object\"}"),
     ("GET", "/api/tileset/tile", "[\"node_id\",\"source_id\"]", "null", "{\"type\":\"object\"}"),
-    ("POST", "/api/tileset/tile/data", "[]", "{\"node_id\":\"number\",\"source_id\":\"number\",\"atlas\":\"array\",\"collision_rect\":\"array\",\"full_cell_collision\":\"boolean\",\"one_way\":\"boolean\",\"custom_data\":\"object\",\"navigation\":\"boolean\",\"navigation_polygon\":\"array\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/tileset/tile/data", "[]", "{\"node_id\":\"number\",\"source_id\":\"number\",\"atlas\":\"array\",\"collision_rect\":\"array\",\"full_cell_collision\":\"boolean\",\"one_way\":\"boolean\",\"custom_data\":\"object\",\"navigation\":\"boolean\",\"navigation_polygon\":\"array\",\"occlusion\":\"boolean\",\"occluder_polygon\":\"array\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/undo", "[]", "null", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\"}}"),
     ("POST", "/api/redo", "[]", "null", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\"}}"),
     ("GET", "/api/history", "[]", "null", "{\"type\":\"object\",\"properties\":{\"current\":\"number\",\"entries\":\"array\"}}"),
@@ -18152,6 +18152,71 @@ fn api_tileset_tile_data(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
     }
     if touched_navigation {
         if let Err(e) = tileset_push_source_id(&mut s, nid, tilemap::TILE_NAV_SOURCES, source_id) {
+            send_error(stream, 500, &e);
+            return;
+        }
+    }
+
+    // -- occlusion ----------------------------------------------------------
+    //
+    // The occlusion twin of the navigation block above, and deliberately the
+    // same shape: `tilemap.rs` documents `__tile_occluder_polygon__` as
+    // TOP-LEFT relative like the navigation polygon (NOT tile-centred like the
+    // physics points), one polygon per LAYER, and an empty polygon meaning
+    // "the whole tile occludes" — Godot's default for an occlusion-enabled
+    // tile.
+    //
+    // ⚠️ The saver and the loader have both handled occlusion since this bead's
+    // first pass; only this route was missing, so a scene could carry tile
+    // occlusion that no editor action could author (pat-s3rrv.65).
+    let mut touched_occlusion = false;
+    if let Some(points) = p.get("occluder_polygon").and_then(|v| v.as_array()) {
+        let polygon: Vec<Vector2> = points
+            .iter()
+            .filter_map(|pt| {
+                let a = pt.as_array()?;
+                Some(Vector2::new(
+                    a.first()?.as_f64()? as f32,
+                    a.get(1)?.as_f64()? as f32,
+                ))
+            })
+            .collect();
+        if !polygon.is_empty() && polygon.len() < 3 {
+            send_error(stream, 400, "occluder_polygon needs at least 3 points");
+            return;
+        }
+        if let Err(e) = tileset_set_property(
+            &mut s,
+            nid,
+            tilemap::TILE_OCCLUDER_POLYGON.to_string(),
+            Variant::PackedVector2Array(polygon),
+        ) {
+            send_error(stream, 500, &e);
+            return;
+        }
+        touched_occlusion = true;
+    }
+    match p.get("occlusion").and_then(|v| v.as_bool()) {
+        // ⚠️ The step that makes it real, exactly as for navigation:
+        // `tile_occluder_polygons` returns nothing at all while the source list
+        // is empty, so a polygon stored without this is saved, reloaded, and
+        // casts no shadow.
+        Some(true) => touched_occlusion = true,
+        Some(false) => {
+            if let Err(e) =
+                tileset_remove_source_id(&mut s, nid, tilemap::TILE_OCCLUDER_SOURCES, source_id)
+            {
+                send_error(stream, 500, &e);
+                return;
+            }
+            touched_occlusion = false;
+        }
+        None => {}
+    }
+    if touched_occlusion {
+        if let Err(e) =
+            tileset_push_source_id(&mut s, nid, tilemap::TILE_OCCLUDER_SOURCES, source_id)
+        {
             send_error(stream, 500, &e);
             return;
         }

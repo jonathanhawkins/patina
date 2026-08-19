@@ -165,14 +165,26 @@ impl Projection {
     /// - `z_near`, `z_far`: clipping plane distances
     ///
     /// Matches Godot's `Projection::create_orthogonal`.
-    pub fn create_orthogonal(size: f32, aspect: f32, z_near: f32, z_far: f32) -> Self {
+    /// Godot `Projection.create_orthogonal_aspect(size, aspect, z_near, z_far,
+    /// flip_fov)` — the size/aspect form.
+    ///
+    /// ⚠️ This was called `create_orthogonal` until pat-s3rrv.59, which is
+    /// Godot's name for the SIX-argument off-centre form below. Both names
+    /// existed here with their meanings swapped, so anyone reading Godot's docs
+    /// and calling `create_orthogonal` on this type got the other projection —
+    /// and because `gdcore::math3d::Projection` spells them Godot's way, moving
+    /// a call between the two identical-looking types silently changed which
+    /// matrix it built.
+    pub fn create_orthogonal_aspect(size: f32, aspect: f32, z_near: f32, z_far: f32) -> Self {
         let half_h = size * 0.5;
         let half_w = half_h * aspect;
-        Self::create_orthogonal_off_center(-half_w, half_w, -half_h, half_h, z_near, z_far)
+        Self::create_orthogonal(-half_w, half_w, -half_h, half_h, z_near, z_far)
     }
 
     /// Creates an orthographic projection from explicit bounds.
-    pub fn create_orthogonal_off_center(
+    /// Godot `Projection.create_orthogonal(left, right, bottom, top, z_near,
+    /// z_far)` — the off-centre form, and the one Godot gives this name to.
+    pub fn create_orthogonal(
         left: f32,
         right: f32,
         bottom: f32,
@@ -731,7 +743,7 @@ pub fn get_camera_projection(
         }
         ProjectionType::Orthogonal => {
             let size = get_size(tree, node_id) as f32;
-            Projection::create_orthogonal(size, aspect, near, far)
+            Projection::create_orthogonal_aspect(size, aspect, near, far)
         }
         ProjectionType::Frustum => {
             let fov = node3d::get_fov(tree, node_id) as f32;
@@ -952,6 +964,45 @@ fn multiply_projection_transform(proj: &Projection, t: &Transform3D) -> Projecti
 mod tests {
     use super::*;
     use crate::node::Node;
+
+    /// 🔑 The two orthogonal constructors are Godot's, spelled Godot's way.
+    ///
+    /// ⚠️ Until pat-s3rrv.59 these names were SWAPPED relative to Godot: the
+    /// size/aspect form was called `create_orthogonal` (Godot's name for the
+    /// six-argument off-centre form) and the off-centre form was called
+    /// `create_orthogonal_off_center` (a name Godot does not use). Because
+    /// `gdcore::math3d::Projection` is a field-for-field identical type that
+    /// spells them correctly, a call moved between the two silently built a
+    /// different matrix. This asserts the aspect form is exactly the off-centre
+    /// form over the derived half-extents, the relationship Godot documents.
+    #[test]
+    fn orthogonal_aspect_is_the_off_centre_form_over_half_extents() {
+        let (size, aspect, near, far) = (10.0f32, 2.0f32, 0.1f32, 100.0f32);
+        let half_h = size * 0.5;
+        let half_w = half_h * aspect;
+
+        let by_aspect = Projection::create_orthogonal_aspect(size, aspect, near, far);
+        let by_extents = Projection::create_orthogonal(-half_w, half_w, -half_h, half_h, near, far);
+        assert_eq!(
+            by_aspect, by_extents,
+            "create_orthogonal_aspect(size, aspect, ..) must equal \
+             create_orthogonal(-w, w, -h, h, ..) — Godot's own relationship",
+        );
+
+        // ⚠️ A non-square aspect is what makes this test able to fail. At
+        // aspect 1.0 the half-width equals the half-height, so an
+        // implementation that dropped `aspect` entirely would still match.
+        assert!(
+            (by_aspect.m[0][0] - 1.0 / half_w).abs() < 1e-6,
+            "the x scale must come from the ASPECT-derived half-width, got {}",
+            by_aspect.m[0][0],
+        );
+        assert!(
+            (by_aspect.m[1][1] - 1.0 / half_h).abs() < 1e-6,
+            "…and the y scale from the half-height, got {}",
+            by_aspect.m[1][1],
+        );
+    }
 
     const EPSILON: f32 = 1e-4;
 
@@ -1195,7 +1246,7 @@ mod tests {
 
     #[test]
     fn orthographic_projection_center_maps_to_origin() {
-        let proj = Projection::create_orthogonal(10.0, 1.0, 0.1, 100.0);
+        let proj = Projection::create_orthogonal_aspect(10.0, 1.0, 0.1, 100.0);
         let clip = proj.xform4(0.0, 0.0, -50.0, 1.0);
         let ndc_x = clip[0] / clip[3];
         let ndc_y = clip[1] / clip[3];
@@ -1205,7 +1256,7 @@ mod tests {
 
     #[test]
     fn orthographic_size_determines_visible_extent() {
-        let proj = Projection::create_orthogonal(10.0, 1.0, 0.1, 100.0);
+        let proj = Projection::create_orthogonal_aspect(10.0, 1.0, 0.1, 100.0);
         // A point at y=5 (half the size) should map to NDC y=1.0.
         let clip = proj.xform4(0.0, 5.0, -50.0, 1.0);
         let ndc_y = clip[1] / clip[3];

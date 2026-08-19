@@ -33,7 +33,8 @@ mod wasm {
 
     use super::FetchId;
     use crate::fetch_state::{
-        apply_read, fetch_state, is_chunked, read_action, FetchProgress, FetchState, ReadAction,
+        apply_read, drain_chunks, fetch_state, is_chunked, read_action, FetchProgress, FetchState,
+        ReadAction,
     };
 
     /// One in-flight fetch. Mirrors the object `GodotFetch.create` builds
@@ -290,22 +291,7 @@ mod wasm {
     /// ⚠️ A partially consumed chunk is pushed back at the FRONT, so a small
     /// buffer drains the stream in order rather than dropping the remainder.
     pub fn read_chunk(id: FetchId, out: &mut [u8]) -> usize {
-        with_fetch(id, |f| {
-            let mut written = 0usize;
-            while written < out.len() {
-                let Some(mut chunk) = f.chunks.pop_front() else {
-                    break;
-                };
-                let take = chunk.len().min(out.len() - written);
-                out[written..written + take].copy_from_slice(&chunk[..take]);
-                written += take;
-                if take < chunk.len() {
-                    f.chunks.push_front(chunk.split_off(take));
-                }
-            }
-            written
-        })
-        .unwrap_or(0)
+        with_fetch(id, |f| drain_chunks(&mut f.chunks, out)).unwrap_or(0)
     }
 
     /// `godot_js_fetch_http_status_get`. `0` until the response arrives.

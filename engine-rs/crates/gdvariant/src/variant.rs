@@ -50,6 +50,19 @@ pub enum CallableRef {
         /// `Arc` so cloning a Callable stays cheap; the map is never mutated
         /// after construction, which is what "by value" means here.
         captures: Arc<HashMap<String, Variant>>,
+        /// Default-value EXPRESSIONS for the parameters, positionally aligned
+        /// with `params` — `None` where a parameter has no default
+        /// (pat-s3rrv.67).
+        ///
+        /// Stored opaquely for the same reason `body` is: gdvariant cannot see
+        /// the parser's `Expr` type. The interpreter downcasts it back to
+        /// `Vec<Option<Expr>>`.
+        ///
+        /// ⚠️ EXPRESSIONS, not evaluated values. Godot evaluates a default when
+        /// the call omits the argument, not when the function is defined, so a
+        /// default that reads a captured local must see it at CALL time. Storing
+        /// pre-evaluated Variants here would be a different language.
+        param_defaults: Arc<dyn std::any::Any + Send + Sync>,
     },
     /// A callable with extra arguments bound (appended after call-site args).
     Bound {

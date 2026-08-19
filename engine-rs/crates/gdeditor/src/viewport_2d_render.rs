@@ -297,6 +297,13 @@ pub struct ParticleQuad {
 /// emitter has no usable texture.
 const PARTICLE_QUAD_SIZE: f32 = 4.0;
 
+/// Safety bound on parallax repeat copies per axis (pat-s3rrv.86).
+///
+/// Godot bounds the equivalent tiling through culling; this renderer emits the
+/// copies eagerly, so a stride far smaller than the viewport would ask for an
+/// unbounded number of them.
+const MAX_PARALLAX_REPEATS_PER_AXIS: i64 = 64;
+
 /// One drawable item in the 2D viewport's render list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Render2DItem {
@@ -1768,7 +1775,106 @@ pub const RUNTIME_CLEAR_COLOR: Color = Color::new(0.3, 0.3, 0.3, 1.0);
 /// before rasterizing with a mutable [`TextureCache`] — the editor's Play loop
 /// borrows both the running tree and the texture cache from the same state.
 pub fn build_runtime_render_list(tree: &SceneTree) -> Vec<Render2DItem> {
-    collect_canvas_items(tree)
+    let mut items = collect_canvas_items(tree);
+    apply_parallax_mirroring(tree, &mut items);
+    items
+}
+
+/// Godot `ParallaxLayer.motion_mirroring` — the layer's content repeats every
+/// `mirroring` pixels on each non-zero axis, which is how an infinitely
+/// scrolling background is built (pat-s3rrv.86).
+///
+/// ⚠️ The wrap arithmetic was already right: `gdserver2d`'s `mirror_axis` wraps
+/// the layer's scroll offset, so a mirrored background scrolled correctly — and
+/// then simply ran out, because the layer was drawn ONCE. This is the missing
+/// half: the same items re-emitted at multiples of the stride.
+///
+/// ⚠️ A stride of `0` on an axis means "do not repeat that axis", NOT "repeat
+/// every 0 pixels". Godot clamps the property to `>= 0`
+/// (`parallax_layer.cpp:81`) and treats either axis being non-zero as enabling
+/// repeat (`renderer_canvas_cull.cpp:533`); dividing by a zero stride is the
+/// obvious way to hang the frame.
+pub fn apply_parallax_mirroring(tree: &SceneTree, items: &mut Vec<Render2DItem>) {
+    let viewport = tree.root_window().visible_size();
+    for layer_id in tree.all_nodes_in_tree_order() {
+        let Some(layer) = tree.get_node(layer_id) else {
+            continue;
+        };
+        if layer.class_name() != "ParallaxLayer" {
+            continue;
+        }
+        let mirroring = match layer.get_property("motion_mirroring") {
+            Variant::Vector2(v) => v,
+            _ => continue,
+        };
+        let (stride_x, stride_y) = (mirroring.x.max(0.0), mirroring.y.max(0.0));
+        if stride_x <= 0.0 && stride_y <= 0.0 {
+            continue;
+        }
+
+        let owned: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item_belongs_to_layer(tree, item.node_id, layer_id))
+            .map(|(i, _)| i)
+            .collect();
+        if owned.is_empty() {
+            continue;
+        }
+
+        // Enough copies to cover the viewport either side of the original.
+        //
+        // ⚠️ Capped. Godot bounds this through culling; here a stride far
+        // smaller than the viewport (a mis-authored 0.01) would otherwise ask
+        // for hundreds of thousands of copies and hang the frame rather than
+        // draw a wrong picture. The cap is generous enough that any stride
+        // large enough to be visible as a repeat is unaffected.
+        let axis_copies = |stride: f32, extent: f32| -> i32 {
+            if stride <= 0.0 {
+                return 0;
+            }
+            let needed = (extent / stride).ceil() as i64 + 1;
+            needed.clamp(0, MAX_PARALLAX_REPEATS_PER_AXIS) as i32
+        };
+        let (nx, ny) = (
+            axis_copies(stride_x, viewport.x),
+            axis_copies(stride_y, viewport.y),
+        );
+
+        let mut copies: Vec<Render2DItem> = Vec::new();
+        for ix in -nx..=nx {
+            for iy in -ny..=ny {
+                if ix == 0 && iy == 0 {
+                    continue;
+                }
+                let dx = ix as f32 * stride_x;
+                let dy = iy as f32 * stride_y;
+                for &i in &owned {
+                    let mut copy = items[i].clone();
+                    copy.global_transform.origin = Vector2::new(
+                        copy.global_transform.origin.x + dx,
+                        copy.global_transform.origin.y + dy,
+                    );
+                    copies.push(copy);
+                }
+            }
+        }
+        items.extend(copies);
+    }
+}
+
+/// Whether a render item was produced by `layer` or one of its descendants.
+fn item_belongs_to_layer(tree: &SceneTree, item_node: u64, layer: NodeId) -> bool {
+    let mut cur = Some(NodeId::from_object_id(gdcore::id::ObjectId::from_raw(
+        item_node,
+    )));
+    while let Some(id) = cur {
+        if id == layer {
+            return true;
+        }
+        cur = tree.get_node(id).and_then(|n| n.parent());
+    }
+    false
 }
 
 /// Lays out and draws the running scene's `Control` subtree into render items the

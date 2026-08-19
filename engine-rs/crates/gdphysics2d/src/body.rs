@@ -32,6 +32,10 @@ pub const DEFAULT_SLEEP_THRESHOLD_LINEAR: f32 = 2.0;
 /// radians (`servers/physics_2d/physics_server_2d.cpp:912`).
 pub const DEFAULT_SLEEP_THRESHOLD_ANGULAR: f32 = 8.0 * std::f32::consts::PI / 180.0;
 
+/// Godot's `CollisionShape2D.one_way_collision_margin` default, in pixels
+/// (`collision_shape_2d.h`). See [`ShapeOwner2D::one_way_margin`].
+pub const DEFAULT_ONE_WAY_MARGIN: f32 = 1.0;
+
 /// One collision shape owned by a [`PhysicsBody2D`], with its transform and its
 /// **own** one-way collision settings (pat-s3rrv.25).
 ///
@@ -60,6 +64,22 @@ pub struct ShapeOwner2D {
     /// Outward normal of the blocking face. Godot's default is the shape's
     /// local "up", i.e. `(0, -1)`.
     pub one_way_direction: Vector2,
+    /// Deepest penetration at which this one-way shape still BLOCKS
+    /// (`CollisionShape2D.one_way_collision_margin`, Godot default `1.0` px).
+    ///
+    /// Godot rejects a one-way contact once it is deeper than
+    /// `MAX(one_way_collision_margin, physics_margin)`
+    /// (`godot_space_2d.cpp:949` sets `valid_depth`, `:424` discards the
+    /// contact past it). A body already further inside than the margin has
+    /// effectively passed through, so continuing to block it would pop it back
+    /// out of a platform it is halfway through.
+    ///
+    /// ⚠️ Consequence, and the reason the property exists: a FAST body can
+    /// cross more than the margin in a single step and so lands inside the
+    /// platform and falls out of it. Raising the margin is Godot's fix, which
+    /// is exactly what the `one_way_collision_margin` property is for.
+    /// Ignored unless [`one_way_collision`](Self::one_way_collision) is set.
+    pub one_way_margin: f32,
 }
 
 impl ShapeOwner2D {
@@ -70,6 +90,7 @@ impl ShapeOwner2D {
             transform,
             one_way_collision: false,
             one_way_direction: Vector2::new(0.0, -1.0),
+            one_way_margin: DEFAULT_ONE_WAY_MARGIN,
         }
     }
 
@@ -165,6 +186,8 @@ pub struct PhysicsBody2D {
     ///
     /// Primary shape only; see [`one_way_collision`](Self::one_way_collision).
     pub one_way_direction: Vector2,
+    /// Primary shape's [`ShapeOwner2D::one_way_margin`]; extras carry their own.
+    pub one_way_margin: f32,
     /// Multiplies the world gravity applied to this body (Godot `gravity_scale`).
     ///
     /// Defaults to `1.0`. A value of `0.0` makes the body ignore gravity; `2.0`
@@ -222,6 +245,24 @@ pub struct PhysicsBody2D {
     /// Constant surface angular velocity this body imparts to contacts (Godot
     /// `StaticBody2D.constant_angular_velocity` — turntables), radians/second.
     pub constant_angular_velocity: f32,
+    /// Bodies this one passes THROUGH while still colliding with everything
+    /// else — Godot's `PhysicsBody2D.add_collision_exception_with`
+    /// (pat-s3rrv.100). A bullet ignoring its shooter, a rider ignoring its
+    /// vehicle.
+    ///
+    /// ⚠️ Godot's exception is **one-way in storage but two-way in effect**:
+    /// `godot_body_2d.h` keeps a per-body set, and the broadphase skips a pair
+    /// when EITHER side lists the other. Storing it on one body and testing
+    /// only that body would make `a.add_collision_exception_with(b)` work or
+    /// not depending on which of the two the pair loop happened to visit first.
+    /// [`PhysicsBody2D::excludes`] is therefore always asked of both sides —
+    /// see [`crate::world::PhysicsWorld2D`].
+    ///
+    /// A `Vec` rather than a `HashSet` on purpose: the set is tiny (a handful
+    /// per body at most), and `get_collision_exceptions()` hands the list back
+    /// to a script, where a nondeterministic iteration order would make the
+    /// result — and any test asserting it — differ run to run.
+    pub collision_exceptions: Vec<BodyId>,
 }
 
 impl PhysicsBody2D {
@@ -250,6 +291,7 @@ impl PhysicsBody2D {
             collision_mask: 1,
             one_way_collision: false,
             one_way_direction: Vector2::new(0.0, -1.0),
+            one_way_margin: DEFAULT_ONE_WAY_MARGIN,
             gravity_scale: 1.0,
             linear_damp: 0.0,
             angular_damp: 0.0,
@@ -266,7 +308,44 @@ impl PhysicsBody2D {
             can_sleep: true,
             constant_linear_velocity: Vector2::ZERO,
             constant_angular_velocity: 0.0,
+            collision_exceptions: Vec::new(),
         }
+    }
+
+    /// Godot's `add_collision_exception_with`. Idempotent: adding the same body
+    /// twice leaves one entry, so a script calling it every frame in
+    /// `_physics_process` — which is how these are usually written — does not
+    /// grow the list without bound.
+    pub fn add_collision_exception(&mut self, other: BodyId) {
+        if !self.collision_exceptions.contains(&other) {
+            self.collision_exceptions.push(other);
+        }
+    }
+
+    /// Godot's `remove_collision_exception_with`. Removing one that was never
+    /// added is a no-op rather than an error, matching Godot.
+    pub fn remove_collision_exception(&mut self, other: BodyId) {
+        self.collision_exceptions.retain(|&b| b != other);
+    }
+
+    /// Whether this body lists `other`. This is the ONE-WAY question; callers
+    /// deciding whether a pair collides must use [`Self::excludes`] instead.
+    pub fn lists_collision_exception(&self, other: BodyId) -> bool {
+        self.collision_exceptions.contains(&other)
+    }
+
+    /// 🔑 **The question every collision site must ask.** True when `a` and `b`
+    /// must not interact because EITHER lists the other.
+    ///
+    /// ⚠️ Symmetric on purpose. Godot stores the exception on the body the
+    /// script called the method on, but its broadphase skips the pair
+    /// regardless of direction, so `bullet.add_collision_exception_with(gun)`
+    /// works exactly like the reverse. Testing only one side makes the feature
+    /// depend on pair-iteration order — it would appear to work in a test whose
+    /// bodies happen to be visited in the lucky order and fail in a scene where
+    /// they are not, which is the worst possible way for this to break.
+    pub fn excludes(a: &PhysicsBody2D, b: &PhysicsBody2D) -> bool {
+        a.lists_collision_exception(b.id) || b.lists_collision_exception(a.id)
     }
 
     /// Velocity of this body's surface at `world_point` — the constant surface
@@ -338,6 +417,7 @@ impl PhysicsBody2D {
             transform: body_tf * self.shape_transform,
             one_way_collision: self.one_way_collision,
             one_way_direction: self.one_way_direction,
+            one_way_margin: self.one_way_margin,
         });
         for extra in &self.extra_shapes {
             out.push(ShapeOwner2D {

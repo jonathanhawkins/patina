@@ -207,3 +207,77 @@ fn a_final_chunk_completes_the_stream() {
     assert!(p.done);
     assert_eq!(read_action(p), ReadAction::ReleaseReader);
 }
+
+// ------------------------------------------------------------ read_chunk
+
+use gdplatform::fetch_state::drain_chunks;
+use std::collections::VecDeque;
+
+fn queue(chunks: &[&[u8]]) -> VecDeque<Vec<u8>> {
+    chunks.iter().map(|c| c.to_vec()).collect()
+}
+
+#[test]
+fn draining_an_empty_queue_writes_nothing() {
+    let mut q: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut out = [0u8; 8];
+    assert_eq!(drain_chunks(&mut q, &mut out), 0);
+}
+
+#[test]
+fn a_buffer_larger_than_the_queue_takes_everything_in_order() {
+    let mut q = queue(&[&b"abc"[..], &b"de"[..], &b"f"[..]]);
+    let mut out = [0u8; 16];
+
+    assert_eq!(drain_chunks(&mut q, &mut out), 6);
+    assert_eq!(&out[..6], b"abcdef");
+    assert!(q.is_empty(), "the queue is fully drained");
+}
+
+/// 🔑 A chunk that does not fit is split, and the REMAINDER stays at the front.
+///
+/// ⚠️ This is the assertion that matters. Dropping the tail silently truncates
+/// the body; pushing it at the back reorders it. Both are invisible whenever a
+/// response happens to fit the buffer, which is most hand tests — so the failure
+/// only shows up on large payloads.
+#[test]
+fn a_partially_consumed_chunk_resumes_where_it_stopped() {
+    let mut q = queue(&[&b"HelloWorld"[..], &b"!!"[..]]);
+    let mut out = [0u8; 4];
+
+    assert_eq!(drain_chunks(&mut q, &mut out), 4);
+    assert_eq!(&out, b"Hell");
+
+    assert_eq!(drain_chunks(&mut q, &mut out), 4);
+    assert_eq!(&out, b"oWor", "the split resumes, it does not restart");
+
+    assert_eq!(drain_chunks(&mut q, &mut out), 4);
+    assert_eq!(&out, b"ld!!", "and it flows into the next chunk");
+
+    assert_eq!(drain_chunks(&mut q, &mut out), 0, "nothing left");
+}
+
+/// A chunk that exactly fills the buffer leaves no empty remainder behind.
+#[test]
+fn an_exactly_filling_chunk_leaves_the_queue_clean() {
+    let mut q = queue(&[&b"abcd"[..]]);
+    let mut out = [0u8; 4];
+
+    assert_eq!(drain_chunks(&mut q, &mut out), 4);
+    assert_eq!(&out, b"abcd");
+    assert!(
+        q.is_empty(),
+        "an exact fit must not push back a zero-length remainder, got {q:?}"
+    );
+}
+
+/// A zero-length output buffer consumes nothing — it must not eat a chunk.
+#[test]
+fn a_zero_length_buffer_consumes_nothing() {
+    let mut q = queue(&[&b"abc"[..]]);
+    let mut out: [u8; 0] = [];
+
+    assert_eq!(drain_chunks(&mut q, &mut out), 0);
+    assert_eq!(q.len(), 1, "the chunk must survive a zero-length read");
+    assert_eq!(q[0], b"abc".to_vec());
+}

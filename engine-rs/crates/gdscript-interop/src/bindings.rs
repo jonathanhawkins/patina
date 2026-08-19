@@ -1053,6 +1053,29 @@ pub trait SceneAccess {
         false
     }
 
+    /// `PhysicsBody2D.add_collision_exception_with(body)` — the two bodies pass
+    /// through each other while both keep colliding with everything else
+    /// (pat-s3rrv.100). Returns whether both nodes resolved to physics bodies.
+    ///
+    /// ⚠️ Defaulted like every other method here, so the mock `SceneAccess`
+    /// implementations in the test suites keep compiling. A default that
+    /// silently answers "did nothing" is right for a mock and wrong for the
+    /// real accessor — `SceneTreeAccessor` overrides all three.
+    fn physics2d_node_add_collision_exception(&mut self, _node: u64, _other: u64) -> bool {
+        false
+    }
+
+    /// `PhysicsBody2D.remove_collision_exception_with(body)`.
+    fn physics2d_node_remove_collision_exception(&mut self, _node: u64, _other: u64) -> bool {
+        false
+    }
+
+    /// `PhysicsBody2D.get_collision_exceptions()` — the excepted bodies as node
+    /// object ids, in the order they were added.
+    fn physics2d_node_get_collision_exceptions(&self, _node: u64) -> Vec<u64> {
+        Vec::new()
+    }
+
     /// `RayCast2D.force_raycast_update()` — re-runs the node's cast **now**,
     /// republishing its `_hit_*` properties, and reports whether it hit
     /// (pat-0q2kx.32).

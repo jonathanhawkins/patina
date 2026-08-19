@@ -161,6 +161,27 @@ impl Viewport3D {
                     None
                 };
                 let is_gridmap = r.class_name == "GridMap";
+                // Skinning and blend shapes (pat-s3rrv.23). A MeshInstance3D
+                // bound to a Skeleton3D, or carrying blend-shape weights, draws
+                // a DEFORMED mesh rather than the file's rest pose. Resolved
+                // here while `tree` is still in scope, for the same reason
+                // `material` is.
+                //
+                // ⚠️ Only actually-deformed meshes take this path — the helper
+                // returns None otherwise, so every ordinary mesh keeps its
+                // existing path-based kind and its downstream caching.
+                //
+                // ⚠️ The marker can carry a `?prop=value` query appended by
+                // `mesh_marker_with_props`; the loader wants the bare path, and
+                // a primitive marker simply fails to load and yields None.
+                let deformed = r
+                    .mesh_path
+                    .as_deref()
+                    .and_then(|marker| marker.split('?').next())
+                    .and_then(mesh_from_file)
+                    .and_then(|base| {
+                        gdscene::render_server_3d::deformed_mesh_for_node(tree, nid, &base)
+                    });
                 // Sprite3D, AnimatedSprite3D and Label3D draw as a TEXTURED
                 // QUAD, not as a mesh resource
                 // (`SpriteBase3D::_draw`). It descends from Node3D, so it was
@@ -174,7 +195,9 @@ impl Viewport3D {
                     &mut material_textures,
                 ) {
                     Some((mesh, sprite_material)) => (Some(mesh), Some(sprite_material)),
-                    None => (csg_mesh, material),
+                    // Deformed geometry outranks CSG here only because a node
+                    // is never both: CSG roots carry no skin or blend shapes.
+                    None => (deformed.or(csg_mesh), material),
                 };
                 let base = render_item_for(r, material, geometry, generated_mesh);
                 if is_gridmap {

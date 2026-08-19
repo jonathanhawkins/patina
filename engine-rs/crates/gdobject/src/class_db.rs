@@ -2912,6 +2912,10 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("Shape3D")
             .parent("Resource")
+            // ⚠️ `inst=false` in Godot, same as Shape2D. Marked when the
+            // interpreter learned to construct Resource classes (pat-s3rrv.98);
+            // without it `Shape3D.new()` would start succeeding.
+            .abstract_class()
             .property(
                 PropertyInfo::new("margin", Variant::Float(0.04))
                     .with_accessors("get_margin", "set_margin"),
@@ -7283,6 +7287,49 @@ pub fn register_3d_classes() {
     //
     // RID-typed members follow World2D's convention directly above: Patina's
     // Variant has no RID, so they register as Nil rather than inventing a type.
+    // The 2D physics SERVER singletons (pat-s3rrv.98). Both are `Object`
+    // subclasses with `inst=false` in extension_api.json, so both are marked
+    // abstract: `ClassDB::instantiate` must refuse them, and Patina's
+    // `instantiate` already returns `None` for an abstract class. That matters
+    // beyond parity — `create_node_catalog` gates its picker on `instantiate`,
+    // so registering these WITHOUT the abstract marker would offer "new
+    // PhysicsServer2D" in the editor's Create dialog for a class that cannot
+    // exist.
+    //
+    // ⚠️ Registration is the ONLY thing that was missing here. `PhysicsServer2D`
+    // is already in `BUILTIN_SINGLETONS` and already has an interpreter dispatch
+    // arm, so scripts could call it while `ClassDB.class_exists("PhysicsServer2D")`
+    // answered false and `get_class_list()` omitted it — introspection
+    // disagreeing with what actually works.
+    //
+    // Only the methods whose Godot arity is unambiguous are listed: the
+    // zero-argument `*_create` factories, and the two-argument setters. The
+    // dispatch arm serves more than this; an entry with a WRONG arity would be
+    // worse than an absent one, since `get_method_list` is read as an oracle.
+    if !class_exists("PhysicsServer2D") {
+        register_class(
+            ClassRegistration::new("PhysicsServer2D")
+                .parent("Object")
+                .abstract_class()
+                .method(MethodInfo::new("area_create", 0))
+                .method(MethodInfo::new("body_create", 0))
+                .method(MethodInfo::new("capsule_shape_create", 0))
+                .method(MethodInfo::new("circle_shape_create", 0))
+                .method(MethodInfo::new("rectangle_shape_create", 0))
+                .method(MethodInfo::new("body_add_shape", 2))
+                .method(MethodInfo::new("body_set_space", 2))
+                .method(MethodInfo::new("shape_set_data", 2)),
+        );
+    }
+    if !class_exists("PhysicsServer2DManager") {
+        register_class(
+            ClassRegistration::new("PhysicsServer2DManager")
+                .parent("Object")
+                .abstract_class()
+                .method(MethodInfo::new("register_server", 2))
+                .method(MethodInfo::new("set_default_server", 2)),
+        );
+    }
     if !class_exists("PhysicsDirectSpaceState2D") {
         register_class(
             ClassRegistration::new("PhysicsDirectSpaceState2D")
@@ -17902,6 +17949,158 @@ pub fn register_2d_classes() {
 
     // Viewport / SubViewport / ViewportTexture (pat-zx775).
     register_viewport_classes();
+
+    // -- Shape2D resource hierarchy + PhysicsMaterial (pat-s3rrv.98) --
+    //
+    // The shapes a `CollisionShape2D.shape` references. The 3D twins have been
+    // registered since pat-nzgdu.96 (`Shape3D` at the top of this file); the 2D
+    // family was missing entirely, so `CircleShape2D.new()` failed from script
+    // and every ClassDB-driven surface — the Create dialog, the inspector's
+    // property schema, `packed_scene`'s default seeding — had nothing to work
+    // with, even though the .tscn parser and the physics solver both handle all
+    // eight by name.
+    //
+    // ⚠️ Defaults are transcribed from `doc/classes/*.xml`, which is the oracle.
+    // Two of them differ from the values `gdscene::physics_server`'s parser
+    // assumes: CapsuleShape2D `height` is **30.0** in Godot (the parser uses
+    // 20.0) and SeparationRayShape2D `length` is **20.0** (the parser has no
+    // entry). Registering Godot's values is deliberate — see the bead note; the
+    // parser's 20.0 is a separate bug, and changing it here would alter the
+    // collision behaviour of every .tscn that omits an explicit height.
+    if !class_exists("Shape2D") {
+        register_class(
+            ClassRegistration::new("Shape2D")
+                .parent("Resource")
+                // ⚠️ `inst=false` in extension_api.json — `Shape2D.new()` is an
+                // error in Godot, only the eight concrete shapes construct.
+                // Load-bearing now that the interpreter constructs any
+                // non-abstract Resource class (pat-s3rrv.98).
+                .abstract_class()
+                .property(PropertyInfo::new("custom_solver_bias", Variant::Float(0.0))),
+        );
+    }
+    if !class_exists("CircleShape2D") {
+        register_class(
+            ClassRegistration::new("CircleShape2D")
+                .parent("Shape2D")
+                .property(
+                    PropertyInfo::new("radius", Variant::Float(10.0))
+                        .with_accessors("get_radius", "set_radius"),
+                ),
+        );
+    }
+    if !class_exists("RectangleShape2D") {
+        register_class(
+            ClassRegistration::new("RectangleShape2D")
+                .parent("Shape2D")
+                .property(
+                    PropertyInfo::new("size", Variant::Vector2(Vector2::new(20.0, 20.0)))
+                        .with_accessors("get_size", "set_size"),
+                ),
+        );
+    }
+    if !class_exists("CapsuleShape2D") {
+        register_class(
+            ClassRegistration::new("CapsuleShape2D")
+                .parent("Shape2D")
+                .property(
+                    PropertyInfo::new("radius", Variant::Float(10.0))
+                        .with_accessors("get_radius", "set_radius"),
+                )
+                // ⚠️ 30.0, not 20.0 — `doc/classes/CapsuleShape2D.xml`.
+                .property(
+                    PropertyInfo::new("height", Variant::Float(30.0))
+                        .with_accessors("get_height", "set_height"),
+                ),
+        );
+    }
+    if !class_exists("SegmentShape2D") {
+        register_class(
+            ClassRegistration::new("SegmentShape2D")
+                .parent("Shape2D")
+                .property(
+                    PropertyInfo::new("a", Variant::Vector2(Vector2::ZERO))
+                        .with_accessors("get_a", "set_a"),
+                )
+                .property(
+                    PropertyInfo::new("b", Variant::Vector2(Vector2::new(0.0, 10.0)))
+                        .with_accessors("get_b", "set_b"),
+                ),
+        );
+    }
+    if !class_exists("WorldBoundaryShape2D") {
+        register_class(
+            ClassRegistration::new("WorldBoundaryShape2D")
+                .parent("Shape2D")
+                // Godot's default normal points UP the screen (-Y), so the
+                // boundary reads as a floor rather than a ceiling.
+                .property(
+                    PropertyInfo::new("normal", Variant::Vector2(Vector2::new(0.0, -1.0)))
+                        .with_accessors("get_normal", "set_normal"),
+                )
+                .property(
+                    PropertyInfo::new("distance", Variant::Float(0.0))
+                        .with_accessors("get_distance", "set_distance"),
+                ),
+        );
+    }
+    if !class_exists("SeparationRayShape2D") {
+        register_class(
+            ClassRegistration::new("SeparationRayShape2D")
+                .parent("Shape2D")
+                // ⚠️ 20.0 — `doc/classes/SeparationRayShape2D.xml`.
+                .property(
+                    PropertyInfo::new("length", Variant::Float(20.0))
+                        .with_accessors("get_length", "set_length"),
+                )
+                .property(
+                    PropertyInfo::new("slide_on_slope", Variant::Bool(false))
+                        .with_accessors("get_slide_on_slope", "set_slide_on_slope"),
+                ),
+        );
+    }
+    if !class_exists("ConvexPolygonShape2D") {
+        register_class(
+            ClassRegistration::new("ConvexPolygonShape2D")
+                .parent("Shape2D")
+                .property(
+                    PropertyInfo::new("points", Variant::PackedVector2Array(Vec::new()))
+                        .with_accessors("get_points", "set_points"),
+                ),
+        );
+    }
+    if !class_exists("ConcavePolygonShape2D") {
+        register_class(
+            ClassRegistration::new("ConcavePolygonShape2D")
+                .parent("Shape2D")
+                .property(
+                    PropertyInfo::new("segments", Variant::PackedVector2Array(Vec::new()))
+                        .with_accessors("get_segments", "set_segments"),
+                ),
+        );
+    }
+    if !class_exists("PhysicsMaterial") {
+        register_class(
+            ClassRegistration::new("PhysicsMaterial")
+                .parent("Resource")
+                .property(
+                    PropertyInfo::new("friction", Variant::Float(1.0))
+                        .with_accessors("get_friction", "set_friction"),
+                )
+                .property(
+                    PropertyInfo::new("rough", Variant::Bool(false))
+                        .with_accessors("is_rough", "set_rough"),
+                )
+                .property(
+                    PropertyInfo::new("bounce", Variant::Float(0.0))
+                        .with_accessors("get_bounce", "set_bounce"),
+                )
+                .property(
+                    PropertyInfo::new("absorbent", Variant::Bool(false))
+                        .with_accessors("is_absorbent", "set_absorbent"),
+                ),
+        );
+    }
 }
 
 /// Registers Viewport, SubViewport, Texture2D, and ViewportTexture in ClassDB.
@@ -17947,6 +18146,58 @@ pub fn register_root_window_chain() {
     // `doc/classes/ClassDB.xml`. 27 are const and `class_call_static` is
     // vararg, which is the first registration in the engine to carry either
     // flag.
+    // -- Engine / DisplayServer / EngineDebugger as ClassDB classes (pat-s3rrv.124) --
+    //
+    // All three dispatch from GDScript and all three are entries in
+    // `extension_api.json`'s `.singletons`, but none was a ClassDB class — so
+    // `ClassDB.class_exists("Engine")` was false, `get_property_list("Engine")`
+    // was empty, and the editor's ClassDB-driven surfaces (`create_dialog`) were
+    // blind to them.
+    //
+    // ⚠️ Being a singleton and being a class are SEPARATE registrations in
+    // Godot, and Patina had them on opposite sides: the interpreter's
+    // `BUILTIN_SINGLETONS` knew these names while ClassDB did not.
+    //
+    // ⚠️ Properties only for now. Godot gives Engine 41 methods and
+    // DisplayServer 269; transcribing those is its own pass, and an empty
+    // method list is honest — `get_method_list` returning nothing reads as "not
+    // transcribed yet", whereas a wrong parent or a missing class silently
+    // breaks `class_exists`.
+    if !class_exists("Engine") {
+        register_class(
+            ClassRegistration::new("Engine")
+                .parent("Object")
+                // `doc/classes/Engine.xml` — the seven documented properties.
+                .property(PropertyInfo::new("max_fps", Variant::Int(0)))
+                .property(PropertyInfo::new(
+                    "max_physics_steps_per_frame",
+                    Variant::Int(8),
+                ))
+                .property(PropertyInfo::new("physics_jitter_fix", Variant::Float(0.5)))
+                .property(PropertyInfo::new(
+                    "physics_ticks_per_second",
+                    Variant::Int(60),
+                ))
+                // ⚠️ Both print flags default to TRUE — a `false` default here
+                // would read as "printing is off by default", the opposite of
+                // Godot.
+                .property(PropertyInfo::new(
+                    "print_error_messages",
+                    Variant::Bool(true),
+                ))
+                .property(PropertyInfo::new("print_to_stdout", Variant::Bool(true)))
+                .property(PropertyInfo::new("time_scale", Variant::Float(1.0))),
+        );
+    }
+    if !class_exists("DisplayServer") {
+        // No properties in `doc/classes/DisplayServer.xml` — it is a pure
+        // method surface.
+        register_class(ClassRegistration::new("DisplayServer").parent("Object"));
+    }
+    if !class_exists("EngineDebugger") {
+        // Likewise property-free.
+        register_class(ClassRegistration::new("EngineDebugger").parent("Object"));
+    }
     if !class_exists("ClassDB") {
         register_class(
             ClassRegistration::new("ClassDB")

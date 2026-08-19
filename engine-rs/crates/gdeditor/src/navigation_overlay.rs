@@ -93,34 +93,6 @@ fn region_enabled(node: &gdscene::node::Node) -> bool {
     }
 }
 
-/// A region's polygons as index lists into its vertex array.
-///
-/// ⚠️ A region is a **set** of indexed polygons, not one blob. Reading the flat
-/// vertex array as a single convex face cannot represent an L-shape or a
-/// multi-part region — it would draw a filled quad across the hole. Vertices
-/// with no `polygons` entry are one face over all of them, which is what a
-/// hand-authored single-face mesh looks like. Out-of-range indices are dropped
-/// rather than panicking: a malformed `.tscn` should cost that polygon, not the
-/// frame. Mirrors `main_loop.rs:585`.
-fn polygon_indices(node: &gdscene::node::Node, vert_count: usize) -> Vec<Vec<usize>> {
-    match node.get_property("__navmesh_polygons__") {
-        Variant::Array(entries) => entries
-            .iter()
-            .filter_map(|entry| match entry {
-                Variant::PackedInt32Array(ids) => Some(
-                    ids.iter()
-                        .filter_map(|&i| usize::try_from(i).ok())
-                        .filter(|&i| i < vert_count)
-                        .collect::<Vec<usize>>(),
-                ),
-                _ => None,
-            })
-            .collect(),
-        _ if vert_count >= 3 => vec![(0..vert_count).collect()],
-        _ => Vec::new(),
-    }
-}
-
 /// A region's baked navmesh polygons in **node-local** space.
 ///
 /// The single place `__navmesh_vertices__` and `__navmesh_polygons__` are turned
@@ -136,20 +108,13 @@ fn polygon_indices(node: &gdscene::node::Node, vert_count: usize) -> Vec<Vec<usi
 /// Polygons of fewer than three points are dropped, so every returned polygon is
 /// drawable.
 pub fn navigation_polygons_local(node: &gdscene::node::Node) -> Vec<Vec<Vector2>> {
-    let Variant::PackedVector2Array(verts) = node.get_property("__navmesh_vertices__") else {
-        return Vec::new();
-    };
-    polygon_indices(node, verts.len())
-        .into_iter()
-        .map(|indices| indices.iter().map(|&i| verts[i]).collect::<Vec<Vector2>>())
-        .filter(|points| points.len() >= 3)
-        .collect()
+    gdscene::navigation::navmesh_polygons_local(node)
 }
 
 /// The `navigation/polygons` and `navigation/edges` performance monitors:
 /// how much baked navmesh geometry the scene actually holds.
 ///
-/// ⚠️ Shares [`polygon_indices`] with [`navigation_overlay_2d`] rather than
+/// ⚠️ Shares [`navigation_polygons_local`] with [`navigation_overlay_2d`] rather than
 /// re-reading `__navmesh_polygons__` here. That parser carries two behaviours a
 /// second reader would drift from: a region with vertices but no `polygons`
 /// entry is ONE face over all of them, and out-of-range indices are dropped
@@ -177,15 +142,10 @@ pub fn navigation_geometry_counts(tree: &SceneTree) -> (u64, u64) {
         if !node.class_name().starts_with("NavigationRegion") {
             continue;
         }
-        let Variant::PackedVector2Array(verts) = node.get_property("__navmesh_vertices__") else {
-            continue;
-        };
-        for indices in polygon_indices(node, verts.len()) {
-            if indices.len() < 3 {
-                continue;
-            }
+        for points in navigation_polygons_local(node) {
             polygons += 1;
-            edges += indices.len() as u64;
+            // A closed polygon of N points contributes N edges, not N - 1.
+            edges += points.len() as u64;
         }
     }
     (polygons, edges)
@@ -216,9 +176,6 @@ pub fn navigation_overlay_2d(tree: &SceneTree, overlays: &OverlaySettings) -> Na
         if node.class_name() != "NavigationRegion2D" {
             continue;
         }
-        let Variant::PackedVector2Array(verts) = node.get_property("__navmesh_vertices__") else {
-            continue;
-        };
         let enabled = region_enabled(node);
         let (face_color, edge_color) = if enabled {
             (FACE_COLOR, EDGE_COLOR)
@@ -229,11 +186,8 @@ pub fn navigation_overlay_2d(tree: &SceneTree, overlays: &OverlaySettings) -> Na
         // offset into world space the same way the navigation map does it.
         let origin = gdscene::node2d::get_position(tree, id);
 
-        for indices in polygon_indices(node, verts.len()) {
-            let points: Vec<Vector2> = indices.iter().map(|&i| verts[i] + origin).collect();
-            if points.len() < 3 {
-                continue;
-            }
+        for local in navigation_polygons_local(node) {
+            let points: Vec<Vector2> = local.iter().map(|&v| v + origin).collect();
             // Edges close the loop: the last point joins back to the first, so a
             // face of N points contributes N segments, not N - 1.
             for w in 0..points.len() {
@@ -296,7 +250,7 @@ mod tests {
     ///
     /// Asserted against `navigation_overlay_2d`'s own output rather than against
     /// the literals 2 and 8. That is the whole reason the counter shares
-    /// `polygon_indices` instead of re-reading `__navmesh_polygons__`: if a
+    /// the shared reader instead of re-reading `__navmesh_polygons__`: if a
     /// second reader ever drifts — on the no-`polygons`-entry fallback, or on
     /// dropping out-of-range indices — this fails, whereas hardcoded numbers
     /// would keep passing while the two views of the scene diverged.
