@@ -273,6 +273,20 @@ impl Node {
 
     /// Sets a property, returning the previous value (or `Nil`).
     pub fn set_property(&mut self, key: &str, value: Variant) -> Variant {
+        // `metadata/foo` IS the node's metadata — that is how a .tscn spells it
+        // and how the loader delivers it (pat-s3rrv.151). Meta lives in a
+        // separate map from properties, so without this mirror a scene could
+        // declare `metadata/foo = 42` and `get_meta("foo")` would still answer
+        // Nil. Done here rather than at the eleven call sites that apply
+        // template properties, so every construction path — plain instance,
+        // inherited scene, editor edit — is covered by one rule.
+        //
+        // The property row is kept as well: callers read it back through
+        // `get_property("metadata/foo")`, and the saver skips any meta key that
+        // already has a row, so this cannot double-write on the way out.
+        if let Some(name) = key.strip_prefix("metadata/") {
+            self.meta.insert(name.to_owned(), value.clone());
+        }
         self.properties
             .insert(key.to_owned(), value)
             .unwrap_or(Variant::Nil)

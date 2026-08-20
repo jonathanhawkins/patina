@@ -138,6 +138,20 @@ fn format_variant(v: &Variant) -> String {
         Variant::Int(i) => i.to_string(),
         Variant::Float(f) => format_float(*f),
         Variant::String(s) => {
+            // Resource references survive a load as PREFIXED STRINGS: the
+            // loader rewrites `SubResource("id")` to `"SubResource:id"` and
+            // `ExtResource("id")` to `"ExtResource:id"` (loader.rs:437-444).
+            // Re-quoting them here would write `= "SubResource:id"`, which our
+            // own loader still reads back — so a Patina round trip looks clean
+            // — while Godot reads it as an ordinary String and the reference is
+            // gone. `scene_saver::write_node_section` already re-encodes both
+            // for .tscn; .tres had no such step (pat-s3rrv.154).
+            if let Some(id) = s.strip_prefix("SubResource:") {
+                return format!("SubResource(\"{id}\")");
+            }
+            if let Some(id) = s.strip_prefix("ExtResource:") {
+                return format!("ExtResource(\"{id}\")");
+            }
             let escaped = s
                 .replace('\\', "\\\\")
                 .replace('"', "\\\"")
@@ -174,6 +188,74 @@ fn format_variant(v: &Variant) -> String {
             p.m.iter()
                 .flatten()
                 .map(|c| format_f32(*c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        // ⚠️ Every packed array except Vector4 fell through to the catch-all
+        // below, whose `Display` writes `[1, 2, 3]` — an ARRAY literal, not the
+        // `PackedInt32Array(1, 2, 3)` constructor Godot's .tres grammar needs.
+        // Nothing noticed because `TresSaver` had no caller that wrote arrays
+        // until pat-s3rrv.154 made it the VisualShader write path, and Patina's
+        // own parser is lenient enough to read the literal back. Syntax mirrors
+        // `scene_saver::format_variant_value`, which has always been correct.
+        Variant::PackedByteArray(v) => format!(
+            "PackedByteArray({})",
+            v.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Variant::PackedInt32Array(v) => format!(
+            "PackedInt32Array({})",
+            v.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Variant::PackedInt64Array(v) => format!(
+            "PackedInt64Array({})",
+            v.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Variant::PackedFloat32Array(v) => format!(
+            "PackedFloat32Array({})",
+            v.iter()
+                .map(|x| format_f32(*x))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Variant::PackedFloat64Array(v) => format!(
+            "PackedFloat64Array({})",
+            v.iter()
+                .map(|x| format_float(*x))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Variant::PackedStringArray(v) => format!(
+            "PackedStringArray({})",
+            v.iter()
+                .map(|x| format!("\"{}\"", x.replace('\\', "\\\\").replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Variant::PackedVector2Array(v) => format!(
+            "PackedVector2Array({})",
+            v.iter()
+                .map(|p| format!("{}, {}", format_f32(p.x), format_f32(p.y)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Variant::PackedVector3Array(v) => format!(
+            "PackedVector3Array({})",
+            v.iter()
+                .map(|p| format!(
+                    "{}, {}, {}",
+                    format_f32(p.x),
+                    format_f32(p.y),
+                    format_f32(p.z)
+                ))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),

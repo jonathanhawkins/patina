@@ -11050,6 +11050,27 @@ pub fn register_2d_classes() {
             .property(
                 PropertyInfo::new("resource_path", Variant::String(String::new()))
                     .with_accessors("get_path", "set_path"),
+            )
+            // Resource's virtuals (pat-s3rrv.157). All four were absent from
+            // ClassDB tree-wide, so reflection could not see them and a script
+            // overriding `_setup_local_to_scene` had nothing to be dispatched
+            // against.
+            //
+            // 🔑 Qualifiers transcribed from doc/classes/Resource.xml, not
+            // derived: `_set_path_cache` is `virtual const` even though it
+            // reads as a setter, and `_get_rid` is const too. Guessing from the
+            // names gets both wrong.
+            .method(MethodInfo::new("_setup_local_to_scene", 0).virtual_method())
+            .method(
+                MethodInfo::new("_get_rid", 0)
+                    .virtual_method()
+                    .const_method(),
+            )
+            .method(MethodInfo::new("_reset_state", 0).virtual_method())
+            .method(
+                MethodInfo::new("_set_path_cache", 1)
+                    .virtual_method()
+                    .const_method(),
             ),
     );
 
@@ -14173,6 +14194,39 @@ pub fn register_2d_classes() {
                 .signal(SignalInfo::new("button_down"))
                 .signal(SignalInfo::new("button_up"))
                 .signal(SignalInfo::new("toggled").arg("toggled_on")),
+        );
+    }
+    if !class_exists("ButtonGroup") {
+        // The resource that turns a set of toggle buttons into radio buttons
+        // (pat-s3rrv.161). Registered beside `BaseButton`, whose `button_group`
+        // property points at it.
+        //
+        // ⚠️ `get_pressed_button()`, `get_buttons()` and the `pressed(button)`
+        // signal are documented on this class and are deliberately NOT declared
+        // here. All three need the ButtonGroup itself as the receiver, and a
+        // Patina resource is a VALUE with no object identity — `button_group`
+        // reads as `Nil`, so no script can obtain the group to call or connect
+        // to it. Declaring them would advertise a surface the engine cannot
+        // dispatch. The behaviour they describe is implemented and tested at
+        // `gdscene::control::{button_group_buttons, button_group_pressed_button}`;
+        // only the resource-as-receiver is missing, and that is an engine-wide
+        // gap rather than a button one.
+        register_class(
+            ClassRegistration::new("ButtonGroup")
+                .parent("Resource")
+                .property(
+                    PropertyInfo::new("allow_unpress", Variant::Bool(false))
+                        // ⚠️ `is_allow_unpress`, not `get_…` — a bool member
+                        // whose getter does not follow the `get_` convention.
+                        .with_accessors("is_allow_unpress", "set_allow_unpress"),
+                )
+                // ⚠️ Overrides Resource's own default of `false`. Godot makes a
+                // ButtonGroup local to its scene so two instances of the same
+                // scene do not share one radio group.
+                .property(
+                    PropertyInfo::new("resource_local_to_scene", Variant::Bool(true))
+                        .with_accessors("is_local_to_scene", "set_local_to_scene"),
+                ),
         );
     }
     if !class_exists("Range") {
@@ -17459,7 +17513,27 @@ pub fn register_2d_classes() {
                 .property(PropertyInfo::new("focus_mode", Variant::Int(1)))
                 .property(PropertyInfo::new("mouse_target", Variant::Bool(false)))
                 .property(PropertyInfo::new("stretch", Variant::Bool(false)))
-                .property(PropertyInfo::new("stretch_shrink", Variant::Int(1))),
+                .property(PropertyInfo::new("stretch_shrink", Variant::Int(1)))
+                // `_propagate_input_event(event) -> bool` decides whether an
+                // event reaches the hosted sub-scene. Declared only because it
+                // is now DISPATCHED — `SceneTree::gui_input_stage` asks the
+                // enclosing container before delivering `_gui_input`, and a
+                // script returning `false` swallows the event (pat-s3rrv.155).
+                //
+                // ⚠️ `virtual const` upstream: it is an override point a script
+                // supplies, and Godot marks it const because vetoing must not
+                // mutate the container. Registering a virtual the engine never
+                // calls would be a lie — this file's rule — so the dispatch
+                // landed first and this declaration second.
+                .method(
+                    MethodInfo::new("_propagate_input_event", 1)
+                        .virtual_method()
+                        .const_method()
+                        .with_arguments(vec![
+                            PropertyInfo::new("event", Variant::Nil).with_hint_string("InputEvent")
+                        ])
+                        .returns(Variant::Bool(false)),
+                ),
         );
     }
 

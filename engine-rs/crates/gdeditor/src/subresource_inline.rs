@@ -92,6 +92,65 @@ mod tests {
 
     /// Acceptance (pat-yb478): expanding an embedded resource property shows its
     /// editable sub-properties inline, and edits persist to the sub-resource.
+    /// 🔑 **This module does NOT understand the representation real scenes use.**
+    ///
+    /// An inline resource has two forms in this tree, and `editor_server.rs`
+    /// spells the difference out where it has to handle both:
+    ///
+    ///   (a) `Variant::Resource(ResourceRef)` — a resource loaded from a file
+    ///       and then edited in place. This is what the test below constructs.
+    ///   (b) `SubResource("id")` on the property, `__resref__<prop>` =
+    ///       `Class::id`, and the body flattened into `<prefix><key>`
+    ///       companions. That is what `.tscn` loading produces and what the
+    ///       inspector's "New <Type>" picker writes — *"the COMMON case: every
+    ///       resource the picker creates lands here, never in (a)"*.
+    ///
+    /// `expand_subresource` matches only `Variant::Resource`, so on the common
+    /// form it answers `None` — "not expandable" — for exactly the
+    /// sub-resources the inspector exists to edit. That is almost certainly why
+    /// this module has never had a caller.
+    ///
+    /// ⚠️ This test asserts the CURRENT limitation on purpose. It is a
+    /// signpost, not an endorsement: anyone about to build the inspector's
+    /// inline expander on `expand_subresource` (pat-s3rrv.152) will trip over
+    /// it here in seconds rather than after wiring a UI that reports every real
+    /// sub-resource as unexpandable. If you teach the module form (b), this
+    /// test should fail — change it deliberately, and say so.
+    ///
+    /// ⚠️ Note how the sibling test below builds its fixture: it constructs a
+    /// `ResourceRef` directly, i.e. form (a). A green suite proved nothing
+    /// about real scenes, which is how the gap survived.
+    #[test]
+    fn expand_subresource_does_not_understand_the_common_subresource_form() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let id = tree
+            .add_child(root, Node::new("Body", "StaticBody2D"))
+            .unwrap();
+        {
+            let node = tree.get_node_mut(id).unwrap();
+            // Exactly the shape `.tscn` loading and the "New <Type>" picker
+            // write: a marker string, the class/id sidecar, and the resource
+            // body flattened into `__shape__`-prefixed companions.
+            node.set_property("shape", Variant::String("SubResource(\"1\")".to_string()));
+            node.set_property(
+                "__resref__shape",
+                Variant::String("RectangleShape2D::1".to_string()),
+            );
+            node.set_property("__shape__size_x", Variant::Int(32));
+            node.set_property("__shape__size_y", Variant::Int(16));
+        }
+
+        assert!(
+            expand_subresource(&tree, id, "shape").is_none(),
+            "🔑 the node plainly carries an inline RectangleShape2D — marker, \
+             __resref__ sidecar and two flattened companions — and \
+             `expand_subresource` still reports it as not expandable, because \
+             it only matches `Variant::Resource`. Build the inspector expander \
+             on this and every real sub-resource reads as empty."
+        );
+    }
+
     #[test]
     fn inspector_subresource_inline_edit_persists() {
         let mut tree = SceneTree::new();

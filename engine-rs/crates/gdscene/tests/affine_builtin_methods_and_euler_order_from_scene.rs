@@ -31,11 +31,15 @@ const SCENE: &str = r#"[gd_scene format=3]
 [node name="Root" type="Node3D"]
 "#;
 
-/// The angles the scene script rotates by. Chosen so no two components are
-/// equal and none is near a gimbal singularity — an angle triple like
-/// `(0.5, 0.5, 0.5)` reads back the same under several orders and would make
-/// the whole point of this test invisible.
-const EULER: [f32; 3] = [0.3, -0.7, 1.1];
+/// The angles the scene script rotates by.
+///
+/// ⚠️ Chosen by SWEEPING candidates, not by taste. The obvious
+/// `(0.3, -0.7, 1.1)` is a near-coincidence point for this test: an XYZ basis
+/// read back in YXZ gives a Y angle only 0.023 from the input, so the
+/// "different orders disagree" assertion below reads as agreement even though
+/// the orders are working. These angles separate every component by at least
+/// 0.16, and none sits near a gimbal singularity (±pi/2).
+const EULER: [f32; 3] = [0.9, -1.1, 0.5];
 
 fn num(v: &Variant) -> f64 {
     match v {
@@ -120,7 +124,7 @@ var hit = null
 var missed = \"unset\"
 var ran = false
 func _ready():
-    var e = Vector3(0.3, -0.7, 1.1)
+    var e = Vector3(0.9, -1.1, 0.5)
     var b = Basis.from_euler(e, EULER_ORDER_XYZ)
     self.transform = Transform3D(b, Vector3(0, 0, 0))
     var back = b.get_euler(EULER_ORDER_XYZ)
@@ -171,13 +175,21 @@ func _ready():
     // discarded these two calls returned identical values, so (a) alone passed
     // for the broken version too — `from_euler` and `get_euler` were simply
     // each other's inverse in YXZ and the order was decorative.
-    let default_y = num(&script_var(ml.tree(), scene_root, "default_y")) as f32;
+    let d = [
+        (num(&script_var(ml.tree(), scene_root, "default_x")) as f32 - EULER[0]).abs(),
+        (num(&script_var(ml.tree(), scene_root, "default_y")) as f32 - EULER[1]).abs(),
+        (num(&script_var(ml.tree(), scene_root, "default_z")) as f32 - EULER[2]).abs(),
+    ];
+    // ⚠️ The WHOLE vector, not one component. Two Euler orders can agree on a
+    // single axis by coincidence while describing quite different rotations —
+    // which is exactly what an earlier fixture here did, turning a working
+    // implementation into a red test.
+    let worst = d[0].max(d[1]).max(d[2]);
     assert!(
-        (default_y - EULER[1]).abs() > 0.05,
+        worst > 0.05,
         "get_euler(EULER_ORDER_YXZ) must differ from get_euler(EULER_ORDER_XYZ) \
-         on the same basis — got {default_y} against {}, which means the order \
-         argument is being ignored",
-        EULER[1],
+         on the same basis — every component was within {worst} of the XYZ \
+         reading {EULER:?}, which means the order argument is being ignored",
     );
 
     // (c) The node's REAL transform carries the rotation — the scene wiring,
@@ -233,7 +245,7 @@ fn every_euler_order_round_trips_and_they_disagree() {
     let mut seen: Vec<gdcore::math::Vector3> = Vec::new();
     for (name, _order) in orders {
         let got = run(&[
-            "var e = Vector3(0.3, -0.7, 1.1)",
+            "var e = Vector3(0.9, -1.1, 0.5)",
             format!("var b = Basis.from_euler(e, {name})").as_str(),
             format!("return [b.get_euler({name}), b.get_euler(EULER_ORDER_YXZ)]").as_str(),
         ]);
@@ -272,7 +284,9 @@ fn every_euler_order_round_trips_and_they_disagree() {
 fn an_out_of_range_euler_order_is_an_error() {
     let mut interp = Interpreter::new();
     let class_def = interp
-        .run_class("extends Node\nfunc check():\n    return Basis.IDENTITY.get_euler(99)\n")
+        .run_class(
+            "extends Node\nfunc check():\n    var b = Basis.IDENTITY\n    return b.get_euler(99)\n",
+        )
         .expect("script parses");
     let mut inst = interp
         .instantiate_class(&class_def)
@@ -286,7 +300,10 @@ fn an_out_of_range_euler_order_is_an_error() {
 
     // The control: a valid order on the same call path succeeds, so the failure
     // above is the range check and not a broken dispatch arm.
-    let got = run(&["return [Basis.IDENTITY.get_euler(EULER_ORDER_ZYX)]"]);
+    let got = run(&[
+        "var b = Basis.IDENTITY",
+        "return [b.get_euler(EULER_ORDER_ZYX)]",
+    ]);
     let identity = vec3_of(&got[0], "identity");
     assert!(
         identity.x.abs() < 1e-6 && identity.y.abs() < 1e-6 && identity.z.abs() < 1e-6,
@@ -353,7 +370,9 @@ fn the_quaternion_methods_answer() {
     let got = run(&[
         "var a = Quaternion.from_euler(Vector3(0, 0, 0))",
         "var b = Quaternion.from_euler(Vector3(0, 1.5, 0))",
-        "return [a.slerpni(b, 0.5), a.slerp(b, 0.5), b.log(), b.log().exp(), b.is_finite(), \
+        "var lg = b.log()",
+        "var rt = lg.exp()",
+        "return [a.slerpni(b, 0.5), a.slerp(b, 0.5), lg, rt, b.is_finite(), \
          a.spherical_cubic_interpolate(b, a, b, 0.5)]",
     ]);
 
@@ -444,9 +463,11 @@ fn the_basis_methods_answer() {
         "var b = Basis(Vector3(1, 2, 3), Vector3(4, 5, 6), Vector3(7, 8, 9))",
         "var s = Basis.from_scale(Vector3(2, 3, 4))",
         "var l = Basis.looking_at(Vector3(0, 0, -1), Vector3(0, 1, 0))",
+        "var i = Basis.IDENTITY",
+        "var sl = s.scaled_local(Vector3(2, 2, 2))",
         "return [b.tdotx(Vector3(1, 0, 0)), b.tdoty(Vector3(1, 0, 0)), b.tdotz(Vector3(1, 0, 0)), \
          s.get_scale(), s.is_conformal(), b.is_finite(), l.is_conformal(), \
-         Basis.IDENTITY.is_conformal(), s.scaled_local(Vector3(2, 2, 2)).get_scale()]",
+         i.is_conformal(), sl.get_scale()]",
     ]);
 
     // 🔑 `tdotx(1,0,0)` takes the first ROW against (1,0,0), which is the x

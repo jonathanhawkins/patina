@@ -2358,6 +2358,7 @@ fn handle_connection(
         ("POST", "/api/node/unique_name") => api_set_unique_name(state, &req.body, &mut stream),
         ("POST", "/api/node/rename") => api_rename_node(state, &req.body, &mut stream),
         ("POST", "/api/node/batch_rename") => api_batch_rename(state, &req.body, &mut stream),
+        ("POST", "/api/node/metadata") => api_set_node_metadata(state, &req.body, &mut stream),
         ("POST", "/api/node/duplicate") => api_duplicate_node(state, &req.body, &mut stream),
         ("POST", "/api/node/create_dialog") => api_create_dialog(state, &req.body, &mut stream),
         ("POST", "/api/node/create_dialog/toggle_favorite") => {
@@ -2484,6 +2485,13 @@ fn handle_connection(
         ("GET", "/api/logs") => api_get_logs(state, &mut stream),
         ("GET", "/api/scene/info") => api_get_scene_info(state, &mut stream),
         ("GET", "/api/filesystem") => api_get_filesystem(state, &req.query, &mut stream),
+        ("GET", "/api/visual_shader") => api_visual_shader_get(state, &req.query, &mut stream),
+        ("POST", "/api/visual_shader/node") => {
+            api_visual_shader_add_node(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/visual_shader/connect") => {
+            api_visual_shader_connect(state, &req.body, &mut stream)
+        }
         ("POST", "/api/project/open") => api_open_project(state, &req.body, &mut stream),
         ("GET", "/api/preview/file") => api_get_file_preview(&req.query, &mut stream),
         ("GET", "/api/script") => api_get_script(&req.query, &mut stream),
@@ -3722,6 +3730,11 @@ fn node_properties_json(
         .filter(|(name, _)| {
             !emitted.contains(name.as_str())
                 && !name.starts_with("__resref__")
+                // `__resscript__<prop>` is the script path behind a SCRIPTED
+                // resource held in `<prop>` (pat-s3rrv.160) — internal, cached
+                // from the sub-resource so render code can reach it with only
+                // the tree.
+                && !name.starts_with("__resscript__")
                 && !name.starts_with("__viewport_")
                 // `__extres__<prop>` is the resolved path behind an
                 // `ExtResource("id")` property (pat-0q2kx.6) — internal, and the
@@ -6504,6 +6517,80 @@ fn api_batch_rename(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     state.scene_modified = true;
     state.add_log("info", format!("Batch-renamed {renamed} node(s)"));
     send_json(stream, &format!(r#"{{"ok":true,"renamed":{renamed}}}"#));
+}
+
+/// `POST /api/node/metadata` — Inspector dock "Add Metadata" (pat-s3rrv.151).
+///
+/// Body: `{"node_id":u64,"name":"foo","type":"int","value":42}`.
+///
+/// Written through `set_property("metadata/<name>")` rather than `set_meta`, so
+/// the value lands in BOTH stores at once: the property row is what `TscnSaver`
+/// serialises, and `Node::set_property` mirrors a `metadata/` key into the meta
+/// map so `get_meta("foo")` sees it from GDScript without a reload.
+fn api_set_node_metadata(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let raw_id = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+    let name = match parsed.get("name").and_then(|v| v.as_str()) {
+        Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+        // An empty name would write a `metadata/` row with no key, which Godot
+        // cannot express and `get_meta("")` could never read back.
+        _ => {
+            send_error(stream, 400, "missing name");
+            return;
+        }
+    };
+    let ty = parsed
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("String");
+    let raw_value = parsed.get("value");
+    // The dialog sends a JSON value already shaped by the chosen type; the type
+    // string decides the Variant so an int stays an int through the .tscn rather
+    // than being re-read as a float.
+    let value = match ty {
+        "int" => gdvariant::Variant::Int(raw_value.and_then(|v| v.as_i64()).unwrap_or(0)),
+        "float" => gdvariant::Variant::Float(raw_value.and_then(|v| v.as_f64()).unwrap_or(0.0)),
+        "bool" => gdvariant::Variant::Bool(raw_value.and_then(|v| v.as_bool()).unwrap_or(false)),
+        _ => gdvariant::Variant::String(
+            raw_value
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        ),
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, raw_id) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+    match state.scene_tree.get_node_mut(node_id) {
+        Some(node) => {
+            node.set_property(&format!("metadata/{name}"), value);
+        }
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    }
+    state.scene_modified = true;
+    state.add_log("info", format!("Added metadata/{name}"));
+    send_json(stream, &format!(r#"{{"ok":true,"name":"{name}"}}"#));
 }
 
 /// `POST /api/node/duplicate` — duplicates a node and its subtree as a sibling.
@@ -11213,6 +11300,358 @@ fn fs_project_root(state: &Arc<Mutex<EditorState>>) -> std::path::PathBuf {
 
 /// Resolve a `res://` path against the project root, rejecting traversal so a
 /// context-menu action can only touch files inside the project.
+/// `GET /api/visual_shader?path=res://x.tres` — the node graph behind a
+/// VisualShader resource (pat-s3rrv.154).
+///
+/// The runtime has read these resources for a while (`visual_shader_load.rs`),
+/// but the editor had no route to them at all, so a project could RUN a
+/// VisualShader that the user could not see. This serves the graph the loader
+/// already understands: nodes with their concrete Godot class, the flat
+/// connection quads, and the compiled shader source for a preview pane.
+///
+/// The node `type` reported here is the **sub-resource class name**
+/// (`VisualShaderNodeColorConstant`), not the 9-variant codegen enum. The enum
+/// collapses whole families together — every unrecognised class becomes `None`
+/// and is dropped — so reporting it would tell the editor far less than the
+/// file actually says, and a node the codegen cannot yet compile would vanish
+/// from the graph rather than showing up as an unsupported node.
+fn api_visual_shader_get(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let Some(res_path) = query_param(query, "path") else {
+        send_error(stream, 400, "missing path");
+        return;
+    };
+    let res_path = url_decode(res_path);
+    let root = {
+        let state = state.lock().unwrap();
+        match state.project_root.clone() {
+            Some(r) => r,
+            None => {
+                send_error(stream, 400, "no project open");
+                return;
+            }
+        }
+    };
+    let disk_path = match resolve_res_path(std::path::Path::new(&root), &res_path) {
+        Ok(p) => p,
+        Err(e) => {
+            send_error(stream, 400, e);
+            return;
+        }
+    };
+    let text = match std::fs::read_to_string(&disk_path) {
+        Ok(t) => t,
+        Err(e) => {
+            send_error(stream, 404, &format!("cannot read resource: {e}"));
+            return;
+        }
+    };
+    let resource = match gdresource::loader::TresLoader::new().parse_str(&text, &res_path) {
+        Ok(r) => r,
+        Err(e) => {
+            send_error(stream, 400, &format!("cannot parse resource: {e}"));
+            return;
+        }
+    };
+    if resource.class_name != "VisualShader" {
+        send_error(stream, 400, "not a VisualShader resource");
+        return;
+    }
+
+    // Node rows: `nodes/<func>/<id>/node` -> SubResource(...). The position is a
+    // sibling key, and Godot omits it at the origin, so a missing one is (0, 0)
+    // rather than a reason to skip the node.
+    let mut nodes: Vec<String> = Vec::new();
+    for (key, value) in resource.properties() {
+        let Some(rest) = key.strip_prefix("nodes/") else {
+            continue;
+        };
+        let Some(id_part) = rest.strip_suffix("/node") else {
+            continue;
+        };
+        let Some((func, id_str)) = id_part.rsplit_once('/') else {
+            continue;
+        };
+        let Ok(id) = id_str.parse::<u32>() else {
+            continue;
+        };
+        let class = visual_shader_sub_class(&resource, value).unwrap_or("VisualShaderNode");
+        let (px, py) = match resource.get_property(&format!("nodes/{func}/{id}/position")) {
+            Some(gdvariant::Variant::Vector2(v)) => (v.x, v.y),
+            _ => (0.0, 0.0),
+        };
+        nodes.push(format!(
+            r#"{{"id":{id},"func":"{}","type":"{}","position":[{},{}]}}"#,
+            json_escape(func),
+            json_escape(class),
+            px,
+            py
+        ));
+    }
+    nodes.sort();
+
+    let mut conns: Vec<String> = Vec::new();
+    for (key, value) in resource.properties() {
+        if !key.starts_with("nodes/") || !key.ends_with("/connections") {
+            continue;
+        }
+        let gdvariant::Variant::PackedInt32Array(quads) = value else {
+            continue;
+        };
+        // Flat quads: from_node, from_port, to_node, to_port — the same shape
+        // `visual_shader_load` reads, kept verbatim so a round trip cannot drift.
+        for q in quads.chunks_exact(4) {
+            conns.push(format!(
+                r#"{{"from":{},"from_port":{},"to":{},"to_port":{}}}"#,
+                q[0].max(0),
+                q[1].max(0),
+                q[2].max(0),
+                q[3].max(0)
+            ));
+        }
+    }
+
+    let code = gdscene::visual_shader_load::visual_shader_from_resource(&resource)
+        .map(|vs| vs.get_code())
+        .unwrap_or_default();
+
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"path":"{}","nodes":[{}],"connections":[{}],"code":"{}"}}"#,
+            json_escape(&res_path),
+            nodes.join(","),
+            conns.join(","),
+            json_escape(&code)
+        ),
+    );
+}
+
+/// Loads a VisualShader `.tres` for editing: the on-disk path plus an owned,
+/// mutable copy of the parsed resource.
+///
+/// Editing works on the RAW `Resource` rather than the compiled `VisualShader`,
+/// because the compiled form is lossy — its node enum has 9 variants and drops
+/// every class it does not recognise, so saving from it would silently delete
+/// the user's graph. Round-tripping the resource keeps classes, positions and
+/// unknown properties verbatim.
+fn visual_shader_open(
+    state: &Arc<Mutex<EditorState>>,
+    res_path: &str,
+) -> Result<(std::path::PathBuf, gdresource::resource::Resource), (u16, String)> {
+    let root = {
+        let state = state.lock().unwrap();
+        state
+            .project_root
+            .clone()
+            .ok_or((400u16, "no project open".to_string()))?
+    };
+    let disk_path = resolve_res_path(std::path::Path::new(&root), res_path)
+        .map_err(|e| (400u16, e.to_string()))?;
+    let text = std::fs::read_to_string(&disk_path)
+        .map_err(|e| (404u16, format!("cannot read resource: {e}")))?;
+    let parsed = gdresource::loader::TresLoader::new()
+        .parse_str(&text, res_path)
+        .map_err(|e| (400u16, format!("cannot parse resource: {e}")))?;
+    if parsed.class_name != "VisualShader" {
+        return Err((400, "not a VisualShader resource".to_string()));
+    }
+    Ok((disk_path, (*parsed).clone()))
+}
+
+/// Serialises an edited graph back over its own file.
+fn visual_shader_save(
+    disk_path: &std::path::Path,
+    resource: &gdresource::resource::Resource,
+) -> Result<(), (u16, String)> {
+    let text = gdresource::saver::TresSaver::new()
+        .save_to_string(resource)
+        .map_err(|e| (500u16, format!("cannot serialise resource: {e}")))?;
+    std::fs::write(disk_path, text).map_err(|e| (500u16, format!("cannot write resource: {e}")))
+}
+
+/// The graph function a node belongs to. Godot keys every node row by the
+/// shader function it lives in; `fragment` is where the editor adds by default.
+const VISUAL_SHADER_DEFAULT_FUNC: &str = "fragment";
+
+/// `POST /api/visual_shader/node` — adds a node to the graph (pat-s3rrv.154).
+///
+/// Body: `{"path":"res://x.tres","type":"VisualShaderNodeColorConstant","position":[x,y]}`.
+fn api_visual_shader_add_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let Some(res_path) = parsed.get("path").and_then(|v| v.as_str()) else {
+        send_error(stream, 400, "missing path");
+        return;
+    };
+    let Some(class) = parsed.get("type").and_then(|v| v.as_str()) else {
+        send_error(stream, 400, "missing type");
+        return;
+    };
+    let (px, py) = match parsed.get("position").and_then(|v| v.as_array()) {
+        Some(a) if a.len() == 2 => (
+            a[0].as_f64().unwrap_or(0.0) as f32,
+            a[1].as_f64().unwrap_or(0.0) as f32,
+        ),
+        _ => (0.0, 0.0),
+    };
+    let (disk_path, mut resource) = match visual_shader_open(state, res_path) {
+        Ok(v) => v,
+        Err((code, msg)) => {
+            send_error(stream, code, &msg);
+            return;
+        }
+    };
+
+    // ⚠️ Ids start at 2, never 0 or 1: Godot does not serialise the output node
+    // and treats it as an implicit id 0, so reusing 0 would collide with a node
+    // that is invisible in the file. `visual_shader_load` synthesises it on read.
+    let next_id = visual_shader_next_node_id(&resource);
+    let sub_id = format!("n{next_id}");
+    let sub = gdresource::resource::Resource::new(class);
+    resource.subresources.insert(sub_id.clone(), Arc::new(sub));
+    let func = VISUAL_SHADER_DEFAULT_FUNC;
+    resource.set_property(
+        format!("nodes/{func}/{next_id}/node"),
+        gdvariant::Variant::String(format!("SubResource:{sub_id}")),
+    );
+    resource.set_property(
+        format!("nodes/{func}/{next_id}/position"),
+        gdvariant::Variant::Vector2(gdcore::math::Vector2::new(px, py)),
+    );
+
+    if let Err((code, msg)) = visual_shader_save(&disk_path, &resource) {
+        send_error(stream, code, &msg);
+        return;
+    }
+    {
+        let mut state = state.lock().unwrap();
+        state.add_log("info", format!("Added {class} to {res_path}"));
+    }
+    send_json(
+        stream,
+        &format!(
+            r#"{{"ok":true,"id":{next_id},"type":"{}"}}"#,
+            json_escape(class)
+        ),
+    );
+}
+
+/// The lowest unused node id, never below 2.
+fn visual_shader_next_node_id(resource: &gdresource::resource::Resource) -> u32 {
+    let mut max = 1u32;
+    for (key, _) in resource.properties() {
+        let Some(rest) = key.strip_prefix("nodes/") else {
+            continue;
+        };
+        let Some(id_part) = rest.strip_suffix("/node") else {
+            continue;
+        };
+        let Some((_func, id_str)) = id_part.rsplit_once('/') else {
+            continue;
+        };
+        if let Ok(id) = id_str.parse::<u32>() {
+            max = max.max(id);
+        }
+    }
+    max + 1
+}
+
+/// `POST /api/visual_shader/connect` — joins two ports (pat-s3rrv.154).
+///
+/// Body: `{"path":"res://x.tres","from":2,"from_port":0,"to":0,"to_port":0}`.
+fn api_visual_shader_connect(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let Some(res_path) = parsed.get("path").and_then(|v| v.as_str()) else {
+        send_error(stream, 400, "missing path");
+        return;
+    };
+    let field = |name: &str| parsed.get(name).and_then(|v| v.as_i64()).unwrap_or(-1);
+    let (from, from_port, to, to_port) = (
+        field("from"),
+        field("from_port"),
+        field("to"),
+        field("to_port"),
+    );
+    // A negative id is not a node; accepting it would append a quad the loader
+    // clamps to 0, silently wiring something to the output node.
+    if from < 0 || from_port < 0 || to < 0 || to_port < 0 {
+        send_error(stream, 400, "missing or negative connection field");
+        return;
+    }
+    let (disk_path, mut resource) = match visual_shader_open(state, res_path) {
+        Ok(v) => v,
+        Err((code, msg)) => {
+            send_error(stream, code, &msg);
+            return;
+        }
+    };
+
+    // Append to whichever function already holds connections, so an existing
+    // graph keeps its single row rather than growing a second one.
+    let key = resource
+        .properties()
+        .find(|(k, _)| k.starts_with("nodes/") && k.ends_with("/connections"))
+        .map(|(k, _)| k.clone())
+        .unwrap_or_else(|| format!("nodes/{VISUAL_SHADER_DEFAULT_FUNC}/connections"));
+    let mut quads: Vec<i32> = match resource.get_property(&key) {
+        Some(gdvariant::Variant::PackedInt32Array(v)) => v.clone(),
+        _ => Vec::new(),
+    };
+    quads.extend_from_slice(&[from as i32, from_port as i32, to as i32, to_port as i32]);
+    resource.set_property(key, gdvariant::Variant::PackedInt32Array(quads));
+
+    if let Err((code, msg)) = visual_shader_save(&disk_path, &resource) {
+        send_error(stream, code, &msg);
+        return;
+    }
+    {
+        let mut state = state.lock().unwrap();
+        state.add_log(
+            "info",
+            format!("Connected {from}:{from_port} -> {to}:{to_port}"),
+        );
+    }
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// Resolves a `nodes/.../node` value to the class name of the sub-resource it
+/// points at.
+///
+/// ⚠️ The .tres parser rewrites `SubResource("X")` to the STRING
+/// `"SubResource:X"` rather than keeping the call text, which is the same trap
+/// documented on `visual_shader_load::sub_resource_id`. Both forms are accepted
+/// so a hand-built `Resource` behaves like a parsed one.
+fn visual_shader_sub_class<'a>(
+    resource: &'a gdresource::resource::Resource,
+    value: &gdvariant::Variant,
+) -> Option<&'a str> {
+    let gdvariant::Variant::String(s) = value else {
+        return None;
+    };
+    let id = match s.strip_prefix("SubResource:") {
+        Some(rest) => rest.to_string(),
+        None => s
+            .strip_prefix("SubResource(\"")
+            .and_then(|r| r.strip_suffix("\")"))
+            .map(|r| r.to_string())?,
+    };
+    resource
+        .subresources
+        .get(&id)
+        .map(|sub| sub.class_name.as_str())
+}
+
 fn resolve_res_path(
     root: &std::path::Path,
     res_path: &str,

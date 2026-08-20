@@ -168,6 +168,46 @@ fn play_remote_tree_live_edit_e2e() {
         );
     }
 
+    // -- the INSPECTOR's read path sees the running value (pat-s3rrv.153) ------
+    //
+    // 🔑 The assertions above read both trees directly through `handle.state()`.
+    // That proves the mutation landed, but says nothing about the endpoint the
+    // Inspector actually calls. `GET /api/runtime/node` had ZERO callers in
+    // EDITOR_HTML, so during Play the panel read `/api/selected` — the EDIT tree
+    // — and showed the stored value for anything a script or a live edit had
+    // changed. You could write a live value and watch the panel redraw stale.
+    let live_read = json_of(&http_get(
+        port,
+        "/api/runtime/node?path=/root/Main/Sprite2D",
+    ));
+    let live_pos = live_read["properties"]
+        .as_array()
+        .expect("runtime node payload has a properties array")
+        .iter()
+        .find(|p| p["name"] == "position")
+        .map(|p| p["value"]["value"].clone())
+        .expect("the running node exposes `position`");
+    assert_eq!(
+        live_pos[0], 42.0,
+        "the runtime read must return the LIVE value: {live_read}"
+    );
+
+    // ⚠️ The pairing is what gives the assertion above its meaning. Alone it
+    // passes for an endpoint that happens to read either tree; only the edit
+    // endpoint still reporting 0 proves the two are genuinely distinct sources.
+    let edit_read = json_of(&http_get(port, &format!("/api/node/{sprite_raw}")));
+    let edit_pos = edit_read["properties"]
+        .as_array()
+        .expect("edit node payload has a properties array")
+        .iter()
+        .find(|p| p["name"] == "position")
+        .map(|p| p["value"]["value"].clone())
+        .expect("the edit node exposes `position`");
+    assert_eq!(
+        edit_pos[0], 0.0,
+        "the EDIT endpoint must still report the stored value: {edit_read}"
+    );
+
     // -- addressing by PATH also works ----------------------------------------
     //
     // ⚠️ This is the branch that matters for a node the game SPAWNED: it has no
@@ -222,6 +262,13 @@ fn play_remote_tree_live_edit_e2e() {
     assert!(
         html.contains("Scene (Remote)"),
         "the dock labels itself Remote so a live tree is distinguishable"
+    );
+    // pat-s3rrv.153: the read half. The endpoint existed and the UI never
+    // called it — this string is the whole difference between an Inspector that
+    // shows the running game and one that shows the .tscn during Play.
+    assert!(
+        html.contains("/api/runtime/node"),
+        "the inspector must READ the running node while the game is running"
     );
 
     // -- an ordinary (non-runtime) edit is still locked during play ------------

@@ -2209,6 +2209,31 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   <div class="dialog-title">Batch Rename</div>
   <input id="batch-rename-pattern" type="text" value="node_%d" placeholder="Pattern, e.g. node_%d">
 </div>
+<div id="nodepath-picker-dialog" class="editor-dialog" style="display:none">
+  <div class="dialog-title">Select a Node</div>
+  <div id="nodepath-picker-filter" class="dialog-hint"></div>
+  <div id="nodepath-picker-tree"></div>
+  <button id="nodepath-picker-cancel">Cancel</button>
+</div>
+<div id="visual-shader-dialog" class="editor-dialog" style="display:none">
+  <div class="dialog-title">Visual Shader</div>
+  <div id="visual-shader-graph"></div>
+  <pre id="visual-shader-code"></pre>
+  <button id="visual-shader-close">Close</button>
+</div>
+<div id="add-metadata-dialog" class="editor-dialog" style="display:none">
+  <div class="dialog-title">Add Metadata</div>
+  <input id="add-metadata-name" type="text" placeholder="Name">
+  <select id="add-metadata-type">
+    <option value="int">int</option>
+    <option value="float">float</option>
+    <option value="String">String</option>
+    <option value="bool">bool</option>
+  </select>
+  <input id="add-metadata-value" type="text" placeholder="Value">
+  <button id="add-metadata-ok">Add</button>
+  <button id="add-metadata-cancel">Cancel</button>
+</div>
 
 <!-- Main area -->
 <div id="main">
@@ -3821,6 +3846,10 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     row.className = 'tree-row' + (selectedNodeIds.has(node.id) || node.id === selectedNodeId ? ' selected' : '');
     if (node.visible === false) row.className += ' hidden-node';
     row.setAttribute('data-node-id', node.id);
+    // pat-s3rrv.153: the remote tree already carries `path` per node
+    // (node_to_json_tree); stash it so the inspector can address the running
+    // clone.
+    if (node.path) nodePathById[node.id] = node.path;
 
     var toggle = document.createElement('span');
     toggle.className = 'tree-toggle';
@@ -4063,9 +4092,20 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     }
   }
 
+  // pat-s3rrv.153: node id -> absolute scene path, rebuilt on every tree
+  // render. The live-property endpoints are addressed by PATH, not by id: Play
+  // runs on a CLONE of the scene and cloning mints fresh ObjectIds, so an
+  // edit-tree id matches nothing in the running tree. A node the script SPAWNED
+  // at runtime has no edit-tree twin at all, which is why the path cannot be
+  // recovered from /api/selected after the fact.
+  var nodePathById = Object.create(null);
+
   function refreshTree() {
     var el = document.getElementById('scene-tree');
     el.innerHTML = '';
+    // Rebuilt with the tree, so a stale path cannot outlive the node it named
+    // — including across the edit/remote tree swap.
+    nodePathById = Object.create(null);
     // Godot parity (SceneTreeDock NOTIFICATION_PROCESS): with no scene root the
     // dock shows the "Create Root Node:" panel in place of the tree.
     if (sceneIsEmpty()) {
@@ -4613,7 +4653,31 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       refreshSubEditorHandles(); // pat-0q2kx.77: clear handles with the selection
       return;
     }
-    var data = await api('GET', '/api/selected');
+    // pat-s3rrv.153: while the game runs the Inspector must show what the
+    // RUNNING clone holds, not what the .tscn stored — a script that sets a
+    // property in _ready leaves the two disagreeing, and the stored value is
+    // simply wrong for anything a script touched. The WRITE direction has
+    // worked since pat-0q2kx.72 (`setProperty` sends `runtime: runtimeRunning`);
+    // only this read was missing, so a live edit landed in the running game and
+    // then the panel redrew with the stale stored value.
+    var data = null;
+    var livePath = (typeof runtimeRunning !== 'undefined' && runtimeRunning)
+      ? nodePathById[selectedNodeId]
+      : null;
+    if (livePath) {
+      data = await api('GET', '/api/runtime/node?path=' + encodeURIComponent(livePath));
+      // ⚠️ `api()` does not check resp.ok, so a 400/404 arrives as the parsed
+      // error envelope {"error":{code,message}} rather than null. Rendering that
+      // as node data fills the Inspector with undefined.
+      if (data && data.error) data = null;
+    }
+    if (!data) {
+      // Not running, no known path, or absent from the running tree (selected
+      // before Play, or already freed). Falling back to the edit tree keeps the
+      // panel populated and cannot mask a broken live read: the acceptance test
+      // asserts the RUNTIME value, which the stored value fails.
+      data = await api('GET', '/api/selected');
+    }
     if (data) {
       selectedNodeData = data;
       buildTilePalette(); // pat-nzgdu.34: refresh TileSet palette for the new selection
@@ -4984,7 +5048,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var addMetaBtn = document.createElement('button');
     addMetaBtn.textContent = '+ Add Metadata';
     addMetaBtn.style.cssText = 'width:100%;font-size:11px;padding:5px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:3px;cursor:pointer;';
-    addMetaBtn.addEventListener('click', function() { logMessage('info', 'Add Metadata (not yet implemented)'); });
+    addMetaBtn.addEventListener('click', function() { openAddMetadataDialog(data.id); });
     metaWrap.appendChild(addMetaBtn);
     el.appendChild(metaWrap);
 
@@ -5163,7 +5227,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   var RESOURCE_PROPS = {
     texture: 'Texture2D', normal_map: 'Texture2D', texture_normal: 'Texture2D', texture_pressed: 'Texture2D',
     material: 'Material', physics_material_override: 'PhysicsMaterial2D', mesh: 'Mesh', shape: 'Shape2D',
-    sprite_frames: 'SpriteFrames', theme: 'Theme', tile_set: 'TileSet'
+    sprite_frames: 'SpriteFrames', theme: 'Theme', tile_set: 'TileSet',
+    // pat-s3rrv.151: `script` used to fall through to the NodePath editor,
+    // which gave it a node picker it has no use for. It is a Resource, and the
+    // node's own script slot already builds a picker with this same type.
+    script: 'Script'
   };
   // Concrete subclasses Godot's "New <Type>" submenu offers for an abstract
   // resource type (editor_resource_picker.cpp builds this from ClassDB). A type
@@ -5837,7 +5905,12 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       colorDiv.appendChild(swatch); colorDiv.appendChild(picker);
       colorDiv.appendChild(hexInput); colorDiv.appendChild(alphaGroup);
       val.appendChild(colorDiv);
-    } else if (type === 'NodePath' || prop.name === 'texture' || prop.name === 'script' || prop.name.indexOf('path') >= 0) {
+    // pat-s3rrv.151: NodePath affordances belong to NodePath properties only.
+    // This used to claim `texture`, `script`, and ANY name containing "path" —
+    // so a plain String like `sprite_path` got a node picker. `texture` was
+    // already dead (RESOURCE_PROPS is tested first, above) and `script` now
+    // joins it there; the rest fall through to the ordinary String editor.
+    } else if (type === 'NodePath') {
       var npDiv = document.createElement('div');
       npDiv.className = 'nodepath-editor';
       var npInput = document.createElement('input');
@@ -5870,7 +5943,16 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       });
       var npBtn = document.createElement('button');
       npBtn.className = 'nodepath-pick'; npBtn.textContent = '...';
-      npBtn.title = 'Pick node (not yet implemented)';
+      npBtn.title = 'Pick a node from the scene tree';
+      (function(btn, input, propName, hintStr) {
+        btn.addEventListener('click', function() {
+          openNodePathPicker(nodeId, propName, hintStr, function(path) {
+            input.value = path;
+            setProperty(nodeId, propName, { type: 'NodePath', value: path });
+            logMessage('info', 'Set ' + propName + ' = ' + path);
+          });
+        });
+      })(npBtn, npInput, prop.name, prop.hint_string || '');
       npDiv.appendChild(npInput); npDiv.appendChild(npBtn);
       val.appendChild(npDiv);
     } else if (type === 'Array') {
@@ -12521,6 +12603,152 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       }
       return qi === q.length;
     });
+  }
+  // ---- pat-s3rrv.154: VisualShader graph ----
+  // The runtime has read VisualShader resources for a while, but the editor had
+  // no route to them at all — a project could RUN a visual shader its author
+  // could not see. This renders the graph the loader already understands, plus
+  // the compiled source, so the resource is inspectable before the full
+  // GraphEdit-style editing surface lands.
+  async function openVisualShader(path) {
+    var dlg = document.getElementById('visual-shader-dialog');
+    var graph = document.getElementById('visual-shader-graph');
+    var code = document.getElementById('visual-shader-code');
+    if (!dlg || !graph) return;
+    var data = await api('GET', '/api/visual_shader?path=' + encodeURIComponent(path));
+    if (!data || data.ok !== true) {
+      logMessage('error', 'Could not open visual shader ' + path);
+      return;
+    }
+    graph.innerHTML = '';
+    var nodes = data.nodes || [];
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      var row = document.createElement('div');
+      row.className = 'vshader-node';
+      row.setAttribute('data-node-id', n.id);
+      // The id is shown because connections address nodes BY id, so a graph
+      // without them cannot be read against the connection list below.
+      row.textContent = '#' + n.id + '  ' + n.type;
+      graph.appendChild(row);
+    }
+    var conns = data.connections || [];
+    for (var j = 0; j < conns.length; j++) {
+      var c = conns[j];
+      var edge = document.createElement('div');
+      edge.className = 'vshader-edge';
+      edge.textContent = c.from + ':' + c.from_port + '  ->  ' + c.to + ':' + c.to_port;
+      graph.appendChild(edge);
+    }
+    if (code) code.textContent = data.code || '';
+    var close = document.getElementById('visual-shader-close');
+    if (close) close.onclick = function() { dlg.style.display = 'none'; };
+    dlg.style.display = 'block';
+  }
+  // Adds a node and reopens the graph so the new node is visible immediately.
+  async function visualShaderAddNode(path, type, x, y) {
+    var res = await api('POST', '/api/visual_shader/node', { path: path, type: type, position: [x || 0, y || 0] });
+    if (res && res.ok === true) { await openVisualShader(path); return res.id; }
+    logMessage('error', 'Could not add ' + type);
+    return null;
+  }
+  async function visualShaderConnect(path, from, fromPort, to, toPort) {
+    var res = await api('POST', '/api/visual_shader/connect', {
+      path: path, from: from, from_port: fromPort, to: to, to_port: toPort
+    });
+    if (res && res.ok === true) { await openVisualShader(path); return true; }
+    logMessage('error', 'Could not connect those ports');
+    return false;
+  }
+  // ---- pat-s3rrv.151: NodePath picker + Add Metadata ----
+  // Godot's EditorPropertyNodePath (editor_properties.cpp) opens a scene-tree
+  // dialog filtered by the property's hint_string valid types; picking a node
+  // writes its path into the property.
+  function nodePathHintTypes(hintStr) {
+    if (!hintStr) return [];
+    return hintStr.split(',').map(function(t) { return t.trim(); }).filter(Boolean);
+  }
+  // An EMPTY hint means every node is assignable — that is Godot's behaviour for
+  // a bare NodePath, and filtering everything out would make the picker useless
+  // for the commonest case.
+  function nodeMatchesHint(node, types) {
+    if (!types.length) return true;
+    return types.indexOf(node.class_name) >= 0;
+  }
+  function openNodePathPicker(nodeId, propName, hintStr, onPick) {
+    var dlg = document.getElementById('nodepath-picker-dialog');
+    var tree = document.getElementById('nodepath-picker-tree');
+    var filt = document.getElementById('nodepath-picker-filter');
+    if (!dlg || !tree) return;
+    var types = nodePathHintTypes(hintStr);
+    if (filt) filt.textContent = types.length ? ('Showing: ' + types.join(', ')) : 'Showing: all nodes';
+    tree.innerHTML = '';
+    if (!sceneData || !sceneData.nodes) {
+      logMessage('error', 'No scene is open to pick a node from');
+      return;
+    }
+    var shown = 0;
+    // `selfPath` is the node's path RELATIVE TO THE SCENE ROOT, which is what a
+    // NodePath property stores: "." for the root, "Child", "Child/Grandchild".
+    (function walk(node, selfPath) {
+      if (nodeMatchesHint(node, types)) {
+        shown++;
+        var row = document.createElement('div');
+        row.className = 'nodepath-pick-row';
+        row.textContent = selfPath + '  (' + (node.class_name || 'Node') + ')';
+        row.addEventListener('click', function() {
+          dlg.style.display = 'none';
+          onPick(selfPath);
+        });
+        tree.appendChild(row);
+      }
+      var kids = node.children || [];
+      for (var i = 0; i < kids.length; i++) {
+        walk(kids[i], selfPath === '.' ? kids[i].name : selfPath + '/' + kids[i].name);
+      }
+    })(sceneData.nodes, '.');
+    if (shown === 0) {
+      var empty = document.createElement('div');
+      empty.className = 'dialog-hint';
+      empty.textContent = 'No node in this scene matches ' + types.join(', ');
+      tree.appendChild(empty);
+    }
+    var cancel = document.getElementById('nodepath-picker-cancel');
+    if (cancel) cancel.onclick = function() { dlg.style.display = 'none'; };
+    dlg.style.display = 'block';
+  }
+  // Inspector dock "Add Metadata" (inspector_dock.cpp): a name + type dialog
+  // writing into the node's metadata, which is saved as a `metadata/<name>` row.
+  function openAddMetadataDialog(nodeId) {
+    var dlg = document.getElementById('add-metadata-dialog');
+    var nameEl = document.getElementById('add-metadata-name');
+    var typeEl = document.getElementById('add-metadata-type');
+    var valEl = document.getElementById('add-metadata-value');
+    var ok = document.getElementById('add-metadata-ok');
+    var cancel = document.getElementById('add-metadata-cancel');
+    if (!dlg || !nameEl || !typeEl || !valEl) return;
+    nameEl.value = ''; valEl.value = '';
+    if (cancel) cancel.onclick = function() { dlg.style.display = 'none'; };
+    if (ok) ok.onclick = async function() {
+      var name = nameEl.value.trim();
+      if (!name) { logMessage('error', 'Metadata needs a name'); return; }
+      var t = typeEl.value;
+      var raw = valEl.value;
+      var value;
+      if (t === 'int') { value = parseInt(raw, 10); if (isNaN(value)) value = 0; }
+      else if (t === 'float') { value = parseFloat(raw); if (isNaN(value)) value = 0; }
+      else if (t === 'bool') { value = (raw === 'true' || raw === '1'); }
+      else { value = raw; }
+      dlg.style.display = 'none';
+      var res = await api('POST', '/api/node/metadata', { node_id: nodeId, name: name, type: t, value: value });
+      if (res && res.ok === true) {
+        logMessage('info', 'Added metadata/' + name);
+        if (typeof fetchScene === 'function') fetchScene();
+      } else {
+        logMessage('error', 'Could not add metadata/' + name);
+      }
+    };
+    dlg.style.display = 'block';
   }
   function openQuickOpen() {
     var dlg = document.getElementById('quick-open-dialog');

@@ -24,6 +24,25 @@ use gdcore::math::{Vector2, Vector3};
 use gdvariant::Variant;
 
 use crate::node::NodeId;
+
+/// Prefix of the `__resref__stream` companion when the stream is an inline
+/// `AudioStreamGenerator` sub-resource — `"<class>::<sub id>"`.
+///
+/// ⚠️ The trailing `::` is part of the needle. Without it this also matches
+/// `AudioStreamGeneratorPlayback`, a different class.
+const GENERATOR_RESREF_PREFIX: &str = "AudioStreamGenerator::";
+
+/// The interpreter's one-shot channel for
+/// `AudioStreamGeneratorPlayback.push_buffer()`, drained every frame.
+///
+/// Modelled on `seek_request`: `gdscene` depends on `gdscript-interop` and not
+/// the reverse, so a script cannot call into this bridge directly. A node
+/// property is the only direction the dependency graph allows.
+const GENERATOR_PUSH_PROP: &str = "__generator_push__";
+
+/// Godot's `AudioStreamGenerator.buffer_length` default, in seconds
+/// (`doc/classes/AudioStreamGenerator.xml`).
+const GENERATOR_BUFFER_SECS: f32 = 0.5;
 use crate::scene_tree::SceneTree;
 
 /// Half of Godot's default viewport width (1152), used as the screen half-width
@@ -102,6 +121,17 @@ pub struct AudioServerBridge {
     /// the loop is a property of the STREAM, so a replayed clip must loop the
     /// same way without re-reading the file.
     stream_loops: HashMap<NodeId, gdaudio::import::StreamLoop>,
+    /// Procedural stream state per generator-backed player (pat-s3rrv.159).
+    ///
+    /// Kept on the bridge rather than on the node because it holds *queued
+    /// audio*, not scene data: it must survive a save/load and must never be
+    /// written into a `.tscn`.
+    generators: HashMap<NodeId, gdaudio::decode::AudioStreamGenerator>,
+    /// Generator-backed players that are playing THIS frame.
+    ///
+    /// Rebuilt every `sync_player_node` rather than remembered, so a player
+    /// that stops simply stops appearing — there is no "stopped" edge to miss.
+    generators_active: HashSet<NodeId>,
 }
 
 impl AudioServerBridge {
@@ -121,6 +151,8 @@ impl AudioServerBridge {
             prev_listener_pos: None,
             stream_loops: HashMap::new(),
             stream_errors: Vec::new(),
+            generators: HashMap::new(),
+            generators_active: HashSet::new(),
         }
     }
 
@@ -339,12 +371,22 @@ impl AudioServerBridge {
                 p.stop(&mut self.server);
             }
             self.seen.remove(&id);
+            // Queued audio for a node that left the tree would otherwise be
+            // held forever, and replayed if a later node reused the id.
+            self.generators.remove(&id);
+            self.generators_active.remove(&id);
         }
 
         // Mix this frame's worth of output.
         self.frame_accumulator += delta * f64::from(self.server.output_sample_rate());
         let frames = self.frame_accumulator as usize;
         self.frame_accumulator -= frames as f64;
+        // Generated audio has to reach the server BEFORE the mix below, or it
+        // lands one frame late — audible as latency that grows with block size.
+        for id in &player_ids {
+            self.mix_generator_block(*id, frames);
+        }
+
         if frames > 0 {
             if let Some(output) = self.output.as_mut() {
                 mix_and_write(&mut self.server, output.as_mut(), frames);
@@ -638,6 +680,119 @@ impl AudioServerBridge {
         }
     }
 
+    /// Creates this player's generator if it is new, then drains whatever the
+    /// script pushed this frame into it.
+    ///
+    /// ⚠️ The push channel is drained even when the queue is full. Godot's
+    /// `push_buffer()` is all-or-nothing and returns `false` when the block
+    /// does not fit; leaving the rejected block on the node would replay it
+    /// next frame and turn a dropped block into a stuck one.
+    fn sync_generator(&mut self, tree: &mut SceneTree, id: NodeId, playing: bool) {
+        // ⚠️ Created BEFORE the play-state gate below. Being generator-backed
+        // is a property of the STREAM, not of whether the player happens to be
+        // running, and `generator_frames_queued()` distinguishes the two by
+        // `None` vs `Some(0)` — creating it only on the playing path would make
+        // a stopped generator report exactly like an inline `AudioStreamWAV`.
+        let rate = self.server.output_sample_rate();
+        self.generators.entry(id).or_insert_with(|| {
+            // ⚠️ The generator's own `mix_rate` / `buffer_length` live in the
+            // sub-resource BODY, which is not on the node (only the
+            // `__resref__` companion is), so they are not readable here.
+            // Adopting the output rate is the assumption that a script pushes
+            // at the rate it is mixed at — the same assumption Godot's default
+            // 44100 encodes for a 44100 output — and it keeps the block out of
+            // the resampler, where a wrong guess would be an inaudible pitch
+            // shift rather than an error.
+            gdaudio::decode::AudioStreamGenerator::new(
+                rate,
+                (GENERATOR_BUFFER_SECS * rate as f32) as usize,
+            )
+        });
+
+        if playing {
+            self.generators_active.insert(id);
+        } else {
+            self.generators_active.remove(&id);
+            // Godot's `get_stream_playback()` yields nothing on a stopped
+            // player, so a script cannot push and nothing already queued is
+            // heard again on replay. Dropping the queue here is what makes
+            // `stop()` silence generated audio at once rather than after the
+            // backlog drains.
+            if let Some(generator) = self.generators.get_mut(&id) {
+                generator.clear_buffer();
+            }
+            if let Some(node) = tree.get_node_mut(id) {
+                node.set_property(GENERATOR_PUSH_PROP, Variant::Nil);
+            }
+            return;
+        }
+        let pushed = match tree
+            .get_node(id)
+            .map(|n| n.get_property(GENERATOR_PUSH_PROP))
+        {
+            Some(Variant::PackedVector2Array(frames)) if !frames.is_empty() => frames,
+            _ => return,
+        };
+
+        if let Some(generator) = self.generators.get_mut(&id) {
+            // Godot's frames are `Vector2(left, right)`.
+            let block: Vec<(f32, f32)> = pushed.iter().map(|v| (v.x, v.y)).collect();
+            if !generator.push_buffer(&block) {
+                tracing::warn!(
+                    frames = block.len(),
+                    available = generator.frames_available(),
+                    "AudioStreamGeneratorPlayback.push_buffer() dropped a block that \
+                     did not fit; the script should check can_push_buffer() first"
+                );
+            }
+        }
+
+        // Drain the one-shot channel so the same block is not pushed again next
+        // frame, which would repeat the audio for as long as the script idled.
+        if let Some(node) = tree.get_node_mut(id) {
+            node.set_property(GENERATOR_PUSH_PROP, Variant::Nil);
+        }
+    }
+
+    /// Hands this frame's worth of generated audio to the server.
+    ///
+    /// ⚠️ Each block is played as its own short one-shot rather than appended
+    /// to a living voice: an `ActiveStream` owns a fixed `AudioBuffer` and a
+    /// playhead, with no append. That is safe here only because the bridge
+    /// never reads `server.take_finished()` — were it to start, these
+    /// per-frame handles would fire `finished` on the node every frame.
+    fn mix_generator_block(&mut self, id: NodeId, frames: usize) {
+        if frames == 0 {
+            return;
+        }
+        if !self.generators_active.contains(&id) {
+            return;
+        }
+        let Some(generator) = self.generators.get_mut(&id) else {
+            return;
+        };
+        // An empty queue is an underrun: silence, not an error. Returning early
+        // keeps a starved generator from queueing zero-length playbacks.
+        if generator.frames_queued() == 0 {
+            return;
+        }
+        let block = generator.mix(frames);
+        let bus = self
+            .players
+            .get(&id)
+            .map(|p| p.bus().to_owned())
+            .unwrap_or_else(|| "Master".to_owned());
+        self.server.play_on_bus(block, &bus);
+    }
+
+    /// Frames a generator-backed player has queued but not yet mixed.
+    ///
+    /// `None` means the node is not backed by a generator at all, which is a
+    /// different thing from a generator that has run dry (`Some(0)`).
+    pub fn generator_frames_queued(&self, id: NodeId) -> Option<usize> {
+        self.generators.get(&id).map(|g| g.frames_queued())
+    }
+
     fn sync_player_node(&mut self, tree: &mut SceneTree, id: NodeId) {
         let (stream_path, volume_db, autoplay, playing_prop, bus, seek_request, paused_prop, pitch) = {
             let Some(node) = tree.get_node(id) else {
@@ -688,13 +843,36 @@ impl AudioServerBridge {
         let can_process = tree.should_process_node(id);
 
         let first_sight = self.seen.insert(id);
+
+        // An `AudioStreamGenerator` has no file. The scene carries it as an
+        // INLINE sub-resource, so `stream` holds `SubResource("id")` and the
+        // class name survives only in the `__resref__stream` companion that
+        // `packed_scene.rs` writes for every inline sub-resource.
+        //
+        // ⚠️ Read the companion, not `stream`. Every inline sub-resource looks
+        // identical in `stream` — matching there would treat an inline
+        // `AudioStreamWAV` as a generator and silently swallow its audio.
+        let is_generator = matches!(
+            tree.get_node(id).map(|n| n.get_property("__resref__stream")),
+            Some(Variant::String(s)) if s.starts_with(GENERATOR_RESREF_PREFIX)
+        );
+        if is_generator {
+            // `autoplay` counts as playing on first sight, matching the voice
+            // path below — otherwise an autoplaying generator would stay mute
+            // until a script also set `playing`.
+            self.sync_generator(tree, id, playing_prop || (first_sight && autoplay));
+        }
+
         let resolved = if stream_path.is_empty() {
             None
         } else if is_unresolved_resource_ref(&stream_path) {
             // The scene named a resource but nothing resolved it to a file. Say
             // so — this is precisely the failure that used to present as a
             // player that simply never made a sound (pat-0q2kx.6).
-            if first_sight {
+            // ⚠️ Not for a generator: it is fileless BY DESIGN, so this
+            // warning would fire every run on a correct scene and train the
+            // reader to ignore the one case it exists to catch.
+            if first_sight && !is_generator {
                 tracing::warn!(
                     node = %tree.get_node(id).map(|n| n.name().to_owned()).unwrap_or_default(),
                     stream = %stream_path,

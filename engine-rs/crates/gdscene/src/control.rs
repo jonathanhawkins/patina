@@ -2729,17 +2729,73 @@ pub fn button_group_of(tree: &SceneTree, node_id: NodeId) -> String {
     }
 }
 
-/// Every other button in the tree sharing `node_id`'s `button_group`.
-fn button_group_siblings(tree: &SceneTree, node_id: NodeId) -> Vec<NodeId> {
-    let group = button_group_of(tree, node_id);
+/// Godot's `ButtonGroup.get_buttons()` — every member of `node_id`'s group, in
+/// tree order, **including `node_id` itself**.
+///
+/// ⚠️ Includes the receiver, unlike [`button_group_siblings`]. Godot's
+/// `_get_buttons()` walks the group's whole `buttons` list with no `continue`,
+/// while `_unpress_group` skips `this` explicitly — the two lists differ by
+/// exactly one element and using the wrong one un-presses the button that was
+/// just clicked.
+///
+/// Ungrouped buttons return empty rather than a list of one: with no group
+/// resource there is no `ButtonGroup` to have called this on.
+///
+/// # Receiver
+///
+/// Takes a member node rather than a group, because a Patina group has no
+/// object to be a receiver — it exists only as the identity string every member
+/// names (see [`button_group_of`]). Callers that hold a group string directly
+/// can use [`buttons_in_group`].
+pub fn button_group_buttons(tree: &SceneTree, node_id: NodeId) -> Vec<NodeId> {
+    buttons_in_group(tree, &button_group_of(tree, node_id))
+}
+
+/// Every button naming `group`, in tree order. Empty `group` matches nothing.
+///
+/// ⚠️ The empty-group guard is load-bearing: `button_group_of` returns `""` for
+/// an ungrouped button, so without it every ungrouped button in the scene would
+/// come back as one enormous mutually-exclusive group.
+pub fn buttons_in_group(tree: &SceneTree, group: &str) -> Vec<NodeId> {
     if group.is_empty() {
         return Vec::new();
     }
     tree.all_nodes_in_tree_order()
         .into_iter()
-        .filter(|&id| id != node_id)
         .filter(|&id| node_is_base_button(tree, id))
         .filter(|&id| button_group_of(tree, id) == group)
+        .collect()
+}
+
+/// Godot's `ButtonGroup.get_pressed_button()` — the first pressed member of
+/// `node_id`'s group, or `None` when the group is empty or all-off.
+///
+/// "First in tree order" is Godot's own answer (`get_pressed_button` returns on
+/// the first `is_pressed()` hit) and is only ever ambiguous while the group is
+/// in an invalid state with two members pressed at once.
+pub fn button_group_pressed_button(tree: &SceneTree, node_id: NodeId) -> Option<NodeId> {
+    button_group_buttons(tree, node_id)
+        .into_iter()
+        .find(|&id| button_is_pressed(tree, id))
+}
+
+/// Godot's `ButtonGroup.allow_unpress` — whether the active member may be
+/// clicked off, leaving the group with nothing pressed. Defaults to `false`.
+///
+/// ⚠️ Read from a `__button_group__*` companion rather than from the group
+/// itself. `allow_unpress` lives in the sub-resource BODY, and a node carries
+/// only a `__resref__button_group` naming `class::id` — the body has to be
+/// flattened onto the member nodes at load, the way `__material__*`,
+/// `__shape__*` and `__replication__*` already are.
+pub fn button_group_allows_unpress(tree: &SceneTree, node_id: NodeId) -> bool {
+    bool_prop_or_false(tree, node_id, "__button_group__allow_unpress")
+}
+
+/// Every other button in the tree sharing `node_id`'s `button_group`.
+fn button_group_siblings(tree: &SceneTree, node_id: NodeId) -> Vec<NodeId> {
+    button_group_buttons(tree, node_id)
+        .into_iter()
+        .filter(|&id| id != node_id)
         .collect()
 }
 
@@ -2780,17 +2836,19 @@ pub fn set_button_pressed(tree: &mut SceneTree, node_id: NodeId, pressed: bool) 
 ///
 /// Port of `BaseButton::_pressed()` plus the toggle branch of `on_action_event`
 /// (`base_button.cpp`). A grouped button that is already pressed does NOT
-/// un-toggle — Godot keeps one member of a group active unless the group allows
-/// unpressing.
+/// un-toggle unless its group sets `allow_unpress` — Godot keeps one member of a
+/// group active, which is what makes a group a set of radio buttons rather than
+/// a set of independent checkboxes.
 pub fn fire_button_action(tree: &mut SceneTree, node_id: NodeId) {
     if button_is_toggle(tree, node_id) {
         let currently = button_is_pressed(tree, node_id);
         let grouped = !button_group_of(tree, node_id).is_empty();
-        let next = if currently && grouped {
-            true
-        } else {
-            !currently
-        };
+        // Godot spells this as forcing `status.pressed = true` back on inside
+        // `_unpress_group` (`base_button.cpp:43-46`); refusing the flip up front
+        // reaches the same state without emitting a `toggled(false)` that is
+        // immediately contradicted.
+        let refuse_unpress = currently && grouped && !button_group_allows_unpress(tree, node_id);
+        let next = if refuse_unpress { true } else { !currently };
         set_button_pressed(tree, node_id, next);
     }
     tree.emit_signal(node_id, "pressed", &[]);

@@ -580,6 +580,15 @@ fn render_node(
         // Pre-order sequence as z so children (added later) paint on top.
         item.z_index = seq as i32;
         item.clip_rect = clip;
+        // A scripted StyleBox has to run before the control is drawn, and
+        // running a script needs `&mut` (pat-s3rrv.160). This is the one place
+        // that has both: the walk holds the tree mutably and `draw_control`
+        // only reborrows it. Doing it here also means the box sees the rect the
+        // control actually resolved to, which is the argument Godot passes.
+        //
+        // Cheap for the common case: the scan finds no `__resscript__`
+        // companion on an ordinary control and returns without running anything.
+        tree.flush_scripted_resources(&[(node_id, rect)]);
         draw_control(tree, node_id, theme, rect, &mut item.commands);
         if !item.commands.is_empty() {
             viewport.add_canvas_item(item);
@@ -2096,9 +2105,19 @@ fn draw_control(
             }
         }
         "Panel" | "PanelContainer" => {
+            // A SCRIPTED StyleBox paints the whole background itself
+            // (pat-s3rrv.160): Godot calls its `_draw` instead of drawing the
+            // default box, so a script emitting a circle gets a circle and no
+            // rectangle underneath it. The commands were produced by
+            // `SceneTree::flush_scripted_resources` — running a script needs
+            // `&mut`, and this path is immutable by design.
+            let scripted = tree.scripted_resource_commands(node_id);
+            if !scripted.is_empty() {
+                out.extend(scripted.iter().cloned());
+            }
             // Prefer a typed StyleBox (pat-u3l8c.70); fall back to the legacy
             // Variant::Color background.
-            if let Some(sb) = theme.get_stylebox("Panel", "panel") {
+            else if let Some(sb) = theme.get_stylebox("Panel", "panel") {
                 out.extend(sb.draw(rect));
             } else {
                 let bg = stylebox_bg(theme, "Panel", "panel", Color::new(0.15, 0.15, 0.15, 1.0));
@@ -2197,7 +2216,14 @@ fn draw_control(
             }
         }
         "TextureRect" => {
-            if let Some(path) = string_prop(tree, node_id, "texture") {
+            // A SCRIPTED Texture2D paints itself through `_draw_rect`
+            // (pat-s3rrv.160), at the size its own `_get_width`/`_get_height`
+            // report rather than the control's rect — a 64x32 procedural
+            // texture in a larger rect still draws 64x32.
+            let scripted = tree.scripted_resource_commands(node_id);
+            if !scripted.is_empty() {
+                out.extend(scripted.iter().cloned());
+            } else if let Some(path) = string_prop(tree, node_id, "texture") {
                 if !path.is_empty() {
                     out.push(DrawCommand::DrawTextureRect {
                         texture_path: path,

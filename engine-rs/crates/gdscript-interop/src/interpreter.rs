@@ -7243,6 +7243,30 @@ impl Interpreter {
             // `weakref` returns the object id as a re-queryable handle;
             // `instance_from_id` resolves an id back to a live object (or Nil).
             // Without scene access both degrade gracefully (passthrough / Nil).
+            // A script instance's own object id, for hosts that give one an
+            // identity — a `resource_local_to_scene` copy does (pat-s3rrv.157),
+            // and its `_setup_local_to_scene` is expected to call this.
+            //
+            // ⚠️ GUARDED so it only claims the call when an id was actually
+            // seeded. `get_instance_id` already has receiver-based handlers for
+            // ObjectId values and for the tagged handle families; an
+            // unconditional arm here would shadow whatever a future node-script
+            // path wants to do with the bare form, for every script in the
+            // engine, to hand back a 0 that means nothing.
+            "get_instance_id"
+                if self
+                    .self_instance
+                    .as_ref()
+                    .is_some_and(|i| i.properties.contains_key(SELF_OBJECT_ID_KEY)) =>
+            {
+                Self::require_args("get_instance_id", args, 0)?;
+                Ok(Some(
+                    self.self_instance
+                        .as_ref()
+                        .and_then(|i| i.properties.get(SELF_OBJECT_ID_KEY).cloned())
+                        .unwrap_or(Variant::Nil),
+                ))
+            }
             "weakref" => {
                 Self::require_args("weakref", args, 1)?;
                 // A WeakRef is a distinct OBJECT that watches the referent,
@@ -19305,6 +19329,11 @@ type BridgeValue = gdplatform::js_bridge::JsValue;
 /// Tag bits marking an `ObjectId` as a `JavaScriptObject` handle
 /// (pat-u3l8c.115). Sits alongside the RegEx/JSON/Thread families above; `0x1B`
 /// is free (`0x1A` is Image).
+/// Property key under which a host seeds a script instance's own object id, so
+/// a bare `get_instance_id()` inside its methods can answer (pat-s3rrv.157).
+/// Written by `gdscene::local_to_scene` before it runs `_setup_local_to_scene`.
+pub const SELF_OBJECT_ID_KEY: &str = "__object_id__";
+
 const JS_OBJECT_HANDLE_TAG: u64 = 0x1B_00_0000_0000_0000;
 
 thread_local! {

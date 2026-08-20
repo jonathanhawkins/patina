@@ -444,6 +444,31 @@ impl PackedScene {
                 })
                 .collect();
             for (prop, meta) in refs {
+                // A scripted resource's script path, carried to the node as
+                // `__resscript__<prop>` (pat-s3rrv.160).
+                //
+                // Render time has the tree but not the PackedScene, so without
+                // this a scripted StyleBox or Texture2D is unreachable once the
+                // scene is loaded: `__resref__` names the class and sub-id, and
+                // the id resolves only against sub-resource bodies that live in
+                // the scene object. The node already carries `_script_path` for
+                // its OWN script; this is the same idea for the resources it
+                // holds.
+                if let Some(sub_id) = meta.rsplit_once("::").map(|(_, id)| id) {
+                    let script_path = sub_resource_props
+                        .get(sub_id)
+                        .and_then(|props| props.get("script"))
+                        .and_then(|v| match v {
+                            Variant::String(s) => s.strip_prefix("ExtResource:"),
+                            _ => None,
+                        })
+                        .and_then(|ext_id| ext_resources.get(ext_id))
+                        .map(|entry| entry.path.clone());
+                    if let Some(path) = script_path {
+                        tmpl.properties
+                            .insert(format!("__resscript__{prop}"), Variant::String(path));
+                    }
+                }
                 tmpl.properties
                     .insert(format!("__resref__{prop}"), Variant::String(meta));
             }
@@ -478,6 +503,37 @@ impl PackedScene {
                 for (key, value) in cfg_props {
                     tmpl.properties
                         .insert(format!("__replication__{key}"), value.clone());
+                }
+            }
+        }
+
+        // Flatten a `BaseButton`'s `ButtonGroup` sub-resource onto the node
+        // under `__button_group__*` (pat-s3rrv.161), mirroring the
+        // `__replication__*` pass above.
+        //
+        // ⚠️ Without this, `allow_unpress` is unreachable at runtime. The group
+        // reference survives on the node, so exclusivity worked, but the flag
+        // that says whether the active member may be clicked OFF lives in the
+        // body — and the body is dropped once the `PackedScene` is gone. The
+        // symptom was silent: a group with `allow_unpress = true` behaved
+        // exactly like one without it.
+        //
+        // ⚠️ Only INLINE groups are covered. A `.tres` `ButtonGroup` shared
+        // between scenes arrives as `ExtResource`, whose body is in another
+        // file this pass never parses; those groups keep the default of
+        // `allow_unpress = false`. Membership still works either way, because
+        // that is keyed on the reference text rather than on the body.
+        for tmpl in &mut templates {
+            let Some(group_id) = tmpl.properties.get("button_group").and_then(|v| match v {
+                Variant::String(s) => s.strip_prefix("SubResource:").map(String::from),
+                _ => None,
+            }) else {
+                continue;
+            };
+            if let Some(group_props) = sub_resource_props.get(&group_id) {
+                for (key, value) in group_props {
+                    tmpl.properties
+                        .insert(format!("__button_group__{key}"), value.clone());
                 }
             }
         }

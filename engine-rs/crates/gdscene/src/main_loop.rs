@@ -3830,7 +3830,7 @@ impl MainLoop {
             // its SkeletonModifier3D stack (IK layers on top of animation), then
             // snaps BoneAttachment3D children to their bone. The render bridge reads
             // the resulting poses to skin bound MeshInstance3D meshes.
-            crate::skeleton3d::process_skeletons(&mut self.tree);
+            crate::skeleton3d::process_skeletons_with_delta(&mut self.tree, delta_secs);
 
             // -- particle phase (pat-u3l8c.4) --
             // Advance CPU particle simulators for emitting particle nodes so that

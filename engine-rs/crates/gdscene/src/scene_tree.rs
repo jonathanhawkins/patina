@@ -581,6 +581,12 @@ pub struct SceneTree {
     /// CanvasItem's commands alive until the item is redrawn, which is why this
     /// survives frames instead of being rebuilt by the render walk.
     custom_draw_commands: HashMap<NodeId, Vec<gdserver2d::canvas::DrawCommand>>,
+    /// What each control's SCRIPTED resource drew on the last pre-pass
+    /// (pat-s3rrv.160). Kept apart from `custom_draw_commands` because a
+    /// control can have both its own `_draw` and a scripted stylebox, and
+    /// merging them would make the two indistinguishable — and double-draw the
+    /// node the moment one of them re-ran.
+    scripted_resource_commands: HashMap<NodeId, Vec<gdserver2d::canvas::DrawCommand>>,
     /// Set only while a `_draw` body is running: the `draw_*` builtins append
     /// here, standing in for Godot's "drawing is only valid inside `_draw`"
     /// rule (a `draw_rect` outside `_draw` is silently dropped, as it is there).
@@ -674,6 +680,7 @@ impl SceneTree {
             root_window: crate::viewport::RootWindow::default(),
             redraw_queued: HashSet::new(),
             custom_draw_commands: HashMap::new(),
+            scripted_resource_commands: HashMap::new(),
             draw_capture: None,
         }
     }
@@ -4660,6 +4667,197 @@ impl SceneTree {
     /// Returns `None` when the node has no script, the script does not define
     /// `method`, or the call raised. Skipping an undefined method is what lets
     /// lifecycle dispatch call `_ready`/`_process` on every node blindly.
+    /// Runs every scripted `StyleBox` in the tree and caches what it drew
+    /// (pat-s3rrv.160).
+    ///
+    /// # Why a pre-pass
+    ///
+    /// Running a script needs `&mut self`, and the control render path takes
+    /// the tree immutably by design. This mirrors what already happens for a
+    /// node's own `_draw`: [`Self::flush_pending_redraws`] runs first and the
+    /// renderer then reads [`Self::custom_draw_commands`]. Threading mutability
+    /// through `draw_control` instead would push `&mut` into every caller of
+    /// `control_draw_items`, including the editor viewport.
+    ///
+    /// The script path reaches here as the `__resscript__<prop>` companion the
+    /// loader records, because render time holds the tree but not the
+    /// `PackedScene` the sub-resource bodies live in.
+    pub fn flush_scripted_resources(&mut self, rects: &[(NodeId, gdcore::math::Rect2)]) {
+        for (node_id, rect) in rects {
+            let Some(node) = self.nodes.get(node_id) else {
+                continue;
+            };
+            // Two kinds of scripted resource draw through this path, and the
+            // slot names vary by control (`panel`, `normal`, `pressed`, …), so
+            // this keys off the companion rather than fixed property names.
+            //
+            // ⚠️ A StyleBox and a Texture2D draw through DIFFERENT virtuals —
+            // `_draw(canvas_item, rect)` against `_draw_rect(canvas_item, rect,
+            // tile, modulate, transpose)` — so the method and its arity are
+            // chosen per slot. Calling one with the other's signature does not
+            // fail loudly; the interpreter simply finds no such method and the
+            // resource silently draws nothing.
+            let scripts: Vec<(String, bool)> = node
+                .properties()
+                .filter_map(|(key, value)| {
+                    let prop = key.strip_prefix("__resscript__")?;
+                    let is_stylebox = prop.starts_with("theme_override_styles/");
+                    if !is_stylebox && prop != "texture" {
+                        return None;
+                    }
+                    match value {
+                        Variant::String(path) => Some((path.clone(), is_stylebox)),
+                        _ => None,
+                    }
+                })
+                .collect();
+
+            let mut drawn = Vec::new();
+            for (path, is_stylebox) in scripts {
+                let Ok(source) = gdcore::file_access::FileAccess::read_file_string(&path) else {
+                    continue;
+                };
+                let Ok(script) =
+                    crate::scripting::GDScriptNodeInstance::from_source(&source, *node_id)
+                else {
+                    continue;
+                };
+                // Godot passes the canvas item as an RID, which has no
+                // equivalent a script can use here, so it arrives as Nil; the
+                // rect is what these virtuals actually need, and the draw calls
+                // route through the same accessor either way.
+                if is_stylebox {
+                    drawn.extend(self.draw_with_external_script(
+                        *node_id,
+                        Box::new(script),
+                        "_draw",
+                        &[Variant::Nil, Variant::Rect2(*rect)],
+                    ));
+                } else {
+                    // A texture reports its OWN size through `_get_width` /
+                    // `_get_height`, and that is the rect it draws into — not
+                    // the control's. That is the whole point of a procedural
+                    // texture: a 64x32 texture in a larger rect still draws
+                    // 64x32. Falling back to the control's rect when the script
+                    // does not override them keeps a partial script usable.
+                    let mut script = script;
+                    // `_get_width`/`_get_height` are declared to return int,
+                    // but a script may compute one and hand back a float; both
+                    // are accepted rather than silently falling back to the
+                    // control's size, which would look like the override never
+                    // ran.
+                    let dimension = |v: Option<Variant>| match v {
+                        Some(Variant::Int(i)) => Some(i as f32),
+                        Some(Variant::Float(f)) => Some(f as f32),
+                        _ => None,
+                    };
+                    let w = dimension(script.call_method("_get_width", &[]).ok())
+                        .unwrap_or(rect.size.x);
+                    let h = dimension(script.call_method("_get_height", &[]).ok())
+                        .unwrap_or(rect.size.y);
+                    let sized =
+                        gdcore::math::Rect2::new(rect.position, gdcore::math::Vector2::new(w, h));
+                    drawn.extend(self.draw_with_external_script(
+                        *node_id,
+                        Box::new(script),
+                        "_draw_rect",
+                        &[
+                            Variant::Nil,
+                            Variant::Rect2(sized),
+                            Variant::Bool(false),
+                            Variant::Color(gdcore::math::Color::WHITE),
+                            Variant::Bool(false),
+                        ],
+                    ));
+                }
+            }
+            if drawn.is_empty() {
+                self.scripted_resource_commands.remove(node_id);
+            } else {
+                self.scripted_resource_commands.insert(*node_id, drawn);
+            }
+        }
+    }
+
+    /// What `node_id`'s scripted StyleBox drew on the last pre-pass.
+    pub fn scripted_resource_commands(
+        &self,
+        node_id: NodeId,
+    ) -> &[gdserver2d::canvas::DrawCommand] {
+        self.scripted_resource_commands
+            .get(&node_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Runs an external script's drawing method and returns what it drew
+    /// (pat-s3rrv.160).
+    ///
+    /// A scripted `StyleBox._draw` paints through the same `draw_rect` /
+    /// `draw_circle` API a node's `_draw` uses, so the commands land in the
+    /// tree's capture buffer rather than being returned. This brackets the call
+    /// exactly as [`Self::flush_pending_redraws`] does — including saving and
+    /// restoring any outer capture, so a nested call cannot clobber the frame
+    /// already being collected — and hands back the commands instead of
+    /// recording them against the node, because a stylebox's output belongs to
+    /// the control that asked for it, not to the node's own `_draw`.
+    pub fn draw_with_external_script(
+        &mut self,
+        context_node: NodeId,
+        script: Box<dyn ScriptInstance>,
+        method: &str,
+        args: &[Variant],
+    ) -> Vec<gdserver2d::canvas::DrawCommand> {
+        let outer = self.draw_capture.take();
+        self.draw_capture = Some(Vec::new());
+        self.call_external_script_method(context_node, script, method, args);
+        let drawn = self.draw_capture.take().unwrap_or_default();
+        self.draw_capture = outer;
+        drawn
+    }
+
+    /// Calls `method` on a script instance the tree does not own, in the
+    /// context of `context_node` (pat-s3rrv.160).
+    ///
+    /// This is how a scripted **resource** runs engine-facing code: Godot's
+    /// `StyleBox._draw(canvas_item, rect)` draws into the canvas item that owns
+    /// it, so the stylebox's script has to run as though it were that node —
+    /// its `draw_circle`/`draw_rect` calls must reach the same accessor and
+    /// land in the same per-node capture a `_draw` override would.
+    ///
+    /// Implemented by installing the instance under `context_node` for the
+    /// duration and restoring whatever was there, rather than duplicating
+    /// [`Self::call_script_method`]'s accessor setup and command capture — a
+    /// second copy of that would drift.
+    ///
+    /// ⚠️ The node keeps its own script afterwards, but the call's variable
+    /// sync-back still writes the RESOURCE's vars onto the node's properties.
+    /// That is visible to anything reading them; a stylebox's fields are not a
+    /// control's fields. Callers that care should read the draw commands, which
+    /// is what this exists for, and not the node's properties.
+    pub fn call_external_script_method(
+        &mut self,
+        context_node: NodeId,
+        script: Box<dyn ScriptInstance>,
+        method: &str,
+        args: &[Variant],
+    ) -> Option<Variant> {
+        let displaced = self.scripts.insert(context_node, script);
+        let result = self.call_script_method(context_node, method, args);
+        // Restore precisely: a node that had NO script must not end up owning
+        // the resource's one, which would make the resource's methods answer
+        // for the node from here on.
+        match displaced {
+            Some(original) => {
+                self.scripts.insert(context_node, original);
+            }
+            None => {
+                self.scripts.remove(&context_node);
+            }
+        }
+        result
+    }
+
     pub fn call_script_method(
         &mut self,
         node_id: NodeId,
@@ -5562,6 +5760,30 @@ impl SceneTree {
         }
     }
 
+    /// The nearest `SubViewportContainer` at or above `node`, if any
+    /// (pat-s3rrv.155).
+    ///
+    /// Walks the ancestor chain because the hit is the control INSIDE the
+    /// sub-viewport, not the container itself — `hit_test_control` descends
+    /// through the container to map the click into sub-viewport space, so by
+    /// the time we have a hit the container is an ancestor.
+    ///
+    /// ⚠️ Matches on the class name as well as ClassDB, mirroring
+    /// `control::is_subviewport_container`: bare unit trees never populate the
+    /// inheritance table, and a ClassDB-only check would silently answer `false`
+    /// for every one of them.
+    fn enclosing_subviewport_container(&self, node: NodeId) -> Option<NodeId> {
+        let mut cur = Some(node);
+        while let Some(id) = cur {
+            let n = self.get_node(id)?;
+            if n.class_name() == "SubViewportContainer" || n.is_class("SubViewportContainer") {
+                return Some(id);
+            }
+            cur = n.parent();
+        }
+        None
+    }
+
     fn gui_input_stage(&mut self, event: &gdplatform::input::InputEvent, payload: &Variant) {
         use gdplatform::input::InputEvent as Ev;
         let position = match event {
@@ -5629,6 +5851,34 @@ impl SceneTree {
             }
             return;
         };
+
+        // `SubViewportContainer._propagate_input_event(event) -> bool` decides
+        // whether an event is allowed to reach the hosted sub-scene
+        // (pat-s3rrv.155). Godot asks the container before forwarding; a script
+        // returning `false` makes the container swallow the event.
+        //
+        // ⚠️ Asked HERE rather than inside the hit test. `hit_test_control`
+        // already descends through a SubViewportContainer into its children —
+        // it has to, to map the click into sub-viewport space — but it takes
+        // `&SceneTree`, and calling a script needs `&mut`. This stage is the
+        // first point after the hit that holds `&mut self`.
+        //
+        // ⚠️ `call_script_method` returns `None` when the script does not define
+        // the method, so an unscripted container (and a scripted one that does
+        // not override it) is untouched — only an explicit `false` vetoes. A
+        // script returning `true`, or nothing, forwards as before.
+        if let Some(container) = self.enclosing_subviewport_container(hit) {
+            if matches!(
+                self.call_script_method(
+                    container,
+                    "_propagate_input_event",
+                    std::slice::from_ref(payload)
+                ),
+                Some(Variant::Bool(false))
+            ) {
+                return;
+            }
+        }
 
         // Deliver `_gui_input` / `gui_input` up the PASS chain: the hit control
         // first, then each ancestor whose filter is PASS. A STOP control ends

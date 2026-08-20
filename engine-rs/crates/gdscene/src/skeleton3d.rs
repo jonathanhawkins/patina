@@ -642,6 +642,17 @@ fn bone_chain(tree: &SceneTree, skeleton_id: NodeId, root: usize, tip: usize) ->
 /// rather than being overwritten by it. Call this once per frame, after the
 /// pose update. Children are processed in tree order; inactive ones are skipped.
 pub fn process_modifiers(tree: &mut SceneTree, skeleton_id: NodeId) {
+    process_modifiers_with_delta(tree, skeleton_id, 0.0);
+}
+
+/// [`process_modifiers`] carrying the frame delta, for
+/// `_process_modification_with_delta` (pat-s3rrv.158).
+///
+/// ⚠️ Added ALONGSIDE `process_modifiers` rather than changing its signature:
+/// that function has a dozen call sites across the skeleton test suites, and a
+/// delta parameter none of them care about would have to be threaded through
+/// every one. The zero-delta delegation keeps them working unchanged.
+pub fn process_modifiers_with_delta(tree: &mut SceneTree, skeleton_id: NodeId, delta: f64) {
     let children = tree
         .get_node(skeleton_id)
         .map(|n| n.children().to_vec())
@@ -652,6 +663,50 @@ pub fn process_modifiers(tree: &mut SceneTree, skeleton_id: NodeId) {
             Some(n) => n.class_name().to_string(),
             None => continue,
         };
+        // A script overriding `_process_modification` IS the modification for
+        // this node: Godot's `SkeletonModifier3D` runs the virtual during the
+        // skeleton's modifier pass, and a custom modifier writes bone poses
+        // from there (pat-s3rrv.158).
+        //
+        // ⚠️ The virtual was DECLARED in `class_db.rs` with a comment calling it
+        // "the pose-update hook itself — the seam the constraint/twist solvers
+        // will run from once they exist". Nothing called it, so overriding it
+        // did nothing and reported nothing. This is that call.
+        //
+        // ⚠️ `call_script_method` returns `None` when the node has no script or
+        // the script does not define the method, and `Some(_)` when it actually
+        // ran. That distinction is what lets an override REPLACE the built-in
+        // behaviour — as it does in Godot — while a modifier without one falls
+        // through to the class dispatch below unchanged. A bare "did it error"
+        // check could not tell the two apart.
+        //
+        // ⚠️ Gated on `active` like every built-in modifier, so a disabled
+        // custom modifier is skipped rather than running its script anyway.
+        let is_modifier = tree
+            .get_node(child)
+            .map(|n| n.is_class(SKELETON_MODIFIER_CLASS) || class == SKELETON_MODIFIER_CLASS)
+            .unwrap_or(false);
+        if is_modifier && modifier_active(tree, child) {
+            // ⚠️ `_process_modification_with_delta` is tried FIRST and the
+            // legacy `_process_modification` only as a fallback, matching
+            // Godot: the delta form is the current hook, and Godot's own base
+            // implementation of it forwards to the older one for compatibility.
+            // Calling the legacy one first would make a script that overrides
+            // BOTH run the deprecated path.
+            let delta_arg = [Variant::Float(delta)];
+            if tree
+                .call_script_method(child, "_process_modification_with_delta", &delta_arg)
+                .is_some()
+            {
+                continue;
+            }
+            if tree
+                .call_script_method(child, "_process_modification", &[])
+                .is_some()
+            {
+                continue;
+            }
+        }
         // Godot picks the algorithm by CLASS: FABRIK3D, CCDIK3D and
         // JacobianIK3D are siblings under IterateIK3D that share every knob and
         // differ only in how they solve (pat-nzgdu.183).
@@ -1743,6 +1798,12 @@ pub fn apply_animation_bone_tracks(tree: &mut SceneTree) {
 /// The resulting poses are what the render bridge reads via [`bone_pose_array`]
 /// to skin bound meshes.
 pub fn process_skeletons(tree: &mut SceneTree) {
+    process_skeletons_with_delta(tree, 0.0);
+}
+
+/// [`process_skeletons`] carrying the frame delta so modifiers can receive it
+/// (pat-s3rrv.158). `MainLoop::step` calls this one.
+pub fn process_skeletons_with_delta(tree: &mut SceneTree, delta: f64) {
     let skeletons = skeletons_in_tree(tree);
     for &skeleton in &skeletons {
         cache_bone_count(tree, skeleton);
@@ -1751,7 +1812,7 @@ pub fn process_skeletons(tree: &mut SceneTree) {
     apply_animation_bone_tracks(tree);
 
     for skeleton in skeletons {
-        process_modifiers(tree, skeleton);
+        process_modifiers_with_delta(tree, skeleton, delta);
 
         // Godot's BoneAttachment3D reads its bone from its parent Skeleton3D.
         let children = tree

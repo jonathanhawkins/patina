@@ -1535,6 +1535,11 @@ fn tileset_custom_data_layer_names(node: &crate::node::Node) -> Vec<String> {
 /// properties (they are re-encoded as resource references / header attributes).
 fn is_internal_prop(key: &str) -> bool {
     key.starts_with("__resref__")
+        // `__resscript__<prop>` caches the script path of a SCRIPTED resource
+        // held in `<prop>`, so render code can reach it with only the tree in
+        // hand (pat-s3rrv.160). Derived from the sub-resource on load, so
+        // writing it back would put engine plumbing into the .tscn.
+        || key.starts_with("__resscript__")
         || key.starts_with("__viewport_")
         // `__shape__*` caches a collision shape sub-resource's class and typed
         // geometry for the physics layer (pat-0q2kx.28). The node's own `shape`
