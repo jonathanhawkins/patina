@@ -678,6 +678,12 @@ pub fn process_modifiers(tree: &mut SceneTree, skeleton_id: NodeId) {
             }
             continue;
         }
+        if class == AIM_MODIFIER_CLASS {
+            if modifier_active(tree, child) {
+                apply_aim_modifier(tree, skeleton_id, child);
+            }
+            continue;
+        }
         let solver = match class.as_str() {
             IK_MODIFIER_CLASS => IkSolverKind::Ccd,
             FABRIK_CLASS => IkSolverKind::Fabrik,
@@ -703,6 +709,9 @@ pub fn process_modifiers(tree: &mut SceneTree, skeleton_id: NodeId) {
 /// `4` (`BONE_AXIS_PLUS_Z`) is `LookAtModifier3D`'s default, so an unset or
 /// unrecognised value must fall back to +Z — **not** to axis 0 (+X), which is
 /// what treating enum-zero as the default would give.
+/// Godot's `AimModifier3D` (pat-s3rrv.132).
+const AIM_MODIFIER_CLASS: &str = "AimModifier3D";
+
 fn bone_axis_vector(axis: i64) -> Vector3 {
     match axis {
         0 => Vector3::new(1.0, 0.0, 0.0),
@@ -1269,6 +1278,120 @@ fn apply_look_at_modifier(tree: &mut SceneTree, skeleton_id: NodeId, modifier_id
     let mut new_pose = pose;
     new_pose.basis = frame.inverse() * delta * frame * pose.basis;
     set_bone_pose(tree, skeleton_id, bone, new_pose);
+}
+
+/// Applies `AimModifier3D`: each setting turns an apply bone's forward axis to
+/// point at a reference bone (pat-s3rrv.132).
+///
+/// The rotation core — [`crate::ik_solver::aim_rotation`] — has existed with its
+/// own unit tests and **zero non-test callers**; `process_modifiers` had no arm
+/// for this class, so every knob the inspector showed did nothing.
+///
+/// ⚠️ `AimModifier3D` is a per-setting class, not a flat one: its only direct
+/// property is `setting_count`, and the real knobs live under
+/// `settings/<i>/…` (`scene/3d/bone_constraint_3d.cpp:101`,
+/// `aim_modifier_3d.cpp:88`). Reading flat `bone`/`forward_axis` the way
+/// `LookAtModifier3D` does would find nothing at all.
+fn apply_aim_modifier(tree: &mut SceneTree, skeleton_id: NodeId, modifier_id: NodeId) {
+    let count = match tree
+        .get_node(modifier_id)
+        .map(|n| n.get_property("setting_count"))
+    {
+        Some(Variant::Int(n)) if n > 0 => n,
+        _ => return,
+    };
+    let influence = modifier_influence(tree, modifier_id);
+
+    for i in 0..count {
+        let prefix = format!("settings/{i}/");
+        let (apply_bone, reference_bone, forward_axis, amount, reference_type) = {
+            let node = match tree.get_node(modifier_id) {
+                Some(n) => n,
+                None => return,
+            };
+            let int_at = |key: &str| match node.get_property(&format!("{prefix}{key}")) {
+                Variant::Int(v) => Some(v),
+                _ => None,
+            };
+            // Both bones default to -1 ("unset"); Godot aims nothing then.
+            let apply_bone = match int_at("apply_bone") {
+                Some(v) if v >= 0 => v as usize,
+                _ => continue,
+            };
+            let reference_bone = match int_at("reference_bone") {
+                Some(v) if v >= 0 => v as usize,
+                _ => continue,
+            };
+            // ⚠️ `forward_axis` defaults to +Z (axis 4), not to enum-zero (+X) —
+            // `bone_axis_vector` already encodes that fallback.
+            let forward_axis = int_at("forward_axis").unwrap_or(4);
+            // ⚠️ `amount` is a 0..1 blend whose Godot default is 1.0. A missing
+            // value must NOT read as 0.0, which would silently disable the
+            // setting while the inspector showed it enabled.
+            let amount = match node.get_property(&format!("{prefix}amount")) {
+                Variant::Float(f) => f as f32,
+                Variant::Int(v) => v as f32,
+                _ => 1.0,
+            };
+            let reference_type = int_at("reference_type").unwrap_or(0);
+            (
+                apply_bone,
+                reference_bone,
+                forward_axis,
+                amount,
+                reference_type,
+            )
+        };
+
+        // ⓘ Only `reference_type == 0` (Bone) is handled; a Node reference needs
+        // the scene-graph lookup `LookAtModifier3D`'s `target_node` path does.
+        if reference_type != 0 {
+            continue;
+        }
+
+        let bone_global = get_bone_global_pose(tree, skeleton_id, apply_bone);
+        let target_global = get_bone_global_pose(tree, skeleton_id, reference_bone);
+        let to_vec = target_global.origin - bone_global.origin;
+        let forward_world = bone_global.basis.xform(bone_axis_vector(forward_axis));
+        if to_vec.length() < IK_EPSILON || forward_world.length() < IK_EPSILON {
+            continue;
+        }
+
+        // The shortest-arc turn, then scaled back by the blend. Scaling the
+        // ANGLE rather than slerping keeps this identical in shape to
+        // `apply_look_at_modifier`'s influence handling.
+        let from = forward_world.normalized();
+        let to = to_vec.normalized();
+        let mut axis = from.cross(to);
+        if axis.length() < IK_EPSILON {
+            // ⚠️ A vanishing cross product is two OPPOSITE cases: already aimed,
+            // or the reference sits exactly behind the bone. Treating both as
+            // "nothing to do" would leave a bone permanently unable to turn
+            // around.
+            if from.dot(to) > 0.0 {
+                continue;
+            }
+            axis = crate::ik_solver::any_perpendicular(from);
+        }
+        let angle = from.dot(to).clamp(-1.0, 1.0).acos() * amount * influence;
+        if angle.abs() < IK_EPSILON {
+            continue;
+        }
+
+        let delta = Basis::from_quaternion(Quaternion::from_axis_angle(axis.normalized(), angle));
+        let parent = get_bone_parent(tree, skeleton_id, apply_bone);
+        let parent_basis = if parent >= 0 {
+            get_bone_global_pose(tree, skeleton_id, parent as usize).basis
+        } else {
+            Basis::IDENTITY
+        };
+        let rest = get_bone_rest(tree, skeleton_id, apply_bone);
+        let pose = get_bone_pose(tree, skeleton_id, apply_bone);
+        let frame = parent_basis * rest.basis;
+        let mut new_pose = pose;
+        new_pose.basis = frame.inverse() * delta * frame * pose.basis;
+        set_bone_pose(tree, skeleton_id, apply_bone, new_pose);
+    }
 }
 
 /// Which algorithm a modifier's class selects.

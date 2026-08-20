@@ -226,12 +226,16 @@ fn area3d_damp_space_override_reaches_the_physics_layer() {
     }
     ml.step(STEP);
 
+    // ⚠️ `physics_server_3d()`, not `physics_server()`. The 2D server also has
+    // an `area_for_node`, so calling the wrong one still compiles at THIS line
+    // and only fails two lines later on `world().get_area()`, where the id is a
+    // 2D `AreaId` and the world is a `PhysicsWorld2D` (pat-s3rrv.102).
     let area_id = ml
-        .physics_server()
+        .physics_server_3d()
         .area_for_node(zone_a)
         .expect("ZoneA registers an area");
     let area = ml
-        .physics_server()
+        .physics_server_3d()
         .world()
         .get_area(area_id)
         .expect("the area exists in the world");
@@ -251,11 +255,11 @@ fn area3d_damp_space_override_reaches_the_physics_layer() {
     // DISABLED, not COMBINE. Without this the test would pass against a bridge
     // that hard-coded every area to COMBINE.
     let other_id = ml
-        .physics_server()
+        .physics_server_3d()
         .area_for_node(zone_b)
         .expect("ZoneB registers an area");
     let other = ml
-        .physics_server()
+        .physics_server_3d()
         .world()
         .get_area(other_id)
         .expect("ZoneB area exists");

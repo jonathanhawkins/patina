@@ -699,12 +699,80 @@ impl PackedScene {
                 "initial_velocity_min",
                 "initial_velocity_max",
                 "color",
+                "scale_min",
+                "scale_max",
             ] {
                 if tmpl.properties.contains_key(key) {
                     continue;
                 }
                 if let Some(value) = props.get(key) {
                     tmpl.properties.insert(key.to_string(), value.clone());
+                }
+            }
+
+            // `color_ramp` is what makes a particle's colour change over its
+            // lifetime, and it was never parsed — the emitter fell back to the
+            // flat `color` (pat-s3rrv.116).
+            //
+            // 🔑 The stops are TWO hops away. Godot types `color_ramp` as
+            // **Texture2D**, not Gradient (`ParticleProcessMaterial.xml`): the
+            // editor assigns a GradientTexture1D whose own `gradient` property
+            // holds the Gradient with the `offsets`/`colors` arrays
+            // (`GradientTexture1D.xml`). Reading `offsets` off the ramp itself
+            // finds nothing.
+            //
+            // ⚠️ A direct Gradient is accepted too, since a hand-written scene
+            // may skip the texture wrapper. The two are told apart by shape
+            // rather than by class name: the bag carrying `offsets` is the
+            // Gradient, wherever it sits.
+            if let Some(ramp_id) = sub_ref_id(props.get("color_ramp")) {
+                let stops = sub_resource_props.get(&ramp_id).and_then(|ramp| {
+                    if ramp.contains_key("offsets") {
+                        Some(ramp)
+                    } else {
+                        sub_ref_id(ramp.get("gradient"))
+                            .and_then(|gid| sub_resource_props.get(&gid))
+                    }
+                });
+                // Both arrays are required to sample, so a bag missing either is
+                // left alone rather than half-copied.
+                if let Some((offsets, colors)) =
+                    stops.and_then(|st| Some((st.get("offsets")?, st.get("colors")?)))
+                {
+                    tmpl.properties
+                        .insert("__color_ramp_offsets".into(), offsets.clone());
+                    tmpl.properties
+                        .insert("__color_ramp_colors".into(), colors.clone());
+                }
+            }
+
+            // `scale_curve` scales a particle over its lifetime. Same two-hop
+            // shape as `color_ramp` above: Godot types it **Texture2D**
+            // (`set_param_texture`), so the editor assigns a CurveTexture whose
+            // own `curve` holds the Curve carrying `_data`.
+            //
+            // ⚠️ A direct Curve is accepted as well, told apart by shape — the
+            // bag carrying `_data` is the Curve wherever it sits — matching how
+            // `color_ramp` handles its wrapper.
+            //
+            // The samples are baked here with the same helper Line2D's
+            // `width_curve` uses, so both spellings of "a Curve in a .tscn"
+            // agree on what the curve means.
+            if let Some(curve_ref) = sub_ref_id(props.get("scale_curve")) {
+                let data = sub_resource_props.get(&curve_ref).and_then(|bag| {
+                    if bag.contains_key("_data") {
+                        Some(bag)
+                    } else {
+                        sub_ref_id(bag.get("curve")).and_then(|cid| sub_resource_props.get(&cid))
+                    }
+                });
+                if let Some(Variant::Array(data)) = data.and_then(|b| b.get("_data")) {
+                    if let Some(samples) = bake_curve_samples(data) {
+                        tmpl.properties.insert(
+                            "__scale_curve_samples".into(),
+                            Variant::PackedFloat32Array(samples),
+                        );
+                    }
                 }
             }
         }
@@ -1146,6 +1214,64 @@ impl PackedScene {
             }
         }
 
+        // Resolve an `AtlasTexture` assigned to a node's `texture`
+        // (pat-s3rrv.117).
+        //
+        // Godot's AtlasTexture presents a sub-rect of a sheet as a standalone
+        // texture — the backbone of sprite-sheet workflows. A Sprite2D given one
+        // drew the WHOLE sheet, because `node2d::get_texture_path` found a
+        // `SubResource(...)` where it wanted a path and gave up.
+        //
+        // 🔑 An AtlasTexture is a REDIRECT plus a rect, so it needs both halves:
+        // the drawn image is the `atlas`, which is an ExtResource pointing at
+        // the sheet file, and the sub-rect is the AtlasTexture's own `region`.
+        // Flattening only the region would leave the texture unresolved; only
+        // the path would draw the entire sheet.
+        //
+        // ⚠️ `__extres__texture` is written deliberately, even though `texture`
+        // holds a SubResource rather than an ExtResource. That companion is
+        // defined as "the resolved path for this property", which is exactly
+        // what the sheet's path is, and `get_texture_path` already prefers it.
+        // The `texture` property itself keeps its `SubResource:<id>` value, so
+        // the scene still round-trips and the sub-resource body is still
+        // emitted from `__resref__`.
+        for tmpl in &mut templates {
+            let Some(atlas_id) = sub_ref_id(tmpl.properties.get("texture")) else {
+                continue;
+            };
+            if sub_resources.get(&atlas_id).map(String::as_str) != Some("AtlasTexture") {
+                continue;
+            }
+            let Some(props) = sub_resource_props.get(&atlas_id) else {
+                continue;
+            };
+
+            // The sheet the region is cut from.
+            if let Some(path) = props.get("atlas").and_then(|v| match v {
+                Variant::String(s) => {
+                    let id = parse_ext_resource_ref(s)?;
+                    Some(ext_resources.get(&id)?.path.clone())
+                }
+                _ => None,
+            }) {
+                tmpl.properties
+                    .insert("__extres__texture".into(), Variant::String(path));
+            }
+
+            // `region` is what the sprite must sample; `margin` and
+            // `filter_clip` ride along so the draw path can honour them without
+            // a second lookup.
+            for (key, companion) in [
+                ("region", "__atlas_region"),
+                ("margin", "__atlas_margin"),
+                ("filter_clip", "__atlas_filter_clip"),
+            ] {
+                if let Some(value) = props.get(key) {
+                    tmpl.properties.insert(companion.to_string(), value.clone());
+                }
+            }
+        }
+
         // Resolve `mesh = SubResource("id")` references to a concrete primitive
         // marker (`primitive:<Type>`) the 3D viewport renderer understands, stored
         // under a `__viewport_mesh__` companion so the real `mesh` property keeps
@@ -1227,6 +1353,38 @@ impl PackedScene {
                             .insert(format!("__occluder__{key}"), value.clone());
                     }
                 }
+            }
+        }
+
+        // Flatten a Label's `label_settings` sub-resource onto the node
+        // (pat-s3rrv.127).
+        //
+        // `LabelSettings` carries the font size, colour, outline and shadow a
+        // Label draws with, and NOTHING consumed it — `control_render` read only
+        // the theme, so an authored LabelSettings changed nothing on screen.
+        //
+        // ⚠️ The companion keys are prefixed rather than written bare: a Label
+        // node has its own `theme_override_*` properties, and a bare `font_size`
+        // on the node would collide with the theme-override lookup rather than
+        // sit beside it.
+        for tmpl in &mut templates {
+            let Some(id) = sub_ref_id(tmpl.properties.get("label_settings")) else {
+                continue;
+            };
+            let Some(props) = sub_resource_props.get(&id) else {
+                continue;
+            };
+            // A marker, so the draw path can tell "settings present with default
+            // values" from "no settings at all". 🔑 That distinction is
+            // load-bearing: Godot's Label uses `has_settings ? settings->X :
+            // theme->X` per field with NO per-field fallback, so a LabelSettings
+            // that sets only `outline_size` still forces font_size to the
+            // resource's own default and overrides the theme.
+            tmpl.properties
+                .insert("__label_settings__".into(), Variant::Bool(true));
+            for (key, value) in props {
+                tmpl.properties
+                    .insert(format!("__ls__{key}"), value.clone());
             }
         }
 

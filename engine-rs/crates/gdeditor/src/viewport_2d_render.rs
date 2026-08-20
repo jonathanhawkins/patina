@@ -129,12 +129,27 @@ pub fn sprite_sheet_for_node(node: &gdscene::node::Node) -> SpriteSheet {
         Some((x, y)) if x != 0 || y != 0 => y * hframes + x,
         _ => int("frame", d.frame),
     };
+    // An `AtlasTexture` assigned to `texture` is a sub-rect of a sheet, which is
+    // the same thing `region_enabled`/`region_rect` already expresses — so it
+    // drives that path rather than getting a parallel one (pat-s3rrv.117).
+    // `packed_scene` redirected the texture to the sheet and parked the rect in
+    // `__atlas_region`.
+    //
+    // ⚠️ The node's own `region_enabled` wins when the scene set it. Godot keeps
+    // the two independent: a Sprite2D can region a texture that is *itself* an
+    // AtlasTexture, and there the node's rect is the one in sprite coordinates.
+    let atlas_region = match node.get_property("__atlas_region") {
+        Variant::Rect2(r) if r.size.x > 0.0 && r.size.y > 0.0 => Some(r),
+        _ => None,
+    };
+    let node_region_enabled = flag("region_enabled", d.region_enabled);
+
     SpriteSheet {
         centered: flag("centered", d.centered),
-        region_enabled: flag("region_enabled", d.region_enabled),
+        region_enabled: node_region_enabled || atlas_region.is_some(),
         region_rect: match node.get_property("region_rect") {
-            Variant::Rect2(r) => r,
-            _ => d.region_rect,
+            Variant::Rect2(r) if node_region_enabled => r,
+            _ => atlas_region.unwrap_or(d.region_rect),
         },
         hframes,
         vframes: int("vframes", d.vframes).max(1),

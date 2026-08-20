@@ -5,6 +5,7 @@ use gdcore::math3d::Transform3D;
 
 use crate::decal::Decal3D;
 use crate::fog_volume::FogVolume;
+use crate::gi::{VoxelGI, VoxelGIId};
 use crate::instance::{GeometryInstanceSettings, Instance3DId};
 use crate::light::{Light3D, Light3DId};
 use crate::material::Material3D;
@@ -101,6 +102,23 @@ pub trait RenderingServer3D {
 
     /// Removes a reflection probe from the scene.
     fn remove_reflection_probe(&mut self, id: ReflectionProbeId);
+
+    /// Adds a `VoxelGI` volume to this frame's scene (pat-s3rrv.114).
+    ///
+    /// ⚠️ DEFAULTED ON PURPOSE, unlike `add_reflection_probe` next door. This
+    /// trait has implementors outside the two renderers — `gdserver2d`'s
+    /// `server3d.rs` is one — so a required method here is a workspace-wide
+    /// outage for a feature only the 3D renderers implement. A renderer that
+    /// does not know about GI keeps compiling and keeps rendering exactly as
+    /// before.
+    fn add_voxel_gi(&mut self, _id: VoxelGIId) {}
+
+    /// Updates a `VoxelGI`'s transform, size and baked grid. Implementations
+    /// should match by `gi.id`.
+    fn update_voxel_gi(&mut self, _gi: &VoxelGI) {}
+
+    /// Removes a `VoxelGI` volume from the scene.
+    fn remove_voxel_gi(&mut self, _id: VoxelGIId) {}
 
     /// Adds a `FogVolume` at `transform` to this frame's scene (pat-0q2kx.132).
     ///

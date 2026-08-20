@@ -413,7 +413,7 @@ pub struct Vector4 {
 
 /// Godot `Math::cubic_interpolate` — the Catmull-Rom basis
 /// (`core/math/math_funcs.h:343-349`).
-fn cubic_interpolate_f(from: f32, to: f32, pre: f32, post: f32, w: f32) -> f32 {
+pub(crate) fn cubic_interpolate_f(from: f32, to: f32, pre: f32, post: f32, w: f32) -> f32 {
     0.5 * ((from * 2.0)
         + (-pre + to) * w
         + (2.0 * pre - 5.0 * from + 4.0 * to - post) * (w * w)
@@ -430,7 +430,7 @@ fn cubic_interpolate_f(from: f32, to: f32, pre: f32, post: f32, w: f32) -> f32 {
 /// spaced keyframes and only misbehave on the degenerate ones animation
 /// actually produces.
 #[allow(clippy::too_many_arguments)]
-fn cubic_interpolate_in_time_f(
+pub(crate) fn cubic_interpolate_in_time_f(
     from: f32,
     to: f32,
     pre: f32,
@@ -1246,6 +1246,13 @@ impl Vector3 {
     /// Returns the squared length.
     pub fn length_squared(self) -> f32 {
         self.x * self.x + self.y * self.y + self.z * self.z
+    }
+
+    /// Whether the vector is (near enough) unit length — Godot
+    /// `Vector3.is_normalized`, which compares the SQUARED length so no square
+    /// root is taken. Mirrors `Vector4::is_normalized`, epsilon included.
+    pub fn is_normalized(self) -> bool {
+        (self.length_squared() - 1.0).abs() < 1e-5
     }
 
     /// Returns the length of the vector.
@@ -2665,6 +2672,91 @@ pub fn linear_to_srgb_channel(c: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// pat-s3rrv.148 — the Rect2 / Transform2D method gaps
+// ---------------------------------------------------------------------------
+
+impl Rect2 {
+    /// The corner furthest along `direction` (`Rect2.get_support`).
+    pub fn get_support(self, direction: Vector2) -> Vector2 {
+        let mut support = self.position;
+        if direction.x > 0.0 {
+            support.x += self.size.x;
+        }
+        if direction.y > 0.0 {
+            support.y += self.size.y;
+        }
+        support
+    }
+
+    /// Whether both corners are approximately equal (`Rect2.is_equal_approx`).
+    pub fn is_equal_approx(self, other: Rect2) -> bool {
+        (self.position.x - other.position.x).abs() < 1e-5
+            && (self.position.y - other.position.y).abs() < 1e-5
+            && (self.size.x - other.size.x).abs() < 1e-5
+            && (self.size.y - other.size.y).abs() < 1e-5
+    }
+
+    /// Whether every component is finite (`Rect2.is_finite`).
+    pub fn is_finite(self) -> bool {
+        self.position.x.is_finite()
+            && self.position.y.is_finite()
+            && self.size.x.is_finite()
+            && self.size.y.is_finite()
+    }
+}
+
+impl Transform2D {
+    /// Whether this transform preserves angles (`Transform2D.is_conformal`).
+    ///
+    /// 🔑 **Not the same test as `Basis.is_conformal`.** Godot checks two
+    /// specific 2×2 shapes — the rotation form (`a == d`, `b == -c`) and the
+    /// FLIPPED form (`a == -d`, `b == c`) — rather than "equal column lengths
+    /// and perpendicular" (`transform_2d.cpp`). Generalizing from the 3D
+    /// version looks equivalent and accepts matrices Godot rejects.
+    pub fn is_conformal(self) -> bool {
+        let eq = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        // Non-flipped (a rotation with uniform scale).
+        if eq(self.x.x, self.y.y) && eq(self.x.y, -self.y.x) {
+            return true;
+        }
+        // Flipped (a rotation with uniform scale and a mirror).
+        if eq(self.x.x, -self.y.y) && eq(self.x.y, self.y.x) {
+            return true;
+        }
+        false
+    }
+
+    /// Whether every component is finite (`Transform2D.is_finite`).
+    pub fn is_finite(self) -> bool {
+        self.x.x.is_finite()
+            && self.x.y.is_finite()
+            && self.y.x.is_finite()
+            && self.y.y.is_finite()
+            && self.origin.x.is_finite()
+            && self.origin.y.is_finite()
+    }
+
+    /// This transform rotated to face `target` (`Transform2D.looking_at`).
+    ///
+    /// ⚠️ The target is a GLOBAL point, brought into local space by the affine
+    /// inverse before its angle is taken — passing it straight to `angle()`
+    /// would aim at a point measured from the origin of the world rather than
+    /// from this transform.
+    ///
+    /// ⓘ Scale is applied to the local target before the angle, so a
+    /// non-uniformly scaled transform aims correctly in the space the user
+    /// sees. Rotation replaces, rather than adds to, whatever `get_rotation`
+    /// already reported — the sum below is Godot's, and it cancels because
+    /// `target_position` was measured after the existing rotation.
+    pub fn looking_at(self, target: Vector2) -> Self {
+        let local = self.affine_inverse().xform(target);
+        let scale = self.get_scale();
+        let scaled = Vector2::new(local.x * scale.x, local.y * scale.y);
+        Self::from_rotation_origin(self.get_rotation() + scaled.angle(), self.origin)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2935,6 +3027,20 @@ mod tests {
         let b = Vector3::new(0.0, 1.0, 0.0);
         assert!(approx_eq(a.dot(b), 0.0));
         assert!(approx_eq(a.dot(a), 1.0));
+    }
+
+    /// `Vector3::is_normalized` existed for Vector4 but not Vector3, so a
+    /// caller in math3d.rs failed to compile with E0599 and took the whole
+    /// gdcore lib — and therefore every dependent crate — down with it.
+    #[test]
+    fn vector3_is_normalized() {
+        assert!(Vector3::new(1.0, 0.0, 0.0).is_normalized());
+        assert!(Vector3::new(1.0, 2.0, -3.0).normalized().is_normalized());
+        // The two ways it must answer false: too long, and the ZERO that
+        // `normalized()` returns for a degenerate vector — the caller relies on
+        // that second case to bail out to IDENTITY.
+        assert!(!Vector3::new(1.0, 1.0, 0.0).is_normalized());
+        assert!(!Vector3::ZERO.is_normalized());
     }
 
     // -- Rect2 edge cases ---------------------------------------------------

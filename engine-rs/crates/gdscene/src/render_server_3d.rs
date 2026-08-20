@@ -307,6 +307,9 @@ impl RenderServer3DAdapter {
     /// Returns a measurable snapshot and the raw frame data.
     pub fn render_frame(&mut self, tree: &SceneTree) -> (RenderFrame3DSnapshot, FrameData3D) {
         self.frame_counter += 1;
+        // Hand this frame's clock to the renderer so custom shaders see a live
+        // `TIME` (pat-s3rrv.122). `MainLoop::step` publishes it onto the tree.
+        self.renderer.set_shader_time(tree.shader_time());
 
         // 1. Find the active Camera3D and build a Viewport3D.
         let (viewport, camera_transform) = self.build_viewport(tree);
@@ -604,7 +607,11 @@ impl RenderServer3DAdapter {
                     self.renderer.set_material(inst_id, resolved_mat);
 
                     // Resolve ShaderMaterial3D if attached to this node.
-                    if let Some(shader_mat) = Self::resolve_shader_material(tree, nid) {
+                    if let Some(mut shader_mat) = Self::resolve_shader_material(tree, nid) {
+                        // Load any `sampler2D` uniform's image before handing the
+                        // material over — the renderers sample from the material's
+                        // texture map, not from `parameters` (pat-s3rrv.122).
+                        self.bind_shader_textures(&mut shader_mat);
                         self.renderer.set_shader_material(inst_id, shader_mat);
                     }
 
@@ -1297,6 +1304,42 @@ impl RenderServer3DAdapter {
     /// string (`"spatial"`/`"sky"`, from the `.gdshader` source) or the legacy
     /// integer form (`1` = Sky). Any `shader_parameter/*` properties become
     /// bound uniform values.
+    /// Loads each `sampler2D` uniform's texture into the material (pat-s3rrv.122).
+    ///
+    /// 🔑 THIS IS THE STEP THAT WAS MISSING ENTIRELY. `resolve_shader_material`
+    /// collects `shader_parameter/<name>` into `parameters`, but a Variant holds
+    /// a resource PATH, not pixels — and the fragment path samples from the
+    /// material's texture map. With nothing performing this load,
+    /// `texture(tex, UV)` always hit the missing-binding white placeholder, and
+    /// `CustomFragmentShader::set_texture` had no caller outside its own tests.
+    ///
+    /// A path that fails to load is skipped rather than bound black, so an
+    /// unresolvable texture keeps the neutral placeholder instead of turning the
+    /// surface into a silhouette.
+    fn bind_shader_textures(&mut self, mat: &mut ShaderMaterial3D) {
+        let Some(shader) = mat.shader.as_ref() else {
+            return;
+        };
+        let compiled = gdserver3d::ShaderCompiler3D::new()
+            .compile_cached(shader.shader_type, &shader.source_code);
+        let samplers: Vec<(String, String)> = compiled
+            .uniforms
+            .iter()
+            .filter(|u| u.uniform_type == gdserver3d::shader::UniformType::Sampler2D)
+            .filter_map(|u| match mat.get_shader_parameter(&u.name) {
+                Some(gdvariant::Variant::String(path)) if !path.is_empty() => {
+                    Some((u.name.clone(), path.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (name, path) in samplers {
+            if let Some(img) = self.texture_cache.get_or_load(&path) {
+                mat.set_texture(&name, img);
+            }
+        }
+    }
+
     fn resolve_shader_material(tree: &SceneTree, nid: NodeId) -> Option<ShaderMaterial3D> {
         let node = tree.get_node(nid)?;
 

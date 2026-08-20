@@ -8,7 +8,7 @@
 //! let the caller resolve it through whatever registry owns the object
 //! (e.g. `SceneTree::get_node`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 use gdcore::id::ObjectId;
@@ -135,6 +135,88 @@ impl WeakRef {
             Variant::Nil
         }
     }
+}
+
+/// Tags an `ObjectId` minted by [`new_weakref_handle`] (pat-s3rrv.146).
+///
+/// 🔑 A handle tag byte is a **workspace-wide** namespace: every `is_*_handle`
+/// predicate tests these same 8 bits, and the FIRST predicate the interpreter
+/// consults wins the dispatch. `0x77` was picked by sweeping every tag constant
+/// under `crates/*/src` — a duplicate byte does not fail loudly, it silently
+/// routes every `WeakRef` method into another family's handler.
+pub const WEAKREF_HANDLE_TAG: u64 = 0x7700_0000_0000_0000;
+
+/// Mask selecting the tag byte out of a raw id.
+const WEAKREF_TAG_MASK: u64 = 0xFF00_0000_0000_0000;
+
+/// Referent of each minted weakref handle, keyed by raw handle id.
+///
+/// The mapping is kept even after the referent dies: `get_ref()` must answer
+/// `null` for a freed object, which requires knowing which object it *was*.
+fn weakref_targets() -> &'static Mutex<HashMap<u64, ObjectId>> {
+    static TARGETS: OnceLock<Mutex<HashMap<u64, ObjectId>>> = OnceLock::new();
+    TARGETS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn next_weakref_seq() -> u64 {
+    static NEXT: OnceLock<Mutex<u64>> = OnceLock::new();
+    let cell = NEXT.get_or_init(|| Mutex::new(1));
+    let mut n = cell.lock().unwrap();
+    let v = *n;
+    *n += 1;
+    v
+}
+
+/// Whether `id` names a `WeakRef` minted by [`new_weakref_handle`].
+pub fn is_weakref_handle(id: ObjectId) -> bool {
+    id.raw() & WEAKREF_TAG_MASK == WEAKREF_HANDLE_TAG
+}
+
+/// Mints a `WeakRef` pointing at `target` — Godot's `weakref(obj)`.
+///
+/// The handle is a **distinct object** from the referent, which is the whole
+/// point: it is what makes `weakref(o) != o`, `w.get_class() == "WeakRef"` and
+/// `w is WeakRef` answer correctly. Handing back the referent unchanged (what
+/// this engine did before) satisfies the liveness half of the contract and
+/// fails every identity question asked of it.
+///
+/// The handle itself is registered alive, so `is_instance_valid(w)` stays true
+/// after the referent is freed — in Godot the WeakRef outlives what it watches.
+///
+/// ⚠️ Nothing unregisters the handle: each call leaves an entry in the target
+/// map and in the alive set for the life of the process. Godot frees a WeakRef
+/// when its refcount drops, which this engine cannot mirror yet — script-side
+/// refcounted handles have no auto-free on scope exit either (the reason
+/// `refcounted_weakref_lifecycle` is `#[ignore]`d). So this is consistent with
+/// the surrounding lifecycle rather than a regression, but it is unbounded
+/// growth for a script that calls `weakref()` in a loop, and it should be
+/// released from the same place that eventually releases refcounted handles.
+pub fn new_weakref_handle(target: ObjectId) -> ObjectId {
+    let id = ObjectId::from_raw(WEAKREF_HANDLE_TAG | next_weakref_seq());
+    weakref_targets().lock().unwrap().insert(id.raw(), target);
+    register_object(id);
+    id
+}
+
+/// The object a weakref handle was minted against, alive or not.
+pub fn weakref_target(id: ObjectId) -> Option<ObjectId> {
+    weakref_targets().lock().unwrap().get(&id.raw()).copied()
+}
+
+/// Godot `WeakRef.get_ref()`: the referent while it lives, `null` afterwards.
+pub fn weakref_get_ref(id: ObjectId) -> Option<ObjectId> {
+    let target = weakref_target(id)?;
+    if is_object_alive(target) {
+        Some(target)
+    } else {
+        None
+    }
+}
+
+/// Clears the weakref handle registry. Test isolation only; see the warning on
+/// [`clear_alive_registry`].
+pub fn clear_weakref_registry_for_testing() {
+    weakref_targets().lock().unwrap().clear();
 }
 
 #[cfg(test)]

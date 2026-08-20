@@ -64,6 +64,36 @@ pub trait AudioEffect: Send {
     fn godot_class(&self) -> &str {
         self.name()
     }
+
+    /// This effect as an [`AudioEffectCapture`], if it is one (pat-s3rrv.141).
+    ///
+    /// 🔑 The typed-accessor pair below is how a caller reaches the concrete
+    /// API of a tap sitting in a bus slot. The alternative — an `as_any`
+    /// downcast hook — is the same amount of plumbing with none of the type
+    /// safety, and the same reason [`magnitude_for_frequency_range`] is
+    /// defaulted applies here: no existing effect has to be touched.
+    ///
+    /// [`magnitude_for_frequency_range`]: Self::magnitude_for_frequency_range
+    fn as_capture(&self) -> Option<&AudioEffectCapture> {
+        None
+    }
+
+    /// Mutable twin of [`as_capture`](Self::as_capture) — `get_buffer` DRAINS,
+    /// so reading a capture is a mutation.
+    fn as_capture_mut(&mut self) -> Option<&mut AudioEffectCapture> {
+        None
+    }
+
+    /// This effect as an [`AudioEffectRecord`], if it is one (pat-s3rrv.141).
+    fn as_record(&self) -> Option<&AudioEffectRecord> {
+        None
+    }
+
+    /// Mutable twin of [`as_record`](Self::as_record), for
+    /// `set_recording_active` / `set_format`.
+    fn as_record_mut(&mut self) -> Option<&mut AudioEffectRecord> {
+        None
+    }
 }
 
 /// Amplify effect — multiplies the signal by a linear gain derived from dB.
@@ -572,6 +602,47 @@ impl EffectChain {
 
     pub fn effect_at(&self, index: usize) -> Option<&dyn AudioEffect> {
         self.slots.get(index).map(|s| s.effect.as_ref())
+    }
+
+    /// The [`AudioEffectCapture`] in slot `index` (pat-s3rrv.141).
+    ///
+    /// `None` when the slot is out of range **or** holds a different effect, so
+    /// a script asking a compressor for its captured frames gets nothing rather
+    /// than a panic.
+    pub fn capture_at(&self, index: usize) -> Option<&AudioEffectCapture> {
+        match self.slots.get(index) {
+            Some(slot) => slot.effect.as_capture(),
+            None => None,
+        }
+    }
+
+    /// Mutable twin of [`capture_at`](Self::capture_at).
+    ///
+    /// ⓘ Written as a `match` rather than `get_mut(..).and_then(..)` on
+    /// purpose — see the note on [`set_sidechain_key_at`](Self::set_sidechain_key_at)
+    /// about handing a `&mut` to a boxed unsized `dyn AudioEffect` back out
+    /// through a closure.
+    pub fn capture_at_mut(&mut self, index: usize) -> Option<&mut AudioEffectCapture> {
+        match self.slots.get_mut(index) {
+            Some(slot) => slot.effect.as_capture_mut(),
+            None => None,
+        }
+    }
+
+    /// The [`AudioEffectRecord`] in slot `index` (pat-s3rrv.141).
+    pub fn record_at(&self, index: usize) -> Option<&AudioEffectRecord> {
+        match self.slots.get(index) {
+            Some(slot) => slot.effect.as_record(),
+            None => None,
+        }
+    }
+
+    /// Mutable twin of [`record_at`](Self::record_at).
+    pub fn record_at_mut(&mut self, index: usize) -> Option<&mut AudioEffectRecord> {
+        match self.slots.get_mut(index) {
+            Some(slot) => slot.effect.as_record_mut(),
+            None => None,
+        }
     }
 
     /// True when empty.
@@ -1236,6 +1307,453 @@ impl AudioEffect for AudioEffectSpectrumAnalyzer {
     fn reset(&mut self) {
         self.buf.clear();
         self.sample_rate = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pat-s3rrv.141 — the two bus taps a script drives.
+// ---------------------------------------------------------------------------
+
+/// `AudioEffectCapture` — a bus tap whose frames a script drains.
+///
+/// Inserted on a bus, it passes the signal through untouched and copies every
+/// frame into a bounded ring the script reads with
+/// [`get_buffer`](Self::get_buffer). This is how a game builds a visualizer, a
+/// voice-chat sender or a level meter out of the audio the mixer actually
+/// produced.
+///
+/// Ported from `upstream/godot/servers/audio/effects/audio_effect_capture.cpp`.
+///
+/// ⚠️ Godot sizes the ring in `instantiate()` from the audio server's mix rate.
+/// Patina has no `instantiate` step — an effect is constructed and inserted —
+/// so the ring is sized lazily on the first [`process`](AudioEffect::process)
+/// call, from the sample rate the mixer passes in. Before that first call the
+/// buffer is uninitialized and every query answers 0, which is exactly what
+/// Godot's `ERR_FAIL_COND_V(!buffer_initialized, 0)` guards return.
+pub struct AudioEffectCapture {
+    buffer_length_seconds: f32,
+    /// The ring. Empty until the first `process` sizes it; its length is always
+    /// a power of two so the position mask is `len - 1`.
+    ring: Vec<(f32, f32)>,
+    /// Monotonic frame positions; the ring index is `pos & (len - 1)`. `u64`
+    /// rather than a wrapped index so `data_left` is a plain subtraction — at
+    /// 48 kHz these need six million years to overflow.
+    read_pos: u64,
+    write_pos: u64,
+    pushed_frames: u64,
+    discarded_frames: u64,
+}
+
+impl Default for AudioEffectCapture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AudioEffectCapture {
+    /// A capture with Godot's default 0.1 s buffer.
+    pub fn new() -> Self {
+        Self {
+            buffer_length_seconds: 0.1,
+            ring: Vec::new(),
+            read_pos: 0,
+            write_pos: 0,
+            pushed_frames: 0,
+            discarded_frames: 0,
+        }
+    }
+
+    /// A capture with an explicit buffer length in seconds.
+    pub fn with_buffer_length(seconds: f32) -> Self {
+        Self {
+            buffer_length_seconds: seconds,
+            ..Self::new()
+        }
+    }
+
+    /// `AudioEffectCapture.buffer_length` — the requested length in seconds.
+    pub fn get_buffer_length(&self) -> f32 {
+        self.buffer_length_seconds
+    }
+
+    /// `AudioEffectCapture.set_buffer_length(buffer_length_seconds)`.
+    ///
+    /// ⚠️ Mirrors a Godot gotcha: this sets the field but does **not** resize a
+    /// ring that has already been sized. Godot only reads
+    /// `buffer_length_seconds` inside `instantiate()`, and then only when
+    /// `!buffer_initialized` — so changing it on a live effect silently does
+    /// nothing until the effect is re-instantiated. Resizing here would be
+    /// *nicer* and would not be parity.
+    pub fn set_buffer_length(&mut self, seconds: f32) {
+        self.buffer_length_seconds = seconds;
+    }
+
+    /// Frames waiting to be read.
+    pub fn get_frames_available(&self) -> i64 {
+        (self.write_pos - self.read_pos) as i64
+    }
+
+    /// `AudioEffectCapture.get_buffer_length_frames()` — the ring's real size.
+    ///
+    /// 🔑 This is **not** `mix_rate * buffer_length`. Godot rounds up to a power
+    /// of two via `nearest_shift`, which returns the shift *past* the highest
+    /// set bit — so 0.1 s at 44100 Hz asks for 4410 frames and gets 8192, and an
+    /// exact power of two is doubled rather than kept.
+    pub fn get_buffer_length_frames(&self) -> i64 {
+        self.ring.len() as i64
+    }
+
+    /// Frames the mixer has handed to this tap and the ring accepted.
+    pub fn get_pushed_frames(&self) -> i64 {
+        self.pushed_frames as i64
+    }
+
+    /// Frames dropped because the script did not drain fast enough.
+    pub fn get_discarded_frames(&self) -> i64 {
+        self.discarded_frames as i64
+    }
+
+    /// Whether [`get_buffer`](Self::get_buffer) would return `frames` frames.
+    pub fn can_get_buffer(&self, frames: i64) -> bool {
+        self.get_frames_available() >= frames
+    }
+
+    /// `AudioEffectCapture.get_buffer(frames)` — drains and returns exactly
+    /// `frames` `(left, right)` pairs, or nothing.
+    ///
+    /// 🔑 **All or nothing.** Godot returns an EMPTY array rather than a short
+    /// read when fewer than `frames` are buffered, and consumes nothing in that
+    /// case (`audio_effect_capture.cpp:39-46`). A caller loop written against a
+    /// short-read version would busy-spin on a partial buffer forever.
+    ///
+    /// Also empty when `frames` is 0, or when `frames` is not smaller than the
+    /// ring itself (`ERR_FAIL_INDEX_V(p_frames, buffer.size())`) — the ring can
+    /// never hold its own size in frames, so such a request could never be
+    /// satisfiable and fails loudly instead of blocking forever.
+    pub fn get_buffer(&mut self, frames: i64) -> Vec<(f32, f32)> {
+        if self.ring.is_empty() || frames <= 0 || frames >= self.ring.len() as i64 {
+            return Vec::new();
+        }
+        if self.get_frames_available() < frames {
+            return Vec::new();
+        }
+        let mask = self.ring.len() - 1;
+        let mut out = Vec::with_capacity(frames as usize);
+        for _ in 0..frames {
+            out.push(self.ring[(self.read_pos as usize) & mask]);
+            self.read_pos += 1;
+        }
+        out
+    }
+
+    /// `AudioEffectCapture.clear_buffer()` — drops everything unread.
+    ///
+    /// ⓘ Deliberately leaves `pushed_frames` and `discarded_frames` alone:
+    /// Godot's `clear_buffer` only advances the read head, so the lifetime
+    /// counters a script uses to detect underruns survive a flush.
+    pub fn clear_buffer(&mut self) {
+        self.read_pos = self.write_pos;
+    }
+
+    /// Room for more frames, in frames.
+    ///
+    /// ⚠️ One slot short of the ring's size: Godot's `RingBuffer::space_left`
+    /// reserves a slot to keep "full" distinguishable from "empty", so a ring of
+    /// 8192 holds 8191 frames.
+    fn space_left(&self) -> u64 {
+        if self.ring.is_empty() {
+            return 0;
+        }
+        self.ring.len() as u64 - (self.write_pos - self.read_pos) - 1
+    }
+
+    /// Sizes the ring on the first `process`, from the mixer's sample rate.
+    fn ensure_ring(&mut self, sample_rate: u32) {
+        if !self.ring.is_empty() {
+            return;
+        }
+        let target = sample_rate as f32 * self.buffer_length_seconds;
+        // Godot's `ERR_FAIL_COND_V(target_buffer_size <= 0 || >= (1 << 27))`.
+        // `is_finite` also rejects a NaN length, which would otherwise fall
+        // through both comparisons and index the ring with garbage.
+        if !target.is_finite() || target <= 0.0 || target >= (1u32 << 27) as f32 {
+            return;
+        }
+        let size = 1usize << nearest_shift(target as u32);
+        self.ring = vec![(0.0, 0.0); size];
+        self.read_pos = 0;
+        self.write_pos = 0;
+    }
+}
+
+/// Godot's `nearest_shift` (`core/math/math_funcs.h`): the shift **past** the
+/// highest set bit, so `1 << nearest_shift(x)` is the smallest power of two
+/// strictly greater than `x`.
+fn nearest_shift(x: u32) -> u32 {
+    for i in (0..=30u32).rev() {
+        if x & (1 << i) != 0 {
+            return i + 1;
+        }
+    }
+    0
+}
+
+impl AudioEffect for AudioEffectCapture {
+    fn name(&self) -> &str {
+        "Capture"
+    }
+
+    fn godot_class(&self) -> &str {
+        "AudioEffectCapture"
+    }
+
+    /// Copies frames into the ring and leaves the signal **untouched** — a
+    /// capture is a tap, not a filter.
+    fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
+        self.ensure_ring(sample_rate);
+        if self.ring.is_empty() {
+            return;
+        }
+        let ch = channels.max(1) as usize;
+        let frame_count = samples.len() / ch;
+        if frame_count == 0 {
+            return;
+        }
+
+        // 🔑 Overflow discards the WHOLE incoming block, never part of it
+        // (`audio_effect_capture.cpp:127-133`). The intuitive "write what fits,
+        // drop the rest" both miscounts `discarded_frames` and tears a block in
+        // half, so a script draining the ring would splice two discontinuous
+        // chunks together and hear a click it cannot explain.
+        if self.space_left() < frame_count as u64 {
+            self.discarded_frames += frame_count as u64;
+            return;
+        }
+
+        let mask = self.ring.len() - 1;
+        for i in 0..frame_count {
+            let left = samples[i * ch];
+            // ⓘ Godot's mixer is stereo throughout, so a capture always yields
+            // `Vector2` frames. A mono bus duplicates its sample to both sides
+            // rather than reporting a silent right channel.
+            let right = if ch > 1 { samples[i * ch + 1] } else { left };
+            self.ring[(self.write_pos as usize) & mask] = (left, right);
+            self.write_pos += 1;
+        }
+        self.pushed_frames += frame_count as u64;
+    }
+
+    fn reset(&mut self) {
+        self.clear_buffer();
+    }
+
+    fn as_capture(&self) -> Option<&AudioEffectCapture> {
+        Some(self)
+    }
+
+    fn as_capture_mut(&mut self) -> Option<&mut AudioEffectCapture> {
+        Some(self)
+    }
+}
+
+/// The in-memory `AudioStreamWAV` an [`AudioEffectRecord`] hands back.
+///
+/// gdaudio sits below gdresource, so this is the raw payload rather than a
+/// `Resource`; the caller that needs a resource builds one from these fields,
+/// which are exactly the four `AudioStreamWAV` setters Godot calls
+/// (`audio_effect_record.cpp:264-269`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordedWav {
+    /// Encoded sample data in `format`.
+    pub data: Vec<u8>,
+    /// `AudioStreamWAV.Format`: 0 = 8-bit, 1 = 16-bit, 2 = IMA ADPCM, 3 = QOA.
+    pub format: i64,
+    /// The mix rate the frames were recorded at.
+    pub mix_rate: u32,
+    /// Always true — Godot notes that "forcing mono is not implemented".
+    pub stereo: bool,
+    /// `AudioStreamWAV.LoopMode::LOOP_DISABLED`.
+    pub loop_mode: i64,
+}
+
+impl RecordedWav {
+    /// Recorded frames, derived from the encoding.
+    pub fn frame_count(&self) -> usize {
+        let bytes_per_frame = match self.format {
+            0 => 2,
+            1 => 4,
+            _ => return 0,
+        };
+        self.data.len() / bytes_per_frame
+    }
+}
+
+/// Why [`AudioEffectRecord::get_recording`] produced no stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordError {
+    /// Nothing has been recorded yet.
+    NothingRecorded,
+    /// A `format` this port does not encode (IMA ADPCM / QOA).
+    UnsupportedFormat(i64),
+}
+
+/// `AudioEffectRecord` — records a bus to memory as an `AudioStreamWAV`.
+///
+/// Ported from `upstream/godot/servers/audio/effects/audio_effect_record.cpp`.
+///
+/// ⓘ Godot buffers into a ring that a background IO thread drains into
+/// `recording_data`. That thread exists to keep allocation off the audio
+/// callback; Patina's mixer already runs `process` off the device callback, so
+/// this appends straight to the recording and the ring/thread pair collapses
+/// away. The observable behaviour — the frames recorded and their order — is
+/// the same.
+pub struct AudioEffectRecord {
+    format: i64,
+    recording: bool,
+    /// Interleaved left, right — **two floats per frame**, exactly Godot's
+    /// `recording_data`.
+    recording_data: Vec<f32>,
+    mix_rate: u32,
+}
+
+impl Default for AudioEffectRecord {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AudioEffectRecord {
+    /// A recorder in Godot's default 16-bit format, not yet recording.
+    pub fn new() -> Self {
+        Self {
+            // ⚠️ 1 = FORMAT_16_BITS. Zero-initializing this field would mean
+            // FORMAT_8_BITS and quietly halve every recording's resolution.
+            format: 1,
+            recording: false,
+            recording_data: Vec::new(),
+            mix_rate: 0,
+        }
+    }
+
+    /// `AudioEffectRecord.set_recording_active(record)`.
+    ///
+    /// 🔑 Switching recording **on** discards whatever was recorded before
+    /// (Godot's `init()` calls `recording_data.clear()`); switching it off keeps
+    /// the data so [`get_recording`](Self::get_recording) can still return it.
+    /// Treating this as a symmetric pause/resume would silently concatenate two
+    /// takes into one stream.
+    pub fn set_recording_active(&mut self, record: bool) {
+        if record && !self.recording {
+            self.recording_data.clear();
+        }
+        self.recording = record;
+    }
+
+    /// `AudioEffectRecord.is_recording_active()`.
+    pub fn is_recording_active(&self) -> bool {
+        self.recording
+    }
+
+    /// `AudioEffectRecord.format` — an `AudioStreamWAV.Format` index.
+    pub fn get_format(&self) -> i64 {
+        self.format
+    }
+
+    /// `AudioEffectRecord.set_format(format)`.
+    pub fn set_format(&mut self, format: i64) {
+        self.format = format;
+    }
+
+    /// Frames recorded so far.
+    pub fn recorded_frames(&self) -> usize {
+        self.recording_data.len() / 2
+    }
+
+    /// `AudioEffectRecord.get_recording()` — encodes the take.
+    ///
+    /// ⚠️ An empty take is an ERROR, not an empty stream: Godot's
+    /// `ERR_FAIL_COND_V(recording_data.is_empty(), nullptr)` returns null so a
+    /// caller cannot mistake "the mic never opened" for "silence was recorded".
+    ///
+    /// ⚠️ Diverges from Godot for an unencodable format. Godot prints
+    /// "Format not implemented." and still returns a stream carrying an EMPTY
+    /// buffer — a silent, valid-looking `AudioStreamWAV`. This reports the
+    /// format instead, because a zero-length recording that claims success is
+    /// the exact failure this class exists to make visible.
+    pub fn get_recording(&self) -> Result<RecordedWav, RecordError> {
+        if self.recording_data.is_empty() {
+            return Err(RecordError::NothingRecorded);
+        }
+        let data = match self.format {
+            // 🔑 8-bit `AudioStreamWAV` is **signed**, stored as the raw two's
+            // complement byte — not the unsigned 0..255 convention a RIFF WAV
+            // file uses. Encoding `v * 127.0 + 128.0` produces a file that plays
+            // fine in an audio editor and is off by a half-scale DC step here.
+            0 => self
+                .recording_data
+                .iter()
+                .map(|s| (s * 128.0).clamp(-128.0, 127.0) as i8 as u8)
+                .collect(),
+            // ⚠️ The scale is 32768 with an asymmetric clamp, not 32767. Every
+            // non-zero sample differs by one LSB from the natural version, and
+            // -1.0 must reach exactly -32768.
+            1 => self
+                .recording_data
+                .iter()
+                .flat_map(|s| (((s * 32768.0).clamp(-32768.0, 32767.0)) as i16).to_le_bytes())
+                .collect(),
+            other => return Err(RecordError::UnsupportedFormat(other)),
+        };
+        Ok(RecordedWav {
+            data,
+            format: self.format,
+            mix_rate: self.mix_rate,
+            // Godot: "forcing mono is not implemented".
+            stereo: true,
+            loop_mode: 0,
+        })
+    }
+}
+
+impl AudioEffect for AudioEffectRecord {
+    fn name(&self) -> &str {
+        "Record"
+    }
+
+    fn godot_class(&self) -> &str {
+        "AudioEffectRecord"
+    }
+
+    /// Appends frames while recording, and always passes the signal through.
+    fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
+        // Remembered even when idle, so `get_recording` can stamp the stream
+        // with the rate the bus actually ran at.
+        self.mix_rate = sample_rate;
+        if !self.recording {
+            return;
+        }
+        let ch = channels.max(1) as usize;
+        let frame_count = samples.len() / ch;
+        self.recording_data.reserve(frame_count * 2);
+        for i in 0..frame_count {
+            let left = samples[i * ch];
+            let right = if ch > 1 { samples[i * ch + 1] } else { left };
+            self.recording_data.push(left);
+            self.recording_data.push(right);
+        }
+    }
+
+    /// ⚠️ Deliberately does NOT drop the recording. `reset` clears DSP state
+    /// between playbacks; a recording is user data that outlives the bus, and
+    /// Godot's own recorder keeps it until the next `set_recording_active(true)`.
+    fn reset(&mut self) {}
+
+    fn as_record(&self) -> Option<&AudioEffectRecord> {
+        Some(self)
+    }
+
+    fn as_record_mut(&mut self) -> Option<&mut AudioEffectRecord> {
+        Some(self)
     }
 }
 

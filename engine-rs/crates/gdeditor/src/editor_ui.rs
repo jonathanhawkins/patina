@@ -2356,6 +2356,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
             <div class="vp3d-sep"></div>
             <div class="vp3d-mi" data-act="view-origin"><span class="vp3d-check">&#10003;</span>View Origin</div>
             <div class="vp3d-mi" data-act="view-grid"><span class="vp3d-check">&#10003;</span>View Grid</div>
+            <div class="vp3d-mi" data-act="view-frame-time"><span class="vp3d-check"></span>View Frame Time</div>
             <div class="vp3d-sep"></div>
             <div class="vp3d-mi" data-act="view-settings">Settings...</div>
           </div>
@@ -7541,6 +7542,147 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       if (isPanning) { isPanning = false; }
     });
 
+    // ---- Ruler-drag guides (pat-s3rrv.149) ----
+    //
+    // Godot drops a guide when you drag out of a ruler: out of the TOP ruler a
+    // horizontal one, out of the LEFT ruler a vertical one. The strip you start
+    // in picks the orientation, and the axis the guide can move along is the
+    // OTHER one — dragging down from the top ruler slides a horizontal line.
+    //
+    // Bound on the container rather than the overlay canvas: that canvas is
+    // `pointer-events:none` (it sits above the viewport image), so it never
+    // receives a mousedown.
+    container.addEventListener('mousedown', function(e) {
+      if (editorMode === '3d') return;
+      if (e.button !== 0 || e.shiftKey) return;
+      if (!editorSettings.rulers_visible) return;
+      var rect = container.getBoundingClientRect();
+      var lx = e.clientX - rect.left;
+      var ly = e.clientY - rect.top;
+      var inTop = ly < RULER_SIZE;
+      var inLeft = lx < RULER_SIZE;
+      if (!inTop && !inLeft) return;
+      e.preventDefault();
+      e.stopPropagation();
+      var zoom = viewportZoom || 1.0;
+      // The corner belongs to the top ruler, matching Godot: a drag starting in
+      // the 18x18 overlap produces a horizontal guide.
+      if (inTop) {
+        pendingGuide = { orientation: 'horizontal', position: (ly - (rect.height / 2 + viewportPanY)) / zoom };
+      } else {
+        pendingGuide = { orientation: 'vertical', position: (lx - (rect.width / 2 + viewportPanX)) / zoom };
+      }
+      renderViewportOverlay();
+    });
+    document.addEventListener('mousemove', function(e) {
+      if (!pendingGuide) return;
+      var rect = container.getBoundingClientRect();
+      var zoom = viewportZoom || 1.0;
+      if (pendingGuide.orientation === 'horizontal') {
+        pendingGuide.position = ((e.clientY - rect.top) - (rect.height / 2 + viewportPanY)) / zoom;
+      } else {
+        pendingGuide.position = ((e.clientX - rect.left) - (rect.width / 2 + viewportPanX)) / zoom;
+      }
+      renderViewportOverlay();
+    });
+    document.addEventListener('mouseup', function(e) {
+      if (!pendingGuide) return;
+      var guide = pendingGuide;
+      pendingGuide = null;
+      var rect = container.getBoundingClientRect();
+      var lx = e.clientX - rect.left;
+      var ly = e.clientY - rect.top;
+      // Released back inside the ruler it came from, or outside the viewport
+      // entirely: Godot treats that as "never mind" and drops nothing.
+      var backInRuler = (guide.orientation === 'horizontal') ? ly < RULER_SIZE : lx < RULER_SIZE;
+      var outside = lx < 0 || ly < 0 || lx > rect.width || ly > rect.height;
+      if (backInRuler || outside) { renderViewportOverlay(); return; }
+      api('POST', '/api/viewport/guides', {
+        orientation: guide.orientation,
+        position: Math.round(guide.position)
+      }).then(loadViewportGuides);
+    });
+
+    // ---- Move or delete an existing guide (pat-s3rrv.149) ----
+    //
+    // Godot lets you grab a placed guide and slide it, and dropping it back on
+    // the ruler (or off the viewport) removes it. The server exposes create and
+    // `{"remove": i}` but no move, so a move is remove-then-create; the
+    // subsequent GET re-reads the list, which is what keeps indices honest
+    // after the shift a removal causes.
+    //
+    // ⚠️ Only swallows the event when a guide is actually under the cursor.
+    // Grabbing the viewport anywhere else must still reach node selection.
+    container.addEventListener('mousedown', function(e) {
+      if (editorMode === '3d') return;
+      if (e.button !== 0 || e.shiftKey) return;
+      if (pendingGuide) return;              // a ruler drag already started
+      if (!viewportGuides.length) return;
+      var rect = container.getBoundingClientRect();
+      var lx = e.clientX - rect.left;
+      var ly = e.clientY - rect.top;
+      if (lx < RULER_SIZE || ly < RULER_SIZE) return;   // ruler strips create
+      var zoom = viewportZoom || 1.0;
+      var ox = rect.width / 2 + viewportPanX;
+      var oy = rect.height / 2 + viewportPanY;
+      var GRAB = 4;                          // px; Godot uses a similar slop
+      for (var i = 0; i < viewportGuides.length; i++) {
+        var g = viewportGuides[i];
+        if (!g) continue;
+        var hit = (g.orientation === 'vertical')
+          ? Math.abs((ox + g.position * zoom) - lx) <= GRAB
+          : Math.abs((oy + g.position * zoom) - ly) <= GRAB;
+        if (hit) {
+          e.preventDefault();
+          e.stopPropagation();
+          draggingGuide = { index: i, orientation: g.orientation, position: g.position };
+          renderViewportOverlay();
+          return;
+        }
+      }
+    });
+    document.addEventListener('mousemove', function(e) {
+      if (!draggingGuide) return;
+      var rect = container.getBoundingClientRect();
+      var zoom = viewportZoom || 1.0;
+      if (draggingGuide.orientation === 'horizontal') {
+        draggingGuide.position = ((e.clientY - rect.top) - (rect.height / 2 + viewportPanY)) / zoom;
+      } else {
+        draggingGuide.position = ((e.clientX - rect.left) - (rect.width / 2 + viewportPanX)) / zoom;
+      }
+      renderViewportOverlay();
+    });
+    document.addEventListener('mouseup', function(e) {
+      if (!draggingGuide) return;
+      var moved = draggingGuide;
+      draggingGuide = null;
+      var rect = container.getBoundingClientRect();
+      var lx = e.clientX - rect.left;
+      var ly = e.clientY - rect.top;
+      var ontoRuler = lx < RULER_SIZE || ly < RULER_SIZE;
+      var outside = lx < 0 || ly < 0 || lx > rect.width || ly > rect.height;
+      // ⚠️ Remove FIRST in both branches. A create-then-remove would delete the
+      // wrong entry: adding shifts nothing, but the index captured at grab time
+      // refers to the pre-insert list, and the server removes by index.
+      api('POST', '/api/viewport/guides', { remove: moved.index }).then(function() {
+        if (ontoRuler || outside) return loadViewportGuides();
+        return api('POST', '/api/viewport/guides', {
+          orientation: moved.orientation,
+          position: Math.round(moved.position)
+        }).then(loadViewportGuides);
+      });
+    });
+
+    // Load whatever guides the scene already carries. Without this the client
+    // only ever shows guides created in THIS session — a saved scene would
+    // reopen with its guides invisible while `apply_snap` kept honouring them,
+    // which reads as snapping to nothing.
+    //
+    // `loadViewportGuides` is declared further down the file; `setupViewport`
+    // runs from the bootstrap after the whole script is parsed, and function
+    // declarations hoist, so the call resolves.
+    loadViewportGuides();
+
     // Zoom indicator
     var zoomIndicator = document.createElement('div');
     zoomIndicator.id = 'zoom-indicator';
@@ -7776,10 +7918,78 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     setVp3dActive('vp3d-snap', !!s.snap);
     setVp3dCheck('view-origin', s.origin !== false);
     setVp3dCheck('view-grid', s.grid !== false);
+    setVp3dCheck('view-frame-time', vp3dFrameTime);
+    updateVp3dPerfOverlay();
     syncVp3dToolActive();
     refreshVp3dModeButtons();
   }
   function setVp3dActive(id, on) { var el = document.getElementById(id); if (el) el.classList.toggle('active', !!on); }
+
+  // ---- 3D 'View Frame Time' overlay (pat-s3rrv.150) ----
+  //
+  // Godot's VIEW_FRAME_TIME shows per-frame timings over the 3D viewport.
+  // `GET /api/viewport/3d/perf` has existed with zero client references; this
+  // is the first consumer.
+  //
+  // ⚠️ **Only two of that payload's seven fields are real**, and the overlay
+  // shows only those:
+  //   * `frames`     — incremented per encoded viewport frame, so an FPS can be
+  //                    derived from the delta between two samples;
+  //   * `encode_ms`  — measured around the PNG/BMP encode.
+  // The others are NOT displayed on purpose: `raster_ms` has no `.store()`
+  // anywhere in the workspace and is therefore permanently 0.000, and `scale`
+  // is written only by its own setter and read only by its own getter — nothing
+  // renders with it. Showing either would put a number on screen that looks
+  // measured and never changes.
+  var vp3dFrameTime = false;
+  var vp3dPerfTimer = null;
+  var vp3dPerfLast = null;   // { frames, t } from the previous sample
+
+  function vp3dPerfEl() {
+    var el = document.getElementById('vp3d-perf-overlay');
+    if (el) return el;
+    var container = document.getElementById('viewport-container');
+    if (!container) return null;
+    el = document.createElement('div');
+    el.id = 'vp3d-perf-overlay';
+    el.style.cssText = 'position:absolute;right:8px;bottom:8px;z-index:7;' +
+      'background:rgba(18,18,18,0.82);color:#ddd;font:11px/1.5 monospace;' +
+      'padding:5px 8px;border-radius:3px;pointer-events:none;white-space:pre;';
+    container.appendChild(el);
+    return el;
+  }
+
+  function updateVp3dPerfOverlay() {
+    var el = vp3dPerfEl();
+    if (!el) return;
+    var on = vp3dFrameTime && editorMode === '3d';
+    el.style.display = on ? 'block' : 'none';
+    if (vp3dPerfTimer) { clearInterval(vp3dPerfTimer); vp3dPerfTimer = null; }
+    if (!on) { vp3dPerfLast = null; return; }
+    vp3dPerfTimer = setInterval(sampleVp3dPerf, 500);
+    sampleVp3dPerf();
+  }
+
+  function sampleVp3dPerf() {
+    return api('GET', '/api/viewport/3d/perf').then(function(d) {
+      var el = document.getElementById('vp3d-perf-overlay');
+      if (!el || !d) return;
+      var now = Date.now();
+      var fps = null;
+      if (vp3dPerfLast && now > vp3dPerfLast.t) {
+        // FPS from the frame COUNTER delta, not from the sample interval: the
+        // viewport only re-encodes when something changed, so a wall-clock rate
+        // would read as full speed on a completely idle scene.
+        fps = (d.frames - vp3dPerfLast.frames) * 1000 / (now - vp3dPerfLast.t);
+      }
+      vp3dPerfLast = { frames: d.frames, t: now };
+      var lines = [];
+      lines.push('FPS: ' + (fps === null ? '--' : fps.toFixed(1)));
+      lines.push('Encode: ' + Number(d.encode_ms || 0).toFixed(2) + ' ms');
+      lines.push('Frames: ' + d.frames);
+      el.textContent = lines.join('\n');
+    });
+  }
   function setVp3dCheck(act, on) {
     var c = document.querySelector('.vp3d-mi[data-act="' + act + '"] .vp3d-check');
     if (c) c.innerHTML = on ? '&#10003;' : '';
@@ -7820,6 +8030,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     else if (act === 'transform-dialog') { openTransformDialog(); }
     else if (act === 'view-origin') { api('POST', '/api/viewport/3d/view_flag', { flag: 'origin' }).then(apply3DState); }
     else if (act === 'view-grid') { api('POST', '/api/viewport/3d/view_flag', { flag: 'grid' }).then(apply3DState); }
+    else if (act === 'view-frame-time') {
+      vp3dFrameTime = !vp3dFrameTime;
+      setVp3dCheck('view-frame-time', vp3dFrameTime);
+      updateVp3dPerfOverlay();
+    }
     else if (act === 'view-settings') { openViewSettingsPopup(); }
     // -- Mesh menu (pat-s3rrv.23) --
     //
@@ -12111,6 +12326,25 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         if (e.key === '7') { e.preventDefault(); api('POST', '/api/viewport/3d/view_preset', { preset: 'top' }).then(apply3DState); return; }
       }
 
+      // 2D 'Frame Selection' (F) — Godot's VIEW_FRAME_SELECTION. The 3D branch
+      // above owns F while in 3D; this is the 2D counterpart, and the server
+      // does the fitting so the client only adopts the pan/zoom it returns.
+      //
+      // ⚠️ Guarded against Ctrl/Cmd-F, which is the script find shortcut.
+      if (editorMode !== '3d' && !e.ctrlKey && !e.metaKey &&
+          (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault();
+        api('POST', '/api/viewport/frame_selection', {}).then(function(d) {
+          if (!d) return;
+          if (typeof d.zoom === 'number') viewportZoom = d.zoom;
+          if (typeof d.pan_x === 'number') viewportPanX = d.pan_x;
+          if (typeof d.pan_y === 'number') viewportPanY = d.pan_y;
+          updateZoomIndicator();
+          renderViewportOverlay();
+        });
+        return;
+      }
+
       // Tool mode shortcuts. While 3D free-look is active (right mouse held), Godot
       // captures W/A/S/D/Q/E for camera flight, so don't let them double as the
       // transform-tool shortcuts — fly3DKeyDown handles the movement.
@@ -15527,6 +15761,24 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 
   // ---- Viewport overlay: grid, rulers, origin, guides (pat-zoh4r) ----
   var activeSnapGuides = [];
+  // User guides dragged out of the rulers (pat-s3rrv.149). Distinct from
+  // `activeSnapGuides` above, which is transient snap FEEDBACK the server
+  // computes during a drag and throws away — these persist in the scene.
+  var viewportGuides = [];
+  // A guide being dragged out of a ruler right now, drawn but not yet POSTed.
+  var pendingGuide = null;
+  // An EXISTING guide being dragged (pat-s3rrv.149). `index` is its position in
+  // `viewportGuides`, which is also the index `POST {"remove": i}` expects.
+  var draggingGuide = null;
+  var RULER_SIZE = 18;
+
+  function loadViewportGuides() {
+    return api('GET', '/api/viewport/guides').then(function(data) {
+      viewportGuides = (data && data.guides) ? data.guides : [];
+      renderViewportOverlay();
+      return viewportGuides;
+    });
+  }
 
   function renderViewportOverlay() {
     var canvas = document.getElementById('viewport-overlay-canvas');
@@ -15579,6 +15831,33 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
           ctx.beginPath(); ctx.moveTo(0, Math.round(gy) + 0.5); ctx.lineTo(cw, Math.round(gy) + 0.5); ctx.stroke();
         }
       }
+    }
+
+    // User guides (pat-s3rrv.149). Drawn BEFORE the ruler strips so the
+    // opaque strips cover the ends of each line, which is what makes a guide
+    // read as coming out of the ruler rather than crossing it.
+    var guidesToDraw = viewportGuides.slice();
+    // While an existing guide is being dragged, hide the copy still sitting at
+    // its old position — otherwise the line appears to duplicate rather than
+    // move, and releasing makes one of the two silently vanish.
+    if (draggingGuide) guidesToDraw[draggingGuide.index] = null;
+    if (pendingGuide) guidesToDraw.push(pendingGuide);
+    if (draggingGuide) guidesToDraw.push(draggingGuide);
+    for (var gi = 0; gi < guidesToDraw.length; gi++) {
+      var gd = guidesToDraw[gi];
+      if (!gd) continue;
+      var provisional = (gd === pendingGuide);
+      ctx.strokeStyle = provisional ? 'rgba(120,180,255,0.9)' : 'rgba(120,180,255,0.55)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      if (gd.orientation === 'vertical') {
+        var gsx = Math.round(ox + gd.position * zoom) + 0.5;
+        ctx.moveTo(gsx, 0); ctx.lineTo(gsx, ch);
+      } else {
+        var gsy = Math.round(oy + gd.position * zoom) + 0.5;
+        ctx.moveTo(0, gsy); ctx.lineTo(cw, gsy);
+      }
+      ctx.stroke();
     }
 
     // Rulers

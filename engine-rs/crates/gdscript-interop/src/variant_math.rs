@@ -23,7 +23,7 @@
 use gdcore::math::{
     Color, Rect2, Rect2i, Transform2D, Vector2, Vector2i, Vector3, Vector3i, Vector4, Vector4i,
 };
-use gdcore::math3d::{Aabb, Basis, Plane, Projection, Quaternion, Transform3D};
+use gdcore::math3d::{Aabb, Basis, EulerOrder, Plane, Projection, Quaternion, Transform3D};
 use gdvariant::Variant;
 
 use crate::interpreter::{RuntimeError, RuntimeErrorKind};
@@ -118,6 +118,45 @@ fn arg_quat(args: &[Variant], idx: usize, ctx: &str) -> Result<Quaternion, Runti
             describe(other)
         ))),
     }
+}
+
+fn arg_plane(args: &[Variant], idx: usize, ctx: &str) -> Result<Plane, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::Plane(p)) => Ok(*p),
+        other => Err(type_error(format!(
+            "{ctx} expects a Plane for argument {idx}, got {}",
+            describe(other)
+        ))),
+    }
+}
+
+/// The optional `EulerOrder` argument of `get_euler` / `from_euler`
+/// (pat-s3rrv.148).
+///
+/// 🔑 Absent means **YXZ**, Godot's default — not XYZ. This argument was being
+/// discarded entirely, so a script asking for XYZ silently received YXZ angles:
+/// a plausible rotation, of the wrong shape, with nothing to indicate it.
+///
+/// An out-of-range index is an error rather than a silent fallback to the
+/// default, matching Godot's `ERR_FAIL_MSG("Invalid Euler order parameter.")`.
+fn arg_euler_order(args: &[Variant], idx: usize, ctx: &str) -> Result<EulerOrder, RuntimeError> {
+    let raw = match args.get(idx) {
+        None | Some(Variant::Nil) => return Ok(EulerOrder::default()),
+        Some(Variant::Int(v)) => *v,
+        // A float is tolerated because arithmetic on an int constant yields one.
+        Some(Variant::Float(f)) => *f as i64,
+        other => {
+            return Err(type_error(format!(
+                "{ctx} expects an EulerOrder constant for argument {idx}, got {}",
+                describe(other)
+            )))
+        }
+    };
+    EulerOrder::from_i64(raw).ok_or_else(|| {
+        type_error(format!(
+            "{ctx}: {raw} is not a valid EulerOrder (expected EULER_ORDER_XYZ..EULER_ORDER_ZYX)"
+        ))
+    })
 }
 
 fn arg_basis(args: &[Variant], idx: usize, ctx: &str) -> Result<Basis, RuntimeError> {
@@ -967,6 +1006,9 @@ fn rect2_method(r: Rect2, method: &str, args: &[Variant]) -> Result<Variant, Run
             Ok(Variant::Rect2(r.grow_side(side, arg_num(args, 1, &ctx)?)))
         }
         "abs" => Ok(Variant::Rect2(r.abs())),
+        "get_support" => Ok(Variant::Vector2(r.get_support(arg_vec2(args, 0, &ctx)?))),
+        "is_equal_approx" => Ok(Variant::Bool(r.is_equal_approx(arg_rect2(args, 0, &ctx)?))),
+        "is_finite" => Ok(Variant::Bool(r.is_finite())),
         _ => Err(undefined_method("Rect2", method)),
     }
 }
@@ -1028,6 +1070,11 @@ fn transform2d_method(
                     && vec2_equal_approx(t.origin, o.origin),
             ))
         }
+        // ⚠️ NOT the same predicate as `Basis.is_conformal` — see the note on
+        // `Transform2D::is_conformal`.
+        "is_conformal" => Ok(Variant::Bool(t.is_conformal())),
+        "is_finite" => Ok(Variant::Bool(t.is_finite())),
+        "looking_at" => Ok(Variant::Transform2D(t.looking_at(arg_vec2(args, 0, &ctx)?))),
         _ => Err(undefined_method("Transform2D", method)),
     }
 }
@@ -1112,7 +1159,21 @@ fn basis_method(b: Basis, method: &str, args: &[Variant]) -> Result<Variant, Run
         "transposed" => Ok(Variant::Basis(b.transposed())),
         "orthonormalized" => Ok(Variant::Basis(b.orthonormalized())),
         "get_scale" => Ok(Variant::Vector3(b.get_scale())),
-        "get_euler" => Ok(Variant::Vector3(b.to_euler())),
+        // 🔑 The order argument was DISCARDED here (pat-s3rrv.148). A script
+        // asking for XYZ received YXZ angles — a plausible rotation of the
+        // wrong shape, with nothing to indicate the argument had been ignored.
+        "get_euler" => Ok(Variant::Vector3(
+            b.to_euler_order(arg_euler_order(args, 0, &ctx)?),
+        )),
+        "scaled_local" => Ok(Variant::Basis(b.scaled_local(arg_vec3(args, 0, &ctx)?))),
+        "is_conformal" => Ok(Variant::Bool(b.is_conformal())),
+        "is_finite" => Ok(Variant::Bool(b.is_finite())),
+        // ⚠️ The "transposed dot" family: these take the basis's ROWS, not its
+        // columns. For a symmetric basis the two agree, which is why a wrong
+        // port survives casual testing.
+        "tdotx" => Ok(Variant::Float(b.tdotx(arg_vec3(args, 0, &ctx)?) as f64)),
+        "tdoty" => Ok(Variant::Float(b.tdoty(arg_vec3(args, 0, &ctx)?) as f64)),
+        "tdotz" => Ok(Variant::Float(b.tdotz(arg_vec3(args, 0, &ctx)?) as f64)),
         "get_rotation_quaternion" => Ok(Variant::Quaternion(b.get_rotation_quaternion())),
         "xform" => Ok(Variant::Vector3(b.xform(arg_vec3(args, 0, &ctx)?))),
         "xform_inv" => Ok(Variant::Vector3(b.xform_inv(arg_vec3(args, 0, &ctx)?))),
@@ -1167,22 +1228,41 @@ fn quaternion_method(
         "slerp" => Ok(Variant::Quaternion(
             q.slerp(arg_quat(args, 0, &ctx)?, arg_num(args, 1, &ctx)?),
         )),
-        "get_euler" => Ok(Variant::Vector3(q.to_euler())),
+        // Same discarded-order bug as `Basis.get_euler` (pat-s3rrv.148).
+        "get_euler" => Ok(Variant::Vector3(
+            q.to_euler_order(arg_euler_order(args, 0, &ctx)?),
+        )),
+        "slerpni" => Ok(Variant::Quaternion(
+            q.slerpni(arg_quat(args, 0, &ctx)?, arg_num(args, 1, &ctx)?),
+        )),
+        "spherical_cubic_interpolate" => Ok(Variant::Quaternion(q.spherical_cubic_interpolate(
+            arg_quat(args, 0, &ctx)?,
+            arg_quat(args, 1, &ctx)?,
+            arg_quat(args, 2, &ctx)?,
+            arg_num(args, 3, &ctx)?,
+        ))),
+        "spherical_cubic_interpolate_in_time" => {
+            Ok(Variant::Quaternion(q.spherical_cubic_interpolate_in_time(
+                arg_quat(args, 0, &ctx)?,
+                arg_quat(args, 1, &ctx)?,
+                arg_quat(args, 2, &ctx)?,
+                arg_num(args, 3, &ctx)?,
+                arg_num(args, 4, &ctx)?,
+                arg_num(args, 5, &ctx)?,
+                arg_num(args, 6, &ctx)?,
+            )))
+        }
+        "exp" => Ok(Variant::Quaternion(q.exp())),
+        "log" => Ok(Variant::Quaternion(q.log())),
+        "is_finite" => Ok(Variant::Bool(q.is_finite())),
         "xform" => Ok(Variant::Vector3(q.xform(arg_vec3(args, 0, &ctx)?))),
         "get_angle" => Ok(Variant::Float((2.0 * q.w.clamp(-1.0, 1.0).acos()) as f64)),
-        "get_axis" => {
-            // Near-identity has no meaningful axis; Godot returns +Z.
-            if q.w.abs() > 1.0 - 1e-6 {
-                Ok(Variant::Vector3(Vector3::new(0.0, 0.0, 1.0)))
-            } else {
-                let inv = 1.0 / (1.0 - q.w * q.w).sqrt();
-                Ok(Variant::Vector3(Vector3::new(
-                    q.x * inv,
-                    q.y * inv,
-                    q.z * inv,
-                )))
-            }
-        }
+        // ⚠️ The degenerate answer here USED to be `+Z`. Godot returns the raw
+        // imaginary part (`quaternion.cpp`, `get_axis`), and `Quaternion.log()`
+        // — added in pat-s3rrv.148 — is built on the axis, so a second,
+        // disagreeing definition of the same method would have made `log` and
+        // `get_axis` describe different rotations. Now both read gdcore's.
+        "get_axis" => Ok(Variant::Vector3(q.get_axis())),
         "angle_to" => {
             let d = q.dot(arg_quat(args, 0, &ctx)?);
             Ok(Variant::Float(
@@ -1228,6 +1308,41 @@ fn aabb_method(a: Aabb, method: &str, args: &[Variant]) -> Result<Variant, Runti
             };
             Ok(Variant::Vector3(a.get_endpoint(idx)))
         }
+        "get_longest_axis" => Ok(Variant::Vector3(a.get_longest_axis())),
+        "get_longest_axis_index" => Ok(Variant::Int(a.get_longest_axis_index())),
+        "get_longest_axis_size" => Ok(Variant::Float(a.get_longest_axis_size() as f64)),
+        "get_shortest_axis" => Ok(Variant::Vector3(a.get_shortest_axis())),
+        "get_shortest_axis_index" => Ok(Variant::Int(a.get_shortest_axis_index())),
+        "get_shortest_axis_size" => Ok(Variant::Float(a.get_shortest_axis_size() as f64)),
+        "get_support" => Ok(Variant::Vector3(a.get_support(arg_vec3(args, 0, &ctx)?))),
+        // ⚠️ `||` over the extents, not `&&`: a flat box still has surface.
+        // This is the whole difference from `has_volume`.
+        "has_surface" => Ok(Variant::Bool(a.has_surface())),
+        "intersects_plane" => Ok(Variant::Bool(a.intersects_plane(arg_plane(args, 0, &ctx)?))),
+        // 🔑 These two return a Vector3 **or null**, not a bool — Godot binds
+        // the `_bind` wrappers that hand back the hit POINT
+        // (`aabb.cpp`, `intersects_ray_bind`). Returning a bool would compile,
+        // read naturally, and silently drop the answer scripts actually pick
+        // with.
+        "intersects_ray" => {
+            let from = arg_vec3(args, 0, &ctx)?;
+            let dir = arg_vec3(args, 1, &ctx)?;
+            Ok(a.intersects_ray(from, dir)
+                .map_or(Variant::Nil, Variant::Vector3))
+        }
+        "intersects_segment" => {
+            let from = arg_vec3(args, 0, &ctx)?;
+            let to = arg_vec3(args, 1, &ctx)?;
+            Ok(a.intersects_segment(from, to)
+                .map_or(Variant::Nil, Variant::Vector3))
+        }
+        "is_equal_approx" => {
+            let o = arg_aabb(args, 0, &ctx)?;
+            Ok(Variant::Bool(
+                vec3_equal_approx(a.position, o.position) && vec3_equal_approx(a.size, o.size),
+            ))
+        }
+        "is_finite" => Ok(Variant::Bool(a.is_finite())),
         _ => Err(undefined_method("AABB", method)),
     }
 }
@@ -1260,6 +1375,20 @@ fn plane_method(p: Plane, method: &str, args: &[Variant]) -> Result<Variant, Run
             .intersects_segment(arg_vec3(args, 0, &ctx)?, arg_vec3(args, 1, &ctx)?)
             .map(Variant::Vector3)
             .unwrap_or(Variant::Nil)),
+        // Null when any two of the three are parallel, so a script cannot read
+        // a garbage point as a real corner.
+        "intersect_3" => {
+            let b = arg_plane(args, 0, &ctx)?;
+            let c = arg_plane(args, 1, &ctx)?;
+            Ok(p.intersect_3(b, c).map_or(Variant::Nil, Variant::Vector3))
+        }
+        "is_equal_approx" => {
+            let o = arg_plane(args, 0, &ctx)?;
+            Ok(Variant::Bool(
+                vec3_equal_approx(p.normal, o.normal) && (p.d - o.d).abs() < 1e-5,
+            ))
+        }
+        "is_finite" => Ok(Variant::Bool(p.is_finite())),
         _ => Err(undefined_method("Plane", method)),
     }
 }
@@ -2501,6 +2630,47 @@ pub(crate) fn vector_static_call(
                 Some(other) => Err(type_error(format!("{ctx} expects an int, got {other:?}"))),
                 None => Err(type_error(format!("{ctx} is missing argument 0"))),
             })
+        }
+
+        // The affine static constructors (pat-s3rrv.148). `Basis.from_euler`
+        // is the documented inverse of `Basis.get_euler`, and without it a
+        // script could read a rotation back in a chosen order but never build
+        // one — so the order argument had no round trip to be checked against.
+        ("Basis", "from_euler") => {
+            let ctx = "Basis.from_euler()";
+            Some((|| {
+                let euler = arg_vec3(args, 0, ctx)?;
+                let order = arg_euler_order(args, 1, ctx)?;
+                Ok(Variant::Basis(Basis::from_euler_order(euler, order)))
+            })())
+        }
+        ("Basis", "from_scale") => {
+            let ctx = "Basis.from_scale()";
+            Some(arg_vec3(args, 0, ctx).map(|s| Variant::Basis(Basis::from_scale(s))))
+        }
+        ("Basis", "looking_at") => {
+            let ctx = "Basis.looking_at()";
+            Some((|| {
+                let target = arg_vec3(args, 0, ctx)?;
+                // Godot's `up` defaults to +Y.
+                let up = match args.get(1) {
+                    None | Some(Variant::Nil) => Vector3::new(0.0, 1.0, 0.0),
+                    _ => arg_vec3(args, 1, ctx)?,
+                };
+                Ok(Variant::Basis(Basis::looking_at(target, up)))
+            })())
+        }
+        ("Quaternion", "from_euler") => {
+            let ctx = "Quaternion.from_euler()";
+            Some((|| {
+                let euler = arg_vec3(args, 0, ctx)?;
+                // ⓘ Godot's `Quaternion.from_euler` takes NO order argument —
+                // it is YXZ only. Accepting one here would invent an API.
+                Ok(Variant::Quaternion(Quaternion::from_euler_order(
+                    euler,
+                    EulerOrder::Yxz,
+                )))
+            })())
         }
         _ => None,
     }

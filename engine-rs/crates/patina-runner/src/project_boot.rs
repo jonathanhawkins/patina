@@ -148,6 +148,59 @@ fn parse_res_path_list(raw: &str) -> Vec<String> {
 /// Unreadable or unparseable entries are skipped rather than aborting the boot:
 /// Godot logs and continues, and a missing translation degrades to the key
 /// itself rather than to no game.
+/// Builds a catalog from a loaded `.translation` Resource (pat-s3rrv.139).
+///
+/// Godot's `Translation` stores its catalog in a **Dictionary** property named
+/// `messages` (`core/string/translation.cpp:74`, `:276`) and its locale in a
+/// `locale` String (`:277`).
+///
+/// ⚠️ Only the plain-`String` keys are read — those are Godot's own "old
+/// version, no context or plural support" case (`translation.cpp:79-85`). A key
+/// of any other type encodes a msgctxt or plural form, and guessing at its
+/// shape would put wrong strings on screen; those entries are skipped rather
+/// than approximated.
+///
+/// ⚠️ `OptimizedTranslation` is a different layout entirely — compressed hash
+/// and bucket tables, no `messages` — so it yields `None` here rather than an
+/// empty catalog that looks like a successful load.
+fn translation_from_resource(
+    res: &gdresource::resource::Resource,
+    rel_path: &str,
+) -> Option<gdcore::translation::Translation> {
+    let messages = match res.get_property("messages") {
+        Some(gdvariant::Variant::Dictionary(d)) => d,
+        _ => return None,
+    };
+
+    // The resource's own locale wins; Godot's importer also encodes it in the
+    // artifact name (`x.en.translation`), which is the fallback.
+    let locale = match res.get_property("locale") {
+        Some(gdvariant::Variant::String(s)) if !s.is_empty() => s.clone(),
+        _ => locale_from_artifact_name(rel_path),
+    };
+
+    let mut t = gdcore::translation::Translation::new(locale);
+    for (key, value) in messages.iter() {
+        if let (gdvariant::Variant::String(k), gdvariant::Variant::String(v)) = (key, value) {
+            t.add_message(k.clone(), v.clone());
+        }
+    }
+    Some(t)
+}
+
+/// `"ui/strings.en.translation"` -> `"en"`.
+///
+/// ⚠️ The locale is the segment BEFORE the extension, not the file stem: the
+/// stem of `strings.en.translation` is `strings.en`, and using it would register
+/// every catalog under a locale no lookup ever asks for.
+fn locale_from_artifact_name(rel_path: &str) -> String {
+    std::path::Path::new(rel_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|stem| stem.rsplit_once('.').map(|(_, loc)| loc.to_string()))
+        .unwrap_or_else(|| "en".to_string())
+}
+
 fn load_project_translations(project_root: &Path, settings: &ProjectSettings) {
     let paths: Vec<String> = settings
         .get("internationalization/locale/translations")
@@ -159,6 +212,33 @@ fn load_project_translations(project_root: &Path, settings: &ProjectSettings) {
         for res_path in &paths {
             let rel = res_path.strip_prefix("res://").unwrap_or(res_path);
             let full = project_root.join(rel);
+            // 🔑 `project.godot` lists the IMPORTED artifacts, not the sources:
+            // Godot's CSV importer emits `res://x.en.translation`, a BINARY
+            // Resource. Reading that as text either fails on invalid UTF-8 or
+            // yields bytes that the `.po` branch below parses into nothing —
+            // so a real Godot project loaded ZERO catalogs and said nothing
+            // about it (pat-s3rrv.139).
+            if rel.ends_with(".translation") {
+                match std::fs::read(&full)
+                    .map_err(|e| e.to_string())
+                    .and_then(|bytes| {
+                        gdresource::res_loader::load_res_binary(&bytes, res_path)
+                            .map_err(|e| e.to_string())
+                    }) {
+                    Ok(res) => match translation_from_resource(&res, rel) {
+                        Some(t) => server.add_translation(t),
+                        None => tracing::warn!(
+                            "translation `{res_path}` is a `{}` with no readable \
+                             `messages`; skipping",
+                            res.class_name
+                        ),
+                    },
+                    Err(e) => {
+                        tracing::warn!("translation `{res_path}` could not be loaded: {e}")
+                    }
+                }
+                continue;
+            }
             let Ok(text) = std::fs::read_to_string(&full) else {
                 tracing::warn!("translation `{res_path}` could not be read; skipping");
                 continue;
@@ -455,6 +535,93 @@ mod tests {
 
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use gdresource::resource::Resource;
+    use gdvariant::Dictionary;
+
+    /// A `Translation` resource as Godot's CSV importer writes one.
+    fn translation_res(locale: Option<&str>) -> Resource {
+        let mut msgs = Dictionary::new();
+        msgs.insert(
+            Variant::String("GREETING".into()),
+            Variant::String("Bonjour".into()),
+        );
+        msgs.insert(
+            Variant::String("FAREWELL".into()),
+            Variant::String("Au revoir".into()),
+        );
+        // ⚠️ A non-String key is Godot's context/plural form. It must be SKIPPED,
+        // not guessed at — a wrong guess puts the wrong string on screen.
+        msgs.insert(
+            Variant::Int(7),
+            Variant::String("not a plain message".into()),
+        );
+
+        let mut res = Resource::new("Translation");
+        res.set_property("messages", Variant::Dictionary(msgs));
+        if let Some(l) = locale {
+            res.set_property("locale", Variant::String(l.into()));
+        }
+        res
+    }
+
+    /// **The core**: a `.translation` artifact yields a real catalog.
+    #[test]
+    fn a_binary_translation_resource_becomes_a_catalog() {
+        let t =
+            translation_from_resource(&translation_res(Some("fr")), "ui/strings.fr.translation")
+                .expect("a Translation resource must convert");
+        assert_eq!(t.locale(), "fr");
+        assert_eq!(t.get_message("GREETING"), Some("Bonjour"));
+        assert_eq!(t.get_message("FAREWELL"), Some("Au revoir"));
+    }
+
+    /// ⚠️ Only plain-String keys are read. The `Int` key above is Godot's
+    /// context/plural encoding; it must not appear as a message.
+    #[test]
+    fn non_string_keys_are_skipped_not_guessed() {
+        let t =
+            translation_from_resource(&translation_res(Some("fr")), "x.fr.translation").unwrap();
+        assert_eq!(t.len(), 2, "only the two plain messages are read");
+    }
+
+    /// 🔑 The locale is the segment BEFORE the extension, not the file stem.
+    ///
+    /// ⚠️ `Path::file_stem("strings.en.translation")` is `"strings.en"` — using
+    /// it registers every catalog under a locale no lookup ever asks for, so
+    /// `tr()` silently returns its key forever.
+    #[test]
+    fn the_locale_comes_from_the_segment_before_the_extension() {
+        assert_eq!(locale_from_artifact_name("ui/strings.en.translation"), "en");
+        assert_eq!(
+            locale_from_artifact_name("a/b/menu.pt_BR.translation"),
+            "pt_BR"
+        );
+        // No locale segment at all — fall back rather than inventing one.
+        assert_eq!(locale_from_artifact_name("strings.translation"), "en");
+    }
+
+    /// The resource's own `locale` is authoritative over the filename.
+    #[test]
+    fn the_resources_locale_property_wins_over_the_filename() {
+        let t =
+            translation_from_resource(&translation_res(Some("de")), "ui/strings.fr.translation")
+                .unwrap();
+        assert_eq!(t.locale(), "de");
+        // And with no property, the name is used.
+        let t2 =
+            translation_from_resource(&translation_res(None), "ui/strings.fr.translation").unwrap();
+        assert_eq!(t2.locale(), "fr");
+    }
+
+    /// ⚠️ `OptimizedTranslation` stores compressed hash/bucket tables and has no
+    /// `messages`. It must yield `None` — an empty catalog would look like a
+    /// successful load and leave every key untranslated with no warning.
+    #[test]
+    fn an_optimized_translation_is_refused_not_silently_empty() {
+        let res = Resource::new("OptimizedTranslation");
+        assert!(translation_from_resource(&res, "x.fr.translation").is_none());
+    }
 
     // `boot_project` mutates the process-global `res://` path roots via
     // `set_path_roots`, so serialize these tests to stay robust under

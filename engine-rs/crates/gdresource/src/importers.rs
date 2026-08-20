@@ -841,7 +841,62 @@ pub fn import_image_with_params(path: &Path, params: &ImportParams) -> EngineRes
     }
     let data = std::fs::read(path).map_err(EngineError::Io)?;
     let res = import_image_bytes(&data, path)?;
+    if let Some(layered) = slice_layered_if_requested(&res, params, path)? {
+        return Ok(layered);
+    }
     Ok(Arc::new(apply_texture_params(&res, params)))
+}
+
+/// Turns a decoded source image into a layered texture when the sidecar asks
+/// for one, or `None` for an ordinary 2D import (pat-s3rrv.138).
+///
+/// ⚠️ **Keyed on the PRESENCE of the slice options**, which is exactly how
+/// upstream decides: `resource_importer_layered_texture.cpp:306-310` reads each
+/// one with `p_options.has(...)`. No ordinary texture import writes a
+/// `slices/*` key, so this branch cannot fire for the 2D path — its blast
+/// radius on existing imports is zero.
+///
+/// ⚠️ **Defaults to a 2D array**, and that is a real limitation rather than a
+/// choice. Which layered kind a source becomes is decided by the sidecar's
+/// `[remap] importer=` (`2d_array_texture` / `cubemap_texture` /
+/// `cubemap_array_texture` / `3d_texture`), and `load_source_params` reads that
+/// field but does not carry it into [`ImportParams`] — so a cubemap source
+/// currently slices as an array. Threading the importer name through is the
+/// next step; it is deliberately not done here because
+/// [`load_source_params`] is on the shared path every texture, audio and font
+/// import takes.
+fn slice_layered_if_requested(
+    source: &Resource,
+    params: &ImportParams,
+    path: &Path,
+) -> EngineResult<Option<Arc<Resource>>> {
+    let requested = ["slices/horizontal", "slices/vertical", "slices/arrangement"]
+        .iter()
+        .any(|k| params.get(k).is_some());
+    if !requested {
+        return Ok(None);
+    }
+
+    let kind = params
+        .string("importer")
+        .and_then(crate::ctex::LayeredKind::from_importer_name)
+        .unwrap_or(crate::ctex::LayeredKind::Texture2DArray);
+
+    // ⚠️ Godot's defaults for these two are **8**, not 1 — an 8x8 atlas is what
+    // the import dock offers first (`resource_importer_layered_texture.cpp`
+    // `get_import_options`). Defaulting them to 1 would turn a sidecar that
+    // sets only `slices/vertical` into a single-layer texture instead of an
+    // eight-column strip.
+    let hslices = params.int("slices/horizontal").unwrap_or(8).max(1) as u32;
+    let vslices = params.int("slices/vertical").unwrap_or(8).max(1) as u32;
+    let arrangement = params.int("slices/arrangement").unwrap_or(1);
+    let layout = params.int("slices/layout").unwrap_or(1);
+    let amount = params.int("slices/amount").unwrap_or(1).max(1) as u32;
+
+    let (h, v) = kind.slice_grid(hslices, vslices, arrangement, layout, amount);
+    Ok(Some(crate::ctex::slice_source_into_layers(
+        source, kind, h, v, path,
+    )?))
 }
 
 /// [`import_webp`] with the source's `.import` options applied. Same
@@ -1138,6 +1193,104 @@ pub fn import_font(path: &Path) -> EngineResult<Arc<Resource>> {
     res.set_property("data_preview", Variant::Array(preview));
 
     Ok(Arc::new(res))
+}
+
+/// Applies `ResourceImporterDynamicFont`'s options to an imported font
+/// (pat-s3rrv.137).
+///
+/// Godot ground truth: `editor/import/resource_importer_dynamic_font.cpp`
+/// `get_import_options`. The option names are **flat** — `hinting`, not
+/// `rendering/hinting` — unlike the texture importer's `process/*` keys, so a
+/// group prefix invented by analogy would silently match nothing.
+///
+/// ⚠️ **Four of these default to TRUE**: `disable_embedded_bitmaps`,
+/// `allow_system_fallback`, `keep_rounding_remainders` and `compress`. Assuming
+/// Godot's usual "bool options start false" flips all four at once, and the
+/// result is a font that quietly ignores its embedded bitmap strikes. Two more
+/// are non-zero ints: `hinting` and `antialiasing` default to `1`, and
+/// `subpixel_positioning` to `4`.
+///
+/// ⚠️ **This records the options; it does not rasterise differently.** Patina's
+/// `import_font` stores metrics and the raw payload — there is no atlas builder
+/// to hand an MSDF flag to yet. Writing them onto the resource is what lets the
+/// text layer read them later and what makes the sidecar round-trip, and is
+/// exactly what `apply_wav_params` does for the sample-rewriting options it
+/// likewise cannot perform.
+pub fn apply_font_params(res: &Resource, params: &ImportParams) -> Resource {
+    let mut out = res.clone();
+
+    // -- Rendering --
+    if let Some(v) = params.int("antialiasing") {
+        out.set_property("antialiasing", Variant::Int(v));
+    }
+    if let Some(v) = params.bool("generate_mipmaps") {
+        out.set_property("generate_mipmaps", Variant::Bool(v));
+    }
+    if let Some(v) = params.bool("disable_embedded_bitmaps") {
+        out.set_property("disable_embedded_bitmaps", Variant::Bool(v));
+    }
+    if let Some(v) = params.bool("multichannel_signed_distance_field") {
+        out.set_property("multichannel_signed_distance_field", Variant::Bool(v));
+    }
+    if let Some(v) = params.int("msdf_pixel_range") {
+        out.set_property("msdf_pixel_range", Variant::Int(v));
+    }
+    if let Some(v) = params.int("msdf_size") {
+        out.set_property("msdf_size", Variant::Int(v));
+    }
+    if let Some(v) = params.bool("allow_system_fallback") {
+        out.set_property("allow_system_fallback", Variant::Bool(v));
+    }
+    if let Some(v) = params.bool("force_autohinter") {
+        out.set_property("force_autohinter", Variant::Bool(v));
+    }
+    if let Some(v) = params.bool("modulate_color_glyphs") {
+        out.set_property("modulate_color_glyphs", Variant::Bool(v));
+    }
+    if let Some(v) = params.int("hinting") {
+        out.set_property("hinting", Variant::Int(v));
+    }
+    if let Some(v) = params.int("subpixel_positioning") {
+        out.set_property("subpixel_positioning", Variant::Int(v));
+    }
+    if let Some(v) = params.bool("keep_rounding_remainders") {
+        out.set_property("keep_rounding_remainders", Variant::Bool(v));
+    }
+    // ⚠️ `oversampling` is a FLOAT (`PROPERTY_HINT_RANGE, "0,10,0.1"`), and `0`
+    // means "follow the viewport scale", not "no oversampling" — so it must be
+    // written through even when zero rather than treated as unset.
+    if let Some(v) = params.float("oversampling") {
+        out.set_property("oversampling", Variant::Float(v));
+    }
+
+    // -- Fallbacks / compress / storage-only options --
+    //
+    // Passed through as whatever Variant the sidecar parsed them into: these
+    // are Arrays and Dictionaries, and re-typing them here would be the only
+    // place their shape is decided.
+    if let Some(v) = params.bool("compress") {
+        out.set_property("compress", Variant::Bool(v));
+    }
+    for key in [
+        "fallbacks",
+        "preload",
+        "language_support",
+        "script_support",
+        "opentype_features",
+    ] {
+        if let Some(v) = params.get(key) {
+            out.set_property(key, v.clone());
+        }
+    }
+
+    out
+}
+
+/// [`import_font`] with the source's `.import` options applied
+/// (pat-s3rrv.137). Mirrors [`import_wav_with_params`].
+pub fn import_font_with_params(path: &Path, params: &ImportParams) -> EngineResult<Arc<Resource>> {
+    let res = import_font(path)?;
+    Ok(Arc::new(apply_font_params(&res, params)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1589,8 +1742,14 @@ impl ResourceFormatLoader {
         rfl.register(".svg", crate::image_svg::import_svg);
         rfl.register(".ctex", load_ctex_file);
         rfl.register(".wav", import_wav);
+        // ⚠️ Registered BOTH ways on purpose. `register_with_params` handles a
+        // font that has a `.import` sidecar; the plain `register` is still the
+        // path for a bare `.ttf` with no sidecar, which is the common case
+        // (pat-s3rrv.137).
         rfl.register(".ttf", import_font);
         rfl.register(".otf", import_font);
+        rfl.register_with_params(".ttf", import_font_with_params);
+        rfl.register_with_params(".otf", import_font_with_params);
         rfl.register(".tres", load_text_or_binary);
         rfl.register(".tscn", load_text_or_binary);
         rfl.register(".res", load_text_or_binary);
@@ -2611,7 +2770,10 @@ svg/scale=1.0
         f.set_param("label", "My Texture");
 
         let out = serialize_import_file(&f);
-        assert!(out.contains("importer=\"texture\""), "strings quoted:\n{out}");
+        assert!(
+            out.contains("importer=\"texture\""),
+            "strings quoted:\n{out}"
+        );
         assert!(
             out.contains("path=\"res://.godot/imported/a.ctex\""),
             "res:// paths stay quoted:\n{out}"
@@ -2619,7 +2781,10 @@ svg/scale=1.0
         assert!(out.contains("mipmaps=false"), "bools bare:\n{out}");
         assert!(out.contains("max_size=0"), "ints bare:\n{out}");
         assert!(out.contains("lossy_quality=0.7"), "floats bare:\n{out}");
-        assert!(out.contains("dest=[\"res://a.ctex\"]"), "arrays bare:\n{out}");
+        assert!(
+            out.contains("dest=[\"res://a.ctex\"]"),
+            "arrays bare:\n{out}"
+        );
         assert!(
             out.contains("label=\"My Texture\""),
             "free text quoted:\n{out}"
@@ -2642,7 +2807,9 @@ svg/scale=1.0
         let text = std::fs::read_to_string(&sidecar).expect("sidecar on disk");
         assert!(text.contains("[params]"), "section emitted:\n{text}");
         assert_eq!(
-            load_import_file(&sidecar).expect("reloads").param("mipmaps"),
+            load_import_file(&sidecar)
+                .expect("reloads")
+                .param("mipmaps"),
             Some("false"),
         );
     }

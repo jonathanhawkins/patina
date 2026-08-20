@@ -1826,6 +1826,26 @@ fn write_node_section(
         }
         writeln!(out, "{} = {}", key, format_variant_value(value)).unwrap();
     }
+
+    // Metadata set at runtime lives in the node's `meta` map, which is a
+    // SEPARATE store from `properties` (pat-s3rrv.151). A `metadata/foo` row
+    // read from a .tscn lands in `properties` and round-trips through the loop
+    // above, but anything written by `set_meta` was dropped silently on save —
+    // so editor- or script-authored metadata never reached the file.
+    //
+    // Only keys with no property row of their own are emitted, so a value that
+    // came from the file is written once, by the loop above, and not duplicated
+    // here. Sorted for the same determinism the property loop wants.
+    let mut metas: Vec<(&str, Variant)> = node
+        .get_meta_list()
+        .into_iter()
+        .filter(|k| node.get_property(&format!("metadata/{k}")).is_nil())
+        .map(|k| (k, node.get_meta(k)))
+        .collect();
+    metas.sort_by_key(|(k, _)| k.to_owned());
+    for (key, value) in metas {
+        writeln!(out, "metadata/{} = {}", key, format_variant_value(&value)).unwrap();
+    }
 }
 
 /// Writes `[connection]` sections for all signals in the subtree.

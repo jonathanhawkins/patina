@@ -90,6 +90,28 @@ pub struct CharacterBody3D {
     /// still a floor the character stands on — it simply does not drag it
     /// along. Skipping the body outright would drop the character through it.
     pub platform_floor_layers: u32,
+    /// Collision layers whose WALL bodies act as moving platforms
+    /// (Godot's `platform_wall_layers`).
+    ///
+    /// ⚠️ Defaults to **0**, the opposite of its floor sibling: Godot ignores
+    /// every wall body unless a scene opts one in
+    /// (`doc/classes/CharacterBody3D.xml`, "all wall bodies are ignored").
+    /// Copying `platform_floor_layers`'s `u32::MAX` here would silently make
+    /// every wall drag the character sideways.
+    ///
+    /// ⚠️ Consulted only when the character is on a wall and NOT on a floor.
+    /// Godot's test is `if (floor) {..} else if (wall) {..}`
+    /// (`character_body_3d.cpp:56-62`) — a character standing on a floor while
+    /// brushing a moving wall is carried by the FLOOR.
+    pub platform_wall_layers: u32,
+    /// The body behind the wall contact of the last `move_and_slide`, kept so
+    /// the next call can look up its velocity for the carry above.
+    ///
+    /// ⚠️ Mirrors Godot's `platform_rid`, which is likewise captured during one
+    /// call and consulted at the top of the NEXT one — the carry has to be
+    /// applied before the motion it affects, so it necessarily uses the
+    /// previous frame's contact.
+    wall_body: Option<BodyId3D>,
     /// Contacts recorded by the last `move_and_slide`, in the order they were
     /// resolved (Godot's `get_slide_collision(i)`).
     slide_collisions: Vec<KinematicCollision3D>,
@@ -185,6 +207,8 @@ impl CharacterBody3D {
             floor_normal: Vector3::ZERO,
             wall_normal: Vector3::ZERO,
             platform_floor_layers: u32::MAX,
+            platform_wall_layers: 0,
+            wall_body: None,
             slide_collisions: Vec::new(),
             slide_on_ceiling: true,
             platform_velocity: Vector3::ZERO,
@@ -220,6 +244,10 @@ impl CharacterBody3D {
     pub fn move_and_slide(&mut self, velocity: Vector3, bodies: &[&PhysicsBody3D]) -> Vector3 {
         let was_on_floor = self.on_floor;
         let previous_platform_velocity = self.platform_velocity;
+        // Read BEFORE the reset below, which clears both — the wall carry is
+        // decided from the PREVIOUS call's contact, as it is in Godot.
+        let was_on_wall = self.on_wall;
+        let previous_wall_body = self.wall_body;
 
         // Reset contact state for this call.
         self.on_floor = false;
@@ -232,6 +260,7 @@ impl CharacterBody3D {
         // previous call's motion visible.
         self.last_motion = Vector3::ZERO;
         self.slide_collisions.clear();
+        self.wall_body = None;
 
         let grounded_mode = self.motion_mode == MotionMode::Grounded;
 
@@ -261,6 +290,26 @@ impl CharacterBody3D {
                     self.platform_angular_velocity = Vector3::ZERO;
                 }
                 probed_floor_normal = Some(normal);
+            } else if was_on_wall {
+                // No floor, but we were against a wall: Godot's `else if
+                // (collision_state.wall)` branch (`character_body_3d.cpp:60`).
+                // A character pinned to a moving wall is carried by it, which is
+                // how wall-riding elevators and conveyor walls work.
+                //
+                // ⚠️ The body is looked up by id rather than index: `bodies` is
+                // rebuilt every tick by the caller and an index from the
+                // previous call can point at a different body, or out of range.
+                let carried = previous_wall_body
+                    .and_then(|id| bodies.iter().position(|b| b.id == id))
+                    .filter(|&idx| (self.platform_wall_layers & bodies[idx].collision_layer) != 0);
+                if let Some(idx) = carried {
+                    self.platform_velocity = bodies[idx].linear_velocity;
+                    self.platform_angular_velocity = bodies[idx].angular_velocity;
+                    motion = motion + self.platform_velocity;
+                } else {
+                    self.platform_velocity = Vector3::ZERO;
+                    self.platform_angular_velocity = Vector3::ZERO;
+                }
             } else {
                 self.platform_velocity = Vector3::ZERO;
                 self.platform_angular_velocity = Vector3::ZERO;
@@ -425,7 +474,7 @@ impl CharacterBody3D {
             // The collision normal points from A (character) toward B (body).
             // The surface normal points from the body toward the character.
             let surface_normal = -result.normal;
-            self.classify_surface(surface_normal);
+            self.classify_surface(surface_normal, deepest_idx.map(|i| bodies[i].id));
 
             // Separate from the surface.
             self.position = target + surface_normal * result.depth;
@@ -646,10 +695,18 @@ impl CharacterBody3D {
     /// Classifies a collision normal as floor, wall, or ceiling.
     ///
     /// In [`MotionMode::Floating`] every surface is a wall.
-    fn classify_surface(&mut self, normal: Vector3) {
+    /// Sorts one contact into floor / wall / ceiling.
+    ///
+    /// `body` is the body that was struck, recorded whenever the contact is a
+    /// WALL so the next `move_and_slide` can carry the character with it
+    /// (`platform_wall_layers`). It is threaded in rather than read from a
+    /// field because the classification is what decides the contact *is* a
+    /// wall — the caller does not know until this returns.
+    fn classify_surface(&mut self, normal: Vector3, body: Option<BodyId3D>) {
         if self.motion_mode == MotionMode::Floating {
             self.on_wall = true;
             self.wall_normal = normal;
+            self.wall_body = body;
             return;
         }
 
@@ -663,6 +720,9 @@ impl CharacterBody3D {
         } else {
             self.on_wall = true;
             self.wall_normal = normal;
+            // Last wall wins, matching Godot: `platform_rid` is overwritten by
+            // each collision, so the platform is the most recent contact.
+            self.wall_body = body;
         }
     }
 
@@ -973,6 +1033,64 @@ mod tests {
             standing.is_on_floor(),
             "🔑 the mask gates the CARRY, not the floor — the character must \
              still be standing on the excluded platform, not falling through it"
+        );
+    }
+
+    /// 🔑 `platform_wall_layers` lets a MOVING WALL carry the character, and
+    /// defaults to ignoring every wall (pat-s3rrv.103,
+    /// `character_body_3d.cpp:60`, `CharacterBody3D.xml`).
+    ///
+    /// ⚠️ **The default half is the load-bearing half.** Godot's default is
+    /// `0` — "all wall bodies are ignored" — the exact opposite of
+    /// `platform_floor_layers`'s `4294967295`. The `ignored` fixture below
+    /// touches nothing but the default, so it fails the moment someone
+    /// "harmonises" the two masks, which is the single most likely way to break
+    /// this: every wall would start dragging the player sideways.
+    ///
+    /// ⚠️ No floor in `bodies`, deliberately. Godot tests the wall mask only in
+    /// the `else if (collision_state.wall)` branch — floor wins — so a fixture
+    /// standing on a floor would exercise the floor path no matter what this
+    /// mask says.
+    #[test]
+    fn platform_wall_layers_gates_the_moving_wall_carry() {
+        // The shared helper puts the wall on collision layer 1; it slides along
+        // +Z, a direction the character cannot reach on its own here.
+        let mut wall = make_static_wall(3.0);
+        wall.linear_velocity = Vector3::new(0.0, 0.0, 4.0);
+        let bodies: Vec<&PhysicsBody3D> = vec![&wall];
+
+        // Opted in: layer 1 is in the mask, so this wall is a moving platform.
+        let mut carried = CharacterBody3D::new(Vector3::ZERO, Shape3D::Sphere { radius: 1.0 });
+        carried.platform_wall_layers = 1;
+        carried.move_and_slide(Vector3::new(2.5, 0.0, 0.0), &bodies);
+        assert!(
+            carried.is_on_wall(),
+            "the carried fixture must reach the wall first, or the carry below \
+             has no contact to key off and the test proves nothing"
+        );
+        carried.move_and_slide(Vector3::ZERO, &bodies);
+
+        // Untouched default (0) — Godot ignores every wall body.
+        let mut ignored = CharacterBody3D::new(Vector3::ZERO, Shape3D::Sphere { radius: 1.0 });
+        ignored.move_and_slide(Vector3::new(2.5, 0.0, 0.0), &bodies);
+        assert!(
+            ignored.is_on_wall(),
+            "the ignored fixture must reach the wall too"
+        );
+        ignored.move_and_slide(Vector3::ZERO, &bodies);
+
+        assert!(
+            carried.position.z > 0.5,
+            "an included moving wall must carry the character along +Z even \
+             with zero input motion; it only reached z = {}",
+            carried.position.z
+        );
+        assert!(
+            ignored.position.z.abs() < 1e-3,
+            "🔑 with the DEFAULT mask of 0 no wall may carry anything, but the \
+             character drifted to z = {}. A non-zero value here means the wall \
+             mask was given the floor mask's all-layers default",
+            ignored.position.z
         );
     }
 

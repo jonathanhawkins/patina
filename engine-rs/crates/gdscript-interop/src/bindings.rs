@@ -1508,6 +1508,39 @@ pub trait SceneAccess {
         false
     }
 
+    /// The Godot class of the effect in slot `effect_idx` of bus `bus_idx`
+    /// (pat-s3rrv.141), e.g. `"AudioEffectCapture"`.
+    ///
+    /// `None` for an unknown bus or an empty slot. Backs
+    /// `AudioServer.get_bus_effect_instance`, which must hand back a null for a
+    /// slot that holds nothing rather than a handle that answers every call
+    /// with a plausible zero.
+    fn audio_effect_class(&self, _bus_idx: i64, _effect_idx: i64) -> Option<String> {
+        None
+    }
+
+    /// Calls `method` on the effect instance in slot `effect_idx` of bus
+    /// `bus_idx` (pat-s3rrv.141).
+    ///
+    /// 🔑 One method rather than a getter per Godot call. `AudioEffectCapture`
+    /// and `AudioEffectRecord` between them bind fourteen methods, and every
+    /// one of them needs the same "find the bus, find the slot, confirm the
+    /// type" preamble — which is work only the scene layer can do, because this
+    /// crate does not depend on gdaudio.
+    ///
+    /// `None` means the slot or the method is unknown, which the caller reports
+    /// as a script error; a handled call that has no value returns
+    /// `Some(Variant::Nil)`.
+    fn audio_effect_call(
+        &mut self,
+        _bus_idx: i64,
+        _effect_idx: i64,
+        _method: &str,
+        _args: &[Variant],
+    ) -> Option<Variant> {
+        None
+    }
+
     /// Warps the mouse cursor to `(x, y)` in window coordinates
     /// (`Input.warp_mouse`).
     fn warp_mouse(&mut self, _x: f32, _y: f32) {}

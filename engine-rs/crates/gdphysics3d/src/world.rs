@@ -1517,7 +1517,10 @@ mod tests {
     fn area_damp_slows_a_body_only_when_the_mode_is_active() {
         fn speed_after(mode: SpaceOverride) -> f32 {
             let mut world = PhysicsWorld3D::new();
-            world.set_gravity(Vector3::ZERO);
+            // `gravity` is a public field, not a setter — there is no
+            // `PhysicsWorld3D::set_gravity`, and calling one made this whole
+            // lib test target fail to compile (E0599).
+            world.gravity = Vector3::ZERO;
             let mut area = damp_area(mode, 5.0, 0.0);
             area.gravity_space_override = SpaceOverride::Disabled;
             world.add_area(area);

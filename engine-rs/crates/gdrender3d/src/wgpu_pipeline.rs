@@ -17,6 +17,7 @@ use gdcore::math3d::Transform3D;
 use gdserver3d::decal::Decal3D;
 use gdserver3d::environment::{BackgroundMode, Environment3D};
 use gdserver3d::fog_volume::FogVolume;
+use gdserver3d::gi::{VoxelGI, VoxelGIId};
 use gdserver3d::instance::{GeometryInstanceSettings, Instance3D, Instance3DId};
 use gdserver3d::occluder::OccluderInstance3D;
 use gdserver3d::light::{Light3D, Light3DId, LightType};
@@ -998,6 +999,13 @@ pub struct RenderPipeline3D {
     pub camera_layout: wgpu::BindGroupLayout,
     /// Bind group layout for model uniforms (group 1).
     pub model_layout: wgpu::BindGroupLayout,
+    /// Bind group layout for a custom shader's uniform block (group 3).
+    ///
+    /// Only the per-material pipelines from [`Self::build_variant`] declare it;
+    /// the shared pipeline stops at group 2. A draw using a custom pipeline MUST
+    /// bind it — the block always carries at least `time`, so the buffer is
+    /// never zero-sized (pat-s3rrv.122).
+    pub custom_layout: wgpu::BindGroupLayout,
     /// Bind group layout for lights (group 2).
     pub light_layout: wgpu::BindGroupLayout,
 }
@@ -1022,6 +1030,46 @@ impl RenderPipeline3D {
                 },
                 count: None,
             }],
+        });
+
+        // Binding 0 is the uniform block; then CUSTOM_SAMPLER_SLOTS fixed
+        // texture+sampler pairs (pat-s3rrv.122). The count is fixed so ONE
+        // layout serves every custom pipeline — wgpu permits layout entries a
+        // shader never references, but a bind GROUP must fill them all, which is
+        // why unused slots get a dummy 1x1 texture rather than being omitted.
+        let mut custom_entries = vec![wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            // Fragment only: the custom body transpiles into `custom_albedo`,
+            // which `fs_main` calls. The vertex stage never reads it.
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }];
+        for slot in 0..CUSTOM_SAMPLER_SLOTS {
+            custom_entries.push(wgpu::BindGroupLayoutEntry {
+                binding: custom_texture_binding(slot),
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            });
+            custom_entries.push(wgpu::BindGroupLayoutEntry {
+                binding: custom_sampler_binding(slot),
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+        }
+        let custom_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("custom-shader-bind-group-layout"),
+            entries: &custom_entries,
         });
 
         let model_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1131,6 +1179,7 @@ impl RenderPipeline3D {
         Self {
             pipeline,
             camera_layout,
+            custom_layout,
             model_layout,
             light_layout,
         }
@@ -1251,6 +1300,10 @@ impl RenderPipeline3D {
                 Some(&self.camera_layout),
                 Some(&self.model_layout),
                 Some(&self.light_layout),
+                // Group 3 exists ONLY here. Every draw that selects a custom
+                // pipeline must bind it or the draw fails validation
+                // (pat-s3rrv.122).
+                Some(&self.custom_layout),
             ],
             immediate_size: 0,
         });
@@ -1309,6 +1362,148 @@ impl RenderPipeline3D {
 /// transpilable, the base shader's shape changed, or (defensively) the produced
 /// module fails WGSL validation — in every such case the caller keeps the flat
 /// albedo path.
+/// Uploads a [`TextureImage`] as an RGBA8 colour texture (pat-s3rrv.122).
+///
+/// `TextureImage` stores linear `Color` floats; the GPU wants 8-bit texels, so
+/// each channel is clamped and scaled here. `Rgba8Unorm` (not `…Srgb`) because
+/// the whole 3D path shades in linear and the camera post-process does the sRGB
+/// encode at the end — letting the sampler decode as well would double-correct.
+fn upload_custom_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    img: &gdserver3d::material::TextureImage,
+) -> wgpu::Texture {
+    let (w, h) = (img.width.max(1), img.height.max(1));
+    let mut bytes = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let c = img
+                .pixels
+                .get(i)
+                .copied()
+                .unwrap_or(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0));
+            for ch in [c.r, c.g, c.b, c.a] {
+                bytes.push((ch.clamp(0.0, 1.0) * 255.0).round() as u8);
+            }
+        }
+    }
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("custom-shader-texture"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(w * 4),
+            rows_per_image: Some(h),
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    texture
+}
+
+/// How many `sampler2D` uniforms a custom spatial shader can bind
+/// (pat-s3rrv.122).
+///
+/// Fixed rather than per-shader so a single `custom_layout` is valid for every
+/// custom pipeline. A shader declaring fewer simply leaves the tail unreferenced,
+/// which wgpu allows; the bind group still fills them with a dummy texture.
+pub const CUSTOM_SAMPLER_SLOTS: u32 = 4;
+
+/// Group-3 binding index of sampler slot `slot`'s texture.
+///
+/// 🔑 ONE function decides these on both sides — the emitted WGSL and the bind
+/// group entries — so a texture and its sampler cannot drift onto mismatched
+/// bindings, which would sample the wrong image rather than fail.
+pub fn custom_texture_binding(slot: u32) -> u32 {
+    1 + slot * 2
+}
+
+/// Group-3 binding index of sampler slot `slot`'s sampler.
+pub fn custom_sampler_binding(slot: u32) -> u32 {
+    2 + slot * 2
+}
+
+/// One shader-parameter value as the `vec4<f32>` slot the block reserves for it
+/// (pat-s3rrv.122).
+///
+/// Every field is a `vec4` regardless of the declared type, which keeps the
+/// struct free of WGSL alignment padding — a `vec3` field would silently pad to
+/// 16 bytes anyway and a mixed-size struct would make the packed buffer and the
+/// declaration disagree. Narrower types occupy the leading components and the
+/// transpiler reads `.x` for a scalar.
+fn uniform_variant_to_vec4(v: &gdvariant::Variant) -> [f32; 4] {
+    use gdvariant::Variant;
+    match v {
+        Variant::Color(c) => [c.r, c.g, c.b, c.a],
+        Variant::Vector3(p) => [p.x, p.y, p.z, 0.0],
+        Variant::Vector2(p) => [p.x, p.y, 0.0, 0.0],
+        Variant::Float(f) => [*f as f32, 0.0, 0.0, 0.0],
+        Variant::Int(i) => [*i as f32, 0.0, 0.0, 0.0],
+        Variant::Bool(b) => [if *b { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+        // An unset or unsupported parameter contributes zero rather than
+        // failing the draw — matching how the software path treats a missing
+        // value.
+        _ => [0.0; 4],
+    }
+}
+
+/// The `sampler2D` uniform names of `compiled`, in declaration order, capped at
+/// [`CUSTOM_SAMPLER_SLOTS`] (pat-s3rrv.122).
+///
+/// 🔑 THE SAMPLER ORDERING AUTHORITY, the exact counterpart of
+/// [`custom_uniform_fields`]. The emitted WGSL declarations and the per-draw
+/// bind group entries both walk this, so slot N means the same sampler on both
+/// sides. A mismatch would sample the WRONG texture rather than fail.
+pub fn custom_sampler_fields(compiled: &gdserver3d::CompiledShader3D) -> Vec<String> {
+    compiled
+        .uniforms
+        .iter()
+        .filter(|u| u.uniform_type == gdserver3d::shader::UniformType::Sampler2D)
+        .take(CUSTOM_SAMPLER_SLOTS as usize)
+        .map(|u| gdserver3d::shader::wgsl_uniform_field(&u.name))
+        .collect()
+}
+
+/// The buffer-backed uniform fields of `compiled`, in declaration order.
+///
+/// 🔑 THE ONE ORDERING AUTHORITY. Both the emitted `CustomUniforms` struct and
+/// the per-draw buffer are built by walking this, so a field cannot be declared
+/// in one order and packed in another — a mismatch would silently read the
+/// wrong value rather than fail (pat-s3rrv.122).
+///
+/// `Sampler2D` is excluded: a texture binds separately, not as a buffer field.
+pub fn custom_uniform_fields(compiled: &gdserver3d::CompiledShader3D) -> Vec<String> {
+    compiled
+        .uniforms
+        .iter()
+        .filter(|u| u.uniform_type != gdserver3d::shader::UniformType::Sampler2D)
+        .map(|u| gdserver3d::shader::wgsl_uniform_field(&u.name))
+        .collect()
+}
+
 pub fn custom_spatial_module_wgsl(compiled: &gdserver3d::CompiledShader3D) -> Option<String> {
     if compiled.fragment_body.is_empty() {
         return None;
@@ -1320,8 +1515,53 @@ pub fn custom_spatial_module_wgsl(compiled: &gdserver3d::CompiledShader3D) -> Op
     if !stmts.iter().any(|s| s.contains("in.uv")) {
         return None;
     }
+    // ⚠️ `TIME` STILL FALLS BACK (pat-s3rrv.122). The block reserves a `time`
+    // field, but nothing feeds a per-frame value to this renderer yet — there is
+    // no elapsed-time source on `GpuRenderer3D` or the viewport. Rendering a
+    // TIME-driven shader with a frozen 0.0 would produce a WRONG picture that
+    // looks like a working feature; falling back to flat albedo stays visibly
+    // unimplemented. Wiring a real clock is a one-field change once a source
+    // exists.
+    if stmts.iter().any(|s| s.contains("custom.time")) {
+        return None;
+    }
+    // A shader may declare more samplers than the layout has slots. Bail rather
+    // than emit a module referencing a binding that does not exist — pipeline
+    // creation would fail, which is worse than the flat-albedo fallback.
+    let sampler_count = compiled
+        .uniforms
+        .iter()
+        .filter(|u| u.uniform_type == gdserver3d::shader::UniformType::Sampler2D)
+        .count();
+    if sampler_count > CUSTOM_SAMPLER_SLOTS as usize {
+        return None;
+    }
 
-    let mut func = String::new();
+    // The group-3 uniform block the transpiler's `custom.<field>` reads refer
+    // to. Field ORDER is the contract with the buffer packed at draw time:
+    // `time` first, then every buffer-backed uniform in declaration order, both
+    // sides walking `compiled.uniforms` the same way. Sampler uniforms are
+    // skipped — a texture is not a buffer field, and `ColorExpr3D::Texture`
+    // still refuses to transpile, so nothing can reference one.
+    let mut block = String::from("struct CustomUniforms {\n    time: vec4<f32>,\n");
+    for u in custom_uniform_fields(compiled) {
+        block.push_str(&format!("    {u}: vec4<f32>,\n"));
+    }
+    block.push_str("};\n@group(3) @binding(0) var<uniform> custom: CustomUniforms;\n");
+    // Sampler pairs, named exactly as the transpiler emits them and bound at the
+    // slot indices `custom_sampler_fields` assigns (pat-s3rrv.122).
+    for (slot, field) in custom_sampler_fields(compiled).iter().enumerate() {
+        block.push_str(&format!(
+            "@group(3) @binding({}) var t_{}: texture_2d<f32>;\n@group(3) @binding({}) var s_{}: sampler;\n",
+            custom_texture_binding(slot as u32),
+            field,
+            custom_sampler_binding(slot as u32),
+            field
+        ));
+    }
+    block.push('\n');
+
+    let mut func = block;
     func.push_str("fn custom_albedo(in: VertexOutput) -> vec4<f32> {\n");
     func.push_str("    var color: vec4<f32> = model.albedo;\n");
     for s in &stmts {
@@ -2337,6 +2577,8 @@ pub struct GpuRenderer3D {
     instances: HashMap<u64, Instance3D>,
     lights: Vec<Light3D>,
     reflection_probes: Vec<ReflectionProbe>,
+    /// `VoxelGI` volumes contributing indirect ambient (pat-s3rrv.114).
+    voxel_gis: Vec<VoxelGI>,
     /// Decals to project onto shaded geometry this frame (pat-s3rrv.29).
     ///
     /// The GPU backend used to drop these on the floor: the four env-effect
@@ -2452,6 +2694,14 @@ struct GpuDrawCall {
     /// Godot `depth_draw_mode` (pat-s3rrv.30); decides whether this draw writes
     /// depth once its transparency is known.
     depth_draw_mode: crate::render_modes::DepthDrawMode,
+    /// The group-3 uniform block for a custom shader: `time` first, then one
+    /// `vec4` per buffer-backed uniform in `custom_uniform_fields` order
+    /// (pat-s3rrv.122). Empty when this draw uses no custom module.
+    custom_uniforms: Vec<[f32; 4]>,
+    /// Images for this draw's `sampler2D` uniforms, in `custom_sampler_fields`
+    /// order — slot N here is slot N in the emitted WGSL. Shorter than the
+    /// layout's slot count when the shader declares fewer; the rest bind a dummy.
+    custom_textures: Vec<std::sync::Arc<gdserver3d::material::TextureImage>>,
     /// When `Some`, a complete transpiled WGSL module for this draw's spatial
     /// shader material whose `fragment()` body is evaluated per-fragment (e.g. a
     /// UV-driven ALBEDO). The render pass builds a per-material pipeline from it
@@ -2597,6 +2847,7 @@ impl GpuRenderer3D {
             instances: HashMap::new(),
             lights: Vec::new(),
             reflection_probes: Vec::new(),
+            voxel_gis: Vec::new(),
             decals: Vec::new(),
             fog_volumes: Vec::new(),
             occluders: Vec::new(),
@@ -2620,6 +2871,9 @@ impl GpuRenderer3D {
         self.instances.clear();
         self.lights.clear();
         self.reflection_probes.clear();
+        // Same reason: a stale GI volume would bleed the previous scene's
+        // colour into the next Play run.
+        self.voxel_gis.clear();
         // pat-s3rrv.29: env effects are per-scene like everything else here.
         // Missing these would leak a previous scene's decals and fog into the
         // next Play run — the editor reuses one renderer across scenes.
@@ -2693,11 +2947,58 @@ impl GpuRenderer3D {
             // module once per instance (shared by all of its expanded draws), so
             // UV/varying-driven shaders render on the GPU instead of collapsing
             // to a flat albedo. `None` keeps the shared flat-albedo pipeline.
-            let custom_module = inst.shader_material.as_ref().and_then(|mat| {
+            let custom_shader = inst.shader_material.as_ref().and_then(|mat| {
                 let compiler = gdserver3d::ShaderCompiler3D::new();
                 let compiled = compiler.compile_material(mat)?;
-                custom_spatial_module_wgsl(&compiled)
+                let module = custom_spatial_module_wgsl(&compiled)?;
+                // Packed by walking the SAME filter `custom_uniform_fields`
+                // uses, so declaration order and packing order cannot disagree.
+                // `time` leads, matching the struct, and guarantees the buffer
+                // is never zero-sized even for a uniform-free shader.
+                let mut values: Vec<[f32; 4]> = vec![[0.0; 4]];
+                for u in compiled
+                    .uniforms
+                    .iter()
+                    .filter(|u| u.uniform_type != gdserver3d::shader::UniformType::Sampler2D)
+                {
+                    // The material's `shader_parameter/<name>` wins; the
+                    // shader's own declared default is the fallback.
+                    let v = mat
+                        .get_shader_parameter(&u.name)
+                        .cloned()
+                        .unwrap_or_else(|| u.default_value.clone());
+                    values.push(uniform_variant_to_vec4(&v));
+                }
+                // Same walk as `custom_sampler_fields`, so slot N is the same
+                // sampler in the module, the bind group and here. A material
+                // that never bound an image simply yields a shorter list and
+                // the tail falls back to the dummy texture.
+                let mut images = Vec::new();
+                for u in compiled
+                    .uniforms
+                    .iter()
+                    .filter(|u| u.uniform_type == gdserver3d::shader::UniformType::Sampler2D)
+                    .take(CUSTOM_SAMPLER_SLOTS as usize)
+                {
+                    match mat.get_texture(&u.name) {
+                        Some(img) => images.push(img.clone()),
+                        // Stop at the first unbound sampler: pushing nothing
+                        // would shift every later image onto the wrong slot.
+                        None => break,
+                    }
+                }
+                Some((module, values, images))
             });
+            let custom_module = custom_shader.as_ref().map(|(m, _, _)| m.clone());
+            let custom_uniform_values: Vec<[f32; 4]> = custom_shader
+                .as_ref()
+                .map(|(_, v, _)| v.clone())
+                .unwrap_or_default();
+            let custom_texture_images: Vec<std::sync::Arc<gdserver3d::material::TextureImage>> =
+                custom_shader
+                    .as_ref()
+                    .map(|(_, _, t)| t.clone())
+                    .unwrap_or_default();
             for entry in instance_draw_entries(inst) {
                 if entry.mesh.indices.is_empty() {
                     continue;
@@ -2722,6 +3023,8 @@ impl GpuRenderer3D {
                     alpha_scissor_threshold: entry.alpha_scissor_threshold,
                     depth_draw_mode: entry.depth_draw_mode,
                     custom_module: custom_module.clone(),
+                    custom_uniforms: custom_uniform_values.clone(),
+                    custom_textures: custom_texture_images.clone(),
                 });
             }
         }
@@ -3247,6 +3550,15 @@ impl GpuRenderer3D {
                 &fx_inv_proj,
                 &viewport.camera_transform,
             );
+            crate::renderer::SoftwareRenderer3D::apply_voxel_gi_pass(
+                &mut pixels,
+                &depth,
+                w,
+                h,
+                &self.voxel_gis,
+                &fx_inv_proj,
+                &viewport.camera_transform,
+            );
             crate::renderer::SoftwareRenderer3D::apply_fog_volume_pass(
                 &mut pixels,
                 &depth,
@@ -3569,13 +3881,79 @@ impl GpuRenderer3D {
                     .iter()
                     .find(|(c, d, _)| *c == call.cull_mode && *d == want_depth)
                     .map(|(_, _, p)| p);
-                let draw_pipeline = call
+                let custom_pipeline = call
                     .custom_module
                     .as_deref()
-                    .and_then(|m| custom_pipelines.get(m))
+                    .and_then(|m| custom_pipelines.get(m));
+                let draw_pipeline = custom_pipeline
                     .or(mode_pipeline)
                     .unwrap_or(&pipeline.pipeline);
                 pass.set_pipeline(draw_pipeline);
+                // Group 3 exists only on a custom pipeline, and when it exists
+                // it MUST be bound or the draw fails validation. `custom_uniforms`
+                // always leads with `time`, so this is never a zero-sized buffer
+                // (pat-s3rrv.122).
+                let custom_bg = custom_pipeline.map(|_| {
+                    let buf = create_buffer_init(
+                        device,
+                        queue,
+                        "custom-uniform-buf",
+                        bytemuck::cast_slice(&call.custom_uniforms),
+                        wgpu::BufferUsages::UNIFORM,
+                    );
+                    // The layout declares a FIXED slot count, and a bind group
+                    // must fill every entry — so slots the shader does not use
+                    // get a 1x1 white dummy. Omitting them fails validation and
+                    // would take down every custom draw, not just textured ones.
+                    let dummy = upload_custom_texture(
+                        device,
+                        queue,
+                        &gdserver3d::material::TextureImage::new(
+                            1,
+                            1,
+                            vec![gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)],
+                        ),
+                    );
+                    let uploaded: Vec<wgpu::Texture> = call
+                        .custom_textures
+                        .iter()
+                        .map(|img| upload_custom_texture(device, queue, img))
+                        .collect();
+                    let views: Vec<wgpu::TextureView> = (0..CUSTOM_SAMPLER_SLOTS)
+                        .map(|slot| match uploaded.get(slot as usize) {
+                            Some(t) => t.create_view(&wgpu::TextureViewDescriptor::default()),
+                            None => dummy.create_view(&wgpu::TextureViewDescriptor::default()),
+                        })
+                        .collect();
+                    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                        label: Some("custom-shader-sampler"),
+                        mag_filter: wgpu::FilterMode::Linear,
+                        min_filter: wgpu::FilterMode::Linear,
+                        ..Default::default()
+                    });
+                    let mut entries = vec![wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buf.as_entire_binding(),
+                    }];
+                    for slot in 0..CUSTOM_SAMPLER_SLOTS {
+                        entries.push(wgpu::BindGroupEntry {
+                            binding: custom_texture_binding(slot),
+                            resource: wgpu::BindingResource::TextureView(&views[slot as usize]),
+                        });
+                        entries.push(wgpu::BindGroupEntry {
+                            binding: custom_sampler_binding(slot),
+                            resource: wgpu::BindingResource::Sampler(&sampler),
+                        });
+                    }
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("custom-shader-bind-group"),
+                        layout: &pipeline.custom_layout,
+                        entries: &entries,
+                    })
+                });
+                if let Some(bg) = custom_bg.as_ref() {
+                    pass.set_bind_group(3, bg, &[]);
+                }
                 pass.set_bind_group(0, &camera_bg, &[]);
                 pass.set_bind_group(2, &light_bg, &[]);
                 // Shade in linear (HDR target + post-process encode back to sRGB).
@@ -3775,6 +4153,15 @@ impl GpuRenderer3D {
             &viewport.camera_transform,
             &crate::renderer::sky_suns_from_lights(&self.lights),
         );
+        crate::renderer::SoftwareRenderer3D::apply_voxel_gi_pass(
+            &mut pixels,
+            &depth,
+            w,
+            h,
+            &self.voxel_gis,
+            &fog_inv_proj,
+            &viewport.camera_transform,
+        );
         crate::renderer::SoftwareRenderer3D::apply_fog_volume_pass(
             &mut pixels,
             &depth,
@@ -3870,6 +4257,24 @@ impl RenderingServer3D for GpuRenderer3D {
         if !self.reflection_probes.iter().any(|p| p.id == id) {
             self.reflection_probes.push(ReflectionProbe::new(id));
         }
+    }
+
+    fn add_voxel_gi(&mut self, id: VoxelGIId) {
+        if !self.voxel_gis.iter().any(|g| g.id == id) {
+            self.voxel_gis.push(VoxelGI::new(id));
+        }
+    }
+
+    fn update_voxel_gi(&mut self, gi: &VoxelGI) {
+        if let Some(existing) = self.voxel_gis.iter_mut().find(|g| g.id == gi.id) {
+            *existing = gi.clone();
+        } else {
+            self.voxel_gis.push(gi.clone());
+        }
+    }
+
+    fn remove_voxel_gi(&mut self, id: VoxelGIId) {
+        self.voxel_gis.retain(|g| g.id != id);
     }
 
     fn update_reflection_probe(&mut self, probe: &ReflectionProbe) {

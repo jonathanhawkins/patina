@@ -768,6 +768,71 @@ impl AudioServer {
             .magnitude_for_frequency_range(from_hz, to_hz)
     }
 
+    /// The Godot class of the effect in slot `effect_idx` of bus `bus_idx`
+    /// (pat-s3rrv.141), e.g. `"AudioEffectCapture"`.
+    ///
+    /// Reads [`godot_class`](crate::effects::AudioEffect::godot_class) rather
+    /// than `name`, because seven Godot filter classes share one Rust type and
+    /// `name()` cannot tell them apart.
+    pub fn bus_effect_class(&self, bus_idx: usize, effect_idx: usize) -> Option<&str> {
+        let effect = self.mixer.get_bus(bus_idx)?.effects().effect_at(effect_idx)?;
+        // Fully qualified: this module does not import `AudioEffect`, and the
+        // only other reference to it here spells out the path too.
+        Some(crate::effects::AudioEffect::godot_class(effect))
+    }
+
+    /// The [`AudioEffectCapture`](crate::effects::AudioEffectCapture) in slot
+    /// `effect_idx` of bus index `bus_idx` (pat-s3rrv.141).
+    ///
+    /// Indexed by bus NUMBER rather than name because that is what a script
+    /// holds — `AudioServer.get_bus_index("Record")` hands back an index and
+    /// every other bus call takes one.
+    ///
+    /// `None` for an unknown bus, an out-of-range slot, or a slot holding some
+    /// other effect.
+    pub fn bus_capture(
+        &self,
+        bus_idx: usize,
+        effect_idx: usize,
+    ) -> Option<&crate::effects::AudioEffectCapture> {
+        self.mixer.get_bus(bus_idx)?.effects().capture_at(effect_idx)
+    }
+
+    /// Mutable twin of [`bus_capture`](Self::bus_capture) — draining a capture
+    /// consumes its frames.
+    pub fn bus_capture_mut(
+        &mut self,
+        bus_idx: usize,
+        effect_idx: usize,
+    ) -> Option<&mut crate::effects::AudioEffectCapture> {
+        self.mixer
+            .get_bus_mut(bus_idx)?
+            .effects_mut()
+            .capture_at_mut(effect_idx)
+    }
+
+    /// The [`AudioEffectRecord`](crate::effects::AudioEffectRecord) in slot
+    /// `effect_idx` of bus index `bus_idx` (pat-s3rrv.141).
+    pub fn bus_record(
+        &self,
+        bus_idx: usize,
+        effect_idx: usize,
+    ) -> Option<&crate::effects::AudioEffectRecord> {
+        self.mixer.get_bus(bus_idx)?.effects().record_at(effect_idx)
+    }
+
+    /// Mutable twin of [`bus_record`](Self::bus_record).
+    pub fn bus_record_mut(
+        &mut self,
+        bus_idx: usize,
+        effect_idx: usize,
+    ) -> Option<&mut crate::effects::AudioEffectRecord> {
+        self.mixer
+            .get_bus_mut(bus_idx)?
+            .effects_mut()
+            .record_at_mut(effect_idx)
+    }
+
     pub fn process_bus_effects(&mut self, bus_name: &str, samples: &mut [f32]) -> bool {
         let Some(idx) = self.mixer.get_bus_by_name(bus_name) else {
             return false;

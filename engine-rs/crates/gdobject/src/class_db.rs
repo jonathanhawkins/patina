@@ -2885,6 +2885,29 @@ pub fn register_3d_classes() {
                     Variant::StringName(gdcore::string_name::StringName::new("Master")),
                 )
                 .with_accessors("get_audio_bus_name", "set_audio_bus_name"),
+            )
+            // pat-s3rrv.102: the last two members of Godot's Area3D. Both are
+            // SURFACE ONLY — nothing reads them yet (no wind force is applied
+            // and no reverb bus is routed), but a `.tscn` that authors them can
+            // now round-trip instead of silently dropping the value, and the
+            // inspector has something to show.
+            //
+            // ⚠️ `reverb_bus_name` defaults to "Master", not "" — an empty
+            // default would route reverb to a nameless bus rather than the one
+            // Godot documents (`Area3D.xml`, `default="&\"Master\""`).
+            .property(
+                PropertyInfo::new(
+                    "reverb_bus_name",
+                    Variant::StringName(gdcore::string_name::StringName::new("Master")),
+                )
+                .with_accessors("get_reverb_bus_name", "set_reverb_bus_name"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "wind_source_path",
+                    Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                )
+                .with_accessors("get_wind_source_path", "set_wind_source_path"),
             ),
     );
 
@@ -4216,14 +4239,82 @@ pub fn register_3d_classes() {
             .method(MethodInfo::new("get_joint_rotation_axis", 2).const_method())
             .method(MethodInfo::new("set_joint_rotation_axis_vector", 3))
             .method(MethodInfo::new("get_joint_rotation_axis_vector", 2).const_method())
-            .method(MethodInfo::new("set_joint_limitation", 3))
-            .method(MethodInfo::new("get_joint_limitation", 2).const_method())
-            .method(MethodInfo::new("set_joint_limitation_right_axis", 3))
-            .method(MethodInfo::new("get_joint_limitation_right_axis", 2).const_method())
-            .method(MethodInfo::new("set_joint_limitation_right_axis_vector", 3))
-            .method(MethodInfo::new("get_joint_limitation_right_axis_vector", 2).const_method())
-            .method(MethodInfo::new("set_joint_limitation_rotation_offset", 3))
-            .method(MethodInfo::new("get_joint_limitation_rotation_offset", 2).const_method()),
+            // ⚠️ These eight carried the right ARITY and no declared types at
+            // all, so `set_joint_limitation`'s third parameter and
+            // `get_joint_limitation`'s return — both `JointLimitation3D` in
+            // `IterateIK3D.xml` — were invisible to introspection. Typing them
+            // is what turns the newly registered resource into something a
+            // caller can discover, and what lets a guard test check that every
+            // class a method names is one ClassDB actually knows
+            // (pat-s3rrv.133).
+            .method(
+                MethodInfo::new("set_joint_limitation", 3).with_arguments(vec![
+                    PropertyInfo::new("index", Variant::Int(0)),
+                    PropertyInfo::new("joint", Variant::Int(0)),
+                    PropertyInfo::new("limitation", Variant::Nil)
+                        .with_hint_string("JointLimitation3D"),
+                ]),
+            )
+            .method(
+                MethodInfo::new("get_joint_limitation", 2)
+                    .const_method()
+                    .with_arguments(vec![
+                        PropertyInfo::new("index", Variant::Int(0)),
+                        PropertyInfo::new("joint", Variant::Int(0)),
+                    ])
+                    .returns_of(Variant::Nil, "JointLimitation3D"),
+            )
+            .method(
+                MethodInfo::new("set_joint_limitation_right_axis", 3).with_arguments(vec![
+                    PropertyInfo::new("index", Variant::Int(0)),
+                    PropertyInfo::new("joint", Variant::Int(0)),
+                    PropertyInfo::new("direction", Variant::Int(0)),
+                ]),
+            )
+            .method(
+                MethodInfo::new("get_joint_limitation_right_axis", 2)
+                    .const_method()
+                    .with_arguments(vec![
+                        PropertyInfo::new("index", Variant::Int(0)),
+                        PropertyInfo::new("joint", Variant::Int(0)),
+                    ])
+                    .returns(Variant::Int(0)),
+            )
+            .method(
+                MethodInfo::new("set_joint_limitation_right_axis_vector", 3).with_arguments(vec![
+                    PropertyInfo::new("index", Variant::Int(0)),
+                    PropertyInfo::new("joint", Variant::Int(0)),
+                    PropertyInfo::new("vector", Variant::Vector3(Vector3::ZERO)),
+                ]),
+            )
+            .method(
+                MethodInfo::new("get_joint_limitation_right_axis_vector", 2)
+                    .const_method()
+                    .with_arguments(vec![
+                        PropertyInfo::new("index", Variant::Int(0)),
+                        PropertyInfo::new("joint", Variant::Int(0)),
+                    ])
+                    .returns(Variant::Vector3(Vector3::ZERO)),
+            )
+            .method(
+                MethodInfo::new("set_joint_limitation_rotation_offset", 3).with_arguments(vec![
+                    PropertyInfo::new("index", Variant::Int(0)),
+                    PropertyInfo::new("joint", Variant::Int(0)),
+                    PropertyInfo::new(
+                        "offset",
+                        Variant::Quaternion(gdcore::math3d::Quaternion::IDENTITY),
+                    ),
+                ]),
+            )
+            .method(
+                MethodInfo::new("get_joint_limitation_rotation_offset", 2)
+                    .const_method()
+                    .with_arguments(vec![
+                        PropertyInfo::new("index", Variant::Int(0)),
+                        PropertyInfo::new("joint", Variant::Int(0)),
+                    ])
+                    .returns(Variant::Quaternion(gdcore::math3d::Quaternion::IDENTITY)),
+            ),
     );
 
     // FABRIK3D declares NOTHING of its own — it is purely the solver choice.
@@ -4236,6 +4327,133 @@ pub fn register_3d_classes() {
     // (pat-0q2kx.156). Same reasoning: no properties of their own.
     register_class(ClassRegistration::new("CCDIK3D").parent("IterateIK3D"));
     register_class(ClassRegistration::new("JacobianIK3D").parent("IterateIK3D"));
+
+    // -- JointLimitation3D family + LimitAngularVelocityModifier3D ----------
+    //   (pat-s3rrv.133)
+    //
+    // ⚠️ IterateIK3D's `set_joint_limitation` / `get_joint_limitation` were
+    // already registered above, taking and returning a `JointLimitation3D`
+    // that ClassDB had never heard of. That is a DANGLING SIGNATURE, not a
+    // missing method: a script could see `set_joint_limitation` exists and had
+    // no way to construct the argument it wants, and no way to use what came
+    // back. Without the cone limit an IK chain solves unconstrained, so elbows
+    // and knees bend the wrong way.
+    //
+    // ⚠️ `JointLimitation3D` is registered upstream with
+    // GDREGISTER_VIRTUAL_CLASS (`register_scene_types.cpp:668`) and so is
+    // abstract; the cone beside it at :669 is a plain GDREGISTER_CLASS and IS
+    // instantiable. The pair is easy to get backwards — the base carries no
+    // properties and no bound methods at all, which reads like the concrete
+    // one.
+    register_class(
+        ClassRegistration::new("JointLimitation3D")
+            .parent("Resource")
+            .abstract_class(),
+    );
+    register_class(
+        ClassRegistration::new("JointLimitationCone3D")
+            .parent("JointLimitation3D")
+            // Godot's documented default is 1.5707964 — a quarter turn.
+            // Transcribed from `JointLimitationCone3D.xml` rather than written
+            // as `PI/2`: the doc value is the f32 rounding, and a test pinning
+            // the f64 constant would disagree with the engine it mirrors.
+            .property(
+                PropertyInfo::new("angle", Variant::Float(1.5707964))
+                    .with_accessors("get_angle", "set_angle"),
+            )
+            .method(
+                MethodInfo::new("set_angle", 1)
+                    .with_arguments(vec![PropertyInfo::new("angle", Variant::Float(0.0))]),
+            )
+            .method(MethodInfo::new("get_angle", 0).returns(Variant::Float(0.0))),
+    );
+    // Every name and argument name below is transcribed from
+    // `limit_angular_velocity_modifier_3d.cpp:249-270`, which binds seventeen
+    // methods. Two of them cannot be derived from the property names:
+    // `exclude`'s getter is `is_exclude` (bool convention, not `get_exclude`),
+    // and `set_max_angular_velocity`'s parameter is `angular_velocity`, not
+    // `max_angular_velocity`.
+    //
+    // ⚠️ `joint_count` is READ-ONLY: its doc entry has an empty `setter=` and
+    // the getter is the underscore-prefixed `_get_joint_count`. Giving it a
+    // `set_joint_count` would invent API Godot does not have.
+    register_class(
+        ClassRegistration::new("LimitAngularVelocityModifier3D")
+            .parent("SkeletonModifier3D")
+            .property(
+                PropertyInfo::new("chain_count", Variant::Int(0))
+                    .with_accessors("get_chain_count", "set_chain_count"),
+            )
+            .property(
+                PropertyInfo::new("exclude", Variant::Bool(false))
+                    .with_accessors("is_exclude", "set_exclude"),
+            )
+            .property(
+                PropertyInfo::new("joint_count", Variant::Int(0))
+                    .with_accessors("_get_joint_count", ""),
+            )
+            .property(
+                PropertyInfo::new("max_angular_velocity", Variant::Float(6.2831855))
+                    .with_accessors("get_max_angular_velocity", "set_max_angular_velocity"),
+            )
+            .method(MethodInfo::new("clear_chains", 0))
+            .method(MethodInfo::new("reset", 0))
+            .method(MethodInfo::new("set_root_bone", 2).with_arguments(vec![
+                PropertyInfo::new("index", Variant::Int(0)),
+                PropertyInfo::new("bone", Variant::Int(0)),
+            ]))
+            .method(
+                MethodInfo::new("get_root_bone", 1)
+                    .with_arguments(vec![PropertyInfo::new("index", Variant::Int(0))])
+                    .returns(Variant::Int(0)),
+            )
+            .method(
+                MethodInfo::new("set_root_bone_name", 2).with_arguments(vec![
+                    PropertyInfo::new("index", Variant::Int(0)),
+                    PropertyInfo::new("bone_name", Variant::String(String::new())),
+                ]),
+            )
+            .method(
+                MethodInfo::new("get_root_bone_name", 1)
+                    .with_arguments(vec![PropertyInfo::new("index", Variant::Int(0))])
+                    .returns(Variant::String(String::new())),
+            )
+            .method(MethodInfo::new("set_end_bone", 2).with_arguments(vec![
+                PropertyInfo::new("index", Variant::Int(0)),
+                PropertyInfo::new("bone", Variant::Int(0)),
+            ]))
+            .method(
+                MethodInfo::new("get_end_bone", 1)
+                    .with_arguments(vec![PropertyInfo::new("index", Variant::Int(0))])
+                    .returns(Variant::Int(0)),
+            )
+            .method(MethodInfo::new("set_end_bone_name", 2).with_arguments(vec![
+                PropertyInfo::new("index", Variant::Int(0)),
+                PropertyInfo::new("bone_name", Variant::String(String::new())),
+            ]))
+            .method(
+                MethodInfo::new("get_end_bone_name", 1)
+                    .with_arguments(vec![PropertyInfo::new("index", Variant::Int(0))])
+                    .returns(Variant::String(String::new())),
+            )
+            .method(
+                MethodInfo::new("set_chain_count", 1)
+                    .with_arguments(vec![PropertyInfo::new("count", Variant::Int(0))]),
+            )
+            .method(MethodInfo::new("get_chain_count", 0).returns(Variant::Int(0)))
+            .method(
+                MethodInfo::new("set_max_angular_velocity", 1).with_arguments(vec![
+                    PropertyInfo::new("angular_velocity", Variant::Float(0.0)),
+                ]),
+            )
+            .method(MethodInfo::new("get_max_angular_velocity", 0).returns(Variant::Float(0.0)))
+            .method(
+                MethodInfo::new("set_exclude", 1)
+                    .with_arguments(vec![PropertyInfo::new("exclude", Variant::Bool(false))]),
+            )
+            .method(MethodInfo::new("is_exclude", 0).returns(Variant::Bool(false)))
+            .method(MethodInfo::new("_get_joint_count", 0).returns(Variant::Int(0))),
+    );
 
     // LookAtModifier3D (pat-0q2kx.156). Aims a bone at a target with optional
     // angle limits and time-based interpolation.
@@ -12682,6 +12900,262 @@ pub fn register_2d_classes() {
             ),
         );
     }
+
+    // -- Skeleton2D modification stack (pat-s3rrv.135) ----------------------
+    //
+    // `Skeleton2D` and `Bone2D` above were registered; the stack that poses
+    // them was not, so a `.tscn` rig loaded and its `modification_stack` sat
+    // there as inert data with nothing able to execute it.
+    //
+    // ⚠️ **None of these three is abstract**, despite the base looking like it
+    // should be. `register_scene_types.cpp:959-964` registers all three with
+    // plain `GDREGISTER_CLASS` — `SkeletonModification2D` included. Marking the
+    // base abstract would make `SkeletonModification2D.new()` fail where Godot
+    // allows it.
+    if !class_exists("SkeletonModification2D") {
+        register_class(
+            ClassRegistration::new("SkeletonModification2D")
+                .parent("Resource")
+                // ⚠️ `enabled` defaults to TRUE here and to FALSE on
+                // `SkeletonModificationStack2D` below. Same property name,
+                // opposite defaults — copying one onto the other silently
+                // enables every stack or disables every modification.
+                .property(
+                    PropertyInfo::new("enabled", Variant::Bool(true))
+                        .with_accessors("get_enabled", "set_enabled"),
+                )
+                // PROPERTY_HINT_ENUM (2) with Godot's two execution modes.
+                .property(
+                    PropertyInfo::new("execution_mode", Variant::Int(0))
+                        .with_hint(2)
+                        .with_hint_string("process,physics_process")
+                        .with_accessors("get_execution_mode", "set_execution_mode"),
+                )
+                // The three script-overridable virtuals (GDVIRTUAL_BIND at
+                // `skeleton_modification_2d.cpp:213-216`), marked as such so a
+                // script overriding `_execute` is distinguishable from calling
+                // a concrete method.
+                .method(
+                    MethodInfo::new("_execute", 1)
+                        .virtual_method()
+                        .with_arguments(vec![PropertyInfo::new("delta", Variant::Float(0.0))]),
+                )
+                .method(
+                    MethodInfo::new("_setup_modification", 1)
+                        .virtual_method()
+                        .with_arguments(vec![PropertyInfo::new(
+                            "modification_stack",
+                            Variant::Nil,
+                        )
+                        .with_hint_string("SkeletonModificationStack2D")]),
+                )
+                .method(MethodInfo::new("_draw_editor_gizmo", 0).virtual_method())
+                .method(
+                    MethodInfo::new("set_enabled", 1)
+                        .with_arguments(vec![PropertyInfo::new("enabled", Variant::Bool(false))]),
+                )
+                .method(MethodInfo::new("get_enabled", 0).returns(Variant::Bool(false)))
+                .method(
+                    MethodInfo::new("get_modification_stack", 0)
+                        .returns_of(Variant::Nil, "SkeletonModificationStack2D"),
+                )
+                .method(
+                    MethodInfo::new("set_is_setup", 1)
+                        .with_arguments(vec![PropertyInfo::new("is_setup", Variant::Bool(false))]),
+                )
+                .method(MethodInfo::new("get_is_setup", 0).returns(Variant::Bool(false)))
+                .method(
+                    MethodInfo::new("set_execution_mode", 1)
+                        .with_arguments(vec![PropertyInfo::new("execution_mode", Variant::Int(0))]),
+                )
+                .method(MethodInfo::new("get_execution_mode", 0).returns(Variant::Int(0)))
+                .method(
+                    MethodInfo::new("clamp_angle", 4)
+                        .with_arguments(vec![
+                            PropertyInfo::new("angle", Variant::Float(0.0)),
+                            PropertyInfo::new("min", Variant::Float(0.0)),
+                            PropertyInfo::new("max", Variant::Float(0.0)),
+                            PropertyInfo::new("invert", Variant::Bool(false)),
+                        ])
+                        .returns(Variant::Float(0.0)),
+                )
+                .method(
+                    MethodInfo::new("set_editor_draw_gizmo", 1).with_arguments(vec![
+                        PropertyInfo::new("draw_gizmo", Variant::Bool(false)),
+                    ]),
+                )
+                .method(MethodInfo::new("get_editor_draw_gizmo", 0).returns(Variant::Bool(false))),
+        );
+    }
+    if !class_exists("SkeletonModificationStack2D") {
+        register_class(
+            ClassRegistration::new("SkeletonModificationStack2D")
+                .parent("Resource")
+                // ⚠️ FALSE — see the note on the base class above.
+                .property(
+                    PropertyInfo::new("enabled", Variant::Bool(false))
+                        .with_accessors("get_enabled", "set_enabled"),
+                )
+                .property(
+                    PropertyInfo::new("modification_count", Variant::Int(0))
+                        .with_accessors("get_modification_count", "set_modification_count"),
+                )
+                .property(
+                    PropertyInfo::new("strength", Variant::Float(1.0))
+                        .with_accessors("get_strength", "set_strength"),
+                )
+                .method(MethodInfo::new("setup", 0))
+                .method(MethodInfo::new("execute", 2).with_arguments(vec![
+                    PropertyInfo::new("delta", Variant::Float(0.0)),
+                    PropertyInfo::new("execution_mode", Variant::Int(0)),
+                ]))
+                .method(
+                    MethodInfo::new("enable_all_modifications", 1)
+                        .with_arguments(vec![PropertyInfo::new("enabled", Variant::Bool(false))]),
+                )
+                .method(
+                    MethodInfo::new("get_modification", 1)
+                        .with_arguments(vec![PropertyInfo::new("mod_idx", Variant::Int(0))])
+                        .returns_of(Variant::Nil, "SkeletonModification2D"),
+                )
+                .method(MethodInfo::new("add_modification", 1).with_arguments(vec![
+                        PropertyInfo::new("modification", Variant::Nil)
+                            .with_hint_string("SkeletonModification2D"),
+                    ]))
+                .method(
+                    MethodInfo::new("delete_modification", 1)
+                        .with_arguments(vec![PropertyInfo::new("mod_idx", Variant::Int(0))]),
+                )
+                .method(MethodInfo::new("set_modification", 2).with_arguments(vec![
+                        PropertyInfo::new("mod_idx", Variant::Int(0)),
+                        PropertyInfo::new("modification", Variant::Nil)
+                            .with_hint_string("SkeletonModification2D"),
+                    ]))
+                // ⚠️ The bound parameter is `count`, not `modification_count`.
+                .method(
+                    MethodInfo::new("set_modification_count", 1)
+                        .with_arguments(vec![PropertyInfo::new("count", Variant::Int(0))]),
+                )
+                .method(MethodInfo::new("get_modification_count", 0).returns(Variant::Int(0)))
+                .method(MethodInfo::new("get_is_setup", 0).returns(Variant::Bool(false)))
+                .method(
+                    MethodInfo::new("set_enabled", 1)
+                        .with_arguments(vec![PropertyInfo::new("enabled", Variant::Bool(false))]),
+                )
+                .method(MethodInfo::new("get_enabled", 0).returns(Variant::Bool(false)))
+                .method(
+                    MethodInfo::new("set_strength", 1)
+                        .with_arguments(vec![PropertyInfo::new("strength", Variant::Float(0.0))]),
+                )
+                .method(MethodInfo::new("get_strength", 0).returns(Variant::Float(0.0)))
+                .method(MethodInfo::new("get_skeleton", 0).returns_of(Variant::Nil, "Skeleton2D")),
+        );
+    }
+    if !class_exists("SkeletonModification2DTwoBoneIK") {
+        register_class(
+            ClassRegistration::new("SkeletonModification2DTwoBoneIK")
+                .parent("SkeletonModification2D")
+                .property(
+                    PropertyInfo::new("flip_bend_direction", Variant::Bool(false))
+                        .with_accessors("get_flip_bend_direction", "set_flip_bend_direction"),
+                )
+                .property(
+                    PropertyInfo::new("target_maximum_distance", Variant::Float(0.0))
+                        .with_accessors(
+                            "get_target_maximum_distance",
+                            "set_target_maximum_distance",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new("target_minimum_distance", Variant::Float(0.0))
+                        .with_accessors(
+                            "get_target_minimum_distance",
+                            "set_target_minimum_distance",
+                        ),
+                )
+                // ⚠️ The MEMBER is `target_nodepath` but its accessors are
+                // `set_target_node` / `get_target_node` — the two names
+                // disagree, so deriving either from the other is wrong.
+                .property(
+                    PropertyInfo::new(
+                        "target_nodepath",
+                        Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                    )
+                    .with_accessors("get_target_node", "set_target_node"),
+                )
+                // ⚠️ Three bound parameter names differ from their property
+                // names: `target_nodepath` (not `target_node`),
+                // `minimum_distance` / `maximum_distance` (not `target_*`), and
+                // `flip_direction` (not `flip_bend_direction`). All four are
+                // transcribed from `skeleton_modification_2d_twoboneik.cpp:471`.
+                .method(MethodInfo::new("set_target_node", 1).with_arguments(vec![
+                    PropertyInfo::new(
+                        "target_nodepath",
+                        Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                    ),
+                ]))
+                .method(
+                    MethodInfo::new("get_target_node", 0)
+                        .returns(Variant::NodePath(gdcore::node_path::NodePath::empty())),
+                )
+                .method(
+                    MethodInfo::new("set_target_minimum_distance", 1).with_arguments(vec![
+                        PropertyInfo::new("minimum_distance", Variant::Float(0.0)),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("get_target_minimum_distance", 0).returns(Variant::Float(0.0)),
+                )
+                .method(
+                    MethodInfo::new("set_target_maximum_distance", 1).with_arguments(vec![
+                        PropertyInfo::new("maximum_distance", Variant::Float(0.0)),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("get_target_maximum_distance", 0).returns(Variant::Float(0.0)),
+                )
+                .method(
+                    MethodInfo::new("set_flip_bend_direction", 1).with_arguments(vec![
+                        PropertyInfo::new("flip_direction", Variant::Bool(false)),
+                    ]),
+                )
+                .method(MethodInfo::new("get_flip_bend_direction", 0).returns(Variant::Bool(false)))
+                .method(
+                    MethodInfo::new("set_joint_one_bone2d_node", 1).with_arguments(vec![
+                        PropertyInfo::new(
+                            "bone2d_node",
+                            Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                        ),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("get_joint_one_bone2d_node", 0)
+                        .returns(Variant::NodePath(gdcore::node_path::NodePath::empty())),
+                )
+                .method(
+                    MethodInfo::new("set_joint_one_bone_idx", 1)
+                        .with_arguments(vec![PropertyInfo::new("bone_idx", Variant::Int(0))]),
+                )
+                .method(MethodInfo::new("get_joint_one_bone_idx", 0).returns(Variant::Int(0)))
+                .method(
+                    MethodInfo::new("set_joint_two_bone2d_node", 1).with_arguments(vec![
+                        PropertyInfo::new(
+                            "bone2d_node",
+                            Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                        ),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("get_joint_two_bone2d_node", 0)
+                        .returns(Variant::NodePath(gdcore::node_path::NodePath::empty())),
+                )
+                .method(
+                    MethodInfo::new("set_joint_two_bone_idx", 1)
+                        .with_arguments(vec![PropertyInfo::new("bone_idx", Variant::Int(0))]),
+                )
+                .method(MethodInfo::new("get_joint_two_bone_idx", 0).returns(Variant::Int(0))),
+        );
+    }
     if !class_exists("Path2D") {
         // Path2D: 1 own properties from doc/classes/Path2D.xml.
         register_class(ClassRegistration::new("Path2D").parent("Node2D").property(
@@ -14442,7 +14916,690 @@ pub fn register_2d_classes() {
         );
     }
     if !class_exists("AudioEffectEQ") {
-        register_class(ClassRegistration::new("AudioEffectEQ").parent("AudioEffect"));
+        register_class(
+            ClassRegistration::new("AudioEffectEQ")
+                .parent("AudioEffect")
+                // `audio_effect_eq.cpp:120-122`. The bands themselves are
+                // dynamic properties on the subclasses, but these three are
+                // bound on the base and are how a script drives an EQ without
+                // knowing its band layout.
+                .method(MethodInfo::new("set_band_gain_db", 2).with_arguments(vec![
+                    PropertyInfo::new("band_idx", Variant::Int(0)),
+                    PropertyInfo::new("volume_db", Variant::Float(0.0)),
+                ]))
+                .method(
+                    MethodInfo::new("get_band_gain_db", 1)
+                        .with_arguments(vec![PropertyInfo::new("band_idx", Variant::Int(0))])
+                        .returns(Variant::Float(0.0)),
+                )
+                .method(MethodInfo::new("get_band_count", 0).returns(Variant::Int(0))),
+        );
+    }
+    // -- The banded EQ subclasses (pat-s3rrv.140) ---------------------------
+    //
+    // ⚠️ **Every frequency below is transcribed from
+    // `servers/audio/effects/eq_filter.cpp:126-150`, never derived.** They are
+    // not an even octave series — EQ6 jumps 32/100/320/1000, EQ21 runs
+    // 22/32/44/63/90 — so a generated table is wrong from the second band on,
+    // and a wrong band name is a property a `.tres` bus layout silently fails
+    // to apply.
+    //
+    // ⚠️ **The name TRUNCATES the frequency.** Godot builds it as
+    // `"band_db/" + itos(freq) + "_hz"` (`audio_effect_eq.cpp:131`), and
+    // `itos` truncates toward zero — so EQ10's 31.25 Hz and 62.5 Hz bands are
+    // `band_db/31_hz` and `band_db/62_hz`. Rounding gives `63` for the second
+    // one and a property nothing matches.
+    //
+    // The hint is Godot's `-60,24,0.1` range, which is NOT symmetric: an EQ
+    // band cuts far deeper than it boosts.
+    // -- Composite AudioStream types (pat-s3rrv.143) ------------------------
+    //
+    // ⚠️ `AudioStreamGeneratorPlayback` was ALREADY registered while
+    // `AudioStreamGenerator` was not — the product existed and its producer did
+    // not, so `get_stream_playback()` had a return type registered and no class
+    // to be called on.
+    //
+    // ⚠️ Registration only. The generator and a polyphonic voice pool are
+    // implemented and unit-tested in `gdaudio::decode`, but nothing outside
+    // that crate references them: there is no `get_stream_playback()` on a
+    // player and no script binding for `push_frame`. These entries make the
+    // classes resolvable; they do not wire the audio path.
+    if !class_exists("AudioStreamGenerator") {
+        register_class(
+            ClassRegistration::new("AudioStreamGenerator")
+                .parent("AudioStream")
+                .property(
+                    PropertyInfo::new("buffer_length", Variant::Float(0.5))
+                        .with_accessors("get_buffer_length", "set_buffer_length"),
+                )
+                .property(
+                    PropertyInfo::new("mix_rate", Variant::Float(44100.0))
+                        .with_accessors("get_mix_rate", "set_mix_rate"),
+                )
+                // ⚠️ Defaults to 2, not 0 — `AudioStreamGeneratorMixRate`.
+                .property(
+                    PropertyInfo::new("mix_rate_mode", Variant::Int(2))
+                        .with_accessors("get_mix_rate_mode", "set_mix_rate_mode"),
+                ),
+        );
+    }
+    if !class_exists("AudioStreamPolyphonic") {
+        register_class(
+            ClassRegistration::new("AudioStreamPolyphonic")
+                .parent("AudioStream")
+                // Godot's default voice count is 32.
+                .property(
+                    PropertyInfo::new("polyphony", Variant::Int(32))
+                        .with_accessors("get_polyphony", "set_polyphony"),
+                ),
+        );
+    }
+    if !class_exists("AudioStreamRandomizer") {
+        register_class(
+            ClassRegistration::new("AudioStreamRandomizer")
+                .parent("AudioStream")
+                .property(
+                    PropertyInfo::new("playback_mode", Variant::Int(0))
+                        .with_accessors("get_playback_mode", "set_playback_mode"),
+                )
+                // ⚠️ `random_pitch` defaults to 1.0 (no jitter), while its
+                // sibling `random_pitch_semitones` defaults to 0.0. One is a
+                // MULTIPLIER and the other an OFFSET, so they cannot share a
+                // neutral value — giving either the other's default detunes
+                // every randomized sound.
+                .property(
+                    PropertyInfo::new("random_pitch", Variant::Float(1.0))
+                        .with_accessors("get_random_pitch", "set_random_pitch"),
+                )
+                .property(
+                    PropertyInfo::new("random_pitch_semitones", Variant::Float(0.0))
+                        .with_accessors("get_random_pitch_semitones", "set_random_pitch_semitones"),
+                )
+                .property(
+                    PropertyInfo::new("random_volume_offset_db", Variant::Float(0.0))
+                        .with_accessors(
+                            "get_random_volume_offset_db",
+                            "set_random_volume_offset_db",
+                        ),
+                )
+                // ⚠️ `streams_count` — plural — on Randomizer, but
+                // `stream_count` (singular) on Playlist and Synchronized below.
+                .property(
+                    PropertyInfo::new("streams_count", Variant::Int(0))
+                        .with_accessors("get_streams_count", "set_streams_count"),
+                )
+                .method(MethodInfo::new("add_stream", 3).with_arguments(vec![
+                    PropertyInfo::new("index", Variant::Int(0)),
+                    PropertyInfo::new("stream", Variant::Nil).with_hint_string("AudioStream"),
+                    PropertyInfo::new("weight", Variant::Float(0.0)),
+                ]))
+                .method(
+                    MethodInfo::new("get_stream", 1)
+                        .with_arguments(vec![PropertyInfo::new("index", Variant::Int(0))])
+                        .returns_of(Variant::Nil, "AudioStream"),
+                )
+                .method(
+                    MethodInfo::new("get_stream_probability_weight", 1)
+                        .with_arguments(vec![PropertyInfo::new("index", Variant::Int(0))])
+                        .returns(Variant::Float(0.0)),
+                )
+                .method(MethodInfo::new("move_stream", 2).with_arguments(vec![
+                    PropertyInfo::new("index_from", Variant::Int(0)),
+                    PropertyInfo::new("index_to", Variant::Int(0)),
+                ]))
+                .method(
+                    MethodInfo::new("remove_stream", 1)
+                        .with_arguments(vec![PropertyInfo::new("index", Variant::Int(0))]),
+                )
+                .method(MethodInfo::new("set_stream", 2).with_arguments(vec![
+                    PropertyInfo::new("index", Variant::Int(0)),
+                    PropertyInfo::new("stream", Variant::Nil).with_hint_string("AudioStream"),
+                ]))
+                .method(
+                    MethodInfo::new("set_stream_probability_weight", 2).with_arguments(vec![
+                        PropertyInfo::new("index", Variant::Int(0)),
+                        PropertyInfo::new("weight", Variant::Float(0.0)),
+                    ]),
+                ),
+        );
+    }
+    if !class_exists("AudioStreamPlaylist") {
+        register_class(
+            ClassRegistration::new("AudioStreamPlaylist")
+                .parent("AudioStream")
+                .property(
+                    PropertyInfo::new("fade_time", Variant::Float(0.3))
+                        .with_accessors("get_fade_time", "set_fade_time"),
+                )
+                // ⚠️ `loop` defaults to TRUE and its getter is `has_loop`,
+                // while `shuffle` right below defaults to false with a plain
+                // `get_shuffle`. The two disagree on BOTH points inside one
+                // class, so neither can be derived from the other.
+                .property(
+                    PropertyInfo::new("loop", Variant::Bool(true))
+                        .with_accessors("has_loop", "set_loop"),
+                )
+                .property(
+                    PropertyInfo::new("shuffle", Variant::Bool(false))
+                        .with_accessors("get_shuffle", "set_shuffle"),
+                )
+                .property(
+                    PropertyInfo::new("stream_count", Variant::Int(0))
+                        .with_accessors("get_stream_count", "set_stream_count"),
+                )
+                .method(MethodInfo::new("get_bpm", 0).returns(Variant::Float(0.0)))
+                .method(
+                    MethodInfo::new("get_list_stream", 1)
+                        .with_arguments(vec![PropertyInfo::new("stream_index", Variant::Int(0))])
+                        .returns_of(Variant::Nil, "AudioStream"),
+                )
+                // ⚠️ The second parameter is `audio_stream`, not `stream`.
+                .method(MethodInfo::new("set_list_stream", 2).with_arguments(vec![
+                    PropertyInfo::new("stream_index", Variant::Int(0)),
+                    PropertyInfo::new("audio_stream", Variant::Nil).with_hint_string("AudioStream"),
+                ])),
+        );
+    }
+    // ⚠️ `AudioStreamInteractive` is the last of the container streams and the
+    // only one with a transition MATRIX rather than a flat list — hence 19
+    // methods, four enums and a `CLIP_ANY` wildcard. Its doc XML lives under
+    // `modules/interactive_music/doc_classes/`, NOT `doc/classes/`, which is
+    // why a sweep of the latter reports it as having no documentation
+    // (pat-s3rrv.144).
+    if !class_exists("AudioStreamInteractive") {
+        register_class(
+            ClassRegistration::new("AudioStreamInteractive")
+                .parent("AudioStream")
+                .property(
+                    PropertyInfo::new("clip_count", Variant::Int(0))
+                        .with_accessors("get_clip_count", "set_clip_count"),
+                )
+                .property(
+                    PropertyInfo::new("initial_clip", Variant::Int(0))
+                        .with_accessors("get_initial_clip", "set_initial_clip"),
+                )
+                // ⚠️ -1, not 0. `CLIP_ANY` is the wildcard "from any clip" in a
+                // transition; a 0 here would silently mean clip index 0.
+                .constant("CLIP_ANY", -1)
+                .enumeration(
+                    EnumInfo::new("TransitionFromTime")
+                        .constant("TRANSITION_FROM_TIME_IMMEDIATE", 0)
+                        .constant("TRANSITION_FROM_TIME_NEXT_BEAT", 1)
+                        .constant("TRANSITION_FROM_TIME_NEXT_BAR", 2)
+                        .constant("TRANSITION_FROM_TIME_END", 3),
+                )
+                .enumeration(
+                    EnumInfo::new("TransitionToTime")
+                        .constant("TRANSITION_TO_TIME_SAME_POSITION", 0)
+                        .constant("TRANSITION_TO_TIME_START", 1),
+                )
+                .enumeration(
+                    EnumInfo::new("FadeMode")
+                        .constant("FADE_DISABLED", 0)
+                        .constant("FADE_IN", 1)
+                        .constant("FADE_OUT", 2)
+                        .constant("FADE_CROSS", 3)
+                        .constant("FADE_AUTOMATIC", 4),
+                )
+                .enumeration(
+                    EnumInfo::new("AutoAdvanceMode")
+                        .constant("AUTO_ADVANCE_DISABLED", 0)
+                        .constant("AUTO_ADVANCE_ENABLED", 1)
+                        .constant("AUTO_ADVANCE_RETURN_TO_HOLD", 2),
+                )
+                // ⚠️ Nine arguments — the widest method in the audio surface.
+                // Transcribed in order from the doc XML; a reordered pair like
+                // (fade_mode, fade_beats) would still typecheck at every call
+                // site because both are numbers.
+                .method(MethodInfo::new("add_transition", 9).with_arguments(vec![
+                    PropertyInfo::new("from_clip", Variant::Int(0)),
+                    PropertyInfo::new("to_clip", Variant::Int(0)),
+                    PropertyInfo::new("from_time", Variant::Int(0)),
+                    PropertyInfo::new("to_time", Variant::Int(0)),
+                    PropertyInfo::new("fade_mode", Variant::Int(0)),
+                    PropertyInfo::new("fade_beats", Variant::Float(0.0)),
+                    PropertyInfo::new("use_filler_clip", Variant::Bool(false)),
+                    PropertyInfo::new("filler_clip", Variant::Int(0)),
+                    PropertyInfo::new("hold_previous", Variant::Bool(false)),
+                ]))
+                .method(MethodInfo::new("erase_transition", 2).with_arguments(vec![
+                    PropertyInfo::new("from_clip", Variant::Int(0)),
+                    PropertyInfo::new("to_clip", Variant::Int(0)),
+                ]))
+                .method(
+                    MethodInfo::new("get_clip_auto_advance", 1)
+                        .with_arguments(vec![PropertyInfo::new("clip_index", Variant::Int(0))])
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_clip_auto_advance_next_clip", 1)
+                        .with_arguments(vec![PropertyInfo::new("clip_index", Variant::Int(0))])
+                        .returns(Variant::Int(0)),
+                )
+                // ⚠️ Returns a StringName, not a String.
+                .method(
+                    MethodInfo::new("get_clip_name", 1)
+                        .with_arguments(vec![PropertyInfo::new("clip_index", Variant::Int(0))])
+                        .returns(Variant::StringName(gdcore::string_name::StringName::new(
+                            "",
+                        ))),
+                )
+                .method(
+                    MethodInfo::new("get_clip_stream", 1)
+                        .with_arguments(vec![PropertyInfo::new("clip_index", Variant::Int(0))])
+                        .returns_of(Variant::Nil, "AudioStream"),
+                )
+                .method(
+                    MethodInfo::new("get_transition_fade_beats", 2)
+                        .with_arguments(vec![
+                            PropertyInfo::new("from_clip", Variant::Int(0)),
+                            PropertyInfo::new("to_clip", Variant::Int(0)),
+                        ])
+                        .returns(Variant::Float(0.0)),
+                )
+                .method(
+                    MethodInfo::new("get_transition_fade_mode", 2)
+                        .with_arguments(vec![
+                            PropertyInfo::new("from_clip", Variant::Int(0)),
+                            PropertyInfo::new("to_clip", Variant::Int(0)),
+                        ])
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_transition_filler_clip", 2)
+                        .with_arguments(vec![
+                            PropertyInfo::new("from_clip", Variant::Int(0)),
+                            PropertyInfo::new("to_clip", Variant::Int(0)),
+                        ])
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_transition_from_time", 2)
+                        .with_arguments(vec![
+                            PropertyInfo::new("from_clip", Variant::Int(0)),
+                            PropertyInfo::new("to_clip", Variant::Int(0)),
+                        ])
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("get_transition_list", 0)
+                        .returns(Variant::PackedInt32Array(Vec::new())),
+                )
+                .method(
+                    MethodInfo::new("get_transition_to_time", 2)
+                        .with_arguments(vec![
+                            PropertyInfo::new("from_clip", Variant::Int(0)),
+                            PropertyInfo::new("to_clip", Variant::Int(0)),
+                        ])
+                        .returns(Variant::Int(0)),
+                )
+                .method(
+                    MethodInfo::new("has_transition", 2)
+                        .with_arguments(vec![
+                            PropertyInfo::new("from_clip", Variant::Int(0)),
+                            PropertyInfo::new("to_clip", Variant::Int(0)),
+                        ])
+                        .returns(Variant::Bool(false)),
+                )
+                // ⚠️ `is_`, not `get_`, on both transition predicates.
+                .method(
+                    MethodInfo::new("is_transition_holding_previous", 2)
+                        .with_arguments(vec![
+                            PropertyInfo::new("from_clip", Variant::Int(0)),
+                            PropertyInfo::new("to_clip", Variant::Int(0)),
+                        ])
+                        .returns(Variant::Bool(false)),
+                )
+                .method(
+                    MethodInfo::new("is_transition_using_filler_clip", 2)
+                        .with_arguments(vec![
+                            PropertyInfo::new("from_clip", Variant::Int(0)),
+                            PropertyInfo::new("to_clip", Variant::Int(0)),
+                        ])
+                        .returns(Variant::Bool(false)),
+                )
+                .method(
+                    MethodInfo::new("set_clip_auto_advance", 2).with_arguments(vec![
+                        PropertyInfo::new("clip_index", Variant::Int(0)),
+                        PropertyInfo::new("mode", Variant::Int(0)),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("set_clip_auto_advance_next_clip", 2).with_arguments(vec![
+                        PropertyInfo::new("clip_index", Variant::Int(0)),
+                        PropertyInfo::new("auto_advance_next_clip", Variant::Int(0)),
+                    ]),
+                )
+                .method(MethodInfo::new("set_clip_name", 2).with_arguments(vec![
+                    PropertyInfo::new("clip_index", Variant::Int(0)),
+                    PropertyInfo::new(
+                        "name",
+                        Variant::StringName(gdcore::string_name::StringName::new("")),
+                    ),
+                ]))
+                .method(MethodInfo::new("set_clip_stream", 2).with_arguments(vec![
+                    PropertyInfo::new("clip_index", Variant::Int(0)),
+                    PropertyInfo::new("stream", Variant::Nil).with_hint_string("AudioStream"),
+                ])),
+        );
+    }
+    if !class_exists("AudioStreamSynchronized") {
+        register_class(
+            ClassRegistration::new("AudioStreamSynchronized")
+                .parent("AudioStream")
+                .property(
+                    PropertyInfo::new("stream_count", Variant::Int(0))
+                        .with_accessors("get_stream_count", "set_stream_count"),
+                )
+                .method(
+                    MethodInfo::new("get_sync_stream", 1)
+                        .with_arguments(vec![PropertyInfo::new("stream_index", Variant::Int(0))])
+                        .returns_of(Variant::Nil, "AudioStream"),
+                )
+                .method(
+                    MethodInfo::new("get_sync_stream_volume", 1)
+                        .with_arguments(vec![PropertyInfo::new("stream_index", Variant::Int(0))])
+                        .returns(Variant::Float(0.0)),
+                )
+                .method(MethodInfo::new("set_sync_stream", 2).with_arguments(vec![
+                    PropertyInfo::new("stream_index", Variant::Int(0)),
+                    PropertyInfo::new("audio_stream", Variant::Nil).with_hint_string("AudioStream"),
+                ]))
+                .method(
+                    MethodInfo::new("set_sync_stream_volume", 2).with_arguments(vec![
+                        PropertyInfo::new("stream_index", Variant::Int(0)),
+                        PropertyInfo::new("volume_db", Variant::Float(0.0)),
+                    ]),
+                ),
+        );
+    }
+    // -- Audio input: microphone, capture and record (pat-s3rrv.142) -------
+    //
+    // All three are plain `GDREGISTER_CLASS` upstream
+    // (`register_server_types.cpp:169,211,215`) — none abstract.
+    //
+    // ⚠️ Registration only. Nothing captures audio yet: there is no input
+    // stream, no ring buffer and no `getUserMedia` backend, and `AudioServer`
+    // is absent from ClassDB entirely so its input half has nowhere to live.
+    // These entries make the classes RESOLVABLE — a `.tscn` naming one, or
+    // `ClassDB.class_get_method_list`, now answers correctly — they do not make
+    // a microphone work.
+    if !class_exists("AudioStreamMicrophone") {
+        // Carries no members and no methods of its own in Godot: it is the
+        // capture device wearing the AudioStream interface, and everything
+        // interesting about it lives on AudioServer.
+        register_class(ClassRegistration::new("AudioStreamMicrophone").parent("AudioStream"));
+    }
+    if !class_exists("AudioEffectCapture") {
+        register_class(
+            ClassRegistration::new("AudioEffectCapture")
+                .parent("AudioEffect")
+                .property(
+                    PropertyInfo::new("buffer_length", Variant::Float(0.1))
+                        .with_hint(1)
+                        .with_hint_string("0.01,10,0.01,suffix:s")
+                        .with_accessors("get_buffer_length", "set_buffer_length"),
+                )
+                .method(
+                    MethodInfo::new("can_get_buffer", 1)
+                        .with_arguments(vec![PropertyInfo::new("frames", Variant::Int(0))])
+                        .returns(Variant::Bool(false)),
+                )
+                // ⚠️ Returns a PackedVector2Array — one Vector2 per FRAME
+                // (left, right), not a flat float array. A caller that treated
+                // it as mono would read every other sample.
+                .method(
+                    MethodInfo::new("get_buffer", 1)
+                        .with_arguments(vec![PropertyInfo::new("frames", Variant::Int(0))])
+                        .returns(Variant::PackedVector2Array(Vec::new())),
+                )
+                .method(MethodInfo::new("clear_buffer", 0))
+                // ⚠️ The bound parameter is `buffer_length_seconds`, not
+                // `buffer_length` — the property and its setter's argument
+                // disagree (`audio_effect_capture.cpp:68`).
+                .method(MethodInfo::new("set_buffer_length", 1).with_arguments(vec![
+                    PropertyInfo::new("buffer_length_seconds", Variant::Float(0.0)),
+                ]))
+                .method(MethodInfo::new("get_buffer_length", 0).returns(Variant::Float(0.0)))
+                .method(MethodInfo::new("get_frames_available", 0).returns(Variant::Int(0)))
+                .method(MethodInfo::new("get_discarded_frames", 0).returns(Variant::Int(0)))
+                .method(MethodInfo::new("get_buffer_length_frames", 0).returns(Variant::Int(0)))
+                .method(MethodInfo::new("get_pushed_frames", 0).returns(Variant::Int(0))),
+        );
+    }
+    if !class_exists("AudioEffectRecord") {
+        register_class(
+            ClassRegistration::new("AudioEffectRecord")
+                .parent("AudioEffect")
+                // ⚠️ Defaults to 1 (16-Bit), not 0. The enum is
+                // `AudioStreamWAV.Format` — "8-Bit,16-Bit,IMA ADPCM,Quite OK
+                // Audio" — so a 0 default would silently record 8-bit.
+                .property(
+                    PropertyInfo::new("format", Variant::Int(1))
+                        .with_hint(2)
+                        .with_hint_string("8-Bit,16-Bit,IMA ADPCM,Quite OK Audio")
+                        .with_accessors("get_format", "set_format"),
+                )
+                .method(
+                    MethodInfo::new("set_recording_active", 1)
+                        .with_arguments(vec![PropertyInfo::new("record", Variant::Bool(false))]),
+                )
+                // ⚠️ `is_recording_active`, not `get_recording_active` — the
+                // bool convention, and the only accessor on these two classes
+                // that does not start with `get_`.
+                .method(MethodInfo::new("is_recording_active", 0).returns(Variant::Bool(false)))
+                .method(
+                    MethodInfo::new("set_format", 1)
+                        .with_arguments(vec![PropertyInfo::new("format", Variant::Int(0))]),
+                )
+                .method(MethodInfo::new("get_format", 0).returns(Variant::Int(0)))
+                .method(
+                    MethodInfo::new("get_recording", 0).returns_of(Variant::Nil, "AudioStreamWAV"),
+                ),
+        );
+    }
+    if !class_exists("AudioEffectEQ6") {
+        register_class(
+            ClassRegistration::new("AudioEffectEQ6")
+                .parent("AudioEffectEQ")
+                .property(
+                    PropertyInfo::new("band_db/32_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/100_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/320_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/1000_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/3200_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/10000_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                ),
+        );
+    }
+    if !class_exists("AudioEffectEQ10") {
+        register_class(
+            ClassRegistration::new("AudioEffectEQ10")
+                .parent("AudioEffectEQ")
+                .property(
+                    PropertyInfo::new("band_db/31_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/62_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/125_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/250_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/500_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/1000_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/2000_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/4000_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/8000_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/16000_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                ),
+        );
+    }
+    if !class_exists("AudioEffectEQ21") {
+        register_class(
+            ClassRegistration::new("AudioEffectEQ21")
+                .parent("AudioEffectEQ")
+                .property(
+                    PropertyInfo::new("band_db/22_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/32_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/44_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/63_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/90_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/125_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/175_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/250_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/350_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/500_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/700_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/1000_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/1400_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/2000_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/2800_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/4000_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/5600_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/8000_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/11000_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/16000_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                )
+                .property(
+                    PropertyInfo::new("band_db/22000_hz", Variant::Float(0.0))
+                        .with_hint(1)
+                        .with_hint_string("-60,24,0.1"),
+                ),
+        );
     }
     // Delay and Distortion carry their full Godot property surfaces (names and
     // defaults from doc/classes/AudioEffectDelay.xml and
@@ -17213,19 +18370,77 @@ pub fn register_2d_classes() {
                 .property(PropertyInfo::new("default_font_size", Variant::Int(-1))),
         );
     }
+    // ⚠️ The five properties below were registered without their accessors and
+    // without a single method, so `class_get_method_list("ThemeDB")` came back
+    // EMPTY while `class_exists("ThemeDB")` answered true — which is exactly
+    // why this read as done (pat-s3rrv.126).
+    //
+    // All twelve names are transcribed from `scene/theme/theme_db.cpp:415-427`,
+    // not derived from the property names: Godot binds `get_default_theme` and
+    // `get_project_theme` as plain methods and the other ten as the members'
+    // accessors. None is bound const, so none is marked const here.
     if !class_exists("ThemeDB") {
         register_class(
             ClassRegistration::new("ThemeDB")
                 .signal(SignalInfo::new("fallback_changed"))
                 .parent("Object")
-                .property(PropertyInfo::new(
-                    "fallback_base_scale",
-                    Variant::Float(1.0),
-                ))
-                .property(PropertyInfo::new("fallback_font_size", Variant::Int(16)))
-                .property(PropertyInfo::new("fallback_font", Variant::Nil))
-                .property(PropertyInfo::new("fallback_icon", Variant::Nil))
-                .property(PropertyInfo::new("fallback_stylebox", Variant::Nil)),
+                .property(
+                    PropertyInfo::new("fallback_base_scale", Variant::Float(1.0))
+                        .with_accessors("get_fallback_base_scale", "set_fallback_base_scale"),
+                )
+                .property(
+                    PropertyInfo::new("fallback_font_size", Variant::Int(16))
+                        .with_accessors("get_fallback_font_size", "set_fallback_font_size"),
+                )
+                .property(
+                    PropertyInfo::new("fallback_font", Variant::Nil)
+                        .with_accessors("get_fallback_font", "set_fallback_font"),
+                )
+                .property(
+                    PropertyInfo::new("fallback_icon", Variant::Nil)
+                        .with_accessors("get_fallback_icon", "set_fallback_icon"),
+                )
+                .property(
+                    PropertyInfo::new("fallback_stylebox", Variant::Nil)
+                        .with_accessors("get_fallback_stylebox", "set_fallback_stylebox"),
+                )
+                // The two real methods. Both return a Theme, and Godot returns
+                // null from `get_project_theme` when the project sets no
+                // `gui/theme/custom` — hence a Nil marker carrying the class
+                // name rather than a Theme-typed value.
+                .method(MethodInfo::new("get_default_theme", 0).returns_of(Variant::Nil, "Theme"))
+                .method(MethodInfo::new("get_project_theme", 0).returns_of(Variant::Nil, "Theme"))
+                // The ten member accessors. Argument names come from the
+                // `D_METHOD("set_fallback_*", "<arg>")` entries upstream.
+                .method(
+                    MethodInfo::new("set_fallback_base_scale", 1)
+                        .with_arguments(vec![PropertyInfo::new("base_scale", Variant::Float(0.0))]),
+                )
+                .method(MethodInfo::new("get_fallback_base_scale", 0).returns(Variant::Float(0.0)))
+                .method(MethodInfo::new("set_fallback_font", 1).with_arguments(vec![
+                    PropertyInfo::new("font", Variant::Nil).with_hint_string("Font"),
+                ]))
+                .method(MethodInfo::new("get_fallback_font", 0).returns_of(Variant::Nil, "Font"))
+                .method(
+                    MethodInfo::new("set_fallback_font_size", 1)
+                        .with_arguments(vec![PropertyInfo::new("font_size", Variant::Int(0))]),
+                )
+                .method(MethodInfo::new("get_fallback_font_size", 0).returns(Variant::Int(0)))
+                .method(MethodInfo::new("set_fallback_icon", 1).with_arguments(vec![
+                    PropertyInfo::new("icon", Variant::Nil).with_hint_string("Texture2D"),
+                ]))
+                .method(
+                    MethodInfo::new("get_fallback_icon", 0).returns_of(Variant::Nil, "Texture2D"),
+                )
+                .method(
+                    MethodInfo::new("set_fallback_stylebox", 1)
+                        .with_arguments(vec![PropertyInfo::new("stylebox", Variant::Nil)
+                            .with_hint_string("StyleBox")]),
+                )
+                .method(
+                    MethodInfo::new("get_fallback_stylebox", 0)
+                        .returns_of(Variant::Nil, "StyleBox"),
+                ),
         );
     }
 
@@ -18602,8 +19817,104 @@ pub fn register_root_window_chain() {
     // settings in the inspector that silently do nothing, which is the failure
     // this file already guards against for methods (see the
     // "nothing unimplemented was advertised" assertion in the tests below).
+    //
+    // ⚠️ The METHODS below were added by pat-s3rrv.145. The property rationale
+    // above still stands and the three members are still NOT registered — this
+    // adds only methods `call_os_static` actually dispatches, so
+    // `class_has_method` cannot lie.
+    //
+    // ⚠️ The list is the INTERSECTION of the dispatch table with
+    // `doc/classes/OS.xml`, not either one alone. Eight dispatched names are
+    // absent from that XML: six are the accessors for the three unregistered
+    // properties, and `get_ticks_msec` / `get_ticks_usec` are **Godot 3 API
+    // that moved to `Time` in Godot 4**. Registering those two on `OS` would
+    // enshrine the wrong class in the table the editor's class docs read.
     if !class_exists("OS") {
-        register_class(ClassRegistration::new("OS").parent("Object"));
+        register_class(
+            ClassRegistration::new("OS")
+                .parent("Object")
+                .method(MethodInfo::new("alert", 2))
+                .method(MethodInfo::new("close_midi_inputs", 0))
+                .method(MethodInfo::new("create_instance", 1))
+                .method(MethodInfo::new("create_process", 3))
+                .method(MethodInfo::new("delay_msec", 1))
+                .method(MethodInfo::new("delay_usec", 1))
+                .method(MethodInfo::new("execute", 5))
+                .method(MethodInfo::new("find_keycode_from_string", 1))
+                .method(MethodInfo::new("get_cache_dir", 0))
+                .method(MethodInfo::new("get_cmdline_args", 0))
+                .method(MethodInfo::new("get_cmdline_user_args", 0))
+                .method(MethodInfo::new("get_config_dir", 0))
+                .method(MethodInfo::new("get_connected_midi_inputs", 0))
+                .method(MethodInfo::new("get_data_dir", 0))
+                .method(MethodInfo::new("get_distribution_name", 0))
+                .method(MethodInfo::new("get_environment", 1))
+                .method(MethodInfo::new("get_executable_path", 0))
+                .method(MethodInfo::new("get_granted_permissions", 0))
+                .method(MethodInfo::new("get_keycode_string", 1))
+                .method(MethodInfo::new("get_locale", 0))
+                .method(MethodInfo::new("get_locale_language", 0))
+                .method(MethodInfo::new("get_main_thread_id", 0))
+                .method(MethodInfo::new("get_memory_info", 0))
+                .method(MethodInfo::new("get_model_name", 0))
+                .method(MethodInfo::new("get_name", 0))
+                .method(MethodInfo::new("get_process_id", 0))
+                .method(MethodInfo::new("get_processor_count", 0))
+                .method(MethodInfo::new("get_restart_on_exit_arguments", 0))
+                .method(MethodInfo::new("get_static_memory_peak_usage", 0))
+                .method(MethodInfo::new("get_static_memory_usage", 0))
+                .method(MethodInfo::new("get_temp_dir", 0))
+                .method(MethodInfo::new("get_thread_caller_id", 0))
+                .method(MethodInfo::new("get_unique_id", 0))
+                .method(MethodInfo::new("get_user_data_dir", 0))
+                .method(MethodInfo::new("get_version", 0))
+                .method(MethodInfo::new("get_version_alias", 0))
+                .method(MethodInfo::new("has_environment", 1))
+                .method(MethodInfo::new("has_feature", 1))
+                .method(MethodInfo::new("is_debug_build", 0))
+                .method(MethodInfo::new("is_keycode_unicode", 1))
+                .method(MethodInfo::new("is_process_running", 1))
+                .method(MethodInfo::new("is_restart_on_exit_set", 0))
+                .method(MethodInfo::new("is_userfs_persistent", 0))
+                .method(MethodInfo::new("kill", 1))
+                .method(MethodInfo::new("open_midi_inputs", 0))
+                .method(MethodInfo::new("request_permission", 1))
+                .method(MethodInfo::new("request_permissions", 0))
+                .method(MethodInfo::new("revoke_granted_permissions", 0))
+                .method(MethodInfo::new("set_environment", 2))
+                .method(MethodInfo::new("set_restart_on_exit", 2))
+                .method(MethodInfo::new("shell_open", 1))
+                .method(MethodInfo::new("shell_show_in_file_manager", 2))
+                .method(MethodInfo::new("unset_environment", 1)),
+        );
+    }
+    // `PCKPacker` is fully dispatched from GDScript — `interpreter.rs`
+    // constructs it by class name and `call_pck_packer_instance` implements
+    // `pck_start`, `add_file` and `flush` over `gdresource::pck` — and was
+    // invisible to ClassDB, so `ClassDB.instantiate("PCKPacker")` failed and
+    // the editor's Create-Node dialog could not see it (pat-s3rrv.145).
+    //
+    // ⚠️ Three methods, not Godot's four. `add_file_removal` is documented but
+    // has NO dispatch arm, and this file's rule is that ClassDB may not
+    // advertise what the engine cannot run.
+    //
+    // ⚠️ `get_file_count` is dispatched but is NOT a Godot method — it is a
+    // Patina extension. Registering it would make
+    // `ClassDB.class_has_method("PCKPacker", "get_file_count")` answer true
+    // where Godot answers false, which is a parity break in the opposite
+    // direction. It stays callable from script and absent from the table.
+    //
+    // Every arity below counts Godot's OPTIONAL arguments too: `pck_start`
+    // takes 4 (three defaulted), `add_file` 3, `flush` 1 — that is what
+    // `class_get_method_list` reports upstream.
+    if !class_exists("PCKPacker") {
+        register_class(
+            ClassRegistration::new("PCKPacker")
+                .parent("RefCounted")
+                .method(MethodInfo::new("pck_start", 4))
+                .method(MethodInfo::new("add_file", 3))
+                .method(MethodInfo::new("flush", 1)),
+        );
     }
     if !class_exists("Time") {
         register_class(ClassRegistration::new("Time").parent("Object"));
@@ -18985,8 +20296,40 @@ pub fn register_viewport_classes() {
     // only picks `RefCounted` up transitively, via the
     // `register_rendering_device_classes()` call far below — guard it here so
     // the base cannot depend on statement order inside this function.
+    //
+    // ⚠️ The four methods are attached HERE, and the location is load-bearing.
+    // `RefCounted` is registered THIRTEEN times across this file — once per
+    // `register_*_classes` function, each `class_exists`-guarded because each
+    // bootstraps the chain it needs. A guard means only the FIRST one to run
+    // ever registers anything. `register_all_classes` calls
+    // `register_root_window_chain()` first — but that function does NOT
+    // register `RefCounted`, only classes that name it as a parent — so
+    // `register_viewport_classes`, called second, is the first to actually
+    // register it. This is that site.
+    //
+    // ⚠️ Attaching the methods to any of the other twelve leaves them silently
+    // unregistered: a bare copy would win the guard and the richer copy would
+    // never execute. My first attempt put them in `register_3d_classes`, which
+    // runs fourth and is therefore inert (pat-s3rrv.147).
+    //
+    // All four are dispatched by the interpreter's refcounted-handle arm and
+    // implemented in `gdobject::refcounted_handle`, so nothing advertised here
+    // is beyond what the engine can run.
     if !class_exists("RefCounted") {
-        register_class(ClassRegistration::new("RefCounted").parent("Object"));
+        register_class(
+            ClassRegistration::new("RefCounted")
+                .parent("Object")
+                // `const` in Godot — asking for the count must not change it.
+                .method(MethodInfo::new("get_reference_count", 0).const_method())
+                // ⚠️ These three return BOOL, not void: `reference` /
+                // `unreference` report whether the count crossed a boundary
+                // (took the first reference / dropped the last), and `init_ref`
+                // whether the initial reference was taken. That answer is how a
+                // caller knows the object just died.
+                .method(MethodInfo::new("init_ref", 0))
+                .method(MethodInfo::new("reference", 0))
+                .method(MethodInfo::new("unreference", 0)),
+        );
     }
     if !class_exists("Resource") {
         register_class(ClassRegistration::new("Resource").parent("RefCounted"));

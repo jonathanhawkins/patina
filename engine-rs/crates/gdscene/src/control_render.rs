@@ -1584,59 +1584,84 @@ fn layout_label_lines(
     // Godot: NONE 0, TRIM_CHAR 1, TRIM_WORD 2, ELLIPSIS 3, WORD_ELLIPSIS 4.
     let overrun = int_prop(tree, node_id, "text_overrun_behavior").unwrap_or(0);
 
-    let words: Vec<&str> = text.split_whitespace().collect();
-    if words.is_empty() {
-        return Vec::new();
-    }
-    let widths: Vec<f32> = words.iter().map(|w| text_width(w, scale)).collect();
     let space = space_advance(scale);
     let max_width = rect.size.x;
     let line_height = (GLYPH_H + GLYPH_GAP) * scale as f32;
 
-    // Wrapping is off unless the node asks for it, matching Godot's default.
-    let lines = if autowrap == 0 {
-        vec![gdrender2d::text_layout::LineRange {
-            start: 0,
-            end: words.len(),
-            width: widths.iter().sum::<f32>() + space * (words.len() as f32 - 1.0),
-        }]
-    } else {
-        break_lines_word(&widths, space, max_width)
-    };
-
     let mut out = Vec::new();
-    for (row, line) in lines.iter().enumerate() {
-        let mut slice: Vec<&str> = words[line.start..line.end].to_vec();
-        let mut line_width = line.width;
+    // The row this paragraph starts on, so paragraphs stack instead of
+    // overwriting each other at y = 0.
+    let mut row_base = 0usize;
 
-        // Overrun trimming only applies to a line that still overflows — i.e.
-        // when wrapping is off, or a single word is wider than the rect.
-        let ellipsis_requested = matches!(overrun, 3 | 4);
-        if ellipsis_requested && line_width > max_width {
-            let ell = "...";
-            let ell_w = text_width(ell, scale);
-            let widths_slice = &widths[line.start..line.end];
-            if let Some(keep) = ellipsis_word_count(widths_slice, space, max_width, ell_w) {
-                slice.truncate(keep);
-                slice.push(ell);
-                line_width = widths_slice[..keep].iter().sum::<f32>() + space * keep as f32 + ell_w;
-            }
-        }
-
-        let text_line = slice.join(" ");
-        if text_line.is_empty() {
+    // 🔑 Godot shapes MANDATORY line breaks FIRST and wraps each paragraph
+    // independently (`Label::_shape`, `scene/gui/label.cpp`). This used to be
+    // `text.split_whitespace()` over the whole string, which treats '\n' as an
+    // ordinary space — so a Label with an explicit newline drew as ONE line, and
+    // with autowrap off every word landed on a single line regardless of how
+    // many the author typed (pat-s3rrv.129).
+    for paragraph in text.split('\n') {
+        let words: Vec<&str> = paragraph.split_whitespace().collect();
+        if words.is_empty() {
+            // ⚠️ A blank line still OCCUPIES a row: "A\n\nB" puts B two rows
+            // down, not one. Skipping it would silently close the gap the
+            // author typed, which is the same class of bug as dropping the
+            // newline entirely.
+            row_base += 1;
             continue;
         }
-        let dx = align_offset(line_width, max_width, align);
-        out.push(DrawCommand::DrawString {
-            text: text_line,
-            position: Vector2::new(
-                rect.position.x + dx,
-                rect.position.y + row as f32 * line_height,
-            ),
-            color,
-            font_size: font_size.max(1) as u32,
-        });
+        let widths: Vec<f32> = words.iter().map(|w| text_width(w, scale)).collect();
+
+        // Wrapping is off unless the node asks for it, matching Godot's default.
+        let lines = if autowrap == 0 {
+            vec![gdrender2d::text_layout::LineRange {
+                start: 0,
+                end: words.len(),
+                width: widths.iter().sum::<f32>() + space * (words.len() as f32 - 1.0),
+            }]
+        } else {
+            break_lines_word(&widths, space, max_width)
+        };
+
+        let line_count = lines.len();
+        for (row_in_paragraph, line) in lines.iter().enumerate() {
+            let row = row_base + row_in_paragraph;
+            let mut slice: Vec<&str> = words[line.start..line.end].to_vec();
+            let mut line_width = line.width;
+
+            // Overrun trimming only applies to a line that still overflows — i.e.
+            // when wrapping is off, or a single word is wider than the rect.
+            let ellipsis_requested = matches!(overrun, 3 | 4);
+            if ellipsis_requested && line_width > max_width {
+                let ell = "...";
+                let ell_w = text_width(ell, scale);
+                let widths_slice = &widths[line.start..line.end];
+                if let Some(keep) = ellipsis_word_count(widths_slice, space, max_width, ell_w) {
+                    slice.truncate(keep);
+                    slice.push(ell);
+                    line_width =
+                        widths_slice[..keep].iter().sum::<f32>() + space * keep as f32 + ell_w;
+                }
+            }
+
+            let text_line = slice.join(" ");
+            if text_line.is_empty() {
+                continue;
+            }
+            let dx = align_offset(line_width, max_width, align);
+            out.push(DrawCommand::DrawString {
+                text: text_line,
+                position: Vector2::new(
+                    rect.position.x + dx,
+                    rect.position.y + row as f32 * line_height,
+                ),
+                color,
+                font_size: font_size.max(1) as u32,
+            });
+        }
+        // ⚠️ Advance by the paragraph's LINE COUNT, not by one: a wrapped
+        // paragraph occupies several rows and the next paragraph must clear all
+        // of them.
+        row_base += line_count;
     }
     out
 }
@@ -2125,10 +2150,38 @@ fn draw_control(
             if !text.is_empty() {
                 // Per-node `theme_override_colors/font_color` wins over the
                 // Theme during draw (pat-z35r2.17).
-                let font_color = color_prop(tree, node_id, "theme_override_colors/font_color")
-                    .or_else(|| theme.get_color("Label", "font_color"))
-                    .unwrap_or(Color::WHITE);
-                let font_size = theme.get_font_size("Label", "font_size").unwrap_or(16);
+                // A `label_settings` resource REPLACES the theme lookup for
+                // every field it owns (pat-s3rrv.127).
+                //
+                // 🔑 Godot's Label reads `has_settings ? settings->X : theme->X`
+                // per field with **no per-field fallback**
+                // (`scene/gui/label.cpp:761-767`), so a LabelSettings that sets
+                // only an outline still forces the font size and colour to the
+                // resource's own values. Treating each field as "override if
+                // present, else theme" is the natural reading and it is wrong —
+                // it would leave the theme's size in place for exactly that
+                // resource. Only `font` itself carries an extra validity check
+                // (`:112`), which is why the marker, not the field, decides.
+                let has_settings = matches!(
+                    tree.get_node(node_id)
+                        .map(|n| n.get_property("__label_settings__")),
+                    Some(Variant::Bool(true))
+                );
+                let font_color = if has_settings {
+                    color_prop(tree, node_id, "__ls__font_color").unwrap_or(Color::WHITE)
+                } else {
+                    color_prop(tree, node_id, "theme_override_colors/font_color")
+                        .or_else(|| theme.get_color("Label", "font_color"))
+                        .unwrap_or(Color::WHITE)
+                };
+                let font_size = if has_settings {
+                    // 16 is `LabelSettings.font_size`'s own Godot default, so an
+                    // authored resource that omits it still overrides the theme
+                    // with 16 rather than inheriting.
+                    int_prop(tree, node_id, "__ls__font_size").unwrap_or(16)
+                } else {
+                    theme.get_font_size("Label", "font_size").unwrap_or(16)
+                };
                 // `scale` is no longer computed here — `layout_label_lines` now
                 // takes the pixel font size and derives it internally
                 // (pat-s3rrv.37).

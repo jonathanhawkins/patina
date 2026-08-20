@@ -390,3 +390,110 @@ mod tests {
         assert!((p.x - 10.0).abs() < 1e-5);
     }
 }
+
+/// `Geometry2D.is_point_in_circle` (`core/math/geometry_2d.h:227`).
+///
+/// Compared squared, so a point exactly on the circumference counts as inside.
+pub fn is_point_in_circle(point: Vector2, circle_pos: Vector2, radius: f32) -> bool {
+    let d = Vector2::new(point.x - circle_pos.x, point.y - circle_pos.y);
+    d.x * d.x + d.y * d.y <= radius * radius
+}
+
+/// `Geometry2D.segment_intersects_circle` (`core/math/geometry_2d.h:231`).
+///
+/// Returns the fraction along `from -> to` of the FIRST intersection, or `-1.0`
+/// when the segment misses.
+///
+/// ⚠️ **`-1.0`, not `0.0`**, is the miss value — `0.0` is a legitimate hit
+/// exactly at `from`, so a caller testing `if t > 0` would silently drop the
+/// grazing case and one testing `if t != 0` would treat every miss as a hit.
+///
+/// 🔑 Both roots are checked, smaller first, because a segment that *starts
+/// inside* the circle has its near root behind `from` (negative) and only the
+/// far root in range. Returning `res1` unconditionally — which upstream notes is
+/// valid only when the segment is known to start outside — reports a miss for
+/// every segment fired from within the circle.
+pub fn segment_intersects_circle(
+    from: Vector2,
+    to: Vector2,
+    circle_pos: Vector2,
+    radius: f32,
+) -> f32 {
+    let line = Vector2::new(to.x - from.x, to.y - from.y);
+    let to_line = Vector2::new(from.x - circle_pos.x, from.y - circle_pos.y);
+
+    // Quadratic a*t^2 + b*t + c = 0.
+    let a = line.x * line.x + line.y * line.y;
+    let b = 2.0 * (to_line.x * line.x + to_line.y * line.y);
+    let c = to_line.x * to_line.x + to_line.y * to_line.y - radius * radius;
+
+    let sqrtterm = b * b - 4.0 * a * c;
+    if sqrtterm < 0.0 {
+        return -1.0;
+    }
+    let sqrtterm = sqrtterm.sqrt();
+    let res1 = (-b - sqrtterm) / (2.0 * a);
+    let res2 = (-b + sqrtterm) / (2.0 * a);
+
+    if (0.0..=1.0).contains(&res1) {
+        return res1;
+    }
+    if (0.0..=1.0).contains(&res2) {
+        return res2;
+    }
+    -1.0
+}
+
+/// The 2D cross product of `OA x OB` (`geometry_2d.h:430`), positive when
+/// `O -> A -> B` turns counter-clockwise.
+fn vec2_cross(o: Vector2, a: Vector2, b: Vector2) -> f32 {
+    (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+}
+
+/// `Geometry2D.convex_hull` — Andrew's monotone chain
+/// (`core/math/geometry_2d.h:436`).
+///
+/// 🔑 **The returned hull is CLOSED: the first point is repeated as the last.**
+/// Godot ends with `H.resize(k)`, keeping the duplicate, where the textbook
+/// monotone chain does `resize(k - 1)` to drop it. A caller drawing the outline
+/// relies on that closing point, so returning the open form leaves a gap in the
+/// last edge — and it silently changes `size()`.
+///
+/// ⚠️ The pop test is `cross <= 0`, not `< 0`, so **collinear points are
+/// discarded** and the hull carries only true corners.
+pub fn convex_hull(points: &[Vector2]) -> Vec<Vector2> {
+    let n = points.len();
+    if n < 3 {
+        return points.to_vec();
+    }
+
+    // Lexicographic sort by x then y, matching `Vector2::operator<`.
+    let mut p = points.to_vec();
+    p.sort_by(|a, b| {
+        a.x.partial_cmp(&b.x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    let mut h: Vec<Vector2> = Vec::with_capacity(2 * n);
+
+    // Lower hull.
+    for &pt in p.iter() {
+        while h.len() >= 2 && vec2_cross(h[h.len() - 2], h[h.len() - 1], pt) <= 0.0 {
+            h.pop();
+        }
+        h.push(pt);
+    }
+
+    // Upper hull. `t` is the floor the upper chain may not pop past, so the two
+    // chains cannot eat each other.
+    let t = h.len() + 1;
+    for &pt in p.iter().rev().skip(1) {
+        while h.len() >= t && vec2_cross(h[h.len() - 2], h[h.len() - 1], pt) <= 0.0 {
+            h.pop();
+        }
+        h.push(pt);
+    }
+
+    h
+}

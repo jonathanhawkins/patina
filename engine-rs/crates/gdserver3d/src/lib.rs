@@ -23,7 +23,6 @@ pub mod mesh;
 pub mod multimesh;
 pub mod navigation;
 pub mod occluder;
-pub mod particles3d;
 pub mod primitive_mesh;
 pub mod projection;
 pub mod reflection_probe;
@@ -58,9 +57,6 @@ pub use navigation::{
     bake_navigation_mesh, BakeSourceGeometry3D, NavPolygon3D, NavigationMesh3D, NavigationRegion3D,
 };
 pub use occluder::{Occluder3D, OccluderInstance3D};
-pub use particles3d::{
-    DrawMode3D, EmissionShape3D, GPUParticles3D, Particle3D, ParticleProcessMaterial3D,
-};
 pub use primitive_mesh::{
     ArrayMesh, BoxMesh, CapsuleMesh, CylinderMesh, PlaneMesh, PrimitiveMeshType, SphereMesh,
 };

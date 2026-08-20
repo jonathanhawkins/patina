@@ -14,6 +14,15 @@ use std::collections::HashMap;
 pub struct Translation {
     locale: String,
     messages: HashMap<String, String>,
+    /// Messages carrying a `msgctxt`, keyed by `(context, key)` (pat-s3rrv.128).
+    ///
+    /// 🔑 Held separately from `messages` rather than folded into a composite
+    /// key, because Godot treats the two as **disjoint entries**:
+    /// `translation_map.getptr({context, src_text})` is an exact pair lookup
+    /// with no fall back to the empty context (`core/string/translation.cpp:169`).
+    /// So `tr("FILE")` and `tr("FILE", "menu")` may legitimately resolve to
+    /// different strings, or one may exist while the other does not.
+    contexts: HashMap<(String, String), String>,
 }
 
 impl Translation {
@@ -22,6 +31,7 @@ impl Translation {
         Self {
             locale: locale.into(),
             messages: HashMap::new(),
+            contexts: HashMap::new(),
         }
     }
 
@@ -36,6 +46,37 @@ impl Translation {
     }
 
     /// Returns the translated text for `key` (Godot `Translation.get_message`).
+    /// Records a message under a `msgctxt`.
+    pub fn add_message_with_context(
+        &mut self,
+        context: impl Into<String>,
+        key: impl Into<String>,
+        text: impl Into<String>,
+    ) {
+        let context = context.into();
+        if context.is_empty() {
+            self.add_message(key, text);
+            return;
+        }
+        self.contexts.insert((context, key.into()), text.into());
+    }
+
+    /// Looks a message up under a `msgctxt`.
+    ///
+    /// ⚠️ An empty context reads the ordinary map, and a non-empty one reads
+    /// ONLY the context map — it does not fall back to the context-free entry,
+    /// matching Godot's exact-pair lookup. Falling back would silently return
+    /// the wrong translation for a word whose meaning depends on its context,
+    /// which is the entire reason `msgctxt` exists.
+    pub fn get_message_with_context(&self, context: &str, key: &str) -> Option<&str> {
+        if context.is_empty() {
+            return self.get_message(key);
+        }
+        self.contexts
+            .get(&(context.to_string(), key.to_string()))
+            .map(|s| s.as_str())
+    }
+
     pub fn get_message(&self, key: &str) -> Option<&str> {
         self.messages.get(key).map(String::as_str)
     }
@@ -84,10 +125,19 @@ fn unquote_po(s: &str) -> String {
 
 /// Commits the currently-accumulated `msgid`/`msgstr` pair into `t`, if both
 /// are present and the key is non-empty (the empty `msgid` is the PO header).
-fn flush_po_entry(t: &mut Translation, id: &mut Option<String>, text: &mut Option<String>) {
+fn flush_po_entry(
+    t: &mut Translation,
+    ctx: &mut Option<String>,
+    id: &mut Option<String>,
+    text: &mut Option<String>,
+) {
+    // ⚠️ The context is taken unconditionally, even when the entry is
+    // incomplete — otherwise a `msgctxt` whose entry is malformed would leak
+    // onto the NEXT message and silently mis-file it.
+    let context = ctx.take().unwrap_or_default();
     if let (Some(k), Some(v)) = (id.take(), text.take()) {
         if !k.is_empty() {
-            t.add_message(k, v);
+            t.add_message_with_context(context, k, v);
         }
     }
 }
@@ -99,9 +149,11 @@ fn flush_po_entry(t: &mut Translation, id: &mut Option<String>, text: &mut Optio
 /// skipped. Plural forms (`msgid_plural` / `msgstr[n]`) are not yet retained.
 pub fn parse_po(locale: impl Into<String>, source: &str) -> Translation {
     let mut t = Translation::new(locale);
+    let mut cur_ctx: Option<String> = None;
     let mut cur_id: Option<String> = None;
     let mut cur_str: Option<String> = None;
-    // 1 = accumulating into msgid, 2 = into msgstr, 0 = neither.
+    // 1 = accumulating into msgid, 2 = into msgstr, 3 = into msgctxt,
+    // 0 = neither.
     let mut mode = 0u8;
 
     for raw in source.lines() {
@@ -109,9 +161,20 @@ pub fn parse_po(locale: impl Into<String>, source: &str) -> Translation {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(rest) = line.strip_prefix("msgid ") {
-            // A new entry begins — commit the previous one first.
-            flush_po_entry(&mut t, &mut cur_id, &mut cur_str);
+        if let Some(rest) = line.strip_prefix("msgctxt ") {
+            // 🔑 `msgctxt` PRECEDES its `msgid`, so it opens the next entry:
+            // the previous one is committed here, not when the msgid arrives.
+            // Treating it as part of the entry already in hand would attach it
+            // to the message before it.
+            flush_po_entry(&mut t, &mut cur_ctx, &mut cur_id, &mut cur_str);
+            cur_ctx = Some(unquote_po(rest));
+            mode = 3;
+        } else if let Some(rest) = line.strip_prefix("msgid ") {
+            // A new entry begins — commit the previous one first, unless a
+            // `msgctxt` line already did so and is waiting for this msgid.
+            if cur_ctx.is_none() {
+                flush_po_entry(&mut t, &mut cur_ctx, &mut cur_id, &mut cur_str);
+            }
             cur_id = Some(unquote_po(rest));
             cur_str = None;
             mode = 1;
@@ -121,6 +184,11 @@ pub fn parse_po(locale: impl Into<String>, source: &str) -> Translation {
         } else if line.starts_with('"') {
             let piece = unquote_po(line);
             match mode {
+                3 => {
+                    if let Some(s) = cur_ctx.as_mut() {
+                        s.push_str(&piece);
+                    }
+                }
                 1 => {
                     if let Some(s) = cur_id.as_mut() {
                         s.push_str(&piece);
@@ -135,7 +203,7 @@ pub fn parse_po(locale: impl Into<String>, source: &str) -> Translation {
             }
         }
     }
-    flush_po_entry(&mut t, &mut cur_id, &mut cur_str);
+    flush_po_entry(&mut t, &mut cur_ctx, &mut cur_id, &mut cur_str);
     t
 }
 
@@ -248,6 +316,32 @@ impl TranslationServer {
             }
         }
         key.to_string()
+    }
+
+    /// `TranslationServer.translate(message, context)` (pat-s3rrv.128).
+    ///
+    /// ⚠️ A miss returns the KEY, not an empty string — Godot's server falls
+    /// back to the source text so an untranslated UI still reads sensibly
+    /// rather than going blank.
+    pub fn translate_with_context(&self, key: &str, context: &str) -> String {
+        for candidate in self.locale_chain() {
+            if let Some(text) = self.lookup_with_context(&candidate, key, context) {
+                return text.to_string();
+            }
+        }
+        key.to_string()
+    }
+
+    fn lookup_with_context(&self, locale: &str, key: &str, context: &str) -> Option<&str> {
+        self.translations.iter().find_map(|t| {
+            let matches =
+                t.locale() == locale || t.locale().split(['_', '-']).next() == Some(locale);
+            if matches {
+                t.get_message_with_context(context, key)
+            } else {
+                None
+            }
+        })
     }
 
     /// The ordered locale-resolution chain for the active locale.
@@ -384,6 +478,11 @@ pub fn with_translation_server_mut<R>(f: impl FnOnce(&mut TranslationServer) -> 
 /// `atr()` and `TranslationServer.translate()` all share.
 pub fn translate(key: &str) -> String {
     with_translation_server(|s| s.translate(key))
+}
+
+/// Engine-wide `tr(key, context)`.
+pub fn translate_with_context(key: &str, context: &str) -> String {
+    with_translation_server(|s| s.translate_with_context(key, context))
 }
 
 impl TranslationServer {

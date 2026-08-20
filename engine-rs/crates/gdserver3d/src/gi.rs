@@ -61,7 +61,13 @@ pub struct VoxelGI {
     pub id: VoxelGIId,
     /// World-space transform.
     pub transform: Transform3D,
-    /// Half-extents of the voxel grid volume.
+    /// FULL extents of the voxel grid volume, matching Godot's
+    /// `VoxelGI.size` (`default="Vector3(20, 20, 20)"`).
+    ///
+    /// ⚠️ Said "half-extents" until pat-s3rrv.114, which contradicted the only
+    /// code that reads it: [`world_aabb_min_max`](Self::world_aabb_min_max)
+    /// halves it. A caller trusting the old wording would have halved the
+    /// authored `.tscn` value a second time and quartered every GI volume.
     pub size: Vector3,
     /// Voxel grid resolution.
     pub subdiv: VoxelGISubdiv,
@@ -175,6 +181,107 @@ impl VoxelGI {
             self.baked_indirect = Color::new(avg.r / count, avg.g / count, avg.b / count, 1.0);
         }
         self.baked = true;
+    }
+
+    /// Direct irradiance reaching `point`, using exactly [`VoxelGI::bake`]'s
+    /// attenuation model so the bounce pass cannot drift from the direct pass.
+    fn direct_light_at(&self, lights: &[Light3D], point: Vector3) -> (f32, f32, f32) {
+        let (mut r, mut g, mut b) = (0.0f32, 0.0f32, 0.0f32);
+        for light in lights {
+            let attenuation = match light.light_type {
+                LightType::Directional => {
+                    if self.interior {
+                        continue;
+                    }
+                    1.0
+                }
+                LightType::Point | LightType::Spot => {
+                    let d = (light.position - point).length().max(1.0);
+                    1.0 / (d * d)
+                }
+            };
+            r += light.color.r * light.energy * attenuation;
+            g += light.color.g * light.energy * attenuation;
+            b += light.color.b * light.energy * attenuation;
+        }
+        (r, g, b)
+    }
+
+    /// Bakes direct light AND one bounce off `surfaces` (pat-s3rrv.114).
+    ///
+    /// 🔑 [`VoxelGI::bake`] accumulates only LIGHT colour — it never sees
+    /// geometry. That makes the canonical GI demo impossible: a red wall beside
+    /// a white one is not a light, so it contributed exactly nothing and no
+    /// amount of wiring could produce colour bleed. This adds the missing term.
+    ///
+    /// The model is deliberately one bounce and distance-weighted, matching the
+    /// coarse grid `bake` already fills: each surface reflects
+    /// `albedo * direct_light_at(surface)`, scattered into every cell with the
+    /// same `1/d²` falloff and `propagation` scale the direct pass uses. It is
+    /// not cone tracing, and the module docs say so.
+    pub fn bake_with_surfaces(&mut self, lights: &[Light3D], surfaces: &[GiSurfaceSample]) {
+        self.bake(lights);
+        if surfaces.is_empty() {
+            return;
+        }
+        let n = self.grid_res as usize;
+        if self.grid.len() != n * n * n {
+            return;
+        }
+        let (min, max) = self.world_aabb_min_max();
+        let prop = self.propagation;
+
+        // Each surface's bounced colour, computed once rather than per cell.
+        let bounced: Vec<(Vector3, f32, f32, f32)> = surfaces
+            .iter()
+            .map(|s| {
+                let (lr, lg, lb) = self.direct_light_at(lights, s.position);
+                (
+                    s.position,
+                    s.albedo.r * lr,
+                    s.albedo.g * lg,
+                    s.albedo.b * lb,
+                )
+            })
+            .collect();
+
+        let mut avg = Color::BLACK;
+        let mut count = 0.0f32;
+        for iz in 0..n {
+            for iy in 0..n {
+                for ix in 0..n {
+                    let fx = (ix as f32 + 0.5) / n as f32;
+                    let fy = (iy as f32 + 0.5) / n as f32;
+                    let fz = (iz as f32 + 0.5) / n as f32;
+                    let cell = Vector3::new(
+                        min.x + (max.x - min.x) * fx,
+                        min.y + (max.y - min.y) * fy,
+                        min.z + (max.z - min.z) * fz,
+                    );
+                    let (mut r, mut g, mut b) = (0.0f32, 0.0f32, 0.0f32);
+                    for (pos, br, bg, bb) in &bounced {
+                        // `max(1.0)` matches the direct pass: without it a cell
+                        // sitting on a surface divides by ~0 and blows out.
+                        let d = (*pos - cell).length().max(1.0);
+                        let falloff = 1.0 / (d * d);
+                        r += br * falloff;
+                        g += bg * falloff;
+                        b += bb * falloff;
+                    }
+                    let idx = iz * n * n + iy * n + ix;
+                    let c = self.grid[idx];
+                    let lit = Color::new(c.r + r * prop, c.g + g * prop, c.b + b * prop, 1.0);
+                    self.grid[idx] = lit;
+                    avg.r += lit.r;
+                    avg.g += lit.g;
+                    avg.b += lit.b;
+                    count += 1.0;
+                }
+            }
+        }
+        if count > 0.0 {
+            self.baked_indirect = Color::new(avg.r / count, avg.g / count, avg.b / count, 1.0);
+        }
     }
 
     /// Samples the baked ambient term at `world_pos`, scaled by `energy`.
@@ -959,4 +1066,31 @@ mod tests {
         let albedo = Color::new(0.3, 0.6, 0.9, 1.0);
         assert_eq!(gi.shade(albedo, Vector3::ZERO), albedo);
     }
+}
+
+/// One bounce surface for [`VoxelGI::bake_with_surfaces`]: a world-space point
+/// on a lit surface and the albedo it reflects.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GiSurfaceSample {
+    /// World-space position of the surface sample.
+    pub position: Vector3,
+    /// The surface's albedo — what colour it bounces.
+    pub albedo: Color,
+}
+
+/// The combined GI ambient at `world_pos` across every volume.
+///
+/// The `VoxelGI` analogue of [`crate::reflection_probe::sample_probes_at`], and
+/// deliberately the same shape: volumes that do not contain the point return
+/// `BLACK` and so add nothing, which keeps a scene with no GI node bit-identical
+/// to one that never had the feature.
+pub fn sample_voxel_gi_at(volumes: &[VoxelGI], world_pos: Vector3) -> Color {
+    let mut acc = Color::new(0.0, 0.0, 0.0, 1.0);
+    for gi in volumes {
+        let c = gi.sample(world_pos);
+        acc.r += c.r;
+        acc.g += c.g;
+        acc.b += c.b;
+    }
+    acc
 }

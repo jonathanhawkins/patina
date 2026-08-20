@@ -128,13 +128,42 @@ impl Rng {
     /// Reseeds from a non-deterministic entropy source (wall clock mixed with
     /// the current state) and returns the new seed, like Godot `randomize`.
     pub fn randomize(&mut self) -> u64 {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        let s = nanos ^ self.state.rotate_left(17) ^ 0x9e3779b97f4a7c15u64;
+        let s = randomize_entropy() ^ self.state.rotate_left(17) ^ 0x9e3779b97f4a7c15u64;
+        // The documented contract is a NON-ZERO seed, and the mixing above can
+        // in principle cancel to zero.
+        let s = if s == 0 { 0x9e3779b97f4a7c15u64 } else { s };
         self.set_seed(s);
         s
+    }
+}
+
+/// Non-deterministic entropy for [`Rng::randomize`].
+///
+/// ⚠️ **`SystemTime::now()` panics on `wasm32-unknown-unknown`** — that target
+/// has no wall clock — and `gdcore` is a dependency of `patina-web`, so this was
+/// a live panic on the web build rather than a theoretical one. `randomize()`
+/// is the global reseed entry, which makes it one of the first things a web
+/// build touches (pat-s3rrv.131).
+///
+/// 🔑 The web target does not need a clock to satisfy the contract.
+/// `randomize()` promises *a different seed each call*, not *a time-derived
+/// one*, so a monotonic counter meets it exactly — and unlike a clock it cannot
+/// go backwards or repeat when two calls land in the same tick.
+fn randomize_entropy() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    return std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // A golden-ratio stride, so successive values differ across the whole
+        // word rather than only in the low bits the way a `+= 1` counter would.
+        const STRIDE: u64 = 0x9e37_79b9_7f4a_7c15;
+        static TICK: AtomicU64 = AtomicU64::new(STRIDE);
+        return TICK.fetch_add(STRIDE, Ordering::Relaxed);
     }
 }
 

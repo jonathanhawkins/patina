@@ -26,6 +26,7 @@ pub mod audio_server_bridge;
 pub mod autoload;
 pub mod behavioral_2d;
 pub mod bezier_bake;
+pub mod bone_map;
 pub mod camera3d;
 // ⚠️ `canvas_layer.rs` existed since the HUD work but was **never declared**, so
 // the compiler had never seen it: not "unused helpers" but an orphaned file, its

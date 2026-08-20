@@ -15270,7 +15270,19 @@ fn advance_running_main_loop(state: &mut EditorState) -> u64 {
     // handler instead would bind a connection thread that dies with the
     // response — the feature would look wired and be inert.
     bind_engine_debugger(state);
+    // Publish the served game view's size to the running loop every frame
+    // (pat-s3rrv.120). `set_viewport_size` drives `resize_root_window`, which
+    // recomputes the content scale, republishes the mirrored root-window
+    // properties and emits `size_changed`.
+    //
+    // ⚠️ Every frame is correct here because `resize_root_window` early-outs on
+    // an unchanged size — so this costs a comparison per frame and fires
+    // `size_changed` only on a real resize. Doing it in the `play` handler
+    // instead would capture the size once at boot and never see the browser
+    // resize the canvas, which is the state this bead is about.
+    let (view_w, view_h) = (state.render_width, state.render_height);
     if let Some(ref mut main_loop) = state.run_main_loop {
+        main_loop.set_viewport_size(view_w, view_h);
         if untyped_key_pressed {
             main_loop.set_input(input_snapshot);
         }

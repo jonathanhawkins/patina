@@ -29,6 +29,31 @@ jobs:
         working-directory: engine-rs
         run: cargo fmt --all -- --check
 
+  # ── Web: the wasm32 target must keep compiling ───────────────────────────
+  #
+  # Nothing built wasm32 before, and the codebase records what that cost:
+  # `crates/patina-web/Cargo.toml` documents a wasm-only E0433 that "the native
+  # build never sees … so nothing caught it until a wasm check was actually
+  # run". A wasm-hostile dependency or API can be introduced by a change that is
+  # perfectly green on every other job here, so this gate is the only thing that
+  # can catch it (pat-s3rrv.131).
+  wasm32:
+    name: Web (wasm32 check)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable (with the wasm32 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Check the web crate for wasm32
+        working-directory: engine-rs
+        run: cargo check -p patina-web --target wasm32-unknown-unknown
+
   # ── Rust: build, test, clippy (multi-platform) ───────────────────────────
   rust:
     name: Rust (${{ matrix.os }})

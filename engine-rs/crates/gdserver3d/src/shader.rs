@@ -123,6 +123,17 @@ pub struct ShaderMaterial3D {
     pub shader: Option<Shader3D>,
     /// Runtime parameter overrides keyed by uniform name.
     pub parameters: HashMap<String, Variant>,
+    /// Loaded images for `sampler2D` uniforms, keyed by uniform name
+    /// (pat-s3rrv.122).
+    ///
+    /// 🔑 SEPARATE FROM `parameters` BECAUSE A VARIANT CANNOT CARRY PIXELS. A
+    /// `shader_parameter/<sampler>` value is a resource path; something has to
+    /// load it into a [`TextureImage`] and put it here, which is what makes
+    /// `texture(tex, UV)` sample anything at all. Without this the fragment
+    /// path's `sample_texture` callback has nothing to look up and returns the
+    /// white placeholder — the reason custom-shader texturing was reachable
+    /// only from tests.
+    pub textures: HashMap<String, std::sync::Arc<crate::material::TextureImage>>,
 }
 
 impl ShaderMaterial3D {
@@ -137,6 +148,23 @@ impl ShaderMaterial3D {
     }
 
     /// Get a shader parameter value.
+    /// Binds a loaded image to a `sampler2D` uniform by name.
+    pub fn set_texture(
+        &mut self,
+        name: &str,
+        image: std::sync::Arc<crate::material::TextureImage>,
+    ) {
+        self.textures.insert(name.to_string(), image);
+    }
+
+    /// The image bound to a `sampler2D` uniform, if any.
+    pub fn get_texture(
+        &self,
+        name: &str,
+    ) -> Option<&std::sync::Arc<crate::material::TextureImage>> {
+        self.textures.get(name)
+    }
+
     pub fn get_shader_parameter(&self, name: &str) -> Option<&Variant> {
         self.parameters.get(name)
     }
@@ -1702,6 +1730,30 @@ pub fn execute_fragment_3d_with_env(
 /// `0.5`, `1e-5`), all of which are valid WGSL float literals — so the value is
 /// typed `f32` rather than an abstract int. Non-finite values collapse to `0.0`
 /// since WGSL has no `inf`/`nan` literals.
+/// A GDShader uniform name as a WGSL struct field (pat-s3rrv.122).
+///
+/// Both languages take `[A-Za-z_][A-Za-z0-9_]*`, so this only has to defend
+/// against a leading digit and stray characters — it is a rename, not an
+/// escape, and the emitted struct field must be generated from the SAME
+/// function so the reference and the declaration cannot disagree.
+pub fn wgsl_uniform_field(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 1);
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            if i == 0 && c.is_ascii_digit() {
+                out.push('_');
+            }
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    out
+}
+
 fn wgsl_f32(v: f32) -> String {
     if !v.is_finite() {
         return "0.0".to_string();
@@ -1718,9 +1770,12 @@ fn float_expr_to_wgsl(expr: &FloatExpr3D) -> Option<String> {
         FloatExpr3D::Literal(v) => wgsl_f32(*v),
         FloatExpr3D::UvComponent(UvAxis3D::X) => "in.uv.x".to_string(),
         FloatExpr3D::UvComponent(UvAxis3D::Y) => "in.uv.y".to_string(),
-        // TIME and custom uniforms are not bound in the base spatial pipeline.
-        FloatExpr3D::BuiltinTime => return None,
-        FloatExpr3D::Uniform(_) => return None,
+        // TIME and custom uniforms read from the per-material uniform block
+        // the custom pipeline binds as group 3 (pat-s3rrv.122). Every field is
+        // a `vec4<f32>` so the struct needs no alignment padding; a scalar
+        // takes `.x`.
+        FloatExpr3D::BuiltinTime => "custom.time.x".to_string(),
+        FloatExpr3D::Uniform(n) => format!("custom.{}.x", wgsl_uniform_field(n)),
         FloatExpr3D::Sin(e) => format!("sin({})", float_expr_to_wgsl(e)?),
         FloatExpr3D::Cos(e) => format!("cos({})", float_expr_to_wgsl(e)?),
         FloatExpr3D::Fract(e) => format!("fract({})", float_expr_to_wgsl(e)?),
@@ -1763,14 +1818,23 @@ fn color_expr_to_wgsl(expr: &ColorExpr3D) -> Option<String> {
             float_expr_to_wgsl(c)?
         ),
         ColorExpr3D::BuiltinColor | ColorExpr3D::BuiltinAlbedo => "color".to_string(),
-        ColorExpr3D::Uniform(_) => return None,
+        ColorExpr3D::Uniform(n) => format!("custom.{}", wgsl_uniform_field(n)),
         ColorExpr3D::Mix(a, b, t) => format!(
             "mix({}, {}, {})",
             color_expr_to_wgsl(a)?,
             color_expr_to_wgsl(b)?,
             float_expr_to_wgsl(t)?
         ),
-        ColorExpr3D::Texture(_, _, _) => return None,
+        // `texture(sampler, uv)` reads the group-3 sampler pair the custom
+        // pipeline binds. Named from the SAME `wgsl_uniform_field` the uniform
+        // block uses, so a sampler and a buffer field can never collide
+        // (pat-s3rrv.122).
+        ColorExpr3D::Texture(name, u, v) => format!(
+            "textureSample(t_{0}, s_{0}, vec2<f32>({1}, {2}))",
+            wgsl_uniform_field(name),
+            float_expr_to_wgsl(u)?,
+            float_expr_to_wgsl(v)?
+        ),
     })
 }
 

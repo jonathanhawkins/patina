@@ -542,6 +542,181 @@ impl LayeredKind {
     }
 }
 
+impl LayeredKind {
+    /// The [`LayeredKind`] a Godot `.import` sidecar's `importer=` names
+    /// (pat-s3rrv.138).
+    ///
+    /// These are the `ResourceImporterLayeredTexture` subclasses'
+    /// `get_importer_name()` values, which is what a project's sidecar records
+    /// — the file extension of the ARTIFACT (`.ctexarray`) is a different
+    /// thing and only appears in `[remap] path=`.
+    pub fn from_importer_name(name: &str) -> Option<Self> {
+        match name {
+            "2d_array_texture" => Some(Self::Texture2DArray),
+            "cubemap_texture" => Some(Self::Cubemap),
+            "cubemap_array_texture" => Some(Self::CubemapArray),
+            "3d_texture" => Some(Self::Texture3D),
+            _ => None,
+        }
+    }
+
+    /// The `(hslices, vslices)` grid this kind slices its source image into.
+    ///
+    /// ⚠️ A cubemap IGNORES `slices/horizontal` and `slices/vertical` entirely
+    /// and derives the grid from `slices/arrangement`
+    /// (`resource_importer_layered_texture.cpp:312-329`): `0`→1x6, `1`→2x3,
+    /// `2`→3x2, `3`→6x1. Feeding it the h/v options instead — they are present
+    /// in the same sidecar — produces a plausible grid with the wrong face
+    /// count.
+    ///
+    /// ⚠️ A cubemap ARRAY then multiplies one axis by `slices/amount`, chosen
+    /// by `slices/layout`: `0` (Horizontal) scales the horizontal axis,
+    /// anything else scales the vertical one.
+    pub fn slice_grid(
+        self,
+        hslices: u32,
+        vslices: u32,
+        arrangement: i64,
+        layout: i64,
+        amount: u32,
+    ) -> (u32, u32) {
+        match self {
+            Self::Cubemap | Self::CubemapArray => {
+                let (mut h, mut v) = match arrangement {
+                    0 => (1, 6),
+                    2 => (3, 2),
+                    3 => (6, 1),
+                    // Godot's default arrangement is 1 (2x3), and an
+                    // out-of-range value falls here rather than erroring.
+                    _ => (2, 3),
+                };
+                if self == Self::CubemapArray {
+                    let amount = amount.max(1);
+                    if layout == 0 {
+                        h *= amount;
+                    } else {
+                        v *= amount;
+                    }
+                }
+                (h, v)
+            }
+            _ => (hslices.max(1), vslices.max(1)),
+        }
+    }
+}
+
+/// Slices one source image into the layers of a layered or volume texture
+/// (pat-s3rrv.138).
+///
+/// Godot ground truth: `resource_importer_layered_texture.cpp:370-385`.
+/// `slice_w = width / hslices` and `slice_h = height / vslices` (integer
+/// division — a source that does not divide evenly loses the remainder, which
+/// is upstream's behaviour, not a rounding bug), and the slices are collected
+/// **row-major**: the outer loop walks `vslices`, the inner walks `hslices`, so
+/// layer `i * hslices + j` is row `i`, column `j`.
+///
+/// ⚠️ **Row-major is load-bearing and not guessable.** A 3x1 strip and a 1x3
+/// column both produce three layers, so a column-major implementation passes
+/// every count assertion and silently reorders the faces of a cubemap. The
+/// order is asserted against distinctly-coloured slices in the tests.
+///
+/// The result mirrors [`load_ctex_layered_bytes`]'s shape exactly — same class
+/// name, same `layers`/`depth` property, same `layer_N` subresources — so a
+/// consumer cannot tell whether the layers arrived from a pre-baked
+/// `.ctexarray` or from slicing a source strip.
+pub fn slice_source_into_layers(
+    source: &Resource,
+    kind: LayeredKind,
+    hslices: u32,
+    vslices: u32,
+    path: &Path,
+) -> EngineResult<Arc<Resource>> {
+    let int_of = |key: &str| match source.get_property(key) {
+        Some(Variant::Int(v)) => *v as i64,
+        _ => 0,
+    };
+    let width = int_of("width");
+    let height = int_of("height");
+    let pixels: &Vec<Variant> = match source.get_property("pixels") {
+        Some(Variant::Array(a)) => a,
+        _ => {
+            return Err(EngineError::Parse(format!(
+                "{} has no decoded pixels to slice",
+                path.display()
+            )))
+        }
+    };
+    if width <= 0 || height <= 0 {
+        return Err(EngineError::Parse(format!(
+            "{} has no dimensions to slice",
+            path.display()
+        )));
+    }
+    if pixels.len() as i64 != width * height {
+        return Err(EngineError::Parse(format!(
+            "{} declares {width}x{height} but carries {} pixels",
+            path.display(),
+            pixels.len()
+        )));
+    }
+
+    let hs = hslices.max(1) as i64;
+    let vs = vslices.max(1) as i64;
+    let slice_w = width / hs;
+    let slice_h = height / vs;
+    if slice_w == 0 || slice_h == 0 {
+        return Err(EngineError::Parse(format!(
+            "{} is {width}x{height}, too small for a {hs}x{vs} slice grid",
+            path.display()
+        )));
+    }
+
+    let mut layers: Vec<Arc<Resource>> = Vec::with_capacity((hs * vs) as usize);
+    for i in 0..vs {
+        for j in 0..hs {
+            let ox = slice_w * j;
+            let oy = slice_h * i;
+            let mut out = Vec::with_capacity((slice_w * slice_h) as usize);
+            for y in 0..slice_h {
+                let row = (oy + y) * width + ox;
+                for x in 0..slice_w {
+                    out.push(pixels[(row + x) as usize].clone());
+                }
+            }
+            let mut layer = Resource::new("Texture2D");
+            layer.set_property("width", Variant::Int(slice_w));
+            layer.set_property("height", Variant::Int(slice_h));
+            layer.set_property("has_pixel_data", Variant::Bool(true));
+            layer.set_property("pixels", Variant::Array(out));
+            layers.push(Arc::new(layer));
+        }
+    }
+
+    let count = layers.len() as i64;
+    let first = layers[0].clone();
+    let mut res = Resource::new(kind.class_name());
+    res.path = format!(
+        "res://{}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
+    res.set_property("width", Variant::Int(slice_w));
+    res.set_property("height", Variant::Int(slice_h));
+    res.set_property("has_pixel_data", Variant::Bool(true));
+    if let Some(pixels) = first.get_property("pixels") {
+        res.set_property("pixels", pixels.clone());
+    }
+    if let Some(format) = source.get_property("format") {
+        res.set_property("format", format.clone());
+    }
+    res.set_property(kind.count_property(), Variant::Int(count));
+    res.set_property("layer_count", Variant::Int(count));
+    res.set_property("mipmap_count", Variant::Int(1));
+    for (i, layer) in layers.into_iter().enumerate() {
+        res.subresources.insert(format!("layer_{i}"), layer);
+    }
+    Ok(Arc::new(res))
+}
+
 /// Loads a layered or volume `.ctex` artifact.
 ///
 /// The header is 36 bytes, written by

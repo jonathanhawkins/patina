@@ -358,8 +358,9 @@ fn effect_from_sub_resource(
     fields: &std::collections::HashMap<String, String>,
 ) -> Option<Box<dyn crate::effects::AudioEffect>> {
     use crate::effects::{
-        AudioEffectAmplify, AudioEffectCompressor, AudioEffectFilter, AudioEffectFilterCascade,
-        AudioEffectHardLimiter, AudioEffectLimiter, AudioEffectReverb, FilterMode,
+        AudioEffectAmplify, AudioEffectCapture, AudioEffectCompressor, AudioEffectFilter,
+        AudioEffectFilterCascade, AudioEffectHardLimiter, AudioEffectLimiter, AudioEffectRecord,
+        AudioEffectReverb, FilterMode,
     };
 
     let f = |name: &str, default: f32| -> f32 {
@@ -405,6 +406,24 @@ fn effect_from_sub_resource(
 
     match type_name {
         "AudioEffectAmplify" => Some(Box::new(AudioEffectAmplify::new(f("volume_db", 0.0)))),
+        // pat-s3rrv.141: the two script-driven taps. Without these arms a bus
+        // layout naming them dropped the slot, so a project whose Record bus was
+        // authored in the editor produced a mixer that could never record.
+        //
+        // ⚠️ `buffer_length` defaults to 0.1 s, NOT 0.0 — a zero here leaves the
+        // ring unsized and every drain returns empty forever.
+        "AudioEffectCapture" => Some(Box::new(AudioEffectCapture::with_buffer_length(f(
+            "buffer_length",
+            0.1,
+        )))),
+        "AudioEffectRecord" => {
+            let mut rec = AudioEffectRecord::new();
+            // ⚠️ 1 = FORMAT_16_BITS is the default; `f(.., 0.0)` would mean
+            // 8-bit and silently halve the resolution of every recording made
+            // from an authored layout.
+            rec.set_format(f("format", 1.0) as i64);
+            Some(Box::new(rec))
+        }
         "AudioEffectReverb" => Some(Box::new(AudioEffectReverb::new())),
         // pat-s3rrv.54: the whole filter family. The biquad DSP already existed
         // and was unit-tested; only three of the eight classes could be named

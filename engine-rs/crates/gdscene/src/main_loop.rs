@@ -417,12 +417,88 @@ fn read_emitter_3d(node: &crate::node::Node) -> crate::particle3d::ParticleEmitt
     if let Some(v) = prop_f32(node.get_property("initial_velocity_max")) {
         emitter.material.initial_velocity_max = v;
     }
-    if let Variant::Color(c) = node.get_property("color") {
+    if let Some(v) = prop_f32(node.get_property("scale_min")) {
+        emitter.material.scale_min = v;
+    }
+    if let Some(v) = prop_f32(node.get_property("scale_max")) {
+        emitter.material.scale_max = v;
+    }
+    // The authored `scale_curve` scales each particle over its lifetime; without
+    // it every particle held its spawn size for its whole life (pat-s3rrv.119).
+    if let Some(curve) = scale_curve_from_samples(node) {
+        emitter.material.scale_curve = curve;
+    }
+    // The authored `color_ramp` wins when the scene has one: it is what makes a
+    // particle's colour change over its lifetime, which a flat `color` cannot
+    // express (pat-s3rrv.116).
+    if let Some(curve) = color_ramp_curve(node) {
+        emitter.material.color_curve = curve;
+    } else if let Variant::Color(c) = node.get_property("color") {
         // `ColorCurve` is a gradient (`keys: Vec<(f32, Color)>`), not a
         // start/end pair — a flat authored `color` is the degenerate gradient.
         emitter.material.color_curve = crate::particle3d::ColorCurve::linear(c, c);
     }
     emitter
+}
+
+/// Builds a [`ColorCurve`](crate::particle3d::ColorCurve) from the
+/// `color_ramp` gradient `PackedScene` flattened onto the node.
+///
+/// Returns `None` when the scene authored no ramp, so the caller keeps its flat
+/// `color` behaviour.
+/// Builds a [`ScaleCurve`](crate::particle3d::ScaleCurve) from the `scale_curve`
+/// samples `PackedScene` baked onto the node.
+///
+/// The samples are evenly spaced over the curve's domain — that is what
+/// `bake_curve_samples` produces, and the same array shape Line2D's
+/// `width_curve` uses — so the key times are `i / (n - 1)`.
+///
+/// Returns `None` when the scene authored no curve, leaving the emitter's
+/// default (a flat 1.0) in place.
+fn scale_curve_from_samples(node: &crate::node::Node) -> Option<crate::particle3d::ScaleCurve> {
+    let samples: Vec<f32> = match node.get_property("__scale_curve_samples") {
+        Variant::PackedFloat32Array(v) => v,
+        Variant::PackedFloat64Array(v) => v.into_iter().map(|f| f as f32).collect(),
+        _ => return None,
+    };
+    // ⚠️ A single sample has no span to spread over, and `i / (n - 1)` would
+    // divide by zero. It is still a meaningful curve — a constant — so it maps
+    // to one key rather than being refused.
+    let keys = match samples.len() {
+        0 => return None,
+        1 => vec![(0.0, samples[0])],
+        n => samples
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| (i as f32 / (n - 1) as f32, v))
+            .collect(),
+    };
+    Some(crate::particle3d::ScaleCurve { keys })
+}
+
+fn color_ramp_curve(node: &crate::node::Node) -> Option<crate::particle3d::ColorCurve> {
+    let offsets: Vec<f32> = match node.get_property("__color_ramp_offsets") {
+        Variant::PackedFloat32Array(v) => v,
+        Variant::PackedFloat64Array(v) => v.into_iter().map(|f| f as f32).collect(),
+        _ => return None,
+    };
+    let colors: Vec<gdcore::math::Color> = match node.get_property("__color_ramp_colors") {
+        Variant::PackedColorArray(v) => v,
+        _ => return None,
+    };
+    // ⚠️ Godot stores the stops as two PARALLEL arrays, so they are coupled by
+    // their count: zipping a mismatched pair would silently drop the tail and
+    // shift every colour onto the wrong offset. A malformed bag is refused
+    // outright rather than half-read.
+    if offsets.is_empty() || offsets.len() != colors.len() {
+        return None;
+    }
+    let mut keys: Vec<(f32, gdcore::math::Color)> = offsets.into_iter().zip(colors).collect();
+    // `ColorCurve::sample` walks the keys in order and short-circuits on the
+    // first and last, so unsorted stops would read as a truncated gradient.
+    // Godot keeps its stops sorted; a hand-written .tscn need not.
+    keys.sort_by(|a, b| a.0.total_cmp(&b.0));
+    Some(crate::particle3d::ColorCurve { keys })
 }
 
 /// Drives a [`SceneTree`] through a deterministic frame loop.
@@ -2877,8 +2953,27 @@ impl MainLoop {
 
     /// Sets the surface size mouse positions are measured in, so 3D picking can
     /// unproject a screen point through the current `Camera3D` (pat-0q2kx.202).
+    /// Sets the surface size, and resizes the root window with it
+    /// (pat-s3rrv.120).
+    ///
+    /// 🔑 **One entry point for both.** This used to store only the pick-ray
+    /// tuple, while `SceneTree::resize_root_window` — which recomputes the
+    /// content scale, republishes the mirrored properties and emits
+    /// `size_changed` — had no caller outside tests. So after a resize the
+    /// stretch transform, `get_viewport().get_visible_rect()` and Control
+    /// anchoring all stayed at the boot size, and the two sizes could disagree
+    /// with each other.
+    ///
+    /// ⚠️ Safe to call every frame: `resize_root_window` returns early when the
+    /// size is unchanged, so `size_changed` fires on a real resize and not once
+    /// per frame. That early-out is what makes the frame loop a legitimate
+    /// caller — Godot delivers this from `NOTIFICATION_WM_SIZE_CHANGED`, an
+    /// event, so a per-frame re-emit would be a parity bug, not just noise.
     pub fn set_viewport_size(&mut self, width: u32, height: u32) {
-        self.viewport_size = (width.max(1), height.max(1));
+        let (w, h) = (width.max(1), height.max(1));
+        self.viewport_size = (w, h);
+        self.tree
+            .resize_root_window(gdcore::math::Vector2::new(w as f32, h as f32));
     }
 
     /// The surface size used for 3D pick rays.
@@ -3940,6 +4035,10 @@ impl MainLoop {
 
         // -- bookkeeping --
         self.process_time += delta_secs;
+        // Publish elapsed seconds for shader `TIME` (pat-s3rrv.122). The render
+        // adapter reads this off the tree; without it `CustomFragmentShader`'s
+        // clock stayed at 0.0 and every animated shader rendered static.
+        self.tree.set_shader_time(self.process_time as f32);
 
         // -- performance monitors (pat-s3rrv.109) --
         // Fed at the END of the frame, after the deferred and free queues have
@@ -4132,6 +4231,156 @@ impl MainLoop {
 mod tests {
     use super::*;
     use crate::node::Node;
+
+    /// pat-s3rrv.116: the flattened `color_ramp` becomes the emitter's
+    /// `ColorCurve`, so a particle's colour changes across its lifetime.
+    ///
+    /// This is the half `packed_scene`'s flattening feeds. It lives here rather
+    /// than in `tests/` because `read_emitter_3d` and `color_ramp_curve` are
+    /// private — the emitter has no public colour accessor to observe from
+    /// outside, and adding one purely to be observed would be the wrong trade.
+    mod color_ramp {
+        use super::*;
+        use gdcore::math::Color;
+
+        fn node_with_ramp(offsets: Vec<f32>, colors: Vec<Color>) -> Node {
+            let mut n = Node::new("Emitter", "GPUParticles3D");
+            n.set_property("__color_ramp_offsets", Variant::PackedFloat32Array(offsets));
+            n.set_property("__color_ramp_colors", Variant::PackedColorArray(colors));
+            n
+        }
+
+        const RED: Color = Color {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        const BLUE: Color = Color {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        };
+
+        /// **The bead's acceptance shape**: colour at 10% of life differs from
+        /// colour at 90%.
+        #[test]
+        fn a_ramp_makes_the_colour_change_over_lifetime() {
+            let node = node_with_ramp(vec![0.0, 1.0], vec![RED, BLUE]);
+            let emitter = read_emitter_3d(&node);
+            let early = emitter.material.color_curve.sample(0.1);
+            let late = emitter.material.color_curve.sample(0.9);
+
+            assert!(
+                early.r > late.r && late.b > early.b,
+                "expected a red-to-blue fade, got {early:?} then {late:?}"
+            );
+            // ⚠️ Not just "different": the old behaviour was
+            // `ColorCurve::linear(c, c)`, a gradient whose two stops are EQUAL.
+            // That samples to one colour everywhere, so the inequality above is
+            // exactly what used to be impossible.
+            assert!(
+                (early.r - late.r).abs() > 0.1,
+                "a degenerate one-colour ramp would make these equal"
+            );
+        }
+
+        /// ⚠️ The two stop arrays are PARALLEL — coupled by their count. Zipping
+        /// a mismatched pair would drop the tail and shift every colour onto the
+        /// wrong offset, so a malformed bag is refused outright and the emitter
+        /// keeps its flat-colour path.
+        #[test]
+        fn mismatched_stop_arrays_are_refused_rather_than_zipped_short() {
+            let node = node_with_ramp(vec![0.0, 0.5, 1.0], vec![RED, BLUE]);
+            assert!(color_ramp_curve(&node).is_none());
+        }
+
+        /// Godot keeps its stops sorted; a hand-written scene need not.
+        /// `ColorCurve::sample` short-circuits on the first and last key, so
+        /// unsorted stops would read as a truncated gradient.
+        #[test]
+        fn unsorted_stops_are_sorted_before_sampling() {
+            let node = node_with_ramp(vec![1.0, 0.0], vec![BLUE, RED]);
+            let curve = color_ramp_curve(&node).expect("a valid ramp");
+            assert_eq!(curve.keys[0].0, 0.0, "keys must ascend");
+            assert!(
+                curve.sample(0.0).r > curve.sample(1.0).r,
+                "red is still the start after sorting"
+            );
+        }
+
+        /// The negative control: with no ramp the emitter keeps the flat colour,
+        /// which is what every existing particle scene relies on.
+        #[test]
+        fn without_a_ramp_the_flat_colour_still_wins() {
+            let mut n = Node::new("Emitter", "GPUParticles3D");
+            n.set_property("color", Variant::Color(RED));
+            assert!(color_ramp_curve(&n).is_none());
+
+            let emitter = read_emitter_3d(&n);
+            let c = emitter.material.color_curve.sample(0.5);
+            assert_eq!((c.r, c.b), (1.0, 0.0), "flat red across the lifetime");
+        }
+    }
+
+    /// pat-s3rrv.119: the `scale_curve` half. Its own module so the
+    /// `color_ramp` sibling keeps the exact test-name prefix pat-s3rrv.116
+    /// was verified with.
+    mod authored_scale_curve {
+        use super::*;
+
+        /// pat-s3rrv.119: the baked `scale_curve` samples become the emitter's
+        /// `ScaleCurve`, so a particle changes size across its lifetime.
+        #[test]
+        fn a_scale_curve_shrinks_the_particle_over_lifetime() {
+            let mut n = Node::new("Emitter", "GPUParticles3D");
+            n.set_property(
+                "__scale_curve_samples",
+                Variant::PackedFloat32Array(vec![1.0, 0.75, 0.5, 0.25]),
+            );
+            let emitter = read_emitter_3d(&n);
+            let curve = &emitter.material.scale_curve;
+
+            // ⚠️ The samples are evenly spaced over the domain, so four of them
+            // are keyed at 0, 1/3, 2/3 and 1 — not at 0..3. Keying by index
+            // would put every sample beyond t=1 and `sample` would clamp to the
+            // first, reading as "the curve does nothing".
+            assert!((curve.sample(0.0) - 1.0).abs() < 1e-4);
+            assert!((curve.sample(1.0) - 0.25).abs() < 1e-4);
+            assert!(
+                curve.sample(0.0) > curve.sample(1.0),
+                "the default is a flat 1.0, so a descending sample proves the \
+                 authored curve landed"
+            );
+        }
+
+        /// ⚠️ A single sample has no span to spread over and `i / (n - 1)` would
+        /// divide by zero. It is still a meaningful curve — a constant — so it
+        /// maps to one key rather than being refused or producing NaN.
+        #[test]
+        fn a_single_sample_curve_is_a_constant_not_a_division_by_zero() {
+            let mut n = Node::new("Emitter", "GPUParticles3D");
+            n.set_property(
+                "__scale_curve_samples",
+                Variant::PackedFloat32Array(vec![0.5]),
+            );
+            let curve = scale_curve_from_samples(&n).expect("one sample is a valid curve");
+            assert_eq!(curve.keys.len(), 1);
+            assert!(curve.sample(0.0).is_finite() && curve.sample(1.0).is_finite());
+            assert!((curve.sample(0.7) - 0.5).abs() < 1e-4);
+        }
+
+        /// With no curve the emitter keeps its default, which every existing
+        /// particle scene relies on.
+        #[test]
+        fn without_a_scale_curve_the_default_survives() {
+            let n = Node::new("Emitter", "GPUParticles3D");
+            assert!(scale_curve_from_samples(&n).is_none());
+            let emitter = read_emitter_3d(&n);
+            assert!((emitter.material.scale_curve.sample(0.5) - 1.0).abs() < 1e-4);
+        }
+    }
     use gdobject::notification::{
         NOTIFICATION_ENTER_TREE, NOTIFICATION_INTERNAL_PHYSICS_PROCESS,
         NOTIFICATION_INTERNAL_PROCESS, NOTIFICATION_PARENTED, NOTIFICATION_PHYSICS_PROCESS,

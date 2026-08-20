@@ -10,6 +10,7 @@ use gdcore::math3d::Transform3D;
 use gdserver3d::decal::Decal3D;
 use gdserver3d::environment::{BackgroundMode, Environment3D, FogMode};
 use gdserver3d::fog_volume::FogVolume;
+use gdserver3d::gi::{sample_voxel_gi_at, VoxelGI, VoxelGIId};
 use gdserver3d::instance::{GeometryInstanceSettings, Instance3D, Instance3DId};
 use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::Material3D;
@@ -141,6 +142,11 @@ pub struct SoftwareRenderer3D {
     instances: Vec<Instance3D>,
     lights: Vec<Light3D>,
     reflection_probes: Vec<ReflectionProbe>,
+    /// `VoxelGI` volumes contributing indirect ambient (pat-s3rrv.114).
+    voxel_gis: Vec<VoxelGI>,
+    /// Elapsed seconds handed to custom fragment shaders as `TIME`
+    /// (pat-s3rrv.122).
+    shader_time: f32,
     fog_volumes: Vec<PlacedFogVolume>,
     decals: Vec<Decal3D>,
     /// Occluders culling hidden instances (pat-nzgdu.211). Each carries its own
@@ -158,6 +164,8 @@ impl SoftwareRenderer3D {
             instances: Vec::new(),
             lights: Vec::new(),
             reflection_probes: Vec::new(),
+            voxel_gis: Vec::new(),
+            shader_time: 0.0,
             fog_volumes: Vec::new(),
             decals: Vec::new(),
             occluders: Vec::new(),
@@ -190,6 +198,8 @@ impl SoftwareRenderer3D {
             instances: Vec::new(),
             lights: Vec::new(),
             reflection_probes: Vec::new(),
+            voxel_gis: Vec::new(),
+            shader_time: 0.0,
             fog_volumes: Vec::new(),
             decals: Vec::new(),
             occluders: Vec::new(),
@@ -306,6 +316,23 @@ impl SoftwareRenderer3D {
     /// [`gdserver3d::reflection_probe::sample_probes_at`] for the parity rule.
     pub fn sample_reflection_probes(&self, world_pos: Vector3) -> Color {
         sample_probes_at(&self.reflection_probes, world_pos)
+    }
+
+    /// Sets the elapsed seconds custom shaders read as `TIME` (pat-s3rrv.122).
+    pub fn set_shader_time(&mut self, seconds: f32) {
+        self.shader_time = seconds;
+    }
+
+    /// The `VoxelGI` volumes currently registered with the renderer.
+    pub fn voxel_gis(&self) -> &[VoxelGI] {
+        &self.voxel_gis
+    }
+
+    /// Samples the combined indirect ambient of every `VoxelGI` containing
+    /// `world_pos` (pat-s3rrv.114). Unbaked or non-containing volumes return
+    /// black, so a scene without GI is unchanged.
+    pub fn sample_voxel_gi(&self, world_pos: Vector3) -> Color {
+        sample_voxel_gi_at(&self.voxel_gis, world_pos)
     }
 
     /// Projects a 3D world-space point to 2D screen coordinates.
@@ -859,7 +886,14 @@ impl SoftwareRenderer3D {
                 // to the standard fragment shader selected by shading mode.
                 let fragment_shader: Box<dyn FragmentShader> =
                     if let Some(ref shader_mat) = inst.shader_material {
-                        Box::new(CustomFragmentShader::from_material(shader_mat))
+                        {
+                            // Hand the frame's clock to the shader — `set_time`
+                            // had no production caller before pat-s3rrv.122, so
+                            // `TIME` was frozen at 0.0 in every real render.
+                            let mut fs = CustomFragmentShader::from_material(shader_mat);
+                            fs.set_time(self.shader_time);
+                            Box::new(fs)
+                        }
                     } else {
                         fragment_shader_for_mode(entry.material.shading_mode)
                     };
@@ -878,10 +912,14 @@ impl SoftwareRenderer3D {
                 // `ambient_color` — this adds exactly zero, so every existing
                 // frame is byte-identical.
                 let probe_ambient = self.sample_reflection_probes(entry.transform.origin);
+                // VoxelGI indirect, sampled at the same point and added the same
+                // way (pat-s3rrv.114). An unbaked volume, or a scene with no GI
+                // node at all, samples black and leaves the frame untouched.
+                let gi_ambient = self.sample_voxel_gi(entry.transform.origin);
                 let entry_ambient = Color::new(
-                    ambient.r + probe_ambient.r,
-                    ambient.g + probe_ambient.g,
-                    ambient.b + probe_ambient.b,
+                    ambient.r + probe_ambient.r + gi_ambient.r,
+                    ambient.g + probe_ambient.g + gi_ambient.g,
+                    ambient.b + probe_ambient.b + gi_ambient.b,
                     1.0,
                 );
 
@@ -1232,6 +1270,62 @@ impl SoftwareRenderer3D {
                         pixels[i].a,
                     );
                 }
+            }
+        }
+    }
+
+    /// Adds `VoxelGI` indirect ambient to a linear HDR frame in place
+    /// (pat-s3rrv.114).
+    ///
+    /// This is the GPU backend's route to GI. It reconstructs each fragment's
+    /// world position from depth — the same reconstruction the decal and fog
+    /// passes use — and tints the pixel by the GI colour sampled there.
+    ///
+    /// ⚠️ A MODULATION, not the software renderer's per-instance ambient add,
+    /// and the difference is forced by what a readback post-pass has to work
+    /// with: final pixels, with no albedo left to multiply. So it scales each
+    /// shaded fragment by `1 + gi`, which brightens a lit surface toward the
+    /// bleeding colour and leaves an unlit (black) fragment exactly black. The
+    /// software path adds GI during shading, where albedo is still in hand.
+    ///
+    /// Only shaded fragments are touched: the sky (depth >= 1.0) has no surface
+    /// to bounce onto. Runs after the decal pass (decals alter albedo first) and
+    /// before fog, which covers the result.
+    pub(crate) fn apply_voxel_gi_pass(
+        pixels: &mut [Color],
+        depth: &[f32],
+        w: u32,
+        h: u32,
+        volumes: &[VoxelGI],
+        inv_proj: &[[f32; 4]; 4],
+        camera_transform: &Transform3D,
+    ) {
+        if volumes.is_empty() {
+            return;
+        }
+        for y in 0..h {
+            let ndc_y = 1.0 - 2.0 * (y as f32 + 0.5) / h as f32;
+            for x in 0..w {
+                let ndc_x = 2.0 * (x as f32 + 0.5) / w as f32 - 1.0;
+                let i = (y * w + x) as usize;
+                let d = depth[i];
+                if d >= 1.0 {
+                    continue;
+                }
+                let view_pos = pixel_view_position(ndc_x, ndc_y, d, inv_proj);
+                let world_pos = camera_transform.xform(view_pos);
+                let gi = sample_voxel_gi_at(volumes, world_pos);
+                // An unbaked volume, or a fragment outside every volume, samples
+                // black — skip so the frame stays byte-identical.
+                if gi.r == 0.0 && gi.g == 0.0 && gi.b == 0.0 {
+                    continue;
+                }
+                pixels[i] = Color::new(
+                    pixels[i].r * (1.0 + gi.r),
+                    pixels[i].g * (1.0 + gi.g),
+                    pixels[i].b * (1.0 + gi.b),
+                    pixels[i].a,
+                );
             }
         }
     }
@@ -2194,6 +2288,24 @@ impl RenderingServer3D for SoftwareRenderer3D {
 
     fn remove_reflection_probe(&mut self, id: ReflectionProbeId) {
         self.reflection_probes.retain(|p| p.id != id);
+    }
+
+    fn add_voxel_gi(&mut self, id: VoxelGIId) {
+        if !self.voxel_gis.iter().any(|g| g.id == id) {
+            self.voxel_gis.push(VoxelGI::new(id));
+        }
+    }
+
+    fn update_voxel_gi(&mut self, gi: &VoxelGI) {
+        if let Some(existing) = self.voxel_gis.iter_mut().find(|g| g.id == gi.id) {
+            *existing = gi.clone();
+        } else {
+            self.voxel_gis.push(gi.clone());
+        }
+    }
+
+    fn remove_voxel_gi(&mut self, id: VoxelGIId) {
+        self.voxel_gis.retain(|g| g.id != id);
     }
 
     // The fog/decal/occluder passes were fully implemented on the concrete

@@ -356,6 +356,14 @@ pub struct SceneTree {
     nodes: HashMap<NodeId, Node>,
     /// The ID of the root node (always valid).
     root_id: NodeId,
+    /// Seconds elapsed in the running loop, published for shader `TIME`
+    /// (pat-s3rrv.122).
+    ///
+    /// 🔑 Lives on the tree because the render adapter's per-frame entry
+    /// (`render_frame`) takes only `&SceneTree`. Threading a parameter instead
+    /// would change a signature `gdeditor` also calls — and gdeditor does not
+    /// currently build, so that edit could not be verified.
+    shader_time: f32,
     /// The root `Window`'s size and content-scale configuration (pat-nzgdu.87).
     root_window: crate::viewport::RootWindow,
     /// Group index: group name -> set of member NodeIds.
@@ -613,6 +621,7 @@ impl SceneTree {
         let mut nodes = HashMap::new();
         nodes.insert(root_id, root);
         Self {
+            shader_time: 0.0,
             nodes,
             root_id,
             groups: HashMap::new(),
@@ -784,6 +793,21 @@ impl SceneTree {
     ///
     /// Returns whether the size changed. A resize to the same size is silent,
     /// as in Godot.
+    /// Publishes the loop's elapsed seconds for shader `TIME` (pat-s3rrv.122).
+    ///
+    /// `MainLoop::step` sets this each frame; the render adapter reads it and
+    /// hands it to the fragment shader. Before this, `CustomFragmentShader`'s
+    /// `set_time` had NO production caller anywhere — `TIME` evaluated to 0.0
+    /// in every real render on every backend, so an animated shader was static.
+    pub fn set_shader_time(&mut self, seconds: f32) {
+        self.shader_time = seconds;
+    }
+
+    /// Elapsed seconds published for shader `TIME`.
+    pub fn shader_time(&self) -> f32 {
+        self.shader_time
+    }
+
     pub fn resize_root_window(&mut self, size: gdcore::math::Vector2) -> bool {
         if self.root_window.size == size {
             return false;

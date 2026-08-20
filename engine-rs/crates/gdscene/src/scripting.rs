@@ -1176,6 +1176,82 @@ fn slide_collision_count(tree: &SceneTree, nid: NodeId) -> usize {
 /// keys, and a handle reaching those arms would read a raycast's empty results
 /// and report nothing — the same shadowing ShapeCast2D had to be lifted above.
 /// Declines every non-handle receiver, so the table stays reachable.
+/// `Timer.start()` / `stop()` / `is_stopped()` from GDScript (pat-s3rrv.121).
+///
+/// `SceneTree::process_timer_nodes` drives Timers from the stashed
+/// `__timer_running` / `time_left` properties, and **nothing outside that
+/// function ever wrote them**, so `$Timer.start()` was a silent no-op: a Timer
+/// without `autostart = true` could never run at all.
+///
+/// Declines every non-Timer node, leaving the dispatch table below reachable.
+fn timer_node_call(
+    tree: &mut SceneTree,
+    nid: NodeId,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    if !matches!(method, "start" | "stop" | "is_stopped") {
+        return None;
+    }
+    if tree.get_node(nid)?.class_name() != "Timer" {
+        return None;
+    }
+
+    let num = |v: Option<&Variant>| -> Option<f64> {
+        match v {
+            Some(Variant::Float(f)) => Some(*f),
+            Some(Variant::Int(i)) => Some(*i as f64),
+            _ => None,
+        }
+    };
+    let read = |tree: &SceneTree, key: &str, default: f64| -> f64 {
+        tree.get_node(nid)
+            .map(|n| n.get_property(key))
+            .and_then(|v| num(Some(&v)))
+            .unwrap_or(default)
+    };
+
+    match method {
+        "start" => {
+            // 🔑 `start(time_sec)` changes `wait_time` PERMANENTLY — Godot calls
+            // `set_wait_time(p_time)` (`timer.cpp:121-123`), it does not
+            // override the duration for one run. A repeating timer restarted
+            // with `start(0.25)` keeps firing every 0.25s afterwards.
+            if let Some(t) = num(args.first()) {
+                if t > 0.0 {
+                    tree.get_node_mut(nid)?
+                        .set_property("wait_time", Variant::Float(t));
+                }
+            }
+            let wait = read(tree, "wait_time", 1.0).max(1e-4);
+            let node = tree.get_node_mut(nid)?;
+            node.set_property("time_left", Variant::Float(wait));
+            node.set_property("__timer_running", Variant::Bool(true));
+            // Mark it started so the first-frame init pass in
+            // `process_timer_nodes` cannot re-seed the countdown underneath us.
+            node.set_property("__timer_started", Variant::Bool(true));
+            Some(Variant::Nil)
+        }
+        "stop" => {
+            let node = tree.get_node_mut(nid)?;
+            node.set_property("time_left", Variant::Float(0.0));
+            node.set_property("__timer_running", Variant::Bool(false));
+            node.set_property("__timer_started", Variant::Bool(true));
+            // ⚠️ `stop()` also CLEARS `autostart` (`timer.cpp:131`). Without
+            // this a stopped Timer whose scene set `autostart = true` would be
+            // restarted by the next init pass — stop would not stick.
+            node.set_property("autostart", Variant::Bool(false));
+            Some(Variant::Nil)
+        }
+        // ⚠️ Godot derives this from the clock alone: `get_time_left() <= 0`,
+        // where `get_time_left()` clamps negatives to 0 (`timer.cpp:155-161`).
+        // It is NOT a separate "running" flag — a *paused* Timer with time
+        // remaining reports `false`, i.e. not stopped.
+        "is_stopped" => Some(Variant::Bool(read(tree, "time_left", 0.0) <= 0.0)),
+        _ => None,
+    }
+}
+
 fn kinematic_collision_call(
     tree: &SceneTree,
     node: u64,
@@ -2267,6 +2343,10 @@ impl SceneAccess for SceneTreeAccessor {
         // Left to the table it would read a raycast's empty results and report
         // nothing (pat-s3rrv.95). Declines every non-handle receiver.
         if let Some(value) = kinematic_collision_call(self.tree(), node, method, args) {
+            return Some(value);
+        }
+        // Timer's own surface (pat-s3rrv.121); declines every non-Timer node.
+        if let Some(value) = timer_node_call(self.tree_mut(), nid, method, args) {
             return Some(value);
         }
 
@@ -4634,6 +4714,134 @@ impl SceneAccess for SceneTreeAccessor {
         }
         mixer.remove_bus(i);
         true
+    }
+
+    // -- bus effect instances (pat-s3rrv.141) -------------------------------
+    // `AudioEffectCapture` and `AudioEffectRecord` are the two effects a script
+    // DRIVES rather than configures, so they need a call path down to the live
+    // mixer. gdscript-interop cannot depend on gdaudio, which is why the
+    // dispatch lands here where both are in scope.
+
+    fn audio_effect_class(&self, bus_idx: i64, effect_idx: i64) -> Option<String> {
+        let bus = usize::try_from(bus_idx).ok()?;
+        let slot = usize::try_from(effect_idx).ok()?;
+        Some(self.audio()?.bus_effect_class(bus, slot)?.to_string())
+    }
+
+    fn audio_effect_call(
+        &mut self,
+        bus_idx: i64,
+        effect_idx: i64,
+        method: &str,
+        args: &[Variant],
+    ) -> Option<Variant> {
+        let bus = usize::try_from(bus_idx).ok()?;
+        let slot = usize::try_from(effect_idx).ok()?;
+        // Frame counts arrive as `Int`, but a float is tolerated because
+        // arithmetic on one yields a float (`get_frames_available() / 2`).
+        let int_arg = |i: usize| -> i64 {
+            match args.get(i) {
+                Some(Variant::Int(v)) => *v,
+                Some(Variant::Float(f)) => *f as i64,
+                _ => 0,
+            }
+        };
+        let audio = self.audio_mut()?;
+
+        match method {
+            // -- AudioEffectCapture ---------------------------------------
+            "get_buffer" => {
+                let frames = audio.bus_capture_mut(bus, slot)?.get_buffer(int_arg(0));
+                // ⚠️ One `Vector2` per FRAME, `(left, right)` — not a flat
+                // float array. A caller reading it as mono would take every
+                // other sample and hear the signal an octave up.
+                Some(Variant::PackedVector2Array(
+                    frames
+                        .into_iter()
+                        .map(|(l, r)| Vector2::new(l, r))
+                        .collect(),
+                ))
+            }
+            "can_get_buffer" => Some(Variant::Bool(
+                audio.bus_capture(bus, slot)?.can_get_buffer(int_arg(0)),
+            )),
+            "clear_buffer" => {
+                audio.bus_capture_mut(bus, slot)?.clear_buffer();
+                Some(Variant::Nil)
+            }
+            "get_frames_available" => Some(Variant::Int(
+                audio.bus_capture(bus, slot)?.get_frames_available(),
+            )),
+            "get_buffer_length_frames" => Some(Variant::Int(
+                audio.bus_capture(bus, slot)?.get_buffer_length_frames(),
+            )),
+            "get_pushed_frames" => Some(Variant::Int(
+                audio.bus_capture(bus, slot)?.get_pushed_frames(),
+            )),
+            "get_discarded_frames" => Some(Variant::Int(
+                audio.bus_capture(bus, slot)?.get_discarded_frames(),
+            )),
+            "get_buffer_length" => Some(Variant::Float(
+                audio.bus_capture(bus, slot)?.get_buffer_length() as f64,
+            )),
+            "set_buffer_length" => {
+                let seconds = match args.first() {
+                    Some(Variant::Float(f)) => *f as f32,
+                    Some(Variant::Int(i)) => *i as f32,
+                    _ => return Some(Variant::Nil),
+                };
+                audio.bus_capture_mut(bus, slot)?.set_buffer_length(seconds);
+                Some(Variant::Nil)
+            }
+
+            // -- AudioEffectRecord ----------------------------------------
+            "set_recording_active" => {
+                let active = matches!(args.first(), Some(Variant::Bool(true)));
+                audio.bus_record_mut(bus, slot)?.set_recording_active(active);
+                Some(Variant::Nil)
+            }
+            "is_recording_active" => Some(Variant::Bool(
+                audio.bus_record(bus, slot)?.is_recording_active(),
+            )),
+            "set_format" => {
+                audio.bus_record_mut(bus, slot)?.set_format(int_arg(0));
+                Some(Variant::Nil)
+            }
+            "get_format" => Some(Variant::Int(audio.bus_record(bus, slot)?.get_format())),
+            "get_recording" => {
+                let recording = audio.bus_record(bus, slot)?.get_recording();
+                // ⚠️ Godot returns a NULL for an empty take rather than a
+                // zero-length stream, so a script cannot mistake "the bus was
+                // never recorded" for "silence was recorded". Same for a format
+                // this port cannot encode.
+                let Ok(wav) = recording else {
+                    return Some(Variant::Nil);
+                };
+                let mut res = gdvariant::ResourceRef {
+                    path: String::new(),
+                    class_name: "AudioStreamWAV".to_string(),
+                    properties: HashMap::new(),
+                };
+                // The four setters Godot calls on the sample it builds
+                // (`audio_effect_record.cpp:264-269`), under their real Godot
+                // property names so a script reads them the usual way.
+                res.properties
+                    .insert("data".to_string(), Variant::PackedByteArray(wav.data));
+                res.properties
+                    .insert("format".to_string(), Variant::Int(wav.format));
+                res.properties.insert(
+                    "mix_rate".to_string(),
+                    Variant::Int(wav.mix_rate as i64),
+                );
+                res.properties
+                    .insert("stereo".to_string(), Variant::Bool(wav.stereo));
+                res.properties
+                    .insert("loop_mode".to_string(), Variant::Int(wav.loop_mode));
+                Some(Variant::Resource(Box::new(res)))
+            }
+
+            _ => None,
+        }
     }
 
     // -- Object metadata (pat-nzgdu.30) -------------------------------------

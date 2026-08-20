@@ -989,7 +989,12 @@ impl CustomFragmentShader {
             compiled,
             parameters: material.parameters.clone(),
             fragment_body,
-            textures: Arc::new(std::collections::HashMap::new()),
+            // pat-s3rrv.122: carry the material's bound sampler images through.
+            // This was `HashMap::new()` unconditionally, so `texture(tex, UV)`
+            // always hit the missing-binding placeholder and custom-shader
+            // texturing was reachable only from this file's own tests — the
+            // engine had a sampler with nothing ever bound to it.
+            textures: Arc::new(material.textures.clone()),
             time: 0.0,
         }
     }

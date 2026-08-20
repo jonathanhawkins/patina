@@ -152,6 +152,12 @@ pub fn process_character_movement(tree: &mut SceneTree, physics: &PhysicsServer3
         // (`CharacterBody3D.xml:168`).
         character.platform_floor_layers =
             u32_prop(tree, node_id, "platform_floor_layers", u32::MAX);
+        // ⚠️ Default 0, NOT u32::MAX like its floor sibling directly above.
+        // Godot ignores every wall body unless a scene opts one in
+        // (`CharacterBody3D.xml`, "all wall bodies are ignored"), so the two
+        // masks deliberately disagree — copying the line above would make every
+        // wall drag the character sideways.
+        character.platform_wall_layers = u32_prop(tree, node_id, "platform_wall_layers", 0);
         character.wall_min_slide_angle = f32_prop(
             tree,
             node_id,

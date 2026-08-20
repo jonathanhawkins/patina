@@ -4193,6 +4193,17 @@ impl Interpreter {
             // Objects match `Object` and any class the resource reports.
             "Object" => matches!(v, Variant::ObjectId(_) | Variant::Resource(_)),
             other => {
+                // A tagged handle knows its own class. `w is WeakRef` has to be
+                // true for a weakref handle and for every ancestor of WeakRef,
+                // which is the same inheritance walk the Resource branch below
+                // performs — the string fallback at the end of this arm reports
+                // the *variant* type and would answer `false` (pat-s3rrv.146).
+                if let Variant::ObjectId(oid) = v {
+                    if gdobject::weak_ref::is_weakref_handle(*oid) {
+                        return other == "WeakRef"
+                            || gdobject::class_db::is_parent_class("WeakRef", other);
+                    }
+                }
                 if let Variant::Resource(r) = v {
                     // Exact class, or any ancestor of it. The inheritance walk
                     // is what makes `event is InputEvent` true for a concrete
@@ -5072,7 +5083,17 @@ impl Interpreter {
                         )))
                     }
                 };
-                Ok(Some(Variant::String(tr_lookup(&key))))
+                // `tr(message, context)` — the second argument was accepted and
+                // then DROPPED, so a context-qualified lookup silently returned
+                // the context-free translation (pat-s3rrv.128).
+                let context = match args.get(1) {
+                    Some(Variant::String(s)) => s.clone(),
+                    Some(Variant::StringName(sn)) => sn.as_str().to_string(),
+                    _ => String::new(),
+                };
+                Ok(Some(Variant::String(
+                    gdcore::translation::translate_with_context(&key, &context),
+                )))
             }
             "tr_n" => {
                 // tr_n(message, plural_message, n[, context]).
@@ -6570,8 +6591,12 @@ impl Interpreter {
                     // (pat-0q2kx.163). Its liveness lives in the process-global
                     // alive-objects registry instead, which is the same one
                     // `WeakRef::get_ref` consults.
+                    // A weakref handle answers here too: it is a real object
+                    // that outlives what it watches, so `is_instance_valid(w)`
+                    // stays true after the referent is freed (pat-s3rrv.146).
                     Variant::ObjectId(oid)
-                        if gdobject::refcounted_handle::is_refcounted_handle(*oid) =>
+                        if gdobject::refcounted_handle::is_refcounted_handle(*oid)
+                            || gdobject::weak_ref::is_weakref_handle(*oid) =>
                     {
                         gdobject::weak_ref::is_object_alive(*oid)
                     }
@@ -7220,10 +7245,20 @@ impl Interpreter {
             // Without scene access both degrade gracefully (passthrough / Nil).
             "weakref" => {
                 Self::require_args("weakref", args, 1)?;
-                // A WeakRef is a non-owning handle: return the object id
-                // unchanged so `is_instance_valid(w)` and `w.get_ref()` re-query
-                // the live registry and observe `Nil` once the referent is freed.
-                Ok(Some(args[0].clone()))
+                // A WeakRef is a distinct OBJECT that watches the referent,
+                // not the referent itself (pat-s3rrv.146). Returning the id
+                // unchanged satisfied liveness — `get_ref()` re-queried the
+                // registry — but made `weakref(o) == o`, reported the
+                // referent's class, and left `w is WeakRef` unanswerable.
+                match &args[0] {
+                    Variant::ObjectId(oid) => Ok(Some(Variant::ObjectId(
+                        gdobject::weak_ref::new_weakref_handle(*oid),
+                    ))),
+                    // Nothing to watch: a non-object argument has no instance
+                    // id, so a handle minted for it could never resolve. Pass
+                    // it through rather than hand back a permanently-dead ref.
+                    other => Ok(Some(other.clone())),
+                }
             }
             "instance_from_id" => {
                 Self::require_args("instance_from_id", args, 1)?;
@@ -9090,8 +9125,72 @@ impl Interpreter {
                 Ok(Variant::Nil)
             }
 
+            // -- effect instances ---------------------------------------------
+            // pat-s3rrv.141. Godot hands back an `AudioEffectInstance` — the
+            // per-playback companion carrying the effect's running state.
+            // Patina keeps that state on the effect itself, so the handle
+            // ADDRESSES the slot instead of owning anything.
+            //
+            // ⚠️ That makes the handle positional, and a script that keeps one
+            // across a `remove_bus` or `swap_bus_effects` is then pointed at
+            // whatever moved into that slot. Godot's reference would follow the
+            // effect. Documented rather than hidden: the alternative is a
+            // registry that outlives the mixer and can hand back a stale
+            // effect, which fails more quietly.
+            "get_bus_effect_instance" => {
+                if args.len() != 2 && args.len() != 3 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "AudioServer.get_bus_effect_instance() takes 2 or 3 arguments, got {}",
+                        args.len()
+                    ))));
+                }
+                let bus = idx_arg(args, 0);
+                let effect = idx_arg(args, 1);
+                let known = self
+                    .scene_access
+                    .as_ref()
+                    .and_then(|a| a.audio_effect_class(bus, effect));
+                match known {
+                    Some(_) => Ok(Variant::ObjectId(new_audio_effect_handle(bus, effect))),
+                    // An empty slot is a null in Godot, not an object that
+                    // answers every query with a plausible zero.
+                    None => Ok(Variant::Nil),
+                }
+            }
+
             other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                 format!("AudioServer.{other}"),
+            ))),
+        }
+    }
+
+    /// Methods on the object `AudioServer.get_bus_effect_instance` returned
+    /// (pat-s3rrv.141).
+    ///
+    /// The handle carries the bus and effect indices, so this unpacks them and
+    /// hands the call to the scene layer, which owns the live mixer. Every
+    /// Godot semantic — the all-or-nothing drain, the 16-bit default, the null
+    /// for an empty take — lives there with the effects themselves rather than
+    /// being re-decided here.
+    fn call_audio_effect_instance(
+        &mut self,
+        id: gdcore::id::ObjectId,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        let (bus_idx, effect_idx) = audio_effect_handle_parts(id);
+        let answer = self
+            .scene_access
+            .as_mut()
+            .and_then(|a| a.audio_effect_call(bus_idx, effect_idx, method, args));
+        match answer {
+            Some(v) => Ok(v),
+            // ⚠️ An unhandled call RAISES rather than returning Nil. A capture
+            // whose `get_buffer` silently answered null would look to a script
+            // exactly like a bus that produced no audio, which is the bug this
+            // whole class exists to let a game see.
+            None => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("AudioEffectInstance.{method}"),
             ))),
         }
     }
@@ -9534,17 +9633,34 @@ impl Interpreter {
             if is_camera_feed_handle(*oid) {
                 return call_camera_feed_instance(*oid, method, args);
             }
+            // Before the RefCounted branch: a WeakRef IS a RefCounted in
+            // Godot, and its own methods must win over the generic ones.
+            if gdobject::weak_ref::is_weakref_handle(*oid) {
+                return call_weakref_instance(*oid, method, args);
+            }
             if gdobject::refcounted_handle::is_refcounted_handle(*oid) {
                 return call_refcounted_instance(*oid, method, args);
             }
             if is_editor_fs_handle(*oid) {
                 return call_editor_fs_instance(*oid, method, args);
             }
+            // Both forward to the free functions that already served the
+            // bare `EditorPaths` / `EditorCommandPalette` idents, so the two
+            // spellings cannot drift apart (pat-s3rrv.123).
+            if is_editor_paths_handle(*oid) {
+                return call_editor_paths_static(method, args);
+            }
+            if is_editor_palette_handle(*oid) {
+                return call_editor_command_palette_static(method, args);
+            }
             if is_editor_fs_dir_handle(*oid) {
                 return call_editor_fs_dir_instance(*oid, method, args);
             }
             if is_image_handle(*oid) {
                 return call_image_instance(*oid, method, args);
+            }
+            if is_audio_effect_handle(*oid) {
+                return self.call_audio_effect_instance(*oid, method, args);
             }
             if gdplatform::websocket_peer::is_websocket_peer_handle(*oid) {
                 return call_websocket_peer_instance(*oid, method, args);
@@ -11642,7 +11758,30 @@ impl Interpreter {
                             )))
                         }
                     }
-                    "stop" => {
+                    // ⚠️ This arm is the AnimationPlayer/playback `stop()`, and
+                    // its fallback sets `playing = false` on ANY node that
+                    // reaches it — which silently swallowed `$Timer.stop()`
+                    // before it could reach the Timer handler in
+                    // `SceneTreeAccessor::call_node_method` (pat-s3rrv.121).
+                    // `start()` and `is_stopped()` have no arm here, which is
+                    // exactly why those two worked and only `stop()` did not.
+                    //
+                    // The guard declines Timers ONLY. Guarding on
+                    // `animation_player_is_playing` like the query verbs below
+                    // would be tidier, but AudioStreamPlayer and
+                    // VideoStreamPlayer rely on this same `playing = false`
+                    // fallback, so a broader guard would stop their `stop()`
+                    // working. An absent `scene_access`, or an unknown class,
+                    // still takes the arm — behaviour is unchanged for
+                    // everything except a Timer.
+                    "stop"
+                        if self
+                            .scene_access
+                            .as_ref()
+                            .and_then(|a| a.get_class(id))
+                            .as_deref()
+                            != Some("Timer") =>
+                    {
                         if let Some(ref mut access) = self.scene_access {
                             if access.animation_player_stop(id) {
                                 return Ok(Variant::Nil);
@@ -14189,12 +14328,28 @@ impl Interpreter {
     }
 
     /// Calls a method on a class instance.
+    ///
+    /// ⚠️ A `__lambda_connection_N` name is NOT a script method — it is how a
+    /// lambda parked in a node signal connection comes back
+    /// (see `lambda_connection_name`), and `class_def.methods` will never
+    /// hold it. It is resolved first, and invoked through
+    /// `resume_with_instance_self`, the same
+    /// install-self / write-back wrapper the coroutine resumes use. That
+    /// wrapper is the load-bearing part: it is what lets
+    /// `sig.connect(func(): self.result = msg)` write through `self` to the
+    /// instance that connected the lambda, and what copies the mutation back
+    /// out afterwards (pat-s3rrv.67).
     pub fn call_instance_method(
         &mut self,
         instance: &mut ClassInstance,
         method_name: &str,
         args: &[Variant],
     ) -> Result<Variant, RuntimeError> {
+        if let Some(callable) = lambda_connection(method_name) {
+            return stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || {
+                self.resume_with_instance_self(instance, |i| i.invoke_callable(&callable, args))
+            });
+        }
         stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || {
             self.call_instance_method_impl(instance, method_name, args)
         })
@@ -23052,6 +23207,26 @@ fn call_camera_feed_instance(
 
 /// `EditorFileSystem`, the scanning service. One per editor, so one handle.
 const EDITOR_FS_HANDLE_TAG: u64 = 0xEE00_0000_0000_0000;
+
+/// Handle tag for the `EditorPaths` object `EditorInterface.get_editor_paths()`
+/// hands back (pat-s3rrv.123).
+///
+/// ⚠️ Handle tags are a WORKSPACE-WIDE namespace — the top byte must be unique
+/// across every crate, not just this file. `0x10` and `0x11` were free when
+/// these were added (41 tags were in use).
+const EDITOR_PATHS_HANDLE_TAG: u64 = 0x1000_0000_0000_0000;
+
+/// Handle tag for the `EditorCommandPalette` object
+/// `EditorInterface.get_command_palette()` hands back.
+const EDITOR_PALETTE_HANDLE_TAG: u64 = 0x1100_0000_0000_0000;
+
+fn is_editor_paths_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == EDITOR_PATHS_HANDLE_TAG
+}
+
+fn is_editor_palette_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == EDITOR_PALETTE_HANDLE_TAG
+}
 /// One node of the scanned tree — what `get_filesystem()` hands back.
 const EDITOR_FS_DIR_HANDLE_TAG: u64 = 0xEF00_0000_0000_0000;
 
@@ -23112,6 +23287,20 @@ fn call_editor_interface_static(member: &str, _args: &[Variant]) -> Result<Varia
         // Godot returns the EditorFileSystem singleton.
         "get_resource_filesystem" => Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(
             EDITOR_FS_HANDLE_TAG | 1,
+        ))),
+        // 🔑 In Godot these are reachable ONLY through EditorInterface —
+        // there is no bare `EditorPaths` or `EditorCommandPalette` global
+        // (`editor/register_editor_types.cpp`). Patina exposes both as bare
+        // idents, which is why their implementations already existed while the
+        // documented spelling `EditorInterface.get_editor_paths()` raised
+        // `UndefinedFunction`. These arms wire the real spelling to the code
+        // that was already there; the bare idents are left alone so existing
+        // scripts keep working (pat-s3rrv.123).
+        "get_editor_paths" => Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(
+            EDITOR_PATHS_HANDLE_TAG | 1,
+        ))),
+        "get_command_palette" => Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(
+            EDITOR_PALETTE_HANDLE_TAG | 1,
         ))),
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("EditorInterface.{other}"),
@@ -23253,6 +23442,45 @@ fn call_editor_fs_dir_instance(
 /// from under other scripts, because `impl Clone for Interpreter` duplicates the
 /// whole `Environment` without incrementing anything. See the pat-0q2kx.163
 /// notes for the RAII design that fixes it properly.
+/// Dispatches a `WeakRef` instance method (pat-s3rrv.146).
+///
+/// Reached only for ids carrying `WEAKREF_HANDLE_TAG`, so every arm here is
+/// about the watcher rather than the watched. `get_ref` deliberately re-queries
+/// the alive registry on each call instead of caching: that re-query IS the
+/// contract of a weak reference, and it is why freeing the referent has to
+/// unregister it.
+fn call_weakref_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdobject::weak_ref as wr;
+    match method {
+        "get_ref" => Ok(match wr::weakref_get_ref(id) {
+            Some(target) => Variant::ObjectId(target),
+            None => Variant::Nil,
+        }),
+        "get_class" => Ok(Variant::String("WeakRef".into())),
+        "is_class" => match args.first() {
+            // WeakRef extends RefCounted extends Object, and `is_class` is true
+            // for the whole chain, not just the leaf.
+            Some(Variant::String(name)) => Ok(Variant::Bool(
+                name == "WeakRef" || name == "RefCounted" || name == "Object",
+            )),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                "WeakRef.is_class() takes a string".into(),
+            ))),
+        },
+        // The handle is its own object, so this is the WeakRef's id — not the
+        // referent's. A script comparing the two is exactly how it tells them
+        // apart.
+        "get_instance_id" => Ok(Variant::Int(id.raw() as i64)),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("WeakRef.{other}"),
+        ))),
+    }
+}
+
 fn call_refcounted_instance(
     id: gdcore::id::ObjectId,
     method: &str,
@@ -23314,6 +23542,40 @@ fn call_refcounted_instance(
 // `set_pixel(x, y, color)`, `get_pixel(x, y)`. Scope is deliberately the
 // pixel-buffer surface that CameraFeed needs; the rest of Godot's Image
 // (compression, resizing, format conversion, save/load) is not here.
+
+// `AudioEffectCapture` / `AudioEffectRecord` instances (pat-s3rrv.141).
+//
+// 🔑 Unlike every other handle family in this file, these are **not** backed by
+// a registry. Patina keeps an effect's running state on the effect itself,
+// which lives in its bus slot, so the handle only has to say WHICH slot: the
+// bus index and the effect index are packed into the id and unpacked on every
+// call. Nothing to allocate, nothing to leak, and no way for the handle to
+// outlive the effect and answer from a stale copy.
+const AUDIO_EFFECT_HANDLE_TAG: u64 = 0x1200_0000_0000_0000;
+
+/// Packs a bus/effect slot pair into an addressing handle.
+///
+/// Both indices are clamped to 16 bits — a bus count or effect count that large
+/// is not reachable through any Godot API, and clamping keeps the tag byte
+/// intact where a wrapping shift would forge another family's handle.
+fn new_audio_effect_handle(bus_idx: i64, effect_idx: i64) -> gdcore::id::ObjectId {
+    let bus = bus_idx.clamp(0, 0xFFFF) as u64;
+    let effect = effect_idx.clamp(0, 0xFFFF) as u64;
+    gdcore::id::ObjectId::from_raw(AUDIO_EFFECT_HANDLE_TAG | (bus << 16) | effect)
+}
+
+/// Returns `true` when `id` was issued by [`new_audio_effect_handle`].
+fn is_audio_effect_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == AUDIO_EFFECT_HANDLE_TAG
+}
+
+/// Unpacks `(bus_idx, effect_idx)` from an audio-effect handle.
+fn audio_effect_handle_parts(id: gdcore::id::ObjectId) -> (i64, i64) {
+    (
+        ((id.raw() >> 16) & 0xFFFF) as i64,
+        (id.raw() & 0xFFFF) as i64,
+    )
+}
 
 const IMAGE_HANDLE_TAG: u64 = 0x1A00_0000_0000_0000;
 
@@ -23439,6 +23701,64 @@ fn call_image_instance(
         match method {
             "get_width" => Ok(Variant::Int(img.width)),
             "get_height" => Ok(Variant::Int(img.height)),
+            "get_size" => Ok(Variant::Vector2i(gdcore::math::Vector2i::new(
+                img.width as i32,
+                img.height as i32,
+            ))),
+            // `premultiply_alpha` — `image.cpp:4220`.
+            //
+            // 🔑 The 8-bit integer form `(c * a + 255) >> 8`, NOT `c * a`. The
+            // doc says `(color * alpha) / 256`, which is a third thing again;
+            // the source is the oracle. The `+ 255` is a round-UP bias, so an
+            // opaque pixel survives exactly (255*255 + 255) >> 8 == 255 rather
+            // than decaying to 254 on every call.
+            //
+            // ⚠️ Godot returns early unless the format is RGBA8, so this is a
+            // no-op on anything else rather than an approximation.
+            "premultiply_alpha" => {
+                if img.format == IMAGE_FORMAT_RGBA8 {
+                    for px in img.pixels.iter_mut() {
+                        let a = (px.a.clamp(0.0, 1.0) * 255.0).round() as u16;
+                        let chan = |c: f32| -> f32 {
+                            let c8 = (c.clamp(0.0, 1.0) * 255.0).round() as u16;
+                            (((c8 * a + 255) >> 8) as f32) / 255.0
+                        };
+                        px.r = chan(px.r);
+                        px.g = chan(px.g);
+                        px.b = chan(px.b);
+                    }
+                }
+                Ok(Variant::Nil)
+            }
+            // `detect_alpha` — `image.cpp:2706`, thresholds at `:2600-2601`.
+            //
+            // ⚠️ The thresholds are 2 and 254, not 0 and 255. A nearly-opaque
+            // pixel (254) counts as opaque and a nearly-transparent one (1)
+            // counts as a cutout, so a slightly-off encoder does not flip a
+            // whole image into the expensive BLEND path.
+            "detect_alpha" => {
+                const ALPHA_NONE: i64 = 0;
+                const ALPHA_BIT: i64 = 1;
+                const ALPHA_BLEND: i64 = 2;
+                let mut bit = false;
+                let mut detected = false;
+                for px in img.pixels.iter() {
+                    let a = (px.a.clamp(0.0, 1.0) * 255.0).round() as u16;
+                    if a < 2 {
+                        bit = true;
+                    } else if a < 254 {
+                        detected = true;
+                        break;
+                    }
+                }
+                Ok(Variant::Int(if detected {
+                    ALPHA_BLEND
+                } else if bit {
+                    ALPHA_BIT
+                } else {
+                    ALPHA_NONE
+                }))
+            }
             "get_format" => Ok(Variant::Int(img.format)),
             "is_empty" => Ok(Variant::Bool(img.pixels.is_empty())),
             "set_pixel" => {
@@ -23612,6 +23932,35 @@ fn call_geometry_2d_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
     }
 
     match method {
+        // Circle predicates + convex hull (pat-s3rrv.125).
+        "is_point_in_circle" => {
+            let point = vec2(args, 0, method)?;
+            let pos = vec2(args, 1, method)?;
+            let radius = num(args, 2, method)?;
+            Ok(Variant::Bool(gdcore::geometry2d::is_point_in_circle(
+                point, pos, radius,
+            )))
+        }
+        // ⚠️ Returns the fraction along the segment, or **-1.0** on a miss —
+        // `0.0` is a real hit exactly at `from`, so the miss value has to be
+        // outside `[0, 1]` rather than at its edge.
+        "segment_intersects_circle" => {
+            let from = vec2(args, 0, method)?;
+            let to = vec2(args, 1, method)?;
+            let pos = vec2(args, 2, method)?;
+            let radius = num(args, 3, method)?;
+            Ok(Variant::Float(
+                gdcore::geometry2d::segment_intersects_circle(from, to, pos, radius) as f64,
+            ))
+        }
+        // 🔑 The hull comes back CLOSED — first point repeated as the last —
+        // which is what Godot's `H.resize(k)` produces.
+        "convex_hull" => {
+            let points = poly(args, 0, method)?;
+            Ok(Variant::PackedVector2Array(
+                gdcore::geometry2d::convex_hull(&points),
+            ))
+        }
         "build_arc" => {
             let center = vec2(args, 0, method)?;
             let radius = num(args, 1, method)?;
@@ -24266,6 +24615,30 @@ fn call_translationserver_static(method: &str, args: &[Variant]) -> Result<Varia
     }
 }
 
+/// Godot's `String::is_valid_ascii_identifier` (`core/string/ustring.cpp:4331`).
+///
+/// ⚠️ It rejects a leading **digit**, not "anything that is not a letter" — the
+/// only other rule is that every character is alphanumeric or `_`. So `_foo`
+/// and `foo1` are valid and `1foo` and `fo-o` are not.
+fn is_valid_ascii_identifier(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        return false;
+    }
+    name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Singletons Godot registers with `editor_only = true`
+/// (`editor/register_editor_types.cpp:304-306`).
+///
+/// `Engine.get_singletons()` skips these when `!is_editor_hint()`
+/// (`core/config/engine.cpp:385-395`), so a running game never sees them listed.
+fn is_editor_only_singleton(name: &str) -> bool {
+    name == "EditorInterface"
+}
+
 fn call_engine_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
     match method {
         "is_editor_hint" => {
@@ -24381,6 +24754,23 @@ fn call_engine_static(method: &str, args: &[Variant]) -> Result<Variant, Runtime
         "register_singleton" => {
             expect_engine_argc(method, args, 2)?;
             let name = engine_arg_string(method, &args[0])?;
+            // 🔑 Godot ERR_FAILs on a duplicate, and its `has_singleton` covers
+            // the BUILT-INS too — so `register_singleton("OS", x)` is rejected
+            // rather than shadowing the real OS singleton
+            // (`core/core_bind.cpp:1989`).
+            let taken = BUILTIN_SINGLETONS.contains(&name.as_str())
+                || engine_singletons()
+                    .lock()
+                    .map(|m| m.contains_key(&name))
+                    .unwrap_or(false);
+            // ⚠️ Both failures are `ERR_FAIL_COND_MSG`, which PRINTS and
+            // RETURNS — it does not throw. A script calling this keeps running,
+            // so raising a RuntimeError here would abort scripts Godot lets
+            // continue. The observable contract is "the registration did not
+            // happen".
+            if taken || !is_valid_ascii_identifier(&name) {
+                return Ok(Variant::Nil);
+            }
             if let Ok(mut map) = engine_singletons().lock() {
                 map.insert(name, args[1].clone());
             }
@@ -24389,6 +24779,16 @@ fn call_engine_static(method: &str, args: &[Variant]) -> Result<Variant, Runtime
         "unregister_singleton" => {
             expect_engine_argc(method, args, 1)?;
             let name = engine_arg_string(method, &args[0])?;
+            // ⚠️ Only USER-CREATED entries may be removed
+            // (`core/core_bind.cpp:2001`). The built-ins are engine-created, so
+            // `unregister_singleton("OS")` must leave OS registered — otherwise
+            // a script could delete the engine's own singletons out from under
+            // every other script in the process.
+            if BUILTIN_SINGLETONS.contains(&name.as_str()) {
+                return Ok(Variant::Nil);
+            }
+            // Removing a name that was never registered is Godot's other
+            // ERR_FAIL, and `remove` is already the no-op that matches it.
             if let Ok(mut map) = engine_singletons().lock() {
                 map.remove(&name);
             }
@@ -24396,7 +24796,14 @@ fn call_engine_static(method: &str, args: &[Variant]) -> Result<Variant, Runtime
         }
         "get_singleton_list" => {
             expect_engine_argc(method, args, 0)?;
-            let mut names: Vec<String> = BUILTIN_SINGLETONS.iter().map(|s| s.to_string()).collect();
+            // Editor-only singletons are hidden from a running game
+            // (`core/config/engine.cpp:388`).
+            let editor = ENGINE_EDITOR_HINT.load(Ordering::Relaxed);
+            let mut names: Vec<String> = BUILTIN_SINGLETONS
+                .iter()
+                .filter(|s| editor || !is_editor_only_singleton(s))
+                .map(|s| s.to_string())
+                .collect();
             if let Ok(map) = engine_singletons().lock() {
                 for name in map.keys() {
                     if !names.iter().any(|n| n == name) {
@@ -25956,6 +26363,80 @@ fn pck_packer_paths() -> std::sync::MutexGuard<'static, HashMap<u64, String>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Prefix of the synthetic method name a lambda signal connection is stored
+/// under (pat-s3rrv.67).
+const LAMBDA_CONNECTION_PREFIX: &str = "__lambda_connection_";
+
+thread_local! {
+    /// Lambda `Callable`s parked in node signal connections, keyed by the
+    /// numeric suffix of their synthetic method name (pat-s3rrv.67).
+    ///
+    /// ⚠️ **Why a registry rather than storing the Callable.** A
+    /// `gdobject::signal::Connection` is `(target_id, method_NAME)` — a name,
+    /// not a `Callable` — so `sig.connect(func(): ...)` had nowhere to be
+    /// stored at all and [`callable_target`] returned `None`, surfacing as
+    /// `connect() Callable has no bindable target/method`. Godot connects
+    /// lambdas routinely (`GDScriptLambdaCallable` is just another
+    /// `CallableCustom`), so the connection is recorded under a generated name
+    /// and resolved back here when the signal fires.
+    ///
+    /// ⚠️ **Entries are never removed, and that is deliberate.** A connection
+    /// outlives the expression that created it and nothing in the `SignalStore`
+    /// reports a disconnect back to the interpreter, so a removal here could
+    /// only ever be a guess. The map grows by one per *distinct* lambda
+    /// connected — [`lambda_connection_name`] reuses the existing entry for a
+    /// Callable it has already seen — so reconnecting the same lambda in a
+    /// per-frame handler does not accumulate.
+    static LAMBDA_CONNECTIONS: std::cell::RefCell<HashMap<u64, CallableRef>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Id sequence for [`LAMBDA_CONNECTIONS`]. Separate from the map's `len()`
+    /// so that ids stay unique even if a future change does start removing.
+    static LAMBDA_CONNECTION_SEQ: std::cell::Cell<u64> = std::cell::Cell::new(0);
+}
+
+/// The synthetic method name `callable` is connected under, registering it on
+/// first use (pat-s3rrv.67).
+///
+/// ⚠️ **Find-or-insert, not insert.** `connect`, `disconnect` and
+/// `is_connected` all resolve their argument through [`callable_target`], so a
+/// name that changed per call would make `sig.disconnect(cb)` silently fail and
+/// `sig.is_connected(cb)` always answer false — the caller would be handing the
+/// `SignalStore` a name it never stored. Matching on `CallableRef`'s `PartialEq`
+/// is what keeps the three in agreement, and for a lambda that equality is
+/// identity of the body `Arc` — Godot's own rule
+/// (`gdscript_lambda_callable.cpp:37-40`). A *freshly written* `func(): ...` is
+/// a different lambda and correctly gets its own name, exactly as it would in
+/// Godot.
+///
+/// The scan is linear in the number of distinct connected lambdas, which is
+/// bounded by the script's own `connect` calls.
+fn lambda_connection_name(callable: &CallableRef) -> String {
+    LAMBDA_CONNECTIONS.with(|m| {
+        let mut map = m.borrow_mut();
+        let existing = map.iter().find(|(_, c)| *c == callable).map(|(id, _)| *id);
+        if let Some(id) = existing {
+            return format!("{}{}", LAMBDA_CONNECTION_PREFIX, id);
+        }
+        let id = LAMBDA_CONNECTION_SEQ.with(|seq| {
+            let next = seq.get();
+            seq.set(next + 1);
+            next
+        });
+        map.insert(id, callable.clone());
+        format!("{}{}", LAMBDA_CONNECTION_PREFIX, id)
+    })
+}
+
+/// The `Callable` a synthetic connection method name resolves to, or `None` for
+/// an ordinary script method name (pat-s3rrv.67).
+fn lambda_connection(method_name: &str) -> Option<CallableRef> {
+    let id: u64 = method_name
+        .strip_prefix(LAMBDA_CONNECTION_PREFIX)?
+        .parse()
+        .ok()?;
+    LAMBDA_CONNECTIONS.with(|m| m.borrow().get(&id).cloned())
+}
+
 /// Returns `true` if the identifier is a known Godot node class name that
 /// supports `.new()` for runtime instantiation.
 /// Resolves the `(target_object, method_name)` a signal connection should
@@ -25977,8 +26458,23 @@ fn callable_target(v: &Variant, self_node: Option<u64>) -> Option<(u64, String)>
                 };
                 Some((target, method.clone()))
             }
-            // A lambda has no bindable target/method name to store in the
-            // SignalStore, so it cannot be connected here.
+            // A lambda has no method NAME, and a `SignalStore` `Connection`
+            // stores a name rather than a `Callable` — so it is parked in a
+            // side registry and connected under a generated one that
+            // `call_instance_method` resolves back at dispatch time
+            // (pat-s3rrv.67).
+            //
+            // ⚠️ The target is the CONNECTING script's own node. That is not an
+            // arbitrary choice: it is what makes `self` inside the lambda body
+            // resolve to the instance that wrote the lambda, because the
+            // dispatch goes through that node's script and installs it as
+            // `self_instance`. A lambda has no target of its own to name.
+            //
+            // ⚠️ Registers the OUTER callable, not the `inner_callable()` this
+            // match ran on: `func(): ...` .bind(x) arrives here as
+            // `Bound { inner: Lambda, .. }`, and registering the unwrapped
+            // Lambda would drop the bound arguments.
+            CallableRef::Lambda { .. } => Some((self_node?, lambda_connection_name(&**c))),
             _ => None,
         },
         Variant::String(s) => Some((self_node?, s.clone())),

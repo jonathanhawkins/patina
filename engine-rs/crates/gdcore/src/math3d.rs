@@ -1201,6 +1201,816 @@ impl Mul for Projection {
     }
 }
 
+// ---------------------------------------------------------------------------
+// pat-s3rrv.148 — Euler order, and the affine method gaps
+// ---------------------------------------------------------------------------
+
+/// Godot's global `EulerOrder` enum — the sequence the three axis rotations are
+/// composed in.
+///
+/// 🔑 The default is **YXZ**, not XYZ. `Basis::get_euler()` and
+/// `Node3D.rotation` both use it, so a port that defaulted to the more familiar
+/// XYZ would disagree with the editor's own rotation fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EulerOrder {
+    /// X, then Y, then Z.
+    Xyz = 0,
+    /// X, then Z, then Y.
+    Xzy = 1,
+    /// Y, then X, then Z — Godot's default.
+    #[default]
+    Yxz = 2,
+    /// Y, then Z, then X.
+    Yzx = 3,
+    /// Z, then X, then Y.
+    Zxy = 4,
+    /// Z, then Y, then X.
+    Zyx = 5,
+}
+
+impl EulerOrder {
+    /// Maps the integer a script passes (`EULER_ORDER_*`) to an order.
+    ///
+    /// `None` for an out-of-range value, so a caller can reject it rather than
+    /// silently substituting the default — Godot's own `set_euler` takes the
+    /// `ERR_FAIL_MSG("Invalid Euler order parameter.")` path there.
+    pub fn from_i64(value: i64) -> Option<Self> {
+        match value {
+            0 => Some(Self::Xyz),
+            1 => Some(Self::Xzy),
+            2 => Some(Self::Yxz),
+            3 => Some(Self::Yzx),
+            4 => Some(Self::Zxy),
+            5 => Some(Self::Zyx),
+            _ => None,
+        }
+    }
+}
+
+impl Basis {
+    /// A rotation about X by `angle`, as a basis.
+    ///
+    /// ⚠️ Godot's `Basis(1,0,0, 0,c,-s, 0,s,c)` constructor takes **rows**,
+    /// while this type stores **columns**, so the sign of `s` moves between the
+    /// two off-diagonal slots. Getting that backwards produces a rotation the
+    /// right size in the wrong direction — which looks correct in any test that
+    /// only checks a magnitude.
+    fn rotation_x(angle: f32) -> Self {
+        let (s, c) = angle.sin_cos();
+        Self {
+            x: Vector3::new(1.0, 0.0, 0.0),
+            y: Vector3::new(0.0, c, s),
+            z: Vector3::new(0.0, -s, c),
+        }
+    }
+
+    /// A rotation about Y by `angle`, as a basis.
+    fn rotation_y(angle: f32) -> Self {
+        let (s, c) = angle.sin_cos();
+        Self {
+            x: Vector3::new(c, 0.0, -s),
+            y: Vector3::new(0.0, 1.0, 0.0),
+            z: Vector3::new(s, 0.0, c),
+        }
+    }
+
+    /// A rotation about Z by `angle`, as a basis.
+    fn rotation_z(angle: f32) -> Self {
+        let (s, c) = angle.sin_cos();
+        Self {
+            x: Vector3::new(c, s, 0.0),
+            y: Vector3::new(-s, c, 0.0),
+            z: Vector3::new(0.0, 0.0, 1.0),
+        }
+    }
+
+    /// Builds a basis from Euler angles composed in `order`
+    /// (`Basis::set_euler`, `basis.cpp:656`).
+    ///
+    /// ⓘ Composed as a product of three axis rotations, exactly as Godot does,
+    /// rather than as six hand-expanded closed forms. The product is verifiable
+    /// term by term against the source; a transcribed closed form is six
+    /// opportunities to swap a sign in a place nothing would catch.
+    ///
+    /// [`from_euler`](Self::from_euler) is this with [`EulerOrder::Yxz`].
+    pub fn from_euler_order(euler: Vector3, order: EulerOrder) -> Self {
+        let x = Self::rotation_x(euler.x);
+        let y = Self::rotation_y(euler.y);
+        let z = Self::rotation_z(euler.z);
+        match order {
+            EulerOrder::Xyz => x * (y * z),
+            EulerOrder::Xzy => x * z * y,
+            EulerOrder::Yxz => y * x * z,
+            EulerOrder::Yzx => y * z * x,
+            EulerOrder::Zxy => z * x * y,
+            EulerOrder::Zyx => z * y * x,
+        }
+    }
+
+    /// Extracts Euler angles in `order` (`Basis::get_euler`, `basis.cpp:455`).
+    ///
+    /// ⚠️ Only the inverse of [`from_euler_order`](Self::from_euler_order) with
+    /// the SAME order. Reading angles back with a different order than they
+    /// were written with yields a different rotation, silently — which is the
+    /// bug this whole slice exists to remove from the script bindings.
+    ///
+    /// ⓘ Godot's element access is `rows[i][j]`; this type stores columns, so
+    /// each `rows[i][j]` below reads as `<column j>.<component i>`. The mapping
+    /// was checked against the pre-existing YXZ extraction, which is known
+    /// good.
+    pub fn to_euler_order(self, order: EulerOrder) -> Vector3 {
+        // Godot's own epsilon: angles within ±0.04° of the singularity are
+        // truncated to it (`basis.cpp:459`).
+        const EPS: f32 = 0.000_000_25;
+        // rows[i][j] == column j, component i.
+        let r = |i: usize, j: usize| -> f32 {
+            let col = match j {
+                0 => self.x,
+                1 => self.y,
+                _ => self.z,
+            };
+            match i {
+                0 => col.x,
+                1 => col.y,
+                _ => col.z,
+            }
+        };
+        let half_pi = std::f32::consts::FRAC_PI_2;
+
+        match order {
+            EulerOrder::Xyz => {
+                let sy = r(0, 2);
+                if sy < 1.0 - EPS {
+                    if sy > -(1.0 - EPS) {
+                        Vector3::new(
+                            (-r(1, 2)).atan2(r(2, 2)),
+                            sy.asin(),
+                            (-r(0, 1)).atan2(r(0, 0)),
+                        )
+                    } else {
+                        Vector3::new(r(2, 1).atan2(r(1, 1)), -half_pi, 0.0)
+                    }
+                } else {
+                    Vector3::new(r(2, 1).atan2(r(1, 1)), half_pi, 0.0)
+                }
+            }
+            EulerOrder::Xzy => {
+                let sz = r(0, 1);
+                if sz < 1.0 - EPS {
+                    if sz > -(1.0 - EPS) {
+                        Vector3::new(r(2, 1).atan2(r(1, 1)), r(0, 2).atan2(r(0, 0)), (-sz).asin())
+                    } else {
+                        Vector3::new(-r(1, 2).atan2(r(2, 2)), 0.0, half_pi)
+                    }
+                } else {
+                    Vector3::new(-r(1, 2).atan2(r(2, 2)), 0.0, -half_pi)
+                }
+            }
+            EulerOrder::Yxz => {
+                let m12 = r(1, 2);
+                if m12 < 1.0 - EPS {
+                    if m12 > -(1.0 - EPS) {
+                        Vector3::new(
+                            (-m12).asin(),
+                            r(0, 2).atan2(r(2, 2)),
+                            r(1, 0).atan2(r(1, 1)),
+                        )
+                    } else {
+                        Vector3::new(half_pi, r(0, 1).atan2(r(0, 0)), 0.0)
+                    }
+                } else {
+                    Vector3::new(-half_pi, -r(0, 1).atan2(r(0, 0)), 0.0)
+                }
+            }
+            EulerOrder::Yzx => {
+                let sz = r(1, 0);
+                if sz < 1.0 - EPS {
+                    if sz > -(1.0 - EPS) {
+                        Vector3::new(
+                            (-r(1, 2)).atan2(r(1, 1)),
+                            (-r(2, 0)).atan2(r(0, 0)),
+                            sz.asin(),
+                        )
+                    } else {
+                        Vector3::new(r(2, 1).atan2(r(2, 2)), 0.0, -half_pi)
+                    }
+                } else {
+                    Vector3::new(r(2, 1).atan2(r(2, 2)), 0.0, half_pi)
+                }
+            }
+            EulerOrder::Zxy => {
+                let sx = r(2, 1);
+                if sx < 1.0 - EPS {
+                    if sx > -(1.0 - EPS) {
+                        Vector3::new(
+                            sx.asin(),
+                            (-r(2, 0)).atan2(r(2, 2)),
+                            (-r(0, 1)).atan2(r(1, 1)),
+                        )
+                    } else {
+                        Vector3::new(-half_pi, r(0, 2).atan2(r(0, 0)), 0.0)
+                    }
+                } else {
+                    Vector3::new(half_pi, r(0, 2).atan2(r(0, 0)), 0.0)
+                }
+            }
+            EulerOrder::Zyx => {
+                let sy = r(2, 0);
+                if sy < 1.0 - EPS {
+                    if sy > -(1.0 - EPS) {
+                        Vector3::new(r(2, 1).atan2(r(2, 2)), (-sy).asin(), r(1, 0).atan2(r(0, 0)))
+                    } else {
+                        Vector3::new(0.0, half_pi, -r(0, 1).atan2(r(1, 1)))
+                    }
+                } else {
+                    Vector3::new(0.0, -half_pi, r(0, 1).atan2(r(1, 1)))
+                }
+            }
+        }
+    }
+
+    /// A basis that scales by `scale` and rotates not at all
+    /// (`Basis.from_scale`).
+    pub fn from_scale(scale: Vector3) -> Self {
+        Self {
+            x: Vector3::new(scale.x, 0.0, 0.0),
+            y: Vector3::new(0.0, scale.y, 0.0),
+            z: Vector3::new(0.0, 0.0, scale.z),
+        }
+    }
+
+    /// Scales in the basis's OWN space rather than the parent's
+    /// (`Basis.scaled_local`).
+    ///
+    /// ⚠️ `self * from_scale(s)`, not `from_scale(s) * self`. The two differ
+    /// for any basis that already carries a rotation, which is precisely when
+    /// someone reaches for the `_local` variant.
+    pub fn scaled_local(self, scale: Vector3) -> Self {
+        self * Self::from_scale(scale)
+    }
+
+    /// Whether this basis is a rotation with uniform scale — angle-preserving
+    /// (`Basis.is_conformal`).
+    ///
+    /// Ported from `basis.cpp`: the three columns must share one length and be
+    /// mutually perpendicular.
+    pub fn is_conformal(self) -> bool {
+        let eps = 1e-5;
+        let x = self.x;
+        let y = self.y;
+        let z = self.z;
+        let x_len_sq = x.length_squared();
+        (x_len_sq - y.length_squared()).abs() < eps
+            && (x_len_sq - z.length_squared()).abs() < eps
+            && x.dot(y).abs() < eps
+            && x.dot(z).abs() < eps
+            && y.dot(z).abs() < eps
+    }
+
+    /// Whether every component is finite (`Basis.is_finite`).
+    pub fn is_finite(self) -> bool {
+        vec3_is_finite(self.x) && vec3_is_finite(self.y) && vec3_is_finite(self.z)
+    }
+
+    /// Dot product of `v` with the basis's first ROW (`Basis.tdotx`).
+    ///
+    /// ⚠️ Row, not column. `tdotx` is the "transposed dot" — it is `x.x`,
+    /// `y.x`, `z.x` across the three columns, i.e. the x component of each.
+    /// Using the `x` column instead gives the untransposed product, which is
+    /// equal for a symmetric basis and different for every other one.
+    pub fn tdotx(self, v: Vector3) -> f32 {
+        self.x.x * v.x + self.y.x * v.y + self.z.x * v.z
+    }
+
+    /// Dot product of `v` with the basis's second row (`Basis.tdoty`).
+    pub fn tdoty(self, v: Vector3) -> f32 {
+        self.x.y * v.x + self.y.y * v.y + self.z.y * v.z
+    }
+
+    /// Dot product of `v` with the basis's third row (`Basis.tdotz`).
+    pub fn tdotz(self, v: Vector3) -> f32 {
+        self.x.z * v.x + self.y.z * v.y + self.z.z * v.z
+    }
+
+    /// A basis whose -Z points at `target`, with `up` as the up hint
+    /// (`Basis.looking_at`).
+    ///
+    /// 🔑 Godot's forward is **-Z**, so the Z column is `-target.normalized()`.
+    /// Building it as `+target` yields a basis that faces exactly backwards —
+    /// and still passes any test that only checks orthonormality.
+    pub fn looking_at(target: Vector3, up: Vector3) -> Self {
+        let v_z = -target.normalized();
+        let mut v_x = up.cross(v_z);
+        if v_x.length_squared() < 1e-12 {
+            // ⚠️ Colinear target and up. Godot picks an arbitrary perpendicular
+            // (`vector3.h:375`) rather than giving up, because returning the
+            // identity here would leave the node UNROTATED — which reads as
+            // "looking_at did nothing" instead of "the up hint was unusable".
+            let a = if up.x.abs() <= up.y.abs() && up.x.abs() <= up.z.abs() {
+                Vector3::new(1.0, 0.0, 0.0)
+            } else {
+                Vector3::new(0.0, 1.0, 0.0)
+            };
+            v_x = up.cross(a);
+        }
+        let v_x = v_x.normalized();
+        let v_y = v_z.cross(v_x);
+        Self {
+            x: v_x,
+            y: v_y,
+            z: v_z,
+        }
+    }
+}
+
+/// Whether all three components are finite.
+fn vec3_is_finite(v: Vector3) -> bool {
+    v.x.is_finite() && v.y.is_finite() && v.z.is_finite()
+}
+
+impl Quaternion {
+    /// The rotation axis (`Quaternion.get_axis`).
+    pub fn get_axis(self) -> Vector3 {
+        if self.w.abs() > 1.0 - 1e-6 {
+            // A near-identity rotation has no meaningful axis; Godot returns
+            // the imaginary part unnormalized here.
+            return Vector3::new(self.x, self.y, self.z);
+        }
+        let r = 1.0 / (1.0 - self.w * self.w).sqrt();
+        Vector3::new(self.x * r, self.y * r, self.z * r)
+    }
+
+    /// The rotation angle in radians (`Quaternion.get_angle`).
+    pub fn get_angle(self) -> f32 {
+        2.0 * self.w.clamp(-1.0, 1.0).acos()
+    }
+
+    /// Builds a rotation from Euler angles composed in `order`
+    /// (`Quaternion.from_euler`).
+    pub fn from_euler_order(euler: Vector3, order: EulerOrder) -> Self {
+        Basis::from_euler_order(euler, order).to_quaternion()
+    }
+
+    /// Extracts Euler angles in `order` (`Quaternion.get_euler`).
+    pub fn to_euler_order(self, order: EulerOrder) -> Vector3 {
+        Basis::from_quaternion(self).to_euler_order(order)
+    }
+
+    /// Whether every component is finite (`Quaternion.is_finite`).
+    pub fn is_finite(self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.z.is_finite() && self.w.is_finite()
+    }
+
+    /// Component-wise negation — the quaternion representing the SAME rotation
+    /// by the other path around.
+    fn negated(self) -> Self {
+        Self {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+            w: -self.w,
+        }
+    }
+
+    /// `Quaternion.log()` — the axis scaled by the angle, as a pure quaternion.
+    pub fn log(self) -> Self {
+        let v = self.get_axis();
+        let angle = self.get_angle();
+        Self {
+            x: v.x * angle,
+            y: v.y * angle,
+            z: v.z * angle,
+            w: 0.0,
+        }
+    }
+
+    /// `Quaternion.exp()` — the inverse of [`log`](Self::log).
+    pub fn exp(self) -> Self {
+        let v = Vector3::new(self.x, self.y, self.z);
+        let theta = v.length();
+        let v = v.normalized();
+        if theta < 1e-5 || !v.is_normalized() {
+            return Self::IDENTITY;
+        }
+        Self::from_axis_angle(v, theta)
+    }
+
+    /// `Quaternion.slerpni(to, weight)` — spherical interpolation that does
+    /// **not** flip to the shorter arc.
+    ///
+    /// ⚠️ This is the whole difference from [`slerp`](Self::slerp): `slerp`
+    /// negates `to` when the dot product is negative so the rotation takes the
+    /// short way round; `slerpni` never does, so it can travel more than 180°.
+    /// Implementing it as a call to `slerp` would make the two identical and
+    /// the distinction invisible.
+    pub fn slerpni(self, to: Self, weight: f32) -> Self {
+        let dot = self.dot(to);
+        if dot.abs() > 0.9999 {
+            return self;
+        }
+        let theta = dot.acos();
+        let sin_t = 1.0 / theta.sin();
+        let new_factor = (weight * theta).sin() * sin_t;
+        let inv_factor = ((1.0 - weight) * theta).sin() * sin_t;
+        Self {
+            x: inv_factor * self.x + new_factor * to.x,
+            y: inv_factor * self.y + new_factor * to.y,
+            z: inv_factor * self.z + new_factor * to.z,
+            w: inv_factor * self.w + new_factor * to.w,
+        }
+    }
+
+    /// `Quaternion.spherical_cubic_interpolate(b, pre_a, post_b, weight)`.
+    ///
+    /// Ported from `quaternion.cpp`: interpolate in the log map of both ends,
+    /// then blend the two results to cancel the exp-map ambiguity.
+    pub fn spherical_cubic_interpolate(
+        self,
+        b: Self,
+        pre_a: Self,
+        post_b: Self,
+        weight: f32,
+    ) -> Self {
+        let (from_q, pre_q, to_q, post_q) = align_cubic_quaternions(self, b, pre_a, post_b);
+
+        // In `from_q`'s tangent space.
+        let ln_to = (from_q.inverse() * to_q).log();
+        let ln_pre = (from_q.inverse() * pre_q).log();
+        let ln_post = (from_q.inverse() * post_q).log();
+        let ln1 = Vector3::new(
+            crate::math::cubic_interpolate_f(0.0, ln_to.x, ln_pre.x, ln_post.x, weight),
+            crate::math::cubic_interpolate_f(0.0, ln_to.y, ln_pre.y, ln_post.y, weight),
+            crate::math::cubic_interpolate_f(0.0, ln_to.z, ln_pre.z, ln_post.z, weight),
+        );
+        let q1 = from_q * pure_quaternion(ln1).exp();
+
+        // In `to_q`'s tangent space.
+        let ln_from = (to_q.inverse() * from_q).log();
+        let ln_pre = (to_q.inverse() * pre_q).log();
+        let ln_post = (to_q.inverse() * post_q).log();
+        let ln2 = Vector3::new(
+            crate::math::cubic_interpolate_f(ln_from.x, 0.0, ln_pre.x, ln_post.x, weight),
+            crate::math::cubic_interpolate_f(ln_from.y, 0.0, ln_pre.y, ln_post.y, weight),
+            crate::math::cubic_interpolate_f(ln_from.z, 0.0, ln_pre.z, ln_post.z, weight),
+        );
+        let q2 = to_q * pure_quaternion(ln2).exp();
+
+        q1.slerp(q2, weight)
+    }
+
+    /// `Quaternion.spherical_cubic_interpolate_in_time(...)` — the same with
+    /// explicit, possibly uneven, key times.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spherical_cubic_interpolate_in_time(
+        self,
+        b: Self,
+        pre_a: Self,
+        post_b: Self,
+        weight: f32,
+        b_t: f32,
+        pre_a_t: f32,
+        post_b_t: f32,
+    ) -> Self {
+        let (from_q, pre_q, to_q, post_q) = align_cubic_quaternions(self, b, pre_a, post_b);
+
+        let ln_to = (from_q.inverse() * to_q).log();
+        let ln_pre = (from_q.inverse() * pre_q).log();
+        let ln_post = (from_q.inverse() * post_q).log();
+        let t1 = |f: f32, t: f32, p: f32, o: f32| {
+            crate::math::cubic_interpolate_in_time_f(f, t, p, o, weight, b_t, pre_a_t, post_b_t)
+        };
+        let ln1 = Vector3::new(
+            t1(0.0, ln_to.x, ln_pre.x, ln_post.x),
+            t1(0.0, ln_to.y, ln_pre.y, ln_post.y),
+            t1(0.0, ln_to.z, ln_pre.z, ln_post.z),
+        );
+        let q1 = from_q * pure_quaternion(ln1).exp();
+
+        let ln_from = (to_q.inverse() * from_q).log();
+        let ln_pre = (to_q.inverse() * pre_q).log();
+        let ln_post = (to_q.inverse() * post_q).log();
+        let ln2 = Vector3::new(
+            t1(ln_from.x, 0.0, ln_pre.x, ln_post.x),
+            t1(ln_from.y, 0.0, ln_pre.y, ln_post.y),
+            t1(ln_from.z, 0.0, ln_pre.z, ln_post.z),
+        );
+        let q2 = to_q * pure_quaternion(ln2).exp();
+
+        q1.slerp(q2, weight)
+    }
+}
+
+/// A pure (zero-real) quaternion carrying `v`.
+fn pure_quaternion(v: Vector3) -> Quaternion {
+    Quaternion {
+        x: v.x,
+        y: v.y,
+        z: v.z,
+        w: 0.0,
+    }
+}
+
+/// Normalizes the four control rotations onto a consistent hemisphere.
+///
+/// ⚠️ Without this, a control quaternion on the opposite hemisphere — which
+/// represents the SAME rotation — sends the interpolation the long way round
+/// and the curve visibly snaps. `q` and `-q` being the same rotation is exactly
+/// what makes this necessary and easy to omit.
+fn align_cubic_quaternions(
+    from: Quaternion,
+    to: Quaternion,
+    pre: Quaternion,
+    post: Quaternion,
+) -> (Quaternion, Quaternion, Quaternion, Quaternion) {
+    let from_q = Basis::from_quaternion(from).get_rotation_quaternion();
+    let mut pre_q = Basis::from_quaternion(pre).get_rotation_quaternion();
+    let mut to_q = Basis::from_quaternion(to).get_rotation_quaternion();
+    let mut post_q = Basis::from_quaternion(post).get_rotation_quaternion();
+
+    let flip1 = from_q.dot(pre_q).is_sign_negative();
+    if flip1 {
+        pre_q = pre_q.negated();
+    }
+    let flip2 = from_q.dot(to_q).is_sign_negative();
+    if flip2 {
+        to_q = to_q.negated();
+    }
+    // ⚠️ Not symmetric with the other two: when `to` was flipped the test
+    // becomes `<= 0` rather than a sign-bit check, so an exactly perpendicular
+    // control flips here and not otherwise (`quaternion.cpp`).
+    let flip3 = if flip2 {
+        to_q.dot(post_q) <= 0.0
+    } else {
+        to_q.dot(post_q).is_sign_negative()
+    };
+    if flip3 {
+        post_q = post_q.negated();
+    }
+    (from_q, pre_q, to_q, post_q)
+}
+
+impl Aabb {
+    /// The corner furthest along `direction` (`AABB.get_support`).
+    pub fn get_support(self, direction: Vector3) -> Vector3 {
+        let mut support = self.position;
+        if direction.x > 0.0 {
+            support.x += self.size.x;
+        }
+        if direction.y > 0.0 {
+            support.y += self.size.y;
+        }
+        if direction.z > 0.0 {
+            support.z += self.size.z;
+        }
+        support
+    }
+
+    /// Whether the box has any surface area at all (`AABB.has_surface`).
+    ///
+    /// ⚠️ `||`, not `&&`: a flat box with one zero extent still has surface.
+    /// This is why it is distinct from `has_volume`.
+    pub fn has_surface(self) -> bool {
+        self.size.x > 0.0 || self.size.y > 0.0 || self.size.z > 0.0
+    }
+
+    /// The unit vector along the longest extent (`AABB.get_longest_axis`).
+    pub fn get_longest_axis(self) -> Vector3 {
+        match self.get_longest_axis_index() {
+            0 => Vector3::new(1.0, 0.0, 0.0),
+            1 => Vector3::new(0.0, 1.0, 0.0),
+            _ => Vector3::new(0.0, 0.0, 1.0),
+        }
+    }
+
+    /// The index (0=X, 1=Y, 2=Z) of the longest extent.
+    ///
+    /// ⓘ Ties resolve to the EARLIER axis: the comparisons are strict `>`, so a
+    /// cube reports X.
+    pub fn get_longest_axis_index(self) -> i64 {
+        let mut axis = 0;
+        let mut max_size = self.size.x;
+        if self.size.y > max_size {
+            axis = 1;
+            max_size = self.size.y;
+        }
+        if self.size.z > max_size {
+            axis = 2;
+        }
+        axis
+    }
+
+    /// The length of the longest extent.
+    pub fn get_longest_axis_size(self) -> f32 {
+        self.size.x.max(self.size.y).max(self.size.z)
+    }
+
+    /// The unit vector along the shortest extent (`AABB.get_shortest_axis`).
+    pub fn get_shortest_axis(self) -> Vector3 {
+        match self.get_shortest_axis_index() {
+            0 => Vector3::new(1.0, 0.0, 0.0),
+            1 => Vector3::new(0.0, 1.0, 0.0),
+            _ => Vector3::new(0.0, 0.0, 1.0),
+        }
+    }
+
+    /// The index (0=X, 1=Y, 2=Z) of the shortest extent.
+    pub fn get_shortest_axis_index(self) -> i64 {
+        let mut axis = 0;
+        let mut min_size = self.size.x;
+        if self.size.y < min_size {
+            axis = 1;
+            min_size = self.size.y;
+        }
+        if self.size.z < min_size {
+            axis = 2;
+        }
+        axis
+    }
+
+    /// The length of the shortest extent.
+    pub fn get_shortest_axis_size(self) -> f32 {
+        self.size.x.min(self.size.y).min(self.size.z)
+    }
+
+    /// Whether the plane cuts through the box (`AABB.intersects_plane`).
+    ///
+    /// ⚠️ True only when corners fall on BOTH sides. A box merely touching the
+    /// plane, or entirely on one side, does not intersect it.
+    pub fn intersects_plane(self, plane: Plane) -> bool {
+        let mut over = false;
+        let mut under = false;
+        for i in 0..8 {
+            if plane.distance_to(self.get_endpoint(i as u8)) > 0.0 {
+                over = true;
+            } else {
+                under = true;
+            }
+        }
+        under && over
+    }
+
+    /// Where a ray from `from` along `dir` first meets the box, if it does
+    /// (`AABB.intersects_ray`).
+    ///
+    /// 🔑 A ray that STARTS INSIDE returns `from` itself. The geometric entry
+    /// point is behind the origin in that case, and handing it back would put
+    /// the hit behind the shooter — Godot's `intersects_ray_bind` special-cases
+    /// exactly this.
+    pub fn intersects_ray(self, from: Vector3, dir: Vector3) -> Option<Vector3> {
+        let end = self.position + self.size;
+        let mut tmin = -1e20f32;
+        let mut tmax = 1e20f32;
+        let mut axis = 0usize;
+
+        let comp = |v: Vector3, i: usize| match i {
+            0 => v.x,
+            1 => v.y,
+            _ => v.z,
+        };
+
+        for i in 0..3 {
+            let d = comp(dir, i);
+            if d == 0.0 {
+                // Parallel to this slab: a miss unless already between them.
+                if comp(from, i) < comp(self.position, i) || comp(from, i) > comp(end, i) {
+                    return None;
+                }
+            } else {
+                let mut t1 = (comp(self.position, i) - comp(from, i)) / d;
+                let mut t2 = (comp(end, i) - comp(from, i)) / d;
+                if t1 > t2 {
+                    std::mem::swap(&mut t1, &mut t2);
+                }
+                if t1 >= tmin {
+                    tmin = t1;
+                    axis = i;
+                }
+                if t2 < tmax {
+                    if t2 < 0.0 {
+                        return None;
+                    }
+                    tmax = t2;
+                }
+                if tmin > tmax {
+                    return None;
+                }
+            }
+        }
+
+        if tmin < 0.0 {
+            // Started inside.
+            return Some(from);
+        }
+
+        let mut point = from + dir * tmin;
+        // Snap onto the slab plane so float error cannot leave the reported hit
+        // fractionally outside the box it just hit.
+        let snapped = if comp(dir, axis) >= 0.0 {
+            comp(self.position, axis)
+        } else {
+            comp(end, axis)
+        };
+        match axis {
+            0 => point.x = snapped,
+            1 => point.y = snapped,
+            _ => point.z = snapped,
+        }
+        Some(point)
+    }
+
+    /// Where the segment `from`..`to` first meets the box, if it does
+    /// (`AABB.intersects_segment`).
+    pub fn intersects_segment(self, from: Vector3, to: Vector3) -> Option<Vector3> {
+        let mut min = 0.0f32;
+        let mut max = 1.0f32;
+
+        let comp = |v: Vector3, i: usize| match i {
+            0 => v.x,
+            1 => v.y,
+            _ => v.z,
+        };
+
+        for i in 0..3 {
+            let seg_from = comp(from, i);
+            let seg_to = comp(to, i);
+            let box_begin = comp(self.position, i);
+            let box_end = box_begin + comp(self.size, i);
+            let (cmin, cmax);
+
+            if seg_from < seg_to {
+                if seg_from > box_end || seg_to < box_begin {
+                    return None;
+                }
+                let length = seg_to - seg_from;
+                cmin = if seg_from < box_begin {
+                    (box_begin - seg_from) / length
+                } else {
+                    0.0
+                };
+                cmax = if seg_to > box_end {
+                    (box_end - seg_from) / length
+                } else {
+                    1.0
+                };
+            } else {
+                if seg_to > box_end || seg_from < box_begin {
+                    return None;
+                }
+                let length = seg_to - seg_from;
+                cmin = if seg_from > box_end {
+                    (box_end - seg_from) / length
+                } else {
+                    0.0
+                };
+                cmax = if seg_to < box_begin {
+                    (box_begin - seg_from) / length
+                } else {
+                    1.0
+                };
+            }
+
+            if cmin > min {
+                min = cmin;
+            }
+            if cmax < max {
+                max = cmax;
+            }
+            if max < min {
+                return None;
+            }
+        }
+
+        Some(from + (to - from) * min)
+    }
+
+    /// Whether every component is finite (`AABB.is_finite`).
+    pub fn is_finite(self) -> bool {
+        vec3_is_finite(self.position) && vec3_is_finite(self.size)
+    }
+}
+
+impl Plane {
+    /// The point where three planes meet, if they do (`Plane.intersect_3`).
+    ///
+    /// `None` when any two are parallel, which is when the triple product of
+    /// the normals vanishes.
+    pub fn intersect_3(self, b: Plane, c: Plane) -> Option<Vector3> {
+        let n0 = self.normal;
+        let n1 = b.normal;
+        let n2 = c.normal;
+        let denom = n0.cross(n1).dot(n2);
+        if denom.abs() < 1e-6 {
+            return None;
+        }
+        Some((n1.cross(n2) * self.d + n2.cross(n0) * b.d + n0.cross(n1) * c.d) * (1.0 / denom))
+    }
+
+    /// Whether every component is finite (`Plane.is_finite`).
+    pub fn is_finite(self) -> bool {
+        vec3_is_finite(self.normal) && self.d.is_finite()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
