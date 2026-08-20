@@ -16,6 +16,7 @@ use gdrender2d::renderer::{Bgra8Image, FrameBuffer, Raster};
 use gdrender3d::SoftwareRenderer3D;
 use gdscene::node::NodeId;
 use gdscene::SceneTree;
+use gdserver3d::compositor::{Compositor, CompositorRenderData, EffectCallbackType};
 use gdserver3d::decal::Decal3D;
 use gdserver3d::fog_volume::FogVolume;
 use gdserver3d::instance::GeometryInstanceSettings;
@@ -1751,6 +1752,15 @@ pub struct Editor3DRenderInputs {
     /// (pat-0q2kx.249). Cleared by [`strip_editor_only_items`] so a game frame
     /// never shows it.
     pub root_motion_grid: Option<RootMotionGridOverlay>,
+    /// The compositor whose effects run at the pipeline stage boundaries
+    /// (pat-s3rrv.251), or `None` for an uncomposited frame.
+    ///
+    /// ⚠️ Carried here rather than on `Viewport3D`, which is where the bead
+    /// suggests it. `Viewport3D` has **24 exhaustive struct literals across
+    /// four crates**, so a new field there is a workspace-wide compile break;
+    /// this struct has two, both in this file. The render path is the same
+    /// either way — this is where the environment is resolved too.
+    pub compositor: Option<Compositor>,
 }
 
 /// The `FogVolume` / `Decal` / `ReflectionProbe` / `OccluderInstance3D` nodes of
@@ -1786,6 +1796,10 @@ pub fn editor_3d_render_inputs(viewport: &Viewport3D, tree: &SceneTree) -> Edito
         scene_lights: scene_lights(tree),
         env_effects: scene_env_effects(tree),
         root_motion_grid: root_motion_grid(tree),
+        // Effects carry Rust callbacks, which a `.tscn` cannot express; a
+        // caller installs the compositor for the frame. See
+        // `render_editor_3d_frame_with_compositor`.
+        compositor: None,
     }
 }
 
@@ -2680,8 +2694,53 @@ fn render_editor_3d_frame_from_inputs(
     let count = frame.pixels.len().min(fb.pixels.len());
     fb.pixels[..count].copy_from_slice(&frame.pixels[..count]);
 
+    // --- CompositorEffect callbacks (pat-s3rrv.251) ------------------------
+    //
+    // Run BEFORE the editor overlays: the overlays are editor furniture — grid,
+    // gizmos, root-motion view — and Godot's compositor operates on the game
+    // frame. Tinting the gizmos would be a visible parity bug.
+    //
+    // Stages run in Godot's pipeline order, and effects within a stage in
+    // insertion order, which is what `effects_for_stage` preserves. Disabled
+    // effects are skipped there, and an effect with no callback is inert.
+    if let Some(compositor) = inputs.compositor.as_ref() {
+        let mut data = CompositorRenderData {
+            width,
+            height,
+            color: &mut fb.pixels,
+        };
+        for stage in [
+            EffectCallbackType::PreOpaque,
+            EffectCallbackType::PostOpaque,
+            EffectCallbackType::PostSky,
+            EffectCallbackType::PreTransparent,
+            EffectCallbackType::PostTransparent,
+        ] {
+            for effect in compositor.effects_for_stage(stage) {
+                if let Some(callback) = effect.callback.as_ref() {
+                    callback.render_callback(stage, &mut data);
+                }
+            }
+        }
+    }
+
     draw_editor_overlays_3d(&mut fb, viewport, &overlays);
     fb
+}
+
+/// [`render_editor_3d_frame`] with a compositor installed for this frame
+/// (pat-s3rrv.251).
+///
+/// The effects hold Rust callbacks, which a `.tscn` cannot express, so the
+/// compositor is supplied by the caller rather than parsed out of the scene.
+pub fn render_editor_3d_frame_with_compositor(
+    viewport: &Viewport3D,
+    tree: &SceneTree,
+    compositor: Option<Compositor>,
+) -> FrameBuffer {
+    let mut inputs = editor_3d_render_inputs(viewport, tree);
+    inputs.compositor = compositor;
+    render_editor_3d_frame_from_inputs(viewport, &inputs)
 }
 
 /// GPU-accelerated twin of [`render_editor_3d_frame`] (pat-ism62 follow-through).

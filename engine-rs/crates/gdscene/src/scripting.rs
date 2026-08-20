@@ -7261,6 +7261,84 @@ impl SceneAccess for SceneTreeAccessor {
                     };
                     Variant::Float(f64::from(f.get_point_penalty(idx)))
                 }
+                // Godot's `data` property is the serialization surface —
+                // `_set_data` / `_get_data` in
+                // `scene/resources/2d/polygon_path_finder.cpp` — and is what
+                // lets a finder round-trip through a `.tres`. Its five keys are
+                // Godot's, not invented here: `points`, `connections` (per-point
+                // adjacency), `segments` (the FLAT edge pairs), `bounds`, and an
+                // optional `penalties`.
+                //
+                // ⚠️ `connections` and `segments` are different shapes and both
+                // are emitted. `segments` is what reconstruction reads;
+                // `connections` is per-point adjacency that Godot's own loader
+                // requires to be present and the same length as `points`, so
+                // omitting it would produce a dictionary Godot refuses.
+                "get_data" => {
+                    let mut d = gdvariant::Dictionary::new();
+                    let points = f.points().to_vec();
+                    let mut adjacency: Vec<Variant> =
+                        vec![Variant::PackedInt32Array(Vec::new()); points.len()];
+                    let mut segments: Vec<i32> = Vec::new();
+                    // `&(i, j)` — `edges()` hands back a slice, so a plain
+                    // `(i, j)` binds two `&usize` and every cast below fails.
+                    for &(i, j) in f.edges() {
+                        segments.push(i as i32);
+                        segments.push(j as i32);
+                        for (from, to) in [(i, j), (j, i)] {
+                            if let Some(Variant::PackedInt32Array(list)) = adjacency.get_mut(from) {
+                                list.push(to as i32);
+                            }
+                        }
+                    }
+                    let (pos, size) = match f.bounds() {
+                        Some((min, max)) => (min, max - min),
+                        None => (gdcore::math::Vector2::ZERO, gdcore::math::Vector2::ZERO),
+                    };
+                    let penalties: Vec<f32> =
+                        (0..points.len()).map(|i| f.get_point_penalty(i)).collect();
+                    d.insert("points", Variant::PackedVector2Array(points));
+                    d.insert("connections", Variant::Array(adjacency));
+                    d.insert("segments", Variant::PackedInt32Array(segments));
+                    d.insert(
+                        "bounds",
+                        Variant::Rect2(gdcore::math::Rect2 {
+                            position: pos,
+                            size,
+                        }),
+                    );
+                    d.insert("penalties", Variant::PackedFloat32Array(penalties));
+                    Variant::Dictionary(d)
+                }
+                "set_data" => {
+                    let Some(Variant::Dictionary(d)) = args.first() else {
+                        return None;
+                    };
+                    let points = match d.get("points") {
+                        Some(Variant::PackedVector2Array(p)) => p.clone(),
+                        _ => return None,
+                    };
+                    // Rebuilt from `segments`, the flat pair list — the same
+                    // shape `setup` takes, and the only key that carries the
+                    // edges unambiguously.
+                    let pairs: Vec<(usize, usize)> = match d.get("segments") {
+                        Some(Variant::PackedInt32Array(seg)) => seg
+                            .chunks_exact(2)
+                            .filter(|c| c[0] >= 0 && c[1] >= 0)
+                            .map(|c| (c[0] as usize, c[1] as usize))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    f.setup(points, &pairs);
+                    // ⚠️ AFTER `setup`, which clears penalties — restoring them
+                    // first would silently drop every one.
+                    if let Some(Variant::PackedFloat32Array(pen)) = d.get("penalties") {
+                        for (i, v) in pen.iter().enumerate() {
+                            f.set_point_penalty(i, *v);
+                        }
+                    }
+                    Variant::Nil
+                }
                 _ => return None,
             })
         })

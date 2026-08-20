@@ -3116,6 +3116,52 @@ impl Interpreter {
         IN_LOGGER_DISPATCH.with(|g| g.set(false));
     }
 
+    /// Delivers `push_error` / `push_warning` to script `Logger`s as
+    /// `_log_error` (pat-s3rrv.244).
+    ///
+    /// ⚠️ **The message goes in `code`, and `rationale` is EMPTY.** That looks
+    /// backwards — `rationale` reads like the human-facing field — but Godot's
+    /// `_err_print_error(func, file, line, p_error, "", notify, type)`
+    /// (`core/error/error_macros.cpp`) passes the message as `p_error`, which
+    /// `Logger::log_error` receives as **`code`**. A test asserting the text
+    /// arrives in `rationale` would fail against correct behaviour.
+    ///
+    /// ⚠️ Seven arguments, per `doc/classes/Logger.xml`: `function`, `file`,
+    /// `line`, `code`, `rationale`, `editor_notify`, `error_type`. (ClassDB
+    /// currently registers this virtual with arity **8**, which is wrong — see
+    /// the note on the bead; the script-facing signature is 7 and that is what
+    /// a `func _log_error(...)` override declares.)
+    ///
+    /// `file` is empty because the interpreter carries no script path; the
+    /// function name and line are real, from the frame that raised.
+    ///
+    /// Reuses `IN_LOGGER_DISPATCH` so a logger that itself calls `push_error`
+    /// cannot recurse — the same guard the message path uses.
+    fn fan_out_error_to_script_loggers(&mut self, message: &str, error_type: i64) {
+        let registered: Vec<u64> = SCRIPT_LOGGERS.with(|l| l.borrow().clone());
+        if registered.is_empty() || IN_LOGGER_DISPATCH.with(|g| g.get()) {
+            return;
+        }
+        IN_LOGGER_DISPATCH.with(|g| g.set(true));
+        let function = self.current_function.clone().unwrap_or_default();
+        let line = self.current_line as i64;
+        let args = [
+            Variant::String(function),
+            Variant::String(String::new()),
+            Variant::Int(line),
+            Variant::String(message.to_string()),
+            Variant::String(String::new()),
+            Variant::Bool(false),
+            Variant::Int(error_type),
+        ];
+        for node in registered {
+            if let Some(access) = self.scene_access.as_mut() {
+                access.call_script_method(node, "_log_error", &args);
+            }
+        }
+        IN_LOGGER_DISPATCH.with(|g| g.set(false));
+    }
+
     /// Dispatches the `WorkerThreadPool` singleton (pat-0q2kx.209).
     ///
     /// Tasks run inline, so every one is complete by the time its id is
@@ -3760,6 +3806,35 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "JavaScriptBridge") {
                             return call_javascriptbridge_static(member, &evaluated_args);
                         }
+                        // JavaClassWrapper singleton (pat-s3rrv.243) — the
+                        // non-Android dummy.
+                        //
+                        // ⚠️ **Surface only: no JNI, and none should be added.**
+                        // There is no JVM to call into from a browser. Godot
+                        // binds `wrap` on every platform
+                        // (`platform/android/api/api.cpp:38-78`) while the object
+                        // it returns exists only on Android, so answering null
+                        // IS the parity behaviour rather than a stub.
+                        //
+                        // The value is that the identifier RESOLVES: without it
+                        // a portable project guarding its Android path with
+                        // `if JavaClassWrapper.wrap(..) == null` fails to parse
+                        // instead of taking the non-Android branch.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "JavaClassWrapper") {
+                            return Ok(match member.as_str() {
+                                // Both of Godot's methods answer null off
+                                // Android: no class to wrap, no exception to
+                                // report.
+                                "wrap" | "get_exception" => Variant::Nil,
+                                other => {
+                                    return Err(RuntimeError::new(
+                                        RuntimeErrorKind::UndefinedFunction(format!(
+                                            "JavaClassWrapper.{other}"
+                                        )),
+                                    ))
+                                }
+                            });
+                        }
                         // Marshalls + ResourceUID IO singletons (pat-nzgdu.79).
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "Marshalls") {
                             return call_marshalls_static(member, &evaluated_args);
@@ -4097,6 +4172,21 @@ impl Interpreter {
                                 // on gdscript-interop, not the reverse — so the
                                 // scene layer owns the instance and hands back a
                                 // tagged handle (pat-s3rrv.19).
+                                // `PolygonPathFinder` is the same shape
+                                // (pat-s3rrv.240): a complete visibility-graph
+                                // pathfinder in `gdscene` that nothing could
+                                // reach, because this crate cannot name the
+                                // type. Resource rather than RefCounted, so a
+                                // `.tres` can carry one too.
+                                if class_name == "PolygonPathFinder" {
+                                    if let Some(access) = self.scene_access.as_mut() {
+                                        if let Some(raw) = access.polygon_path_finder_new() {
+                                            return Ok(Variant::ObjectId(
+                                                gdcore::id::ObjectId::from_raw(raw),
+                                            ));
+                                        }
+                                    }
+                                }
                                 if matches!(
                                     class_name.as_str(),
                                     "AStar2D" | "AStar3D" | "AStarGrid2D"
@@ -7577,6 +7667,12 @@ impl Interpreter {
                     self.current_function.as_deref().unwrap_or("<anonymous>"),
                     self.current_line
                 ));
+                // ⚠️ AFTER the push, never instead of it. Godot chains loggers
+                // on top of the default console routing, so installing one must
+                // not swallow the engine's own record of the error.
+                //
+                // `Logger.ERROR_TYPE_ERROR` == 0 (`doc/classes/Logger.xml`).
+                self.fan_out_error_to_script_loggers(&msg, 0);
                 Ok(Some(Variant::Nil))
             }
             "push_warning" => {
@@ -7589,6 +7685,9 @@ impl Interpreter {
                     self.current_function.as_deref().unwrap_or("<anonymous>"),
                     self.current_line
                 ));
+                // `Logger.ERROR_TYPE_WARNING` == 1. Same ordering as
+                // push_error: the console record happens first.
+                self.fan_out_error_to_script_loggers(&msg, 1);
                 Ok(Some(Variant::Nil))
             }
             "printraw" => {
@@ -10541,6 +10640,43 @@ impl Interpreter {
             // AStar objects live in the scene layer (pat-s3rrv.19); forward on
             // the handle tag. A `None` means the handle died, so fall through
             // rather than swallowing the call.
+            // PolygonPathFinder, same seam as AStar (pat-s3rrv.240).
+            //
+            // ⚠️ Errors rather than falling through on an unmatched method, for
+            // the reason the AStar arm below records: a fall-through reports it
+            // as an unknown NODE method, naming neither the class nor the
+            // handle, which made that bead undiagnosable for four passes. The
+            // same Object-method allowlist applies — those belong to the
+            // general table, not to this arm.
+            if crate::bindings::is_polygon_path_finder_handle(oid.raw()) {
+                let had_access = self.scene_access.is_some();
+                if let Some(access) = self.scene_access.as_mut() {
+                    if let Some(v) = access.polygon_path_finder_call(oid.raw(), method, args) {
+                        return Ok(v);
+                    }
+                }
+                if !matches!(
+                    method,
+                    "get_class"
+                        | "is_class"
+                        | "free"
+                        | "get_instance_id"
+                        | "has_method"
+                        | "call"
+                        | "callv"
+                        | "get"
+                        | "set"
+                ) {
+                    return Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                        format!(
+                            "PolygonPathFinder.{method}: no such method on handle {:#018x} \
+                             (scene access {})",
+                            oid.raw(),
+                            if had_access { "present" } else { "MISSING" }
+                        ),
+                    )));
+                }
+            }
             if crate::bindings::is_astar_handle(oid.raw()) {
                 let had_access = self.scene_access.is_some();
                 if let Some(access) = self.scene_access.as_mut() {
@@ -18505,6 +18641,54 @@ fn singleton_class_constant(class_name: &str, member: &str) -> Option<i64> {
         ("IP", "TYPE_IPV4") => Some(gdplatform::ip::TYPE_IPV4),
         ("IP", "TYPE_IPV6") => Some(gdplatform::ip::TYPE_IPV6),
         ("IP", "TYPE_ANY") => Some(gdplatform::ip::TYPE_ANY),
+        // Godot `DisplayServer.Feature`, all 34, transcribed from
+        // `doc/classes/DisplayServer.xml` (pat-s3rrv.245).
+        //
+        // ⚠️ **The enum is NOT contiguous: value 17 is absent**, so it jumps
+        // from 16 straight to 18. Generating these as `0..n` from the name
+        // order — the obvious shortcut — shifts `FEATURE_CLIPBOARD_PRIMARY` and
+        // the sixteen constants after it down by one, silently and uniformly,
+        // which is the kind of drift no single test notices.
+        //
+        // Added whole rather than just the one `has_feature(FEATURE_GLOBAL_MENU)`
+        // needs: a half-filled enum is a trap, because the missing names fall
+        // through to `UndefinedVariable` while the present ones work, so the
+        // table looks functional right up until a script names a different
+        // feature.
+        ("DisplayServer", "FEATURE_GLOBAL_MENU") => Some(0),
+        ("DisplayServer", "FEATURE_SUBWINDOWS") => Some(1),
+        ("DisplayServer", "FEATURE_TOUCHSCREEN") => Some(2),
+        ("DisplayServer", "FEATURE_MOUSE") => Some(3),
+        ("DisplayServer", "FEATURE_MOUSE_WARP") => Some(4),
+        ("DisplayServer", "FEATURE_CLIPBOARD") => Some(5),
+        ("DisplayServer", "FEATURE_VIRTUAL_KEYBOARD") => Some(6),
+        ("DisplayServer", "FEATURE_CURSOR_SHAPE") => Some(7),
+        ("DisplayServer", "FEATURE_CUSTOM_CURSOR_SHAPE") => Some(8),
+        ("DisplayServer", "FEATURE_NATIVE_DIALOG") => Some(9),
+        ("DisplayServer", "FEATURE_IME") => Some(10),
+        ("DisplayServer", "FEATURE_WINDOW_TRANSPARENCY") => Some(11),
+        ("DisplayServer", "FEATURE_HIDPI") => Some(12),
+        ("DisplayServer", "FEATURE_ICON") => Some(13),
+        ("DisplayServer", "FEATURE_NATIVE_ICON") => Some(14),
+        ("DisplayServer", "FEATURE_ORIENTATION") => Some(15),
+        ("DisplayServer", "FEATURE_SWAP_BUFFERS") => Some(16),
+        ("DisplayServer", "FEATURE_CLIPBOARD_PRIMARY") => Some(18),
+        ("DisplayServer", "FEATURE_TEXT_TO_SPEECH") => Some(19),
+        ("DisplayServer", "FEATURE_EXTEND_TO_TITLE") => Some(20),
+        ("DisplayServer", "FEATURE_SCREEN_CAPTURE") => Some(21),
+        ("DisplayServer", "FEATURE_STATUS_INDICATOR") => Some(22),
+        ("DisplayServer", "FEATURE_NATIVE_HELP") => Some(23),
+        ("DisplayServer", "FEATURE_NATIVE_DIALOG_INPUT") => Some(24),
+        ("DisplayServer", "FEATURE_NATIVE_DIALOG_FILE") => Some(25),
+        ("DisplayServer", "FEATURE_NATIVE_DIALOG_FILE_EXTRA") => Some(26),
+        ("DisplayServer", "FEATURE_WINDOW_DRAG") => Some(27),
+        ("DisplayServer", "FEATURE_SCREEN_EXCLUDE_FROM_CAPTURE") => Some(28),
+        ("DisplayServer", "FEATURE_WINDOW_EMBEDDING") => Some(29),
+        ("DisplayServer", "FEATURE_NATIVE_DIALOG_FILE_MIME") => Some(30),
+        ("DisplayServer", "FEATURE_EMOJI_AND_SYMBOL_PICKER") => Some(31),
+        ("DisplayServer", "FEATURE_NATIVE_COLOR_PICKER") => Some(32),
+        ("DisplayServer", "FEATURE_SELF_FITTING_WINDOWS") => Some(33),
+        ("DisplayServer", "FEATURE_ACCESSIBILITY_SCREEN_READER") => Some(34),
         ("NativeMenu", "FEATURE_GLOBAL_MENU") => Some(0),
         ("NativeMenu", "FEATURE_POPUP_MENU") => Some(1),
         ("NativeMenu", "FEATURE_OPEN_CLOSE_CALLBACK") => Some(2),
@@ -29336,7 +29520,7 @@ fn call_xml_parser_instance(
         "get_named_attribute_value" | "get_named_attribute_value_safe" => {
             let name = arg_as_string(args, 0, "get_named_attribute_value")?;
             XmlParser::with_handle_mut(id, |p| {
-                Variant::String(p.named_attribute_value(&name).unwrap_or("").to_string())
+                Variant::String(p.named_attribute_value_safe(&name).to_string())
             })
         }
         "open_buffer" => {
@@ -29346,20 +29530,21 @@ fn call_xml_parser_instance(
                 Variant::Int(0)
             })
         }
-        // Reads the file through FileAccess so `res://` resolution matches every
-        // other script-facing open.
+        // ⚠️ Reads through `XmlParser::open`, which goes via
+        // `FileAccess::read_file_bytes` — **not** `FileAccess::open`
+        // (pat-s3rrv.254). The handle form cannot serve a mounted `.pck`; its
+        // own doc says so. So this used to fail for exactly the case a shipped
+        // game hits, where the XML exists only inside the pack.
         "open" => {
             let path = arg_as_string(args, 0, "open")?;
-            let text = match gdcore::FileAccess::open(&path, gdcore::FileMode::Read)
-                .and_then(|mut fa| fa.get_as_text())
-            {
-                Ok(t) => t,
+            let text = match XmlParser::open(&path) {
+                Ok(parser) => parser,
                 // ERR_FILE_CANT_OPEN, rather than throwing: Godot's open()
                 // returns an Error code.
                 Err(_) => return Ok(Variant::Int(12)),
             };
             XmlParser::with_handle_mut(id, |p| {
-                p.open_buffer(&text);
+                *p = text;
                 Variant::Int(0)
             })
         }
@@ -29374,7 +29559,19 @@ fn call_xml_parser_instance(
             p.skip_section();
             Variant::Nil
         }),
-        "get_current_line" => XmlParser::with_handle_mut(id, |p| Variant::Int(p.cursor() as i64)),
+        // ⚠️ This returned `p.cursor()` — a CHARACTER OFFSET reported as a line
+        // number (pat-s3rrv.254). It answered plausibly (a small integer that
+        // grows as you read) and was wrong everywhere, which is the worst shape
+        // for a diagnostic a script prints in an error message.
+        "get_current_line" => {
+            XmlParser::with_handle_mut(id, |p| Variant::Int(p.current_line() as i64))
+        }
+        // The offset the current node STARTS at, which is what makes
+        // `seek(get_node_offset())` re-read it. `cursor()` is where the parser
+        // has reached, and seeking to that would skip the node.
+        "get_node_offset" => {
+            XmlParser::with_handle_mut(id, |p| Variant::Int(p.node_offset() as i64))
+        }
         other => {
             return Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                 format!("XMLParser.{other}"),

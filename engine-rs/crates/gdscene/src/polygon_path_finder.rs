@@ -89,6 +89,15 @@ impl PolygonPathFinder {
     }
 
     /// The waypoints backing this graph.
+    /// The boundary edges as index pairs into [`points`](Self::points).
+    ///
+    /// Exposed for the `data` serialization surface (pat-s3rrv.240): Godot's
+    /// `data` Dictionary carries the edges as a flat `segments` array, and only
+    /// this side knows them.
+    pub fn edges(&self) -> &[(usize, usize)] {
+        &self.edges
+    }
+
     pub fn points(&self) -> &[Vector2] {
         &self.points
     }

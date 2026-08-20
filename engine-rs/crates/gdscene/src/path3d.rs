@@ -592,6 +592,55 @@ impl Curve2D {
         *self.points.last().unwrap()
     }
 
+    /// Cubic (Catmull-Rom) sample at arc-length `offset` — Godot's
+    /// `sample_baked(offset, cubic = true)`, which is `PathFollow2D`'s DEFAULT
+    /// (pat-s3rrv.241).
+    ///
+    /// Mirrors [`Curve3D::sample_baked_cubic`] exactly; the 3D path has had this
+    /// since pat-s3rrv.91 while the 2D one sampled linearly no matter what
+    /// `cubic_interp` said.
+    ///
+    /// ⚠️ Both neighbours CLAMP at the ends rather than wrapping. Clamping makes
+    /// the first and last segments degrade toward the linear result, which keeps
+    /// the curve from bulging past its own endpoints; wrapping would tie the two
+    /// ends of an open curve together.
+    ///
+    /// ⚠️ Uses the same zero-length SKIP as [`sample_baked`](Self::sample_baked)
+    /// rather than returning early. Returning on a degenerate segment truncates
+    /// the curve there — a bug that would live on the cubic path ONLY, which is
+    /// the default, and be absent from the linear path anyone would compare
+    /// against.
+    pub fn sample_baked_cubic(&self, offset: f32) -> gdcore::math::Vector2 {
+        use gdcore::math::Vector2;
+        if self.points.is_empty() {
+            return Vector2::ZERO;
+        }
+        if self.points.len() == 1 {
+            return self.points[0];
+        }
+        let count = self.points.len();
+        let total = self.baked_length().max(1e-6);
+        let mut o = offset.clamp(0.0, total);
+        for (i, w) in self.points.windows(2).enumerate() {
+            let seg = (w[1] - w[0]).length();
+            if seg < 1e-8 {
+                continue;
+            }
+            if o <= seg {
+                let t = o / seg;
+                let pre = if i > 0 { self.points[i - 1] } else { w[0] };
+                let post = if i + 2 < count {
+                    self.points[i + 2]
+                } else {
+                    w[1]
+                };
+                return w[0].cubic_interpolate(w[1], pre, post, t);
+            }
+            o -= seg;
+        }
+        *self.points.last().unwrap()
+    }
+
     /// Normalized tangent (direction of travel) at arc-length `offset`.
     pub fn sample_tangent(&self, offset: f32) -> gdcore::math::Vector2 {
         use gdcore::math::Vector2;

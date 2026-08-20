@@ -18,6 +18,7 @@ pub mod light2d;
 pub mod occluder_polygon;
 pub mod polygon_raster;
 pub mod renderer;
+pub mod sdf2d;
 pub mod test_adapter;
 pub mod text_layout;
 pub mod text_server;

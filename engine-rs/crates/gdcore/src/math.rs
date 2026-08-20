@@ -1068,6 +1068,27 @@ impl Vector2 {
         self.x * other.y - self.y * other.x
     }
 
+    /// Godot `Vector2.cubic_interpolate(b, pre_a, post_b, weight)`.
+    ///
+    /// ⚠️ ARGUMENT ORDER IS A TRAP, exactly as on [`Vector3::cubic_interpolate`]
+    /// and [`Vector4::cubic_interpolate`]: this takes `(b, pre_a, post_b, w)`
+    /// while the scalar it delegates to takes `(from, to, pre, post, w)`, so
+    /// `b` is the SECOND scalar argument and `pre_a` the third. A transposition
+    /// still produces a smooth curve through plausible values, which is why the
+    /// tests pin the endpoints: `w == 0` must be exactly `self` and `w == 1`
+    /// exactly `b`.
+    ///
+    /// Added for `Curve2D`'s cubic baked sampling (pat-s3rrv.241). Godot has
+    /// had this on Vector2 all along; only the Vector3 and Vector4 forms
+    /// existed here, so `PathFollow2D.cubic_interp` had nothing to call while
+    /// its 3D twin worked.
+    pub fn cubic_interpolate(self, b: Self, pre_a: Self, post_b: Self, weight: f32) -> Self {
+        Self::new(
+            cubic_interpolate_f(self.x, b.x, pre_a.x, post_b.x, weight),
+            cubic_interpolate_f(self.y, b.y, pre_a.y, post_b.y, weight),
+        )
+    }
+
     /// Linear interpolation.
     pub fn lerp(self, to: Self, t: f32) -> Self {
         Self::new(self.x + (to.x - self.x) * t, self.y + (to.y - self.y) * t)

@@ -40,6 +40,13 @@ pub struct XmlParser {
     node_data: String,
     attributes: Vec<(String, String)>,
     empty: bool,
+    /// Char index where the CURRENT node began (pat-s3rrv.254).
+    ///
+    /// Captured before parsing rather than after, which is what makes
+    /// `seek(node_offset())` re-read the same node: `seek` sets `pos` and
+    /// `read` parses forward from it, so the offset has to be the position the
+    /// node started at, not the one it ended at (`cursor`).
+    node_offset: usize,
 }
 
 impl XmlParser {
@@ -53,6 +60,7 @@ impl XmlParser {
             node_data: String::new(),
             attributes: Vec::new(),
             empty: false,
+            node_offset: 0,
         }
     }
 
@@ -68,6 +76,9 @@ impl XmlParser {
             self.node_type = XmlNodeType::None;
             return false;
         }
+
+        // Before either parse call, which both advance `pos`.
+        self.node_offset = self.pos;
 
         if self.chars[self.pos] == '<' {
             self.read_tag();
@@ -119,6 +130,44 @@ impl XmlParser {
 
     /// The value of the attribute named `name`, if present
     /// (Godot `get_named_attribute_value`).
+    /// `XMLParser.get_named_attribute_value_safe(name)` — the attribute's value,
+    /// or `""` when it is absent (pat-s3rrv.254).
+    ///
+    /// The whole point of the "safe" variant: Godot's plain
+    /// `get_named_attribute_value` raises on a missing attribute, so parsing
+    /// optional attributes with it means checking `has_attribute` first. This
+    /// one returns the empty string, which is why a script can read an optional
+    /// attribute in one call.
+    pub fn named_attribute_value_safe(&self, name: &str) -> &str {
+        self.named_attribute_value(name).unwrap_or("")
+    }
+
+    /// `XMLParser.get_node_offset()` — the char index the current node starts at.
+    ///
+    /// Feed it back to [`seek`](Self::seek) to re-read the same node. Distinct
+    /// from [`cursor`](Self::cursor), which is where the parser has reached.
+    pub fn node_offset(&self) -> usize {
+        self.node_offset
+    }
+
+    /// `XMLParser.get_current_line()` — the 1-based line the current node starts
+    /// on.
+    ///
+    /// Counted from the start each call rather than maintained incrementally.
+    /// That is O(n) per call and obviously correct; a running counter has to be
+    /// kept in step with `seek`, `skip_section` and every parse path, and a
+    /// counter that drifts reports plausible-but-wrong line numbers — the worst
+    /// kind of bug in a diagnostic API.
+    ///
+    /// Before the first `read()` the offset is 0, so this reports line 1, which
+    /// is what Godot reports for a fresh parser.
+    pub fn current_line(&self) -> usize {
+        1 + self.chars[..self.node_offset.min(self.chars.len())]
+            .iter()
+            .filter(|c| **c == '\n')
+            .count()
+    }
+
     pub fn named_attribute_value(&self, name: &str) -> Option<&str> {
         self.attributes
             .iter()
@@ -369,6 +418,10 @@ impl XmlParser {
             return false;
         }
         self.pos = position;
+        // Keep the reported line in step with the cursor: without this,
+        // `current_line()` after a seek would report the line of whatever node
+        // was read BEFORE it (pat-s3rrv.254).
+        self.node_offset = position;
         self.node_type = XmlNodeType::None;
         self.node_name.clear();
         self.node_data.clear();
@@ -395,6 +448,21 @@ impl XmlParser {
                 _ => {}
             }
         }
+    }
+
+    /// `XMLParser.open(path)` — parse a document from the virtual filesystem
+    /// (pat-s3rrv.254).
+    ///
+    /// Reads through [`FileAccess::read_file_bytes`], so `res://` inside a
+    /// mounted `.pck` and `user://` both work — a direct `std::fs` read would
+    /// see neither, and a packed game is exactly where a project ships its XML.
+    ///
+    /// Invalid UTF-8 is replaced rather than refused, matching the tolerance of
+    /// the rest of the text pipeline: a stray byte in a comment should not make
+    /// the whole document unopenable.
+    pub fn open(path: &str) -> crate::error::EngineResult<Self> {
+        let bytes = crate::file_access::FileAccess::read_file_bytes(path)?;
+        Ok(XmlParser::new(&String::from_utf8_lossy(&bytes)))
     }
 
     /// The current cursor position, for `seek` round-trips.

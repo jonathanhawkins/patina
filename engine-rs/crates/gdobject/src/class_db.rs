@@ -6276,6 +6276,57 @@ pub fn register_3d_classes() {
                     .with_accessors("get_light_data", "set_light_data"),
             ),
     );
+    // The lightmap bake family (pat-s3rrv.249). `LightmapGI` above carries a
+    // `light_data` property whose type did not exist, so a `.tscn` pointing it
+    // at a `LightmapGIData` resource had nothing to resolve to.
+    //
+    // Abstractness is taken from Godot's own registration macros, not inferred:
+    // `scene/register_scene_types.cpp:649` `GDREGISTER_CLASS(LightmapGIData)`,
+    // `:651` `GDREGISTER_ABSTRACT_CLASS(Lightmapper)`, and
+    // `modules/lightmapper_rd/register_types.cpp:65`
+    // `GDREGISTER_CLASS(LightmapperRD)`.
+    //
+    // ⚠️ `Lightmapper` is the ONLY abstract one. Marking `LightmapperRD`
+    // abstract too — the reflex, since it is "just the RD backend" — would make
+    // the one member of the family a project actually instantiates
+    // unconstructible.
+    if !class_exists("LightmapGIData") {
+        register_class(
+            ClassRegistration::new("LightmapGIData")
+                .parent("Resource")
+                // ⚠️ Members transcribed from `doc/classes/LightmapGIData.xml`.
+                // The bead also lists `uses_spherical_harmonics` as a member; the
+                // XML has no such member, only the
+                // `is_using_spherical_harmonics` / `set_uses_spherical_harmonics`
+                // METHOD pair, so registering it as a property would invent
+                // surface Godot does not have.
+                .property(PropertyInfo::new("light_texture", Variant::Nil))
+                .property(PropertyInfo::new(
+                    "lightmap_textures",
+                    Variant::Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new(
+                    "shadowmask_textures",
+                    Variant::Array(Vec::new()),
+                ))
+                .method(MethodInfo::new("add_user", 4))
+                .method(MethodInfo::new("clear_users", 0))
+                .method(MethodInfo::new("get_user_count", 0).const_method())
+                .method(MethodInfo::new("get_user_path", 1).const_method())
+                .method(MethodInfo::new("is_using_spherical_harmonics", 0).const_method())
+                .method(MethodInfo::new("set_uses_spherical_harmonics", 1)),
+        );
+    }
+    if !class_exists("Lightmapper") {
+        register_class(
+            ClassRegistration::new("Lightmapper")
+                .parent("RefCounted")
+                .abstract_class(),
+        );
+    }
+    if !class_exists("LightmapperRD") {
+        register_class(ClassRegistration::new("LightmapperRD").parent("Lightmapper"));
+    }
     // ⚠️ `LightmapProbe` was not registered at ALL — instantiating one from a
     // `.tscn` or the create dialog failed outright. It genuinely has no
     // properties in Godot (it is a placement marker the bake reads), and it
@@ -6873,6 +6924,35 @@ pub fn register_3d_classes() {
                 .method(MethodInfo::new("is_empty", 0).const_method()),
         );
     }
+    // pat-s3rrv.254 — XMLParser. The interpreter has dispatched its whole
+    // surface for some time; ClassDB simply did not know the class, so
+    // `class_exists("XMLParser")` was false for something a script could
+    // construct and drive.
+    //
+    // Method table transcribed from `doc/classes/XMLParser.xml`.
+    if !class_exists("XMLParser") {
+        register_class(
+            ClassRegistration::new("XMLParser")
+                .parent("RefCounted")
+                .method(MethodInfo::new("get_attribute_count", 0))
+                .method(MethodInfo::new("get_attribute_name", 1))
+                .method(MethodInfo::new("get_attribute_value", 1))
+                .method(MethodInfo::new("get_current_line", 0))
+                .method(MethodInfo::new("get_named_attribute_value", 1))
+                .method(MethodInfo::new("get_named_attribute_value_safe", 1))
+                .method(MethodInfo::new("get_node_data", 0))
+                .method(MethodInfo::new("get_node_name", 0))
+                .method(MethodInfo::new("get_node_offset", 0))
+                .method(MethodInfo::new("get_node_type", 0))
+                .method(MethodInfo::new("has_attribute", 1))
+                .method(MethodInfo::new("is_empty", 0))
+                .method(MethodInfo::new("open", 1))
+                .method(MethodInfo::new("open_buffer", 1))
+                .method(MethodInfo::new("read", 0))
+                .method(MethodInfo::new("seek", 1))
+                .method(MethodInfo::new("skip_section", 0)),
+        );
+    }
     if !class_exists("RegEx") {
         register_class(
             ClassRegistration::new("RegEx")
@@ -6902,6 +6982,54 @@ pub fn register_3d_classes() {
                 .method(MethodInfo::new("get_names", 0))
                 .method(MethodInfo::new("get_strings", 0))
                 .method(MethodInfo::new("get_subject", 0)),
+        );
+    }
+    // JSON and Marshalls (pat-s3rrv.252). Both were fully dispatched in the
+    // interpreter and absent from ClassDB, so `class_exists("JSON")` answered
+    // false for a name `JSON.new()` already worked on.
+    //
+    // 🔑 JSON's parent is **Resource**, not `RefCounted`. `core/io/json.h:39`
+    // is `GDCLASS(JSON, Resource)`. The bead's acceptance says RefCounted, and
+    // because `Resource` derives from `RefCounted` a transitive
+    // `is_parent_class("JSON", "RefCounted")` check passes either way — so the
+    // wrong parent would look correct while making JSON not-a-Resource, which
+    // is what `.tres` handling and `ResourceLoader` key off.
+    //
+    // ⚠️ JSON is NOT a singleton, though Patina reaches it through the
+    // singleton interception path. `core/register_core_types.cpp` calls
+    // `add_singleton` for Marshalls (`:373`) and never for JSON — it is a class
+    // you instantiate. That modelling gap is why `ClassDB.instantiate("JSON")`
+    // and a typed `var j: JSON` still cannot work; see the bead's remaining
+    // scope.
+    if !class_exists("JSON") {
+        register_class(
+            ClassRegistration::new("JSON")
+                .parent("Resource")
+                .property(PropertyInfo::new("data", Variant::Nil))
+                .method(MethodInfo::new("parse", 2))
+                .method(MethodInfo::new("parse_string", 1).static_method())
+                .method(MethodInfo::new("stringify", 4).static_method())
+                .method(MethodInfo::new("from_native", 2).static_method())
+                .method(MethodInfo::new("to_native", 2).static_method())
+                .method(MethodInfo::new("get_error_line", 0).const_method())
+                .method(MethodInfo::new("get_error_message", 0).const_method())
+                .method(MethodInfo::new("get_parsed_text", 0).const_method()),
+        );
+    }
+    // ⚠️ Marshalls, by contrast, genuinely IS a singleton
+    // (`register_core_types.cpp:373`) and inherits `Object`
+    // (`core/core_bind.h:420`) — the opposite shape to JSON, which is the whole
+    // point of registering them together rather than assuming they match.
+    if !class_exists("Marshalls") {
+        register_class(
+            ClassRegistration::new("Marshalls")
+                .parent("Object")
+                .method(MethodInfo::new("variant_to_base64", 2))
+                .method(MethodInfo::new("base64_to_variant", 2))
+                .method(MethodInfo::new("raw_to_base64", 1))
+                .method(MethodInfo::new("base64_to_raw", 1))
+                .method(MethodInfo::new("utf8_to_base64", 1))
+                .method(MethodInfo::new("base64_to_utf8", 1)),
         );
     }
     if !class_exists("Resource") {
@@ -10422,7 +10550,13 @@ pub fn register_3d_classes() {
         ClassRegistration::new("VisualShaderNodeTexture")
             .parent("VisualShaderNode")
             .property(PropertyInfo::new("source", Variant::Int(0)))
-            .property(PropertyInfo::new("texture_type", Variant::Int(0))),
+            .property(PropertyInfo::new("texture_type", Variant::Int(0)))
+            // ⚠️ The third member (pat-s3rrv.247). `source` and `texture_type`
+            // were registered and `texture` was not, so the class read as done
+            // while the member that actually carries the image stayed invisible
+            // to `class_get_property_list`. A `Texture2D` ref with no documented
+            // default, i.e. null.
+            .property(PropertyInfo::new("texture", Variant::Nil)),
     );
 
     // -- XR tracker / modifier / interface family (pat-0q2kx.263) ----------
@@ -21237,7 +21371,45 @@ pub fn register_root_window_chain() {
         );
     }
     if !class_exists("Time") {
-        register_class(ClassRegistration::new("Time").parent("Object"));
+        // pat-s3rrv.246 — Time was registered as a BARE class: parent set,
+        // zero methods. So `class_exists("Time")` answered true while
+        // `get_method_list("Time")` returned nothing, and a script doing
+        // reflection over the singleton found an empty API for a subsystem
+        // that has been fully dispatchable all along.
+        //
+        // ⚠️ Description only — `call_time_static` in gdscript-interop stays
+        // the single execution path. These 21 entries and that dispatch table
+        // are two hand-maintained lists of the same names, so
+        // `time_singleton_classdb_matches_dispatch` calls every name this
+        // declares and fails if the interpreter does not answer it.
+        //
+        // Transcribed from `upstream/godot/doc/classes/Time.xml`; the bead
+        // names `extension_api.json`, which is not vendored here.
+        register_class(
+            ClassRegistration::new("Time")
+                .parent("Object")
+                .method(MethodInfo::new("get_date_dict_from_system", 1))
+                .method(MethodInfo::new("get_date_dict_from_unix_time", 1))
+                .method(MethodInfo::new("get_date_string_from_system", 1))
+                .method(MethodInfo::new("get_date_string_from_unix_time", 1))
+                .method(MethodInfo::new("get_datetime_dict_from_datetime_string", 2))
+                .method(MethodInfo::new("get_datetime_dict_from_system", 1))
+                .method(MethodInfo::new("get_datetime_dict_from_unix_time", 1))
+                .method(MethodInfo::new("get_datetime_string_from_datetime_dict", 2))
+                .method(MethodInfo::new("get_datetime_string_from_system", 2))
+                .method(MethodInfo::new("get_datetime_string_from_unix_time", 2))
+                .method(MethodInfo::new("get_offset_string_from_offset_minutes", 1))
+                .method(MethodInfo::new("get_ticks_msec", 0))
+                .method(MethodInfo::new("get_ticks_usec", 0))
+                .method(MethodInfo::new("get_time_dict_from_system", 1))
+                .method(MethodInfo::new("get_time_dict_from_unix_time", 1))
+                .method(MethodInfo::new("get_time_string_from_system", 1))
+                .method(MethodInfo::new("get_time_string_from_unix_time", 1))
+                .method(MethodInfo::new("get_time_zone_from_system", 0))
+                .method(MethodInfo::new("get_unix_time_from_datetime_dict", 1))
+                .method(MethodInfo::new("get_unix_time_from_datetime_string", 1))
+                .method(MethodInfo::new("get_unix_time_from_system", 0)),
+        );
     }
     if !class_exists("Performance") {
         register_class(ClassRegistration::new("Performance").parent("Object"));
@@ -24997,6 +25169,58 @@ pub fn register_io_classes() {
     // pat-nzgdu.66); this registers the ClassDB surface Godot also exposes, so
     // ClassDB.class_exists("JavaScriptBridge") and class_get_method_list agree
     // with upstream.
+    // pat-s3rrv.243 — the Java/JNI bridge class surface.
+    //
+    // ⚠️ **OUT_OF_SCOPE: the transport is out of scope, the class is not.** No
+    // JNI is implemented and none should be — there is no JVM to call into from
+    // a browser. Same rule the socket surfaces closed under
+    // (`gdobject/tests/oos_native_sockets.rs`); scope anchor `docs/taxonomy.md`.
+    //
+    // Registering them anyway is Godot's own behaviour, not a courtesy:
+    // `platform/android/api/api.cpp:38-78` binds `JavaClassWrapper::wrap` on
+    // every platform while the object it returns exists only on Android. The
+    // value is that a portable project guarding its Android path with
+    // `if JavaClassWrapper.wrap(..) == null` PARSES and takes the non-Android
+    // branch, instead of failing on an unknown class.
+    //
+    // Parents and method tables are transcribed from each class's doc XML and
+    // cross-checked against `gdeditor/src/inspector_schema_generated.rs:4629-4635`,
+    // which the editor reads — the two must not disagree.
+    if !class_exists("JavaClass") {
+        register_class(
+            ClassRegistration::new("JavaClass")
+                .parent("RefCounted")
+                .method(MethodInfo::new("get_java_class_name", 0))
+                .method(MethodInfo::new("get_java_method_list", 0))
+                .method(MethodInfo::new("get_java_parent_class", 0))
+                .method(MethodInfo::new("has_java_method", 1)),
+        );
+    }
+    if !class_exists("JavaObject") {
+        register_class(
+            ClassRegistration::new("JavaObject")
+                .parent("RefCounted")
+                .method(MethodInfo::new("get_java_class", 0))
+                .method(MethodInfo::new("has_java_method", 1)),
+        );
+    }
+    // ⚠️ Not a bare marker class: 4.6 gives JNISingleton a method, which is easy
+    // to register as empty if you go by the name alone.
+    if !class_exists("JNISingleton") {
+        register_class(
+            ClassRegistration::new("JNISingleton")
+                .parent("Object")
+                .method(MethodInfo::new("has_java_method", 1)),
+        );
+    }
+    if !class_exists("JavaClassWrapper") {
+        register_class(
+            ClassRegistration::new("JavaClassWrapper")
+                .parent("Object")
+                .method(MethodInfo::new("get_exception", 0))
+                .method(MethodInfo::new("wrap", 1)),
+        );
+    }
     if !class_exists("JavaScriptBridge") {
         register_class(
             ClassRegistration::new("JavaScriptBridge")
@@ -25995,6 +26219,9 @@ pub fn register_networking_classes() {
         register_class(
             ClassRegistration::new("HTTPClient")
                 .parent("RefCounted")
+                // pat-s3rrv.248: `connection` is a StreamPeer and defaults to null, so Nil is
+                // the honest default rather than an empty string.
+                .property(PropertyInfo::new("connection", Variant::Nil))
                 .method(MethodInfo::new("connect_to_host", 3))
                 .method(MethodInfo::new("request", 4))
                 .method(MethodInfo::new("poll", 0))
@@ -26069,6 +26296,17 @@ pub fn register_networking_classes() {
         register_class(
             ClassRegistration::new("WebSocketPeer")
                 .parent("PacketPeer")
+                // pat-s3rrv.248: the two of Godot's six this class was missing. Defaults are
+                // 65535 from doc/classes/WebSocketPeer.xml, not 0 — a zero-sized buffer reads
+                // as "no buffering configured" to anything inspecting the property.
+                .property(PropertyInfo::new(
+                    "inbound_buffer_size",
+                    Variant::Int(65535),
+                ))
+                .property(PropertyInfo::new(
+                    "outbound_buffer_size",
+                    Variant::Int(65535),
+                ))
                 .method(MethodInfo::new("connect_to_url", 2))
                 .method(MethodInfo::new("accept_stream", 1))
                 .method(MethodInfo::new("send", 2))
@@ -26689,6 +26927,11 @@ pub fn register_networking_classes() {
         register_class(
             ClassRegistration::new("MultiplayerSpawner")
                 .parent("Node")
+                // pat-s3rrv.248: `class_has_signal` gates `has_signal`, so without these a
+                // script cannot even discover that the spawner announces anything. Argument
+                // names from doc/classes/MultiplayerSpawner.xml.
+                .signal(SignalInfo::new("spawned").arg("node"))
+                .signal(SignalInfo::new("despawned").arg("node"))
                 // pat-s3rrv.17 — `spawn_path` is how a .tscn names the node the
                 // spawner replicates under; without it the property is dropped
                 // on load and the spawner has no target.
@@ -26716,6 +26959,12 @@ pub fn register_networking_classes() {
         register_class(
             ClassRegistration::new("MultiplayerSynchronizer")
                 .parent("Node")
+                // pat-s3rrv.248. ⚠️ `synchronized` and `delta_synchronized` take NO arguments
+                // while `visibility_changed` takes `for_peer` — transcribed from the doc XML
+                // rather than assumed uniform.
+                .signal(SignalInfo::new("synchronized"))
+                .signal(SignalInfo::new("delta_synchronized"))
+                .signal(SignalInfo::new("visibility_changed").arg("for_peer"))
                 .property(PropertyInfo::new(
                     "root_path",
                     Variant::String(String::from("..")),
@@ -27073,6 +27322,19 @@ pub fn register_navigation_classes() {
                 .property(PropertyInfo::new(
                     "size",
                     Variant::Vector2i(gdcore::math::Vector2i::new(0, 0)),
+                ))
+                // ⚠️ `region` was the ONE member genuinely missing here
+                // (pat-s3rrv.247). The bead says AStarGrid2D "registers zero
+                // properties"; it already had these eight, with correct
+                // defaults. Adding the full nine blind would have created
+                // eight SILENT duplicates — a duplicate member shadows
+                // rather than erroring, so nothing would have complained.
+                .property(PropertyInfo::new(
+                    "region",
+                    Variant::Rect2i(gdcore::math::Rect2i::new(
+                        gdcore::math::Vector2i::new(0, 0),
+                        gdcore::math::Vector2i::new(0, 0),
+                    )),
                 )),
         );
     }
@@ -27346,6 +27608,34 @@ fn register_navigation_resource_classes() {
                     PropertyInfo::new("path_length", Variant::Float(0.0))
                         .with_accessors("get_path_length", "set_path_length"),
                 ),
+        );
+    }
+    // pat-s3rrv.240 — `PolygonPathFinder`.
+    //
+    // `gdscene::polygon_path_finder` has been a complete visibility-graph
+    // pathfinder with its own unit tests and NO route in: not in ClassDB, not
+    // constructible from a script, not loadable from a `.tres`. Its only
+    // reference anywhere was the `pub mod` line.
+    //
+    // The `data` Dictionary is Godot's serialization surface — `_set_data` /
+    // `_get_data` in `scene/resources/2d/polygon_path_finder.cpp` — which is
+    // what lets a finder round-trip through a `.tres`.
+    if !class_exists("PolygonPathFinder") {
+        register_class(
+            ClassRegistration::new("PolygonPathFinder")
+                .parent("Resource")
+                .property(PropertyInfo::new(
+                    "data",
+                    Variant::Dictionary(gdvariant::Dictionary::new()),
+                ))
+                .method(MethodInfo::new("setup", 2))
+                .method(MethodInfo::new("find_path", 2))
+                .method(MethodInfo::new("get_intersections", 2))
+                .method(MethodInfo::new("get_closest_point", 1))
+                .method(MethodInfo::new("is_point_inside", 1))
+                .method(MethodInfo::new("set_point_penalty", 2))
+                .method(MethodInfo::new("get_point_penalty", 1))
+                .method(MethodInfo::new("get_bounds", 0)),
         );
     }
     if !class_exists("NavigationPolygon") {
@@ -31150,7 +31440,36 @@ pub fn register_server_extension_classes() {
                 .parent("Object")
                 .method(MethodInfo::new("_set_aabb", 1).virtual_method())
                 .method(MethodInfo::new("_set_normal", 2).virtual_method())
-                .method(MethodInfo::new("_set_vertex", 2).virtual_method()),
+                .method(MethodInfo::new("_set_vertex", 2).virtual_method())
+                // pat-s3rrv.242: the NON-underscore half. The `_`-prefixed entries
+                // above are the virtuals a GDExtension backend OVERRIDES; these are
+                // the ones the engine CALLS. A handler advertising only the
+                // overridable half gives a caller nothing to invoke — arities from
+                // doc/classes/PhysicsServer3DRenderingServerHandler.xml, not derived.
+                .method(MethodInfo::new("set_vertex", 2))
+                .method(MethodInfo::new("set_normal", 2))
+                .method(MethodInfo::new("set_aabb", 1)),
+        );
+    }
+    // PhysicsServer3DManager (pat-s3rrv.242) — one of Godot's singletons, and how
+    // a project selects a physics backend.
+    //
+    // The script surface already existed: the interpreter lists it in
+    // BUILTIN_SINGLETONS and `call_server_manager_static` implements
+    // register_server / set_default_server / get_servers_count for all four
+    // `*Manager` singletons. Only the ClassDB entry was missing, so
+    // `class_exists` said no about a name scripts could already call.
+    //
+    // ⚠️ Both methods take TWO arguments — `register_server(name, create_callback)`
+    // and `set_default_server(name, priority)`. Transcribed from
+    // doc/classes/PhysicsServer3DManager.xml; deriving an arity from the name
+    // would have declared one argument each and quietly mis-stated the contract.
+    if !class_exists("PhysicsServer3DManager") {
+        register_class(
+            ClassRegistration::new("PhysicsServer3DManager")
+                .parent("Object")
+                .method(MethodInfo::new("register_server", 2))
+                .method(MethodInfo::new("set_default_server", 2)),
         );
     }
 }

@@ -985,6 +985,53 @@ impl MainLoop {
         // Drop simulators for nodes that no longer exist.
         self.particles.retain(|id, _| present.contains(id));
 
+        // pat-s3rrv.250: build the canvas SDF once for the frame, from every
+        // occluder marked `sdf_collision`. Godot rasterizes these into a distance
+        // texture that GPUParticles2D collision samples; before this nothing
+        // produced a field at all, so 2D particles passed through level geometry.
+        //
+        // Built BEFORE the loop, not per-simulator: it is one field per frame and
+        // rebuilding it per emitter would be O(emitters) identical rasterizations.
+        let canvas_sdf = {
+            let occluders: Vec<(Vec<Vector2>, bool)> =
+                crate::light2d_scene::collect_occluders_2d(&self.tree)
+                    .into_iter()
+                    .filter(|o| o.sdf_collision)
+                    .map(|o| (o.points, o.closed))
+                    .collect();
+            if occluders.is_empty() {
+                None
+            } else {
+                let (vw, vh) = self.viewport_size;
+                let frame = Vector2::new(vw as f32, vh as f32);
+                let root = self.tree.root_id();
+                // ⚠️ These properties are ENUM INDICES, not multipliers.
+                // `Viewport.sdf_oversize` defaults to 1, which is 120% — NOT 1.0x —
+                // and `sdf_scale` defaults to 1, which is 50%. Passing the raw int
+                // through as a factor would quietly build a 100%/100% field and look
+                // entirely reasonable doing it.
+                let oversize = match self
+                    .tree
+                    .get_node(root)
+                    .map(|n| n.get_property("sdf_oversize"))
+                {
+                    Some(Variant::Int(i)) => gdrender2d::sdf2d::sdf_oversize_factor(i),
+                    _ => gdrender2d::sdf2d::sdf_oversize_factor(1),
+                };
+                let scale = match self
+                    .tree
+                    .get_node(root)
+                    .map(|n| n.get_property("sdf_scale"))
+                {
+                    Some(Variant::Int(i)) => gdrender2d::sdf2d::sdf_scale_factor(i),
+                    _ => gdrender2d::sdf2d::sdf_scale_factor(1),
+                };
+                Some(gdrender2d::sdf2d::CanvasSdf::generate(
+                    frame, oversize, scale, &occluders,
+                ))
+            }
+        };
+
         // Step every particle node's simulator: emitting nodes spawn new
         // particles, non-emitting nodes just age their remaining particles out.
         // pat-nzgdu.145: nodes whose one_shot burst drains this frame get their
@@ -1013,7 +1060,10 @@ impl MainLoop {
             if let Some(c) = chain {
                 sim.sub_emitter_frequency = c.frequency;
             }
-            sim.step(dt);
+            match &canvas_sdf {
+                Some(sdf) => sim.step_with_sdf(dt, sdf),
+                None => sim.step(dt),
+            }
             // Drain the one-shot completion edge (fires exactly once per drain).
             if sim.take_finished() {
                 finished_emitters.push(id);
@@ -1622,7 +1672,22 @@ impl MainLoop {
                     rotates,
                 };
                 follow.advance(&curve, speed * dt);
-                let mut pos = follow.position_on(&curve);
+                // Godot samples with `curve->sample_baked(progress, cubic_interp)`
+                // (`path_2d.cpp`, `PathFollow2D::_update_transform`).
+                //
+                // ⚠️ `cubic_interp` DEFAULTS TO TRUE (`PathFollow2D.xml`, and
+                // `classdb_2d_node_property_tables_match_godot.rs` asserts the
+                // Bool(true) default), so an ABSENT property means CUBIC.
+                // Reading it as false-by-default would silently downgrade every
+                // scene that never set it — and the two agree exactly on a
+                // straight path, so most fixtures would never notice. This is
+                // the same wiring the 3D branch already uses.
+                let cubic = !matches!(node.get_property("cubic_interp"), Variant::Bool(false));
+                let mut pos = if cubic {
+                    curve.sample_baked_cubic(follow.progress)
+                } else {
+                    follow.position_on(&curve)
+                };
                 let tangent = curve.sample_tangent(follow.progress);
 
                 // `h_offset`/`v_offset` shift the sample off the curve.

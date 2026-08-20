@@ -269,6 +269,13 @@ pub struct LightOccluder2D {
     pub closed: bool,
     /// Items with matching mask bits are occluded by this shape.
     pub light_mask: u32,
+    /// Godot `LightOccluder2D.sdf_collision` — whether this shape is rasterized
+    /// into the canvas signed-distance field (pat-s3rrv.250).
+    ///
+    /// ⚠️ Independent of `light_mask`: an occluder can cast shadows without being
+    /// SDF geometry, and vice versa. Godot defaults it to **true**, so an authored
+    /// occluder participates in particle collision unless the project opts out.
+    pub sdf_collision: bool,
 }
 
 impl LightOccluder2D {
@@ -278,6 +285,9 @@ impl LightOccluder2D {
             points,
             closed,
             light_mask: 1,
+            // Godot's default (doc/classes/LightOccluder2D.xml `sdf_collision`
+            // default="true"); a caller opts out rather than in.
+            sdf_collision: true,
         }
     }
 }

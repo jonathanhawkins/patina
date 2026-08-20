@@ -32,6 +32,7 @@
 //! as written, and are tracked separately. Do not describe these nodes as
 //! GPU-accelerated in docs or parity scorecards on the strength of the class name.
 
+use crate::particle3d::ParticleCollisionMode;
 use gdcore::math::{Color, Transform2D, Vector2};
 
 // ---------------------------------------------------------------------------
@@ -137,6 +138,17 @@ pub struct ParticleMaterial {
     pub end_color: Color,
     /// Lifetime randomness factor in [0, 1].
     pub lifetime_randomness: f32,
+    /// Godot `ParticleProcessMaterial.collision_mode` (pat-s3rrv.250).
+    ///
+    /// Shares [`ParticleCollisionMode`] with the 3D path deliberately — it is one
+    /// Godot enum on one resource, used by GPUParticles2D and 3D alike, so a second
+    /// copy here would be a second thing to keep in step.
+    pub collision_mode: ParticleCollisionMode,
+    /// Godot `collision_friction` — damps the velocity left tangential to the
+    /// contact after a bounce.
+    pub collision_friction: f32,
+    /// Godot `collision_bounce` — restitution along the contact normal.
+    pub collision_bounce: f32,
 }
 
 impl Default for ParticleMaterial {
@@ -154,6 +166,11 @@ impl Default for ParticleMaterial {
             start_color: Color::WHITE,
             end_color: Color::WHITE,
             lifetime_randomness: 0.0,
+            // Godot's default is COLLISION_DISABLED, so particles pass through until a
+            // project opts in — same defaults as the 3D path in `particle3d.rs`.
+            collision_mode: ParticleCollisionMode::Disabled,
+            collision_friction: 0.0,
+            collision_bounce: 0.0,
         }
     }
 }
@@ -590,6 +607,67 @@ impl ParticleSimulator {
     /// in fixed increments and any remainder is carried to the next call, so the
     /// outcome depends only on total elapsed time rather than on the render
     /// delta (pat-nzgdu.145). Otherwise `dt` is simulated directly.
+    /// [`step`](Self::step), then resolve collisions against the canvas SDF
+    /// (pat-s3rrv.250).
+    ///
+    /// This is the path `GPUParticles2D` takes when the frame has `sdf_collision`
+    /// occluders. Godot samples the same field on the GPU; here the field is exact,
+    /// so a particle rests exactly on the surface rather than within a texel of it.
+    ///
+    /// ⚠️ Collision resolves AFTER integration, not during it. A particle that
+    /// would cross the surface within one step is pulled back to the surface, which
+    /// is what stops fast particles tunnelling through a thin occluder — resolving
+    /// before the move would let the same particle pass straight through.
+    pub fn step_with_sdf(&mut self, dt: f32, sdf: &gdrender2d::sdf2d::CanvasSdf) {
+        self.step(dt);
+        self.resolve_sdf_collisions(sdf);
+    }
+
+    /// Pushes every particle inside an occluder back onto its surface.
+    fn resolve_sdf_collisions(&mut self, sdf: &gdrender2d::sdf2d::CanvasSdf) {
+        let mode = self.emitter.material.collision_mode;
+        if mode == ParticleCollisionMode::Disabled {
+            return;
+        }
+        // Godot clamps both to [0,1]; a bounce above 1 would add energy every
+        // contact and a particle would climb away from the surface forever.
+        let friction = self.emitter.material.collision_friction.clamp(0.0, 1.0);
+        let bounce = self.emitter.material.collision_bounce.clamp(0.0, 1.0);
+
+        if mode == ParticleCollisionMode::HideOnContact {
+            self.active_particles
+                .retain(|p| sdf.sample(p.position) > 0.0);
+            return;
+        }
+
+        for p in &mut self.active_particles {
+            let d = sdf.sample(p.position);
+            // `> 0.0` and not `>= 0.0`: a particle resting exactly ON the surface is
+            // in contact and must keep being resolved, or gravity walks it inside
+            // one step at a time.
+            if d > 0.0 {
+                continue;
+            }
+            let n = sdf.normal_at(p.position);
+            if n.x == 0.0 && n.y == 0.0 {
+                // No gradient to push along — a degenerate field. Leaving the
+                // particle put is better than moving it in an arbitrary direction.
+                continue;
+            }
+            // Back onto the surface. `d` is negative inside, so `-d` is the depth.
+            p.position = p.position + n * (-d);
+
+            // Split the velocity about the contact normal and treat the halves
+            // differently: restitution acts along the normal, friction across it.
+            let vn = p.velocity.dot(n);
+            if vn < 0.0 {
+                let normal_part = n * vn;
+                let tangent = p.velocity - normal_part;
+                p.velocity = tangent * (1.0 - friction) - normal_part * bounce;
+            }
+        }
+    }
+
     pub fn step(&mut self, dt: f32) {
         if self.emitter.fixed_fps > 0 {
             let fixed_dt = 1.0 / self.emitter.fixed_fps as f32;

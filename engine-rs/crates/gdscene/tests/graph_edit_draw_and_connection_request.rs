@@ -141,8 +141,13 @@ fn has_rect_at(cmds: &[DrawCommand], pos: Vector2, size: Vector2) -> bool {
 }
 
 /// Records a signal's arguments. Mirrors `range_control_family_renders_and_drags`
-/// rather than inventing a second recorder — the connection carries the callback,
-/// so `tag` only has to be unique per connection.
+/// rather than inventing a second recorder.
+///
+/// ⚠️ `tag` must be HIGH and unused, not merely unique. It becomes
+/// `ObjectId::from_raw(tag)`, and a low value collides with a real node's id —
+/// this scene's root/GraphEdit/A/B occupy the small ids — which routes the
+/// connection at a live object instead of at the callback. The reference test
+/// uses 69 for the same reason; these use 9000+.
 fn watch(
     tree: &mut SceneTree,
     node: NodeId,
@@ -214,7 +219,7 @@ fn graph_edit_draw_and_connection_request() {
     );
 
     // --- dragging A's output onto B's input asks for a connection ----------
-    let seen = watch(&mut tree, edit, "connection_request", 1);
+    let seen = watch(&mut tree, edit, "connection_request", 9001);
 
     tree.push_input(&InputEvent::MouseButton {
         button: MouseButton::Left,
@@ -275,7 +280,7 @@ fn graph_edit_draw_and_connection_request() {
 fn graph_edit_draw_and_connection_request_titlebar_drag_moves_and_selects() {
     let (mut tree, edit, a, _b) = graph_scene();
 
-    let selected = watch(&mut tree, edit, "node_selected", 2);
+    let selected = watch(&mut tree, edit, "node_selected", 9002);
 
     // Grab A's titlebar off-centre, so a handler that snapped the corner to the
     // cursor would land somewhere different from one that keeps the grab offset.
@@ -320,9 +325,32 @@ fn graph_edit_draw_and_connection_request_titlebar_drag_moves_and_selects() {
 fn graph_edit_draw_and_connection_request_drag_to_empty_canvas() {
     let (mut tree, edit, _a, _b) = graph_scene();
 
-    let empty = watch(&mut tree, edit, "connection_to_empty", 3);
-    let requests = watch(&mut tree, edit, "connection_request", 4);
+    let empty = watch(&mut tree, edit, "connection_to_empty", 9003);
+    let requests = watch(&mut tree, edit, "connection_request", 9004);
 
+    // CONTROL FIRST: the same fixture, the same press, but released on a real
+    // port. If this fails, the problem is the fixture or the press path, not the
+    // empty-canvas branch — which is the distinction a bare "it did not fire"
+    // cannot make.
+    tree.push_input(&InputEvent::MouseButton {
+        button: MouseButton::Left,
+        pressed: true,
+        position: expected_port(A_OFFSET, 0, true),
+    });
+    tree.push_input(&InputEvent::MouseButton {
+        button: MouseButton::Left,
+        pressed: false,
+        position: expected_port(B_OFFSET, 0, false),
+    });
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "CONTROL: a port-to-port drag in this fixture must emit connection_request; \
+         if this line fails the fixture or the press path is at fault, not the \
+         empty-canvas branch"
+    );
+
+    // Now the case under test: same press, released over bare canvas.
     tree.push_input(&InputEvent::MouseButton {
         button: MouseButton::Left,
         pressed: true,
@@ -341,8 +369,9 @@ fn graph_edit_draw_and_connection_request_drag_to_empty_canvas() {
     );
     assert_eq!(
         requests.lock().unwrap().len(),
-        0,
-        "and no connection_request — nothing was connected"
+        1,
+        "still just the control's connection — the empty-canvas release must NOT \
+         add a second connection_request"
     );
 }
 
@@ -367,7 +396,30 @@ fn graph_edit_draw_and_connection_request_resolves_the_edit_with_classdb_populat
     );
 
     let (mut tree, edit, _a, _b) = graph_scene();
-    let seen = watch(&mut tree, edit, "connection_request", 5);
+    let seen = watch(&mut tree, edit, "connection_request", 9005);
+    let selected = watch(&mut tree, edit, "node_selected", 9006);
+
+    // CONTROL: press a TITLEBAR first. That only emits node_selected if the press
+    // resolved to the owning GraphEdit — i.e. if `enclosing_graph_edit` walked up
+    // correctly from whatever ClassDB made `control_at_point` return. If this
+    // fails, the walk-up is the problem; if it passes but the port drag below
+    // fails, the problem is in the port path instead.
+    tree.push_input(&InputEvent::MouseButton {
+        button: MouseButton::Left,
+        pressed: true,
+        position: Vector2::new(A_OFFSET.0 + 30.0, A_OFFSET.1 + 8.0),
+    });
+    assert_eq!(
+        selected.lock().unwrap().len(),
+        1,
+        "CONTROL: with ClassDB populated a titlebar press must still resolve to \
+         the GraphEdit and emit node_selected"
+    );
+    tree.push_input(&InputEvent::MouseButton {
+        button: MouseButton::Left,
+        pressed: false,
+        position: Vector2::new(A_OFFSET.0 + 30.0, A_OFFSET.1 + 8.0),
+    });
 
     tree.push_input(&InputEvent::MouseButton {
         button: MouseButton::Left,

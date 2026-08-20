@@ -194,6 +194,11 @@ pub fn collect_occluders_2d(tree: &SceneTree) -> Vec<LightOccluder2D> {
             _ => prop_bool(node, "closed", true),
         };
         let mut occ = LightOccluder2D::new(points, closed);
+        // pat-s3rrv.250: whether this occluder is rasterized into the canvas SDF
+        // that 2D particle collision and the `texture_sdf*` shader builtins read.
+        // Godot defaults it to true, so an authored occluder participates unless
+        // the project opts out.
+        occ.sdf_collision = prop_bool(node, "sdf_collision", true);
         // Godot's property is `occluder_light_mask`; `light_mask` is the
         // CanvasItem one and is not what the shadow pass filters on.
         occ.light_mask = match node.get_property("occluder_light_mask") {
@@ -253,6 +258,10 @@ pub fn collect_occluders_2d(tree: &SceneTree) -> Vec<LightOccluder2D> {
             // with a missing side.
             let mut occ = LightOccluder2D::new(points, true);
             occ.light_mask = light_mask;
+            // Tile occluders are level geometry by definition — exactly what a
+            // particle should collide with — so they stay in the SDF. There is no
+            // per-tile `sdf_collision` property in Godot to read here.
+            occ.sdf_collision = true;
             occluders.push(occ);
         }
     }

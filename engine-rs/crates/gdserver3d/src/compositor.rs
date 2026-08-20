@@ -8,6 +8,46 @@
 //! passes; at each stage the pipeline runs the enabled effects whose
 //! `effect_callback_type` matches — see [`Compositor::effects_for_stage`].
 
+use std::sync::Arc;
+
+use gdcore::math::Color;
+
+/// The buffers and frame description a [`CompositorEffect`] callback receives
+/// (Godot's `render_data`), for pat-s3rrv.240's successor pat-s3rrv.251.
+///
+/// Godot hands the effect the live render buffers so it can read and WRITE
+/// them; a callback that could only read would be a no-op pass. `color` is
+/// therefore a mutable slice of the frame being composited, in the same
+/// row-major order as `FrameData3D::pixels`.
+pub struct CompositorRenderData<'a> {
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// The colour buffer, row-major, mutable — this is what an effect changes.
+    pub color: &'a mut [Color],
+}
+
+impl CompositorRenderData<'_> {
+    /// The pixel at `(x, y)`, or `None` when out of bounds.
+    pub fn pixel(&self, x: u32, y: u32) -> Option<Color> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        self.color.get((y * self.width + x) as usize).copied()
+    }
+}
+
+/// A `CompositorEffect`'s `_render_callback` (pat-s3rrv.251).
+///
+/// A trait rather than a boxed closure so an implementor can hold state across
+/// frames — an invocation counter, an accumulation buffer — which is exactly
+/// what a real post-process effect needs and what the acceptance test counts.
+pub trait CompositorEffectCallback: Send + Sync {
+    /// Runs at `stage` with the live frame in `data`.
+    fn render_callback(&self, stage: EffectCallbackType, data: &mut CompositorRenderData<'_>);
+}
+
 /// The 3D-pipeline stage at which a [`CompositorEffect`] runs
 /// (Godot `CompositorEffect.EffectCallbackType`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,8 +90,20 @@ impl EffectCallbackType {
 }
 
 /// A custom render pass injected into the 3D pipeline (Godot `CompositorEffect`).
-#[derive(Debug, Clone, PartialEq)]
+///
+/// ⚠️ `Debug` and `PartialEq` are hand-written below rather than derived: the
+/// `callback` is a trait object, which implements neither. They compare and
+/// print the DATA fields, and treat the callback as identity — two effects with
+/// the same settings and different callbacks are not equal.
+#[derive(Clone)]
 pub struct CompositorEffect {
+    /// The `_render_callback` to run at [`effect_callback_type`].
+    ///
+    /// `None` is a described-but-inert pass: the data model existed with no way
+    /// to invoke anything, which is the state this bead found the module in.
+    ///
+    /// [`effect_callback_type`]: Self::effect_callback_type
+    pub callback: Option<Arc<dyn CompositorEffectCallback>>,
     /// Whether this effect runs. Disabled effects are skipped by
     /// [`Compositor::effects_for_stage`].
     pub enabled: bool,
@@ -74,6 +126,7 @@ impl CompositorEffect {
     /// buffer-access requirements.
     pub fn new(effect_callback_type: EffectCallbackType) -> Self {
         Self {
+            callback: None,
             enabled: true,
             effect_callback_type,
             access_resolved_color: false,
@@ -82,6 +135,45 @@ impl CompositorEffect {
             needs_normal_roughness: false,
             needs_separate_specular: false,
         }
+    }
+
+    /// The same effect with `callback` installed — the builder the render path
+    /// and the tests both use.
+    pub fn with_callback(mut self, callback: Arc<dyn CompositorEffectCallback>) -> Self {
+        self.callback = Some(callback);
+        self
+    }
+}
+
+impl std::fmt::Debug for CompositorEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompositorEffect")
+            .field("enabled", &self.enabled)
+            .field("effect_callback_type", &self.effect_callback_type)
+            .field("access_resolved_color", &self.access_resolved_color)
+            .field("access_resolved_depth", &self.access_resolved_depth)
+            .field("needs_motion_vectors", &self.needs_motion_vectors)
+            .field("needs_normal_roughness", &self.needs_normal_roughness)
+            .field("needs_separate_specular", &self.needs_separate_specular)
+            .field("callback", &self.callback.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for CompositorEffect {
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.effect_callback_type == other.effect_callback_type
+            && self.access_resolved_color == other.access_resolved_color
+            && self.access_resolved_depth == other.access_resolved_depth
+            && self.needs_motion_vectors == other.needs_motion_vectors
+            && self.needs_normal_roughness == other.needs_normal_roughness
+            && self.needs_separate_specular == other.needs_separate_specular
+            && match (&self.callback, &other.callback) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
     }
 }
 

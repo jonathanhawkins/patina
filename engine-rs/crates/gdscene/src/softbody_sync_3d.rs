@@ -12,7 +12,8 @@
 
 use crate::node::NodeId;
 use crate::scene_tree::SceneTree;
-use gdcore::math3d::Transform3D;
+use gdcore::math::Vector3;
+use gdcore::math3d::{Aabb, Transform3D};
 use gdphysics3d::softbody3d::SoftBody3D;
 use gdserver3d::mesh::Mesh3D;
 use gdvariant::Variant;
@@ -152,4 +153,148 @@ pub fn softbody_mesh_for_node(tree: &SceneTree, nid: NodeId, base: &Mesh3D) -> O
     let mut out = base.clone();
     out.vertices = solved;
     Some(out)
+}
+
+// ---------------------------------------------------------------------------
+// PhysicsServer3DRenderingServerHandler (pat-s3rrv.242)
+// ---------------------------------------------------------------------------
+
+/// The object a physics backend pushes a solved soft body through on its way to
+/// the renderer — Godot's `PhysicsServer3DRenderingServerHandler`
+/// (`servers/physics_3d/physics_server_3d.h:216`).
+///
+/// Godot's backend calls `set_vertex(i, v)` and `set_normal(i, n)` per vertex and
+/// `set_aabb(bounds)` once per step; the handler is what forwards that to the
+/// RenderingServer. Patina already owned the hard half — [`softbody_deformed_mesh`]
+/// translates solved *particles* into welded mesh *vertices* — but there was no
+/// object for a backend to push into, so the class was declared with nothing
+/// behind it.
+///
+/// ⚠️ Deliberately built ON `softbody_deformed_mesh` rather than re-deriving the
+/// weld. The particle→vertex mapping is the part that is easy to get wrong (the
+/// two sets are different sizes), and it already has tests; a second
+/// implementation here would be a second thing to keep correct.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PhysicsServer3DRenderingServerHandler {
+    vertices: Vec<Vector3>,
+    normals: Vec<Vector3>,
+    aabb: Aabb,
+}
+
+impl Default for PhysicsServer3DRenderingServerHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PhysicsServer3DRenderingServerHandler {
+    /// An empty handler with a zero AABB.
+    ///
+    /// Written out rather than derived: `Aabb` carries two `Vector3`s and a
+    /// `derive(Default)` would be an assertion about types this module does not
+    /// own.
+    pub fn new() -> Self {
+        let zero = Vector3::new(0.0, 0.0, 0.0);
+        Self {
+            vertices: Vec::new(),
+            normals: Vec::new(),
+            aabb: Aabb::new(zero, zero),
+        }
+    }
+
+    /// `set_vertex(index, vertex)`.
+    ///
+    /// ⚠️ Grows to fit rather than indexing blindly: Godot's backend addresses
+    /// vertices by index and makes no promise about arrival order, so a handler
+    /// that assumed ascending writes would panic on a backend that batches.
+    pub fn set_vertex(&mut self, index: usize, vertex: Vector3) {
+        if self.vertices.len() <= index {
+            self.vertices.resize(index + 1, Vector3::new(0.0, 0.0, 0.0));
+        }
+        self.vertices[index] = vertex;
+    }
+
+    /// `set_normal(index, normal)`. Same growth rule as [`Self::set_vertex`].
+    pub fn set_normal(&mut self, index: usize, normal: Vector3) {
+        if self.normals.len() <= index {
+            self.normals.resize(index + 1, Vector3::new(0.0, 0.0, 0.0));
+        }
+        self.normals[index] = normal;
+    }
+
+    /// `set_aabb(aabb)` — the bounds the renderer culls the soft body against.
+    pub fn set_aabb(&mut self, aabb: Aabb) {
+        self.aabb = aabb;
+    }
+
+    /// Vertices received so far.
+    pub fn vertices(&self) -> &[Vector3] {
+        &self.vertices
+    }
+
+    /// Normals received so far.
+    pub fn normals(&self) -> &[Vector3] {
+        &self.normals
+    }
+
+    /// The last AABB received.
+    pub fn aabb(&self) -> Aabb {
+        self.aabb
+    }
+
+    /// Drops everything received, for reuse across frames.
+    pub fn clear(&mut self) {
+        self.vertices.clear();
+        self.normals.clear();
+        let zero = Vector3::new(0.0, 0.0, 0.0);
+        self.aabb = Aabb::new(zero, zero);
+    }
+
+    /// Drives the handler from a solved soft body, which is the path a physics
+    /// backend takes each step.
+    ///
+    /// Returns whether anything was pushed — `false` when the body or the base
+    /// mesh is empty, matching [`softbody_deformed_mesh`]'s "nothing to do".
+    pub fn push_softbody(
+        &mut self,
+        base: &Mesh3D,
+        body: &SoftBody3D,
+        visual_to_physics: &[usize],
+    ) -> bool {
+        let Some(mesh) = softbody_deformed_mesh(base, body, visual_to_physics) else {
+            return false;
+        };
+        for (i, v) in mesh.vertices.iter().enumerate() {
+            self.set_vertex(i, *v);
+        }
+        for (i, n) in mesh.normals.iter().enumerate() {
+            self.set_normal(i, *n);
+        }
+        self.set_aabb(enclosing_aabb(&mesh.vertices));
+        true
+    }
+}
+
+/// The tight bounding box of `points`, as the backend hands to `set_aabb`.
+///
+/// An empty set yields a zero box at the origin rather than an inverted one —
+/// an inverted AABB read as "everything is inside" by a naive culler.
+fn enclosing_aabb(points: &[Vector3]) -> Aabb {
+    let zero = Vector3::new(0.0, 0.0, 0.0);
+    let Some(first) = points.first() else {
+        return Aabb::new(zero, zero);
+    };
+    let (mut min, mut max) = (*first, *first);
+    for p in points.iter().skip(1) {
+        min.x = min.x.min(p.x);
+        min.y = min.y.min(p.y);
+        min.z = min.z.min(p.z);
+        max.x = max.x.max(p.x);
+        max.y = max.y.max(p.y);
+        max.z = max.z.max(p.z);
+    }
+    Aabb::new(
+        min,
+        Vector3::new(max.x - min.x, max.y - min.y, max.z - min.z),
+    )
 }
