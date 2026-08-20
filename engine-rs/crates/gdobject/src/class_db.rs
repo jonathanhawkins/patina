@@ -14175,6 +14175,12 @@ pub fn register_2d_classes() {
                     "keep_pressed_outside",
                     Variant::Bool(false),
                 ))
+                // The Shortcut resource itself; `shortcut_feedback` only
+                // controls whether the press is animated (pat-s3rrv.175).
+                .property(
+                    PropertyInfo::new("shortcut", Variant::Nil)
+                        .with_accessors("get_shortcut", "set_shortcut"),
+                )
                 .property(PropertyInfo::new("shortcut_feedback", Variant::Bool(true)))
                 .property(PropertyInfo::new(
                     "shortcut_in_tooltip",
@@ -14428,6 +14434,17 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("SpinBox")
                 .parent("Range")
+                // 🔑 SpinBox OVERRIDES Range's `step` — 1.0 here against Range's
+                // 0.01 (doc/classes/SpinBox.xml, `overrides="Range"`).
+                // Inheriting the base value gives a spin box that steps by a
+                // hundredth: plausible-looking, wrong, and silent. Declared here
+                // rather than relied on from Range because `property_get_revert`
+                // takes the LAST declaration in the chain, so the derived class
+                // is the one that must carry it (pat-s3rrv.168).
+                .property(
+                    PropertyInfo::new("step", Variant::Float(1.0))
+                        .with_accessors("get_step", "set_step"),
+                )
                 .property(
                     PropertyInfo::new("alignment", Variant::Int(0))
                         .with_accessors("get_horizontal_alignment", "set_horizontal_alignment"),
@@ -14622,6 +14639,19 @@ pub fn register_2d_classes() {
     // pat-p0s82.29: VideoStreamPlayer is a high-use Control node; register the
     // class + defaults for ClassDB parity (the video decode/playback path is a
     // separate media bead, pat-p0s82.28).
+    // The stream resources a VideoStreamPlayer points at (pat-s3rrv.171). Both
+    // inherit Resource per doc/classes/VideoStream.xml and
+    // VideoStreamPlayback.xml — VideoStreamPlayback is NOT a child of
+    // VideoStream, though the names suggest it; they are siblings.
+    //
+    // Registered before the player below so a `stream` property that reflects
+    // its resource's class resolves it rather than finding nothing.
+    if !class_exists("VideoStream") {
+        register_class(ClassRegistration::new("VideoStream").parent("Resource"));
+    }
+    if !class_exists("VideoStreamPlayback") {
+        register_class(ClassRegistration::new("VideoStreamPlayback").parent("Resource"));
+    }
     if !class_exists("VideoStreamPlayer") {
         register_class(
             ClassRegistration::new("VideoStreamPlayer")
@@ -14640,7 +14670,13 @@ pub fn register_2d_classes() {
                         .with_accessors("get_volume_db", "set_volume_db"),
                 )
                 .property(
-                    PropertyInfo::new("expand", Variant::Bool(true))
+                    // 🔑 `expand` defaults to **false**
+                    // (doc/classes/VideoStreamPlayer.xml). It was registered as
+                    // true, which silently stretches every video to its control
+                    // rect where Godot keeps the source size — plausible on
+                    // screen and wrong (pat-s3rrv.174). The getter really is
+                    // `has_expand`, not `get_expand`.
+                    PropertyInfo::new("expand", Variant::Bool(false))
                         .with_accessors("has_expand", "set_expand"),
                 )
                 .property(PropertyInfo::new("audio_track", Variant::Int(0)))
@@ -19244,15 +19280,70 @@ pub fn register_2d_classes() {
                         .with_accessors("get_title_alignment", "set_title_alignment"),
                 )
                 .signal(SignalInfo::new("folding_changed").arg("is_folded"))
+                // ⚠️ `focus_mode` and `mouse_filter` are re-declared to OVERRIDE
+                // Control's defaults (FOCUS_ALL = 2, and MOUSE_FILTER_STOP = 0
+                // where Container would otherwise leave PASS), matching
+                // `foldable_container.cpp:599-600`. They carry no accessors
+                // because Control's own declarations do not either — diverging
+                // here would make the derived copy the one `get_property_getter`
+                // answers with, since the most-derived declaration wins.
                 .property(PropertyInfo::new("focus_mode", Variant::Int(2)))
-                .property(PropertyInfo::new("language", Variant::String("".into())))
                 .property(PropertyInfo::new("mouse_filter", Variant::Int(0)))
-                .property(PropertyInfo::new("title_position", Variant::Int(0)))
-                .property(PropertyInfo::new("title_text_direction", Variant::Int(0)))
-                .property(PropertyInfo::new(
-                    "title_text_overrun_behavior",
-                    Variant::Int(0),
-                )),
+                .property(
+                    PropertyInfo::new("language", Variant::String("".into()))
+                        .with_accessors("get_language", "set_language"),
+                )
+                .property(
+                    PropertyInfo::new("title_position", Variant::Int(0))
+                        .with_accessors("get_title_position", "set_title_position"),
+                )
+                .property(
+                    PropertyInfo::new("title_text_direction", Variant::Int(0))
+                        .with_accessors("get_title_text_direction", "set_title_text_direction"),
+                )
+                .property(
+                    PropertyInfo::new("title_text_overrun_behavior", Variant::Int(0))
+                        .with_accessors(
+                            "get_title_text_overrun_behavior",
+                            "set_title_text_overrun_behavior",
+                        ),
+                )
+                // The group that makes folding exclusive. `Nil` because a Patina
+                // resource reference is carried as the scene's reference TEXT,
+                // not as an object — see `control::foldable_group_of`.
+                .property(
+                    PropertyInfo::new("foldable_group", Variant::Nil)
+                        .with_accessors("get_foldable_group", "set_foldable_group"),
+                ),
+        );
+    }
+    if !class_exists("FoldableGroup") {
+        // Makes a set of FoldableContainers mutually exclusive (pat-s3rrv.165).
+        //
+        // ⚠️ `get_containers()`, `get_expanded_container()` and the
+        // `expanded(container)` signal are documented on this class and are
+        // deliberately NOT declared. All three need the FoldableGroup itself as
+        // the receiver, and a Patina resource is a VALUE with no object identity
+        // — `foldable_group` reads as `Nil`, so no script can obtain the group to
+        // call or connect to it. Declaring them would advertise a surface the
+        // engine cannot dispatch. The behaviour is implemented and tested at
+        // `gdscene::control::{foldable_group_members, foldable_group_expanded}`.
+        // Same situation as `ButtonGroup` (pat-s3rrv.161).
+        register_class(
+            ClassRegistration::new("FoldableGroup")
+                .parent("Resource")
+                .property(
+                    PropertyInfo::new("allow_folding_all", Variant::Bool(false))
+                        // ⚠️ `is_allow_folding_all`, not `get_…` — transcribed
+                        // from the doc XML, not derived from the member name.
+                        .with_accessors("is_allow_folding_all", "set_allow_folding_all"),
+                )
+                // ⚠️ Overrides Resource's own default of `false`, so two
+                // instances of one scene do not share a single fold group.
+                .property(
+                    PropertyInfo::new("resource_local_to_scene", Variant::Bool(true))
+                        .with_accessors("is_local_to_scene", "set_local_to_scene"),
+                ),
         );
     }
 
@@ -19349,8 +19440,21 @@ pub fn register_2d_classes() {
                         .with_accessors("is_draw_center_enabled", "set_draw_center"),
                 )
                 .property(
-                    PropertyInfo::new("region_rect", Variant::Nil)
-                        .with_accessors("get_region_rect", "set_region_rect"),
+                    // Rect2(0, 0, 0, 0), from doc/classes/NinePatchRect.xml —
+                    // NOT Nil (pat-s3rrv.167). A Nil default makes
+                    // `property_get_revert` hand back a value of the wrong TYPE,
+                    // so a caller reverting the property or reading the default
+                    // to decide "is a region set?" gets Nil where it expects a
+                    // zero-size rect, and a type-matching reader falls through
+                    // to whatever its `_ =>` arm does.
+                    PropertyInfo::new(
+                        "region_rect",
+                        Variant::Rect2(gdcore::math::Rect2::new(
+                            gdcore::math::Vector2::ZERO,
+                            gdcore::math::Vector2::ZERO,
+                        )),
+                    )
+                    .with_accessors("get_region_rect", "set_region_rect"),
                 )
                 .property(
                     PropertyInfo::new("patch_margin_left", Variant::Int(0))
@@ -19544,10 +19648,14 @@ pub fn register_2d_classes() {
                     "layout_toggle_enabled",
                     Variant::Bool(true),
                 ))
-                .property(PropertyInfo::new(
-                    "mode_overrides_title",
-                    Variant::Bool(true),
-                ))
+                // 🔑 `is_mode_overriding_title`, NOT `get_mode_overrides_title`
+                // (doc/classes/FileDialog.xml). The accessor pair is stored from
+                // the doc rather than derived, and this is a member where the
+                // two disagree (pat-s3rrv.162).
+                .property(
+                    PropertyInfo::new("mode_overrides_title", Variant::Bool(true))
+                        .with_accessors("is_mode_overriding_title", "set_mode_overrides_title"),
+                )
                 .property(PropertyInfo::new("option_count", Variant::Int(0)))
                 .property(PropertyInfo::new(
                     "overwrite_warning_enabled",
@@ -25985,8 +26093,38 @@ pub fn register_input_event_classes() {
                 ),
         );
     }
+    // The resource a Button/PopupMenu points at to declare its accelerator
+    // (pat-s3rrv.175). `events` holds InputEvent resources — an empty Array by
+    // default, per doc/classes/Shortcut.xml, NOT Nil: a Nil default is the
+    // wrong TYPE, so a caller reading the default to iterate gets nothing it
+    // can loop over.
+    if !class_exists("Shortcut") {
+        register_class(
+            ClassRegistration::new("Shortcut")
+                .parent("Resource")
+                .property(
+                    PropertyInfo::new("events", Variant::Array(Vec::new()))
+                        .with_accessors("get_events", "set_events"),
+                )
+                // Arities are TOTAL parameter counts from doc/classes/Shortcut.xml,
+                // matching how the InputEvent spine above counts them.
+                .method(MethodInfo::new("get_as_text", 0).const_method())
+                .method(MethodInfo::new("has_valid_event", 0).const_method())
+                .method(MethodInfo::new("matches_event", 1).const_method()),
+        );
+    }
+    // Godot synthesises this event when a Shortcut fires, and delivers it to
+    // `_shortcut_input`. Its one documented member points back at the Shortcut
+    // that produced it (doc/classes/InputEventShortcut.xml).
     if !class_exists("InputEventShortcut") {
-        register_class(ClassRegistration::new("InputEventShortcut").parent("InputEvent"));
+        register_class(
+            ClassRegistration::new("InputEventShortcut")
+                .parent("InputEvent")
+                .property(
+                    PropertyInfo::new("shortcut", Variant::Nil)
+                        .with_accessors("get_shortcut", "set_shortcut"),
+                ),
+        );
     }
 }
 
@@ -26011,6 +26149,20 @@ pub fn register_all_classes() {
 
 pub fn register_editor_classes() {
     register_2d_classes();
+
+    // ⚠️ EditorFileDialog inherits **FileDialog**, not ConfirmationDialog
+    // (doc/classes/EditorFileDialog.xml). Parenting it to ConfirmationDialog
+    // would still satisfy `class_exists` while losing every FileDialog member
+    // beneath it — filters, access, the selection signals (pat-s3rrv.162).
+    //
+    // Placed AFTER this function's own `register_2d_classes()` call, which is
+    // where FileDialog is registered: an inheritance chain stops dead at an
+    // unregistered base, so registering the child first would leave
+    // `is_parent_class("EditorFileDialog", "FileDialog")` false whenever this
+    // registrar runs on its own rather than via `register_all_classes`.
+    if !class_exists("EditorFileDialog") {
+        register_class(ClassRegistration::new("EditorFileDialog").parent("FileDialog"));
+    }
     register_3d_classes();
     register_audio_classes();
     register_io_classes();

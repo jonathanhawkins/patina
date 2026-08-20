@@ -60,6 +60,7 @@ fn misc_controls_tabbar_optionbutton_ninepatch() {
         axis_h: gdserver2d::canvas::NinePatchAxis::Stretch,
         axis_v: gdserver2d::canvas::NinePatchAxis::Stretch,
         modulate: Color::WHITE,
+        region: gdcore::math::Rect2::new(gdcore::math::Vector2::ZERO, gdcore::math::Vector2::ZERO),
     });
     assert!(
         matches!(

@@ -1668,6 +1668,16 @@ fn http_delivery(tree: &SceneTree, node_id: NodeId) -> crate::http_request_node:
         .unwrap_or_default()
 }
 
+/// The HTTPRequest PROXY settings as authored on the node (pat-s3rrv.78).
+///
+/// Delegates like `http_delivery` does, so the setter arms below and the
+/// request arms cannot drift apart on the "unset" rule.
+fn http_proxies(tree: &SceneTree, node_id: NodeId) -> crate::http_request_node::ProxySettings {
+    tree.get_node(node_id)
+        .map(crate::http_request_node::proxy_settings)
+        .unwrap_or_default()
+}
+
 /// Godot's `custom_headers` argument: a `PackedStringArray` of `"Name: Value"`.
 ///
 /// ⚠️ An untyped `Array` of strings is accepted too — GDScript array literals
@@ -4004,13 +4014,15 @@ impl SceneAccess for SceneTreeAccessor {
                     _ => Vec::new(),
                 };
                 // ⚠️ Resolved BEFORE the mutable borrow below; reading the
-                // tree inside the `http_request_for` call is E0502.
+                // tree inside the `http_request_for` call is E0502. The proxies
+                // are read here for exactly the same reason.
                 let settings = http_settings(self.tree(), nid);
+                let proxies = http_proxies(self.tree(), nid);
                 let headers = custom_headers_arg(args);
                 let code = self
                     .tree_mut()
                     .http_request_for(nid)
-                    .request_with_headers(&url, method, body, &headers, settings);
+                    .request_with_proxies(&url, method, body, &headers, settings, &proxies);
                 Some(Variant::Int(code as i64))
             }
             // `request_raw` differs only in taking the body as bytes, which the
@@ -4030,13 +4042,15 @@ impl SceneAccess for SceneTreeAccessor {
                     _ => Vec::new(),
                 };
                 // ⚠️ Resolved BEFORE the mutable borrow below; reading the
-                // tree inside the `http_request_for` call is E0502.
+                // tree inside the `http_request_for` call is E0502. The proxies
+                // are read here for exactly the same reason.
                 let settings = http_settings(self.tree(), nid);
+                let proxies = http_proxies(self.tree(), nid);
                 let headers = custom_headers_arg(args);
                 let code = self
                     .tree_mut()
                     .http_request_for(nid)
-                    .request_with_headers(&url, method, body, &headers, settings);
+                    .request_with_proxies(&url, method, body, &headers, settings, &proxies);
                 Some(Variant::Int(code as i64))
             }
             // ⚠️ `cancel_request` returns VOID and emits nothing. The
@@ -4045,6 +4059,32 @@ impl SceneAccess for SceneTreeAccessor {
             // recorded failure so no late `request_completed` fires, matching
             // `http_request.cpp:186-210`) with no route from a script to reach
             // it — a cancel button in a game could not cancel anything.
+            // 🔑 Registered in ClassDB but, until now, with no arm here — so
+            // `has_method` reported true and the call returned `Nil`. A script
+            // comparing the result against `HTTPClient.STATUS_DISCONNECTED` got
+            // `false` even while idle, which is the failure mode this bead exists
+            // to remove: it looks supported and quietly is not.
+            //
+            // ⚠️ Only two of the ten statuses are reachable, and that is the
+            // transport's shape rather than a shortcut here — see
+            // `http_request_node::STATUS_REQUESTING`. Both values reported are
+            // ones Godot really produces, and both are correct at their endpoint.
+            "get_http_client_status" if is_http_request(self.tree(), nid) => {
+                // ⚠️ Guarded on `has_http_request` so a GETTER does not lazily
+                // create per-node transport state. `http_request_for` is
+                // `entry().or_default()`, so calling it unguarded would allocate
+                // an HttpRequestNode for every node a script merely polls.
+                let requesting = if self.tree().has_http_request(nid) {
+                    self.tree_mut().http_request_for(nid).is_requesting()
+                } else {
+                    false
+                };
+                Some(Variant::Int(if requesting {
+                    crate::http_request_node::STATUS_REQUESTING
+                } else {
+                    crate::http_request_node::STATUS_DISCONNECTED
+                }))
+            }
             "cancel_request" if is_http_request(self.tree(), nid) => {
                 self.tree_mut().http_request_for(nid).cancel();
                 Some(Variant::Nil)
@@ -4069,6 +4109,45 @@ impl SceneAccess for SceneTreeAccessor {
             }
             "get_timeout" if is_http_request(self.tree(), nid) => {
                 Some(Variant::Float(http_settings(self.tree(), nid).timeout))
+            }
+            // 🔑 Setters only — Godot exposes NO getter and no property for
+            // either proxy (`doc/classes/HTTPRequest.xml:209-225`). Every other
+            // pair on this node has a `get_*` twin, so adding one here by
+            // symmetry would invent API upstream does not have.
+            //
+            // ⚠️ The first HTTPRequest arms that take a SECOND argument, which
+            // makes the missing-arg default load-bearing: a bare
+            // `set_http_proxy("host")` must fall back to `-1` (= unset), never
+            // to `0`. Port 0 is a real value the "unset" rule does not cover
+            // (`HTTPRequest.xml:215`, `http_client_tcp.cpp:771` — the test is
+            // `port == -1` exactly), so defaulting to 0 would leave the node
+            // holding a live proxy the script never asked for.
+            "set_http_proxy" | "set_https_proxy" if is_http_request(self.tree(), nid) => {
+                let host = match args.first() {
+                    Some(Variant::String(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                let port = match args.get(1) {
+                    Some(Variant::Int(p)) => *p,
+                    _ => -1,
+                };
+                // Matched by name rather than `if/else`, following the
+                // `apply_*`/`add_constant_*` arm at :3541. ⚠️ Not cosmetic: an
+                // `else` would silently classify any third name later added to
+                // the pattern above as the HTTPS proxy.
+                let (host_key, port_key): (&str, &str) = match method {
+                    "set_http_proxy" => ("http_proxy_host", "http_proxy_port"),
+                    "set_https_proxy" => ("https_proxy_host", "https_proxy_port"),
+                    _ => return Some(Variant::Nil),
+                };
+                // Stored verbatim; the "unset" rule is applied once, on read,
+                // by `http_request_node::proxy_settings`. Normalising here as
+                // well would give two places to disagree.
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property(host_key, Variant::String(host));
+                    n.set_property(port_key, Variant::Int(port));
+                }
+                Some(Variant::Nil)
             }
             "set_max_redirects" if is_http_request(self.tree(), nid) => {
                 let Some(Variant::Int(amount)) = args.first() else {

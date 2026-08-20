@@ -172,6 +172,16 @@ pub enum DrawCommand {
         margin_bottom: f32,
         /// Whether to draw the center region.
         draw_center: bool,
+        /// Sub-rectangle of the SOURCE texture the nine patches are cut from —
+        /// Godot's `NinePatchRect.region_rect` (pat-s3rrv.167).
+        ///
+        /// ⚠️ A **zero-size** rect means "use the whole texture", which is
+        /// Godot's default and must stay byte-for-byte identical to the
+        /// behaviour before this field existed. It is not `Option` because the
+        /// engine's own default is a zero `Rect2`, and an `Option` would invite
+        /// `None` and `Some(Rect2::ZERO)` to drift apart while meaning the same
+        /// thing.
+        region: Rect2,
         /// How the left/right edges and the centre fill horizontally.
         axis_h: NinePatchAxis,
         /// How the top/bottom edges and the centre fill vertically.
@@ -313,6 +323,7 @@ mod tests {
         item.commands.push(DrawCommand::DrawNinePatch {
             texture_path: "res://panel.png".to_string(),
             rect: Rect2::new(Vector2::ZERO, Vector2::new(100.0, 50.0)),
+            region: Rect2::new(Vector2::ZERO, Vector2::ZERO),
             margin_left: 8.0,
             margin_top: 8.0,
             margin_right: 8.0,

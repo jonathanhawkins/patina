@@ -907,7 +907,12 @@ pub fn control_at_point(tree: &SceneTree, point: Vector2) -> Option<NodeId> {
 /// fallback to ClassDB (`is_class("Control")`) so hit-testing works even when
 /// the ClassDB inheritance table has not been populated (e.g. bare unit tests),
 /// mirroring [`crate::control_render`]'s control detection.
-const CONTROL_HIT_CLASSES: &[&str] = &[
+/// Exposed so a test can assert this list is REDUNDANT — every name in it
+/// should resolve through ClassDB as a Control descendant once the registry is
+/// populated, which is the point of pat-s3rrv.168. A name that only ever
+/// matched here is a class ClassDB does not know, and hit-testing it works by
+/// accident.
+pub const CONTROL_HIT_CLASSES: &[&str] = &[
     // pat-s3rrv.72: a MenuBar's title strip has to be hit-testable or the press
     // never resolves to the bar and no menu can open — the strip would draw and
     // ignore every click.
@@ -956,6 +961,14 @@ const CONTROL_HIT_CLASSES: &[&str] = &[
     "FlowContainer",
     "HFlowContainer",
     "VFlowContainer",
+    // ⚠️ FoldableContainer is hit-testable but is deliberately NOT in the
+    // `PASS` list beside its container siblings. `container.cpp:233` sets
+    // `MOUSE_FILTER_PASS`, but `foldable_container.cpp:600` sets it straight
+    // back to `MOUSE_FILTER_STOP` — the title bar is a click target, so the
+    // container has to win the hit test rather than let the event through.
+    // Adding it to `PASS` is the obvious-looking move that makes the title
+    // silently unclickable (pat-s3rrv.165).
+    "FoldableContainer",
 ];
 
 /// Button-family classes whose click emits the `pressed` signal.
@@ -988,10 +1001,51 @@ pub fn node_is_base_button(tree: &SceneTree, node_id: NodeId) -> bool {
 /// This is the runtime entry point exercised by the app-level test: connecting
 /// a callback to a Button's `pressed` signal and calling this on the button's
 /// rect fires the callback.
+/// Godot's `LinkButton::pressed()` override (pat-s3rrv.166).
+///
+/// ```cpp
+/// void LinkButton::pressed() {
+///     if (uri.is_empty()) { return; }
+///     OS::get_singleton()->shell_open(uri);
+/// }
+/// ```
+///
+/// 🔑 **Unconditional on a non-empty `uri`.** It is a `BaseButton` virtual that
+/// runs *alongside* the `pressed` signal, so connecting a handler does not
+/// suppress it — the two are independent. (The bead for this work described it
+/// as opening the uri only when no `pressed` handler is attached; upstream has
+/// no such condition, and inventing one would make a scripted LinkButton stop
+/// navigating the moment someone connected a listener.)
+///
+/// ⚠️ Records the request instead of calling `gdplatform::os::shell_open`,
+/// which really spawns `open`/`xdg-open`. gdscene performs no platform side
+/// effects, and a press handler that launched a browser would do so on every
+/// test that clicks one.
+fn link_button_pressed(tree: &mut SceneTree, node_id: NodeId) {
+    let is_link = tree
+        .get_node(node_id)
+        .map(|n| n.class_name() == "LinkButton")
+        .unwrap_or(false);
+    if !is_link {
+        return;
+    }
+    let uri = match tree.get_node(node_id).map(|n| n.get_property("uri")) {
+        Some(Variant::String(u)) => u,
+        _ => String::new(),
+    };
+    if !uri.is_empty() {
+        tree.request_shell_open(uri);
+    }
+}
+
 pub fn click_at_point(tree: &mut SceneTree, point: Vector2) -> Option<NodeId> {
     let hit = control_at_point(tree, point)?;
     if node_is_base_button(tree, hit) {
         tree.emit_signal(hit, "pressed", &[]);
+        // Both press paths run it: Godot calls the `pressed()` virtual however
+        // the button was activated, so hooking only `fire_button_action` would
+        // leave a plain click inert.
+        link_button_pressed(tree, hit);
     }
     // An item view resolves the click further, onto the row or tab under the
     // point (pat-0q2kx.85).
@@ -1576,10 +1630,11 @@ fn arrange_box(
 
 /// Reflows `children` into rows (horizontal flow) or columns (vertical flow),
 /// wrapping to a new line whenever the next child would overflow the container's
-/// main-axis extent. Mirrors Godot's HFlowContainer / VFlowContainer at the
-/// default `BEGIN` alignment: each child keeps its effective minimum size and is
-/// packed from the start of its line, and a line's cross-axis thickness is the
-/// largest child thickness on that line.
+/// main-axis extent. Mirrors Godot's HFlowContainer / VFlowContainer: each child
+/// keeps its effective minimum size, a line's cross-axis thickness is the
+/// largest child thickness on that line, and the container's `alignment`,
+/// `last_wrap_alignment` and `reverse_fill` decide where each line sits
+/// (pat-s3rrv.164).
 ///
 /// `vertical` selects the flow direction: `false` fills rows left-to-right and
 /// advances downward (HFlowContainer); `true` fills columns top-to-bottom and
@@ -1587,8 +1642,197 @@ fn arrange_box(
 /// an oversized child never produces an empty line. `sep` (the container's
 /// `separation` theme override) is used for both the in-line gap between children
 /// and the gap between wrapped lines.
+/// One wrapped line, as produced by [`flow_lines`].
+struct FlowLine {
+    /// Index into the child slice of this line's first child.
+    start: usize,
+    /// How many children are on this line. Never zero.
+    count: usize,
+    /// Main-axis extent the children occupy, **excluding** trailing separation
+    /// (Godot's `line_length`).
+    ///
+    /// ⚠️ Patina's cursor carries a trailing separation and Godot's does not, so
+    /// this is the cursor minus one `sep`. Leaving it in would shrink every
+    /// line's leftover space by one gap and pull centred content off-centre.
+    length: f32,
+    /// Largest child cross-size on the line (Godot's `line_height`).
+    thickness: f32,
+    /// Godot's `is_filled`: whether the line is packed tight enough that
+    /// `last_wrap_alignment` should NOT treat it as a short trailing line.
+    filled: bool,
+}
+
+/// Groups `mins` into wrapped lines — Godot's first `_resort` pass.
+///
+/// Wrapping matches the previous single-pass code exactly: a child starts a new
+/// line when it would overflow, and every line keeps at least one child so an
+/// oversized child never produces an empty line.
+fn flow_lines(mins: &[Vector2], main_limit: f32, sep: f32, vertical: bool) -> Vec<FlowLine> {
+    let mut lines: Vec<FlowLine> = Vec::new();
+    if mins.is_empty() {
+        return lines;
+    }
+    let main_of = |v: Vector2| if vertical { v.y } else { v.x };
+    let cross_of = |v: Vector2| if vertical { v.x } else { v.y };
+
+    let mut start = 0usize;
+    let mut main = 0.0f32;
+    let mut thickness = 0.0f32;
+    let mut count = 0usize;
+
+    for (i, m) in mins.iter().enumerate() {
+        let main_size = main_of(*m);
+        if count > 0 && main + main_size > main_limit {
+            lines.push(FlowLine {
+                start,
+                count,
+                length: main - sep,
+                thickness,
+                // Every wrapped line is `filled` by definition — something did
+                // not fit on it (`flow_container.cpp:80,101`).
+                filled: true,
+            });
+            start = i;
+            main = 0.0;
+            thickness = 0.0;
+            count = 0;
+        }
+        main += main_size + sep;
+        let cross_size = cross_of(*m);
+        if cross_size > thickness {
+            thickness = cross_size;
+        }
+        count += 1;
+    }
+
+    // The final line never wrapped, so Godot asks a different question of it:
+    // would ANOTHER child the size of the last one have overflowed? If so the
+    // line is effectively full and `last_wrap_alignment` leaves it alone
+    // (`flow_container.cpp:124-128`).
+    //
+    // ⚠️ No separation is added before that hypothetical child. That is Godot's
+    // arithmetic, not an oversight to "fix" — changing it flips `filled` for
+    // lines that end within one gap of the edge.
+    let length = main - sep;
+    let last_main = main_of(mins[mins.len() - 1]);
+    lines.push(FlowLine {
+        start,
+        count,
+        length,
+        thickness,
+        filled: length + last_main > main_limit,
+    });
+    lines
+}
+
+/// How far along the main axis a line's first child is pushed, given the
+/// container's `alignment` and `last_wrap_alignment`.
+///
+/// Port of the `switch (alignment)` in `flow_container.cpp:165-197`.
+/// `stretch_avail` is this line's leftover main-axis space and `prior` is the
+/// previous line's; `trailing` is Godot's `is_not_first_line_and_not_filled`,
+/// which is what makes `last_wrap_alignment` apply to a short final line only.
+///
+/// ⚠️ `last_wrap_alignment` uses a DIFFERENT enum from `alignment`: it carries
+/// an extra `INHERIT = 0` at the bottom, so its BEGIN/CENTER/END are 1/2/3
+/// against alignment's 0/1/2 (`flow_container.h:40-48`). Comparing the two with
+/// the same constants silently shifts every mode by one.
+fn flow_alignment_offset(
+    alignment: i64,
+    last_wrap: i64,
+    stretch_avail: f32,
+    prior: f32,
+    trailing: bool,
+) -> f32 {
+    const WRAP_INHERIT: i64 = 0;
+    const WRAP_BEGIN: i64 = 1;
+    const WRAP_CENTER: i64 = 2;
+    const WRAP_END: i64 = 3;
+
+    match alignment {
+        // ALIGNMENT_CENTER
+        1 => {
+            if last_wrap != WRAP_INHERIT && last_wrap != WRAP_CENTER && trailing {
+                if last_wrap == WRAP_END {
+                    stretch_avail - prior * 0.5
+                } else {
+                    prior * 0.5
+                }
+            } else {
+                stretch_avail * 0.5
+            }
+        }
+        // ALIGNMENT_END
+        2 => {
+            if last_wrap != WRAP_INHERIT && last_wrap != WRAP_END && trailing {
+                if last_wrap == WRAP_BEGIN {
+                    prior
+                } else {
+                    prior + (stretch_avail - prior) * 0.5
+                }
+            } else {
+                stretch_avail
+            }
+        }
+        // ALIGNMENT_BEGIN, and anything unrecognised.
+        _ => {
+            if last_wrap != WRAP_INHERIT && trailing {
+                if last_wrap == WRAP_END {
+                    stretch_avail - prior
+                } else if last_wrap == WRAP_CENTER {
+                    (stretch_avail - prior) * 0.5
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            }
+        }
+    }
+}
+
+/// Number of wrapped lines the container currently produces — Godot's
+/// `FlowContainer.get_line_count()`.
+///
+/// Reads the container's laid-out `size`, so it answers for the arrangement as
+/// it stands. Returns 0 for a node that is not sized yet or has no children,
+/// which is also what Godot reports before its first sort.
+pub fn flow_container_line_count(tree: &SceneTree, container_id: NodeId) -> usize {
+    let Some(node) = tree.get_node(container_id) else {
+        return 0;
+    };
+    let total = match node.get_property("size") {
+        Variant::Vector2(v) => v,
+        _ => return 0,
+    };
+    let children = node.children().to_vec();
+    let vertical = flow_is_vertical(tree, container_id);
+    let mins: Vec<Vector2> = children.iter().map(|&c| effective_min(tree, c)).collect();
+    let sep = get_separation(tree, container_id) as f32;
+    let main_limit = if vertical { total.y } else { total.x };
+    flow_lines(&mins, main_limit, sep, vertical).len()
+}
+
+/// Whether this flow container fills columns instead of rows.
+///
+/// The concrete subclasses pin the direction; the abstract base honours its own
+/// `vertical` property, which is how Godot's `FlowContainer` behaves when one is
+/// constructed directly.
+fn flow_is_vertical(tree: &SceneTree, container_id: NodeId) -> bool {
+    let class = tree
+        .get_node(container_id)
+        .map(|n| n.class_name().to_string())
+        .unwrap_or_default();
+    match class.as_str() {
+        "VFlowContainer" => true,
+        "HFlowContainer" => false,
+        _ => bool_prop_or_false(tree, container_id, "vertical"),
+    }
+}
+
 fn arrange_flow(
     tree: &mut SceneTree,
+    container_id: NodeId,
     children: &[NodeId],
     total: Vector2,
     sep: f32,
@@ -1599,39 +1843,61 @@ fn arrange_flow(
     }
     let mins: Vec<Vector2> = children.iter().map(|&c| effective_min(tree, c)).collect();
     let main_limit = if vertical { total.y } else { total.x };
+    let cross_limit = if vertical { total.x } else { total.y };
 
-    let mut main = 0.0f32; // cursor along the current line
-    let mut cross = 0.0f32; // start of the current line on the cross axis
-    let mut line_thickness = 0.0f32; // max child cross-size on the current line
-    let mut line_started = false;
+    let lines = flow_lines(&mins, main_limit, sep, vertical);
+    let alignment = int_prop_or(tree, container_id, "alignment", 0);
+    let last_wrap = int_prop_or(tree, container_id, "last_wrap_alignment", 0);
+    let reverse_fill = bool_prop_or_false(tree, container_id, "reverse_fill");
 
-    for (i, &c) in children.iter().enumerate() {
-        // main_size grows the line; cross_size decides how thick the line is.
-        let (main_size, cross_size) = if vertical {
-            (mins[i].y, mins[i].x)
+    let mut cross = 0.0f32;
+    for (line_idx, line) in lines.iter().enumerate() {
+        let stretch_avail = main_limit - line.length;
+        // Godot's `is_not_first_line_and_not_filled`.
+        let trailing = line_idx != 0 && !line.filled;
+        let prior = if trailing {
+            main_limit - lines[line_idx - 1].length
         } else {
-            (mins[i].x, mins[i].y)
+            0.0
         };
-        // Wrap when the child would overflow the line, but always keep at least
-        // one child per line so an oversized child does not spawn an empty line.
-        if line_started && main + main_size > main_limit {
-            cross += line_thickness + sep;
-            main = 0.0;
-            line_thickness = 0.0;
-            line_started = false;
+        // ⚠️ Godot skips the offset entirely on a line holding an EXPAND child,
+        // because expansion has already eaten the slack. Patina's flow layout
+        // does no expansion, so there is never slack to skip for — if expansion
+        // is added here, this is where the `stretch_ratio_total == 0` guard from
+        // `flow_container.cpp:161` has to come with it.
+        let mut main = flow_alignment_offset(alignment, last_wrap, stretch_avail, prior, trailing);
+
+        for k in 0..line.count {
+            let idx = line.start + k;
+            let child = children[idx];
+            let (main_size, cross_size) = if vertical {
+                (mins[idx].y, mins[idx].x)
+            } else {
+                (mins[idx].x, mins[idx].y)
+            };
+            // `reverse_fill` mirrors the CROSS axis, so lines stack from the far
+            // edge inward. Godot writes it as two separate branches — `y` for a
+            // horizontal container, `x` for a vertical one
+            // (`flow_container.cpp:245-250`) — but both are the cross axis.
+            //
+            // ⚠️ Mirrored per child using that child's own cross size, not per
+            // line, which is what leaves a short child flush with the far edge
+            // of its line rather than the near one.
+            let cross_pos = if reverse_fill {
+                cross_limit - cross - cross_size
+            } else {
+                cross
+            };
+            let pos = if vertical {
+                Vector2::new(cross_pos, main)
+            } else {
+                Vector2::new(main, cross_pos)
+            };
+            set_position(tree, child, pos);
+            set_size(tree, child, mins[idx]);
+            main += main_size + sep;
         }
-        let pos = if vertical {
-            Vector2::new(cross, main)
-        } else {
-            Vector2::new(main, cross)
-        };
-        set_position(tree, c, pos);
-        set_size(tree, c, mins[i]);
-        main += main_size + sep;
-        if cross_size > line_thickness {
-            line_thickness = cross_size;
-        }
-        line_started = true;
+        cross += line.thickness + sep;
     }
 }
 
@@ -1822,8 +2088,10 @@ pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vect
         }
         // FlowContainer defaults to horizontal flow (Godot's `vertical` property
         // is false by default); H/VFlowContainer force the direction.
-        "FlowContainer" | "HFlowContainer" => arrange_flow(tree, &children, total, sep, false),
-        "VFlowContainer" => arrange_flow(tree, &children, total, sep, true),
+        "FlowContainer" | "HFlowContainer" | "VFlowContainer" => {
+            let vertical = flow_is_vertical(tree, container_id);
+            arrange_flow(tree, container_id, &children, total, sep, vertical)
+        }
         "GridContainer" => {
             let cols = get_columns(tree, container_id).max(1) as usize;
             let h_sep = get_h_separation(tree, container_id) as f32;
@@ -1847,6 +2115,20 @@ pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vect
             let current = get_current_tab(tree, container_id);
             let strip_h = get_tab_bar_height(tree, container_id);
             arrange_tabs(tree, &children, total, current, strip_h);
+        }
+        "FoldableContainer" => {
+            let title_h = get_foldable_title_height(tree, container_id);
+            let at_bottom = foldable_title_at_bottom(tree, container_id);
+            let folded = is_foldable_folded(tree, container_id);
+            arrange_foldable(
+                tree,
+                container_id,
+                &children,
+                total,
+                title_h,
+                at_bottom,
+                folded,
+            );
         }
         // Split containers place their first two children on either side of a
         // draggable divider positioned by `split_offset` (pat-nzgdu.158).
@@ -1936,6 +2218,7 @@ pub fn is_container_class_name(class: &str) -> bool {
             | "HSplitContainer"
             | "VSplitContainer"
             | "SubViewportContainer"
+            | "FoldableContainer"
     )
 }
 
@@ -2500,6 +2783,328 @@ fn arrange_tabs(
 }
 
 // ===========================================================================
+// FoldableContainer
+// ===========================================================================
+
+/// Height of a FoldableContainer's title bar, in pixels.
+///
+/// Godot derives this from the theme (the title StyleBox margins plus the font
+/// height); Patina uses a fixed stand-in and honours a scene override, exactly
+/// as [`TAB_BAR_HEIGHT`] does for the tab strip.
+pub const FOLDABLE_TITLE_HEIGHT: f32 = 32.0;
+
+/// Height of this container's title bar, honouring a
+/// `theme_override_constants/title_height` override.
+pub fn get_foldable_title_height(tree: &SceneTree, node_id: NodeId) -> f32 {
+    let Some(node) = tree.get_node(node_id) else {
+        return FOLDABLE_TITLE_HEIGHT;
+    };
+    match node.get_property("theme_override_constants/title_height") {
+        Variant::Int(i) => i.max(0) as f32,
+        Variant::Float(f) => (f as f32).max(0.0),
+        _ => FOLDABLE_TITLE_HEIGHT,
+    }
+}
+
+/// Whether the title bar sits below the content — Godot's
+/// `title_position = POSITION_BOTTOM` (`POSITION_TOP = 0`, `POSITION_BOTTOM = 1`).
+pub fn foldable_title_at_bottom(tree: &SceneTree, node_id: NodeId) -> bool {
+    int_prop_or(tree, node_id, "title_position", 0) == 1
+}
+
+/// Whether this container is currently collapsed.
+pub fn is_foldable_folded(tree: &SceneTree, node_id: NodeId) -> bool {
+    bool_prop_or_false(tree, node_id, "folded")
+}
+
+/// The container's `foldable_group`, as the group resource's identity string.
+/// Empty means ungrouped.
+///
+/// Patina resources are values with no object identity, so — exactly as for
+/// `button_group` (pat-s3rrv.161) — two containers naming the SAME resource
+/// reference are in the same group. That is the comparison Godot's
+/// `Ref<FoldableGroup>` equality makes.
+pub fn foldable_group_of(tree: &SceneTree, node_id: NodeId) -> String {
+    let Some(node) = tree.get_node(node_id) else {
+        return String::new();
+    };
+    match node.get_property("__extres__foldable_group") {
+        Variant::String(s) if !s.is_empty() => return s,
+        _ => {}
+    }
+    match node.get_property("foldable_group") {
+        Variant::String(s) => s,
+        _ => String::new(),
+    }
+}
+
+/// Every FoldableContainer naming `group`, in tree order. An empty `group`
+/// matches nothing — without that guard every ungrouped container in the scene
+/// would become one mutually exclusive group.
+pub fn foldable_group_members(tree: &SceneTree, group: &str) -> Vec<NodeId> {
+    if group.is_empty() {
+        return Vec::new();
+    }
+    tree.all_nodes_in_tree_order()
+        .into_iter()
+        .filter(|&id| {
+            tree.get_node(id)
+                .map(|n| n.class_name() == "FoldableContainer")
+                .unwrap_or(false)
+        })
+        .filter(|&id| foldable_group_of(tree, id) == group)
+        .collect()
+}
+
+/// Godot's `FoldableGroup.get_expanded_container()` — the one member that is
+/// currently unfolded, if any.
+pub fn foldable_group_expanded(tree: &SceneTree, group: &str) -> Option<NodeId> {
+    foldable_group_members(tree, group)
+        .into_iter()
+        .find(|&id| !is_foldable_folded(tree, id))
+}
+
+/// Godot's `FoldableGroup.allow_folding_all` — whether every member may be
+/// closed at once. Defaults to false, so a group always keeps one open.
+///
+/// ⚠️ Read from a `__foldable_group__*` companion, not from the group. The flag
+/// lives in the sub-resource BODY and a node carries only the reference, so the
+/// body has to be flattened onto the members at load — the same arrangement
+/// `__button_group__allow_unpress` uses.
+pub fn foldable_group_allows_folding_all(tree: &SceneTree, node_id: NodeId) -> bool {
+    bool_prop_or_false(tree, node_id, "__foldable_group__allow_folding_all")
+}
+
+/// Sets `folded`, applying group exclusivity. Returns whether the state changed.
+///
+/// Port of `FoldableContainer::set_folded` (`foldable_container.cpp:66-82`):
+///
+/// - **Unfolding** a grouped container folds every other member first, which is
+///   what makes a group behave like an accordion.
+/// - **Folding** the group's only open member is REFUSED unless the group sets
+///   `allow_folding_all` — the same shape as `ButtonGroup.allow_unpress`.
+///
+/// ⚠️ Does NOT emit `folding_changed`, on any container. Godot emits it from the
+/// *callers* — `fold()`, `unfold()` and `gui_input` (`:57-63`, `:235-236`) — and
+/// never from `set_folded` itself, so the siblings that `_update_group` folds
+/// stay silent. A script listening on a sibling hears nothing when the group
+/// closes it. Surprising, but it is the behaviour, and emitting here would make
+/// one click fire the signal on every member of the group.
+pub fn set_foldable_folded(tree: &mut SceneTree, node_id: NodeId, folded: bool) -> bool {
+    if is_foldable_folded(tree, node_id) == folded {
+        return false;
+    }
+    let group = foldable_group_of(tree, node_id);
+    if !group.is_empty() {
+        if folded {
+            // Closing the last open one would empty the group.
+            if foldable_group_expanded(tree, &group) == Some(node_id)
+                && !foldable_group_allows_folding_all(tree, node_id)
+            {
+                return false;
+            }
+        } else {
+            for other in foldable_group_members(tree, &group) {
+                if other != node_id {
+                    if let Some(node) = tree.get_node_mut(other) {
+                        node.set_property("folded", Variant::Bool(true));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("folded", Variant::Bool(folded));
+    }
+    true
+}
+
+/// The title bar's rect in container-local coordinates: `(position, size)`.
+///
+/// Mirrors `foldable_container.cpp:252` — the band is at the top, or flush with
+/// the bottom edge when `title_position = POSITION_BOTTOM`.
+pub fn foldable_title_rect(tree: &SceneTree, node_id: NodeId) -> (Vector2, Vector2) {
+    let size = get_size(tree, node_id);
+    let title_h = get_foldable_title_height(tree, node_id).min(size.y.max(0.0));
+    let y = if foldable_title_at_bottom(tree, node_id) {
+        (size.y - title_h).max(0.0)
+    } else {
+        0.0
+    };
+    (Vector2::new(0.0, y), Vector2::new(size.x, title_h))
+}
+
+/// Whether `local` (a point in the container's own coordinate space) is inside
+/// the title bar.
+///
+/// ⚠️ Only the title bar toggles. A click in the content area must fall through
+/// to the children, or an expanded container could never be interacted with.
+pub fn point_in_foldable_title(tree: &SceneTree, node_id: NodeId, local: Vector2) -> bool {
+    let (pos, size) = foldable_title_rect(tree, node_id);
+    local.x >= pos.x && local.x < pos.x + size.x && local.y >= pos.y && local.y < pos.y + size.y
+}
+
+/// Handles a click that landed inside the title bar: toggles `folded` and emits
+/// `folding_changed`.
+///
+/// Port of the `gui_input` branch at `foldable_container.cpp:235-236`.
+///
+/// ⚠️ The signal carries the state AFTER the attempt, and fires even when the
+/// toggle was refused — Godot reads its `folded` member back out on the line
+/// following `set_folded`, so a refused fold reports the unchanged value rather
+/// than staying silent. Returns whether anything actually changed, for callers
+/// that need to know.
+pub fn toggle_foldable_from_click(tree: &mut SceneTree, node_id: NodeId) -> bool {
+    let want = !is_foldable_folded(tree, node_id);
+    let changed = set_foldable_folded(tree, node_id, want);
+    let now = is_foldable_folded(tree, node_id);
+    // ⚠️ Signal only — there is deliberately no `_folding_changed` virtual call
+    // beside it. `foldable_container.h` declares no `GDVIRTUAL` at all and the
+    // doc XML lists `folding_changed` under <signals>, so the `_toggled`-style
+    // pairing that BaseButton uses would be inventing a Godot API.
+    tree.emit_signal(node_id, "folding_changed", &[Variant::Bool(now)]);
+
+    // ⚠️ Re-sort AFTER the state change, and re-sort every member of the group —
+    // not just the one clicked. Unfolding one container folds its siblings, and
+    // a sibling whose children are still laid out is a container that looks
+    // open while reporting closed.
+    if changed {
+        let group = foldable_group_of(tree, node_id);
+        let affected = if group.is_empty() {
+            vec![node_id]
+        } else {
+            foldable_group_members(tree, &group)
+        };
+        for id in affected {
+            resort_foldable(tree, id);
+        }
+    }
+    changed
+}
+
+/// Godot's folded-container minimum size: the title band alone.
+///
+/// This is what "a folded container collapses to its title bar" means in
+/// Godot — `update_minimum_size` shrinks the MINIMUM and the parent container
+/// re-sorts the node down to it. A FoldableContainer sitting under a plain
+/// `Control` keeps whatever rect it was given, in Patina exactly as upstream.
+pub fn foldable_minimum_size(tree: &SceneTree, node_id: NodeId) -> Vector2 {
+    let custom = get_custom_minimum_size(tree, node_id);
+    if !is_foldable_folded(tree, node_id) {
+        return custom;
+    }
+    Vector2::new(
+        custom.x,
+        custom.y.max(get_foldable_title_height(tree, node_id)),
+    )
+}
+
+/// Re-runs the container's sort so a fold change reaches the children now.
+///
+/// Godot spells this `queue_sort()` inside `set_folded`; Patina's GUI handlers
+/// re-arrange inline instead — the scroll-wheel branch at `scene_tree.rs:6233`
+/// does the same thing for the same reason, "so the content child's offset
+/// reflects the new value before the next frame is drawn".
+fn resort_foldable(tree: &mut SceneTree, node_id: NodeId) {
+    let size = get_size(tree, node_id);
+    arrange_container(tree, node_id, size);
+}
+
+/// Horizontal padding on each side of a FoldableContainer's title text — the
+/// stand-in for Godot's `h_separation` theme constant, mirroring
+/// [`TAB_H_PADDING`].
+pub const FOLDABLE_TITLE_H_PADDING: f32 = 8.0;
+
+/// The container's `title` text.
+pub fn get_foldable_title(tree: &SceneTree, node_id: NodeId) -> String {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("title") {
+            Variant::String(s) => s,
+            _ => String::new(),
+        })
+        .unwrap_or_default()
+}
+
+/// The title's horizontal alignment: Godot's `HorizontalAlignment`
+/// (LEFT 0, CENTER 1, RIGHT 2, FILL 3).
+pub fn foldable_title_alignment(tree: &SceneTree, node_id: NodeId) -> i64 {
+    int_prop_or(tree, node_id, "title_alignment", 0)
+}
+
+/// Whether `node_id` is a FoldableContainer.
+pub fn is_foldable_container(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .map(|n| n.class_name() == "FoldableContainer")
+        .unwrap_or(false)
+}
+
+/// Handles a mouse PRESS at `global_point` on `node_id`, folding or unfolding it
+/// when the press landed on its title bar. Returns whether the fold toggled.
+///
+/// This is the whole of the input behaviour, so the scene-tree router only has
+/// to call it for every press it already resolves — it is a no-op for anything
+/// that is not a FoldableContainer, and for a press outside the title band.
+///
+/// ⚠️ **Press, not release.** `foldable_container.cpp:242-247` gates on
+/// `b->is_pressed()`, unlike the button family, whose ACTION fires on the
+/// release by default. Wiring this into the release branch beside
+/// `fire_button_action` would make the title feel a frame late and would break
+/// on a press-then-drag-away, which Godot still treats as a fold.
+///
+/// ⚠️ The class check is not optional. [`point_in_foldable_title`] answers for
+/// any node with a size, so without it every Control in the scene would toggle
+/// something when clicked in its top 32 pixels.
+pub fn foldable_title_press(tree: &mut SceneTree, node_id: NodeId, global_point: Vector2) -> bool {
+    if !is_foldable_container(tree, node_id) {
+        return false;
+    }
+    // The title rect is in the container's own space; the router works in
+    // globals. Same conversion `item_views::item_view_click` makes.
+    let origin = get_global_rect(tree, node_id).position;
+    if !point_in_foldable_title(tree, node_id, global_point - origin) {
+        return false;
+    }
+    toggle_foldable_from_click(tree, node_id)
+}
+
+/// FoldableContainer: the children fill whatever is left beside the title band,
+/// or vanish entirely when the container is folded.
+///
+/// ⚠️ Folding collapses the CHILDREN and leaves the container's own size alone.
+/// Godot shrinks a folded container through `update_minimum_size` — its minimum
+/// becomes the title panel and its *parent* re-sorts it down — which is why
+/// [`foldable_minimum_size`] exists rather than a `set_size` here.
+///
+/// Overriding the size in this function is the tempting shortcut and it is a
+/// trap: it throws away the expanded height, so the next unfold re-arranges
+/// against the collapsed rect and hands every child zero space. A container
+/// folded and then unfolded would come back empty.
+fn arrange_foldable(
+    tree: &mut SceneTree,
+    container_id: NodeId,
+    children: &[NodeId],
+    total: Vector2,
+    title_h: f32,
+    at_bottom: bool,
+    folded: bool,
+) {
+    let _ = container_id;
+    if folded {
+        for &c in children {
+            set_position(tree, c, Vector2::ZERO);
+            set_size(tree, c, Vector2::ZERO);
+        }
+        return;
+    }
+    let content_h = (total.y - title_h).max(0.0);
+    let content_y = if at_bottom { 0.0 } else { title_h };
+    for &c in children {
+        set_position(tree, c, Vector2::new(0.0, content_y));
+        set_size(tree, c, Vector2::new(total.x, content_h));
+    }
+}
+
+// ===========================================================================
 // Label
 // ===========================================================================
 
@@ -2852,6 +3457,7 @@ pub fn fire_button_action(tree: &mut SceneTree, node_id: NodeId) {
         set_button_pressed(tree, node_id, next);
     }
     tree.emit_signal(node_id, "pressed", &[]);
+    link_button_pressed(tree, node_id);
     tree.call_script_with_access(node_id, "_pressed", &[]);
 }
 

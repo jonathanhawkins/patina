@@ -702,8 +702,15 @@ impl SoftwareRenderer {
                     axis_h,
                     axis_v,
                     modulate,
+                    region,
                 } => {
                     if let Some(tex) = self.find_texture(texture_path) {
+                        // `region_rect` confines sampling to a sub-rect of the
+                        // source (pat-s3rrv.167). A zero-size region yields
+                        // `None`, and the whole texture is used byte-for-byte as
+                        // before this field existed.
+                        let cropped = draw::crop_to_region(tex, *region);
+                        let tex = cropped.as_ref().unwrap_or(tex);
                         let transformed = Self::transform_rect(global_transform, *rect);
                         draw::draw_nine_patch_axes(
                             fb,
@@ -1452,6 +1459,10 @@ mod tests {
             axis_h: gdserver2d::canvas::NinePatchAxis::Stretch,
             axis_v: gdserver2d::canvas::NinePatchAxis::Stretch,
             modulate: Color::rgb(0.0, 1.0, 0.0),
+            region: gdcore::math::Rect2::new(
+                gdcore::math::Vector2::ZERO,
+                gdcore::math::Vector2::ZERO,
+            ),
         });
         vp.add_canvas_item(item);
 

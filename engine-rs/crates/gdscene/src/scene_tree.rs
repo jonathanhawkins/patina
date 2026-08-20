@@ -416,6 +416,16 @@ pub struct SceneTree {
     /// An in-flight scrollbar grabber drag (Godot's `ScrollBar::drag`), holding
     /// where the grab started so the handle stays under the pointer.
     gui_scrollbar_drag: Option<(NodeId, crate::range_controls::ScrollBarDrag)>,
+    /// An in-flight SplitContainer divider drag: `(container, grab position
+    /// along the split axis, the container's `split_offset` when grabbed)`
+    /// (pat-s3rrv.173).
+    ///
+    /// ⚠️ The offset at grab time is stored rather than applying per-motion
+    /// deltas. `drag_split` CLAMPS, so accumulating deltas would desynchronise
+    /// the divider from the pointer the moment a drag ran into the clamp: the
+    /// pointer keeps moving, the offset does not, and the divider then lags by
+    /// however far the user overshot on the way back.
+    gui_split_drag: Option<(NodeId, f32, f32)>,
     /// The `[url=…]` run the pointer is currently inside: its label, the run's
     /// index and the payload.
     ///
@@ -495,6 +505,14 @@ pub struct SceneTree {
     current_scene_id: Option<NodeId>,
     /// Nodes marked for deferred deletion via `queue_free()`.
     /// They are removed at the end of the frame by `process_deletions()`.
+    /// URIs a `LinkButton` press asked the host to open (pat-s3rrv.166).
+    ///
+    /// 🔑 Recorded rather than performed. `gdplatform::os::shell_open` really
+    /// spawns `open` / `xdg-open` / `cmd start`, and gdscene performs no
+    /// platform side effects anywhere else — a layout/input pass that launched
+    /// a browser would fire on every test run that clicks one. The host drains
+    /// these and decides; the same shape as `pending_input_commands` below.
+    pending_shell_open: Vec<String>,
     pending_deletions: Vec<NodeId>,
     /// Methods queued via [`call_deferred`](Self::call_deferred). Flushed after
     /// the process phase (before deletions), matching Godot's MessageQueue.
@@ -642,6 +660,7 @@ impl SceneTree {
             gui_mouse_focus: None,
             http_requests: HashMap::new(),
             gui_scrollbar_drag: None,
+            gui_split_drag: None,
             hovered_meta: None,
             focus_owner: None,
             tweens: HashMap::new(),
@@ -659,6 +678,7 @@ impl SceneTree {
             input_map_bindings: std::collections::HashMap::new(),
             current_packed_scene: None,
             current_scene_id: None,
+            pending_shell_open: Vec::new(),
             pending_deletions: Vec::new(),
             pending_deferred_calls: Vec::new(),
             scene_timers: Vec::new(),
@@ -1890,6 +1910,19 @@ impl SceneTree {
 
     /// Drain signal names for timers that timed out (for await resume).
     /// Also removes finished timers after reporting.
+    /// Records a URI for the host to open (pat-s3rrv.166).
+    pub fn request_shell_open(&mut self, uri: impl Into<String>) {
+        self.pending_shell_open.push(uri.into());
+    }
+
+    /// Drains the pending `shell_open` URIs.
+    ///
+    /// Draining is what makes a second press observable as a second request
+    /// rather than folding into the first.
+    pub fn take_shell_open_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_shell_open)
+    }
+
     pub fn take_timeout_signals(&mut self) -> Vec<String> {
         let mut names = Vec::new();
         let mut keep = Vec::new();
@@ -4667,6 +4700,47 @@ impl SceneTree {
     /// Returns `None` when the node has no script, the script does not define
     /// `method`, or the call raised. Skipping an undefined method is what lets
     /// lifecycle dispatch call `_ready`/`_process` on every node blindly.
+    /// Sets a node property and emits whatever change signal Godot emits for
+    /// it (pat-s3rrv.167).
+    ///
+    /// Writing straight to `Node::set_property` stores the value and tells
+    /// nobody; a `NinePatchRect` swapping its texture has to notify whatever is
+    /// drawing it. Use this whenever a property is assigned on a node that is
+    /// already in the tree.
+    ///
+    /// ⚠️ **No-op assignments emit nothing.** Godot fires the signal on a
+    /// CHANGE, so assigning the same texture twice is one emission, not two —
+    /// that is the "exactly once" a listener counts on, and re-emitting would
+    /// make any redraw-on-change handler loop on itself.
+    ///
+    /// Whether a signal exists is asked of ClassDB rather than a hardcoded list
+    /// of classes, so a class gaining `texture_changed` gets the behaviour
+    /// without a second place needing to learn about it.
+    pub fn set_node_property_notifying(
+        &mut self,
+        node_id: NodeId,
+        key: &str,
+        value: Variant,
+    ) -> bool {
+        let Some(node) = self.nodes.get(&node_id) else {
+            return false;
+        };
+        if node.get_property(key) == value {
+            return false;
+        }
+        let class = node.class_name().to_string();
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.set_property(key, value);
+        }
+        // `texture` is the only property with a dedicated change signal in
+        // Godot's Texture2D-holding controls; others notify through `changed`
+        // on the resource itself, which this engine does not model yet.
+        if key == "texture" && gdobject::class_db::class_has_signal(&class, "texture_changed") {
+            self.emit_signal(node_id, "texture_changed", &[]);
+        }
+        true
+    }
+
     /// Runs every scripted `StyleBox` in the tree and caches what it drew
     /// (pat-s3rrv.160).
     ///
@@ -5983,15 +6057,29 @@ impl SceneTree {
         // works anywhere over the container, not just over the bar itself.
         if let Ev::MouseButton {
             button:
-                gdplatform::input::MouseButton::WheelUp | gdplatform::input::MouseButton::WheelDown,
+                gdplatform::input::MouseButton::WheelUp
+                | gdplatform::input::MouseButton::WheelDown
+                | gdplatform::input::MouseButton::WheelLeft
+                | gdplatform::input::MouseButton::WheelRight,
             pressed: true,
             ..
         } = event
         {
+            // `down` is really "the positive direction": down for a vertical
+            // wheel, right for a horizontal one (pat-s3rrv.173).
             let down = matches!(
                 event,
                 Ev::MouseButton {
-                    button: gdplatform::input::MouseButton::WheelDown,
+                    button: gdplatform::input::MouseButton::WheelDown
+                        | gdplatform::input::MouseButton::WheelRight,
+                    ..
+                }
+            );
+            let horizontal = matches!(
+                event,
+                Ev::MouseButton {
+                    button: gdplatform::input::MouseButton::WheelLeft
+                        | gdplatform::input::MouseButton::WheelRight,
                     ..
                 }
             );
@@ -6002,7 +6090,14 @@ impl SceneTree {
             // to. Godot gives the event to the control under the cursor, and the
             // container case only exists because a container FORWARDS to its own
             // internal bars (`ScrollContainer::gui_input`).
-            if let Some(delta) = crate::range_controls::wheel_delta(self, hit, down) {
+            //
+            // ⚠️ Vertical wheels only. `wheel_delta` knows a direction but not an
+            // axis, so feeding a horizontal notch to it would make a VSlider or
+            // VScrollBar respond to WheelLeft/WheelRight — which Godot does not
+            // do, and which no user expects from a sideways scroll.
+            if let Some(delta) =
+                crate::range_controls::wheel_delta(self, hit, down).filter(|_| !horizontal)
+            {
                 let target = crate::control::get_range_value(self, hit) + delta;
                 if crate::control::set_range_value(self, hit, target) {
                     // Re-read: the stored value is snapped and clamped, so it is
@@ -6016,7 +6111,7 @@ impl SceneTree {
                 self.input_handled = true;
                 return;
             }
-            if self.scroll_under_cursor(hit, down) {
+            if self.scroll_under_cursor(hit, down, horizontal) {
                 self.input_handled = true;
             }
             return;
@@ -6029,6 +6124,33 @@ impl SceneTree {
         // moves the value immediately and the following motion continues from
         // there (upstream/godot/scene/gui/slider.cpp).
         //
+        // A SplitContainer divider drag, checked BEFORE the range controls: the
+        // divider sits in the gap between two panes, so nothing else wants that
+        // press, and a drag in flight must keep winning motion even when the
+        // pointer wanders over a child (pat-s3rrv.173).
+        let split_press = match event {
+            Ev::MouseButton {
+                pressed: true,
+                button: gdplatform::input::MouseButton::Left,
+                ..
+            } => Some(true),
+            // ⚠️ Keyed on the drag being in flight, NOT on `gui_mouse_focus`
+            // matching `hit` the way the range controls below are. The divider
+            // is a gap between two panes, so the captured node is the CONTAINER
+            // while `hit` may be either child — comparing them would end the
+            // drag the moment the pointer crossed into a pane. Capture is still
+            // taken on press (see `drag_split_divider`); it is what keeps this
+            // stage running at all once the cursor leaves the container.
+            Ev::MouseMotion { .. } if self.gui_split_drag.is_some() => Some(false),
+            _ => None,
+        };
+        if let Some(is_press) = split_press {
+            if self.drag_split_divider(hit, position, is_press) {
+                self.input_handled = true;
+                return;
+            }
+        }
+
         // Placed AFTER the wheel block above, which returns for wheel events: a
         // wheel notch over a scrollbar must scroll, not be read as a drag to the
         // cursor's position. Only the left button drags, as in `slider.cpp` and
@@ -6108,6 +6230,13 @@ impl SceneTree {
                 // `mb->is_pressed()` (pat-0q2kx.85).
                 if !disabled {
                     crate::item_views::item_view_click(self, hit, position, false);
+                    // A FoldableContainer folds on the PRESS too
+                    // (`foldable_container.cpp:242-247` gates on
+                    // `b->is_pressed()`), so it belongs here rather than beside
+                    // `fire_button_action` in the release branch. The call is a
+                    // no-op unless `hit` really is a FoldableContainer and the
+                    // point really is inside its title bar (pat-s3rrv.165).
+                    crate::control::foldable_title_press(self, hit, position);
                 }
             } else {
                 // A click only counts when press and release land on the same
@@ -6126,6 +6255,7 @@ impl SceneTree {
                 // clears `drag.active`; otherwise the next stray motion would
                 // resume a drag the user already finished.
                 self.gui_scrollbar_drag = None;
+                self.gui_split_drag = None;
                 if is_button && !disabled && same {
                     // `button_up` reports the physical release and fires even
                     // when the pointer wandered off; only the ACTION is gated on
@@ -6197,6 +6327,133 @@ impl SceneTree {
         }
     }
 
+    /// How wide the grabbable band around a divider is, in pixels, when the
+    /// container's `separation` is narrower than that.
+    ///
+    /// ⚠️ Load-bearing. `get_separation` returns **0** for a container with no
+    /// `theme_override_constants/separation`, which is the default, so the
+    /// divider is a zero-width line and would be literally impossible to grab.
+    /// Godot avoids this with a themed dragger; this is the stand-in.
+    const SPLIT_DRAG_GRAB_PX: f32 = 6.0;
+
+    /// The SplitContainer at or above `from` whose divider band contains
+    /// `position`, with its split axis. `None` when the press was not on a
+    /// divider.
+    ///
+    /// ⚠️ The divider's position is read back off the LAID-OUT first child
+    /// rather than recomputed. `arrange_split` places child 0 with exactly the
+    /// span the divider starts after, so reading it keeps hit-testing and layout
+    /// as one rule; re-deriving it here would duplicate the clamp arithmetic and
+    /// the two would drift the first time either changed.
+    fn split_divider_under(
+        &self,
+        from: NodeId,
+        position: gdcore::math::Vector2,
+    ) -> Option<(NodeId, bool)> {
+        let mut cursor = Some(from);
+        while let Some(id) = cursor {
+            let class = self
+                .nodes
+                .get(&id)
+                .map(|n| n.class_name().to_string())
+                .unwrap_or_default();
+            if matches!(
+                class.as_str(),
+                "SplitContainer" | "HSplitContainer" | "VSplitContainer"
+            ) {
+                let vertical = class == "VSplitContainer";
+                let rect = crate::control::get_global_rect(self, id);
+                let local = position - rect.position;
+                let (along, across) = if vertical {
+                    (local.y, local.x)
+                } else {
+                    (local.x, local.y)
+                };
+                let across_extent = if vertical { rect.size.x } else { rect.size.y };
+                if across >= 0.0 && across <= across_extent {
+                    let children: Vec<NodeId> = self
+                        .nodes
+                        .get(&id)
+                        .map(|n| n.children().to_vec())
+                        .unwrap_or_default();
+                    if let Some(&first) = children.first() {
+                        let first_size = crate::control::get_size(self, first);
+                        let start = if vertical { first_size.y } else { first_size.x };
+                        let sep = crate::control::get_separation(self, id) as f32;
+                        let band = sep.max(Self::SPLIT_DRAG_GRAB_PX);
+                        // Centre the grab band on the gap when the band is wider
+                        // than the separation, so a hairline divider is grabbable
+                        // from either side rather than only from below/right.
+                        let pad = (band - sep).max(0.0) * 0.5;
+                        if along >= start - pad && along <= start + sep + pad {
+                            return Some((id, vertical));
+                        }
+                    }
+                }
+            }
+            cursor = self.nodes.get(&id).and_then(|n| n.parent());
+        }
+        None
+    }
+
+    /// Begins or continues a divider drag. Returns whether the event was for a
+    /// divider at all.
+    ///
+    /// The offset arithmetic and the `dragged` signal both live in
+    /// `control::drag_split`, which already existed with no caller — this is
+    /// only the input half.
+    fn drag_split_divider(
+        &mut self,
+        hit: NodeId,
+        position: gdcore::math::Vector2,
+        is_press: bool,
+    ) -> bool {
+        if is_press {
+            let Some((container, vertical)) = self.split_divider_under(hit, position) else {
+                return false;
+            };
+            let grab = if vertical { position.y } else { position.x };
+            let offset = crate::control::get_split_offset(self, container);
+            self.gui_split_drag = Some((container, grab, offset));
+            // ⚠️ Capture the pointer, exactly as the button path does at
+            // `:6204`. Without this the drag dies the moment the cursor leaves
+            // the container: `gui_input_stage` resolves `hit` with
+            // `control_at_point`, and a motion outside every control makes it
+            // return BEFORE reaching the split block. The press branch that
+            // normally sets `gui_mouse_focus` is below this one and never runs,
+            // because a divider press returns early.
+            //
+            // Dragging past the edge and back is the whole point of a divider,
+            // so this is not an edge case — it is the common gesture.
+            self.gui_mouse_focus = Some(container);
+            return true;
+        }
+
+        let Some((container, grab, offset_at_press)) = self.gui_split_drag else {
+            return false;
+        };
+        if !self.nodes.contains_key(&container) {
+            self.gui_split_drag = None;
+            return false;
+        }
+        let vertical = self
+            .nodes
+            .get(&container)
+            .map(|n| n.class_name() == "VSplitContainer")
+            .unwrap_or(false);
+        let now = if vertical { position.y } else { position.x };
+        let total = crate::control::get_size(self, container);
+        if crate::control::drag_split(self, container, offset_at_press + (now - grab), total) {
+            // ⚠️ `drag_split` only writes `split_offset` and emits `dragged`; it
+            // does not re-lay-out. Godot spells that `queue_sort()`, and this
+            // stage re-sorts inline the way the scroll-wheel branch does — a
+            // moved divider whose panes have not been re-arranged is a divider
+            // that visibly does not move (pat-s3rrv.165 hit the same thing).
+            crate::control::arrange_container(self, container, total);
+        }
+        true
+    }
+
     /// Scrolls the nearest ScrollContainer at or above `from` by one wheel step
     /// (pat-0q2kx.86). Returns whether anything actually scrolled, so a wheel
     /// over non-scrolling content still reaches gameplay code.
@@ -6204,7 +6461,7 @@ impl SceneTree {
     /// The offset is clamped to the container's scrollable range, matching
     /// Godot's scrollbars — wheeling past the end parks at the last band
     /// instead of scrolling the content out of sight.
-    fn scroll_under_cursor(&mut self, from: NodeId, down: bool) -> bool {
+    fn scroll_under_cursor(&mut self, from: NodeId, down: bool, horizontal: bool) -> bool {
         let mut cursor = Some(from);
         while let Some(id) = cursor {
             let is_scroll = self
@@ -6213,6 +6470,37 @@ impl SceneTree {
                 .map(|n| n.class_name() == "ScrollContainer")
                 .unwrap_or(false);
             if is_scroll {
+                // `vertical_scroll_mode = SCROLL_MODE_DISABLED` (0) takes this
+                // container out of the wheel's path entirely (pat-s3rrv.173).
+                //
+                // ⚠️ DISABLED is the ONLY mode that blocks scrolling —
+                // `scroll_container.cpp:540-544` gates on
+                // `!= SCROLL_MODE_DISABLED`. `SHOW_NEVER` (3) merely hides the
+                // bar and still scrolls on the wheel; treating it as "no
+                // scrolling" is the easy misreading of the enum's name.
+                //
+                // ⚠️ `continue`, not `return false`: a disabled container has
+                // not consumed the notch, so an enclosing ScrollContainer must
+                // still get it. Stopping the walk here would make a disabled
+                // inner panel silently swallow its parent's scrolling.
+                let mode_key = if horizontal {
+                    "horizontal_scroll_mode"
+                } else {
+                    "vertical_scroll_mode"
+                };
+                let vmode = self
+                    .nodes
+                    .get(&id)
+                    .map(|n| match n.get_property(mode_key) {
+                        Variant::Int(i) => i,
+                        _ => 1,
+                    })
+                    .unwrap_or(1);
+                if vmode == 0 {
+                    cursor = self.nodes.get(&id).and_then(|n| n.parent());
+                    continue;
+                }
+
                 let view = crate::control::get_size(self, id);
                 let limit = crate::control::max_scroll(self, id, view);
                 let current = crate::control::get_scroll(self, id);
@@ -6221,13 +6509,54 @@ impl SceneTree {
                 // PAGE_DIVISOR = 8 (upstream/godot/scene/gui/scroll_bar.cpp:84).
                 // `page` is the viewport extent, so a taller container scrolls
                 // proportionally further per notch.
-                let magnitude = (view.y / 8.0).max(1.0);
+                //
+                // `scroll_vertical_custom_step` overrides that when set —
+                // `custom_step >= 0 ? custom_step : <default>`
+                // (`scroll_bar.cpp:112`, reached through
+                // `ScrollContainer::set_vertical_custom_step`).
+                //
+                // ⚠️ `>= 0`, not `> 0`. The "unset" value is spelled **-1.0**,
+                // and a custom step of exactly 0 is a real setting meaning "the
+                // wheel moves nothing" — folding it in with unset would silently
+                // restore default scrolling to a container that asked for none.
+                let step_key = if horizontal {
+                    "scroll_horizontal_custom_step"
+                } else {
+                    "scroll_vertical_custom_step"
+                };
+                let custom = self
+                    .nodes
+                    .get(&id)
+                    .map(|n| match n.get_property(step_key) {
+                        Variant::Float(f) => f as f32,
+                        Variant::Int(i) => i as f32,
+                        _ => -1.0,
+                    })
+                    .unwrap_or(-1.0);
+                // The extent along the axis being scrolled: a horizontal notch
+                // is sized by the container's WIDTH, not its height.
+                let extent = if horizontal { view.x } else { view.y };
+                let magnitude = if custom >= 0.0 {
+                    custom
+                } else {
+                    (extent / 8.0).max(1.0)
+                };
                 let step = if down { magnitude } else { -magnitude };
-                let next = (current.y + step).clamp(0.0, limit.y);
-                if next == current.y {
+                let (from_value, ceiling) = if horizontal {
+                    (current.x, limit.x)
+                } else {
+                    (current.y, limit.y)
+                };
+                let next = (from_value + step).clamp(0.0, ceiling);
+                if next == from_value {
                     return false;
                 }
-                crate::control::set_scroll(self, id, gdcore::math::Vector2::new(current.x, next));
+                let scrolled = if horizontal {
+                    gdcore::math::Vector2::new(next, current.y)
+                } else {
+                    gdcore::math::Vector2::new(current.x, next)
+                };
+                crate::control::set_scroll(self, id, scrolled);
                 // Re-run the container's sort so the content child's offset
                 // reflects the new value before the next frame is drawn.
                 crate::control::arrange_container(self, id, view);
@@ -6439,6 +6768,74 @@ impl SceneTree {
         self.focus_owner = Some(node_id);
         self.emit_signal(node_id, "focus_entered", &[]);
         self.call_script_with_access(node_id, "_focus_entered", &[]);
+        // `ScrollContainer.follow_focus` scrolls a newly focused descendant into
+        // view (`scroll_container.cpp:311-312`), which is what makes keyboard
+        // navigation through a long scrolled list usable at all.
+        self.follow_focus_to(node_id);
+    }
+
+    /// Scrolls the nearest `follow_focus` ScrollContainer so `node_id` is
+    /// visible, if there is one (pat-s3rrv.173).
+    ///
+    /// Port of `ScrollContainer::ensure_control_visible`
+    /// (`scroll_container.cpp:322-339`), without the rotation and scrollbar
+    /// margin terms — Patina's scroll containers have neither.
+    fn follow_focus_to(&mut self, node_id: NodeId) {
+        let mut cursor = self.nodes.get(&node_id).and_then(|n| n.parent());
+        while let Some(id) = cursor {
+            let is_scroll = self
+                .nodes
+                .get(&id)
+                .map(|n| n.class_name() == "ScrollContainer")
+                .unwrap_or(false);
+            if is_scroll {
+                let follows = self
+                    .nodes
+                    .get(&id)
+                    .map(|n| matches!(n.get_property("follow_focus"), Variant::Bool(true)))
+                    .unwrap_or(false);
+                if !follows {
+                    // ⚠️ Godot's default is FALSE, so a container that has not
+                    // opted in must not move. Keep walking: an outer container
+                    // may still follow.
+                    cursor = self.nodes.get(&id).and_then(|n| n.parent());
+                    continue;
+                }
+                let view = crate::control::get_size(self, id);
+                let container_origin = crate::control::get_global_rect(self, id).position;
+                let child = crate::control::get_global_rect(self, node_id);
+                // The focused control's rect in the container's own space. This
+                // already reflects the current scroll, because the content child
+                // is positioned by it — the same thing Godot's `other_in_this`
+                // gives, which is why the result is applied as a DELTA below.
+                let top_left = child.position - container_origin;
+
+                // `MAX(MIN(near, 0), far - view)` — scroll up when the control
+                // starts above the view, down when it ends below it, and not at
+                // all when it already fits (`scroll_container.cpp:334-335`).
+                let axis =
+                    |near: f32, extent: f32, view: f32| near.min(0.0).max(near + extent - view);
+                let diff = gdcore::math::Vector2::new(
+                    axis(top_left.x, child.size.x, view.x),
+                    axis(top_left.y, child.size.y, view.y),
+                );
+                if diff.x == 0.0 && diff.y == 0.0 {
+                    return;
+                }
+                let limit = crate::control::max_scroll(self, id, view);
+                let current = crate::control::get_scroll(self, id);
+                let next = gdcore::math::Vector2::new(
+                    (current.x + diff.x).clamp(0.0, limit.x),
+                    (current.y + diff.y).clamp(0.0, limit.y),
+                );
+                crate::control::set_scroll(self, id, next);
+                // Re-sort so the content child's offset reflects the new scroll,
+                // as the wheel path does.
+                crate::control::arrange_container(self, id, view);
+                return;
+            }
+            cursor = self.nodes.get(&id).and_then(|n| n.parent());
+        }
     }
 
     /// Drops keyboard focus, emitting `focus_exited` on the owner if there was

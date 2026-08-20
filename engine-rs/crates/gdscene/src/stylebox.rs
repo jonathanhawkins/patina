@@ -261,6 +261,10 @@ impl StyleBoxTexture {
             axis_h: self.axis_h.to_nine_patch_axis(),
             axis_v: self.axis_v.to_nine_patch_axis(),
             modulate: self.modulate,
+            region: gdcore::math::Rect2::new(
+                gdcore::math::Vector2::ZERO,
+                gdcore::math::Vector2::ZERO,
+            ),
         }]
     }
 }

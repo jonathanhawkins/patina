@@ -693,6 +693,45 @@ pub fn draw_nine_patch(
 /// reaching any rasterizer, so `axis_stretch_horizontal = Tile` stretched the
 /// edge exactly like the default.
 #[allow(clippy::too_many_arguments)]
+/// Crops a texture to `region` for nine-patch sampling (pat-s3rrv.167).
+///
+/// `None` when the region is empty or degenerate, which means "use the whole
+/// texture" — Godot's default, and the behaviour every existing scene relies on.
+///
+/// ⚠️ Implemented as a crop rather than by offsetting the nine-patch source
+/// maths. Those coordinates are interdependent — `tw - src_right` is a source
+/// WIDTH, not a position, so adding an origin to the obvious places silently
+/// produces patches of the wrong size rather than a visible error. Cropping
+/// leaves that arithmetic untouched and makes "the patches come from the
+/// region" true by construction, at the cost of one copy on the non-default
+/// path.
+pub fn crop_to_region(texture: &Texture2D, region: Rect2) -> Option<Texture2D> {
+    if region.size.x <= 0.0 || region.size.y <= 0.0 {
+        return None;
+    }
+    // Clamp into the texture: a region reaching past the edge samples what is
+    // there rather than reading out of bounds.
+    let x0 = region.position.x.max(0.0).floor() as u32;
+    let y0 = region.position.y.max(0.0).floor() as u32;
+    let x1 = ((region.position.x + region.size.x).max(0.0).ceil() as u32).min(texture.width);
+    let y1 = ((region.position.y + region.size.y).max(0.0).ceil() as u32).min(texture.height);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let (w, h) = (x1 - x0, y1 - y0);
+    let mut pixels = Vec::with_capacity((w * h) as usize);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            pixels.push(texture.pixels[(y * texture.width + x) as usize]);
+        }
+    }
+    Some(Texture2D {
+        width: w,
+        height: h,
+        pixels,
+    })
+}
+
 pub fn draw_nine_patch_axes(
     fb: &mut FrameBuffer,
     texture: &Texture2D,

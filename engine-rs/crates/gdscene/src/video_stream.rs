@@ -448,3 +448,77 @@ mod tests {
         ));
     }
 }
+
+/// Binds every `VideoStreamPlayer` in `tree` to a decoded stream, so the frame
+/// loop can advance it (pat-s3rrv.171).
+///
+/// # Why a pass, and why it was missing
+///
+/// `SceneTree::add_video_player` existed with **no callers**: the decoder, the
+/// player, `process_video_players` and the `finished` emission were all present
+/// and reachable only from tests. A `.tscn` player therefore loaded, showed its
+/// `stream` property in the inspector, and never produced a frame — the whole
+/// feature was one binding short of working.
+///
+/// The stream path arrives as the `__extres__stream` companion the loader
+/// records for `stream = ExtResource(...)`; the property itself holds
+/// `ExtResource("id")`, which names nothing on its own once the scene is loaded.
+///
+/// Returns how many players were bound. Silent on a missing or undecodable
+/// file: a broken video reference should leave a blank player, exactly as an
+/// unloadable texture leaves a blank sprite, rather than failing the scene.
+pub fn bind_video_players(tree: &mut crate::scene_tree::SceneTree) -> usize {
+    let mut bound = 0usize;
+    for node_id in tree.all_nodes_in_tree_order() {
+        let Some(node) = tree.get_node(node_id) else {
+            continue;
+        };
+        if node.class_name() != "VideoStreamPlayer" {
+            continue;
+        }
+        // ⚠️ Idempotent: instancing a sub-scene runs this again over the whole
+        // tree, and rebinding would reset a player that is already mid-stream
+        // back to frame zero. Binding is a one-time attach, not a refresh.
+        if tree.get_video_player(node_id).is_some() {
+            continue;
+        }
+        let path = match node.get_property("__extres__stream") {
+            gdvariant::Variant::String(p) if !p.is_empty() => p,
+            // A bare string in `stream` is accepted too, so a hand-built tree
+            // in a test binds the same way a loaded scene does.
+            _ => match node.get_property("stream") {
+                gdvariant::Variant::String(p) if !p.is_empty() && !p.starts_with("ExtResource") => {
+                    p
+                }
+                _ => continue,
+            },
+        };
+        // Godot's `autoplay` starts the stream as the scene enters the tree;
+        // `paused` freezes it without ending playback, which is a different
+        // state from stopped and is why both are read here rather than folded
+        // into one flag.
+        let autoplay = matches!(
+            node.get_property("autoplay"),
+            gdvariant::Variant::Bool(true)
+        );
+        let paused = matches!(node.get_property("paused"), gdvariant::Variant::Bool(true));
+
+        let Ok(bytes) = gdcore::file_access::FileAccess::read_file_bytes(&path) else {
+            continue;
+        };
+        let Ok(stream) = VideoStream::from_fixture_bytes(&bytes) else {
+            continue;
+        };
+
+        let mut player = VideoStreamPlayer::default();
+        player.set_stream(stream);
+        player.stream_path = path;
+        if autoplay {
+            player.play();
+        }
+        player.set_paused(paused);
+        tree.add_video_player(node_id, player);
+        bound += 1;
+    }
+    bound
+}

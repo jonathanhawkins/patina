@@ -158,6 +158,44 @@ pub struct HttpClient {
     response_body: Vec<u8>,
     read_timeout: Option<Duration>,
     connect_timeout: Duration,
+    /// `HTTPClient.set_http_proxy` — the proxy for plaintext exchanges.
+    ///
+    /// The port is an `i32`, not a `u16`, because `-1` is upstream's documented
+    /// "no proxy" sentinel (`http_client_tcp.h:48`) and a `u16` cannot express
+    /// it. See [`proxy_setting`] for how a value is accepted or cleared.
+    http_proxy: Option<(String, i32)>,
+    /// `HTTPClient.set_https_proxy` — the proxy for TLS exchanges.
+    ///
+    /// ⚠️ Stored but currently inert: [`HttpClient::perform`] refuses `https://`
+    /// with `SslHandshakeError` before it ever connects, so nothing reaches the
+    /// CONNECT tunnel upstream builds here (`http_client_tcp.cpp:322-350`). It
+    /// round-trips through the setter so a script's configuration survives, and
+    /// takes effect when a TLS backend lands.
+    https_proxy: Option<(String, i32)>,
+    /// Whether the live connection was dialled through [`Self::http_proxy`].
+    ///
+    /// 🔑 This is what makes [`request`](Self::request) emit an absolute-form
+    /// request-target. It is decided at connect time, not read from
+    /// `http_proxy` at request time: a proxy configured *after* the connection
+    /// was opened did not affect where the bytes are going, so pretending
+    /// otherwise would address the request to a proxy that is not on the wire.
+    via_http_proxy: bool,
+}
+
+/// Normalises a `(host, port)` pair the way `HTTPClientTCP::set_http_proxy`
+/// does (`http_client_tcp.cpp:770-778`).
+///
+/// ⚠️ The clear sentinel is an **empty host or a port of exactly `-1`**. Port
+/// `0` is *not* a sentinel upstream — it is stored like any other value. The
+/// natural-looking `port <= 0` reads as a tidier spelling of the same rule and
+/// silently swallows a caller that asked for port 0, so the comparison must
+/// stay exact.
+fn proxy_setting(host: &str, port: i32) -> Option<(String, i32)> {
+    if host.is_empty() || port == -1 {
+        None
+    } else {
+        Some((host.to_string(), port))
+    }
 }
 
 impl Default for HttpClient {
@@ -180,7 +218,42 @@ impl HttpClient {
             // A sane default so a misbehaving host can't hang the caller forever.
             connect_timeout: Duration::from_secs(30),
             read_timeout: None,
+            http_proxy: None,
+            https_proxy: None,
+            via_http_proxy: false,
         }
+    }
+
+    /// Sets the proxy used for plaintext `http://` exchanges.
+    ///
+    /// Mirrors `HTTPClientTCP::set_http_proxy` (`http_client_tcp.cpp:770`).
+    /// An empty `host` or a `port` of `-1` clears the setting; see
+    /// [`proxy_setting`] for why `0` does not.
+    ///
+    /// Takes effect on the next [`connect_to_host`](Self::connect_to_host) —
+    /// an already-open connection keeps going where it was dialled.
+    pub fn set_http_proxy(&mut self, host: &str, port: i32) {
+        self.http_proxy = proxy_setting(host, port);
+    }
+
+    /// Sets the proxy used for `https://` exchanges.
+    ///
+    /// Mirrors `HTTPClientTCP::set_https_proxy` (`http_client_tcp.cpp:780`).
+    ///
+    /// ⚠️ Accepted and readable back, but inert until a TLS backend exists —
+    /// see the [`https_proxy`](Self::https_proxy) field note.
+    pub fn set_https_proxy(&mut self, host: &str, port: i32) {
+        self.https_proxy = proxy_setting(host, port);
+    }
+
+    /// The configured plaintext proxy, if any.
+    pub fn http_proxy(&self) -> Option<(&str, i32)> {
+        self.http_proxy.as_ref().map(|(h, p)| (h.as_str(), *p))
+    }
+
+    /// The configured TLS proxy, if any.
+    pub fn https_proxy(&self) -> Option<(&str, i32)> {
+        self.https_proxy.as_ref().map(|(h, p)| (h.as_str(), *p))
     }
 
     /// Sets the read timeout applied to the connection (None = block).
@@ -205,9 +278,41 @@ impl HttpClient {
     pub fn connect_to_host(&mut self, host: &str, port: u16) -> Result<(), HttpResultCode> {
         self.host = host.to_string();
         self.port = port;
+
+        // 🔑 Upstream keeps two pairs: `conn_host`/`conn_port` (the origin the
+        // caller asked for) and `server_host`/`server_port` (what is actually
+        // dialled), and only the second becomes the proxy
+        // (`http_client_tcp.cpp:76-86`). `self.host`/`self.port` stay the
+        // ORIGIN here for the same reason — the `Host:` header and the
+        // absolute request-target in `request` both describe the origin, and
+        // overwriting them with the proxy would make every proxied request ask
+        // the proxy to fetch from itself.
+        //
+        // ⚠️ Taken by value first: the arms below assign to `self.via_http_proxy`
+        // and `self.status`, which a live `&self.http_proxy` borrow from the
+        // match scrutinee would forbid.
+        let proxy = self.http_proxy.clone();
+        self.via_http_proxy = false;
+
+        let (dial_host, dial_port) = match proxy {
+            Some((proxy_host, proxy_port)) => match u16::try_from(proxy_port) {
+                Ok(proxy_port) => {
+                    self.via_http_proxy = true;
+                    (proxy_host, proxy_port)
+                }
+                // A port outside 0..=65535 cannot be dialled. Reported rather
+                // than clamped: silently connecting somewhere the caller did
+                // not name is worse than a clean failure.
+                Err(_) => {
+                    self.status = HttpClientStatus::CantConnect;
+                    return Err(HttpResultCode::CantConnect);
+                }
+            },
+            None => (host.to_string(), port),
+        };
         self.status = HttpClientStatus::Resolving;
 
-        let addrs = match (host, port).to_socket_addrs() {
+        let addrs = match (dial_host.as_str(), dial_port).to_socket_addrs() {
             Ok(addrs) => addrs.collect::<Vec<_>>(),
             Err(_) => {
                 self.status = HttpClientStatus::CantResolve;
@@ -256,8 +361,24 @@ impl HttpClient {
             return Err(HttpResultCode::ConnectionError);
         }
 
+        // 🔑 Through a proxy the request-target is the ABSOLUTE URI, not the
+        // path (`http_client_tcp.cpp:162-164`): the proxy has no other way to
+        // know which origin to forward to.
+        //
+        // ⚠️ The port is always present in that URI — including the default
+        // `80` — which is deliberately *unlike* the `Host:` header a few lines
+        // below, where upstream omits standard ports (`:186-190`). The two
+        // rules look like they should match and do not; a proxy keys its
+        // upstream connection off this URI, so dropping `:80` here changes
+        // where the request is forwarded rather than merely how it is spelled.
+        let target = if self.via_http_proxy {
+            format!("http://{}:{}{}", self.host, self.port, path)
+        } else {
+            path.to_string()
+        };
+
         let mut head = String::new();
-        head.push_str(&format!("{} {} HTTP/1.1\r\n", method.as_str(), path));
+        head.push_str(&format!("{} {} HTTP/1.1\r\n", method.as_str(), target));
         if self.port == 80 {
             head.push_str(&format!("Host: {}\r\n", self.host));
         } else {
@@ -442,6 +563,10 @@ impl HttpClient {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
         self.status = HttpClientStatus::Disconnected;
+        // The proxy *setting* survives a close (upstream keeps it on the
+        // client); only the fact that this connection went through one does
+        // not, since there is no longer a connection.
+        self.via_http_proxy = false;
     }
 
     /// Performs a complete blocking request described by `config`, following
@@ -469,6 +594,18 @@ impl HttpClient {
                 let d = Duration::from_secs_f64(config.timeout_seconds);
                 client.set_read_timeout(Some(d));
                 client.set_connect_timeout(d);
+            }
+
+            // ⚠️ Applied INSIDE the redirect loop, because the loop builds a
+            // fresh client per hop. Configuring the proxy once before the loop
+            // would route the first request through it and every redirect
+            // directly — the failure only appears on a 3xx, so a hand test
+            // against a non-redirecting URL would look completely correct.
+            if let Some((host, port)) = &config.http_proxy {
+                client.set_http_proxy(host, *port);
+            }
+            if let Some((host, port)) = &config.https_proxy {
+                client.set_https_proxy(host, *port);
             }
 
             if let Err(code) = client.connect_to_host(&parsed.host, parsed.port) {

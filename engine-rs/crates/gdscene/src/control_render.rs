@@ -44,6 +44,14 @@ const CONTROL_CLASSES: &[&str] = &[
     // entirely and the `"MenuBar"` arm below is unreachable — the strip would
     // be laid out, clickable and invisible.
     "MenuBar",
+    // pat-s3rrv.166: LinkButton was in CONTROL_HIT_CLASSES and BUTTON_CLASSES
+    // but not here — clickable, focusable and invisible, the same failure the
+    // note above describes.
+    "LinkButton",
+    // pat-s3rrv.172: same story again — both picker classes are registered and
+    // load from a `.tscn`, and neither was ever painted.
+    "ColorPicker",
+    "ColorPickerButton",
     "Control",
     "Panel",
     "PanelContainer",
@@ -89,6 +97,14 @@ const CONTROL_CLASSES: &[&str] = &[
     // pat-s3rrv.75. `Tree` was already in `CONTROL_HIT_CLASSES` (control.rs:941)
     // and missing here, so it absorbed clicks while never drawing.
     "Tree",
+    // pat-s3rrv.165 — same pairing: FoldableContainer is in
+    // `CONTROL_HIT_CLASSES` so its title bar can take a click, and needs to be
+    // here so the title bar it is taking clicks on is actually drawn.
+    "FoldableContainer",
+    // pat-s3rrv.170 — the third instance of that pairing. TextureButton was in
+    // `BUTTON_CLASSES` and `CONTROL_HIT_CLASSES` (control.rs:829, :869), so it
+    // took clicks and fired `pressed` while drawing nothing at all.
+    "TextureButton",
     "MarginContainer",
     "ScrollContainer",
     "GridContainer",
@@ -2164,6 +2180,202 @@ fn draw_control(
                 });
             }
         }
+        // pat-s3rrv.166: LinkButton is Godot's hyperlink-styled button. It was
+        // in `CONTROL_HIT_CLASSES` and `BUTTON_CLASSES` but not in
+        // `CONTROL_CLASSES`, so it laid out, took clicks and took focus while
+        // painting nothing — an invisible rectangle you could tab to and press.
+        "LinkButton" => {
+            let text = string_prop(tree, node_id, "text").unwrap_or_default();
+            if !text.is_empty() {
+                let font_color = color_prop(tree, node_id, "theme_override_colors/font_color")
+                    .or_else(|| theme.get_color("LinkButton", "font_color"))
+                    // Godot's default LinkButton font colour is the same
+                    // near-white as Button; the underline, not a colour, is what
+                    // marks it as a link.
+                    .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
+                let font_size = theme.get_font_size("LinkButton", "font_size").unwrap_or(16);
+                let scale = text_scale(font_size);
+                let tw = text_width(&text, scale);
+                let glyph_h = GLYPH_H * scale as f32;
+                // ⚠️ Drawn at the rect's top-left, NOT centred like `"Button"`.
+                // A LinkButton has no stylebox and its minimum size is the text
+                // itself (`link_button.cpp::get_minimum_size`), so there is no
+                // box to centre within — centring would shift the text off its
+                // own underline whenever the node was stretched by a container.
+                let position = rect.position;
+                out.push(DrawCommand::DrawString {
+                    text,
+                    position,
+                    color: font_color,
+                    font_size: font_size.max(1) as u32,
+                });
+
+                // `UnderlineMode`: ALWAYS = 0, ON_HOVER = 1, NEVER = 2
+                // (`upstream/godot/scene/gui/link_button.h:40`). ClassDB
+                // registers the default as `Int(0)`, i.e. ALWAYS, so a
+                // LinkButton that never sets the property is underlined.
+                const UNDERLINE_ALWAYS: i64 = 0;
+                const UNDERLINE_ON_HOVER: i64 = 1;
+                let mode = int_prop(tree, node_id, "underline").unwrap_or(UNDERLINE_ALWAYS);
+                // 🔑 `control_draw_items` takes no hover argument and MainLoop's
+                // `hovered_pickables` tracks pickables rather than Controls, so
+                // `SceneTree::hovered_control()` is the only thing that makes
+                // ON_HOVER expressible in the draw pass at all.
+                let hovered = tree.hovered_control() == Some(node_id);
+                if mode == UNDERLINE_ALWAYS || (mode == UNDERLINE_ON_HOVER && hovered) {
+                    // Same geometry the RichTextLabel underline uses, so the two
+                    // rules sit at the same offset for identical text.
+                    let thickness = scale as f32;
+                    let uy = position.y + glyph_h + thickness;
+                    out.push(DrawCommand::DrawLine {
+                        from: Vector2::new(position.x, uy),
+                        // Spans the TEXT width, not the control rect: a
+                        // container-stretched LinkButton must not trail a rule
+                        // past the end of its own label.
+                        to: Vector2::new(position.x + tw, uy),
+                        color: font_color,
+                        width: thickness,
+                    });
+                }
+            }
+        }
+        // pat-s3rrv.172: ColorPicker. Registered and loadable from a `.tscn` all
+        // along, and `color_picker.rs` held a faithful `Color::set_hsv` port plus
+        // the hit mapping — with **zero non-test callers**. Nothing drew it, so a
+        // picker in a played scene was an invisible, inert rectangle.
+        "ColorPicker" => {
+            let color = color_prop(tree, node_id, "color").unwrap_or(Color::WHITE);
+            let edit_alpha = bool_prop(tree, node_id, "edit_alpha").unwrap_or(true);
+            let model = crate::color_picker::ColorPickerModel::from_color(color);
+            let layout = crate::color_picker::picker_layout(rect, edit_alpha);
+
+            // ⚠️ The SV area is a GRADIENT in Godot; Patina's draw model has no
+            // gradient primitive, so it is approximated by a grid of cells. The
+            // cell colours come from `color_from_hsv` — the same function the
+            // hit mapping inverts — so what is painted and what a click resolves
+            // to cannot drift apart.
+            const SV_CELLS: usize = 16;
+            if layout.sv.size.x > 0.0 && layout.sv.size.y > 0.0 {
+                let cw = layout.sv.size.x / SV_CELLS as f32;
+                let ch = layout.sv.size.y / SV_CELLS as f32;
+                for iy in 0..SV_CELLS {
+                    for ix in 0..SV_CELLS {
+                        // Sample at the cell CENTRE: sampling the corner makes
+                        // the top row pure white and the left column pure grey,
+                        // a visible seam against the cursor's own position.
+                        let s = (ix as f32 + 0.5) / SV_CELLS as f32;
+                        let v = 1.0 - (iy as f32 + 0.5) / SV_CELLS as f32;
+                        out.push(DrawCommand::DrawRect {
+                            rect: Rect2::new(
+                                Vector2::new(
+                                    layout.sv.position.x + ix as f32 * cw,
+                                    layout.sv.position.y + iy as f32 * ch,
+                                ),
+                                Vector2::new(cw, ch),
+                            ),
+                            color: crate::color_picker::color_from_hsv(model.hue, s, v, 1.0),
+                            filled: true,
+                        });
+                    }
+                }
+            }
+
+            // The hue bar: full saturation and value down the spectrum.
+            const HUE_CELLS: usize = 24;
+            if layout.hue.size.x > 0.0 && layout.hue.size.y > 0.0 {
+                let hh = layout.hue.size.y / HUE_CELLS as f32;
+                for i in 0..HUE_CELLS {
+                    let h = (i as f32 + 0.5) / HUE_CELLS as f32;
+                    out.push(DrawCommand::DrawRect {
+                        rect: Rect2::new(
+                            Vector2::new(
+                                layout.hue.position.x,
+                                layout.hue.position.y + i as f32 * hh,
+                            ),
+                            Vector2::new(layout.hue.size.x, hh),
+                        ),
+                        color: crate::color_picker::color_from_hsv(h, 1.0, 1.0, 1.0),
+                        filled: true,
+                    });
+                }
+            }
+
+            // The alpha bar, when `edit_alpha`. Drawn as the current colour at
+            // rising opacity rather than a checkerboard — Patina has no alpha
+            // compositing in this pass, so a checkerboard would be decoration
+            // that says nothing about the value.
+            if let Some(ab) = layout.alpha {
+                const A_CELLS: usize = 16;
+                if ab.size.x > 0.0 && ab.size.y > 0.0 {
+                    let aw = ab.size.x / A_CELLS as f32;
+                    for i in 0..A_CELLS {
+                        let a = (i as f32 + 0.5) / A_CELLS as f32;
+                        out.push(DrawCommand::DrawRect {
+                            rect: Rect2::new(
+                                Vector2::new(ab.position.x + i as f32 * aw, ab.position.y),
+                                Vector2::new(aw, ab.size.y),
+                            ),
+                            color: crate::color_picker::color_from_hsv(
+                                model.hue,
+                                model.saturation,
+                                model.value,
+                                a,
+                            ),
+                            filled: true,
+                        });
+                    }
+                }
+            }
+
+            // 🔑 The cursor marks the SELECTED colour inside the SV square, and
+            // it is what makes the picker readable: without it every colour of a
+            // given hue paints the same square and the control shows no state at
+            // all. Outlined, not filled, so it stays visible against both a light
+            // and a dark selection.
+            if layout.sv.size.x > 0.0 && layout.sv.size.y > 0.0 {
+                const CURSOR: f32 = 6.0;
+                let cx = layout.sv.position.x + model.saturation * layout.sv.size.x;
+                // `value` runs bottom→top, so the y is inverted here exactly as
+                // `pick_sv_rect` inverts it on the way in.
+                let cy = layout.sv.position.y + (1.0 - model.value) * layout.sv.size.y;
+                out.push(DrawCommand::DrawRect {
+                    rect: Rect2::new(
+                        Vector2::new(cx - CURSOR * 0.5, cy - CURSOR * 0.5),
+                        Vector2::new(CURSOR, CURSOR),
+                    ),
+                    color: Color::new(1.0, 1.0, 1.0, 1.0),
+                    filled: false,
+                });
+            }
+        }
+        // pat-s3rrv.172: ColorPickerButton shows its colour as its face.
+        "ColorPickerButton" => {
+            let color = color_prop(tree, node_id, "color").unwrap_or(Color::WHITE);
+            // The swatch is inset so the button still reads as a button — Godot
+            // draws the stylebox and then the colour inside it.
+            const INSET: f32 = 2.0;
+            let inner = Rect2::new(
+                Vector2::new(rect.position.x + INSET, rect.position.y + INSET),
+                Vector2::new(
+                    (rect.size.x - INSET * 2.0).max(0.0),
+                    (rect.size.y - INSET * 2.0).max(0.0),
+                ),
+            );
+            if let Some(sb) = theme.get_stylebox("Button", "normal") {
+                out.extend(sb.draw(rect));
+            } else {
+                out.push(DrawCommand::DrawRect {
+                    rect,
+                    color: stylebox_bg(theme, "Button", "normal", Color::new(0.2, 0.2, 0.2, 1.0)),
+                    filled: true,
+                });
+            }
+            out.push(DrawCommand::DrawRect {
+                rect: inner,
+                color,
+                filled: true,
+            });
+        }
         "Label" => {
             let text = string_prop(tree, node_id, "text").unwrap_or_default();
             if !text.is_empty() {
@@ -2215,6 +2427,97 @@ fn draw_control(
                 }
             }
         }
+        "TextureButton" => {
+            // Godot picks ONE texture by draw mode and falls back to
+            // `texture_normal` whenever the state's own texture is unset
+            // (`texture_button.cpp:140-166`) — an unset `texture_pressed` keeps
+            // showing the normal art rather than blanking the button mid-click.
+            let tex = |key: &str| string_prop(tree, node_id, key).filter(|p| !p.is_empty());
+            let disabled = bool_prop(tree, node_id, "disabled").unwrap_or(false);
+            let pressed = bool_prop(tree, node_id, "button_pressed").unwrap_or(false);
+
+            // ⚠️ Only three of Godot's five draw modes are reachable here.
+            // `texture_hover` and `texture_focused` need hover/focus state, and
+            // nothing records hover on a node — `scene_tree` tracks it only for
+            // the duration of an event. Selecting them would mean inventing
+            // state, so they are left for whoever adds hover tracking.
+            let chosen = if disabled {
+                tex("texture_disabled").or_else(|| tex("texture_normal"))
+            } else if pressed {
+                tex("texture_pressed").or_else(|| tex("texture_normal"))
+            } else {
+                tex("texture_normal")
+            }
+            // Godot's last resort: with nothing else valid, the focused texture
+            // is drawn (`texture_button.cpp:172-176`).
+            .or_else(|| tex("texture_focused"));
+
+            if let Some(texture_path) = chosen {
+                // ⚠️ Drawn into the control rect, i.e. `STRETCH_SCALE`, whatever
+                // `stretch_mode` says — including its default of `STRETCH_KEEP`,
+                // which should draw at the texture's NATURAL size.
+                //
+                // Every other mode needs the texture's dimensions, and this pass
+                // cannot know them: `draw_control` emits a path, and the pixels
+                // are resolved much later by `gdrender2d::Renderer::find_texture`.
+                // There is no size source in `gdscene`, and threading a resource
+                // cache in would change the signature of every arm in this file.
+                // `TextureRect` above ignores `stretch_mode` for exactly the same
+                // reason, so this is consistent rather than newly wrong — but it
+                // IS wrong, and the fix belongs with a texture-metadata source
+                // for the whole control pass, not in this arm (pat-s3rrv.170).
+                out.push(DrawCommand::DrawTextureRect {
+                    texture_path,
+                    rect,
+                    modulate: Color::WHITE,
+                });
+            }
+        }
+        // A playing VideoStreamPlayer paints its current frame over the control
+        // rect (pat-s3rrv.171). It reaches here because ClassDB parents it to
+        // Control, but there was no arm, so it fell through to `_ => {}` and a
+        // video drew nothing at all.
+        //
+        // The command carries the stream path rather than the decoded frame:
+        // `DrawCommand` addresses textures by path, and the frame itself is
+        // reachable through `SceneTree::get_video_player` for anything that
+        // needs the pixels.
+        "VideoStreamPlayer" => {
+            if let Some(player) = tree.get_video_player(node_id) {
+                if !player.stream_path.is_empty() {
+                    // `expand` picks the destination size (pat-s3rrv.174):
+                    // Godot fills the control when true and keeps the SOURCE
+                    // size when false.
+                    //
+                    // ⚠️ It defaults to **false**, so an absent property must
+                    // NOT be read as expand — that is the assumption which had
+                    // the registration defaulting to true and silently
+                    // stretching every video.
+                    let expand = matches!(
+                        tree.get_node(node_id).map(|n| n.get_property("expand")),
+                        Some(Variant::Bool(true))
+                    );
+                    let dest = if expand {
+                        rect
+                    } else {
+                        // The current frame's own dimensions, anchored at the
+                        // control's origin. Falling back to the control size
+                        // when there is no frame yet keeps a just-bound player
+                        // from drawing a zero-sized rect.
+                        let (w, h) = player
+                            .get_video_texture()
+                            .map(|img| (img.get_width() as f32, img.get_height() as f32))
+                            .unwrap_or((rect.size.x, rect.size.y));
+                        Rect2::new(rect.position, Vector2::new(w, h))
+                    };
+                    out.push(DrawCommand::DrawTextureRect {
+                        texture_path: player.stream_path.clone(),
+                        rect: dest,
+                        modulate: Color::WHITE,
+                    });
+                }
+            }
+        }
         "TextureRect" => {
             // A SCRIPTED Texture2D paints itself through `_draw_rect`
             // (pat-s3rrv.160), at the size its own `_get_width`/`_get_height`
@@ -2261,6 +2564,19 @@ fn draw_control(
                         // Godot's `draw_center` defaults to true; an absent
                         // property must not blank the middle patch.
                         draw_center: bool_prop(tree, node_id, "draw_center").unwrap_or(true),
+                        // `region_rect` confines the patches to a sub-rect of
+                        // the source texture (pat-s3rrv.167). An absent or
+                        // zero-size region means the whole texture, which is
+                        // Godot's default and what every existing scene relies
+                        // on — so this must not invent a region when the
+                        // property is missing.
+                        region: match tree
+                            .get_node(node_id)
+                            .map(|n| n.get_property("region_rect"))
+                        {
+                            Some(Variant::Rect2(r)) => r,
+                            _ => Rect2::new(Vector2::ZERO, Vector2::ZERO),
+                        },
                         axis_h: axis("axis_stretch_horizontal"),
                         axis_v: axis("axis_stretch_vertical"),
                         modulate: Color::WHITE,
@@ -3105,6 +3421,90 @@ fn draw_control(
                 }
             }
         }
+        "FoldableContainer" => {
+            // A title bar that is always drawn, plus a content panel that is
+            // drawn only while the container is open (pat-s3rrv.165).
+            //
+            // ⚠️ The bands are ordered by `title_position`, not fixed to the
+            // top: `POSITION_BOTTOM` puts the title flush with the bottom edge
+            // and the content above it (`foldable_container.cpp:252`).
+            let title_h = crate::control::get_foldable_title_height(tree, node_id).min(rect.size.y);
+            let folded = crate::control::is_foldable_folded(tree, node_id);
+            let at_bottom = crate::control::foldable_title_at_bottom(tree, node_id);
+
+            if !folded && rect.size.y > title_h {
+                let content_y = if at_bottom {
+                    rect.position.y
+                } else {
+                    rect.position.y + title_h
+                };
+                out.push(DrawCommand::DrawRect {
+                    rect: Rect2::new(
+                        Vector2::new(rect.position.x, content_y),
+                        Vector2::new(rect.size.x, rect.size.y - title_h),
+                    ),
+                    color: stylebox_bg(
+                        theme,
+                        "FoldableContainer",
+                        "panel_style",
+                        Color::new(0.15, 0.15, 0.15, 1.0),
+                    ),
+                    filled: true,
+                });
+            }
+
+            if title_h <= 0.0 {
+                return;
+            }
+            let title_y = if at_bottom {
+                rect.position.y + rect.size.y - title_h
+            } else {
+                rect.position.y
+            };
+            out.push(DrawCommand::DrawRect {
+                rect: Rect2::new(
+                    Vector2::new(rect.position.x, title_y),
+                    Vector2::new(rect.size.x, title_h),
+                ),
+                color: stylebox_bg(
+                    theme,
+                    "FoldableContainer",
+                    "title_style",
+                    Color::new(0.22, 0.22, 0.22, 1.0),
+                ),
+                filled: true,
+            });
+
+            let title = crate::control::get_foldable_title(tree, node_id);
+            if !title.is_empty() {
+                // ⚠️ `get_font_size`/`get_color` on `Theme`, NOT the
+                // `*_or` pair — those live on `ThemeDB` (theme.rs:658-693) and
+                // the names are close enough to read as interchangeable.
+                let font_size = theme
+                    .get_font_size("FoldableContainer", "title_font_size")
+                    .unwrap_or(16);
+                let text_w = measure_text_px(&title, font_size as f32);
+                let pad = crate::control::FOLDABLE_TITLE_H_PADDING;
+                // Godot's `HorizontalAlignment`: LEFT 0, CENTER 1, RIGHT 2,
+                // FILL 3. FILL has nothing to stretch for a single run, so it
+                // lands with LEFT, as it does upstream.
+                let x = match crate::control::foldable_title_alignment(tree, node_id) {
+                    1 => rect.position.x + (rect.size.x - text_w) * 0.5,
+                    2 => rect.position.x + rect.size.x - text_w - pad,
+                    _ => rect.position.x + pad,
+                };
+                out.push(DrawCommand::DrawString {
+                    text: title,
+                    // Centred in the band: the title is one line, so the glyph
+                    // box is the font size and the leftover splits evenly.
+                    position: Vector2::new(x, title_y + (title_h - font_size as f32) * 0.5),
+                    color: theme
+                        .get_color("FoldableContainer", "title_font_color")
+                        .unwrap_or(Color::new(0.9, 0.9, 0.9, 1.0)),
+                    font_size: font_size.max(1) as u32,
+                });
+            }
+        }
         "TabContainer" => {
             // Panel background behind the content area, plus a header strip.
             let panel_bg = stylebox_bg(
@@ -3446,6 +3846,60 @@ mod tests {
             .filter(|c| matches!(c, DrawCommand::DrawRect { filled: true, .. }))
             .count();
         assert!(filled >= 2, "panel bg + header strip");
+    }
+
+    /// pat-s3rrv.165 — the title bar is drawn, with its text, and an open
+    /// container also gets a content panel.
+    ///
+    /// ⚠️ The folded case is the one worth asserting: a folded container still
+    /// draws its title (that is the only thing left to click) but must NOT draw
+    /// the content panel behind children that are collapsed to nothing.
+    #[test]
+    fn foldable_container_draws_its_title_bar() {
+        let render = |folded: bool| {
+            let mut tree = SceneTree::new();
+            let root = tree.root_id();
+            let id = tree
+                .add_child(root, Node::new("F", "FoldableContainer"))
+                .unwrap();
+            control::apply_anchor_preset(&mut tree, id, AnchorPreset::FullRect);
+            if let Some(n) = tree.get_node_mut(id) {
+                n.set_property("title", Variant::String("Details".into()));
+                n.set_property("folded", Variant::Bool(folded));
+            }
+            let mut vp = Viewport::new(200, 200, Color::BLACK);
+            let theme = Theme::default_theme();
+            render_control_tree(&mut tree, id, &theme, &mut vp, Vector2::new(200.0, 200.0));
+            let cmds = vp.get_sorted_items()[0].commands.clone();
+            let has_title = cmds
+                .iter()
+                .any(|c| matches!(c, DrawCommand::DrawString { text, .. } if text == "Details"));
+            let filled = cmds
+                .iter()
+                .filter(|c| matches!(c, DrawCommand::DrawRect { filled: true, .. }))
+                .count();
+            (has_title, filled)
+        };
+
+        let (open_title, open_rects) = render(false);
+        assert!(open_title, "an open container draws its title text");
+        assert!(
+            open_rects >= 2,
+            "and both bands — content panel + title bar — got {open_rects}"
+        );
+
+        let (folded_title, folded_rects) = render(true);
+        assert!(
+            folded_title,
+            "a FOLDED container still draws its title: it is the only thing left \
+             to click, so losing it makes the container unrecoverable"
+        );
+        assert!(
+            folded_rects < open_rects,
+            "but it must draw fewer bands than an open one — the content panel \
+             belongs to content that is collapsed to nothing (open {open_rects}, \
+             folded {folded_rects})"
+        );
     }
 
     #[test]

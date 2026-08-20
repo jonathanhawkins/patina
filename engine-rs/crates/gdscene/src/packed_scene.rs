@@ -469,6 +469,27 @@ impl PackedScene {
                             .insert(format!("__resscript__{prop}"), Variant::String(path));
                     }
                 }
+                // A `shortcut` pointing at a Shortcut resource is flattened to
+                // the accelerators it declares (pat-s3rrv.175), because at input
+                // time the tree is all we have — the Shortcut's `events` array
+                // lives in the scene's sub-resource bodies and is unreachable
+                // once loading is done.
+                //
+                // Stored as [keycode, modifier_mask, keycode, modifier_mask, …]
+                // in ONE array rather than two parallel ones: parallel arrays
+                // read by index are coupled through their length, and a filter
+                // applied to one silently misaligns the other.
+                if prop == "shortcut" {
+                    if let Some(sub_id) = meta.rsplit_once("::").map(|(_, id)| id) {
+                        let pairs = shortcut_event_pairs(&sub_resource_props, sub_id);
+                        if !pairs.is_empty() {
+                            tmpl.properties.insert(
+                                "__shortcut__events".to_string(),
+                                Variant::PackedInt32Array(pairs),
+                            );
+                        }
+                    }
+                }
                 tmpl.properties
                     .insert(format!("__resref__{prop}"), Variant::String(meta));
             }
@@ -2728,6 +2749,51 @@ fn parse_ext_resource_ref(value: &str) -> Option<String> {
 /// [`crate::SceneTree`] under the given parent.
 ///
 /// Returns the [`NodeId`] of the instanced scene's root node.
+/// The `[keycode, modifier_mask, …]` pairs a Shortcut sub-resource declares
+/// (pat-s3rrv.175).
+///
+/// `events` is an Array of nested `SubResource:<id>` references to InputEventKey
+/// bodies, so each entry is resolved one more level to read its `keycode` and
+/// modifier flags. An event with no keycode is skipped rather than stored as 0,
+/// which is a real key and would fire the shortcut on the wrong press.
+///
+/// Modifier mask: 1 = ctrl, 2 = shift, 4 = alt.
+fn shortcut_event_pairs(
+    sub_props: &HashMap<String, HashMap<String, Variant>>,
+    shortcut_id: &str,
+) -> Vec<i32> {
+    let Some(props) = sub_props.get(shortcut_id) else {
+        return Vec::new();
+    };
+    let Some(Variant::Array(events)) = props.get("events") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for ev in events {
+        let Variant::String(reference) = ev else {
+            continue;
+        };
+        let Some(id) = reference.strip_prefix("SubResource:") else {
+            continue;
+        };
+        let Some(key) = sub_props.get(id) else {
+            continue;
+        };
+        let keycode = match key.get("keycode") {
+            Some(Variant::Int(k)) if *k != 0 => *k as i32,
+            _ => continue,
+        };
+        let flag = |name: &str, bit: i32| match key.get(name) {
+            Some(Variant::Bool(true)) => bit,
+            _ => 0,
+        };
+        let mods = flag("ctrl_pressed", 1) + flag("shift_pressed", 2) + flag("alt_pressed", 4);
+        out.push(keycode);
+        out.push(mods);
+    }
+    out
+}
+
 pub fn add_packed_scene_to_tree(
     tree: &mut crate::scene_tree::SceneTree,
     parent_id: crate::node::NodeId,
@@ -2813,6 +2879,11 @@ pub fn add_packed_scene_to_tree(
     // when a Camera3D enters the viewport.
     auto_assign_current_camera(tree, new_root_id);
 
+    // Attach a decoded stream to every VideoStreamPlayer the scene brought in
+    // (pat-s3rrv.171). Done here rather than at the runner's three instancing
+    // sites so every caller gets it, and idempotent so instancing a sub-scene
+    // does not rewind a player that is already running.
+    crate::video_stream::bind_video_players(tree);
     Ok(new_root_id)
 }
 

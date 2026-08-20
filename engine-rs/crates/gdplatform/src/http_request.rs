@@ -145,6 +145,16 @@ pub struct HttpRequestConfig {
     pub timeout_seconds: f64,
     /// Whether to use SSL verification.
     pub use_ssl: bool,
+    /// `HTTPRequest.set_http_proxy(host, port)` — proxy for plaintext requests.
+    ///
+    /// `None` means "direct". The port is an `i32` because `-1` is upstream's
+    /// "no proxy" sentinel; see `HttpClient::set_http_proxy`.
+    pub http_proxy: Option<(String, i32)>,
+    /// `HTTPRequest.set_https_proxy(host, port)` — proxy for TLS requests.
+    ///
+    /// ⚠️ Carried and readable back, but inert until a TLS backend lands —
+    /// `HttpClient::perform` refuses `https://` before it connects.
+    pub https_proxy: Option<(String, i32)>,
 }
 
 impl Default for HttpRequestConfig {
@@ -157,6 +167,8 @@ impl Default for HttpRequestConfig {
             max_redirects: 8,
             timeout_seconds: 0.0,
             use_ssl: true,
+            http_proxy: None,
+            https_proxy: None,
         }
     }
 }

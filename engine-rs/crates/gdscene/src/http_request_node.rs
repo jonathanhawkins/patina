@@ -74,6 +74,33 @@ pub const RESULT_BODY_DECOMPRESS_FAILED: i32 = 8;
 pub const RESULT_DOWNLOAD_FILE_CANT_OPEN: i32 = 10;
 /// See [`RESULT_BODY_SIZE_LIMIT_EXCEEDED`].
 pub const RESULT_DOWNLOAD_FILE_WRITE_ERROR: i32 = 11;
+/// `HTTPClient.Status.STATUS_DISCONNECTED` — no request in flight.
+///
+/// Transcribed positionally from `core/io/http_client.h`'s `enum Status`, not
+/// derived: DISCONNECTED 0, RESOLVING 1, CANT_RESOLVE 2, CONNECTING 3,
+/// CANT_CONNECT 4, CONNECTED 5, REQUESTING 6, BODY 7, CONNECTION_ERROR 8,
+/// TLS_HANDSHAKE_ERROR 9. (Independently matches
+/// `gdplatform::http_client::HttpClientStatus::as_godot_code`.)
+pub const STATUS_DISCONNECTED: i64 = 0;
+
+/// `HTTPClient.Status.STATUS_REQUESTING` — a request is in progress.
+///
+/// 🔑 These two are the ONLY statuses this node can honestly report, and that is
+/// a property of the transport rather than an omission. `HttpClient::perform` is
+/// a blocking call handed to a worker thread: it walks
+/// RESOLVING → CONNECTING → CONNECTED → REQUESTING → BODY internally and
+/// surfaces nothing until it is finished, so the intermediate states are not
+/// observable from here at all.
+///
+/// ⚠️ Reporting a coarse-but-true value beats what happened before. Godot's
+/// `get_http_client_status` IS registered in ClassDB
+/// (`class_db.rs`, the HTTPRequest block) while having no dispatch arm, so
+/// `has_method` answered **true** and the call returned `Nil`. A script writing
+/// `if r.get_http_client_status() == HTTPClient.STATUS_DISCONNECTED:` compared
+/// against `Nil` and got `false` **even when idle** — silently, forever. Two
+/// correct endpoints are strictly better than that.
+pub const STATUS_REQUESTING: i64 = 6;
+
 /// `RESULT_SUCCESS`, the only result the post-processing below acts on.
 const RESULT_SUCCESS: i32 = 0;
 
@@ -138,6 +165,76 @@ pub fn delivery_settings(node: &crate::node::Node) -> DeliverySettings {
             // mention, which is all of them.
             _ => DEFAULT_ACCEPT_GZIP,
         },
+    }
+}
+
+/// The HTTPRequest proxy settings as authored on the node.
+///
+/// ⚠️ A **third** struct rather than two more fields on [`RequestSettings`].
+/// That one is `Copy` (see its derive), and `Option<(String, i32)>` is not — so
+/// folding these in would silently strip a `Copy` the file deliberately keeps.
+/// It would still compile: `settings` is moved exactly once along
+/// `request` → `request_with_headers` → `config_for_with_headers`, so nothing
+/// today needs the second use that `Copy` exists to allow. The invariant would
+/// just be gone. Cf. the same argument for [`DeliverySettings`] above.
+///
+/// 🔑 Godot has **no getter and no property** for either proxy — `HTTPRequest`
+/// exposes `set_http_proxy` / `set_https_proxy` and nothing else
+/// (`doc/classes/HTTPRequest.xml:209-225`; six `proxy` hits, not one a
+/// `<member>`). Every other pair on this node has a getter, so adding one here
+/// by symmetry would invent API that upstream does not have.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProxySettings {
+    /// `set_http_proxy(host, port)` — for plaintext requests.
+    pub http: Option<(String, i32)>,
+    /// `set_https_proxy(host, port)` — for TLS requests.
+    pub https: Option<(String, i32)>,
+}
+
+/// Applies Godot's documented "unset" rule to one authored pair.
+///
+/// ⚠️ `HTTPRequest.xml:215` states it in words — *"unset if [param host] is
+/// empty or [param port] is -1"* — and `http_client_tcp.cpp:771` spells the
+/// same test in code. **Port `0` is not a sentinel.** Collapsing the rule to
+/// `port <= 0` reads as a tidier version of it and silently discards a caller
+/// that asked for port 0.
+///
+/// Applied here, at the node, so an unset pair never reaches
+/// [`HttpRequestConfig`] as `Some(("", -1))`.
+fn proxy_pair(host: String, port: i64) -> Option<(String, i32)> {
+    // The script surface carries an `int` (i64); the transport takes an i32
+    // because that is the width Godot's own `set_http_proxy(host, port)` uses.
+    // A value that cannot fit was never a reachable TCP port anyway.
+    let port = i32::try_from(port).ok()?;
+    if host.is_empty() || port == -1 {
+        None
+    } else {
+        Some((host, port))
+    }
+}
+
+/// Reads [`ProxySettings`] off the node, the way [`delivery_settings`] does.
+///
+/// Single reader for the same reason: a `.tscn` and a script call must land in
+/// one place or the two disagree silently.
+pub fn proxy_settings(node: &crate::node::Node) -> ProxySettings {
+    let read = |host_key: &str, port_key: &str| {
+        let host = match node.get_property(host_key) {
+            gdvariant::Variant::String(s) => s,
+            _ => String::new(),
+        };
+        let port = match node.get_property(port_key) {
+            gdvariant::Variant::Int(i) => i,
+            // ⚠️ Absent means UNSET, which is `-1` — not `0`. Defaulting to 0
+            // would turn a node that never called the setter into one holding a
+            // live proxy on port 0.
+            _ => -1,
+        };
+        proxy_pair(host, port)
+    };
+    ProxySettings {
+        http: read("http_proxy_host", "http_proxy_port"),
+        https: read("https_proxy_host", "https_proxy_port"),
     }
 }
 
@@ -500,6 +597,31 @@ impl HttpRequestNode {
         custom_headers: &[String],
         settings: RequestSettings,
     ) -> HttpRequestConfig {
+        self.config_for_with_proxies(
+            url,
+            method,
+            body,
+            custom_headers,
+            settings,
+            &ProxySettings::default(),
+        )
+    }
+
+    /// [`config_for_with_headers`](Self::config_for_with_headers) plus the
+    /// node's proxy settings.
+    ///
+    /// 🔑 Additive for the same reason `config_for_with_headers` itself is —
+    /// see its doc-comment. Widening the existing signature would edit five
+    /// call sites across two test files to pass a default nobody cares about.
+    pub fn config_for_with_proxies(
+        &self,
+        url: &str,
+        method: HttpMethod,
+        body: Vec<u8>,
+        custom_headers: &[String],
+        settings: RequestSettings,
+        proxies: &ProxySettings,
+    ) -> HttpRequestConfig {
         let mut headers: HashMap<String, String> = HashMap::new();
         for line in custom_headers {
             // Godot's custom_headers are `"Name: Value"` lines; the first colon
@@ -527,6 +649,10 @@ impl HttpRequestNode {
             // separately — a script calling `request("https://…")` has already
             // said so.
             use_ssl: url.starts_with("https://"),
+            // Already collapsed to `None` when unset by `proxy_pair`, so an
+            // authored `("", -1)` never reaches the transport as a live proxy.
+            http_proxy: proxies.http.clone(),
+            https_proxy: proxies.https.clone(),
         }
     }
 
@@ -552,12 +678,34 @@ impl HttpRequestNode {
         custom_headers: &[String],
         settings: RequestSettings,
     ) -> i32 {
-        self.inner.request(self.config_for_with_headers(
+        self.request_with_proxies(
             url,
             method,
             body,
             custom_headers,
             settings,
+            &ProxySettings::default(),
+        )
+    }
+
+    /// [`request_with_headers`](Self::request_with_headers) plus the node's
+    /// proxy settings.
+    pub fn request_with_proxies(
+        &self,
+        url: &str,
+        method: HttpMethod,
+        body: Vec<u8>,
+        custom_headers: &[String],
+        settings: RequestSettings,
+        proxies: &ProxySettings,
+    ) -> i32 {
+        self.inner.request(self.config_for_with_proxies(
+            url,
+            method,
+            body,
+            custom_headers,
+            settings,
+            proxies,
         ))
     }
 
