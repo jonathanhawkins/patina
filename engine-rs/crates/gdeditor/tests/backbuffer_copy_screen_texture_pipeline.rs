@@ -241,3 +241,157 @@ fn screen_texture_is_no_longer_reported_unsupported() {
          the renderer cannot tell it apart from an ordinary sampler2D"
     );
 }
+
+/// A backdrop split down the middle: RED left of x = 32, GREEN right of it.
+///
+/// The right half is a **Sprite2D**, not a second ColorRect. Positioning a
+/// Control means resolving anchors and offsets (`resolve_control_layout`), which
+/// nothing in this test path is proven to call; `Sprite2D` `position`/`scale`
+/// with a registered texture is the placement every green test in this file
+/// already relies on. Using the proven mechanism keeps a fixture mistake from
+/// masquerading as a shader defect.
+///
+/// ⚠️ The three tests above all use a UNIFORM backdrop, which makes the
+/// `SCREEN_UV` offset invisible — sampling a flat red field 5% to the right
+/// still returns red. So a build that dropped `+ vec2(0.05, 0.0)`, or ignored
+/// `SCREEN_UV` and sampled one fixed texel, passes every one of them. The
+/// acceptance names the shift explicitly ("shifted by 5% of the frame width"),
+/// so it needs a backdrop with an EDGE in it to land on.
+fn two_tone_scene(offset: &str) -> String {
+    format!(
+        r#"[gd_scene load_steps=3 format=3]
+
+[sub_resource type="Shader" id="Shader_1"]
+code = "shader_type canvas_item; uniform sampler2D screen_tex : hint_screen_texture; void fragment() {{ COLOR = texture(screen_tex, SCREEN_UV + vec2({offset}, 0.0)); }}"
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]
+shader = SubResource("Shader_1")
+
+[node name="Main" type="Node2D"]
+
+[node name="Backdrop" type="ColorRect" parent="."]
+offset_left = 0.0
+offset_top = 0.0
+size = Vector2(64, 64)
+color = Color(1, 0, 0, 1)
+
+[node name="RightHalf" type="Sprite2D" parent="."]
+position = Vector2(48, 32)
+scale = Vector2(4, 8)
+
+[node name="Copy" type="BackBufferCopy" parent="."]
+copy_mode = 2
+
+[node name="Shaded" type="Sprite2D" parent="."]
+position = Vector2(32, 32)
+scale = Vector2(8, 8)
+material = SubResource("ShaderMaterial_1")
+"#
+    )
+}
+
+fn render_two_tone(offset: &str) -> FrameBuffer {
+    gdobject::class_db::register_2d_classes();
+    let mut textures = TextureCache::new(".");
+    textures.insert("res://white.png", Texture2D::solid(8, 8, Color::WHITE));
+    textures.insert(
+        "res://green.png",
+        Texture2D::solid(8, 8, Color::new(0.0, 1.0, 0.0, 1.0)),
+    );
+
+    let packed = PackedScene::from_tscn(&two_tone_scene(offset)).expect("scene parses");
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    add_packed_scene_to_tree(&mut tree, root, &packed).expect("scene instances");
+    let sprite = tree
+        .all_nodes_in_tree_order()
+        .into_iter()
+        .find(|id| {
+            tree.get_node(*id)
+                .map(|n| n.name() == "Shaded")
+                .unwrap_or(false)
+        })
+        .expect("the shaded sprite");
+    tree.get_node_mut(sprite)
+        .expect("sprite node")
+        .set_property("texture", Variant::String("res://white.png".into()));
+
+    let right = tree
+        .all_nodes_in_tree_order()
+        .into_iter()
+        .find(|id| {
+            tree.get_node(*id)
+                .map(|n| n.name() == "RightHalf")
+                .unwrap_or(false)
+        })
+        .expect("the right-half sprite");
+    tree.get_node_mut(right)
+        .expect("right-half node")
+        .set_property("texture", Variant::String("res://green.png".into()));
+
+    let items = build_runtime_render_list(&tree);
+    rasterize_render_list(&items, W, H, BG, Some(&mut textures))
+}
+
+/// First column on the middle row where GREEN overtakes RED — the visible
+/// position of the backdrop's edge.
+fn green_edge(fb: &FrameBuffer) -> Option<u32> {
+    let y = H / 2;
+    (0..W).find(|x| {
+        let c = fb.pixels[(y * W + x) as usize];
+        c.g > c.r
+    })
+}
+
+/// 🔑 **The `SCREEN_UV` offset actually moves the sample**, which is the half of
+/// the acceptance a uniform backdrop cannot show.
+///
+/// `COLOR = texture(screen_tex, SCREEN_UV + vec2(0.05, 0.0))` makes each output
+/// pixel display what sits 5% of the frame — `0.05 * 64 = 3.2 px` — to its
+/// RIGHT. So the edge appears 3.2 px to the LEFT of where the backdrop puts it.
+///
+/// ⚠️ Asserted DIFFERENTIALLY, against the same scene rendered with a `0.0`
+/// offset, rather than against the absolute column 28.8. The absolute answer
+/// depends on sampling and rounding conventions this test has no business
+/// pinning; the *difference* between the two renders depends only on whether the
+/// offset was applied at all.
+#[test]
+fn the_screen_uv_offset_shifts_the_sampled_edge() {
+    let shifted = render_two_tone("0.05");
+    let unshifted = render_two_tone("0.0");
+
+    let shifted_edge = green_edge(&shifted).expect(
+        "the shifted render must still contain a red->green edge; no green at \
+         all means the back buffer was never sampled",
+    );
+    let unshifted_edge = green_edge(&unshifted).expect(
+        "the unshifted render must contain a red->green edge; no green at all \
+         means the two-tone backdrop never reached the back buffer",
+    );
+
+    // Sanity: with no offset the sprite reproduces the backdrop, so the edge
+    // must land near the authored boundary at x = 32. A wildly different column
+    // means the fixture is wrong and the comparison below is meaningless.
+    assert!(
+        unshifted_edge.abs_diff(32) <= 2,
+        "with a 0.0 offset the edge must reproduce the backdrop's boundary at \
+         x = 32, got {unshifted_edge}"
+    );
+
+    assert!(
+        shifted_edge < unshifted_edge,
+        "a +0.05 SCREEN_UV offset samples further RIGHT, so the edge must move \
+         LEFT: shifted {shifted_edge} vs unshifted {unshifted_edge}. Equal \
+         columns mean the `+ vec2(0.05, 0.0)` was dropped and SCREEN_UV was \
+         used unmodified — which every other test in this file would still pass"
+    );
+
+    let moved = unshifted_edge - shifted_edge;
+    assert!(
+        (2..=6).contains(&moved),
+        "0.05 of a {W}px frame is 3.2px, so the edge should move about 3 \
+         columns; it moved {moved}. A much larger shift means SCREEN_UV is not \
+         normalised to the frame, a much smaller one that the offset is being \
+         scaled by something"
+    );
+}

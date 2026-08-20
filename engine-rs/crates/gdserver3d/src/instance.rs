@@ -373,6 +373,19 @@ pub struct Instance3D {
     pub mesh: Option<Mesh3D>,
     /// Surface material (if assigned).
     pub material: Option<Material3D>,
+    /// Material override for each ADDITIONAL surface, parallel to
+    /// [`Mesh3D::surfaces`] (pat-s3rrv.187).
+    ///
+    /// ⚠️ **Off by one against Godot's property names, and deliberately so.**
+    /// `Mesh3D::surfaces` holds the surfaces *beyond* the primary one — the
+    /// primary is the mesh's own top-level vertex arrays — so
+    /// `surface_materials[i]` belongs to `surfaces[i]`, which Godot spells
+    /// `surface_material_override/{i + 1}`. Override `0` is the primary surface
+    /// and arrives through [`Instance3D::material`] like it always has.
+    ///
+    /// `None` at an index means that surface falls back to the instance
+    /// material, which is what Godot draws when no override is set.
+    pub surface_materials: Vec<Option<Material3D>>,
     /// Shader material override (takes precedence over `material` for color).
     pub shader_material: Option<ShaderMaterial3D>,
     /// MultiMesh resource for instanced rendering (if assigned).
@@ -393,6 +406,7 @@ impl Instance3D {
             id,
             mesh: None,
             material: None,
+            surface_materials: Vec::new(),
             shader_material: None,
             multimesh: None,
             transform: Transform3D::IDENTITY,

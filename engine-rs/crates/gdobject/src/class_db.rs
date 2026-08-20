@@ -24992,16 +24992,6 @@ pub fn register_audio_classes() {
                     ),
                 )
                 .property(
-                    PropertyInfo::new(
-                        "emission_angle_filter_attenuation_db",
-                        Variant::Float(-12.0),
-                    )
-                    .with_accessors(
-                        "get_emission_angle_filter_attenuation_db",
-                        "set_emission_angle_filter_attenuation_db",
-                    ),
-                )
-                .property(
                     PropertyInfo::new("attenuation_filter_cutoff_hz", Variant::Float(5000.0))
                         .with_accessors(
                             "get_attenuation_filter_cutoff_hz",

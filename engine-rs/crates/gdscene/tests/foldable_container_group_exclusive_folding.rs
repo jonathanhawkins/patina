@@ -463,3 +463,65 @@ fn folding_round_trips() {
          re-sorted against a container whose expanded height had been thrown away"
     );
 }
+
+/// The `FoldableGroup`'s `allow_folding_all` reaches the container THROUGH THE
+/// LOADER, not just when a test writes the companion by hand.
+///
+/// ⚠️ This is the gap that made the flag inert in a real scene (pat-s3rrv.165).
+/// `control.rs` reads `__foldable_group__allow_folding_all`, but nothing wrote
+/// one: the group reference survives on the node while its BODY — where the flag
+/// lives — is dropped with the `PackedScene`. Membership is keyed on the
+/// reference text, so exclusivity kept working and only the flag went missing,
+/// which is why the symptom was silent rather than obvious.
+///
+/// ⚠️ `allow_folding_all_lets_every_member_close` above cannot catch this: it
+/// sets the companion directly and therefore never crosses the loader. A test
+/// that hand-writes what a layer would normally produce is blind to every bug in
+/// that layer — so this one authors the flag in the `.tscn` and asserts the
+/// BEHAVIOUR it should buy.
+///
+/// The scene needs a real `[sub_resource]` block; `SCENE` references `Group_1`
+/// without ever declaring one, which is exactly why the flatten is a no-op there
+/// and the other tests in this file are unaffected by it.
+#[test]
+fn allow_folding_all_authored_in_the_tscn_reaches_the_container() {
+    const GROUPED: &str = r#"[gd_scene load_steps=2 format=3]
+
+[sub_resource type="FoldableGroup" id="Group_1"]
+allow_folding_all = true
+
+[node name="Root" type="Control"]
+
+[node name="F1" type="FoldableContainer" parent="."]
+title = "First"
+foldable_group = SubResource("Group_1")
+
+[node name="F2" type="FoldableContainer" parent="."]
+title = "Second"
+folded = true
+foldable_group = SubResource("Group_1")
+"#;
+
+    let mut tree = loaded(GROUPED);
+    let f1 = find(&tree, "F1");
+
+    // The companion really was flattened onto the node. Asserted before the
+    // behaviour so a failure names the missing flatten rather than the fold rule.
+    assert_eq!(
+        tree.get_node(f1).map(|n| n.get_property("__foldable_group__allow_folding_all")),
+        Some(Variant::Bool(true)),
+        "the loader must copy `allow_folding_all` off the FoldableGroup sub-resource          onto every member, the way it does for `__button_group__allow_unpress`"
+    );
+
+    // …and it buys the behaviour: the last open member may close.
+    assert!(
+        set_foldable_folded(&mut tree, f1, true),
+        "with allow_folding_all authored in the scene, the last open container folds"
+    );
+    let group = foldable_group_of(&tree, f1);
+    assert_eq!(
+        foldable_group_expanded(&tree, &group),
+        None,
+        "and the group is legitimately empty afterwards"
+    );
+}

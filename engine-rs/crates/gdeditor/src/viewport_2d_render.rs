@@ -1537,6 +1537,16 @@ fn resolve_relative(
         if part.is_empty() || part == "." {
             continue;
         }
+        // `Polygon2D.skeleton` is authored as `NodePath("../Skel")` — the
+        // skeleton is a SIBLING, so the common case starts by going up. `..` is
+        // kept as a name by `NodePath`, so without this arm the walk searched
+        // for a child called ".." and gave up, and `skinned_polygon_points`
+        // returned `None` for every normally-authored rig: the polygon drew at
+        // its rest pose no matter how the bones moved (pat-s3rrv.185).
+        if part == ".." {
+            current = tree.get_node(current).and_then(|n| n.parent())?;
+            continue;
+        }
         let children = tree.get_node(current).map(|n| n.children().to_vec())?;
         current = children
             .into_iter()

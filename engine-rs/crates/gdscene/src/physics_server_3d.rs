@@ -1286,6 +1286,39 @@ impl PhysicsServer3D {
                     float_prop_3d(tree, node_id, "angular_limit/restitution", 0.7) as f32;
                 slider.angular_limit_damping =
                     float_prop_3d(tree, node_id, "angular_limit/damping", 0.0) as f32;
+                // The motion/ortho triples (pat-s3rrv.192). Godot exposes three
+                // groups per axis pair — limit, motion and ortho — and only the
+                // limit group was read here, so a slider authored with softer
+                // off-axis coupling behaved exactly like a rigid one.
+                //
+                // ⚠️ Every default below is transcribed from
+                // `doc/classes/SliderJoint3D.xml`. They are NOT uniform:
+                // `linear_motion/damping` is 0.0 while the other three dampings
+                // are 1.0, and getting that one wrong locks the slider.
+                slider.linear_motion_softness =
+                    float_prop_3d(tree, node_id, "linear_motion/softness", 1.0) as f32;
+                slider.linear_motion_restitution =
+                    float_prop_3d(tree, node_id, "linear_motion/restitution", 0.7) as f32;
+                slider.linear_motion_damping =
+                    float_prop_3d(tree, node_id, "linear_motion/damping", 0.0) as f32;
+                slider.linear_ortho_softness =
+                    float_prop_3d(tree, node_id, "linear_ortho/softness", 1.0) as f32;
+                slider.linear_ortho_restitution =
+                    float_prop_3d(tree, node_id, "linear_ortho/restitution", 0.7) as f32;
+                slider.linear_ortho_damping =
+                    float_prop_3d(tree, node_id, "linear_ortho/damping", 1.0) as f32;
+                slider.angular_motion_softness =
+                    float_prop_3d(tree, node_id, "angular_motion/softness", 1.0) as f32;
+                slider.angular_motion_restitution =
+                    float_prop_3d(tree, node_id, "angular_motion/restitution", 0.7) as f32;
+                slider.angular_motion_damping =
+                    float_prop_3d(tree, node_id, "angular_motion/damping", 1.0) as f32;
+                slider.angular_ortho_softness =
+                    float_prop_3d(tree, node_id, "angular_ortho/softness", 1.0) as f32;
+                slider.angular_ortho_restitution =
+                    float_prop_3d(tree, node_id, "angular_ortho/restitution", 0.7) as f32;
+                slider.angular_ortho_damping =
+                    float_prop_3d(tree, node_id, "angular_ortho/damping", 1.0) as f32;
                 Joint3D::Slider(slider)
             }
             "ConeTwistJoint3D" => {

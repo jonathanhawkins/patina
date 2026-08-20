@@ -171,6 +171,15 @@ fn resolve_from_skeleton(tree: &SceneTree, skeleton: NodeId, path: &str) -> Opti
         if part.is_empty() || part == "." {
             continue;
         }
+        // `..` is a real name in a relative NodePath, not a separator artifact:
+        // `NodePath::new("../Skel")` keeps it as `get_name(0)`. Without this arm
+        // the walk looked for a CHILD literally named "..", found none, and
+        // resolved to `None` — turning every rig that reaches outside its own
+        // subtree into a silent no-op.
+        if part == ".." {
+            current = tree.get_node(current).and_then(|n| n.parent())?;
+            continue;
+        }
         let children = tree.get_node(current).map(|n| n.children().to_vec())?;
         let next = children
             .into_iter()
@@ -186,6 +195,18 @@ fn mod_string(tree: &SceneTree, skeleton: NodeId, i: usize, key: &str) -> Option
         .map(|n| n.get_property(&format!("__skelmod_{i}_{key}__")))
     {
         Some(Variant::String(s)) if !s.is_empty() => Some(s),
+        // A `.tscn` writes every one of these keys as `NodePath("Bone1")`, not
+        // as a String, and the flattener in `packed_scene.rs` copies the parsed
+        // Variant through verbatim. Accepting only `String` meant each solver
+        // returned at its FIRST guard, so a scene-loaded modification stack did
+        // nothing at all — silently, with the stack flattened and `enabled`
+        // true. The unit tests stayed green because they inject
+        // `Variant::String` properties instead of loading a scene, which is
+        // exactly the load boundary this bead exists to close (pat-s3rrv.185).
+        Some(Variant::NodePath(np)) => {
+            let joined = np.get_concatenated_names();
+            (!joined.is_empty()).then_some(joined)
+        }
         _ => None,
     }
 }

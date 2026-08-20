@@ -273,6 +273,43 @@ pub struct SliderJoint3D {
     pub angular_limit_restitution: f32,
     /// Damping applied when within angular limits.
     pub angular_limit_damping: f32,
+    /// Softness for free sliding along the axis (`linear_motion/softness`).
+    ///
+    /// 🔑 The "motion" triple governs the axis while it is NOT against a limit,
+    /// and the "ortho" triple governs the two perpendicular directions. Godot
+    /// selects between them exactly that way — `godot_slider_joint_3d.cpp:148`
+    /// reads `(i) ? Ortho : (solveLinLim ? Lim : Dir)`, where `i == 0` is the
+    /// slide axis and `Dir` is what the docs call `linear_motion`.
+    pub linear_motion_softness: f32,
+    /// Restitution for free sliding along the axis.
+    pub linear_motion_restitution: f32,
+    /// Damping for free sliding along the axis (`linear_motion/damping`).
+    ///
+    /// ⚠️ Defaults to **0.0**, unlike every other damping here, which default to
+    /// 1.0 (`SliderJoint3D.xml`). That zero is what makes a slider slide: the
+    /// reference impulse is `softness * (restitution * depth / step - damping *
+    /// rel_vel)`, so with no limit violation (`depth == 0`) and zero damping the
+    /// whole term vanishes and motion along the axis is unopposed. Copying 1.0
+    /// here would silently glue every slider shut.
+    pub linear_motion_damping: f32,
+    /// Softness for the two directions perpendicular to the axis.
+    pub linear_ortho_softness: f32,
+    /// Restitution perpendicular to the axis.
+    pub linear_ortho_restitution: f32,
+    /// Damping perpendicular to the axis (`linear_ortho/damping`).
+    pub linear_ortho_damping: f32,
+    /// Softness for free rotation about the axis (`angular_motion/softness`).
+    pub angular_motion_softness: f32,
+    /// Restitution for free rotation about the axis.
+    pub angular_motion_restitution: f32,
+    /// Damping for free rotation about the axis.
+    pub angular_motion_damping: f32,
+    /// Softness for rotation off the axis (`angular_ortho/softness`).
+    pub angular_ortho_softness: f32,
+    /// Restitution for rotation off the axis.
+    pub angular_ortho_restitution: f32,
+    /// Damping for rotation off the axis.
+    pub angular_ortho_damping: f32,
 }
 
 impl SliderJoint3D {
@@ -295,6 +332,20 @@ impl SliderJoint3D {
             angular_limit_softness: 1.0,
             angular_limit_restitution: 0.7,
             angular_limit_damping: 1.0,
+            // Transcribed from `doc/classes/SliderJoint3D.xml`, not derived —
+            // `linear_motion/damping` really is the odd one out at 0.0.
+            linear_motion_softness: 1.0,
+            linear_motion_restitution: 0.7,
+            linear_motion_damping: 0.0,
+            linear_ortho_softness: 1.0,
+            linear_ortho_restitution: 0.7,
+            linear_ortho_damping: 1.0,
+            angular_motion_softness: 1.0,
+            angular_motion_restitution: 0.7,
+            angular_motion_damping: 1.0,
+            angular_ortho_softness: 1.0,
+            angular_ortho_restitution: 0.7,
+            angular_ortho_damping: 1.0,
         }
     }
 

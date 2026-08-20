@@ -750,6 +750,36 @@ impl PackedScene {
             }
         }
 
+        // The same flatten for a `FoldableContainer`'s `FoldableGroup`
+        // (pat-s3rrv.165). `control.rs` reads `allow_folding_all` from a
+        // `__foldable_group__*` companion and nothing ever wrote one, so the flag
+        // was unreachable at runtime in exactly the way `allow_unpress` was above,
+        // with the same silent symptom: a group authored to let every member close
+        // still refused to fold its last open one, because the reader saw the
+        // default `false`.
+        //
+        // Membership itself never depended on this — `foldable_group_of` keys on the
+        // reference text — so only the body-borne flag was lost, which is why
+        // exclusivity looked correct while `allow_folding_all` did nothing.
+        //
+        // ⚠️ INLINE groups only, as above: a `.tres` FoldableGroup shared between
+        // scenes arrives as `ExtResource`, whose body lives in a file this pass never
+        // parses, and keeps the default.
+        for tmpl in &mut templates {
+            let Some(group_id) = tmpl.properties.get("foldable_group").and_then(|v| match v {
+                Variant::String(s) => s.strip_prefix("SubResource:").map(String::from),
+                _ => None,
+            }) else {
+                continue;
+            };
+            if let Some(group_props) = sub_resource_props.get(&group_id) {
+                for (key, value) in group_props {
+                    tmpl.properties
+                        .insert(format!("__foldable_group__{key}"), value.clone());
+                }
+            }
+        }
+
         // Resolve a mesh's material albedo to an `albedo_color` property so the
         // 3D viewport can shade the mesh in its real colour (like Godot), from a
         // node-level `surface_material_override/0` or the mesh's own `material`.

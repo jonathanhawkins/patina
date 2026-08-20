@@ -1822,6 +1822,19 @@ pub struct MultiplayerSynchronizer {
     /// Default visibility for peers without an explicit override.
     public_visibility: bool,
     /// Optional replication config describing spawn/sync properties.
+    ///
+    /// ⚠️ NOT ON THE LIVE PATH (pat-s3rrv.177). Nothing reads this field:
+    /// `poll_outbound` never consults it, and its two accessors below have zero
+    /// callers in the workspace — no other crate, no test, not even this file.
+    /// The replication that actually runs is driven by `SceneTree`'s
+    /// `__replication__properties` reader in `gdscene/src/scene_tree.rs`, which
+    /// is fed from the `.tscn` sub-resource.
+    ///
+    /// It is left in place rather than deleted because wiring it up is a real
+    /// design decision with a live blast radius, not a cleanup: the existing
+    /// path works, so replacing half of it would be a regression. Decide
+    /// deliberately — wire it or remove it — and do not assume setting it here
+    /// changes what goes on the wire, because today it does not.
     replication_config: SceneReplicationConfig,
 }
 
@@ -1876,6 +1889,9 @@ impl MultiplayerSynchronizer {
     }
 
     /// Returns the scene replication config (Godot `replication_config`).
+    ///
+    /// ⚠️ Reading this tells you what was *stored*, not what replicates — see
+    /// the field's note. Zero callers today.
     pub fn replication_config(&self) -> &SceneReplicationConfig {
         &self.replication_config
     }

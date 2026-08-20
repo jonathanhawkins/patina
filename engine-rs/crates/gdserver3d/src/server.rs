@@ -45,6 +45,20 @@ pub trait RenderingServer3D {
     /// Assigns a material to an instance.
     fn set_material(&mut self, id: Instance3DId, material: Material3D);
 
+    /// Assigns per-surface material overrides for a mesh's ADDITIONAL surfaces
+    /// (pat-s3rrv.187).
+    ///
+    /// `materials[i]` belongs to `Mesh3D::surfaces[i]`, which Godot spells
+    /// `surface_material_override/{i + 1}`; override `0` is the primary surface
+    /// and still goes through [`RenderingServer3D::set_material`]. A `None`
+    /// entry falls back to the instance material.
+    ///
+    /// ⚠️ Defaulted to a no-op rather than required, so a backend that cannot
+    /// draw extra surfaces yet keeps compiling and simply ignores the data
+    /// instead of every implementor breaking at once. A backend that CAN draw
+    /// them overrides this.
+    fn set_surface_materials(&mut self, _id: Instance3DId, _materials: Vec<Option<Material3D>>) {}
+
     /// Assigns a shader material to an instance, overriding the standard material for color.
     fn set_shader_material(&mut self, id: Instance3DId, material: ShaderMaterial3D);
 

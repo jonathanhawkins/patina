@@ -1119,54 +1119,116 @@ impl PhysicsWorld3D {
                 let ra = a.rotation.xform(s.local_a);
                 let rb = b.rotation.xform(s.local_b);
                 let offset = ((b.position + rb) - (a.position + ra)).dot(axis);
-                // Off-axis translation is fully constrained; sliding along the
-                // axis is the one free linear degree of freedom.
+                // Off-axis translation is governed by the `linear_ortho`
+                // triple; travel along the axis is the one free linear degree of
+                // freedom, governed by `linear_motion` (pat-s3rrv.192).
+                //
+                // 🔑 `solve_linear_axis` drives the relative velocity to
+                // `-bias`, so passing `-(1 - f) * rel` leaves exactly the
+                // fraction `f` of it removed. That reproduces the reference's
+                // `damping * rel_vel` impulse term
+                // (`godot_slider_joint_3d.cpp:152`) without a second solver
+                // path — and at Godot's defaults (softness 1.0, damping 1.0)
+                // `f == 1`, so `bias == 0` and this is bit-identical to the
+                // unconditional solve it replaces.
+                let ortho_lin = (s.linear_ortho_softness * s.linear_ortho_damping).clamp(0.0, 1.0);
                 for n in perpendicular_basis(axis) {
+                    let rel = (b.velocity_at(rb) - a.velocity_at(ra)).dot(n);
                     solve_linear_axis(
                         &mut a,
                         &mut b,
                         ra,
                         rb,
                         n,
-                        0.0,
+                        -(1.0 - ortho_lin) * rel,
                         f32::NEG_INFINITY,
                         f32::INFINITY,
                     );
                 }
-                if s.use_linear_limit {
-                    let violation =
-                        limit_violation(offset, s.linear_limit_lower, s.linear_limit_upper);
-                    if violation != 0.0 {
-                        let (min, max) = one_sided_bounds(violation);
-                        let bias = JOINT_LIMIT_BIAS * violation * inv_dt;
-                        solve_linear_axis(&mut a, &mut b, ra, rb, axis, bias, min, max);
+                // ⚠️ The reference picks the limit triple ONLY while the axis is
+                // actually against a limit, and the motion triple otherwise —
+                // `(i) ? Ortho : (solveLinLim ? Lim : Dir)`. Applying both, or
+                // applying motion damping during a limit violation, would fight
+                // the limit impulse.
+                let lin_violation = if s.use_linear_limit {
+                    limit_violation(offset, s.linear_limit_lower, s.linear_limit_upper)
+                } else {
+                    0.0
+                };
+                if lin_violation != 0.0 {
+                    let (min, max) = one_sided_bounds(lin_violation);
+                    let bias = JOINT_LIMIT_BIAS * lin_violation * inv_dt;
+                    solve_linear_axis(&mut a, &mut b, ra, rb, axis, bias, min, max);
+                } else {
+                    // ⚠️ `linear_motion/damping` defaults to 0.0, so this arm is
+                    // inert unless the author asks for it. That zero is what
+                    // makes a slider slide.
+                    let f = (s.linear_motion_softness * s.linear_motion_damping).clamp(0.0, 1.0);
+                    if f > 0.0 {
+                        let rel = (b.velocity_at(rb) - a.velocity_at(ra)).dot(axis);
+                        solve_linear_axis(
+                            &mut a,
+                            &mut b,
+                            ra,
+                            rb,
+                            axis,
+                            -(1.0 - f) * rel,
+                            f32::NEG_INFINITY,
+                            f32::INFINITY,
+                        );
                     }
                 }
                 // Rotation off the slide axis is constrained the same way the
                 // hinge does it; rotation about the axis is limited, not locked.
                 let axis_b = b.rotation.xform(s.axis).normalized();
                 let misalignment = axis.cross(axis_b);
+                // The `angular_ortho` triple scales how hard the off-axis
+                // misalignment is removed; the reference folds the same product
+                // into `velrelOrthog` at `godot_slider_joint_3d.cpp:207`. The
+                // positional `bias` stays untouched — that is the restitution
+                // term, not the damping one.
+                let ortho_ang =
+                    (s.angular_ortho_softness * s.angular_ortho_damping).clamp(0.0, 1.0);
                 for n in perpendicular_basis(axis) {
                     let bias = JOINT_LIMIT_BIAS * misalignment.dot(n) * inv_dt;
+                    let rel = (b.angular_velocity - a.angular_velocity).dot(n);
                     solve_angular_axis(
                         &mut a,
                         &mut b,
                         n,
-                        0.0,
+                        (1.0 - ortho_ang) * rel,
                         bias,
                         f32::NEG_INFINITY,
                         f32::INFINITY,
                     );
                 }
-                if s.use_angular_limit {
+                let ang_violation = if s.use_angular_limit {
                     let angle =
                         twist_angle_about(a.rotation.inverse() * b.rotation, s.axis.normalized());
-                    let violation =
-                        limit_violation(angle, s.angular_limit_lower, s.angular_limit_upper);
-                    if violation != 0.0 {
-                        let (min, max) = one_sided_bounds(violation);
-                        let bias = JOINT_LIMIT_BIAS * violation * inv_dt;
-                        solve_angular_axis(&mut a, &mut b, axis, 0.0, bias, min, max);
+                    limit_violation(angle, s.angular_limit_lower, s.angular_limit_upper)
+                } else {
+                    0.0
+                };
+                if ang_violation != 0.0 {
+                    let (min, max) = one_sided_bounds(ang_violation);
+                    let bias = JOINT_LIMIT_BIAS * ang_violation * inv_dt;
+                    solve_angular_axis(&mut a, &mut b, axis, 0.0, bias, min, max);
+                } else {
+                    // Free rotation about the axis: the `angular_motion` triple,
+                    // mirroring the reference's `m_solveAngLim ? Lim : Dir`
+                    // selection at :227-231.
+                    let f = (s.angular_motion_softness * s.angular_motion_damping).clamp(0.0, 1.0);
+                    if f > 0.0 {
+                        let rel = (b.angular_velocity - a.angular_velocity).dot(axis);
+                        solve_angular_axis(
+                            &mut a,
+                            &mut b,
+                            axis,
+                            (1.0 - f) * rel,
+                            0.0,
+                            f32::NEG_INFINITY,
+                            f32::INFINITY,
+                        );
                     }
                 }
             }
@@ -1256,7 +1318,30 @@ impl PhysicsWorld3D {
                     // one way and the spring would not return.
                     let sp = g.linear_springs[axis];
                     if sp.enabled && sp.stiffness > 0.0 {
-                        let error = offset.dot(n) - sp.equilibrium_point;
+                        // ⚠️ Measured from body B's ORIGIN to body A's anchor, NOT
+                        // between the two anchor frames (pat-s3rrv.192).
+                        //
+                        // `offset` above is frame-to-frame, and both frames derive
+                        // from the same joint node — so it is EXACTLY zero at joint
+                        // creation, for every rig, by construction. A spring fed
+                        // that error can never move anything: it reads the authored
+                        // pose as its own equilibrium and sits there. The symptom is
+                        // a body that neither drifts nor sags but stays at its start
+                        // value to the last digit.
+                        //
+                        // Subtracting `rb` removes B's own anchor arm, leaving where
+                        // B's origin sits relative to A's anchor along this axis —
+                        // which is what the acceptance means by pulling a displaced
+                        // body back to the ANCHOR PLANE, and what `equilibrium_point`
+                        // is measured against.
+                        //
+                        // ⚠️ Deliberately NOT applied to the limits above or to the
+                        // angular spring below. A limit is a frame-to-frame
+                        // constraint and is correct as it stands, and the angular
+                        // error already comes from the bodies' RELATIVE rotation, so
+                        // it never cancels the way the linear one does.
+                        let spring_offset = offset - rb;
+                        let error = spring_offset.dot(n) - sp.equilibrium_point;
                         let bias = spring_bias(sp.stiffness, error, dt, inv_dt);
                         solve_linear_axis(
                             &mut a,

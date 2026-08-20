@@ -243,3 +243,87 @@ fn a_finished_player_reports_itself_stopped() {
         "an exhausted stream must clear `playing`"
     );
 }
+
+/// pat-s3rrv.196 — no audio member is registered TWICE.
+///
+/// `AudioStreamPlayer3D` carried `emission_angle_filter_attenuation_db` in its
+/// registration **twice**. Nothing caught it, and nothing could:
+/// `get_property_list` folds duplicates by name as it walks the chain
+/// (`class_db.rs`, the "a derived class re-declaring a base property is an
+/// OVERRIDE" arm), so the public API reported one member while the stored table
+/// held two.
+///
+/// 🔑 That is why this reads `get_class_info(..).properties` — the RAW
+/// registration — instead of `get_property_list`. A test written against the
+/// deduplicating accessor passes on the bug it is meant to catch.
+///
+/// ⚠️ A duplicate is not cosmetic: `register()` merges a second registration
+/// only when the name is absent, so whichever copy is written first silently
+/// wins any future edit to the other. Someone correcting the default on copy two
+/// would see no change and no error.
+#[test]
+fn no_audio_class_registers_a_member_twice() {
+    register_all_classes();
+
+    for class in [
+        "AudioEffectAmplify",
+        "AudioEffectReverb",
+        "AudioStreamPlayer",
+        "AudioStreamPlayer2D",
+        "AudioStreamPlayer3D",
+    ] {
+        let info = gdobject::class_db::get_class_info(class)
+            .unwrap_or_else(|| panic!("{class} must be registered"));
+        let mut seen: Vec<&str> = Vec::new();
+        let mut dupes: Vec<&str> = Vec::new();
+        for p in &info.properties {
+            if seen.contains(&p.name.as_str()) {
+                dupes.push(p.name.as_str());
+            } else {
+                seen.push(p.name.as_str());
+            }
+        }
+        assert!(
+            dupes.is_empty(),
+            "{class} registers {dupes:?} more than once — a duplicate shadows \
+             silently instead of failing, and `get_property_list` hides it"
+        );
+    }
+}
+
+/// 🔑 `volume_linear` stays OUT of all four audio tables, on purpose.
+///
+/// The bead's ground truth counts it — "AudioEffectAmplify {volume_db,
+/// volume_linear}", "AudioStreamPlayer3D 22 properties" — and I registered it on
+/// all four before finding that this project had already made the opposite
+/// decision deliberately. `doc/classes/*.xml` gives `volume_linear` no
+/// `default=`, because it is not stored: it is the linear view of `volume_db`.
+/// The rule is stated in
+/// `gdobject/tests/documented_property_defaults_are_registered.rs` — a member
+/// with no documented default is left unregistered, because a fabricated value
+/// "would read back through reflection as Godot's answer, and nothing downstream
+/// could tell the invention from a fact". That suite already pins the 3D player;
+/// this extends the same guard to the other three.
+///
+/// ⚠️ So a doc `<member>` count is NOT the target for these tables. The bead's
+/// "22" counts documented members; the registrable number is 21.
+#[test]
+fn volume_linear_is_deliberately_not_registered() {
+    register_all_classes();
+
+    for class in [
+        "AudioEffectAmplify",
+        "AudioStreamPlayer",
+        "AudioStreamPlayer2D",
+        "AudioStreamPlayer3D",
+    ] {
+        let props = get_property_list(class);
+        assert!(
+            !props.iter().any(|p| p.name == "volume_linear"),
+            "{class} must NOT register `volume_linear` — it has no documented \
+             default, and inventing one makes reflection report a guess as \
+             fact. Got {:?}",
+            props.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
+    }
+}

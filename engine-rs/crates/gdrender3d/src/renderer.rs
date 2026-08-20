@@ -977,6 +977,36 @@ impl SoftwareRenderer3D {
             // Godot scales the surface's alpha by (1 - transparency); the
             // fragment shaders carry albedo.a straight through to the frame.
             base_material.albedo.a *= opacity;
+
+            // pat-s3rrv.187: a mesh's ADDITIONAL surfaces, each promoted to a
+            // standalone `Mesh3D` so it can travel the ordinary draw path.
+            //
+            // Before this, `gdrender3d` never read `Mesh3D::surfaces` at all —
+            // both backends iterated only the top-level vertex arrays, so a
+            // two-surface mesh silently drew just its primary surface and a
+            // `surface_material_override/1` could never appear on screen.
+            //
+            // ⚠️ Built BEFORE `entries` and never mutated afterwards: the draw
+            // entries borrow from this vec, so it has to outlive them, and
+            // pushing to it while a borrow is live would not compile.
+            let surface_meshes: Vec<Mesh3D> = inst
+                .mesh
+                .as_ref()
+                .map(|m| {
+                    m.surfaces
+                        .iter()
+                        .map(|s| Mesh3D {
+                            vertices: s.vertices.clone(),
+                            normals: s.normals.clone(),
+                            uvs: s.uvs.clone(),
+                            indices: s.indices.clone(),
+                            primitive_type: s.primitive_type,
+                            ..Default::default()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
             let mut entries: Vec<DrawEntry<'_>> = Vec::new();
 
             if let Some(ref mm) = inst.multimesh {
@@ -1008,12 +1038,37 @@ impl SoftwareRenderer3D {
                     }
                 }
             } else if let Some(ref mesh) = inst.mesh {
-                // Single mesh instance.
+                // Single mesh instance: the primary surface.
                 entries.push(DrawEntry {
                     mesh,
                     transform: inst.transform,
-                    material: base_material,
+                    material: base_material.clone(),
                 });
+                // ...then every additional surface, each with its own override.
+                //
+                // `surface_materials[i]` pairs with `surfaces[i]`, which Godot
+                // spells `surface_material_override/{i + 1}`; an absent entry
+                // falls back to the instance material, which is what Godot
+                // draws when a surface has no override.
+                for (i, surface) in surface_meshes.iter().enumerate() {
+                    if surface.indices.is_empty() {
+                        continue;
+                    }
+                    let mut mat = inst
+                        .surface_materials
+                        .get(i)
+                        .and_then(|m| m.clone())
+                        .unwrap_or_else(|| inst.material.as_ref().cloned().unwrap_or_default());
+                    // The same transparency scaling the primary surface gets —
+                    // applied here too, or a per-surface override would ignore
+                    // GeometryInstance3D.transparency.
+                    mat.albedo.a *= opacity;
+                    entries.push(DrawEntry {
+                        mesh: surface,
+                        transform: inst.transform,
+                        material: mat,
+                    });
+                }
             }
 
             // GeometryInstance3D.material_overlay (pat-nzgdu.76): an extra pass
@@ -2408,6 +2463,12 @@ impl RenderingServer3D for SoftwareRenderer3D {
     fn set_material(&mut self, id: Instance3DId, material: Material3D) {
         if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
             inst.material = Some(material);
+        }
+    }
+
+    fn set_surface_materials(&mut self, id: Instance3DId, materials: Vec<Option<Material3D>>) {
+        if let Some(inst) = self.instances.iter_mut().find(|i| i.id == id) {
+            inst.surface_materials = materials;
         }
     }
 

@@ -95,14 +95,43 @@ impl Shader {
 /// shader uniform declarations without a full GLSL/Godot-shading-language parser.
 pub fn parse_uniforms(source: &str) -> Vec<ShaderUniform> {
     let mut uniforms = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim();
+
+    // ⚠️ Scans DECLARATIONS, not raw source lines. A `.tscn` stores a shader as a single
+    // `code = "..."` string, so the whole program arrives on ONE line beginning
+    // with `shader_type` — and a line-based scan gated on
+    // `starts_with("uniform ")` then finds NOTHING. Every uniform in every
+    // scene-authored shader was invisible, which is why a
+    // `hint_screen_texture` sampler fell through to the item's own texture and
+    // a sprite sampled itself (pat-s3rrv.202).
+    //
+    // Comments are stripped first: once statements rather than lines are the
+    // unit, a `// note` above a declaration would otherwise sit inside the same
+    // `;`-segment and stop it matching. A bare `//` scan is safe here because
+    // the shading language has no string literals for one to hide in.
+    let decommented: String = source
+        .lines()
+        .map(|l| match l.find("//") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // ⚠️ `;` alone is NOT enough to separate statements. `void fragment() {}`
+    // carries no semicolon, so a `;`-only split swallows the declaration that
+    // follows it — `parse_multiple_uniforms` drops from three uniforms to two.
+    // Braces are separators too. Turning all three into newlines and then
+    // scanning LINES keeps every declaration the old line-based scan found
+    // (line breaks survive the replacement) and adds the ones sharing a line.
+    let normalized = decommented.replace(&[';', '{', '}'][..], "\n");
+
+    for statement in normalized.lines() {
+        let trimmed = statement.trim();
         if !trimmed.starts_with("uniform ") {
             continue;
         }
-        // Strip trailing semicolon
-        let trimmed = trimmed.trim_end_matches(';').trim();
-        // "uniform TYPE name [: hint] [= default]"
+        // "uniform TYPE name [: hint] [= default]" — any trailing `;` became
+        // the newline that ended this piece, so there is none left to strip.
         let rest = &trimmed["uniform ".len()..];
         let mut parts = rest.splitn(2, char::is_whitespace);
         let type_str = match parts.next() {
@@ -1576,6 +1605,61 @@ mod tests {
     fn shader_type_equality() {
         assert_eq!(ShaderType::Spatial, ShaderType::Spatial);
         assert_ne!(ShaderType::Spatial, ShaderType::CanvasItem);
+    }
+
+    /// 🔑 A `.tscn` stores a shader as ONE `code = "..."` string, so every
+    /// statement shares a line and the program starts with `shader_type`.
+    ///
+    /// The parser used to scan LINES gated on `starts_with("uniform ")`, so a
+    /// scene-authored shader yielded ZERO uniforms — no default reached the
+    /// renderer, and a `hint_screen_texture` sampler was indistinguishable from
+    /// an ordinary one, which made a sprite sample its own texture instead of
+    /// the back buffer (pat-s3rrv.202).
+    #[test]
+    fn parse_uniforms_finds_declarations_sharing_a_line() {
+        let src = "shader_type canvas_item; uniform sampler2D screen_tex : \
+                   hint_screen_texture; uniform float amount = 0.5; void \
+                   fragment() { COLOR = texture(screen_tex, SCREEN_UV); }";
+        let uniforms = parse_uniforms(src);
+
+        assert_eq!(
+            uniforms.len(),
+            2,
+            "both declarations share the line with `shader_type` and the \
+             fragment body; a line-based scan finds neither: {uniforms:?}"
+        );
+        assert_eq!(uniforms[0].name, "screen_tex");
+        assert_eq!(uniforms[0].uniform_type, UniformType::Sampler2D);
+        assert_eq!(
+            uniforms[0].hint.as_deref(),
+            Some("hint_screen_texture"),
+            "the hint is what tells the renderer this sampler reads the back \
+             buffer rather than the item's own texture"
+        );
+        assert_eq!(uniforms[1].name, "amount");
+        assert_eq!(uniforms[1].default_value, Variant::Float(0.5));
+
+        // ⚠️ The fragment body is full of `;` too. Splitting on it must not
+        // invent a uniform out of `COLOR = texture(...)`.
+        assert!(
+            uniforms.iter().all(|u| u.name != "COLOR"),
+            "statement splitting must not turn body statements into uniforms"
+        );
+    }
+
+    /// A comment must not swallow the declaration that follows it.
+    ///
+    /// ⚠️ This is the regression the statement split could have introduced: a
+    /// `// note` line and the `uniform` below it land in the SAME `;`-segment,
+    /// so without stripping comments first the segment no longer begins with
+    /// `uniform ` and the declaration disappears — a case the old line-based
+    /// scan handled correctly.
+    #[test]
+    fn a_comment_line_above_a_uniform_does_not_hide_it() {
+        let src = "// the tint applied to every pixel\nuniform vec4 tint : source_color;";
+        let uniforms = parse_uniforms(src);
+        assert_eq!(uniforms.len(), 1, "got {uniforms:?}");
+        assert_eq!(uniforms[0].name, "tint");
     }
 
     #[test]

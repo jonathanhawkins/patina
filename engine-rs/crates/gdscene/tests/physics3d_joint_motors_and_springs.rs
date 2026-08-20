@@ -171,6 +171,23 @@ fn position(ml: &MainLoop, id: NodeId) -> Vector3 {
         .position
 }
 
+/// The node's own authored transform, read WITHOUT going through the physics
+/// server.
+///
+/// ⚠️ Needed because the 3D server registers bodies **lazily inside
+/// `sync_to_physics`**, which only runs from `MainLoop::step` (main_loop.rs:3901).
+/// Before the first tick `body_for_node` answers `None` for every node, so
+/// [`position`] panics on its own `expect` — which is what the fixture
+/// precondition below used to do (pat-s3rrv.192).
+///
+/// Stepping once first is NOT an alternative here: with stiffness 100 the spring
+/// moves the bob ~14 mm in a single tick, which is fourteen times the 1e-3
+/// tolerance the precondition asserts. The precondition is about what the SCENE
+/// authored, so it has to be read from the scene.
+fn authored_y(ml: &MainLoop, id: NodeId) -> f32 {
+    node3d::get_global_transform(ml.tree(), id).origin.y
+}
+
 fn run(ml: &mut MainLoop, ticks: usize) {
     for _ in 0..ticks {
         ml.step(1.0 / 60.0);
@@ -220,7 +237,7 @@ fn physics3d_joint_motors_and_springs() {
     // -- (b) the linear spring pulls the body back to equilibrium -----------
     let mut sp = load(SPRING_TSCN);
     let bob = node_of(&sp, "/root/Main/Bob");
-    let start = position(&sp, bob).y;
+    let start = authored_y(&sp, bob);
     assert!(
         (start - 0.5).abs() < 1e-3,
         "fixture: the bob must start displaced 0.5 m above the anchor, got \
@@ -263,18 +280,33 @@ fn build_rig(joint_type: i64, limited: bool) -> (MainLoop, NodeId, NodeId, NodeI
     let hip_idx = skeleton3d::add_bone(&mut tree, skeleton, "hip");
     let thigh_idx = skeleton3d::add_bone(&mut tree, skeleton, "thigh");
     skeleton3d::set_bone_parent(&mut tree, skeleton, thigh_idx, hip_idx as i64);
-    let drop = Transform3D {
+    // ⚠️ The chain reaches along +X, NOT straight down, and the bone bodies sit
+    // BEYOND the joint rather than on it. Both are load-bearing (pat-s3rrv.192).
+    //
+    // The joint is placed at the child bone's head — `start_ragdoll_simulation`
+    // uses `get_bone_global_pose(idx)` — and the pivot handed to the constraint
+    // is `joint.origin - body_position`. The original rig put the ThighBone node
+    // at exactly the thigh bone's head, so that pivot was the ZERO VECTOR: the
+    // body was pinned through its own centre of mass. An impulse at r = 0
+    // applies no torque, so the thigh could only ever translate, and
+    // `widest_angle` read exactly 0.0 rad for every joint type — including the
+    // pin, whose whole job in this test is to swing freely.
+    //
+    // A vertical chain would not have helped either: hanging straight down under
+    // gravity is the equilibrium, so the torque is zero there too. The bone has
+    // to stick out sideways for gravity to have a moment arm about the joint.
+    let reach = Transform3D {
         basis: gdcore::math3d::Basis::IDENTITY,
-        origin: Vector3::new(0.0, -SEGMENT, 0.0),
+        origin: Vector3::new(SEGMENT, 0.0, 0.0),
     };
     skeleton3d::set_bone_rest(&mut tree, skeleton, hip_idx, Transform3D::IDENTITY);
-    skeleton3d::set_bone_rest(&mut tree, skeleton, thigh_idx, drop);
+    skeleton3d::set_bone_rest(&mut tree, skeleton, thigh_idx, reach);
 
     let simulator = tree
         .add_child(skeleton, Node::new("Sim", "PhysicalBoneSimulator3D"))
         .unwrap();
 
-    let add = |tree: &mut SceneTree, name: &str, bone: &str, y: f32| -> NodeId {
+    let add = |tree: &mut SceneTree, name: &str, bone: &str, pos: Vector3| -> NodeId {
         let id = tree
             .add_child(simulator, Node::new(name, "PhysicalBone3D"))
             .unwrap();
@@ -297,11 +329,18 @@ fn build_rig(joint_type: i64, limited: bool) -> (MainLoop, NodeId, NodeId, NodeI
                 );
             }
         }
-        node3d::set_position(tree, id, Vector3::new(0.0, y, 0.0));
+        node3d::set_position(tree, id, pos);
         id
     };
-    let hip = add(&mut tree, "HipBone", "hip", 0.0);
-    let thigh = add(&mut tree, "ThighBone", "thigh", -SEGMENT);
+    let hip = add(&mut tree, "HipBone", "hip", Vector3::ZERO);
+    // Half a segment PAST the joint at (SEGMENT, 0, 0), so gravity acting at the
+    // thigh's centre has a 0.5 m moment arm about the pivot.
+    let thigh = add(
+        &mut tree,
+        "ThighBone",
+        "thigh",
+        Vector3::new(SEGMENT * 1.5, 0.0, 0.0),
+    );
 
     (MainLoop::new(tree), simulator, hip, thigh)
 }

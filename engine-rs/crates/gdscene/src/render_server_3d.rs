@@ -632,6 +632,18 @@ impl RenderServer3DAdapter {
                     let resolved_mat = self.resolve_material(tree, nid);
                     self.renderer.set_material(inst_id, resolved_mat);
 
+                    // Overrides for the mesh's ADDITIONAL surfaces
+                    // (pat-s3rrv.187). `packed_scene` has flattened
+                    // `surface_material_override/N` onto the node as
+                    // `__surfmat<N>__*` since the per-surface load pass landed,
+                    // but nothing read them back — the data reached the node and
+                    // stopped there, so a second material could never be drawn.
+                    let surface_mats =
+                        surface_materials_for_node(tree, nid, &mut self.texture_cache);
+                    if !surface_mats.is_empty() {
+                        self.renderer.set_surface_materials(inst_id, surface_mats);
+                    }
+
                     // Resolve ShaderMaterial3D if attached to this node.
                     if let Some(mut shader_mat) = Self::resolve_shader_material(tree, nid) {
                         // Load any `sampler2D` uniform's image before handing the
@@ -2829,6 +2841,77 @@ pub fn material_props_from_node(
 /// The whole `.tscn` -> pixels chain in one call: node companions ->
 /// [`standard_material_from_props`] -> [`StandardMaterial3D::to_material3d`],
 /// with any texture references resolved through `textures`.
+/// Per-surface material overrides for a node's ADDITIONAL surfaces
+/// (pat-s3rrv.187).
+///
+/// Returns a list parallel to `Mesh3D::surfaces`: index `i` is the override for
+/// `surfaces[i]`, which Godot spells `surface_material_override/{i + 1}`.
+///
+/// ⚠️ **The +1 is the whole subtlety.** `packed_scene` flattens override `N` to
+/// `__surfmat<N>__*` and deliberately SKIPS `N == 0`, because override 0 belongs
+/// to the primary surface and is already flattened as `__material__*`. So the
+/// lowest companion index that can exist here is 1, and it maps to `surfaces[0]`.
+///
+/// Gaps stay `None` rather than collapsing, so a mesh that overrides only its
+/// second extra surface does not shift that material onto the first.
+pub fn surface_materials_for_node(
+    tree: &SceneTree,
+    node_id: NodeId,
+    textures: &mut MaterialTextureCache,
+) -> Vec<Option<Material3D>> {
+    const PREFIX: &str = "__surfmat";
+    let Some(node) = tree.get_node(node_id) else {
+        return Vec::new();
+    };
+
+    // Group the flattened keys by surface index first: a material is built from
+    // a whole property bag, not key by key.
+    let mut bags: HashMap<usize, HashMap<String, Variant>> = HashMap::new();
+    for key in node.get_property_list() {
+        let Some(rest) = key.strip_prefix(PREFIX) else {
+            continue;
+        };
+        let Some((index, field)) = rest.split_once("__") else {
+            continue;
+        };
+        let Ok(index) = index.parse::<usize>() else {
+            continue;
+        };
+        // Override 0 is the primary surface's, handled by `material3d_for_node`.
+        if index == 0 {
+            continue;
+        }
+        // `class` records the resource type, not a material parameter — the
+        // same exclusion `material_props_from_node` makes.
+        if field == "class" {
+            continue;
+        }
+        bags.entry(index)
+            .or_default()
+            .insert(field.to_string(), node.get_property(key));
+    }
+    if bags.is_empty() {
+        return Vec::new();
+    }
+
+    let highest = bags.keys().copied().max().unwrap_or(0);
+    let mut out: Vec<Option<Material3D>> = vec![None; highest];
+    for (index, props) in bags {
+        let standard = standard_material_from_props(&props);
+        let mut material = standard.to_material3d();
+        if let Some(slot) = standard.albedo_texture.as_ref() {
+            material.albedo_texture = textures.get_or_load(&slot.path);
+        }
+        if let Some(slot) = standard.normal_texture.as_ref() {
+            material.normal_texture = textures.get_or_load(&slot.path);
+        }
+        // `index - 1`: companion 1 is `surfaces[0]`. Safe because `index == 0`
+        // is filtered above.
+        out[index - 1] = Some(material);
+    }
+    out
+}
+
 pub fn material3d_for_node(
     tree: &SceneTree,
     node_id: NodeId,

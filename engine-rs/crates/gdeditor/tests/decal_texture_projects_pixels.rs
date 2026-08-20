@@ -332,12 +332,31 @@ fn an_untextured_decal_still_stamps_one_flat_modulate() {
 /// appear if `u` and `v` were swapped, so this pins each axis to the screen
 /// direction it actually drives.
 ///
-/// ⚠️ `project_point` maps decal-local **x → u** and decal-local **z → v**. With
-/// the camera on the +z axis looking down -z, x runs across the screen and z
-/// runs into it. So a texture that varies only in u must split the footprint
-/// left-to-right, and one that varies only in v must split it near-to-far —
-/// and each must leave the *other* axis alone. A build that swapped the two
-/// would pass every other test in this file.
+/// `project_point` maps decal-local **x → u** and decal-local **z → v**
+/// (`gdserver3d/src/decal.rs`), both increasing: `u = (local.x / he.x) * 0.5 +
+/// 0.5`. The decal here carries no `transform`, so decal-local *is* world.
+///
+/// ⚠️ **This scene's `Camera3D` is NOT what draws the frame** — the original
+/// version of this test assumed it was, and asserted that `v` splits the
+/// footprint top-to-bottom because the scene camera sits on +z looking down -z.
+/// `render_editor_3d_frame` renders "from the editor camera"
+/// (`viewport_3d_render.rs`), i.e. the orbit camera in `Viewport3D::default()`,
+/// whose yaw is `FRAC_PI_4` (`viewport_3d.rs`). Its right vector is
+/// `right() = (cos yaw, 0, -sin yaw)` = `(0.707, 0, -0.707)`, so:
+///
+/// * world **+x** projects screen **RIGHT** (`+x · right > 0`)
+/// * world **+z** projects screen **LEFT**  (`+z · right < 0`)
+///
+/// Both axes are HORIZONTAL and neither has a vertical component, so "v splits
+/// top-to-bottom" cannot hold for any correct projection — it reported centroids
+/// 0.1px apart in y, which is the two colours landing on the same row, not a
+/// bug in the decal (pat-s3rrv.204).
+///
+/// So each axis is pinned by what it CAN show under this camera: both split
+/// horizontally, neither splits vertically, and — the part that actually
+/// catches a transpose — `u`'s low texel lands on the LEFT. Swap `u` and `v` and
+/// that flips, because the low texel would then track world z, which runs the
+/// other way.
 #[test]
 fn the_projection_uses_both_uv_axes() {
     let baseline = render(&scene(""));
@@ -388,16 +407,38 @@ fn the_projection_uses_both_uv_axes() {
          is driving the v axis (the two are transposed)"
     );
 
-    let ((vrx, vry), (vgx, vgy)) = split(&v_frame, &v_foot[..]);
+    // 🔑 THE TRANSPOSE GUARD, and the only absolute-direction claim here.
+    //
+    // `u`'s low texel is RED (`texture_file` writes texel 0 at x=0), low `u` is
+    // low `local.x`, and world +x projects screen-right — so red must sit LEFT
+    // of green. Under a u/v swap the low texel would track world z instead,
+    // which projects the other way, and this flips. Every other assertion in
+    // this test survives a transpose; this one does not.
+    //
+    // ⚠️ Depends on the default orbit yaw being FRAC_PI_4. If that default ever
+    // changes, recompute from `ViewportCamera3D::right()` rather than deleting
+    // this — it is the only thing standing between a transposed projection and
+    // a green suite.
     assert!(
-        (vry - vgy).abs() > 3.0,
-        "a texture varying in v must split the footprint near-to-far, i.e. \
-         top-to-bottom on screen; centroids at y={vry:.1} and y={vgy:.1}"
+        urx < ugx,
+        "u's low texel must project LEFT of its high texel: red x={urx:.1}, \
+         green x={ugx:.1}. Reversed means the u axis is running backwards, or \
+         u and v are transposed and u is tracking world z"
+    );
+
+    let ((vrx, vry), (vgx, vgy)) = split(&v_frame, &v_foot[..]);
+    // Under the orbit camera world +z is HORIZONTAL (screen-left), so a
+    // v-varying texture splits across the screen, not into it.
+    assert!(
+        (vrx - vgx).abs() > 3.0,
+        "a texture varying in v must split the footprint; centroids at \
+         x={vrx:.1} and x={vgx:.1} means v reaches no pixel at all"
     );
     assert!(
-        (vrx - vgx).abs() < 3.0,
-        "…and must NOT split it left-to-right — x={vrx:.1} vs x={vgx:.1} means v \
-         is driving the u axis"
+        (vry - vgy).abs() < 3.0,
+        "…and must NOT split it top-to-bottom — y={vry:.1} vs y={vgy:.1}. \
+         Neither camera axis has a vertical component at yaw 45°, so a vertical \
+         split means something other than the projection moved these pixels"
     );
 }
 

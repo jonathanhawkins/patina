@@ -1536,6 +1536,85 @@ fn shape_for(raw: u64) -> Option<gdphysics2d::shape::Shape2D> {
     SHAPES.with(|m| m.borrow().get(&raw).copied())
 }
 
+/// The inverse of `physics_server`'s shape reader: a solver `Shape2D` turned
+/// back into the resource a `CollisionShape2D.shape` property holds.
+///
+/// ⚠️ This exists so the SCRIPT path and the SCENE path leave the SAME thing on
+/// the node (pat-s3rrv.188). A `.tscn` stores `shape` as a sub-resource and
+/// `physics_server` reads the geometry out of that resource's properties, but a
+/// script builds shapes as HANDLES — so assigning one stored a `Variant::ObjectId`
+/// the physics reader could not interpret, and `col.shape` read back as an
+/// ObjectId rather than the Resource Godot promises.
+///
+/// Every arm MUST mirror the reader in `physics_server.rs` exactly, because the
+/// two now describe one wire format. Both of its documented traps are reproduced
+/// here deliberately: `RectangleShape2D.size` is the FULL size while the solver
+/// stores HALF extents, and a concave polygon's points travel under `segments`
+/// rather than `points`.
+fn shape_resource_ref(shape: &gdphysics2d::shape::Shape2D) -> gdvariant::ResourceRef {
+    use gdphysics2d::shape::Shape2D as S;
+    let mut properties: HashMap<String, Variant> = HashMap::new();
+    let class_name = match shape {
+        S::Circle { radius } => {
+            properties.insert("radius".to_string(), Variant::Float(*radius as f64));
+            "CircleShape2D"
+        }
+        S::Rectangle { half_extents } => {
+            // FULL size, not the stored half extents.
+            properties.insert(
+                "size".to_string(),
+                Variant::Vector2(gdcore::math::Vector2::new(
+                    half_extents.x * 2.0,
+                    half_extents.y * 2.0,
+                )),
+            );
+            "RectangleShape2D"
+        }
+        S::Capsule { radius, height } => {
+            properties.insert("radius".to_string(), Variant::Float(*radius as f64));
+            properties.insert("height".to_string(), Variant::Float(*height as f64));
+            "CapsuleShape2D"
+        }
+        S::Segment { a, b } => {
+            properties.insert("a".to_string(), Variant::Vector2(*a));
+            properties.insert("b".to_string(), Variant::Vector2(*b));
+            "SegmentShape2D"
+        }
+        S::ConvexPolygon { points, count } => {
+            properties.insert(
+                "points".to_string(),
+                Variant::PackedVector2Array(points[..*count as usize].to_vec()),
+            );
+            "ConvexPolygonShape2D"
+        }
+        S::ConcavePolygon { points, count } => {
+            // ⚠️ `segments`, not `points` — Godot stores concave collision as a
+            // flat array of point PAIRS, and the reader looks for that key.
+            properties.insert(
+                "segments".to_string(),
+                Variant::PackedVector2Array(points[..*count as usize].to_vec()),
+            );
+            "ConcavePolygonShape2D"
+        }
+        S::WorldBoundary { normal, distance } => {
+            properties.insert("normal".to_string(), Variant::Vector2(*normal));
+            properties.insert("distance".to_string(), Variant::Float(*distance as f64));
+            "WorldBoundaryShape2D"
+        }
+        S::SeparationRay { length } => {
+            properties.insert("length".to_string(), Variant::Float(*length as f64));
+            "SeparationRayShape2D"
+        }
+    };
+    // `path` is empty on purpose: a script-built resource has no `res://` file
+    // until something saves it, which is what Godot's empty `resource_path` means.
+    gdvariant::ResourceRef {
+        path: String::new(),
+        class_name: class_name.to_string(),
+        properties,
+    }
+}
+
 /// Reads one script-visible property off a shape resource.
 ///
 /// ⚠️ Every arm here MUST agree with the matching setter in
@@ -2217,6 +2296,34 @@ impl SceneAccess for SceneTreeAccessor {
             return;
         }
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // pat-s3rrv.188 — `col.shape = WorldBoundaryShape2D.new()`.
+        //
+        // A script builds a shape as a HANDLE (a `Variant::ObjectId` into
+        // `SHAPES`), but a `.tscn` leaves a `Variant::Resource` on this property
+        // and `physics_server` reads the geometry out of THAT. Storing the bare
+        // handle left the two authoring paths disagreeing: the body kept its
+        // default shape, and `col.shape` read back as an ObjectId rather than the
+        // Resource Godot promises for a `Shape2D`.
+        //
+        // Assignment is the right moment to convert, not construction: a script
+        // mutates the shape through the handle (`s.normal = ...`) BEFORE handing
+        // it over, so converting here captures the final geometry. Converting in
+        // `new()` would freeze the defaults and silently drop every later edit.
+        //
+        // Only a live handle is converted. Any other `ObjectId` falls through
+        // untouched, so `PhysicsShapeQueryParameters2D.shape`, which really does
+        // take an id, keeps its existing meaning.
+        if prop == "shape" {
+            if let Variant::ObjectId(id) = &value {
+                if let Some(shape) = shape_for(id.raw()) {
+                    let as_resource = Variant::Resource(Box::new(shape_resource_ref(&shape)));
+                    if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                        n.set_property(prop, as_resource);
+                    }
+                    return;
+                }
+            }
+        }
         // Route an AnimationTree's own properties into the attached graph so a
         // script driving it (`tree.set("parameters/conditions/run", true)`,
         // `tree.active = false`) affects the next frame's evaluation, as Godot's
